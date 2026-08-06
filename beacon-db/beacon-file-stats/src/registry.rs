@@ -230,6 +230,26 @@ impl Registry {
         }
     }
 
+    /// Resolve many paths at once, in order, `None` where the path is unknown.
+    ///
+    /// One read transaction and one open table for the whole batch. A scan holds
+    /// paths and the store holds ids, so this conversion sits between a query and
+    /// any pruning at all: doing it a path at a time costs a transaction and two
+    /// table opens per file, which at a million files is seconds of pure
+    /// overhead.
+    pub fn file_ids(&self, paths: &[&str]) -> Result<Vec<Option<FileId>>> {
+        let read = self.db.begin_read()?;
+        let table = read.open_table(FILES_BY_PATH)?;
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            out.push(match table.get(path.as_bytes())? {
+                Some(value) => Some(read_u64(value.value())?),
+                None => None,
+            });
+        }
+        Ok(out)
+    }
+
     pub fn record(&self, id: FileId) -> Result<Option<FileRecord>> {
         let read = self.db.begin_read()?;
         let table = read.open_table(FILES_BY_ID)?;
@@ -538,6 +558,21 @@ mod tests {
             .unwrap();
         assert_eq!(second, vec![1, 2]);
         assert_eq!(registry.num_files().unwrap(), 3);
+    }
+
+    /// The batch form answers the same as the single form, and says `None` for
+    /// a path it has never seen rather than failing the whole lookup.
+    #[test]
+    fn batched_lookups_match_the_single_form() {
+        let (registry, _dir) = registry();
+        registry
+            .intern_files(&[observed("a.nc", 1), observed("b.nc", 1)])
+            .unwrap();
+
+        let batched = registry.file_ids(&["b.nc", "missing.nc", "a.nc"]).unwrap();
+        assert_eq!(batched, vec![Some(1), None, Some(0)]);
+        assert_eq!(batched[0], registry.file_id("b.nc").unwrap());
+        assert!(registry.file_ids(&[]).unwrap().is_empty());
     }
 
     #[test]

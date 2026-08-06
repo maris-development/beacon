@@ -11,10 +11,14 @@ use std::sync::Arc;
 use arrow::array::{Float64Array, Int64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use beacon_common::FileStatsConfig;
+use beacon_core::AuthIdentity;
+use beacon_core::query::Query;
+use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
 use beacon_datafusion_ext::listing_factory::RootStore;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::parquet::arrow::ArrowWriter;
+use futures::TryStreamExt;
 
 /// File statistics on, but with the timer far enough out that every pass in
 /// these tests is one this code asked for.
@@ -219,4 +223,129 @@ async fn statistics_survive_a_restart() {
         .expect("the registry came back with the database");
     assert_eq!(store.registry().record(id).unwrap().unwrap().stats_epoch, 1);
     assert_eq!(store.num_segments().await, 1, "the segment came back too");
+}
+
+// ── scan-time pruning ───────────────────────────────────────────────────────
+
+/// The number of files a plan will actually open.
+fn files_in_plan(explain: &str) -> usize {
+    // The scan node lists its file groups; counting `.parquet` occurrences in the
+    // plan text is crude but it is what the plan actually says it will read.
+    explain.matches(".parquet").count()
+}
+
+async fn explain(runtime: &Runtime, sql: &str) -> String {
+    let batches = runtime
+        .run_query(
+            Query::sql(format!("EXPLAIN {sql}")),
+            AuthIdentity::system(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("EXPLAIN {sql}: {e}"))
+        .into_record_stream()
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    arrow::util::pretty::pretty_format_batches(&batches)
+        .unwrap()
+        .to_string()
+}
+
+/// The whole point: a predicate the statistics rule out must leave the file out
+/// of the plan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_predicate_drops_files_from_the_scan() {
+    let root = tempfile::tempdir().unwrap();
+    // Three files with disjoint TEMP ranges.
+    write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/mild.parquet"), 20.0, 25.0);
+    write_parquet(&root.path().join("datasets/obs/hot.parquet"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    let pass = runtime.file_stats().unwrap().run_once().await.unwrap();
+    assert_eq!(pass.analyzed, 3);
+
+    let all = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
+    assert_eq!(files_in_plan(&all), 3, "no predicate reads everything:\n{all}");
+
+    let hot = explain(
+        &runtime,
+        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert_eq!(
+        files_in_plan(&hot),
+        1,
+        "only hot.parquet can hold a TEMP above 80:\n{hot}"
+    );
+    assert!(hot.contains("hot.parquet"), "and it must be that one:\n{hot}");
+}
+
+/// Pruning must never remove a file that could match. A predicate every file
+/// could satisfy leaves the plan alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_predicate_every_file_could_match_drops_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/b.parquet"), 20.0, 25.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let plan = explain(
+        &runtime,
+        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > -1000",
+    )
+    .await;
+    assert_eq!(files_in_plan(&plan), 2, "both files can match:\n{plan}");
+}
+
+/// A file the collector has never seen has no statistics, so nothing may rule it
+/// out. This is the case a partially-backfilled store is in constantly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unanalyzed_file_is_never_dropped() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/analyzed.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    // Appears after the pass, so it is in no segment.
+    write_parquet(&root.path().join("datasets/obs/fresh.parquet"), 0.0, 5.0);
+
+    let plan = explain(
+        &runtime,
+        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert!(
+        plan.contains("fresh.parquet"),
+        "a file with no statistics must survive:\n{plan}"
+    );
+    assert!(
+        !plan.contains("analyzed.parquet"),
+        "while the analyzed one is still ruled out:\n{plan}"
+    );
+}
+
+/// With the subsystem off there is no store to prune against, so every file is
+/// read. Correct, just slower.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nothing_is_pruned_when_the_subsystem_is_off() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/hot.parquet"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), FileStatsConfig::default())
+        .build()
+        .await
+        .unwrap();
+
+    let plan = explain(
+        &runtime,
+        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert_eq!(files_in_plan(&plan), 2, "no statistics means no pruning:\n{plan}");
 }

@@ -256,6 +256,27 @@ async fn main() -> anyhow::Result<()> {
         lookups.as_secs_f64() * 1e6 / probes as f64
     );
 
+    // ── path -> id, the conversion a real scan has to pay ────────────────
+    let sample: Vec<String> = (0..FILES)
+        .step_by(1)
+        .map(|i| {
+            let family = i / FILES_PER_FAMILY;
+            let index = i % FILES_PER_FAMILY;
+            format!("family{family}/2024/{index:05}.nc")
+        })
+        .collect();
+    let refs: Vec<&str> = sample.iter().map(|s| s.as_str()).collect();
+    let start = Instant::now();
+    let resolved = store.registry().file_ids(&refs)?;
+    let batch_lookup = start.elapsed();
+    flush();
+    println!(
+        "path -> id for all {FILES}: {:.0} ms ({:.2} us each), {} resolved",
+        batch_lookup.as_secs_f64() * 1e3,
+        batch_lookup.as_secs_f64() * 1e6 / FILES as f64,
+        resolved.iter().filter(|r| r.is_some()).count()
+    );
+
     // ── prune: the sparse tail ───────────────────────────────────────────
     let all_ids: Vec<u64> = (0..FILES).collect();
     let narrow = "fam7_var300";

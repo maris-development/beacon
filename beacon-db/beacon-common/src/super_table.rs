@@ -141,7 +141,11 @@ impl TableProvider for SuperListingTable {
             .scan(state, projection, filters, limit)
             .await?;
 
-        Ok(plan)
+        // Drop the files whose recorded ranges say they cannot match. Done on the
+        // built plan, so all of `ListingTable`'s listing, partition and ordering
+        // logic still runs and only the file list changes. This is the hook every
+        // SQL `read_*` function goes through.
+        Ok(beacon_file_stats::prune_scan(state, plan, filters, self.schema()).await)
     }
 
     fn supports_filters_pushdown(

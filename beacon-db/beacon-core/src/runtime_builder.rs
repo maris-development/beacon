@@ -343,7 +343,7 @@ impl RuntimeBuilder {
 
         init_crawler_manager(&self, &session_ctx, session_cell.clone(), file_formats).await?;
 
-        let file_stats = init_file_stats(&self, session_cell, redb_store).await?;
+        let file_stats = init_file_stats(&self, &session_ctx, session_cell, redb_store).await?;
 
         // Event-driven external-table refresh was removed; external tables become
         // current on an explicit `REFRESH` only.
@@ -372,6 +372,7 @@ impl RuntimeBuilder {
 /// registry needs redb tables, and an in-memory store has none to offer.
 async fn init_file_stats(
     builder: &RuntimeBuilder,
+    session_ctx: &Arc<SessionContext>,
     session_cell: SessionCell,
     redb_store: Option<RedbStore>,
 ) -> anyhow::Result<Option<Arc<crate::file_stats::FileStatsService>>> {
@@ -416,6 +417,17 @@ async fn init_file_stats(
         builder.file_stats.clone(),
     );
     service.start();
+
+    // Publish the store so a scan can prune against it. Only now, once it is
+    // openable: a handle filled with a half-built store would have scans pruning
+    // on statistics that are not there yet.
+    if let Some(handle) = session_ctx
+        .state()
+        .config()
+        .get_extension::<std::sync::OnceLock<Arc<beacon_file_stats::FileStatsStore>>>()
+    {
+        let _ = handle.set(service.store().clone());
+    }
 
     tracing::info!(
         interval_secs = builder.file_stats.interval_secs,
@@ -831,6 +843,10 @@ fn build_session_config(
         )))
         // Late-filled by `init_crawler_manager` once the data lake and tables exist.
         .with_extension(new_crawler_manager_handle())
+        // Late-filled by `init_file_stats`, and left empty when the subsystem is
+        // off. A scan reads it to prune its file list; empty simply means no
+        // pruning, which is always a correct answer.
+        .with_extension(beacon_file_stats::new_file_stats_handle())
         .with_extension(secrets_store.clone())
         .with_extension(Arc::new(ArrowTypeWidening::new(
             builder

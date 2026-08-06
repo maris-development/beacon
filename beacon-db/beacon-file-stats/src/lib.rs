@@ -50,6 +50,8 @@ pub mod error;
 pub mod manifest;
 #[cfg(feature = "datafusion")]
 pub mod pruning;
+#[cfg(feature = "datafusion")]
+pub mod scan_pruning;
 pub mod registry;
 pub mod scalar;
 pub mod segment;
@@ -61,6 +63,8 @@ pub use error::{FileStatsError, Result};
 pub use manifest::{Manifest, SegmentEntry};
 #[cfg(feature = "datafusion")]
 pub use pruning::{FileStatsPruningStatistics, prune_files};
+#[cfg(feature = "datafusion")]
+pub use scan_pruning::{FileStatsHandle, new_file_stats_handle, prune_scan, try_file_stats_from_session};
 pub use registry::{AnalyzedFile, ReconcileReport, Registry};
 pub use scalar::{StatScalar, super_type};
 pub use segment::{ColumnStat, ColumnStats, SegmentBuilder, SegmentReader};

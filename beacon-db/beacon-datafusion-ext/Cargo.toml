@@ -5,6 +5,7 @@ edition = "2024"
 
 rust-version.workspace = true
 [dependencies]
+beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
 datafusion = { workspace = true }
 datafusion-federation = { workspace = true }
 chrono = { workspace = true }
