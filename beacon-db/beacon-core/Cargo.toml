@@ -70,3 +70,4 @@ beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
 
 [dev-dependencies]
 deltalake = { workspace = true }
+tempfile = { workspace = true }

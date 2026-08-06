@@ -339,6 +339,98 @@ mod tests {
         assert_eq!(analysis.columns[0].1.null_count, 0, "absent nulls read as zero");
     }
 
+    // ── against a real file ────────────────────────────────────────────
+
+    /// Parquet keeps min/max in its footer, so a range costs a metadata read
+    /// rather than a scan. This drives the real format end to end and asserts
+    /// the ranges survive the mapping into `FileAnalysis`.
+    #[tokio::test]
+    async fn parquet_yields_real_ranges_through_the_analyzer() {
+        use arrow::array::{Float64Array, Int64Array, RecordBatch, StringArray};
+        use arrow::datatypes::{Field, Schema};
+        use datafusion::datasource::file_format::FileFormat;
+        use datafusion::execution::session_state::SessionStateBuilder;
+        use datafusion::parquet::arrow::ArrowWriter;
+        use datafusion::prelude::SessionContext;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("obs.parquet");
+
+        let file_schema = Arc::new(Schema::new(vec![
+            Field::new("TEMP", DataType::Float64, false),
+            Field::new("DEPTH", DataType::Int64, false),
+            Field::new("PLATFORM", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            file_schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![3.5, 18.25, 7.0])),
+                Arc::new(Int64Array::from(vec![10, 4000, 250])),
+                Arc::new(StringArray::from(vec!["argo", "ctd", "buoy"])),
+            ],
+        )
+        .unwrap();
+        {
+            let file = std::fs::File::create(&file_path).unwrap();
+            let mut writer = ArrowWriter::try_new(file, file_schema.clone(), None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        }
+
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new());
+        let location = Path::from_absolute_path(&file_path).unwrap();
+        let file_meta = std::fs::metadata(&file_path).unwrap();
+        let object = ObjectMeta {
+            location,
+            last_modified: file_meta.modified().map(Into::into).unwrap_or_default(),
+            size: file_meta.len(),
+            e_tag: None,
+            version: None,
+        };
+
+        let ctx = SessionContext::new_with_state(
+            SessionStateBuilder::new().with_default_features().build(),
+        );
+        let state = ctx.state();
+        let format = beacon_arrow_parquet::datafusion::ParquetFormat::new();
+
+        let schema = format
+            .infer_schema(&state, &store, std::slice::from_ref(&object))
+            .await
+            .expect("parquet infers a schema");
+        let statistics = format
+            .infer_stats(&state, &store, schema.clone(), &object)
+            .await
+            .expect("parquet reports statistics from its footer");
+
+        let analysis = to_analysis("parquet", &schema, &statistics);
+
+        assert_eq!(analysis.num_rows, Some(3));
+        let names: Vec<&str> = analysis.columns.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"TEMP") && names.contains(&"DEPTH"),
+            "parquet must yield ranges for its numeric columns, got {names:?}"
+        );
+        // Parquet keeps byte-array bounds too, and the segment format stores
+        // them, so a predicate on a platform or station name prunes as well.
+        assert!(
+            names.contains(&"PLATFORM"),
+            "parquet string bounds should survive the mapping, got {names:?}"
+        );
+
+        // And the ranges are the real ones, not placeholders.
+        let temp = &analysis
+            .columns
+            .iter()
+            .find(|(name, _)| name == "TEMP")
+            .unwrap()
+            .1;
+        assert_eq!(temp.min, beacon_file_stats::StatScalar::F64(3.5));
+        assert_eq!(temp.max, beacon_file_stats::StatScalar::F64(18.25));
+        assert_eq!(temp.row_count, 3);
+    }
+
     #[test]
     fn zarr_metadata_files_resolve_to_the_zarr_format() {
         let meta = |path: &str| ObjectMeta {
