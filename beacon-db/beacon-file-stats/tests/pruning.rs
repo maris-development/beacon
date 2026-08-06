@@ -242,3 +242,67 @@ async fn degenerate_inputs_fail_open() {
     let kept = prune_files(&store, &greater_than("TEMP", 0.0), &schema(), &ids).await;
     assert_eq!(kept, ids, "no statistics means nothing is prunable");
 }
+
+/// A file that changed on disk must not be pruned on its *old* range.
+///
+/// The window between a listing noticing a change and the collector re-analyzing
+/// is the dangerous one: the stored statistics describe content that is gone. If
+/// the new content would match the predicate and the old range rules it out, the
+/// query loses real rows.
+#[tokio::test]
+async fn a_stale_files_old_statistics_are_not_trusted() {
+    let (store, _dir) = store().await;
+    let ids = seed_temp(&store, &[(0.0, 5.0)]).await;
+    store
+        .registry()
+        .mark_analyzed(ids[0], "netcdf", Some(10), Some(1))
+        .unwrap();
+
+    // The file is rewritten. Its contents now reach 60, but nothing has
+    // re-analyzed it yet, so the store still holds [0, 5].
+    store
+        .registry()
+        .intern_files(&[ObservedFile::new("argo/2024/000.nc", 999_999, 2)])
+        .unwrap();
+    assert_eq!(
+        store.registry().record(ids[0]).unwrap().unwrap().state,
+        beacon_file_stats::FileState::Stale
+    );
+
+    let kept = prune_files(&store, &greater_than("TEMP", 40.0), &schema(), &ids).await;
+    assert_eq!(
+        kept, ids,
+        "the stale range said max 5, but the file's real content is unknown"
+    );
+}
+
+/// A deleted file's statistics must stop being used, whether or not the caller
+/// remembers to drop it from the candidate list.
+#[tokio::test]
+async fn a_deleted_files_statistics_are_not_used() {
+    let (store, _dir) = store().await;
+    let ids = seed_temp(&store, &[(0.0, 5.0), (90.0, 100.0)]).await;
+    for id in &ids {
+        store.registry().mark_analyzed(*id, "netcdf", None, None).unwrap();
+    }
+
+    // Both files still prune normally.
+    let kept = prune_files(&store, &greater_than("TEMP", 50.0), &schema(), &ids).await;
+    assert_eq!(kept, vec![ids[1]]);
+
+    // The listing no longer reports file 1.
+    let report = store
+        .registry()
+        .reconcile_prefix("argo/2024/", &[ObservedFile::new("argo/2024/000.nc", 1, 1)])
+        .unwrap();
+    assert_eq!(report.deleted, 1);
+    assert_eq!(
+        store.registry().record(ids[1]).unwrap().unwrap().state,
+        beacon_file_stats::FileState::Deleted
+    );
+
+    // Its range said [90, 100], but it is gone, so nothing may be concluded
+    // from it. File 0 is still ruled out on its own live statistics.
+    let kept = prune_files(&store, &greater_than("TEMP", 50.0), &schema(), &ids).await;
+    assert_eq!(kept, vec![ids[1]], "the tombstoned file is kept, not trusted");
+}

@@ -61,7 +61,7 @@ pub use error::{FileStatsError, Result};
 pub use manifest::{Manifest, SegmentEntry};
 #[cfg(feature = "datafusion")]
 pub use pruning::{FileStatsPruningStatistics, prune_files};
-pub use registry::{AnalyzedFile, Registry};
+pub use registry::{AnalyzedFile, ReconcileReport, Registry};
 pub use scalar::{StatScalar, super_type};
 pub use segment::{ColumnStat, ColumnStats, SegmentBuilder, SegmentReader};
 pub use store::FileStatsStore;

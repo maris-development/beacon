@@ -128,7 +128,10 @@ async fn try_prune(
 
     let range = (candidates[0], candidates[candidates.len() - 1]);
 
-    let mut columns: HashMap<String, PackedColumn> = HashMap::new();
+    // Fetch first, pack second. The suppression lookup below is only worth
+    // paying for once we know there is something to prune on, and on a store
+    // still being ingested there is not.
+    let mut fetched: Vec<(&str, &DataType, Vec<ColumnStats>)> = Vec::new();
     for column in &referenced {
         let Ok(field) = schema.field_with_name(column.name()) else {
             continue; // not a table column; it contributes no statistics
@@ -137,16 +140,39 @@ async fn try_prune(
             .column_stats_by_name(column.name(), range)
             .await
             .unwrap_or_default();
-        if segments.is_empty() {
-            continue;
+        if !segments.is_empty() {
+            fetched.push((column.name(), field.data_type(), segments));
         }
-        if let Some(packed) = pack(&segments, field.data_type(), candidates) {
-            columns.insert(column.name().to_string(), packed);
+    }
+    if fetched.is_empty() {
+        return Ok(None); // nothing to prune on
+    }
+
+    // A file whose content changed since it was analyzed still has rows in the
+    // segments, and those rows describe content that is gone. Pruning on them
+    // drops files the new content would have matched. Treat them as having no
+    // statistics at all, which keeps them.
+    let suppressed = store
+        .registry()
+        .suppressed_in_range(range)
+        .unwrap_or_default();
+    // Empty means "every candidate is trustworthy", which is the steady state.
+    // Allocating and walking a million-entry mask to say so is pure cost.
+    let trusted = if suppressed.is_empty() {
+        Vec::new()
+    } else {
+        trust_mask(candidates, &suppressed)
+    };
+
+    let mut columns: HashMap<String, PackedColumn> = HashMap::new();
+    for (name, data_type, segments) in fetched {
+        if let Some(packed) = pack(&segments, data_type, candidates, &trusted) {
+            columns.insert(name.to_string(), packed);
         }
     }
 
     if columns.is_empty() {
-        return Ok(None); // nothing to prune on
+        return Ok(None);
     }
 
     let statistics = FileStatsPruningStatistics {
@@ -171,10 +197,32 @@ async fn try_prune(
 /// takes a null index and reads back null, which the pruning engine treats as
 /// unknown. `None` when the column cannot be cast to the type the predicate
 /// compares against.
+/// `false` at every candidate row whose statistics must not be trusted.
+///
+/// Both inputs are ascending, so this is a merge. An empty return from the
+/// caller means every row is trustworthy; see [`is_trusted`].
+fn trust_mask(candidates: &[FileId], suppressed: &[FileId]) -> Vec<bool> {
+    let mut mask = vec![true; candidates.len()];
+    let (mut row, mut other) = (0usize, 0usize);
+    while row < candidates.len() && other < suppressed.len() {
+        match candidates[row].cmp(&suppressed[other]) {
+            std::cmp::Ordering::Less => row += 1,
+            std::cmp::Ordering::Greater => other += 1,
+            std::cmp::Ordering::Equal => {
+                mask[row] = false;
+                row += 1;
+                other += 1;
+            }
+        }
+    }
+    mask
+}
+
 fn pack(
     segments: &[ColumnStats],
     target: &DataType,
     candidates: &[FileId],
+    trusted: &[bool],
 ) -> Option<PackedColumn> {
     // Both sides are sorted ascending, so the join is a merge, not a hash. That
     // matters at scale: a hash map over a million candidates costs ~50 MB and an
@@ -204,7 +252,9 @@ fn pack(
                 std::cmp::Ordering::Less => row += 1,
                 std::cmp::Ordering::Greater => within += 1,
                 std::cmp::Ordering::Equal => {
-                    indices[row] = Some(offset + within as u32);
+                    if is_trusted(trusted, row) {
+                        indices[row] = Some(offset + within as u32);
+                    }
                     row += 1;
                     within += 1;
                 }
@@ -226,6 +276,12 @@ fn pack(
         null_count: arrow::compute::take(&null_count, &indices, None).ok()?,
         row_count: arrow::compute::take(&row_count, &indices, None).ok()?,
     })
+}
+
+/// An empty mask means nothing is suppressed, which is the steady state.
+#[inline]
+fn is_trusted(mask: &[bool], row: usize) -> bool {
+    mask.is_empty() || mask[row]
 }
 
 fn concat(arrays: &[ArrayRef]) -> Option<ArrayRef> {

@@ -160,6 +160,79 @@ because a wrong "unchanged" prunes real rows away.
 
 ---
 
+## 4b. When a file changes or disappears
+
+Both cases keep the file's id. Ids never shift, so a segment written months ago
+still means what it said.
+
+### A file is updated
+
+```text
+                    listing sees size/mtime/etag differ
+                                  │
+   segments still hold ───────────┼──────────► collector re-analyzes
+   the OLD range                  │            into a NEW segment
+                                  ▼
+                        ┌──────────────────┐
+                        │  DANGEROUS GAP   │
+                        └──────────────────┘
+   old range says TEMP ≤ 5
+   real content now reaches 60
+   WHERE TEMP > 40 would drop a file that matches
+```
+
+The store closes that gap with an `fs_suppressed` table: file ids that have
+stored statistics which must not be trusted. `prune_files` reads it once per
+query and treats those rows as absent, so the file is **kept**.
+
+Membership is `stats_epoch > 0 && state != Analyzed`. Both halves earn their
+place:
+
+| Half | Why |
+|---|---|
+| `state != Analyzed` | the danger: rows describing content that is gone |
+| `stats_epoch > 0` | keeps the table empty through a first ingest, when a million files are pending but none has any rows to distrust |
+
+Once the collector finishes, the file has rows in **two** segments. Segments fold
+oldest first, so the newest range wins. The old row stays on disk until
+compaction, which is not built yet.
+
+### A file is deleted
+
+Registering files can only add or update, because a listing reports what is
+there, never what is gone. Deletion needs a comparison:
+
+```mermaid
+flowchart LR
+    L["listing for argo/"] --> R{"reconcile_prefix"}
+    K["registry: every path<br/>under argo/<br/><i>one B-tree range scan</i>"] --> R
+    R -->|"in listing"| U["registered or refreshed"]
+    R -->|"absent from listing"| D["marked Deleted<br/>+ suppressed"]
+```
+
+`reconcile_prefix(prefix, observed)` scans the path table over that prefix, and
+every path the listing did not report becomes `Deleted`. The path table is keyed
+by path, so this is a range scan, not a walk over every file in the store.
+
+Two rules come with it:
+
+- **`observed` must be the complete listing for the prefix.** A partial one
+  deletes the files it happened to leave out.
+- **Only that prefix is touched.** A listing for `argo/` never tombstones
+  anything under `ctd/`.
+
+A tombstoned path that turns up again is revived, **even byte-identical**. Its
+record still says `Deleted`, which suppresses its statistics and keeps it off the
+queue, so leaving it alone would lose the file until someone noticed.
+Re-analyzing an unchanged revival wastes one read; not reviving it loses data.
+
+### What is not reclaimed
+
+A tombstone keeps its registry record and its rows in every segment that ever
+held it. Nothing shrinks. That is compaction's job, and compaction is not built.
+
+---
+
 ## 5. The read path
 
 `WHERE TEMP > 6.5`, against a store with 160 000 column names:

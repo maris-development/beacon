@@ -33,10 +33,34 @@ const COLUMNS_BY_ID: ByteTable = TableDefinition::new("fs_columns_by_id");
 /// Files awaiting analysis. A dedicated table keeps the collector's next batch
 /// an O(batch) range scan instead of a full scan over every known file.
 const PENDING: ByteTable = TableDefinition::new("fs_pending");
+/// Files that have stored statistics which must not be trusted.
+///
+/// Membership is `stats_epoch > 0 && state != Analyzed`. Both halves matter. The
+/// second is the danger: between a listing noticing a change and the collector
+/// re-analyzing, the segments still describe content that is gone, and pruning
+/// on that range drops files the new content would have matched. The first keeps
+/// the set small: a file that was never analyzed has no rows anywhere, so there
+/// is nothing to distrust, and during a first ingest of a million files this
+/// table stays empty rather than holding all of them.
+///
+/// A dedicated table makes "is this file trustworthy" one range scan over the
+/// churn in flight, instead of a record lookup per candidate.
+const SUPPRESSED: ByteTable = TableDefinition::new("fs_suppressed");
 const STATE: ByteTable = TableDefinition::new("fs_state");
 
 const NEXT_FILE_ID: &[u8] = b"next_file_id";
 const NEXT_COLUMN_ID: &[u8] = b"next_column_id";
+
+/// What [`Registry::reconcile_prefix`] changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcileReport {
+    /// Files the listing reported, registered or refreshed.
+    pub present: usize,
+    /// Files the registry held that the listing no longer reports.
+    pub deleted: usize,
+    /// Files the registry held under the prefix before this call.
+    pub known_before: usize,
+}
 
 /// One file's analysis outcome, for [`Registry::mark_analyzed_batch`].
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +98,7 @@ impl Registry {
             write.open_table(COLUMNS_BY_NAME)?;
             write.open_table(COLUMNS_BY_ID)?;
             write.open_table(PENDING)?;
+            write.open_table(SUPPRESSED)?;
             write.open_table(STATE)?;
         }
         write.commit()?;
@@ -93,6 +118,7 @@ impl Registry {
             let mut by_path = write.open_table(FILES_BY_PATH)?;
             let mut by_id = write.open_table(FILES_BY_ID)?;
             let mut pending = write.open_table(PENDING)?;
+            let mut suppressed = write.open_table(SUPPRESSED)?;
             let mut state = write.open_table(STATE)?;
 
             let mut next = match state.get(NEXT_FILE_ID)? {
@@ -112,7 +138,14 @@ impl Registry {
                                 "file {id} has a path entry but no record"
                             ))
                         })?;
-                        if !record.matches(file) {
+                        // A tombstoned path that turns up again must come back,
+                        // even byte-identical: its record says Deleted, which
+                        // suppresses its statistics and keeps it off the queue.
+                        // Re-analyzing an unchanged revival wastes one read; not
+                        // reviving it loses the file until someone notices.
+                        let revived = record.state == FileState::Deleted;
+                        if revived || !record.matches(file) {
+                            let had_statistics = record.stats_epoch > 0;
                             record.size = file.size;
                             record.last_modified_millis = file.last_modified_millis;
                             record.e_tag = file.e_tag.clone();
@@ -122,6 +155,9 @@ impl Registry {
                                 encode_record(&record)?.as_slice(),
                             )?;
                             pending.insert(file_key(id).as_slice(), [].as_slice())?;
+                            if had_statistics {
+                                suppressed.insert(file_key(id).as_slice(), [].as_slice())?;
+                            }
                         }
                         ids.push(id);
                     }
@@ -274,6 +310,7 @@ impl Registry {
         {
             let mut by_id = write.open_table(FILES_BY_ID)?;
             let mut pending = write.open_table(PENDING)?;
+            let mut suppressed = write.open_table(SUPPRESSED)?;
             for file in files {
                 let Some(mut record) = read_record(&by_id, file.id)? else {
                     return Err(FileStatsError::Registry(format!("unknown file {}", file.id)));
@@ -288,6 +325,7 @@ impl Registry {
                     encode_record(&record)?.as_slice(),
                 )?;
                 pending.remove(file_key(file.id).as_slice())?;
+                suppressed.remove(file_key(file.id).as_slice())?;
             }
         }
         write.commit()?;
@@ -303,6 +341,7 @@ impl Registry {
         {
             let mut by_id = write.open_table(FILES_BY_ID)?;
             let mut pending = write.open_table(PENDING)?;
+            let mut suppressed = write.open_table(SUPPRESSED)?;
             for id in ids {
                 let Some(mut record) = read_record(&by_id, *id)? else {
                     return Err(FileStatsError::Registry(format!("unknown file {id}")));
@@ -316,6 +355,11 @@ impl Registry {
                     _ => {
                         pending.remove(file_key(*id).as_slice())?;
                     }
+                }
+                if new_state != FileState::Analyzed && record.stats_epoch > 0 {
+                    suppressed.insert(file_key(*id).as_slice(), [].as_slice())?;
+                } else {
+                    suppressed.remove(file_key(*id).as_slice())?;
                 }
             }
         }
@@ -341,6 +385,76 @@ impl Registry {
     pub fn num_columns(&self) -> Result<u64> {
         let read = self.db.begin_read()?;
         Ok(read.open_table(COLUMNS_BY_NAME)?.len()?)
+    }
+
+    /// The files in `range` whose stored statistics must not be trusted,
+    /// ascending.
+    ///
+    /// Read once per query, and only after the reader knows it has statistics to
+    /// prune on. In steady state this is empty, and it is only ever as large as
+    /// the churn currently in flight.
+    pub fn suppressed_in_range(&self, range: (FileId, FileId)) -> Result<Vec<FileId>> {
+        let read = self.db.begin_read()?;
+        let table = read.open_table(SUPPRESSED)?;
+        let (low, high) = (file_key(range.0), file_key(range.1));
+        let mut out = Vec::new();
+        for entry in table.range(low.as_slice()..=high.as_slice())? {
+            let (key, _) = entry?;
+            out.push(read_u64(key.value())?);
+        }
+        Ok(out)
+    }
+
+    /// Reconcile a prefix against what a listing just saw.
+    ///
+    /// Registering files can only ever add or update, because a listing reports
+    /// what is there, never what is gone. Deletion needs this comparison: every
+    /// path the registry holds under `prefix` that the listing did not report is
+    /// marked [`FileState::Deleted`].
+    ///
+    /// The path table is a B-tree keyed by path, so "everything under this
+    /// prefix" is one range scan, not a walk over every file in the store.
+    ///
+    /// `observed` must be the *complete* listing for `prefix`. A partial one
+    /// would delete the files it happened to leave out.
+    pub fn reconcile_prefix(
+        &self,
+        prefix: &str,
+        observed: &[ObservedFile],
+    ) -> Result<ReconcileReport> {
+        let seen: std::collections::HashSet<&str> =
+            observed.iter().map(|file| file.path.as_str()).collect();
+
+        let known: Vec<(String, FileId)> = {
+            let read = self.db.begin_read()?;
+            let table = read.open_table(FILES_BY_PATH)?;
+            let mut out = Vec::new();
+            for entry in table.range(prefix.as_bytes()..)? {
+                let (key, value) = entry?;
+                let path = String::from_utf8_lossy(key.value()).into_owned();
+                if !path.starts_with(prefix) {
+                    break; // the scan has walked past the prefix
+                }
+                out.push((path, read_u64(value.value())?));
+            }
+            out
+        };
+
+        let gone: Vec<FileId> = known
+            .iter()
+            .filter(|(path, _)| !seen.contains(path.as_str()))
+            .map(|(_, id)| *id)
+            .collect();
+
+        let before = known.len();
+        let ids = self.intern_files(observed)?;
+        self.set_state_batch(&gone, FileState::Deleted)?;
+
+        Ok(ReconcileReport {
+            present: ids.len(),
+            deleted: gone.len(),
+            known_before: before,
+        })
     }
 
     pub fn num_pending(&self) -> Result<u64> {
@@ -490,6 +604,105 @@ mod tests {
 
         registry.set_state(id, FileState::Pending).unwrap();
         assert_eq!(registry.num_pending().unwrap(), 1);
+    }
+
+
+    /// Registering can only add or update: a listing reports what is there, never
+    /// what is gone. Deletion needs the comparison `reconcile_prefix` does.
+    #[test]
+    fn reconcile_tombstones_the_paths_a_listing_no_longer_reports() {
+        let (registry, _dir) = registry();
+        registry
+            .intern_files(&[
+                observed("argo/a.nc", 1),
+                observed("argo/b.nc", 1),
+                observed("ctd/c.nc", 1),
+            ])
+            .unwrap();
+        for id in 0..3 {
+            registry.mark_analyzed(id, "netcdf", None, None).unwrap();
+        }
+
+        // The listing for `argo/` now reports only a.nc.
+        let report = registry
+            .reconcile_prefix("argo/", &[observed("argo/a.nc", 1)])
+            .unwrap();
+        assert_eq!(report.known_before, 2);
+        assert_eq!(report.present, 1);
+        assert_eq!(report.deleted, 1);
+
+        assert_eq!(registry.record(0).unwrap().unwrap().state, FileState::Analyzed);
+        assert_eq!(registry.record(1).unwrap().unwrap().state, FileState::Deleted);
+        // A different prefix is untouched, however sure the listing was.
+        assert_eq!(registry.record(2).unwrap().unwrap().state, FileState::Analyzed);
+    }
+
+    /// The slot survives the tombstone, so a segment written before the delete
+    /// still means what it said.
+    #[test]
+    fn a_deleted_file_keeps_its_id() {
+        let (registry, _dir) = registry();
+        let ids = registry.intern_files(&[observed("argo/a.nc", 1)]).unwrap();
+        registry.mark_analyzed(ids[0], "netcdf", None, None).unwrap();
+
+        registry.reconcile_prefix("argo/", &[]).unwrap();
+        assert_eq!(registry.record(ids[0]).unwrap().unwrap().state, FileState::Deleted);
+
+        // A new path continues the sequence rather than reusing the slot.
+        let next = registry.intern_files(&[observed("argo/b.nc", 1)]).unwrap();
+        assert_eq!(next, vec![1]);
+    }
+
+    /// A tombstoned path that reappears must come back, even byte-identical.
+    /// Its record still says Deleted, which suppresses its statistics and keeps
+    /// it off the queue.
+    #[test]
+    fn a_reappearing_file_is_revived() {
+        let (registry, _dir) = registry();
+        let ids = registry.intern_files(&[observed("argo/a.nc", 1)]).unwrap();
+        registry.mark_analyzed(ids[0], "netcdf", None, None).unwrap();
+        registry.reconcile_prefix("argo/", &[]).unwrap();
+        assert_eq!(registry.num_pending().unwrap(), 0);
+
+        // Same size, same mtime: nothing about the file changed, only its
+        // presence.
+        let again = registry.intern_files(&[observed("argo/a.nc", 1)]).unwrap();
+        assert_eq!(again, ids, "the id is stable across a delete and a return");
+        assert_eq!(registry.record(ids[0]).unwrap().unwrap().state, FileState::Stale);
+        assert_eq!(registry.num_pending().unwrap(), 1);
+    }
+
+    /// Untrusted files are exactly the ones not in `Analyzed`, and the range scan
+    /// returns them ascending.
+    #[test]
+    fn suppression_tracks_the_file_state() {
+        let (registry, _dir) = registry();
+        let ids = registry
+            .intern_files(&[observed("a", 1), observed("b", 1), observed("c", 1)])
+            .unwrap();
+
+        // Nothing is analyzed yet, so nothing has statistics to distrust. This
+        // is what keeps the table empty through a first ingest.
+        assert!(
+            registry.suppressed_in_range((0, 2)).unwrap().is_empty(),
+            "a file that was never analyzed has no rows to suppress"
+        );
+
+        for id in &ids {
+            registry.mark_analyzed(*id, "csv", None, None).unwrap();
+        }
+        assert!(registry.suppressed_in_range((0, 2)).unwrap().is_empty());
+
+        // Now they have statistics, so a change to one suppresses that one.
+        registry.intern_files(&[observed("b", 999)]).unwrap();
+        assert_eq!(registry.suppressed_in_range((0, 2)).unwrap(), vec![1]);
+
+        // Re-analysis restores trust.
+        registry.mark_analyzed(ids[1], "csv", None, None).unwrap();
+        assert!(registry.suppressed_in_range((0, 2)).unwrap().is_empty());
+
+        // And the range scan honours its bounds.
+        assert!(registry.suppressed_in_range((2, 2)).unwrap().is_empty());
     }
 
     #[test]

@@ -151,6 +151,34 @@ That is the rule the whole crate obeys: **an absent statistic keeps a file**. A
 file wrongly dropped is a silently wrong answer. A file wrongly kept is one scan
 the optimizer would have skipped.
 
+## When a file changes or disappears
+
+Both keep the file's id, so old segments stay meaningful.
+
+**Updated.** The listing notices a differing size, mtime, or etag and marks the
+record `Stale`. Until the collector catches up, the segments still hold the old
+range, and pruning on it would drop files the new content matches. The
+`fs_suppressed` table names the ids whose statistics must not be trusted, and
+`prune_files` treats those rows as absent, so the file is kept. Membership is
+`stats_epoch > 0 && state != Analyzed`: the second half is the danger, the first
+keeps the table empty through a first ingest.
+
+After re-analysis the file has rows in two segments. Segments fold oldest first,
+so the newest range wins.
+
+**Deleted.** Registering can only add or update, because a listing reports what
+is there and never what is gone. `Registry::reconcile_prefix(prefix, observed)`
+does the comparison: it range-scans the path table over the prefix, and every
+path the listing did not report becomes `Deleted` and suppressed. `observed` must
+be the complete listing for that prefix, or it will tombstone whatever it left
+out.
+
+A tombstoned path that reappears is revived even byte-identical, because its
+record still says `Deleted`.
+
+Nothing is reclaimed by either case. Tombstoned records and superseded rows stay
+until compaction, which is not built.
+
 ## What a read actually costs
 
 `WHERE TEMP > 6.5` against a store with 160 000 column names:
