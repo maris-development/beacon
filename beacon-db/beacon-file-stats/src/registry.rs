@@ -38,6 +38,15 @@ const STATE: ByteTable = TableDefinition::new("fs_state");
 const NEXT_FILE_ID: &[u8] = b"next_file_id";
 const NEXT_COLUMN_ID: &[u8] = b"next_column_id";
 
+/// One file's analysis outcome, for [`Registry::mark_analyzed_batch`].
+#[derive(Debug, Clone, Copy)]
+pub struct AnalyzedFile<'a> {
+    pub id: FileId,
+    pub format: &'a str,
+    pub num_rows: Option<u64>,
+    pub total_byte_size: Option<u64>,
+}
+
 /// File and column identity, backed by redb.
 pub struct Registry {
     db: Arc<Database>,
@@ -233,6 +242,10 @@ impl Registry {
     }
 
     /// Record a successful analysis and take the file off the queue.
+    ///
+    /// Prefer [`mark_analyzed_batch`](Self::mark_analyzed_batch) for more than a
+    /// handful: every call here is one redb transaction, and a transaction is one
+    /// fsync.
     pub fn mark_analyzed(
         &self,
         id: FileId,
@@ -240,20 +253,71 @@ impl Registry {
         num_rows: Option<u64>,
         total_byte_size: Option<u64>,
     ) -> Result<()> {
+        self.mark_analyzed_batch(&[AnalyzedFile {
+            id,
+            format,
+            num_rows,
+            total_byte_size,
+        }])
+    }
+
+    /// Record a whole batch's analyses in one transaction.
+    ///
+    /// A transaction costs an fsync, so doing this per file caps the collector at
+    /// a few hundred files a second however fast the analysis is. At a million
+    /// files that is the difference between minutes and hours.
+    pub fn mark_analyzed_batch(&self, files: &[AnalyzedFile<'_>]) -> Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
         let write = self.db.begin_write()?;
         {
             let mut by_id = write.open_table(FILES_BY_ID)?;
             let mut pending = write.open_table(PENDING)?;
-            let Some(mut record) = read_record(&by_id, id)? else {
-                return Err(FileStatsError::Registry(format!("unknown file {id}")));
-            };
-            record.format = format.to_string();
-            record.num_rows = num_rows;
-            record.total_byte_size = total_byte_size;
-            record.state = FileState::Analyzed;
-            record.stats_epoch += 1;
-            by_id.insert(file_key(id).as_slice(), encode_record(&record)?.as_slice())?;
-            pending.remove(file_key(id).as_slice())?;
+            for file in files {
+                let Some(mut record) = read_record(&by_id, file.id)? else {
+                    return Err(FileStatsError::Registry(format!("unknown file {}", file.id)));
+                };
+                record.format = file.format.to_string();
+                record.num_rows = file.num_rows;
+                record.total_byte_size = file.total_byte_size;
+                record.state = FileState::Analyzed;
+                record.stats_epoch += 1;
+                by_id.insert(
+                    file_key(file.id).as_slice(),
+                    encode_record(&record)?.as_slice(),
+                )?;
+                pending.remove(file_key(file.id).as_slice())?;
+            }
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Move a batch of files to one state, in a single transaction.
+    pub fn set_state_batch(&self, ids: &[FileId], new_state: FileState) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let write = self.db.begin_write()?;
+        {
+            let mut by_id = write.open_table(FILES_BY_ID)?;
+            let mut pending = write.open_table(PENDING)?;
+            for id in ids {
+                let Some(mut record) = read_record(&by_id, *id)? else {
+                    return Err(FileStatsError::Registry(format!("unknown file {id}")));
+                };
+                record.state = new_state;
+                by_id.insert(file_key(*id).as_slice(), encode_record(&record)?.as_slice())?;
+                match new_state {
+                    FileState::Pending | FileState::Stale => {
+                        pending.insert(file_key(*id).as_slice(), [].as_slice())?;
+                    }
+                    _ => {
+                        pending.remove(file_key(*id).as_slice())?;
+                    }
+                }
+            }
         }
         write.commit()?;
         Ok(())
@@ -264,26 +328,7 @@ impl Registry {
     /// [`FileState::Pending`] and [`FileState::Stale`] put it back on the queue.
     /// Everything else takes it off.
     pub fn set_state(&self, id: FileId, new_state: FileState) -> Result<()> {
-        let write = self.db.begin_write()?;
-        {
-            let mut by_id = write.open_table(FILES_BY_ID)?;
-            let mut pending = write.open_table(PENDING)?;
-            let Some(mut record) = read_record(&by_id, id)? else {
-                return Err(FileStatsError::Registry(format!("unknown file {id}")));
-            };
-            record.state = new_state;
-            by_id.insert(file_key(id).as_slice(), encode_record(&record)?.as_slice())?;
-            match new_state {
-                FileState::Pending | FileState::Stale => {
-                    pending.insert(file_key(id).as_slice(), [].as_slice())?;
-                }
-                _ => {
-                    pending.remove(file_key(id).as_slice())?;
-                }
-            }
-        }
-        write.commit()?;
-        Ok(())
+        self.set_state_batch(&[id], new_state)
     }
 
     /// Files known to the registry, tombstones included.

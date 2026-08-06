@@ -33,6 +33,7 @@ use std::sync::Arc;
 use futures::stream::{self, StreamExt};
 
 use crate::error::Result;
+use crate::registry::AnalyzedFile;
 use crate::segment::{ColumnStat, SegmentBuilder};
 use crate::store::FileStatsStore;
 use crate::types::{FileId, FileRecord, FileState};
@@ -192,6 +193,7 @@ impl StatsCollector {
             .await;
 
         let mut analyzed: Vec<(FileId, FileAnalysis)> = Vec::with_capacity(outcomes.len());
+        let mut failed: Vec<FileId> = Vec::new();
         for (id, outcome) in outcomes {
             match outcome {
                 Ok(analysis) => analyzed.push((id, analysis)),
@@ -199,11 +201,14 @@ impl StatsCollector {
                     // A bad file must not stop the batch, and it must leave the
                     // queue: a failure that stays pending is retried forever.
                     tracing::warn!(file_id = id, %error, "file statistics analysis failed");
-                    self.store.registry().set_state(id, FileState::Failed)?;
-                    report.failed += 1;
+                    failed.push(id);
                 }
             }
         }
+        report.failed += failed.len();
+        self.store
+            .registry()
+            .set_state_batch(&failed, FileState::Failed)?;
 
         if analyzed.is_empty() {
             return Ok(());
@@ -241,16 +246,20 @@ impl StatsCollector {
             report.segments += 1;
         }
 
-        // Only after the segment is durable.
-        for (file_id, analysis) in &analyzed {
-            self.store.registry().mark_analyzed(
-                *file_id,
-                &analysis.format,
-                analysis.num_rows,
-                analysis.total_byte_size,
-            )?;
-            report.analyzed += 1;
-        }
+        // Only after the segment is durable, and in one transaction: a redb
+        // commit is an fsync, so per-file marking caps the whole collector at a
+        // few hundred files a second however fast the analysis is.
+        let marks: Vec<AnalyzedFile<'_>> = analyzed
+            .iter()
+            .map(|(id, analysis)| AnalyzedFile {
+                id: *id,
+                format: &analysis.format,
+                num_rows: analysis.num_rows,
+                total_byte_size: analysis.total_byte_size,
+            })
+            .collect();
+        self.store.registry().mark_analyzed_batch(&marks)?;
+        report.analyzed += marks.len();
 
         tracing::debug!(
             prefix,

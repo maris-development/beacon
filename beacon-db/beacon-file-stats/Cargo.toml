@@ -50,3 +50,7 @@ anyhow = { workspace = true }
 [[example]]
 name = "walkthrough"
 required-features = ["datafusion"]
+
+[[example]]
+name = "scale_million"
+required-features = ["datafusion"]

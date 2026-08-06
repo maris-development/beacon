@@ -127,7 +127,6 @@ async fn try_prune(
     }
 
     let range = (candidates[0], candidates[candidates.len() - 1]);
-    let positions = row_positions(candidates);
 
     let mut columns: HashMap<String, PackedColumn> = HashMap::new();
     for column in &referenced {
@@ -141,7 +140,7 @@ async fn try_prune(
         if segments.is_empty() {
             continue;
         }
-        if let Some(packed) = pack(&segments, field.data_type(), &positions, candidates.len()) {
+        if let Some(packed) = pack(&segments, field.data_type(), candidates) {
             columns.insert(column.name().to_string(), packed);
         }
     }
@@ -166,15 +165,6 @@ async fn try_prune(
     Ok(Some(kept))
 }
 
-/// `file_id -> output row`, for the merge back onto the caller's order.
-fn row_positions(candidates: &[FileId]) -> HashMap<FileId, u32> {
-    candidates
-        .iter()
-        .enumerate()
-        .map(|(row, id)| (*id, row as u32))
-        .collect()
-}
-
 /// Fold every segment's rows for one column onto the candidate rows.
 ///
 /// Values are gathered with `take`, so a candidate with no statistics simply
@@ -184,18 +174,20 @@ fn row_positions(candidates: &[FileId]) -> HashMap<FileId, u32> {
 fn pack(
     segments: &[ColumnStats],
     target: &DataType,
-    positions: &HashMap<FileId, u32>,
-    rows: usize,
+    candidates: &[FileId],
 ) -> Option<PackedColumn> {
+    // Both sides are sorted ascending, so the join is a merge, not a hash. That
+    // matters at scale: a hash map over a million candidates costs ~50 MB and an
+    // allocation per entry, for a walk that needs neither.
+    let mut indices: Vec<Option<u32>> = vec![None; candidates.len()];
+
     // Concatenate the segments, casting each to the predicate's type. Segments
-    // arrive oldest first, so a later row for the same file overwrites an
-    // earlier one below.
+    // arrive oldest first, and a later row for the same file overwrites an
+    // earlier one, so the newest statistic wins.
     let mut mins: Vec<ArrayRef> = Vec::with_capacity(segments.len());
     let mut maxes: Vec<ArrayRef> = Vec::with_capacity(segments.len());
     let mut null_counts: Vec<u64> = Vec::new();
     let mut row_counts: Vec<u64> = Vec::new();
-    // Output row -> index into the concatenated arrays.
-    let mut source_of: HashMap<u32, u32> = HashMap::new();
 
     let mut offset = 0u32;
     for segment in segments {
@@ -206,9 +198,16 @@ fn pack(
         null_counts.extend_from_slice(&segment.null_count);
         row_counts.extend_from_slice(&segment.row_count);
 
-        for (within, file_id) in segment.file_ids.iter().enumerate() {
-            if let Some(row) = positions.get(file_id) {
-                source_of.insert(*row, offset + within as u32);
+        let (mut row, mut within) = (0usize, 0usize);
+        while row < candidates.len() && within < segment.file_ids.len() {
+            match candidates[row].cmp(&segment.file_ids[within]) {
+                std::cmp::Ordering::Less => row += 1,
+                std::cmp::Ordering::Greater => within += 1,
+                std::cmp::Ordering::Equal => {
+                    indices[row] = Some(offset + within as u32);
+                    row += 1;
+                    within += 1;
+                }
             }
         }
         offset += segment.len() as u32;
@@ -219,7 +218,7 @@ fn pack(
     let null_count: ArrayRef = Arc::new(UInt64Array::from(null_counts));
     let row_count: ArrayRef = Arc::new(UInt64Array::from(row_counts));
 
-    let indices = UInt32Array::from_iter((0..rows as u32).map(|row| source_of.get(&row).copied()));
+    let indices = UInt32Array::from_iter(indices);
 
     Some(PackedColumn {
         min: arrow::compute::take(&min, &indices, None).ok()?,
@@ -234,15 +233,3 @@ fn concat(arrays: &[ArrayRef]) -> Option<ArrayRef> {
     arrow::compute::concat(&refs).ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn positions_follow_the_callers_order() {
-        let positions = row_positions(&[7, 9, 11]);
-        assert_eq!(positions[&7], 0);
-        assert_eq!(positions[&11], 2);
-        assert_eq!(positions.len(), 3);
-    }
-}

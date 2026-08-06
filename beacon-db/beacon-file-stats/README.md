@@ -225,6 +225,81 @@ The second rule is easy to get wrong because it looks fine at small scale. The
 test measures it: for one column across four segments, prefix-local reads **1 of
 4**, scattered reads **4 of 4**.
 
+## At a million files
+
+`examples/scale_million.rs` builds and queries the real target shape: 1M files,
+100 families, ~160 000 distinct column names, 20 columns per file.
+
+```bash
+cargo run --release -p beacon-file-stats --example scale_million --features datafusion
+```
+
+```text
+shape: 1000000 files, 100 families, ~160010 distinct columns, 20 columns/file
+
+register : 1000000 files in 2.5s  (392972 files/s)
+collect  : 1000000 analyzed, 100 segments in 8.1s  (123411 files/s)
+
+registry :    514.0 MB
+segments :    780.1 MB over 100 objects, 40.9 bytes/cell
+manifest :      0.6 MB   <- the metadata that decides which segments to read
+cells    : 20000000 real, against 160010000000 dense (8000x)
+columns  : 160010 interned
+
+registry lookup: 7.2 us each  (path -> id -> record, 10000 probes)
+
+prune on a family column : 14 ms, keeps 999943 of 1000000
+prune on a store-wide column : 57 ms, keeps 50000 of 1000000
+prune the same family column over that family's 10k files only : 0 ms, keeps 9943 of 10000
+```
+
+Peak resident memory is ~1.0 GB for the whole run, ~810 MB of it in the build
+phase. Nothing resident grows with the column count.
+
+### The manifest holds up
+
+0.6 MB. That was the part of the design most likely to fail: a manifest keeping
+per-column min/max per segment would be 16M entries here, and the metadata would
+cost more than the data it guards. Keeping only a file id range and a sorted
+column id list per segment is what makes it a rounding error instead.
+
+### Where pruning pays, and where it does not
+
+Read the last three lines together. They say something the design cannot escape.
+
+**Pruning power is bounded by how many of the candidate files declare the
+column.** An absent statistic keeps a file, so a column that 0.6% of the
+candidates declare can only ever prune 0.6% of them.
+
+| Predicate | Candidates | Kept | Verdict |
+|---|---|---|---|
+| `core_3 > 9500`, declared by every file | 1 000 000 | 50 000 | 20x fewer files to open, in 57 ms |
+| `fam7_var300 > 9000`, declared by ~62 files | 1 000 000 | 999 943 | correct, and useless |
+| `fam7_var300 > 9000` | 10 000 (one family) | 9 943 | correct, cheap, still little use |
+
+This is not a flaw to fix. It is what a sparse column space means. The win comes
+from columns that are widely declared inside the set being scanned, which is
+exactly the columns people filter on: time, latitude, depth. A column only a
+handful of files declare will not prune, and no layout changes that.
+
+The practical consequence is that **the candidate list should come from the table
+being scanned, not from the whole instance.** Pruning a million candidates on a
+column 62 of them declare is arithmetically correct and buys nothing.
+
+### Two bugs this run found
+
+Both were invisible below about 100 000 files.
+
+**A redb commit is an fsync.** The collector called `mark_analyzed` per file, so
+a million files meant a million transactions. The collect phase ran at ~250
+files/s and would have taken over an hour. Batching the whole group into one
+transaction took it to 8 seconds.
+
+**A hash join where a merge join would do.** `prune_files` built a hash map over
+every candidate to align segment rows onto output rows. Both sides are already
+sorted by file id, so the map bought nothing and cost ~50 MB and an allocation
+per entry. The merge join took the store-wide prune from 242 ms to 57 ms.
+
 ## Measured, not asserted
 
 From `tests/scale.rs`:
