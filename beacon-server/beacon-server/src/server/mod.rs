@@ -260,6 +260,7 @@ async fn build_runtime(
         // query pool, which fails the first ORDER BY that needs to sort.
         .with_vm_memory_limit(config.runtime.vm_memory_size.saturating_mul(1024 * 1024))
         .with_crawler(config.crawler.clone())
+        .with_file_stats(config.file_stats.clone())
         .with_netcdf_config(config.netcdf.clone())
         .with_sql_settings(SqlSettings {
             default_table: config.sql.default_table.clone(),

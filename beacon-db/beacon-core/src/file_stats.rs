@@ -33,19 +33,25 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::datatypes::{DataType, SchemaRef};
 use beacon_datafusion_ext::format_ext::try_file_format_factory_ext;
 use beacon_datafusion_ext::listing_factory::try_listing_factory_from_session;
+use beacon_common::FileStatsConfig;
 use beacon_file_stats::segment::ColumnStat;
-use beacon_file_stats::{FileAnalysis, FileAnalyzer, FileRecord, FileStatsError};
+use beacon_file_stats::{
+    CollectorConfig, FileAnalysis, FileAnalyzer, FileRecord, FileStatsError, FileStatsStore,
+    ObservedFile, StatsCollector,
+};
 use chrono::TimeZone;
 use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
-use object_store::{ObjectMeta, path::Path};
+use futures::StreamExt;
+use object_store::{ObjectMeta, ObjectStore, path::Path};
 
 use crate::statement_plan::{SessionCell, upgrade_session};
 
@@ -239,6 +245,189 @@ fn to_column_stat(
         num_rows.unwrap_or(0),
         data_type,
     ))
+}
+
+
+// ── the background service ──────────────────────────────────────────────────
+
+/// Owns the store and the collector, and drives them on a timer.
+///
+/// One pass discovers, then analyzes:
+///
+/// 1. **Discover.** List the datasets store and register what it reports. New
+///    paths get an id and join the queue; changed ones go stale and rejoin it.
+///    Listing is streamed in chunks so a store of a million files never has to be
+///    held whole.
+/// 2. **Analyze.** Drain the queue into segments, bounded by `batch_files` per
+///    pass so one tick cannot run away with the machine.
+///
+/// Discovery here only ever adds or updates. A listing reports what is there,
+/// never what is gone, so tombstoning a deleted file needs
+/// [`Registry::reconcile_prefix`], which must see a complete listing for its
+/// prefix and so does not belong on a chunked hot path. It is called explicitly
+/// instead.
+///
+/// The background task holds a [`Weak`] back to the service, so dropping the
+/// runtime stops it. [`Drop`] aborts it outright.
+pub struct FileStatsService {
+    store: Arc<FileStatsStore>,
+    collector: StatsCollector,
+    session: SessionCell,
+    datasets_url: ObjectStoreUrl,
+    config: FileStatsConfig,
+    task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl FileStatsService {
+    pub fn new(
+        store: Arc<FileStatsStore>,
+        analyzer: Arc<dyn FileAnalyzer>,
+        session: SessionCell,
+        datasets_url: ObjectStoreUrl,
+        config: FileStatsConfig,
+    ) -> Arc<Self> {
+        let collector = StatsCollector::new(
+            store.clone(),
+            analyzer,
+            CollectorConfig {
+                batch_files: config.batch_files,
+                concurrency: config.concurrency,
+                target_group_files: config.target_group_files,
+                min_group_files: config.min_group_files,
+                prefix_depth: config.prefix_depth,
+            },
+        );
+        Arc::new(Self {
+            store,
+            collector,
+            session,
+            datasets_url,
+            config,
+            task: parking_lot::Mutex::new(None),
+        })
+    }
+
+    pub fn store(&self) -> &Arc<FileStatsStore> {
+        &self.store
+    }
+
+    /// Start the timer. The first pass runs one interval from now, so startup is
+    /// not competing with a backfill.
+    pub fn start(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let interval = Duration::from_secs(self.config.interval_secs.max(1));
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await; // consume the immediate first tick
+            loop {
+                ticker.tick().await;
+                let Some(service) = weak.upgrade() else {
+                    break; // the runtime went away
+                };
+                if let Err(error) = service.run_once().await {
+                    tracing::warn!(%error, "a file statistics pass failed");
+                }
+            }
+        });
+        *self.task.lock() = Some(handle);
+    }
+
+    /// Discover, then analyze. Exposed so a caller can force a pass.
+    pub async fn run_once(&self) -> anyhow::Result<FileStatsPass> {
+        let discovered = self.discover().await?;
+        let report = self
+            .collector
+            .run_once()
+            .await
+            .map_err(|e| anyhow::anyhow!("file statistics collection failed: {e}"))?;
+
+        let pass = FileStatsPass {
+            discovered,
+            analyzed: report.analyzed,
+            failed: report.failed,
+            segments: report.segments,
+            pending: self.store.registry().num_pending().unwrap_or(0),
+        };
+        if !report.is_idle() || discovered > 0 {
+            tracing::info!(
+                discovered = pass.discovered,
+                analyzed = pass.analyzed,
+                failed = pass.failed,
+                segments = pass.segments,
+                pending = pass.pending,
+                "file statistics pass"
+            );
+        }
+        Ok(pass)
+    }
+
+    /// Register everything the datasets store currently lists, in chunks.
+    async fn discover(&self) -> anyhow::Result<usize> {
+        let session = self.session()?;
+        let store = session
+            .state()
+            .runtime_env()
+            .object_store(&self.datasets_url)
+            .map_err(|e| anyhow::anyhow!("datasets store unavailable: {e}"))?;
+
+        let prefix = (!self.config.scan_prefix.is_empty())
+            .then(|| Path::from(self.config.scan_prefix.as_str()));
+        let mut listing = store.list(prefix.as_ref());
+
+        let mut batch: Vec<ObservedFile> = Vec::with_capacity(self.config.discovery_chunk);
+        let mut total = 0usize;
+        while let Some(entry) = listing.next().await {
+            let meta = match entry {
+                Ok(meta) => meta,
+                Err(error) => {
+                    tracing::warn!(%error, "listing the datasets store failed part-way");
+                    break;
+                }
+            };
+            batch.push(
+                ObservedFile::new(
+                    meta.location.as_ref(),
+                    meta.size,
+                    meta.last_modified.timestamp_millis(),
+                )
+                .with_e_tag(meta.e_tag.clone()),
+            );
+            if batch.len() >= self.config.discovery_chunk {
+                total += batch.len();
+                self.store.registry().intern_files(&batch)?;
+                batch.clear();
+            }
+        }
+        if !batch.is_empty() {
+            total += batch.len();
+            self.store.registry().intern_files(&batch)?;
+        }
+        Ok(total)
+    }
+
+    fn session(&self) -> anyhow::Result<Arc<SessionContext>> {
+        upgrade_session(&self.session, "file statistics service")
+    }
+}
+
+impl Drop for FileStatsService {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.lock().take() {
+            task.abort();
+        }
+    }
+}
+
+/// What one pass of the service did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileStatsPass {
+    /// Files the listing reported, new or already known.
+    pub discovered: usize,
+    pub analyzed: usize,
+    pub failed: usize,
+    pub segments: usize,
+    /// Files still awaiting analysis when the pass ended.
+    pub pending: u64,
 }
 
 #[cfg(test)]

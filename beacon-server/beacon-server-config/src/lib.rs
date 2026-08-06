@@ -13,6 +13,7 @@ use error::Result;
 pub use beacon_arrow_atlas::datafusion::AtlasConfig;
 pub use beacon_arrow_bbf::datafusion::BbfConfig;
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
+pub use beacon_common::FileStatsConfig;
 pub use beacon_common::CrawlerConfig;
 
 #[derive(Debug, Clone)]
@@ -29,6 +30,7 @@ pub struct Config {
     pub atlas: AtlasConfig,
     pub bbf: BbfConfig,
     pub crawler: CrawlerConfig,
+    pub file_stats: FileStatsConfig,
     pub api_docs: ApiDocsConfig,
     /// Resolved data-directory paths (root + sub-directories).
     pub data: DataDirsConfig,
@@ -438,6 +440,37 @@ struct RawConfig {
     #[envconfig(from = "BEACON_CRAWLER_DEFAULT_INTERVAL_SECS", default = "900")]
     crawler_default_interval_secs: u64,
 
+    // File statistics subsystem
+    //
+    // Background per-file column ranges, used to skip files a predicate cannot
+    // match. Off by default: it has not run against a real archive yet, and on a
+    // netCDF deployment it does nothing at all unless
+    // `BEACON_NETCDF_USE_RUST_READER` is on, because netcdf-c serialises every
+    // call on a process-global lock.
+    #[envconfig(from = "BEACON_FILE_STATS_ENABLE", default = "false")]
+    file_stats_enable: bool,
+    #[envconfig(from = "BEACON_FILE_STATS_INTERVAL_SECS", default = "900")]
+    file_stats_interval_secs: u64,
+    /// Files analyzed at once. Empty takes a quarter of the cores, which leaves
+    /// room for queries. Raise it well above the core count for datasets in
+    /// object storage, where the work is waiting rather than parsing.
+    #[envconfig(from = "BEACON_FILE_STATS_CONCURRENCY")]
+    file_stats_concurrency: Option<usize>,
+    #[envconfig(from = "BEACON_FILE_STATS_BATCH_FILES", default = "10000")]
+    file_stats_batch_files: usize,
+    #[envconfig(from = "BEACON_FILE_STATS_TARGET_GROUP_FILES", default = "10000")]
+    file_stats_target_group_files: usize,
+    #[envconfig(from = "BEACON_FILE_STATS_MIN_GROUP_FILES", default = "500")]
+    file_stats_min_group_files: usize,
+    /// Fix the segment grouping at this directory depth. Leave unset: the
+    /// derivation handles roots of differing shape, which one depth cannot.
+    #[envconfig(from = "BEACON_FILE_STATS_PREFIX_DEPTH")]
+    file_stats_prefix_depth: Option<usize>,
+    #[envconfig(from = "BEACON_FILE_STATS_SCAN_PREFIX", default = "")]
+    file_stats_scan_prefix: String,
+    #[envconfig(from = "BEACON_FILE_STATS_DISCOVERY_CHUNK", default = "10000")]
+    file_stats_discovery_chunk: usize,
+
     // OpenAPI documentation metadata
     #[envconfig(from = "BEACON_API_TITLE", default = "Beacon Rest API")]
     api_title: String,
@@ -537,6 +570,20 @@ impl From<RawConfig> for Config {
             },
             bbf: BbfConfig {
                 split_streams_slice: raw.bbf_split_streams_slice,
+            },
+            file_stats: FileStatsConfig {
+                enable: raw.file_stats_enable,
+                interval_secs: raw.file_stats_interval_secs,
+                concurrency: raw
+                    .file_stats_concurrency
+                    .filter(|n| *n > 0)
+                    .unwrap_or_else(beacon_common::file_stats_config::default_concurrency),
+                batch_files: raw.file_stats_batch_files.max(1),
+                target_group_files: raw.file_stats_target_group_files.max(1),
+                min_group_files: raw.file_stats_min_group_files,
+                prefix_depth: raw.file_stats_prefix_depth,
+                scan_prefix: raw.file_stats_scan_prefix.clone(),
+                discovery_chunk: raw.file_stats_discovery_chunk.max(1),
             },
             crawler: CrawlerConfig {
                 enable: raw.crawler_enable,

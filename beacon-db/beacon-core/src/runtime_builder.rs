@@ -90,6 +90,7 @@ pub struct RuntimeBuilder {
     pub sql: SqlSettings,
 
     pub crawler: CrawlerConfig,
+    pub file_stats: beacon_common::FileStatsConfig,
 
     pub netcdf: NetcdfConfig,
 
@@ -191,6 +192,13 @@ impl RuntimeBuilder {
 
     /// Configures the crawler subsystem. `CrawlerConfig::enable = false` builds a
     /// runtime with no crawler at all (crawler DDL then errors).
+    /// Configures the background file-statistics subsystem.
+    /// `FileStatsConfig::enable = false` builds a runtime with no collector.
+    pub fn with_file_stats(mut self, file_stats: beacon_common::FileStatsConfig) -> Self {
+        self.file_stats = file_stats;
+        self
+    }
+
     pub fn with_crawler(mut self, crawler: CrawlerConfig) -> Self {
         self.crawler = crawler;
         self
@@ -273,7 +281,7 @@ impl RuntimeBuilder {
         } = init_auth_context(&self, session_cell.clone()).await?;
         let auth_context = Arc::new(auth_context);
 
-        let session_ctx = init_session_ctx(&self, auth_context.clone(), session_cell.clone())
+        let (session_ctx, redb_store) = init_session_ctx(&self, auth_context.clone(), session_cell.clone())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
 
@@ -333,7 +341,9 @@ impl RuntimeBuilder {
         // `beacon.system` — the auth directory and query metrics as SQL tables.
         register_system_schema(&session_ctx, session_cell.clone(), auth_context.clone())?;
 
-        init_crawler_manager(&self, &session_ctx, session_cell, file_formats).await?;
+        init_crawler_manager(&self, &session_ctx, session_cell.clone(), file_formats).await?;
+
+        let file_stats = init_file_stats(&self, session_cell, redb_store).await?;
 
         // Event-driven external-table refresh was removed; external tables become
         // current on an explicit `REFRESH` only.
@@ -349,11 +359,74 @@ impl RuntimeBuilder {
             auth: auth_context,
             auth_enforce: self.auth_enforce,
             read_only: self.read_only,
+            file_stats,
 
             tmp_dir,
         })
     }
 }
+
+/// Builds the file-statistics service and starts its timer.
+///
+/// `None` when the subsystem is off, or when there is no on-disk database: the
+/// registry needs redb tables, and an in-memory store has none to offer.
+async fn init_file_stats(
+    builder: &RuntimeBuilder,
+    session_cell: SessionCell,
+    redb_store: Option<RedbStore>,
+) -> anyhow::Result<Option<Arc<crate::file_stats::FileStatsService>>> {
+    if !builder.file_stats.enable {
+        return Ok(None);
+    }
+    let Some(redb) = redb_store else {
+        tracing::warn!(
+            "file statistics are enabled but this runtime has no database file; \
+             the registry needs one, so the subsystem stays off"
+        );
+        return Ok(None);
+    };
+    let Some(datasets) = builder.default_store.as_ref().map(|store| store.url.clone()) else {
+        tracing::warn!(
+            "file statistics are enabled but no datasets store is configured; \
+             there is nothing to discover, so the subsystem stays off"
+        );
+        return Ok(None);
+    };
+
+    let registry = Arc::new(beacon_file_stats::Registry::from_database(redb.database())?);
+    let objects: Arc<dyn ObjectStore> = Arc::new(redb);
+    let store = Arc::new(
+        beacon_file_stats::FileStatsStore::open(
+            registry,
+            objects,
+            object_store::path::Path::from(FILE_STATS_PREFIX),
+        )
+        .await?,
+    );
+
+    let analyzer = Arc::new(crate::file_stats::FormatFileAnalyzer::new(
+        session_cell.clone(),
+        datasets.clone(),
+    ));
+    let service = crate::file_stats::FileStatsService::new(
+        store,
+        analyzer,
+        session_cell,
+        datasets,
+        builder.file_stats.clone(),
+    );
+    service.start();
+
+    tracing::info!(
+        interval_secs = builder.file_stats.interval_secs,
+        concurrency = builder.file_stats.concurrency,
+        "file statistics subsystem started"
+    );
+    Ok(Some(service))
+}
+
+/// Where the statistics live inside the database's object namespace.
+const FILE_STATS_PREFIX: &str = "__file_stats__";
 
 /// Builds the crawler manager, loads persisted crawlers and starts their triggers,
 /// then publishes it through the session-extension handle so `CREATE/RUN/DROP
@@ -468,9 +541,17 @@ async fn init_session_ctx(
     builder: &RuntimeBuilder,
     auth_context: Arc<AuthContext>,
     session_cell: SessionCell,
-) -> anyhow::Result<Arc<SessionContext>> {
-    let db_store: Arc<dyn ObjectStore> = match &builder.db_path {
-        Some(db_path) => Arc::new(RedbStore::open(db_path)?),
+) -> anyhow::Result<(Arc<SessionContext>, Option<RedbStore>)> {
+    // The concrete store is returned alongside the trait object: the
+    // file-statistics registry is a B-tree, not an object, and keeping it inside
+    // the same beacon.db needs `RedbStore::database()`. An in-memory database has
+    // no such handle, so file statistics are unavailable there.
+    let redb = match &builder.db_path {
+        Some(db_path) => Some(RedbStore::open(db_path)?),
+        None => None,
+    };
+    let db_store: Arc<dyn ObjectStore> = match &redb {
+        Some(store) => Arc::new(store.clone()),
         None => Arc::new(object_store::memory::InMemory::new()),
     };
 
@@ -527,7 +608,7 @@ async fn init_session_ctx(
     )?);
     session_ctx.register_object_store(TMP_STORE_URL_OBJECT_URL.as_ref(), tmp_store);
 
-    Ok(session_ctx)
+    Ok((session_ctx, redb))
 }
 
 async fn register_schema_provider(
