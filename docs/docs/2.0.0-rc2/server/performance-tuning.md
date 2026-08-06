@@ -109,6 +109,12 @@ For a deployment with many NetCDF files:
 `BEACON_NETCDF_ENABLE_STATISTICS` controls the statistics of each file. Beacon uses them to prune a
 query. The default is `true`. Keep it on. Switch it off only to debug the pruning.
 
+Statistics also need the pure-Rust reader described below. The netCDF-C library serialises every
+call in the process on one lock, so computing them through it would be single-threaded however many
+cores you have, and would block queries while it ran. With the default reader Beacon reports no
+statistics for netCDF and prunes nothing, whatever this setting says. See
+[File statistics](/docs/2.0.0-rc2/internals/file-statistics).
+
 ### Pure-Rust reader (parallel reads and object storage)
 
 #### `BEACON_NETCDF_USE_RUST_READER`

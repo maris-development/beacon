@@ -171,6 +171,26 @@ then registers them as external tables.
 | `BEACON_CRAWLER_ENABLE` | `true` | Master switch for crawler scheduling and event triggers. When `false`, crawlers can still be defined and run on demand, but no background tasks are spawned. |
 | `BEACON_CRAWLER_DEFAULT_INTERVAL_SECS` | `900` | Fallback poll interval (seconds) for an event-driven crawler on a deployment where storage events are unavailable. |
 
+## File statistics
+
+Beacon records the value range of each column in each file, in the background, and uses it to skip
+files a query cannot match. See [File statistics](/docs/2.0.0-rc2/internals/file-statistics).
+
+Off by default. On a netCDF server you also need `BEACON_NETCDF_USE_RUST_READER=true` (see
+[File formats](#file-formats)), or the pass runs and stores nothing.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_FILE_STATS_ENABLE` | `false` | Master switch. When `false`, nothing is discovered, read or stored, and no background task runs. |
+| `BEACON_FILE_STATS_INTERVAL_SECS` | `900` | Seconds between passes. |
+| `BEACON_FILE_STATS_CONCURRENCY` | a quarter of the cores, minimum 2 | Files read at once. A fraction of the machine by default, so a backfill does not compete with queries. Raise it well above your core count for data in object storage, where the work is waiting on the network. |
+| `BEACON_FILE_STATS_BATCH_FILES` | `10000` | Files read per pass. Bounds how much memory one pass uses. |
+| `BEACON_FILE_STATS_TARGET_GROUP_FILES` | `10000` | Files a stored group should cover. Smaller groups skip more sharply for rare columns, at the cost of more of them to read for a common one. |
+| `BEACON_FILE_STATS_MIN_GROUP_FILES` | `500` | Never split a group below this, even across folders. |
+| `BEACON_FILE_STATS_PREFIX_DEPTH` | unset | Fix the grouping at this folder depth instead of deriving it from your paths. Leave unset: the derivation handles roots of differing shape, which one depth cannot. |
+| `BEACON_FILE_STATS_SCAN_PREFIX` | *(everything)* | Restrict discovery to this prefix of the datasets store. |
+| `BEACON_FILE_STATS_DISCOVERY_CHUNK` | `10000` | Files registered per transaction, so listing a large store is never held whole in memory. |
+
 ## CORS
 
 | Variable | Default | Description |
