@@ -187,8 +187,8 @@ mod tests {
         ColumnStat {
             min: StatScalar::F64(min),
             max: StatScalar::F64(max),
-            null_count: 1,
-            row_count: 100,
+            null_count: Some(1),
+            row_count: Some(100),
             data_type: DataType::Float64,
         }
     }
@@ -229,8 +229,15 @@ mod tests {
         assert_eq!(temp.data_type, DataType::Float64);
         assert_eq!(temp.min.as_primitive::<Float64Type>().values(), &[0.0, 20.0]);
         assert_eq!(temp.max.as_primitive::<Float64Type>().values(), &[10.0, 30.0]);
-        assert_eq!(temp.null_count, vec![1, 1]);
-        assert_eq!(temp.row_count, vec![100, 100]);
+        assert_eq!(
+            temp.null_count.as_ref(),
+            &arrow::array::UInt64Array::from(vec![Some(1), Some(1)]) as &dyn arrow::array::Array
+        );
+        assert_eq!(
+            temp.row_count.as_ref(),
+            &arrow::array::UInt64Array::from(vec![Some(100), Some(100)])
+                as &dyn arrow::array::Array
+        );
 
         let psal = store.column_stats_by_name("PSAL", (0, 2)).await.unwrap();
         assert_eq!(psal[0].file_ids, vec![1, 2]);

@@ -18,7 +18,7 @@ use crate::types::ColumnId;
 use super::format::{
     INDEX_ENTRY_LEN, MAGIC, SegmentFooter, StatBlockMeta, TRAILER_LEN, VERSION, decode_index_entry,
 };
-use super::values::{decode_u64s, decode_values};
+use super::values::{decode_counts, decode_u64s, decode_values};
 
 /// How much of a segment's tail the first read grabs. Large enough that a
 /// typical footer arrives whole, small enough to be cheap when it does not.
@@ -34,8 +34,10 @@ pub struct ColumnStats {
     pub file_ids: Vec<u64>,
     pub min: ArrayRef,
     pub max: ArrayRef,
-    pub null_count: Vec<u64>,
-    pub row_count: Vec<u64>,
+    /// Nullable: an entry is null where the format reported no count.
+    pub null_count: ArrayRef,
+    /// Nullable, and null for every netCDF file, which reports no row count.
+    pub row_count: ArrayRef,
 }
 
 impl ColumnStats {
@@ -167,8 +169,8 @@ impl SegmentReader {
             file_ids: decode_u64s(&meta.file_ids, &block),
             min: decode_values(&meta.min, len, &data_type, &block)?,
             max: decode_values(&meta.max, len, &data_type, &block)?,
-            null_count: decode_u64s(&meta.null_count, &block),
-            row_count: decode_u64s(&meta.row_count, &block),
+            null_count: decode_counts(&meta.null_count, &meta.null_count_valid, len, &block)?,
+            row_count: decode_counts(&meta.row_count, &meta.row_count_valid, len, &block)?,
             data_type,
         }))
     }

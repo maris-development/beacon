@@ -30,8 +30,8 @@ fn float_stat(min: f64, max: f64) -> ColumnStat {
     ColumnStat {
         min: StatScalar::F64(min),
         max: StatScalar::F64(max),
-        null_count: 0,
-        row_count: 100,
+        null_count: Some(0),
+        row_count: Some(100),
         data_type: DataType::Float64,
     }
 }
@@ -209,8 +209,8 @@ async fn segments_with_different_types_still_prune() {
             ColumnStat {
                 min: StatScalar::I64(1),
                 max: StatScalar::I64(2),
-                null_count: 0,
-                row_count: 10,
+                null_count: Some(0),
+                row_count: Some(10),
                 data_type: DataType::Int16,
             },
         )],
@@ -306,4 +306,108 @@ async fn a_deleted_files_statistics_are_not_used() {
     // from it. File 0 is still ruled out on its own live statistics.
     let kept = prune_files(&store, &greater_than("TEMP", 50.0), &schema(), &ids).await;
     assert_eq!(kept, vec![ids[1]], "the tombstoned file is kept, not trusted");
+}
+
+/// `WHERE TEMP IS NOT NULL` prunes on `null_count != row_count`, so a file whose
+/// counts are both zero reads as "every value is null" and is dropped.
+///
+/// Zero is what an unknown count currently becomes. netCDF never reports
+/// `num_rows`, so this is every netCDF file in a store.
+#[tokio::test]
+async fn is_not_null_must_not_drop_a_file_whose_counts_are_unknown() {
+    use datafusion::physical_expr::expressions::is_not_null;
+
+    let (store, _dir) = store().await;
+    let ids = store
+        .registry()
+        .intern_files(&[ObservedFile::new("argo/2024/000.nc", 1, 1)])
+        .unwrap();
+    let column = store.registry().intern_columns(&["TEMP"]).unwrap()[0];
+
+    // A real range, but no counts: the format gave a min and max and knew
+    // nothing about how many rows or nulls there are.
+    let mut builder = SegmentBuilder::new();
+    builder.push_file(
+        ids[0],
+        [(
+            column,
+            ColumnStat {
+                min: StatScalar::F64(0.0),
+                max: StatScalar::F64(10.0),
+                // Unknown, not zero. This is every netCDF file.
+                null_count: None,
+                row_count: None,
+                data_type: DataType::Float64,
+            },
+        )],
+    );
+    store.commit_segment(builder).await.unwrap();
+
+    let schema = schema();
+    let predicate = is_not_null(col("TEMP", &schema).unwrap()).unwrap();
+    let kept = prune_files(&store, &predicate, &schema, &ids).await;
+
+    assert_eq!(
+        kept, ids,
+        "the file has non-null TEMP values; unknown counts must not read as all-null"
+    );
+}
+
+
+/// The other half: a file that genuinely *is* all null is still prunable, so
+/// making counts optional did not just disable the test.
+#[tokio::test]
+async fn is_not_null_still_drops_a_file_that_is_entirely_null() {
+    use datafusion::physical_expr::expressions::is_not_null;
+
+    let (store, _dir) = store().await;
+    let ids = store
+        .registry()
+        .intern_files(&[
+            ObservedFile::new("argo/2024/000.nc", 1, 1),
+            ObservedFile::new("argo/2024/001.nc", 1, 1),
+        ])
+        .unwrap();
+    let column = store.registry().intern_columns(&["TEMP"]).unwrap()[0];
+
+    let mut builder = SegmentBuilder::new();
+    // Known counts, and every value is null.
+    builder.push_file(
+        ids[0],
+        [(
+            column,
+            ColumnStat {
+                min: StatScalar::Absent,
+                max: StatScalar::Absent,
+                null_count: Some(100),
+                row_count: Some(100),
+                data_type: DataType::Float64,
+            },
+        )],
+    );
+    // Known counts, and some values are not null.
+    builder.push_file(
+        ids[1],
+        [(
+            column,
+            ColumnStat {
+                min: StatScalar::F64(0.0),
+                max: StatScalar::F64(1.0),
+                null_count: Some(3),
+                row_count: Some(100),
+                data_type: DataType::Float64,
+            },
+        )],
+    );
+    store.commit_segment(builder).await.unwrap();
+
+    let schema = schema();
+    let predicate = is_not_null(col("TEMP", &schema).unwrap()).unwrap();
+    let kept = prune_files(&store, &predicate, &schema, &ids).await;
+
+    assert_eq!(
+        kept,
+        vec![ids[1]],
+        "the all-null file is ruled out; the one with values is not"
+    );
 }

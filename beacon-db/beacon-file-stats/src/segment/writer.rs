@@ -24,15 +24,21 @@ use super::format::{
     BufRef, INDEX_STRIDE, MAGIC, SegmentFooter, StatBlockMeta, StatValuesMeta, VERSION, align_up,
     encode_index_entry,
 };
-use super::values::{EncodedValues, encode_values, normalize_type, storage_type};
+use super::values::{EncodedValues, encode_counts, encode_values, normalize_type, storage_type};
 
 /// One file's statistics for one column.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnStat {
     pub min: StatScalar,
     pub max: StatScalar,
-    pub null_count: u64,
-    pub row_count: u64,
+    /// `None` when the format did not report it.
+    ///
+    /// Not zero. DataFusion prunes `IS NOT NULL` on `null_count != row_count`,
+    /// so a pair of unknowns written as zeroes reads as "every value is null"
+    /// and drops a file full of values.
+    pub null_count: Option<u64>,
+    /// `None` when the format did not report it. netCDF never does.
+    pub row_count: Option<u64>,
     /// The type this file declares for the column. Files may disagree; the
     /// builder reconciles them at [`SegmentBuilder::finish`].
     pub data_type: DataType,
@@ -43,8 +49,8 @@ impl ColumnStat {
     pub fn from_arrays(
         min: Option<&ArrayRef>,
         max: Option<&ArrayRef>,
-        null_count: u64,
-        row_count: u64,
+        null_count: Option<u64>,
+        row_count: Option<u64>,
         data_type: &DataType,
     ) -> Self {
         Self {
@@ -63,8 +69,8 @@ struct ColumnAccumulator {
     file_ids: Vec<u64>,
     mins: Vec<StatScalar>,
     maxs: Vec<StatScalar>,
-    null_counts: Vec<u64>,
-    row_counts: Vec<u64>,
+    null_counts: Vec<Option<u64>>,
+    row_counts: Vec<Option<u64>>,
     /// The running super type, or `None` once two contributions cannot share a
     /// block.
     data_type: Option<DataType>,
@@ -322,10 +328,12 @@ fn write_block(
     let min = append_values(out, block_start, encode_values(&accumulator.mins, data_type)?)?;
     let max = append_values(out, block_start, encode_values(&accumulator.maxs, data_type)?)?;
 
-    let null_count = flatten_u64(&accumulator.null_counts);
-    let null_count = append_buffer(out, block_start, &null_count)?;
-    let row_count = flatten_u64(&accumulator.row_counts);
-    let row_count = append_buffer(out, block_start, &row_count)?;
+    let (null_values, null_valid) = encode_counts(&accumulator.null_counts);
+    let null_count = append_buffer(out, block_start, &null_values)?;
+    let null_count_valid = append_buffer(out, block_start, &null_valid)?;
+    let (row_values, row_valid) = encode_counts(&accumulator.row_counts);
+    let row_count = append_buffer(out, block_start, &row_values)?;
+    let row_count_valid = append_buffer(out, block_start, &row_valid)?;
 
     let meta = StatBlockMeta {
         type_id,
@@ -335,7 +343,9 @@ fn write_block(
         min,
         max,
         null_count,
+        null_count_valid,
         row_count,
+        row_count_valid,
     };
 
     pad_to_align(out);
@@ -362,8 +372,8 @@ mod tests {
         ColumnStat {
             min: StatScalar::I64(min),
             max: StatScalar::I64(max),
-            null_count: 0,
-            row_count: 10,
+            null_count: Some(0),
+            row_count: Some(10),
             data_type: DataType::Int64,
         }
     }
@@ -415,8 +425,8 @@ mod tests {
                 ColumnStat {
                     min: StatScalar::Bytes(b"a".to_vec()),
                     max: StatScalar::Bytes(b"z".to_vec()),
-                    null_count: 0,
-                    row_count: 1,
+                    null_count: Some(0),
+                    row_count: Some(1),
                     data_type: DataType::Utf8,
                 },
             )],

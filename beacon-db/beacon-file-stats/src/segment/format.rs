@@ -38,7 +38,7 @@
 pub const MAGIC: &[u8; 8] = b"BCNFSTS\x01";
 
 /// The format version the writer emits.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Column index entries per sparse top-level entry.
 pub const INDEX_STRIDE: u32 = 1024;
@@ -114,8 +114,19 @@ pub struct StatBlockMeta {
     pub max: StatValuesMeta,
     /// `u64` little-endian.
     pub null_count: BufRef,
+    /// Validity for [`null_count`](Self::null_count). Empty means every entry is
+    /// known.
+    ///
+    /// A count has to be able to say "unknown", and zero cannot: DataFusion
+    /// prunes `IS NOT NULL` on `null_count != row_count`, so a pair of unknowns
+    /// recorded as `0, 0` reads as "every value is null" and drops a file that is
+    /// full of values. netCDF reports no row count at all, so that would be every
+    /// netCDF file in a store.
+    pub null_count_valid: BufRef,
     /// `u64` little-endian.
     pub row_count: BufRef,
+    /// Validity for [`row_count`](Self::row_count).
+    pub row_count_valid: BufRef,
 }
 
 /// The always-read tail of a segment.

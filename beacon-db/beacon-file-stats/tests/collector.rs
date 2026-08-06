@@ -63,8 +63,8 @@ impl FileAnalyzer for FakeAnalyzer {
                         ColumnStat {
                             min: StatScalar::F64(0.0),
                             max: StatScalar::F64(10.0),
-                            null_count: 0,
-                            row_count: 1_000,
+                            null_count: Some(0),
+                            row_count: Some(1_000),
                             data_type: DataType::Float64,
                         },
                     )

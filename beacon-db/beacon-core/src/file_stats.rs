@@ -211,6 +211,13 @@ fn to_analysis(format: &str, schema: &SchemaRef, statistics: &Statistics) -> Fil
 
 /// One column's range, or `None` when it carries nothing worth storing.
 ///
+/// # On unknown counts
+///
+/// `null_count` and `row_count` pass through as `Option`, and an absent one is
+/// stored as null rather than zero. DataFusion prunes `IS NOT NULL` on
+/// `null_count != row_count`; a pair of zeroes means "every value is null" and
+/// would drop the file.
+///
 /// # On `Precision`
 ///
 /// `get_value` accepts `Exact` and `Inexact` alike, which is what DataFusion's
@@ -241,8 +248,11 @@ fn to_column_stat(
     Some(ColumnStat::from_arrays(
         min.as_ref(),
         max.as_ref(),
-        column.null_count.get_value().map(|n| *n as u64).unwrap_or(0),
-        num_rows.unwrap_or(0),
+        // Absent stays absent. Writing an unknown count as zero makes
+        // `null_count != row_count` false, and DataFusion prunes `IS NOT NULL`
+        // on exactly that, so it would drop files full of values.
+        column.null_count.get_value().map(|n| *n as u64),
+        num_rows,
         data_type,
     ))
 }
@@ -539,8 +549,8 @@ mod tests {
 
         let names: Vec<&str> = analysis.columns.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["TEMP", "PSAL"]);
-        assert_eq!(analysis.columns[0].1.null_count, 3);
-        assert_eq!(analysis.columns[0].1.row_count, 1_000);
+        assert_eq!(analysis.columns[0].1.null_count, Some(3));
+        assert_eq!(analysis.columns[0].1.row_count, Some(1_000));
     }
 
     /// A format returning `new_unknown` must analyze cleanly and contribute
@@ -596,7 +606,10 @@ mod tests {
         let analysis = to_analysis("parquet", &schema(), &statistics);
         assert_eq!(analysis.columns.len(), 1);
         assert_eq!(analysis.num_rows, Some(50));
-        assert_eq!(analysis.columns[0].1.null_count, 0, "absent nulls read as zero");
+        // Absent stays absent. Zero would mean "no nulls", and paired with an
+        // absent row count that reads as "all values null" to the pruning engine.
+        assert_eq!(analysis.columns[0].1.null_count, None);
+        assert_eq!(analysis.columns[0].1.row_count, Some(50));
     }
 
     // ── against a real file ────────────────────────────────────────────
@@ -688,7 +701,7 @@ mod tests {
             .1;
         assert_eq!(temp.min, beacon_file_stats::StatScalar::F64(3.5));
         assert_eq!(temp.max, beacon_file_stats::StatScalar::F64(18.25));
-        assert_eq!(temp.row_count, 3);
+        assert_eq!(temp.row_count, Some(3));
     }
 
     #[test]

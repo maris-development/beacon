@@ -42,8 +42,8 @@ impl FileAnalyzer for DemoAnalyzer {
         let temp = ColumnStat {
             min: StatScalar::F64(index),
             max: StatScalar::F64(index + 2.0),
-            null_count: 3,
-            row_count: 1_000,
+            null_count: Some(3),
+            row_count: Some(1_000),
             data_type: DataType::Float64,
         };
 
@@ -54,8 +54,8 @@ impl FileAnalyzer for DemoAnalyzer {
                 ColumnStat {
                     min: StatScalar::F64(34.0),
                     max: StatScalar::F64(35.5),
-                    null_count: 0,
-                    row_count: 1_000,
+                    null_count: Some(0),
+                    row_count: Some(1_000),
                     data_type: DataType::Float64,
                 },
             ));

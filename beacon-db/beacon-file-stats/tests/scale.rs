@@ -99,8 +99,8 @@ fn stat(min: f64, max: f64) -> ColumnStat {
     ColumnStat {
         min: StatScalar::F64(min),
         max: StatScalar::F64(max),
-        null_count: 0,
-        row_count: 1_000,
+        null_count: Some(0),
+        row_count: Some(1_000),
         data_type: DataType::Float64,
     }
 }

@@ -21,7 +21,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array, UInt64Array};
+use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array};
 use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::Column;
 use datafusion::common::pruning::PruningStatistics;
@@ -274,8 +274,8 @@ fn pack(
     // earlier one, so the newest statistic wins.
     let mut mins: Vec<ArrayRef> = Vec::with_capacity(segments.len());
     let mut maxes: Vec<ArrayRef> = Vec::with_capacity(segments.len());
-    let mut null_counts: Vec<u64> = Vec::new();
-    let mut row_counts: Vec<u64> = Vec::new();
+    let mut null_counts: Vec<ArrayRef> = Vec::with_capacity(segments.len());
+    let mut row_counts: Vec<ArrayRef> = Vec::with_capacity(segments.len());
 
     let mut offset = 0u32;
     for segment in segments {
@@ -283,8 +283,8 @@ fn pack(
         let max = arrow::compute::cast(&segment.max, target).ok()?;
         mins.push(min);
         maxes.push(max);
-        null_counts.extend_from_slice(&segment.null_count);
-        row_counts.extend_from_slice(&segment.row_count);
+        null_counts.push(segment.null_count.clone());
+        row_counts.push(segment.row_count.clone());
 
         let (mut row, mut within) = (0usize, 0usize);
         while row < candidates.len() && within < segment.file_ids.len() {
@@ -305,8 +305,10 @@ fn pack(
 
     let min = concat(&mins)?;
     let max = concat(&maxes)?;
-    let null_count: ArrayRef = Arc::new(UInt64Array::from(null_counts));
-    let row_count: ArrayRef = Arc::new(UInt64Array::from(row_counts));
+    // Nullable, and stays nullable through the gather: an unknown count must
+    // reach the pruning engine as unknown, not as zero.
+    let null_count = concat(&null_counts)?;
+    let row_count = concat(&row_counts)?;
 
     let indices = UInt32Array::from_iter(indices);
 

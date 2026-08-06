@@ -54,14 +54,14 @@ pub(crate) enum EncodedValues {
 ///
 /// Returns an empty vector when every value is valid, which the block meta
 /// records as "no null buffer".
-struct ValidityBuilder {
+pub(crate) struct ValidityBuilder {
     bits: Vec<u8>,
     len: usize,
     any_null: bool,
 }
 
 impl ValidityBuilder {
-    fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             bits: vec![0u8; capacity.div_ceil(8)],
             len: 0,
@@ -69,7 +69,7 @@ impl ValidityBuilder {
         }
     }
 
-    fn push(&mut self, valid: bool) {
+    pub(crate) fn push(&mut self, valid: bool) {
         if valid {
             self.bits[self.len / 8] |= 1 << (self.len % 8);
         } else {
@@ -78,7 +78,7 @@ impl ValidityBuilder {
         self.len += 1;
     }
 
-    fn finish(self) -> Vec<u8> {
+    pub(crate) fn finish(self) -> Vec<u8> {
         if self.any_null { self.bits } else { Vec::new() }
     }
 }
@@ -286,6 +286,36 @@ pub(crate) fn decode_u64s(reference: &BufRef, block: &Bytes) -> Vec<u64> {
         .chunks_exact(8)
         .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
         .collect()
+}
+
+/// Read a count column as a nullable Arrow array.
+///
+/// An empty `valid` means every entry is known, which is the common case and
+/// costs no bytes to say.
+pub(crate) fn decode_counts(
+    values: &BufRef,
+    valid: &BufRef,
+    len: usize,
+    block: &Bytes,
+) -> Result<ArrayRef> {
+    let mut builder = ArrayData::builder(DataType::UInt64)
+        .len(len)
+        .add_buffer(buffer_from(block, values));
+    if !valid.is_empty() {
+        builder = builder.null_bit_buffer(Some(buffer_from(block, valid)));
+    }
+    Ok(make_array(builder.build()?))
+}
+
+/// Pack `Option<u64>` counts into a value buffer plus a validity bitmap.
+pub(crate) fn encode_counts(counts: &[Option<u64>]) -> (Vec<u8>, Vec<u8>) {
+    let mut values = Vec::with_capacity(counts.len() * 8);
+    let mut valid = ValidityBuilder::new(counts.len());
+    for count in counts {
+        values.extend_from_slice(&count.unwrap_or(0).to_le_bytes());
+        valid.push(count.is_some());
+    }
+    (values, valid.finish())
 }
 
 /// The declared statistics type after normalization, or `None` when this crate
