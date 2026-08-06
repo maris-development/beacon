@@ -66,6 +66,8 @@ beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
 beacon-redb-store = { path = "../beacon-redb-store" }
+beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
 
 [dev-dependencies]
 deltalake = { workspace = true }
+tempfile = { workspace = true }

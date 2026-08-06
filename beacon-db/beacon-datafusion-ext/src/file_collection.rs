@@ -154,7 +154,10 @@ impl TableProvider for FileCollection {
             .scan(state, projection, filters, limit)
             .await?;
 
-        Ok(plan)
+        // Drop the files whose recorded ranges say they cannot match. The JSON
+        // query API reaches its scans through here; SQL `read_*` functions reach
+        // theirs through `SuperListingTable`, which does the same.
+        Ok(beacon_file_stats::prune_scan(state, plan, filters, self.schema()).await)
     }
 
     fn supports_filters_pushdown(

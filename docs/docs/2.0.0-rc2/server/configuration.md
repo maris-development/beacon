@@ -171,6 +171,27 @@ then registers them as external tables.
 | `BEACON_CRAWLER_ENABLE` | `true` | Master switch for crawler scheduling and event triggers. When `false`, crawlers can still be defined and run on demand, but no background tasks are spawned. |
 | `BEACON_CRAWLER_DEFAULT_INTERVAL_SECS` | `900` | Fallback poll interval (seconds) for an event-driven crawler on a deployment where storage events are unavailable. |
 
+## File statistics
+
+Beacon records the value range of each column in each file. A query then prunes the files that
+cannot match. See [File statistics](/docs/2.0.0-rc2/internals/file-statistics).
+
+Beacon does not enable this feature by default. For netCDF, also set
+`BEACON_NETCDF_USE_RUST_READER=true` (see [File formats](#file-formats)). Without that variable,
+Beacon reads each netCDF file and records no ranges.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_FILE_STATS_ENABLE` | `false` | Master switch. When `false`, Beacon finds nothing, reads nothing and starts no background task. |
+| `BEACON_FILE_STATS_INTERVAL_SECS` | `900` | The seconds between two passes. |
+| `BEACON_FILE_STATS_CONCURRENCY` | one quarter of the cores, minimum 2 | The files that Beacon reads at the same time. A pass uses part of the machine, so it does not compete with queries. Increase this value above your core count for data in object storage. |
+| `BEACON_FILE_STATS_BATCH_FILES` | `10000` | The files that Beacon reads in one pass. This value limits the memory of one pass. |
+| `BEACON_FILE_STATS_TARGET_GROUP_FILES` | `10000` | The files that one segment covers. A small value prunes more for a rare column. It also adds segments to read for a common column. |
+| `BEACON_FILE_STATS_MIN_GROUP_FILES` | `500` | Beacon does not split a group below this size, even across folders. |
+| `BEACON_FILE_STATS_PREFIX_DEPTH` | *(derived)* | The folder depth for a group. Leave this variable unset. Beacon derives the depth from your paths and handles roots of different shapes. |
+| `BEACON_FILE_STATS_SCAN_PREFIX` | *(all files)* | Beacon finds files under this prefix of the datasets store only. |
+| `BEACON_FILE_STATS_DISCOVERY_CHUNK` | `10000` | The files that Beacon registers in one transaction. Beacon does not hold a large listing in memory. |
+
 ## CORS
 
 | Variable | Default | Description |

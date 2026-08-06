@@ -1643,6 +1643,7 @@ version = "2.0.0-rc.2"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
+ "beacon-file-stats",
  "datafusion",
  "futures",
  "glob",
@@ -1680,6 +1681,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-delta",
+ "beacon-file-stats",
  "beacon-functions",
  "beacon-lance",
  "beacon-redb-store",
@@ -1721,6 +1723,7 @@ dependencies = [
  "async-trait",
  "base64",
  "beacon-common",
+ "beacon-file-stats",
  "chrono",
  "datafusion",
  "datafusion-federation",
@@ -1778,6 +1781,30 @@ dependencies = [
  "tokio",
  "typetag",
  "url",
+]
+
+[[package]]
+name = "beacon-file-stats"
+version = "2.0.0-rc.2"
+dependencies = [
+ "anyhow",
+ "arrow 58.3.0",
+ "arrow-schema 58.3.0",
+ "async-trait",
+ "beacon-redb-store",
+ "bincode",
+ "bytes",
+ "datafusion",
+ "futures",
+ "object_store 0.13.2",
+ "redb",
+ "rkyv 0.8.10",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

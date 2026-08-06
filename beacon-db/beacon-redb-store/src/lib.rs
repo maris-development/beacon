@@ -63,7 +63,7 @@ use object_store::{
     ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
     RenameOptions, RenameTargetMode, Result as OsResult, UploadPart, path::Path,
 };
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 use serde::{Deserialize, Serialize};
 
 use container::{Container, Extent, RegionBackend};
@@ -78,6 +78,10 @@ const DATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("objects_d
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("objects_meta");
 const STATE_TABLE: TableDefinition<&str, u64> = TableDefinition::new("state");
 const SEQ_KEY: &str = "seq";
+
+/// The tables [`RedbStore`] owns. Everything else in the database belongs to a
+/// tenant sharing the file, and [`RedbStore::vacuum`] copies it verbatim.
+pub const OWNED_TABLES: [&str; 3] = ["objects_data", "objects_meta", "state"];
 
 /// Where an object's payload bytes live.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +122,7 @@ pub struct RedbStore {
 }
 
 struct Inner {
-    db: Database,
+    db: Arc<Database>,
     container: Arc<Container>,
     /// The container file's path — kept so [`RedbStore::vacuum`] can rewrite the
     /// store into a sibling temp file and atomically rename it back.
@@ -156,11 +160,35 @@ impl RedbStore {
         txn.commit().map_err(generic)?;
         Ok(Self {
             inner: Arc::new(Inner {
-                db,
+                db: Arc::new(db),
                 container,
                 path,
             }),
         })
+    }
+
+    /// The underlying redb database, so another component can keep its own
+    /// tables inside this one file.
+    ///
+    /// This is how the single-file goal survives contact with data that is not
+    /// object-shaped. Point lookups over a million paths belong in a B-tree, not
+    /// in an object store, and the store already holds an exclusive lock on the
+    /// file, so a second opener cannot have one.
+    ///
+    /// # Rules for a tenant
+    ///
+    /// 1. **Prefix your table names.** [`OWNED_TABLES`] are taken.
+    /// 2. **Declare tables as `TableDefinition<&[u8], &[u8]>`.** [`vacuum`] must
+    ///    copy tables it knows nothing about, and redb type-checks a definition
+    ///    against the stored one, so bytes is the only signature it can open
+    ///    them with. Encode integer keys big-endian if you need ordered
+    ///    iteration: redb orders byte keys lexicographically.
+    /// 3. **Drop the handle before a vacuum.** A rewrite replaces the file, and
+    ///    [`vacuum`] refuses to run while a tenant still holds the database.
+    ///
+    /// [`vacuum`]: Self::vacuum
+    pub fn database(&self) -> Arc<Database> {
+        self.inner.db.clone()
     }
 
     /// Compact the store, reclaiming space held by deleted or overwritten
@@ -191,6 +219,15 @@ impl RedbStore {
                 "cannot vacuum: the store still has outstanding clones",
             ))
         })?;
+        // A rewrite replaces the file, so it needs the only handle on the old
+        // one. A tenant holding `database()` would keep it alive past the drop
+        // below and block (or, on Windows, break) the rename.
+        if Arc::strong_count(&inner.db) > 1 {
+            return Err(generic(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "cannot vacuum: a tenant still holds the redb database handle",
+            )));
+        }
         block(move || inner.rewrite()).await
     }
 
@@ -574,6 +611,31 @@ impl Inner {
                     ndatas
                         .insert(path.as_str(), bytes.as_slice())
                         .map_err(generic)?;
+                }
+            }
+
+            // Copy every table this store does not own. A tenant keeping its own
+            // tables in this file (the file-statistics registry, say) would
+            // otherwise lose them silently on the first vacuum, which is the
+            // worst shape a bug can take: no error, no warning, no data.
+            //
+            // The tables are opened as bytes because a vacuum cannot know a
+            // tenant's key and value types, and redb type-checks a definition
+            // against the stored one. `RedbStore::database` states the rule.
+            let rtxn = db.begin_read().map_err(generic)?;
+            let tenant_tables: Vec<String> = rtxn
+                .list_tables()
+                .map_err(generic)?
+                .map(|handle| handle.name().to_string())
+                .filter(|name| !OWNED_TABLES.contains(&name.as_str()))
+                .collect();
+            for name in &tenant_tables {
+                let definition: TableDefinition<&[u8], &[u8]> = TableDefinition::new(name);
+                let source = rtxn.open_table(definition).map_err(generic)?;
+                let mut target = wtxn.open_table(definition).map_err(generic)?;
+                for entry in source.iter().map_err(generic)? {
+                    let (key, value) = entry.map_err(generic)?;
+                    target.insert(key.value(), value.value()).map_err(generic)?;
                 }
             }
         }

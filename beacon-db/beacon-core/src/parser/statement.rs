@@ -14,6 +14,7 @@ pub enum BeaconStatement {
     RunCrawler(RunCrawlerStatement),
     DropCrawler(DropCrawlerStatement),
     ShowCrawlers,
+    AnalyzeFiles(AnalyzeFilesStatement),
     SetExtension(SetExtensionStatement),
     DropExtension(DropExtensionStatement),
     ShowExtensions(ShowExtensionsStatement),
@@ -301,6 +302,37 @@ impl Display for RunCrawlerStatement {
     }
 }
 
+/// ANALYZE FILES ['<prefix>'] [FORCE]
+///
+/// Runs the background statistics pass now, rather than waiting for its timer.
+/// The collector takes `batch_files` per tick every `interval_secs`, so a fresh
+/// store is hours from being useful; this is how an operator backfills one
+/// prefix and sees the result.
+///
+/// `FORCE` re-analyzes files that are already analyzed. Nothing else does: a
+/// file whose content has not changed is not re-queued, so after turning on a
+/// reader that can finally produce ranges (netCDF's, say) every file looks
+/// up to date and would stay barren without this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyzeFilesStatement {
+    /// Restrict to paths under this prefix. `None` means the whole store.
+    pub prefix: Option<String>,
+    pub force: bool,
+}
+
+impl Display for AnalyzeFilesStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ANALYZE FILES")?;
+        if let Some(prefix) = &self.prefix {
+            write!(f, " '{prefix}'")?;
+        }
+        if self.force {
+            write!(f, " FORCE")?;
+        }
+        Ok(())
+    }
+}
+
 /// DROP CRAWLER <name>
 #[derive(Debug, Clone)]
 pub struct DropCrawlerStatement {
@@ -352,6 +384,7 @@ impl Display for BeaconStatement {
             Self::Refresh(s) => write!(f, "{s}"),
             Self::CreateCrawler(s) => write!(f, "{s}"),
             Self::RunCrawler(s) => write!(f, "{s}"),
+            Self::AnalyzeFiles(s) => write!(f, "{s}"),
             Self::DropCrawler(s) => write!(f, "{s}"),
             Self::ShowCrawlers => write!(f, "SHOW CRAWLERS"),
             Self::SetExtension(s) => write!(f, "{s}"),

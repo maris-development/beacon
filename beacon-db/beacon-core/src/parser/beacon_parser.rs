@@ -13,7 +13,7 @@ use super::statement::{
     AttachStatement, AuthStatement, BeaconStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
-    RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
+    AnalyzeFilesStatement, RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
     SummarizeStatement,
 };
 
@@ -107,9 +107,52 @@ impl<'a> BeaconParser<'a> {
             return self.parse_summarize();
         }
 
+        if self.is_analyze_files() {
+            return self.parse_analyze_files();
+        }
+
         let df_statement = Box::new(self.df_parser.parse_statement()?);
 
         Ok(BeaconStatement::DFStatement(df_statement))
+    }
+
+    /// Whether the next two tokens are `ANALYZE FILES`.
+    ///
+    /// Both words are required. `ANALYZE` alone belongs to DataFusion, and
+    /// taking it here would shadow it.
+    fn is_analyze_files(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.value.to_uppercase() == "ANALYZE")
+            && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "FILES")
+    }
+
+    /// Parse: ANALYZE FILES ['<prefix>'] [FORCE]
+    fn parse_analyze_files(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // ANALYZE
+        self.df_parser.parser.next_token(); // FILES
+
+        let prefix = match &self.df_parser.parser.peek_token().token {
+            Token::SingleQuotedString(value) => {
+                let value = value.clone();
+                self.df_parser.parser.next_token();
+                Some(value)
+            }
+            _ => None,
+        };
+
+        let force = matches!(
+            &self.df_parser.parser.peek_token().token,
+            Token::Word(w) if w.value.to_uppercase() == "FORCE"
+        );
+        if force {
+            self.df_parser.parser.next_token();
+        }
+
+        Ok(BeaconStatement::AnalyzeFiles(AnalyzeFilesStatement {
+            prefix,
+            force,
+        }))
     }
 
     /// Whether the next two tokens are `<KW1> CRAWLER`, where `KW1` matches `first`.

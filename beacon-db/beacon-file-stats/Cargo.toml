@@ -1,0 +1,56 @@
+[package]
+name = "beacon-file-stats"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+
+# Deliberately free of `datafusion` and of `beacon-binary-format`: neither
+# appears anywhere in this crate's dependency graph, so `cargo test -p
+# beacon-file-stats` compiles a small tree and runs in seconds. The DataFusion
+# pruning adapter arrives later behind an optional feature, so the core never
+# gains the dependency.
+#
+# Note this does not free the *workspace* from the binary-format submodule.
+# That crate is still a workspace member, so cargo needs it checked out to load
+# the workspace at all, whichever package you name with `-p`.
+[features]
+default = []
+# The DataFusion pruning adapter. Off by default so the storage engine keeps a
+# small dependency tree and a fast test run.
+datafusion = ["dep:datafusion"]
+
+[dependencies]
+arrow = { workspace = true }
+# Declared explicitly, and not left to workspace feature unification, because
+# this crate serialises `DataType` through serde. beacon-datafusion-ext lost its
+# standalone build to exactly that omission.
+arrow-schema = { workspace = true, features = ["serde"] }
+object_store = { workspace = true }
+redb = { workspace = true }
+rkyv = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+datafusion = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# A dev-dependency only: the engine works against any `ObjectStore`, and
+# `tests/single_file.rs` proves it also works when that store and the registry
+# are the *same* `beacon.db`. Nothing in `src/` may depend on this.
+beacon-redb-store = { path = "../beacon-redb-store" }
+anyhow = { workspace = true }
+
+[[example]]
+name = "walkthrough"
+required-features = ["datafusion"]
+
+[[example]]
+name = "scale_million"
+required-features = ["datafusion"]

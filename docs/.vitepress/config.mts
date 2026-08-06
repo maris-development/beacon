@@ -191,6 +191,7 @@ export default defineConfig({
             { text: 'Access Control', link: '/docs/2.0.0-rc2/security/access-control' },
             { text: 'Performance Tuning', link: '/docs/2.0.0-rc2/server/performance-tuning' },
             { text: 'Storage internals', link: '/docs/2.0.0-rc2/internals/storage' },
+            { text: 'File statistics', link: '/docs/2.0.0-rc2/internals/file-statistics' },
             { text: 'Troubleshooting', link: '/docs/2.0.0-rc2/troubleshooting' },
           ]
         },

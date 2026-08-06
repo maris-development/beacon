@@ -44,6 +44,10 @@ pub struct Runtime {
     /// (writes, DDL/DML, and beacon's side-effecting extension statements) is refused.
     pub(crate) read_only: bool,
 
+    /// The background file-statistics service, when enabled. Held so the runtime
+    /// owns its timer: dropping the runtime aborts it.
+    pub(crate) file_stats: Option<Arc<crate::file_stats::FileStatsService>>,
+
     /// tmp directory for storing temporary files (e.g. for query output)
     pub(crate) tmp_dir: PathBuf,
 }
@@ -537,6 +541,9 @@ impl Runtime {
                 Ok(crate::statement_plan::drop_crawler_plan(statement))
             }
             BeaconStatement::ShowCrawlers => Ok(crate::statement_plan::show_crawlers_plan()),
+            BeaconStatement::AnalyzeFiles(statement) => {
+                Ok(crate::statement_plan::analyze_files_plan(statement))
+            }
             BeaconStatement::SetExtension(statement) => {
                 Ok(crate::statement_plan::set_extension_plan(statement))
             }
@@ -1275,3 +1282,12 @@ mod crawler_sql_tests {
 // a helper that no longer exists: `CREATE EXTERNAL TABLE` is now expressed directly in
 // SQL (see the `tests/` integration suite, e.g. `tables_store_lock_release`), so there is
 // no SQL-builder function left to unit test.
+
+impl Runtime {
+    /// The background file-statistics service, when the subsystem is enabled and
+    /// this runtime has a database file to keep the registry in.
+    pub fn file_stats(&self) -> Option<&Arc<crate::file_stats::FileStatsService>> {
+        self.file_stats.as_ref()
+    }
+}
+

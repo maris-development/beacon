@@ -42,7 +42,13 @@ async fn system_tables_are_listed_in_information_schema() {
 
     assert_eq!(
         names,
-        vec!["query_metrics", "roles", "users"],
+        vec![
+            "file_stats",
+            "file_stats_segments",
+            "query_metrics",
+            "roles",
+            "users"
+        ],
         "the system schema should expose exactly these tables"
     );
 }
