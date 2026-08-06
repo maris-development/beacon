@@ -1787,6 +1787,7 @@ dependencies = [
  "arrow 58.3.0",
  "arrow-schema 58.3.0",
  "async-trait",
+ "beacon-redb-store",
  "bincode",
  "bytes",
  "futures",

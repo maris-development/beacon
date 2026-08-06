@@ -11,22 +11,32 @@
 use std::path::Path as FsPath;
 use std::sync::Arc;
 
-use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{
+    Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+};
 
 use crate::error::{FileStatsError, Result};
 use crate::types::{ColumnId, FileId, FileRecord, FileState, ObservedFile};
 
-const FILES_BY_PATH: TableDefinition<&str, u64> = TableDefinition::new("fs_files_by_path");
-const FILES_BY_ID: TableDefinition<u64, &[u8]> = TableDefinition::new("fs_files_by_id");
-const COLUMNS_BY_NAME: TableDefinition<&str, u32> = TableDefinition::new("fs_columns_by_name");
-const COLUMNS_BY_ID: TableDefinition<u32, &str> = TableDefinition::new("fs_columns_by_id");
+// Every table is `<&[u8], &[u8]>`, and every name is prefixed. Both are the
+// tenant contract `RedbStore::database` sets out: a vacuum rewrites the whole
+// file and has to copy tables whose types it cannot know, so bytes is the only
+// signature it can open them with. Integer keys are big-endian, because redb
+// orders byte keys lexicographically and the collector's queue depends on
+// ascending file ids.
+type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
+
+const FILES_BY_PATH: ByteTable = TableDefinition::new("fs_files_by_path");
+const FILES_BY_ID: ByteTable = TableDefinition::new("fs_files_by_id");
+const COLUMNS_BY_NAME: ByteTable = TableDefinition::new("fs_columns_by_name");
+const COLUMNS_BY_ID: ByteTable = TableDefinition::new("fs_columns_by_id");
 /// Files awaiting analysis. A dedicated table keeps the collector's next batch
 /// an O(batch) range scan instead of a full scan over every known file.
-const PENDING: TableDefinition<u64, ()> = TableDefinition::new("fs_pending");
-const STATE: TableDefinition<&str, u64> = TableDefinition::new("fs_state");
+const PENDING: ByteTable = TableDefinition::new("fs_pending");
+const STATE: ByteTable = TableDefinition::new("fs_state");
 
-const NEXT_FILE_ID: &str = "next_file_id";
-const NEXT_COLUMN_ID: &str = "next_column_id";
+const NEXT_FILE_ID: &[u8] = b"next_file_id";
+const NEXT_COLUMN_ID: &[u8] = b"next_column_id";
 
 /// File and column identity, backed by redb.
 pub struct Registry {
@@ -76,10 +86,16 @@ impl Registry {
             let mut pending = write.open_table(PENDING)?;
             let mut state = write.open_table(STATE)?;
 
-            let mut next = state.get(NEXT_FILE_ID)?.map(|v| v.value()).unwrap_or(0);
+            let mut next = match state.get(NEXT_FILE_ID)? {
+                Some(value) => read_u64(value.value())?,
+                None => 0,
+            };
 
             for file in observed {
-                let existing = by_path.get(file.path.as_str())?.map(|v| v.value());
+                let existing = match by_path.get(file.path.as_bytes())? {
+                    Some(value) => Some(read_u64(value.value())?),
+                    None => None,
+                };
                 match existing {
                     Some(id) => {
                         let mut record = read_record(&by_id, id)?.ok_or_else(|| {
@@ -92,8 +108,11 @@ impl Registry {
                             record.last_modified_millis = file.last_modified_millis;
                             record.e_tag = file.e_tag.clone();
                             record.state = FileState::Stale;
-                            by_id.insert(id, encode_record(&record)?.as_slice())?;
-                            pending.insert(id, ())?;
+                            by_id.insert(
+                                file_key(id).as_slice(),
+                                encode_record(&record)?.as_slice(),
+                            )?;
+                            pending.insert(file_key(id).as_slice(), [].as_slice())?;
                         }
                         ids.push(id);
                     }
@@ -106,14 +125,14 @@ impl Registry {
                             file.last_modified_millis,
                         );
                         record.e_tag = file.e_tag.clone();
-                        by_path.insert(file.path.as_str(), id)?;
-                        by_id.insert(id, encode_record(&record)?.as_slice())?;
-                        pending.insert(id, ())?;
+                        by_path.insert(file.path.as_bytes(), file_key(id).as_slice())?;
+                        by_id.insert(file_key(id).as_slice(), encode_record(&record)?.as_slice())?;
+                        pending.insert(file_key(id).as_slice(), [].as_slice())?;
                         ids.push(id);
                     }
                 }
             }
-            state.insert(NEXT_FILE_ID, next)?;
+            state.insert(NEXT_FILE_ID, next.to_be_bytes().as_slice())?;
         }
         write.commit()?;
         Ok(ids)
@@ -128,25 +147,28 @@ impl Registry {
             let mut by_id = write.open_table(COLUMNS_BY_ID)?;
             let mut state = write.open_table(STATE)?;
 
-            let mut next = state
-                .get(NEXT_COLUMN_ID)?
-                .map(|v| v.value())
-                .unwrap_or(0) as u32;
+            let mut next = match state.get(NEXT_COLUMN_ID)? {
+                Some(value) => read_u32(value.value())?,
+                None => 0,
+            };
 
             for name in names {
-                let existing = by_name.get(*name)?.map(|v| v.value());
+                let existing = match by_name.get(name.as_bytes())? {
+                    Some(value) => Some(read_u32(value.value())?),
+                    None => None,
+                };
                 match existing {
                     Some(id) => ids.push(id),
                     None => {
                         let id = next;
                         next += 1;
-                        by_name.insert(*name, id)?;
-                        by_id.insert(id, *name)?;
+                        by_name.insert(name.as_bytes(), column_key(id).as_slice())?;
+                        by_id.insert(column_key(id).as_slice(), name.as_bytes())?;
                         ids.push(id);
                     }
                 }
             }
-            state.insert(NEXT_COLUMN_ID, next as u64)?;
+            state.insert(NEXT_COLUMN_ID, next.to_be_bytes().as_slice())?;
         }
         write.commit()?;
         Ok(ids)
@@ -155,7 +177,10 @@ impl Registry {
     pub fn file_id(&self, path: &str) -> Result<Option<FileId>> {
         let read = self.db.begin_read()?;
         let table = read.open_table(FILES_BY_PATH)?;
-        Ok(table.get(path)?.map(|v| v.value()))
+        match table.get(path.as_bytes())? {
+            Some(value) => Ok(Some(read_u64(value.value())?)),
+            None => Ok(None),
+        }
     }
 
     pub fn record(&self, id: FileId) -> Result<Option<FileRecord>> {
@@ -167,13 +192,22 @@ impl Registry {
     pub fn column_id(&self, name: &str) -> Result<Option<ColumnId>> {
         let read = self.db.begin_read()?;
         let table = read.open_table(COLUMNS_BY_NAME)?;
-        Ok(table.get(name)?.map(|v| v.value()))
+        match table.get(name.as_bytes())? {
+            Some(value) => Ok(Some(read_u32(value.value())?)),
+            None => Ok(None),
+        }
     }
 
     pub fn column_name(&self, id: ColumnId) -> Result<Option<String>> {
         let read = self.db.begin_read()?;
         let table = read.open_table(COLUMNS_BY_ID)?;
-        Ok(table.get(id)?.map(|v| v.value().to_string()))
+        match table.get(column_key(id).as_slice())? {
+            Some(value) => Ok(Some(
+                String::from_utf8(value.value().to_vec())
+                    .map_err(|e| FileStatsError::Registry(format!("column {id} name: {e}")))?,
+            )),
+            None => Ok(None),
+        }
     }
 
     /// The next files awaiting analysis, ascending by id.
@@ -190,7 +224,7 @@ impl Registry {
         let mut out = Vec::with_capacity(limit);
         for entry in pending.iter()?.take(limit) {
             let (key, _) = entry?;
-            let id = key.value();
+            let id = read_u64(key.value())?;
             if let Some(record) = read_record(&by_id, id)? {
                 out.push((id, record));
             }
@@ -218,8 +252,8 @@ impl Registry {
             record.total_byte_size = total_byte_size;
             record.state = FileState::Analyzed;
             record.stats_epoch += 1;
-            by_id.insert(id, encode_record(&record)?.as_slice())?;
-            pending.remove(id)?;
+            by_id.insert(file_key(id).as_slice(), encode_record(&record)?.as_slice())?;
+            pending.remove(file_key(id).as_slice())?;
         }
         write.commit()?;
         Ok(())
@@ -238,13 +272,13 @@ impl Registry {
                 return Err(FileStatsError::Registry(format!("unknown file {id}")));
             };
             record.state = new_state;
-            by_id.insert(id, encode_record(&record)?.as_slice())?;
+            by_id.insert(file_key(id).as_slice(), encode_record(&record)?.as_slice())?;
             match new_state {
                 FileState::Pending | FileState::Stale => {
-                    pending.insert(id, ())?;
+                    pending.insert(file_key(id).as_slice(), [].as_slice())?;
                 }
                 _ => {
-                    pending.remove(id)?;
+                    pending.remove(file_key(id).as_slice())?;
                 }
             }
         }
@@ -270,15 +304,39 @@ impl Registry {
     }
 }
 
+/// Big-endian, so redb's lexicographic byte ordering is numeric ordering. The
+/// collector's queue reads ascending file ids straight out of that.
+fn file_key(id: FileId) -> [u8; 8] {
+    id.to_be_bytes()
+}
+
+fn column_key(id: ColumnId) -> [u8; 4] {
+    id.to_be_bytes()
+}
+
+fn read_u64(bytes: &[u8]) -> Result<u64> {
+    bytes
+        .try_into()
+        .map(u64::from_be_bytes)
+        .map_err(|_| FileStatsError::Registry(format!("expected an 8-byte value, got {}", bytes.len())))
+}
+
+fn read_u32(bytes: &[u8]) -> Result<u32> {
+    bytes
+        .try_into()
+        .map(u32::from_be_bytes)
+        .map_err(|_| FileStatsError::Registry(format!("expected a 4-byte value, got {}", bytes.len())))
+}
+
 fn encode_record(record: &FileRecord) -> Result<Vec<u8>> {
     bincode::serialize(record).map_err(|e| FileStatsError::Registry(format!("file record: {e}")))
 }
 
 fn read_record<T>(table: &T, id: FileId) -> Result<Option<FileRecord>>
 where
-    T: ReadableTable<u64, &'static [u8]>,
+    T: ReadableTable<&'static [u8], &'static [u8]>,
 {
-    match table.get(id)? {
+    match table.get(file_key(id).as_slice())? {
         Some(bytes) => bincode::deserialize(bytes.value())
             .map(Some)
             .map_err(|e| FileStatsError::Registry(format!("file record {id}: {e}"))),

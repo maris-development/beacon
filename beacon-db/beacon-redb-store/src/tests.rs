@@ -9,6 +9,7 @@
 
 use super::*;
 use object_store::{ObjectStoreExt, PutMode, UpdateVersion, path::Path};
+use redb::ReadableTableMetadata;
 use tempfile::TempDir;
 
 /// A fresh store backed by a file inside a temp dir. The `TempDir` is returned
@@ -648,4 +649,95 @@ mod conformance {
         let (_dir, store) = store();
         integration::stream_get(&store).await;
     }
+}
+
+// ── tenant tables ────────────────────────────────────────────────────────────
+
+/// A tenant table, declared the way [`RedbStore::database`] requires.
+const TENANT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("fs_files_by_path");
+
+/// A vacuum rewrites the whole file, so anything it forgets to copy is gone with
+/// no error and no warning. A tenant's tables must come through untouched.
+#[tokio::test]
+async fn vacuum_preserves_a_tenant_table() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("beacon.db");
+    let store = RedbStore::open(&file).unwrap();
+
+    // A tenant writes through the shared database handle.
+    {
+        let db = store.database();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TENANT_TABLE).unwrap();
+            table.insert(b"argo/0001.nc".as_slice(), 7u64.to_be_bytes().as_slice()).unwrap();
+            table.insert(b"argo/0002.nc".as_slice(), 8u64.to_be_bytes().as_slice()).unwrap();
+        }
+        write.commit().unwrap();
+    } // the handle goes out of scope, so the vacuum can take the file
+
+    // Give the store some object churn to reclaim, so the vacuum does real work.
+    let churn = Path::from("data/churn.lance");
+    for i in 0..3u8 {
+        store.put(&churn, vec![i; super::HEAP_THRESHOLD * 2].into()).await.unwrap();
+    }
+
+    let store = store.vacuum(VacuumMode::Rewrite).await.unwrap();
+
+    let db = store.database();
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(TENANT_TABLE).unwrap();
+    assert_eq!(
+        table.get(b"argo/0001.nc".as_slice()).unwrap().unwrap().value(),
+        7u64.to_be_bytes(),
+        "the tenant table did not survive the rewrite"
+    );
+    assert_eq!(
+        table.get(b"argo/0002.nc".as_slice()).unwrap().unwrap().value(),
+        8u64.to_be_bytes()
+    );
+    assert_eq!(table.len().unwrap(), 2);
+}
+
+/// A rewrite replaces the file, so it must not start while a tenant still holds
+/// the database. Refusing is the safe answer; proceeding would break the rename.
+#[tokio::test]
+async fn vacuum_refuses_while_a_tenant_holds_the_database() {
+    let dir = TempDir::new().unwrap();
+    let store = RedbStore::open(dir.path().join("beacon.db")).unwrap();
+
+    let tenant = store.database();
+    let error = store.vacuum(VacuumMode::Rewrite).await.unwrap_err();
+    assert!(
+        error.to_string().contains("holds the redb database handle"),
+        "unexpected error: {error}"
+    );
+    drop(tenant);
+}
+
+/// Big-endian keys are what make a tenant's ordered iteration work, because redb
+/// orders byte keys lexicographically.
+#[test]
+fn big_endian_keys_iterate_in_numeric_order() {
+    let dir = TempDir::new().unwrap();
+    let store = RedbStore::open(dir.path().join("beacon.db")).unwrap();
+    let db = store.database();
+
+    let write = db.begin_write().unwrap();
+    {
+        let mut table = write.open_table(TENANT_TABLE).unwrap();
+        for id in [300u64, 1, 256, 2] {
+            table.insert(id.to_be_bytes().as_slice(), b"".as_slice()).unwrap();
+        }
+    }
+    write.commit().unwrap();
+
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(TENANT_TABLE).unwrap();
+    let ids: Vec<u64> = table
+        .iter()
+        .unwrap()
+        .map(|entry| u64::from_be_bytes(entry.unwrap().0.value().try_into().unwrap()))
+        .collect();
+    assert_eq!(ids, vec![1, 2, 256, 300]);
 }
