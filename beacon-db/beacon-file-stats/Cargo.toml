@@ -1,0 +1,36 @@
+[package]
+name = "beacon-file-stats"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+
+# Deliberately free of `datafusion` and of `beacon-binary-format`: neither
+# appears anywhere in this crate's dependency graph, so `cargo test -p
+# beacon-file-stats` compiles a small tree and runs in seconds. The DataFusion
+# pruning adapter arrives later behind an optional feature, so the core never
+# gains the dependency.
+#
+# Note this does not free the *workspace* from the binary-format submodule.
+# That crate is still a workspace member, so cargo needs it checked out to load
+# the workspace at all, whichever package you name with `-p`.
+[dependencies]
+arrow = { workspace = true }
+# Declared explicitly, and not left to workspace feature unification, because
+# this crate serialises `DataType` through serde. beacon-datafusion-ext lost its
+# standalone build to exactly that omission.
+arrow-schema = { workspace = true, features = ["serde"] }
+object_store = { workspace = true }
+redb = { workspace = true }
+rkyv = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+async-trait = { workspace = true }

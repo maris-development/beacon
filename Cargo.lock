@@ -1781,6 +1781,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-file-stats"
+version = "2.0.0-rc.2"
+dependencies = [
+ "arrow 58.3.0",
+ "arrow-schema 58.3.0",
+ "async-trait",
+ "bincode",
+ "bytes",
+ "futures",
+ "object_store 0.13.2",
+ "redb",
+ "rkyv 0.8.10",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "beacon-functions"
 version = "2.0.0-rc.2"
 dependencies = [
