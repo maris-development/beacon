@@ -46,6 +46,14 @@ pub struct FileRecord {
     pub format: String,
     pub num_rows: Option<u64>,
     pub total_byte_size: Option<u64>,
+    /// Columns this file contributed statistics for.
+    ///
+    /// Zero is the interesting value. A format that returns no ranges (ODV,
+    /// Zarr, TIFF, CSV today) analyzes cleanly and contributes nothing, which
+    /// otherwise looks identical to a format that works. Recording it is what
+    /// lets an operator see `odv: 12000 files analyzed, 0 columns` instead of
+    /// wondering why pruning never helps.
+    pub column_count: u32,
     pub state: FileState,
     /// Bumped every time the collector rewrites this file's statistics. Lets a
     /// reader tell a stale segment entry from a current one.
@@ -63,6 +71,7 @@ impl FileRecord {
             format: String::new(),
             num_rows: None,
             total_byte_size: None,
+            column_count: 0,
             state: FileState::Pending,
             stats_epoch: 0,
         }

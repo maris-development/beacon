@@ -256,6 +256,7 @@ impl StatsCollector {
                 format: &analysis.format,
                 num_rows: analysis.num_rows,
                 total_byte_size: analysis.total_byte_size,
+                column_count: analysis.columns.len() as u32,
             })
             .collect();
         self.store.registry().mark_analyzed_batch(&marks)?;

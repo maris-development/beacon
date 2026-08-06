@@ -255,8 +255,8 @@ async fn a_stale_files_old_statistics_are_not_trusted() {
     let ids = seed_temp(&store, &[(0.0, 5.0)]).await;
     store
         .registry()
-        .mark_analyzed(ids[0], "netcdf", Some(10), Some(1))
-        .unwrap();
+        .mark_analyzed(ids[0], "netcdf", Some(10), Some(1), 1)
+            .unwrap();
 
     // The file is rewritten. Its contents now reach 60, but nothing has
     // re-analyzed it yet, so the store still holds [0, 5].
@@ -283,7 +283,8 @@ async fn a_deleted_files_statistics_are_not_used() {
     let (store, _dir) = store().await;
     let ids = seed_temp(&store, &[(0.0, 5.0), (90.0, 100.0)]).await;
     for id in &ids {
-        store.registry().mark_analyzed(*id, "netcdf", None, None).unwrap();
+        store.registry().mark_analyzed(*id, "netcdf", None, None, 1)
+            .unwrap();
     }
 
     // Both files still prune normally.

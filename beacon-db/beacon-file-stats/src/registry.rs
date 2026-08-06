@@ -69,6 +69,8 @@ pub struct AnalyzedFile<'a> {
     pub format: &'a str,
     pub num_rows: Option<u64>,
     pub total_byte_size: Option<u64>,
+    /// Columns this file contributed. Zero means the format produced no ranges.
+    pub column_count: u32,
 }
 
 /// File and column identity, backed by redb.
@@ -288,12 +290,14 @@ impl Registry {
         format: &str,
         num_rows: Option<u64>,
         total_byte_size: Option<u64>,
+        column_count: u32,
     ) -> Result<()> {
         self.mark_analyzed_batch(&[AnalyzedFile {
             id,
             format,
             num_rows,
             total_byte_size,
+            column_count,
         }])
     }
 
@@ -318,6 +322,7 @@ impl Registry {
                 record.format = file.format.to_string();
                 record.num_rows = file.num_rows;
                 record.total_byte_size = file.total_byte_size;
+                record.column_count = file.column_count;
                 record.state = FileState::Analyzed;
                 record.stats_epoch += 1;
                 by_id.insert(
@@ -552,7 +557,7 @@ mod tests {
     fn a_changed_file_goes_stale_and_keeps_its_id() {
         let (registry, _dir) = registry();
         let id = registry.intern_files(&[observed("a.nc", 1)]).unwrap()[0];
-        registry.mark_analyzed(id, "netcdf", Some(10), Some(100)).unwrap();
+        registry.mark_analyzed(id, "netcdf", Some(10), Some(100), 2).unwrap();
         assert_eq!(registry.record(id).unwrap().unwrap().state, FileState::Analyzed);
         assert_eq!(registry.num_pending().unwrap(), 0);
 
@@ -570,7 +575,7 @@ mod tests {
     fn an_unchanged_file_is_not_re_queued() {
         let (registry, _dir) = registry();
         let id = registry.intern_files(&[observed("a.nc", 1)]).unwrap()[0];
-        registry.mark_analyzed(id, "netcdf", None, None).unwrap();
+        registry.mark_analyzed(id, "netcdf", None, None, 0).unwrap();
 
         registry.intern_files(&[observed("a.nc", 1)]).unwrap();
         assert_eq!(registry.record(id).unwrap().unwrap().state, FileState::Analyzed);
@@ -588,7 +593,7 @@ mod tests {
         assert_eq!(batch.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![0, 1]);
 
         for (id, _) in &batch {
-            registry.mark_analyzed(*id, "csv", Some(1), Some(1)).unwrap();
+            registry.mark_analyzed(*id, "csv", Some(1), Some(1), 1).unwrap();
         }
         assert_eq!(registry.num_pending().unwrap(), 1);
         assert_eq!(registry.next_pending(10).unwrap()[0].0, 2);
@@ -620,7 +625,7 @@ mod tests {
             ])
             .unwrap();
         for id in 0..3 {
-            registry.mark_analyzed(id, "netcdf", None, None).unwrap();
+            registry.mark_analyzed(id, "netcdf", None, None, 0).unwrap();
         }
 
         // The listing for `argo/` now reports only a.nc.
@@ -643,7 +648,7 @@ mod tests {
     fn a_deleted_file_keeps_its_id() {
         let (registry, _dir) = registry();
         let ids = registry.intern_files(&[observed("argo/a.nc", 1)]).unwrap();
-        registry.mark_analyzed(ids[0], "netcdf", None, None).unwrap();
+        registry.mark_analyzed(ids[0], "netcdf", None, None, 0).unwrap();
 
         registry.reconcile_prefix("argo/", &[]).unwrap();
         assert_eq!(registry.record(ids[0]).unwrap().unwrap().state, FileState::Deleted);
@@ -660,7 +665,7 @@ mod tests {
     fn a_reappearing_file_is_revived() {
         let (registry, _dir) = registry();
         let ids = registry.intern_files(&[observed("argo/a.nc", 1)]).unwrap();
-        registry.mark_analyzed(ids[0], "netcdf", None, None).unwrap();
+        registry.mark_analyzed(ids[0], "netcdf", None, None, 0).unwrap();
         registry.reconcile_prefix("argo/", &[]).unwrap();
         assert_eq!(registry.num_pending().unwrap(), 0);
 
@@ -689,7 +694,7 @@ mod tests {
         );
 
         for id in &ids {
-            registry.mark_analyzed(*id, "csv", None, None).unwrap();
+            registry.mark_analyzed(*id, "csv", None, None, 0).unwrap();
         }
         assert!(registry.suppressed_in_range((0, 2)).unwrap().is_empty());
 
@@ -698,7 +703,7 @@ mod tests {
         assert_eq!(registry.suppressed_in_range((0, 2)).unwrap(), vec![1]);
 
         // Re-analysis restores trust.
-        registry.mark_analyzed(ids[1], "csv", None, None).unwrap();
+        registry.mark_analyzed(ids[1], "csv", None, None, 0).unwrap();
         assert!(registry.suppressed_in_range((0, 2)).unwrap().is_empty());
 
         // And the range scan honours its bounds.
@@ -709,12 +714,13 @@ mod tests {
     fn analysis_records_the_summary_the_scan_layer_asks_for() {
         let (registry, _dir) = registry();
         let id = registry.intern_files(&[observed("a", 1)]).unwrap()[0];
-        registry.mark_analyzed(id, "parquet", Some(42), Some(4096)).unwrap();
+        registry.mark_analyzed(id, "parquet", Some(42), Some(4096), 7).unwrap();
 
         let record = registry.record(id).unwrap().unwrap();
         assert_eq!(record.num_rows, Some(42));
         assert_eq!(record.total_byte_size, Some(4096));
         assert_eq!(record.format, "parquet");
+        assert_eq!(record.column_count, 7);
         assert_eq!(record.stats_epoch, 1);
     }
 }

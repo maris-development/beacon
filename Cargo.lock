@@ -1680,6 +1680,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-delta",
+ "beacon-file-stats",
  "beacon-functions",
  "beacon-lance",
  "beacon-redb-store",

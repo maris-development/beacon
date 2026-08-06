@@ -59,7 +59,7 @@ async fn seed(store: &FileStatsStore) {
     for id in &file_ids {
         store
             .registry()
-            .mark_analyzed(*id, "netcdf", Some(1_000), Some(4096))
+            .mark_analyzed(*id, "netcdf", Some(1_000), Some(4096), 1)
             .unwrap();
     }
 }
