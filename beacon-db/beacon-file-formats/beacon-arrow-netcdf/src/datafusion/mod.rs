@@ -388,23 +388,46 @@ impl FileFormat for NetcdfFormat {
         table_schema: SchemaRef,
         object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
-        if self.enable_statistics {
-            // Built the same way the reader builds it, so statistics and scans
-            // can never disagree about where a file is or which reader opens it.
-            let input = self.access.input_for(store, object)?;
-            Ok(statistics::generate_statistics(input, &table_schema)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        "Failed to generate statistics for object {}: {}",
-                        object.location,
-                        e
-                    );
-                    Statistics::new_unknown(&table_schema)
-                }))
-        } else {
-            Ok(Statistics::new_unknown(&table_schema))
+        // Statistics need the Rust reader. Every netcdf-c call serialises on a
+        // process-global mutex (`netcdf_sys::libnetcdf_lock`, which the crate
+        // documents as the difference between working and segfaulting on a
+        // non-threadsafe hdf5 build), and `read_arrays` is synchronous, so
+        // generating statistics under netcdf-c parks a tokio worker while
+        // queued behind every other netCDF call in the process. One cold query
+        // over a large collection is then serial *and* blocks query serving.
+        //
+        // `oxcdf` reads byte ranges through the object store: async, no global
+        // lock, and it produces the same ranges for the same file. So the
+        // capability follows the reader.
+        //
+        // Reporting unknown rather than erroring is deliberate. Absent
+        // statistics are always a legal answer -- DataFusion prunes nothing and
+        // scans everything, which is correct, just slower -- so a netcdf-c
+        // deployment keeps working untouched.
+        if !self.enable_statistics {
+            return Ok(Statistics::new_unknown(&table_schema));
         }
+        if !matches!(self.access, FileAccess::Oxcdf) {
+            tracing::debug!(
+                object = %object.location,
+                "netCDF statistics need the Rust reader; set use_rust_reader to enable them"
+            );
+            return Ok(Statistics::new_unknown(&table_schema));
+        }
+
+        // Built the same way the reader builds it, so statistics and scans
+        // can never disagree about where a file is or which reader opens it.
+        let input = self.access.input_for(store, object)?;
+        Ok(statistics::generate_statistics(input, &table_schema)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to generate statistics for object {}: {}",
+                    object.location,
+                    e
+                );
+                Statistics::new_unknown(&table_schema)
+            }))
     }
 
     async fn create_physical_plan(
@@ -605,6 +628,105 @@ mod reader_backend_tests {
             .await
             .unwrap_or_else(|e| panic!("register {file} on {backend:?}: {e}"));
         ctx.register_table(table, Arc::new(listing)).unwrap();
+    }
+
+    // ── statistics follow the reader ───────────────────────────────────
+
+    /// The object metadata for a bundled test file, read through a bare
+    /// `LocalFileSystem`.
+    fn local_object(file: &str) -> (Arc<dyn ObjectStore>, ObjectMeta) {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::local::LocalFileSystem::new());
+        let path = test_file(file);
+        let location = object_store::path::Path::from_absolute_path(&path)
+            .unwrap_or_else(|e| panic!("{} is not an absolute object path: {e}", path.display()));
+        let file_meta = std::fs::metadata(&path).expect("the bundled test file exists");
+        let object = ObjectMeta {
+            location,
+            last_modified: file_meta.modified().map(Into::into).unwrap_or_default(),
+            size: file_meta.len(),
+            e_tag: None,
+            version: None,
+        };
+        (store, object)
+    }
+
+    /// Statistics are a capability of the Rust reader, not of the format.
+    ///
+    /// Every netcdf-c call serialises on a process-global mutex, and the read is
+    /// synchronous, so computing statistics under it is serial and parks a tokio
+    /// worker. `oxcdf` has neither problem and produces the same ranges, so the
+    /// capability follows the reader.
+    #[tokio::test]
+    async fn statistics_come_from_the_rust_reader_only() {
+        let ctx = session();
+        let state = ctx.state();
+        let (store, object) = local_object(WOD_FILE);
+
+        let oxcdf = format_on(ReaderBackend::Oxcdf).with_enable_statistics(true);
+        let schema = oxcdf
+            .infer_schema(&state, &store, std::slice::from_ref(&object))
+            .await
+            .expect("oxcdf infers a schema");
+
+        let with_rust_reader = oxcdf
+            .infer_stats(&state, &store, schema.clone(), &object)
+            .await
+            .expect("statistics are never an error");
+        assert!(
+            with_rust_reader
+                .column_statistics
+                .iter()
+                .any(|column| column.min_value.get_value().is_some()),
+            "the Rust reader must produce real ranges for the coordinate variables"
+        );
+
+        // netcdf-c reports unknown rather than erroring, so a deployment on it
+        // keeps working and simply prunes nothing.
+        let netcdf_c = format_on(ReaderBackend::NetcdfC).with_enable_statistics(true);
+        let without_rust_reader = netcdf_c
+            .infer_stats(&state, &store, schema.clone(), &object)
+            .await
+            .expect("netcdf-c reports unknown, it does not fail");
+        assert!(
+            without_rust_reader
+                .column_statistics
+                .iter()
+                .all(|column| column.min_value.get_value().is_none()
+                    && column.max_value.get_value().is_none()),
+            "netcdf-c must report unknown rather than compute"
+        );
+        assert_eq!(
+            without_rust_reader.column_statistics.len(),
+            schema.fields().len(),
+            "unknown statistics still cover every column, as DataFusion requires"
+        );
+    }
+
+    /// The switch is still honoured on top of the reader gate.
+    #[tokio::test]
+    async fn disabling_statistics_wins_over_the_reader() {
+        let ctx = session();
+        let state = ctx.state();
+        let (store, object) = local_object(WOD_FILE);
+
+        let oxcdf = format_on(ReaderBackend::Oxcdf).with_enable_statistics(true);
+        let schema = oxcdf
+            .infer_schema(&state, &store, std::slice::from_ref(&object))
+            .await
+            .unwrap();
+
+        let off = format_on(ReaderBackend::Oxcdf).with_enable_statistics(false);
+        let statistics = off
+            .infer_stats(&state, &store, schema, &object)
+            .await
+            .unwrap();
+        assert!(
+            statistics
+                .column_statistics
+                .iter()
+                .all(|column| column.min_value.get_value().is_none()),
+            "enable_statistics=false must still mean no statistics"
+        );
     }
 
     // ── FileAccess ─────────────────────────────────────────────────────

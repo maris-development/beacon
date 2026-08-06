@@ -23,6 +23,13 @@
 //! nothing. [`FileAnalysis::columns`] being empty is the signal, and the
 //! collector records it so a format that yields nothing is visible rather than
 //! silently inert.
+//!
+//! **netCDF joins that list unless the Rust reader is on.** Every netcdf-c call
+//! serialises on a process-global mutex and the read is synchronous, so
+//! computing ranges under it is serial *and* parks a tokio worker. The format
+//! therefore reports unknown unless `use_rust_reader` is set, which is off by
+//! default. A netCDF node that prunes nothing is usually this, and
+//! `column_count = 0` on its records is how it shows.
 
 use std::collections::HashMap;
 use std::sync::Arc;
