@@ -1790,6 +1790,7 @@ dependencies = [
  "beacon-redb-store",
  "bincode",
  "bytes",
+ "datafusion",
  "futures",
  "object_store 0.13.2",
  "redb",

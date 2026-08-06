@@ -1,0 +1,248 @@
+//! Turning stored statistics into a DataFusion [`PruningPredicate`] input.
+//!
+//! This is what the store is for: given a predicate and a list of candidate
+//! files, drop the ones whose recorded ranges say they cannot hold a matching
+//! row. Only the columns the predicate names are read, so a three-column `WHERE`
+//! over a store with 160K column names costs three blocks per surviving segment.
+//!
+//! # Fail open, always
+//!
+//! Every path here returns the full candidate list on any error, unsupported
+//! predicate shape, unknown column, or failed cast. Pruning may only ever drop a
+//! file that provably cannot match. A file wrongly dropped is a silently wrong
+//! answer; a file wrongly kept costs one scan the optimizer would have skipped.
+//!
+//! # Duplicate rows
+//!
+//! A file re-analyzed after a change appears in more than one segment. Segments
+//! are folded oldest first, so the newest row for a file wins. The old row is
+//! not wrong, just stale, and preferring the newest keeps the range tightest.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array, UInt64Array};
+use arrow::datatypes::{DataType, SchemaRef};
+use datafusion::common::Column;
+use datafusion::common::pruning::PruningStatistics;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::utils::collect_columns;
+use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion::scalar::ScalarValue;
+
+use crate::segment::ColumnStats;
+use crate::store::FileStatsStore;
+use crate::types::FileId;
+
+/// Statistics for a set of candidate files, one row per file, in the caller's
+/// order.
+pub struct FileStatsPruningStatistics {
+    rows: usize,
+    columns: HashMap<String, PackedColumn>,
+}
+
+struct PackedColumn {
+    min: ArrayRef,
+    max: ArrayRef,
+    null_count: ArrayRef,
+    row_count: ArrayRef,
+}
+
+impl std::fmt::Debug for FileStatsPruningStatistics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileStatsPruningStatistics")
+            .field("rows", &self.rows)
+            .field("columns", &self.columns.len())
+            .finish()
+    }
+}
+
+impl PruningStatistics for FileStatsPruningStatistics {
+    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
+        self.columns.get(column.name()).map(|c| c.min.clone())
+    }
+
+    fn max_values(&self, column: &Column) -> Option<ArrayRef> {
+        self.columns.get(column.name()).map(|c| c.max.clone())
+    }
+
+    fn num_containers(&self) -> usize {
+        self.rows
+    }
+
+    fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
+        self.columns.get(column.name()).map(|c| c.null_count.clone())
+    }
+
+    fn row_counts(&self, column: &Column) -> Option<ArrayRef> {
+        self.columns.get(column.name()).map(|c| c.row_count.clone())
+    }
+
+    /// Not answerable from a min/max range, so the predicate falls back to the
+    /// range tests. Returning `None` is the fail-open answer.
+    fn contained(&self, _column: &Column, _values: &HashSet<ScalarValue>) -> Option<BooleanArray> {
+        None
+    }
+}
+
+/// The files in `candidates` whose statistics leave them able to satisfy
+/// `predicate`.
+///
+/// `candidates` must be ascending. `schema` must carry every column the
+/// predicate names, with the type the predicate compares against.
+///
+/// Returns every candidate unchanged when pruning cannot apply.
+pub async fn prune_files(
+    store: &FileStatsStore,
+    predicate: &Arc<dyn PhysicalExpr>,
+    schema: &SchemaRef,
+    candidates: &[FileId],
+) -> Vec<FileId> {
+    match try_prune(store, predicate, schema, candidates).await {
+        Ok(Some(kept)) => kept,
+        Ok(None) => candidates.to_vec(),
+        Err(error) => {
+            tracing::debug!(%error, "file statistics pruning did not apply; keeping every file");
+            candidates.to_vec()
+        }
+    }
+}
+
+async fn try_prune(
+    store: &FileStatsStore,
+    predicate: &Arc<dyn PhysicalExpr>,
+    schema: &SchemaRef,
+    candidates: &[FileId],
+) -> crate::Result<Option<Vec<FileId>>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let Ok(pruning_predicate) = PruningPredicate::try_new(predicate.clone(), schema.clone()) else {
+        return Ok(None); // a shape the pruning engine cannot use
+    };
+
+    let referenced = collect_columns(pruning_predicate.orig_expr());
+    if referenced.is_empty() {
+        return Ok(None);
+    }
+
+    let range = (candidates[0], candidates[candidates.len() - 1]);
+    let positions = row_positions(candidates);
+
+    let mut columns: HashMap<String, PackedColumn> = HashMap::new();
+    for column in &referenced {
+        let Ok(field) = schema.field_with_name(column.name()) else {
+            continue; // not a table column; it contributes no statistics
+        };
+        let segments = store
+            .column_stats_by_name(column.name(), range)
+            .await
+            .unwrap_or_default();
+        if segments.is_empty() {
+            continue;
+        }
+        if let Some(packed) = pack(&segments, field.data_type(), &positions, candidates.len()) {
+            columns.insert(column.name().to_string(), packed);
+        }
+    }
+
+    if columns.is_empty() {
+        return Ok(None); // nothing to prune on
+    }
+
+    let statistics = FileStatsPruningStatistics {
+        rows: candidates.len(),
+        columns,
+    };
+    let Ok(mask) = pruning_predicate.prune(&statistics) else {
+        return Ok(None);
+    };
+
+    let kept: Vec<FileId> = candidates
+        .iter()
+        .zip(mask)
+        .filter_map(|(id, keep)| keep.then_some(*id))
+        .collect();
+    Ok(Some(kept))
+}
+
+/// `file_id -> output row`, for the merge back onto the caller's order.
+fn row_positions(candidates: &[FileId]) -> HashMap<FileId, u32> {
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(row, id)| (*id, row as u32))
+        .collect()
+}
+
+/// Fold every segment's rows for one column onto the candidate rows.
+///
+/// Values are gathered with `take`, so a candidate with no statistics simply
+/// takes a null index and reads back null, which the pruning engine treats as
+/// unknown. `None` when the column cannot be cast to the type the predicate
+/// compares against.
+fn pack(
+    segments: &[ColumnStats],
+    target: &DataType,
+    positions: &HashMap<FileId, u32>,
+    rows: usize,
+) -> Option<PackedColumn> {
+    // Concatenate the segments, casting each to the predicate's type. Segments
+    // arrive oldest first, so a later row for the same file overwrites an
+    // earlier one below.
+    let mut mins: Vec<ArrayRef> = Vec::with_capacity(segments.len());
+    let mut maxes: Vec<ArrayRef> = Vec::with_capacity(segments.len());
+    let mut null_counts: Vec<u64> = Vec::new();
+    let mut row_counts: Vec<u64> = Vec::new();
+    // Output row -> index into the concatenated arrays.
+    let mut source_of: HashMap<u32, u32> = HashMap::new();
+
+    let mut offset = 0u32;
+    for segment in segments {
+        let min = arrow::compute::cast(&segment.min, target).ok()?;
+        let max = arrow::compute::cast(&segment.max, target).ok()?;
+        mins.push(min);
+        maxes.push(max);
+        null_counts.extend_from_slice(&segment.null_count);
+        row_counts.extend_from_slice(&segment.row_count);
+
+        for (within, file_id) in segment.file_ids.iter().enumerate() {
+            if let Some(row) = positions.get(file_id) {
+                source_of.insert(*row, offset + within as u32);
+            }
+        }
+        offset += segment.len() as u32;
+    }
+
+    let min = concat(&mins)?;
+    let max = concat(&maxes)?;
+    let null_count: ArrayRef = Arc::new(UInt64Array::from(null_counts));
+    let row_count: ArrayRef = Arc::new(UInt64Array::from(row_counts));
+
+    let indices = UInt32Array::from_iter((0..rows as u32).map(|row| source_of.get(&row).copied()));
+
+    Some(PackedColumn {
+        min: arrow::compute::take(&min, &indices, None).ok()?,
+        max: arrow::compute::take(&max, &indices, None).ok()?,
+        null_count: arrow::compute::take(&null_count, &indices, None).ok()?,
+        row_count: arrow::compute::take(&row_count, &indices, None).ok()?,
+    })
+}
+
+fn concat(arrays: &[ArrayRef]) -> Option<ArrayRef> {
+    let refs: Vec<&dyn Array> = arrays.iter().map(|a| a.as_ref()).collect();
+    arrow::compute::concat(&refs).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positions_follow_the_callers_order() {
+        let positions = row_positions(&[7, 9, 11]);
+        assert_eq!(positions[&7], 0);
+        assert_eq!(positions[&11], 2);
+        assert_eq!(positions.len(), 3);
+    }
+}

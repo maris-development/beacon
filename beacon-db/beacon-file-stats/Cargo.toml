@@ -13,6 +13,12 @@ rust-version.workspace = true
 # Note this does not free the *workspace* from the binary-format submodule.
 # That crate is still a workspace member, so cargo needs it checked out to load
 # the workspace at all, whichever package you name with `-p`.
+[features]
+default = []
+# The DataFusion pruning adapter. Off by default so the storage engine keeps a
+# small dependency tree and a fast test run.
+datafusion = ["dep:datafusion"]
+
 [dependencies]
 arrow = { workspace = true }
 # Declared explicitly, and not left to workspace feature unification, because
@@ -30,10 +36,11 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
+datafusion = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-async-trait = { workspace = true }
 # A dev-dependency only: the engine works against any `ObjectStore`, and
 # `tests/single_file.rs` proves it also works when that store and the registry
 # are the *same* `beacon.db`. Nothing in `src/` may depend on this.

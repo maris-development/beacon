@@ -45,16 +45,22 @@
 //!    and most segments then skip on the manifest alone. Batching at random
 //!    makes every segment match every query, and the skip stops working.
 
+pub mod collector;
 pub mod error;
 pub mod manifest;
+#[cfg(feature = "datafusion")]
+pub mod pruning;
 pub mod registry;
 pub mod scalar;
 pub mod segment;
 pub mod store;
 pub mod types;
 
+pub use collector::{CollectReport, CollectorConfig, FileAnalysis, FileAnalyzer, StatsCollector};
 pub use error::{FileStatsError, Result};
 pub use manifest::{Manifest, SegmentEntry};
+#[cfg(feature = "datafusion")]
+pub use pruning::{FileStatsPruningStatistics, prune_files};
 pub use registry::Registry;
 pub use scalar::{StatScalar, super_type};
 pub use segment::{ColumnStat, ColumnStats, SegmentBuilder, SegmentReader};
