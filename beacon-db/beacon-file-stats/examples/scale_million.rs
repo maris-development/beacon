@@ -296,6 +296,47 @@ async fn main() -> anyhow::Result<()> {
     println!("  (every segment holds it, so all {} blocks are read)", report.segments);
 
     flush();
+    // ── prune on three columns at once ───────────────────────────────────
+    // The question this whole store exists to answer. The three columns are
+    // fetched and packed together, so the cost is close to one column's rather
+    // than three.
+    let three = ["core_1", "core_3", "core_7"];
+    let schema_three = schema(&three);
+    let predicate_three = binary(
+        binary(
+            binary(
+                col(three[0], &schema_three)?,
+                Operator::Gt,
+                lit(1_000.0f64),
+                &schema_three,
+            )?,
+            Operator::And,
+            binary(
+                col(three[1], &schema_three)?,
+                Operator::Gt,
+                lit(9_500.0f64),
+                &schema_three,
+            )?,
+            &schema_three,
+        )?,
+        Operator::And,
+        binary(
+            col(three[2], &schema_three)?,
+            Operator::Lt,
+            lit(9_900.0f64),
+            &schema_three,
+        )?,
+        &schema_three,
+    )?;
+    let start = Instant::now();
+    let kept = prune_files(&store, &predicate_three, &schema_three, &all_ids).await;
+    flush();
+    println!(
+        "prune on THREE store-wide columns : {:.0} ms, keeps {} of {FILES}",
+        start.elapsed().as_secs_f64() * 1e3,
+        kept.len()
+    );
+
     // ── prune with a realistic candidate set ─────────────────────────────
     // A real scan passes the files of one table, not the whole store. Pruning a
     // sparse column against every file in the instance is arithmetically correct

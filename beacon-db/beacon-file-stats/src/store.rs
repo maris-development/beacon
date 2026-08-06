@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use futures::stream::{self, StreamExt};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use tokio::sync::RwLock;
 
@@ -10,6 +11,20 @@ use crate::manifest::{Manifest, SegmentEntry};
 use crate::registry::Registry;
 use crate::segment::{ColumnStats, SegmentBuilder, SegmentReader};
 use crate::types::{ColumnId, FileId};
+
+/// Segment reads in flight for one column.
+///
+/// Bounded rather than unbounded: a wide column can live in every segment of a
+/// store, and opening all of them at once would trade one queue for a thundering
+/// herd on the object store.
+const SEGMENT_READ_CONCURRENCY: usize = 16;
+
+/// The crate's `Result` alias fixes the error type, so the join result is
+/// spelled out.
+type Joined = std::result::Result<
+    std::result::Result<(usize, Option<ColumnStats>), crate::FileStatsError>,
+    tokio::task::JoinError,
+>;
 
 /// Statistics for every known file, split across immutable segments.
 pub struct FileStatsStore {
@@ -92,16 +107,45 @@ impl FileStatsStore {
                 .collect()
         };
 
-        let mut out = Vec::with_capacity(names.len());
-        for name in names {
-            let reader =
-                SegmentReader::open(self.store.clone(), self.prefix.clone().join(name.as_str()))
-                    .await?;
-            if let Some(stats) = reader.column(column_id).await? {
-                out.push(stats);
+        // Segments are read in parallel, then put back in manifest order. Order
+        // is not cosmetic: the reader folds oldest first so the newest row for a
+        // file wins, and losing that lets a stale range beat a fresh one.
+        //
+        // Spawned, not merely buffered. A segment read decodes buffers and
+        // rebuilds Arrow arrays, so it is CPU bound between awaits, and
+        // `buffer_unordered` alone would poll every one of them from a single
+        // task. For a column present in every segment that is the difference
+        // between reading 100 segments in parallel and reading them in a queue.
+        let indexed: Vec<Joined> = stream::iter(names.into_iter().enumerate())
+            .map(|(position, name)| {
+                let store = self.store.clone();
+                let path = self.prefix.clone().join(name.as_str());
+                tokio::spawn(async move {
+                    let reader = SegmentReader::open(store, path).await?;
+                    Ok::<_, crate::FileStatsError>((position, reader.column(column_id).await?))
+                })
+            })
+            .buffer_unordered(SEGMENT_READ_CONCURRENCY)
+            .collect()
+            .await;
+
+        let mut found: Vec<(usize, ColumnStats)> = Vec::with_capacity(indexed.len());
+        for outcome in indexed {
+            match outcome {
+                Ok(Ok((position, Some(stats)))) => found.push((position, stats)),
+                // The manifest said the segment held the column and it did not.
+                // Not an error: a reader treats a missing statistic as unknown.
+                Ok(Ok((_, None))) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(error) => {
+                    return Err(crate::FileStatsError::Format(format!(
+                        "a segment read task panicked: {error}"
+                    )));
+                }
             }
         }
-        Ok(out)
+        found.sort_by_key(|(position, _)| *position);
+        Ok(found.into_iter().map(|(_, stats)| stats).collect())
     }
 
     /// Statistics for a column named rather than numbered.

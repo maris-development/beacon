@@ -277,12 +277,16 @@ manifest :      0.6 MB   <- the metadata that decides which segments to read
 cells    : 20000000 real, against 160010000000 dense (8000x)
 columns  : 160010 interned
 
-registry lookup: 7.2 us each  (path -> id -> record, 10000 probes)
+registry lookup: 9.0 us each  (path -> id -> record, 10000 probes)
 
 prune on a family column : 14 ms, keeps 999943 of 1000000
-prune on a store-wide column : 57 ms, keeps 50000 of 1000000
-prune the same family column over that family's 10k files only : 0 ms, keeps 9943 of 10000
+prune on a store-wide column : 58 ms, keeps 50000 of 1000000
+prune on THREE store-wide columns : 105 ms, keeps 40000 of 1000000
+prune the same family column over that family's 10k files only : 1 ms, keeps 9943 of 10000
 ```
+
+Three columns cost 1.8x one column, not 3x. The predicate's columns are fetched
+and packed together, and within each column the segments are read together.
 
 Peak resident memory is ~1.0 GB for the whole run, ~810 MB of it in the build
 phase. Nothing resident grows with the column count.
@@ -330,6 +334,15 @@ transaction took it to 8 seconds.
 every candidate to align segment rows onto output rows. Both sides are already
 sorted by file id, so the map bought nothing and cost ~50 MB and an allocation
 per entry. The merge join took the store-wide prune from 242 ms to 57 ms.
+
+**Concurrency mistaken for parallelism, twice.** `buffer_unordered` polls every
+future it holds from one task, so work that is CPU bound between awaits runs
+single-threaded however high the limit. Reading a netCDF file's ranges is that
+shape, and so is decoding a segment block. Measured against a bundled netCDF
+file on eight cores: `buffer_unordered(8)` managed 296 files/s where serial
+managed 287, and spawning the same work reached 1193. Both the collector's
+analyses and the reader's segment fetches are now spawned, with
+`buffer_unordered` kept only to bound how many run at once.
 
 ## Measured, not asserted
 

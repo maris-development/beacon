@@ -128,24 +128,36 @@ async fn try_prune(
 
     let range = (candidates[0], candidates[candidates.len() - 1]);
 
-    // Fetch first, pack second. The suppression lookup below is only worth
-    // paying for once we know there is something to prune on, and on a store
-    // still being ingested there is not.
-    let mut fetched: Vec<(&str, &DataType, Vec<ColumnStats>)> = Vec::new();
-    for column in &referenced {
-        let Ok(field) = schema.field_with_name(column.name()) else {
-            continue; // not a table column; it contributes no statistics
-        };
-        let segments = store
-            .column_stats_by_name(column.name(), range)
-            .await
-            .unwrap_or_default();
-        if !segments.is_empty() {
-            fetched.push((column.name(), field.data_type(), segments));
-        }
-    }
+    // The predicate's columns are independent, so fetch them together rather
+    // than in a queue. A three-column `WHERE` otherwise costs three times one
+    // column's segment reads purely because they were written as a loop.
+    let wanted: Vec<(String, DataType)> = referenced
+        .iter()
+        .filter_map(|column| {
+            schema
+                .field_with_name(column.name())
+                .ok()
+                .map(|field| (column.name().to_string(), field.data_type().clone()))
+        })
+        .collect();
+
+    let fetched: Vec<(String, DataType, Vec<ColumnStats>)> =
+        futures::future::join_all(wanted.into_iter().map(|(name, data_type)| async move {
+            let segments = store
+                .column_stats_by_name(&name, range)
+                .await
+                .unwrap_or_default();
+            (name, data_type, segments)
+        }))
+        .await
+        .into_iter()
+        .filter(|(_, _, segments)| !segments.is_empty())
+        .collect();
+
+    // The suppression lookup is only worth paying for once we know there is
+    // something to prune on, and on a store still being ingested there is not.
     if fetched.is_empty() {
-        return Ok(None); // nothing to prune on
+        return Ok(None);
     }
 
     // A file whose content changed since it was analyzed still has rows in the
@@ -158,16 +170,44 @@ async fn try_prune(
         .unwrap_or_default();
     // Empty means "every candidate is trustworthy", which is the steady state.
     // Allocating and walking a million-entry mask to say so is pure cost.
-    let trusted = if suppressed.is_empty() {
+    let trusted = Arc::new(if suppressed.is_empty() {
         Vec::new()
     } else {
         trust_mask(candidates, &suppressed)
-    };
+    });
+
+    // Packing casts, concatenates and gathers over one row per candidate, so at
+    // a million files it is real CPU work with no await in it. `spawn_blocking`
+    // keeps it off the async workers, and running the columns together means a
+    // three-column predicate pays for one column's pack, not three.
+    //
+    // The candidate list is shared rather than cloned: a million ids is 8 MB,
+    // and copying that per column to avoid an `Arc` would cost more than the
+    // pack.
+    let shared_candidates = Arc::new(candidates.to_vec());
+    let packs = futures::future::join_all(fetched.into_iter().map(
+        |(name, data_type, segments)| {
+            let candidates = shared_candidates.clone();
+            let trusted = trusted.clone();
+            tokio::task::spawn_blocking(move || {
+                (name, pack(&segments, &data_type, &candidates, &trusted))
+            })
+        },
+    ))
+    .await;
 
     let mut columns: HashMap<String, PackedColumn> = HashMap::new();
-    for (name, data_type, segments) in fetched {
-        if let Some(packed) = pack(&segments, data_type, candidates, &trusted) {
-            columns.insert(name.to_string(), packed);
+    for outcome in packs {
+        match outcome {
+            Ok((name, Some(packed))) => {
+                columns.insert(name, packed);
+            }
+            // A column that cannot be cast to the predicate's type contributes
+            // nothing, which keeps every file.
+            Ok((_, None)) => {}
+            Err(error) => {
+                tracing::debug!(%error, "a statistics packing task panicked; skipping the column");
+            }
         }
     }
 
