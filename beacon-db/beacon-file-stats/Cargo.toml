@@ -45,3 +45,8 @@ tempfile = { workspace = true }
 # `tests/single_file.rs` proves it also works when that store and the registry
 # are the *same* `beacon.db`. Nothing in `src/` may depend on this.
 beacon-redb-store = { path = "../beacon-redb-store" }
+anyhow = { workspace = true }
+
+[[example]]
+name = "walkthrough"
+required-features = ["datafusion"]

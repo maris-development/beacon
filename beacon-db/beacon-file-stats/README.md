@@ -1,0 +1,275 @@
+# beacon-file-stats
+
+Durable, column-addressable statistics for every file a Beacon instance knows
+about. A query reads only the columns its `WHERE` clause names.
+
+## The problem
+
+A Beacon node can hold a million files. Those files draw on 160 000 distinct
+column names between them, and each file declares maybe fifty.
+
+The obvious store is a table of files by columns. That table holds 1.6e11 cells.
+It cannot be built, held, or written.
+
+Only the pairs that exist may cost anything:
+
+| Quantity | Value |
+|---|---|
+| Real cells, at ~50 columns per file | ~50 million |
+| On disk, at the measured 40 bytes per cell | ~2 GB |
+| Reads for a three-column predicate | 3 blocks per surviving segment |
+
+Everything in this crate follows from that one constraint.
+
+## The three layers
+
+| Layer | Holds | Answers |
+|---|---|---|
+| `registry` | path ↔ `FileId`, name ↔ `ColumnId`, per-file summary | "what is this file's id, and its row count?" |
+| `segment` | immutable per-batch blocks, one per column | "what are this column's ranges, per file?" |
+| `manifest` | file id range and column ids per segment | "which segments need reading at all?" |
+
+`store` puts the three behind one handle. `collector` fills them. `pruning`
+(behind the `datafusion` feature) uses them.
+
+### Why ids and not names
+
+A segment references a file in 8 bytes. A 200-byte path repeated across 50
+million cells costs 10 GB; the ids cost 400 MB.
+
+Ids never shift. A delete sets a tombstone and keeps the slot, so a segment
+written months ago still means what it said. Only compaction renumbers.
+
+### Why the registry is a B-tree and the segments are objects
+
+They answer different questions. "What id does this path have" is a point lookup
+over a million keys, which belongs in a B-tree. "What are this column's ranges"
+is a byte range over an immutable blob, which belongs in an object store.
+
+Both live in the same `beacon.db`. The registry uses `RedbStore::database()`, the
+segments use its `ObjectStore` face. Copy the one file and the statistics come
+with it.
+
+## A worked example
+
+`examples/walkthrough.rs` runs the whole loop. Run it with:
+
+```bash
+cargo run -p beacon-file-stats --example walkthrough --features datafusion
+```
+
+### 1. Open the store
+
+```rust
+let registry = Arc::new(Registry::open(dir.join("registry.redb"))?);
+let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+let store = Arc::new(
+    FileStatsStore::open(registry, objects, Path::from("__file_stats__")).await?
+);
+```
+
+In Beacon both arguments come from the one `RedbStore`.
+
+### 2. Register what a listing found
+
+Nothing is read here. This assigns ids and queues the files.
+
+```rust
+let ids = store.registry().intern_files(&discovered)?;
+```
+
+A path already known keeps its id. A file that changed underneath is marked
+stale and goes back on the queue. An etag settles that when both sides carry
+one; size and last-modified settle it otherwise. A doubtful match counts as
+changed, because a wrong "unchanged" prunes real rows away.
+
+### 3. Let the collector fill the store
+
+```rust
+let collector = StatsCollector::new(store.clone(), analyzer, CollectorConfig {
+    batch_files: 1_000,
+    concurrency: 4,
+    prefix_depth: 2,
+});
+let report = collector.run_once().await?;
+```
+
+The collector groups its batch by path prefix and writes one segment per group.
+`atlantic/2024` and `pacific/2024` become separate segments.
+
+Reading a real file's statistics needs the format layer, which needs DataFusion,
+which this crate does not depend on. So the collector takes a `FileAnalyzer`
+trait and Beacon supplies one.
+
+### 4. Ask a per-file question
+
+```rust
+let id = store.registry().file_id("atlantic/2024/3.nc")?.unwrap();
+let record = store.registry().record(id)?.unwrap();
+```
+
+`num_rows` and `total_byte_size` live in the record on purpose. DataFusion asks
+for those per file, so that question never touches a column block.
+
+### 5. Prune
+
+```rust
+let predicate = binary(col("TEMP", &schema)?, Operator::Gt, lit(6.5f64), &schema)?;
+let kept = prune_files(&store, &predicate, &schema, &ids).await;
+```
+
+### The output
+
+```text
+1. store opened
+2. registered 10 files as ids 0..=9, all pending
+3. collector: 10 analyzed, 0 failed, 2 groups -> 2 segments
+4. registry: atlantic/2024/3.nc is id 3, 1000 rows, read by netcdf
+5. WHERE TEMP > 6.5 keeps 1 of 10 files: [5]
+     SKIP  id=0  atlantic/2024/0.nc     TEMP in [0, 2]
+     SKIP  id=1  atlantic/2024/1.nc     TEMP in [1, 3]
+     SKIP  id=2  atlantic/2024/2.nc     TEMP in [2, 4]
+     SKIP  id=3  atlantic/2024/3.nc     TEMP in [3, 5]
+     SKIP  id=4  atlantic/2024/4.nc     TEMP in [4, 6]
+     keep  id=5  atlantic/2024/5.nc     TEMP in [5, 7]
+     SKIP  id=6  pacific/2024/0.nc      TEMP in [0, 2]
+     SKIP  id=7  pacific/2024/1.nc      TEMP in [1, 3]
+     SKIP  id=8  pacific/2024/2.nc      TEMP in [2, 4]
+     SKIP  id=9  pacific/2024/3.nc      TEMP in [3, 5]
+6. WHERE PSAL > 40 keeps 4 of 10 files: [6, 7, 8, 9]
+     the pacific files never declared PSAL, so they are not prunable on it
+```
+
+Step 6 is the interesting one. Only the atlantic files declare `PSAL`, and their
+range is `[34.0, 35.5]`, so `PSAL > 40` rules them out. The pacific files carry
+no `PSAL` statistic at all, so nothing rules them out and they survive.
+
+That is the rule the whole crate obeys: **an absent statistic keeps a file**. A
+file wrongly dropped is a silently wrong answer. A file wrongly kept is one scan
+the optimizer would have skipped.
+
+## What a read actually costs
+
+`WHERE TEMP > 6.5` against a store with 160 000 column names:
+
+1. **The manifest** names the segments that hold `TEMP` and cover the wanted file
+   ids. No read. The manifest keeps a file id range and a sorted list of column
+   ids per segment, which stays in the low megabytes for a whole store.
+2. **The footer** of each surviving segment: one ranged read. It carries the type
+   table and a sparse column index, one entry per 1024 columns.
+3. **One index chunk**: one ranged read of 16 KB, binary-searched for the column.
+4. **The block**: one ranged read.
+
+Two reads per column lookup, and the count does not grow with the segment's
+width. `tests/scale.rs` measures the same two reads at 100 columns and at 8000.
+
+Nothing reads `PSAL`. Nothing reads a segment that holds no `TEMP`.
+
+## The segment layout
+
+```text
+[MAGIC 8]
+[block 0][block 1] ... [block N-1]      each starts 8-aligned
+[column index]                          N fixed 16-byte records, sorted by column_id
+[footer: rkyv SegmentFooter]
+[footer_len: u32 LE][MAGIC 8]
+```
+
+One block per column, sorted ascending by file id:
+
+| Field | Bytes | Note |
+|---|---|---|
+| `file_id` | 8 | ascending |
+| `min` / `max` | the column's width | super-typed per block |
+| `null_count` / `row_count` | 8 each | |
+
+### Why buffers sit outside the rkyv metadata
+
+rkyv aligns an archived region to its type's alignment, and `Vec<u8>` has
+alignment 1. Arrow's `ScalarBuffer<T>` *asserts* alignment to `align_of::<T>()`.
+A raw Arrow buffer nested inside an archived struct could land anywhere, and
+every read would pay a realigning copy.
+
+So the writer places every buffer itself, 8-byte aligned, and the metadata holds
+only offsets. Alignment still cannot be guaranteed end to end, because the base
+address of the `bytes::Bytes` an object store returns belongs to the allocator.
+The reader checks the pointer and copies only when it must.
+
+### Why types are per block, not per value
+
+Files disagree. One declares `TEMP` as `Int16`, another as `Float32`. The
+tempting fix is a tagged value enum, and it is the wrong trade at 50 million
+cells: 56 bytes per cell against 40, no narrowing, no delta encoding, and a
+`match` per value on read.
+
+Instead each block is homogeneous. The builder casts to the super type at write
+time, the block records its own Arrow type, and the reader casts to the type the
+predicate compares against. Different segments may settle on different types for
+the same column, and that is fine.
+
+Two types with no common super type do not merge. The column is dropped from that
+segment and logged. That costs pruning, never correctness.
+
+## Two rules a caller must not break
+
+**1. Push files in ascending id order.** That is what keeps blocks sorted without
+a sort at finish.
+
+**2. Batch a segment by path prefix, not by arrival order.** Files under one
+prefix share columns, so a prefix-local segment is skipped outright by a
+predicate on a column it does not hold. A segment batched by arrival order holds
+a broad slice of the column space, matches nearly every query, and the manifest's
+skip stops working.
+
+The second rule is easy to get wrong because it looks fine at small scale. The
+test measures it: for one column across four segments, prefix-local reads **1 of
+4**, scattered reads **4 of 4**.
+
+## Measured, not asserted
+
+From `tests/scale.rs`:
+
+```text
+prefix-local : 64 columns,   40.2 bytes/cell   (the 40-byte payload floor)
+scattered    : 4000 columns, 51.2 bytes/cell
+framing      : ~112 bytes per block
+lookup       : 2 ranged reads at both 100 and 8000 columns
+manifest     : column 70 reads 1 of 4 prefix-local segments, 4 of 4 scattered
+```
+
+40 bytes per cell is today's floor: file id, min, max, null count, and row count,
+all 8 bytes. Delta-packing the file ids and narrowing the counts to 32 bits would
+lower it. Neither is built.
+
+## Durability
+
+Everything survives a restart and a vacuum. `tests/single_file.rs` covers both
+against a real `beacon.db`.
+
+The vacuum case needed a fix in `beacon-redb-store`. A rewrite copied only the
+store's own three tables, so any tenant table was dropped with no error and no
+warning. `vacuum` now copies tenant tables verbatim, and refuses to run while a
+tenant still holds the database handle.
+
+A tenant sharing the file must prefix its table names, declare tables as
+`TableDefinition<&[u8], &[u8]>`, and encode integer keys big-endian. The byte
+typing is what lets a vacuum copy a table whose types it cannot know. The
+big-endian keys are what make redb's lexicographic ordering numeric, which the
+collector's queue depends on.
+
+## Dependencies
+
+No DataFusion and no `beacon-binary-format` in the default graph. `cargo test -p
+beacon-file-stats` compiles a small tree and runs in under a second.
+
+The `datafusion` feature adds the pruning adapter and nothing else.
+
+`beacon-redb-store` is a dev-dependency only, for the single-file tests.
+
+## Not built yet
+
+- A `FileAnalyzer` over Beacon's real format registry.
+- Scan-time pruning inside `FileCollection::scan`.
+- `ANALYZE` and a `beacon.system.file_stats` view.
+- Compaction, tombstone collection, and zone maps inside a block.
+- Backing `BeaconFileStatisticsCache` with this store.
