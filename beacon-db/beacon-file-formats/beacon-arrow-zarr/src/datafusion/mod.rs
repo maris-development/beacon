@@ -10,9 +10,6 @@ use std::{any::Any, sync::Arc};
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
-use beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema;
-use beacon_nd_array::dataset::resolve_read_dimensions;
-use beacon_nd_array::projection::DatasetProjection;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -25,15 +22,10 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 use zarrs::group::Group;
-use zarrs_object_store::AsyncObjectStore;
-use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::{
-    reader::dataset_from_group,
-    util::{
-        ZarrPath, find_partitioned_files, is_zarr_v3_metadata, recursive_groups,
-        top_level_zarr_meta_v3,
-    },
+    reader::schema_from_group_path,
+    util::{ZarrPath, ZarrStorage, is_zarr_v3_metadata, leaf_group_keys, top_level_zarr_meta_v3},
 };
 
 pub mod source;
@@ -133,14 +125,51 @@ pub struct ZarrFormat {
     /// only variables whose dimensions are a subset of these are read; when
     /// `None`, a broadcast-compatible default is auto-selected.
     pub read_dimensions: Option<Vec<String>>,
+    /// Storage to open groups over, replacing the session's object store.
+    /// Set by the Icechunk reader; `None` for a listed zarr store.
+    storage: Option<ZarrStorage>,
 }
 
 impl ZarrFormat {
     /// Build a format that reads only the variables belonging to
     /// `read_dimensions` (or auto-selects a default when `None`).
     pub fn new(read_dimensions: Option<Vec<String>>) -> Self {
-        Self { read_dimensions }
+        Self {
+            read_dimensions,
+            storage: None,
+        }
     }
+
+    /// Returns a copy of this format that opens groups over `storage` instead of
+    /// the session's object store.
+    pub fn with_storage(mut self, storage: ZarrStorage) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// The storage to open groups over: the override when set, otherwise the
+    /// session's object store.
+    fn storage(&self, object_store: Arc<dyn ObjectStore>) -> ZarrStorage {
+        self.storage
+            .clone()
+            .unwrap_or_else(|| ZarrStorage::from_object_store(object_store))
+    }
+}
+
+/// Wrap a zarr file scan in the nd spine: `NdBroadcastExec` → `NdSourceExec` →
+/// `DataSourceExec`.
+///
+/// The scan carries nd data as `beacon.nd`-encoded struct columns, so
+/// `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it back to the
+/// logical table schema above the scan.
+pub fn nd_scan_plan(conf: FileScanConfig) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
+    let nd_source = Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(
+        data_source,
+    )?);
+    Ok(Arc::new(
+        beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?,
+    ))
 }
 
 #[async_trait::async_trait]
@@ -181,6 +210,7 @@ impl FileFormat for ZarrFormat {
                 "No Zarr v3 metadata (zarr.json) found in the provided path(s)".to_string(),
             ));
         }
+        let storage = self.storage(store.clone());
         let mut schemas = Vec::new();
         for object in verified_objects {
             let zarr_path = ZarrPath::new_from_object_meta(object.clone()).map_err(|e| {
@@ -189,53 +219,15 @@ impl FileFormat for ZarrFormat {
                     object.location
                 ))
             })?;
-            let zarr_store = Arc::new(AsyncObjectStore::new(store.clone()))
-                as Arc<dyn AsyncReadableListableStorageTraits>;
-            let group = Group::async_open(zarr_store, &zarr_path.as_zarr_path())
-                .await
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to open Zarr group at {}: {e}",
-                        object.location
-                    ))
-                })?;
-
-            let mut leaves = Vec::new();
-            recursive_groups(Arc::new(group), &mut leaves)
-                .await
-                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-
-            for leaf in leaves {
-                let any = dataset_from_group(&leaf, None).await.map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to read Zarr group as dataset: {e}"
-                    ))
-                })?;
-
-                // Apply explicit dimensions, or narrow to a broadcast-compatible
-                // default so the inferred schema matches what the scan returns.
-                let any = match resolve_read_dimensions(
-                    &any,
-                    self.read_dimensions.clone(),
-                    Some("read_zarr"),
-                ) {
-                    Some(dims) => any
-                        .project(&DatasetProjection::new_with_dimension_projection(dims))
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Failed to project Zarr dataset with dimensions: {e}"
-                            ))
-                        })?,
-                    None => any,
-                };
-
-                let schema = any_dataset_to_arrow_schema(&any).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to derive Zarr Arrow schema: {e}"
-                    ))
-                })?;
-                schemas.push(Arc::new(schema));
-            }
+            let schema = schema_from_group_path(
+                storage.inner(),
+                &zarr_path.as_zarr_path(),
+                self.read_dimensions.clone(),
+                Some("read_zarr"),
+            )
+            .await
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+            schemas.push(Arc::new(schema));
         }
 
         if schemas.is_empty() {
@@ -288,8 +280,6 @@ impl FileFormat for ZarrFormat {
 
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so the
         // file source's schema is the encoded form of the logical table schema.
-        // `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it back to
-        // the logical schema above the scan.
         let encoded_file_schema =
             Arc::new(beacon_datafusion_ext::nd::encoded_schema(conf.file_schema()));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
@@ -299,26 +289,30 @@ impl FileFormat for ZarrFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = ZarrSource::new(table_schema)
+        let mut source = ZarrSource::new(table_schema)
             .with_read_dimensions(self.read_dimensions.clone())
             .with_projection(projection);
+        if let Some(storage) = &self.storage {
+            source = source.with_storage(storage.clone());
+        }
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
             .build();
 
-        let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
-        let nd_source =
-            Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(data_source)?);
-        let broadcast = beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?;
-        Ok(Arc::new(broadcast))
+        nd_scan_plan(conf)
     }
 
     fn file_source(
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(ZarrSource::new(table_schema).with_read_dimensions(self.read_dimensions.clone()))
+        let mut source =
+            ZarrSource::new(table_schema).with_read_dimensions(self.read_dimensions.clone());
+        if let Some(storage) = &self.storage {
+            source = source.with_storage(storage.clone());
+        }
+        Arc::new(source)
     }
 }
 
@@ -330,43 +324,31 @@ impl ZarrFormat {
         object: &ObjectMeta,
         object_store: Arc<dyn ObjectStore>,
     ) -> datafusion::error::Result<FileGroup> {
-        let zarr_store = Arc::new(AsyncObjectStore::new(object_store))
-            as Arc<dyn AsyncReadableListableStorageTraits>;
         let group_path = ZarrPath::new_from_object_meta(object.clone()).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(
                 "Failed to create ZarrPath from ObjectMeta at {}: {e}",
                 object.location
             ))
         })?;
-        let group = Group::async_open(zarr_store, &group_path.as_zarr_path())
-            .await
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to open Zarr group at {}: {e}",
-                    object.location
-                ))
-            })?;
+        let group = Group::async_open(
+            self.storage(object_store).inner(),
+            &group_path.as_zarr_path(),
+        )
+        .await
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to open Zarr group at {}: {e}",
+                object.location
+            ))
+        })?;
 
-        match find_partitioned_files(&group).await {
-            Some(partition_groups) => {
-                if partition_groups.is_empty() {
-                    Ok(FileGroup::new(vec![PartitionedFile::new(
-                        group_path.as_zarr_json_path(),
-                        0,
-                    )]))
-                } else {
-                    let mut files = Vec::new();
-                    for group in partition_groups {
-                        let partition_path = group.path().to_string();
-                        let partitioned_file =
-                            PartitionedFile::new(format!("{partition_path}/zarr.json"), 0);
-                        files.push(partitioned_file);
-                    }
-                    Ok(FileGroup::new(files))
-                }
-            }
-            None => Ok(FileGroup::new(vec![])),
-        }
+        let files = leaf_group_keys(&group)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|key| PartitionedFile::new(key, 0))
+            .collect();
+        Ok(FileGroup::new(files))
     }
 }
 

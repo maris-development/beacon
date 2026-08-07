@@ -24,6 +24,16 @@ tag. Releases before 2.0.0 are recorded in the
   pushed into the Iceberg scan, which drops data files from the manifests' statistics. Reads only:
   no `INSERT`, `MERGE` or snapshot expiry, and no REST or Glue catalog yet. See
   [Apache Iceberg](docs/docs/2.0.0-rc2/formats/iceberg.md).
+- **Icechunk repositories read through the Zarr reader.** An Icechunk repository is a Zarr v3 store
+  with commits, branches and snapshots. `read_icechunk('sst/repo')` and `CREATE EXTERNAL TABLE …
+  STORED AS ICECHUNK` read one version of it: the tip of a branch by default, or a fixed `tag` /
+  `snapshot`, so a query reproduces after a later commit. The repository only supplies the storage
+  a group is opened over — schema inference, the array handling and the chunk-level predicate
+  pushdown are the same code a plain Zarr store already went through. A repository reads in place
+  from the datasets store, S3, GCS or Azure, with no local copy. Reads only: no commit, no branch
+  creation, no `INSERT`. Virtual chunk references — chunks that stay inside a netCDF or HDF5 file
+  outside the repository, as VirtualiZarr produces — are **not** followed, because that read needs
+  the credentials of a different store than the one the caller was granted.
 
 ### Changed
 
@@ -31,7 +41,6 @@ tag. Releases before 2.0.0 are recorded in the
   only release line built against the DataFusion 53 and Arrow 58 this workspace unifies on —
   declare `rust-version = "1.94"`, so the workspace floor follows. Beacon's own code uses no
   feature newer than 1.91. CI builds the floor leg at 1.94.
-
 - **One product, one name.** "Beacon Data Lake" and "BeaconDB" are gone as marketed products.
   There is one thing, and it is called **Beacon**. Where the running process needs a name, the
   docs say "the Beacon server" in lowercase. The tagline is now "a query engine for scientific

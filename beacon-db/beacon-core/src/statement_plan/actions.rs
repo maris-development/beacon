@@ -243,6 +243,13 @@ pub(crate) async fn create_external_table(
         return create_iceberg_table(session, cmd).await;
     }
 
+    // `STORED AS ICECHUNK` registers an Icechunk repository read through the zarr
+    // reader. A repository keeps its metadata in snapshots rather than in listable
+    // `zarr.json` objects, so it bypasses the listing-table factory too.
+    if cmd.file_type.eq_ignore_ascii_case("ICECHUNK") {
+        return create_icechunk_table(session, cmd).await;
+    }
+
     // `STORED AS POSTGRES|MYSQL` registers an external database table backed by a
     // federated connection to the source database, rather than a listing table.
     if let Some(engine) = SqlEngine::from_stored_as(&cmd.file_type) {
@@ -376,6 +383,28 @@ async fn create_iceberg_table(
     };
 
     // `build_provider` reads the schema from the table metadata; registration
+    // persists `table.json` via the TableManager.
+    let provider = definition.build_provider(session.clone()).await?;
+    session.register_table(cmd.name.clone(), provider)?;
+    Ok(())
+}
+
+/// Build and register an Icechunk table from
+/// `CREATE EXTERNAL TABLE … STORED AS ICECHUNK LOCATION 'argo/repo'
+/// OPTIONS ('branch' 'dev')`. The repository must already exist at the location;
+/// its schema is read from the selected version. Reads only.
+async fn create_icechunk_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+) -> anyhow::Result<()> {
+    let definition = beacon_icechunk::IcechunkTableDefinition {
+        name: cmd.name.to_string(),
+        location: cmd.location.clone(),
+        options: cmd.options.clone(),
+        definition: None,
+    };
+
+    // `build_provider` reads the schema from the repository; registration
     // persists `table.json` via the TableManager.
     let provider = definition.build_provider(session.clone()).await?;
     session.register_table(cmd.name.clone(), provider)?;

@@ -219,6 +219,7 @@ export default defineConfig({
                 { text: 'BBF', link: '/docs/2.0.0-rc2/formats/bbf' },
                 { text: 'Delta Lake', link: '/docs/2.0.0-rc2/formats/delta-lake' },
                 { text: 'Apache Iceberg', link: '/docs/2.0.0-rc2/formats/iceberg' },
+                { text: 'Icechunk', link: '/docs/2.0.0-rc2/formats/icechunk' },
                 { text: 'ODV ASCII', link: '/docs/2.0.0-rc2/formats/odv' },
               ]
             },

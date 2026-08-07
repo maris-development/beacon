@@ -15,7 +15,6 @@ use beacon_nd_array::{
         nd_provider::any_dataset_as_encoded_stream, pushdown_filter::PushdownFilter,
         schema::any_dataset_to_arrow_schema,
     },
-    dataset::resolve_read_dimensions,
     projection::DatasetProjection,
 };
 use datafusion::{
@@ -39,10 +38,11 @@ use datafusion::{
 use futures::{FutureExt, StreamExt, TryStreamExt, future};
 use object_store::ObjectStore;
 use zarrs::group::Group;
-use zarrs_object_store::AsyncObjectStore;
-use zarrs_storage::AsyncReadableListableStorageTraits;
 
-use crate::{reader::dataset_from_group, util::ZarrPath};
+use crate::{
+    reader::{dataset_from_group, project_read_dimensions},
+    util::{ZarrPath, ZarrStorage},
+};
 
 /// DataFusion [`FileSource`] for zarr groups.
 #[derive(Clone)]
@@ -56,6 +56,9 @@ pub struct ZarrSource {
     read_dimensions: Option<Vec<String>>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
+    /// Storage to open groups over, replacing the session's object store.
+    /// Set by the Icechunk reader; `None` for a listed zarr store.
+    storage: Option<ZarrStorage>,
 }
 
 impl ZarrSource {
@@ -68,7 +71,15 @@ impl ZarrSource {
             predicate: None,
             read_dimensions: None,
             projection: None,
+            storage: None,
         }
+    }
+
+    /// Returns a copy of this source that opens groups over `storage` instead of
+    /// the session's object store.
+    pub fn with_storage(mut self, storage: ZarrStorage) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     /// Returns a copy of this source that reads only the variables belonging to
@@ -97,7 +108,10 @@ impl FileSource for ZarrSource {
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(ZarrOpener {
-            object_store,
+            storage: self
+                .storage
+                .clone()
+                .unwrap_or_else(|| ZarrStorage::from_object_store(object_store)),
             projected_schema,
             predicate: self.predicate.clone(),
             batch_size: self.batch_size,
@@ -191,7 +205,7 @@ impl FileSource for ZarrSource {
 // ─── FileOpener ──────────────────────────────────────────────────────────────
 
 struct ZarrOpener {
-    object_store: Arc<dyn ObjectStore>,
+    storage: ZarrStorage,
     projected_schema: SchemaRef,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     batch_size: usize,
@@ -206,7 +220,7 @@ impl FileOpener for ZarrOpener {
             DataFusionError::Execution(format!("Failed to create ZarrPath from object metadata: {e}"))
         })?;
 
-        let object_store = self.object_store.clone();
+        let storage = self.storage.clone();
         let projected_schema = self.projected_schema.clone();
         let predicate = self.predicate.clone();
         let batch_size = self.batch_size;
@@ -214,9 +228,7 @@ impl FileOpener for ZarrOpener {
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
 
         let fut = async move {
-            let zarr_store = Arc::new(AsyncObjectStore::new(object_store))
-                as Arc<dyn AsyncReadableListableStorageTraits>;
-            let group = Group::async_open(zarr_store, &zarr_path.as_zarr_path())
+            let group = Group::async_open(storage.inner(), &zarr_path.as_zarr_path())
                 .await
                 .map_err(|e| {
                     DataFusionError::Execution(format!(
@@ -235,16 +247,8 @@ impl FileOpener for ZarrOpener {
             // default so `SELECT *` cannot fail when variables live on
             // incompatible dimension sets. No log label: this runs per
             // file/partition (logging happens in schema inference).
-            let full = match resolve_read_dimensions(&full, read_dimensions, None) {
-                Some(dims) => full
-                    .project(&DatasetProjection::new_with_dimension_projection(dims))
-                    .map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "Failed to project Zarr dataset with dimensions: {e}"
-                        ))
-                    })?,
-                None => full,
-            };
+            let full = project_read_dimensions(full, read_dimensions, None)
+                .map_err(|e| DataFusionError::Execution(e.to_string()))?;
 
             let file_schema: SchemaRef = Arc::new(any_dataset_to_arrow_schema(&full).map_err(
                 |e| DataFusionError::Execution(format!("Failed to derive Zarr Arrow schema: {e}")),

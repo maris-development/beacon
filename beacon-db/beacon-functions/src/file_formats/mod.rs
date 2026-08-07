@@ -83,6 +83,10 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
         )),
+        Arc::new(beacon_icechunk::ReadIcechunkFunc::new(
+            runtime_handle.clone(),
+            Arc::downgrade(&session_ctx),
+        )),
     ];
 
     // For every reader, a `<name>_schema` function that returns the file(s)'

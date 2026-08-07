@@ -41,6 +41,7 @@ async fn schema_functions_are_registered_for_each_reader() {
         "read_arrow_schema",
         "read_delta_schema",
         "read_iceberg_schema",
+        "read_icechunk_schema",
     ] {
         let error = rt
             .try_sql(&format!("SELECT * FROM {name}('no-such-file')"))
