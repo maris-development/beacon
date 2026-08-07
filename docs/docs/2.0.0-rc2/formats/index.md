@@ -37,10 +37,12 @@ S3-compatible bucket, chosen at startup. See
 | [GeoTIFF / COG](/docs/2.0.0-rc2/formats/geotiff) | `read_tiff` | `TIFF` | `.tif`, `.tiff` |
 | [BBF](/docs/2.0.0-rc2/formats/bbf) | `read_bbf` | `BBF` | `.bbf` |
 | [Delta Lake](/docs/2.0.0-rc2/formats/delta-lake) | `read_delta` | `DELTA` | `_delta_log/` directory |
+| [Icechunk](/docs/2.0.0-rc2/formats/icechunk) | `read_icechunk` | `ICECHUNK` | repository directory |
 | [ODV ASCII](/docs/2.0.0-rc2/formats/odv) | `read_odv_ascii` | not supported | `.txt` |
 
-Beacon finds every format in the dataset store automatically. **Delta Lake** and **ODV
-ASCII** are the exception. Point a function at them. For Delta, you can also use an external table.
+Beacon finds every format in the dataset store automatically. **Delta Lake**, **Icechunk** and
+**ODV ASCII** are the exception. Point a function at them. For Delta and Icechunk, you can also use
+an external table.
 
 ## Capability matrix
 
@@ -59,6 +61,7 @@ The table above says how to read each format. This one says what you get.
 | GeoTIFF / COG | Full | Projection, range requests | No | `read_tiff_schema` | Yes |
 | BBF | Full | Predicate + projection | No | `read_bbf_schema` | No |
 | Delta Lake | Full | Predicate + projection, file skipping | No, but see below | `read_delta_schema` | No |
+| Icechunk | Full, see [Icechunk](/docs/2.0.0-rc2/formats/icechunk) | Projection + dimension selection, chunk pruning | No | `read_icechunk_schema` | Yes |
 | ODV ASCII | Full | Projection only | Yes | `read_odv_ascii_schema` | No |
 
 Reading the columns:

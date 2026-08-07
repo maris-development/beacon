@@ -8,7 +8,40 @@ use std::{
 
 use object_store::{ObjectStore, ObjectStoreExt};
 use zarrs::group::Group;
+use zarrs_object_store::AsyncObjectStore;
 use zarrs_storage::AsyncReadableListableStorageTraits;
+
+/// The storage a zarr group is opened over.
+///
+/// The reader is storage independent: everything after [`Group::async_open`] —
+/// schema inference, the leaf-group walk, the `beacon-nd-array` scan and the
+/// predicate pushdown — works the same whatever backs the store. This newtype
+/// carries that storage through the DataFusion plumbing, which is otherwise
+/// hard-wired to an [`ObjectStore`]. A plain zarr store wraps the session's
+/// object store; an Icechunk repository wraps a repository session instead.
+#[derive(Clone)]
+pub struct ZarrStorage(Arc<dyn AsyncReadableListableStorageTraits>);
+
+impl ZarrStorage {
+    pub fn new(storage: Arc<dyn AsyncReadableListableStorageTraits>) -> Self {
+        Self(storage)
+    }
+
+    /// The storage backed by an object store — the default for a listed zarr store.
+    pub fn from_object_store(object_store: Arc<dyn ObjectStore>) -> Self {
+        Self(Arc::new(AsyncObjectStore::new(object_store)))
+    }
+
+    pub fn inner(&self) -> Arc<dyn AsyncReadableListableStorageTraits> {
+        self.0.clone()
+    }
+}
+
+impl std::fmt::Debug for ZarrStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZarrStorage").finish_non_exhaustive()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum ZarrPath {
@@ -85,9 +118,46 @@ pub fn path_parent(p: &object_store::path::Path) -> Option<object_store::path::P
 }
 
 /// Check if this ObjectMeta represents a Zarr v3 metadata file (`zarr.json`).
+///
+/// A bare `zarr.json` — no parent directory — counts too: a repository-backed
+/// store such as Icechunk exposes its root group there. Listing-based discovery
+/// is unaffected, because [`top_level_zarr_meta_v3`] keys groups by their parent
+/// directory and a root-level metadata file has none.
 pub fn is_zarr_v3_metadata(meta: &object_store::ObjectMeta) -> bool {
     let loc = meta.location.to_string().to_lowercase();
-    loc.ends_with("/zarr.json")
+    loc == "zarr.json" || loc.ends_with("/zarr.json")
+}
+
+/// The store key of a group's metadata file, given the group's zarr node path.
+///
+/// `/` (the root group) maps to `zarr.json`; `/a/b` maps to `a/b/zarr.json`.
+pub fn group_metadata_key(node_path: &str) -> String {
+    let trimmed = node_path.trim_matches('/');
+    if trimmed.is_empty() {
+        "zarr.json".to_string()
+    } else {
+        format!("{trimmed}/zarr.json")
+    }
+}
+
+/// The metadata keys of the leaf groups under `group` — one scan partition each,
+/// so nested sub-groups are read independently.
+///
+/// A group with no child groups is its own single leaf. Returns `None` when the
+/// children could not be listed, mirroring [`find_partitioned_files`].
+pub async fn leaf_group_keys(
+    group: &Group<dyn AsyncReadableListableStorageTraits>,
+) -> Option<Vec<String>> {
+    let leaves = find_partitioned_files(group).await?;
+    if leaves.is_empty() {
+        return Some(vec![group_metadata_key(group.path().as_str())]);
+    }
+    Some(
+        leaves
+            .iter()
+            .map(|leaf| group_metadata_key(leaf.path().as_str()))
+            .collect(),
+    )
 }
 
 /// Return only the ObjectMeta entries corresponding to **top-level Zarr groups**.

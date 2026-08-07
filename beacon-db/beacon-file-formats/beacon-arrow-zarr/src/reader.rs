@@ -12,15 +12,74 @@
 
 use std::sync::Arc;
 
+use arrow::datatypes::Schema;
+use beacon_common::super_typing::super_type_schema;
 use beacon_nd_array::{
     NdArrayD,
-    dataset::{AnyDataset, Dataset},
+    arrow::schema::any_dataset_to_arrow_schema,
+    dataset::{AnyDataset, Dataset, resolve_read_dimensions},
+    projection::DatasetProjection,
 };
 use indexmap::IndexMap;
 use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
-use crate::{attributes::AttributeValue, compat};
+use crate::{attributes::AttributeValue, compat, util::recursive_groups};
+
+/// Narrow a group's dataset to `read_dimensions`, or to a broadcast-compatible
+/// default when none are given, so a `SELECT *` cannot mix variables that live
+/// on incompatible dimension sets.
+///
+/// `log_label` names the caller in the auto-selection log line; pass `None` from
+/// per-partition code, where schema inference has already logged the choice.
+pub fn project_read_dimensions(
+    dataset: AnyDataset,
+    read_dimensions: Option<Vec<String>>,
+    log_label: Option<&str>,
+) -> anyhow::Result<AnyDataset> {
+    match resolve_read_dimensions(&dataset, read_dimensions, log_label) {
+        Some(dims) => dataset
+            .project(&DatasetProjection::new_with_dimension_projection(dims))
+            .map_err(|e| anyhow::anyhow!("Failed to project Zarr dataset with dimensions: {e}")),
+        None => Ok(dataset),
+    }
+}
+
+/// The super-typed Arrow schema of every leaf group under `group_path`.
+///
+/// Storage independent: it reads the same whether `storage` is an object store
+/// or an Icechunk repository session.
+pub async fn schema_from_group_path(
+    storage: Arc<dyn AsyncReadableListableStorageTraits>,
+    group_path: &str,
+    read_dimensions: Option<Vec<String>>,
+    log_label: Option<&str>,
+) -> anyhow::Result<Schema> {
+    let group = Group::async_open(storage, group_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to open Zarr group at '{group_path}': {e}"))?;
+
+    let mut leaves = Vec::new();
+    recursive_groups(Arc::new(group), &mut leaves).await?;
+
+    let mut schemas = Vec::new();
+    for leaf in leaves {
+        let dataset = dataset_from_group(&leaf, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?;
+        // Match what the scan returns: the same narrowing runs per partition.
+        let dataset = project_read_dimensions(dataset, read_dimensions.clone(), log_label)?;
+        let schema = any_dataset_to_arrow_schema(&dataset)
+            .map_err(|e| anyhow::anyhow!("Failed to derive Zarr Arrow schema: {e}"))?;
+        schemas.push(Arc::new(schema));
+    }
+
+    if schemas.is_empty() {
+        anyhow::bail!("No valid Zarr v3 groups found under '{group_path}' to infer schema");
+    }
+    super_type_schema(&schemas)
+        .map_err(|e| anyhow::anyhow!("Failed to compute super schema for Zarr groups: {e}"))
+}
 
 /// Build an [`AnyDataset`] from a zarr group.
 ///

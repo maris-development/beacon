@@ -271,3 +271,42 @@ SELECT * FROM read_delta('delta/ocean_profiles', '2026-01-01T00:00:00Z')
 
 Use [`CREATE EXTERNAL TABLE … STORED AS DELTA`](/docs/2.0.0-rc2/formats/delta-lake)
 to register a Delta table permanently. That form also supports `INSERT INTO`.
+
+## `read_icechunk`
+
+```text
+read_icechunk(location)
+read_icechunk(location, branch)
+read_icechunk(location, branch, snapshot)
+read_icechunk(location, branch, snapshot, dimensions)
+```
+
+Beacon reads an [Icechunk](/docs/2.0.0-rc2/formats/icechunk) repository as a Zarr store. A
+repository is a Zarr store with commits, branches, tags and snapshots.
+
+Give one `location`. The `location` is the path to the directory of the repository. The `location`
+is not a glob. The `location` is not a list.
+
+The other arguments select the version and the arrays:
+
+- `branch` reads the tip of that branch. The default branch is `main`.
+- `snapshot` reads that snapshot. The snapshot does not move after a later commit.
+- Give `NULL` for `branch` to set `snapshot` by position.
+- `dimensions` selects the arrays. Beacon reads an array only if the list holds all dimensions of
+  the array.
+
+A branch selects a different version than a snapshot. Give one of the two.
+
+```sql
+-- Read the tip of `main`
+SELECT * FROM read_icechunk('sst/repo') LIMIT 100
+
+-- Read the tip of a different branch
+SELECT count(*) FROM read_icechunk('sst/repo', 'dev')
+
+-- Read one snapshot
+SELECT avg(sst) FROM read_icechunk('sst/repo', NULL, 'NNNGCAX7Z99K7XTTYK8G')
+```
+
+[`CREATE EXTERNAL TABLE … STORED AS ICECHUNK`](/docs/2.0.0-rc2/formats/icechunk) adds a repository
+to the catalog. Beacon reads Icechunk. Beacon does not write Icechunk.

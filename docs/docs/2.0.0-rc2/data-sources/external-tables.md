@@ -173,6 +173,26 @@ A Delta table supports consistent snapshots. It supports **time travel** through
 new Delta version. See [Delta Lake](/docs/2.0.0-rc2/formats/delta-lake) for the
 full reference.
 
+### Icechunk
+
+`STORED AS ICECHUNK` adds an [Icechunk](/docs/2.0.0-rc2/formats/icechunk) repository to the
+catalog. A repository is a Zarr store with commits, branches, tags and snapshots. The repository
+must exist.
+
+Set `LOCATION` to the directory of the repository. Do not give a glob of files:
+
+```sql
+CREATE EXTERNAL TABLE sst
+STORED AS ICECHUNK
+LOCATION 'sst/repo'
+OPTIONS ('branch' 'main')
+```
+
+`OPTIONS` selects the version. Use `branch`, `tag` or `snapshot`. Set one of the three. A tag and a
+snapshot do not move. The table reads the same rows after a later commit.
+
+The table is read only. See [Icechunk](/docs/2.0.0-rc2/formats/icechunk) for the full reference.
+
 ## Partitioned data
 
 Your files can use Hive-style partition directories such as `year=2024/month=01/...`. Declare the

@@ -212,6 +212,8 @@ pub fn definition_from_provider(
         Ok(Arc::new(definition))
     } else if let Some(table) = table.as_any().downcast_ref::<beacon_delta::BeaconDeltaTable>() {
         Ok(Arc::new(table.definition().clone()))
+    } else if let Some(table) = table.as_any().downcast_ref::<beacon_icechunk::IcechunkTable>() {
+        Ok(Arc::new(table.definition().clone()))
     } else if let Some(definition) = beacon_sql_databases::sql_database_table_definition(table) {
         Ok(Arc::new(definition))
     } else if let Some(table) = table.as_any().downcast_ref::<ViewTable>() {
