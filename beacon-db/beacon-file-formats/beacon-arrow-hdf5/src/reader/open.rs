@@ -27,12 +27,18 @@
 //!
 //! # A known limit of the attribute decoder
 //!
-//! A version-1 attribute message pads its value block to 8 bytes, and [`oxcdf`]
-//! takes that padding as data. A scalar attribute narrower than 8 bytes
-//! therefore decodes as two values, and an array attribute as more values than
-//! it holds. Beacon drops such an attribute rather than surface a wrong one, so
-//! it is missing from the arrays. This lives in [`oxcdf`], below both readers,
-//! so the netCDF path behaves the same way.
+//! A version-1 object header pads every message to 8 bytes, and the declared
+//! message size includes that padding. [`oxcdf`] takes the whole message body
+//! as the attribute value, so the padding becomes data: a scalar attribute
+//! narrower than 8 bytes decodes as two values, and `int32[3]` as four. Beacon
+//! drops such an attribute rather than surface a wrong one, so it is missing
+//! from the arrays.
+//!
+//! netcdf-c writes version-2 object headers, so a netCDF-4 file is unaffected
+//! and the netCDF reader never meets this. It bites a plain HDF5 file written
+//! with the earliest library version — h5py's default — which is exactly the
+//! population this reader exists for. The fix belongs in [`oxcdf`]; see
+//! <https://github.com/robinskil/oxcdf/issues/1>.
 //!
 //! # Example
 //!

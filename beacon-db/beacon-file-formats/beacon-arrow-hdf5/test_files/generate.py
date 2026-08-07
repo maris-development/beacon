@@ -29,10 +29,10 @@ def nested_groups() -> None:
     """
     with h5py.File(os.path.join(HERE, "nested-groups.h5"), "w") as f:
         f.attrs["title"] = "nested group example"
-        # 8 bytes wide on purpose. A version-1 attribute message pads its value
-        # block to 8 bytes, and `oxcdf` takes the padding as data, so a narrower
-        # scalar comes back as two values and is dropped. See the note in
-        # `reader::open`.
+        # 8 bytes wide on purpose. h5py writes a version-1 object header, which
+        # pads every message to 8 bytes, and `oxcdf` takes that padding as
+        # attribute data. A narrower scalar therefore comes back as two values
+        # and is dropped. See the note in `reader::open`.
         f.attrs["version"] = np.int64(2)
 
         f.create_dataset("station_id", data=np.array([11, 22, 33], dtype=np.int32))
