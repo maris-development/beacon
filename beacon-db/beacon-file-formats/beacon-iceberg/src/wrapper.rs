@@ -24,8 +24,9 @@ use std::sync::{Arc, RwLock};
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
-use datafusion::common::Statistics;
+use datafusion::common::{not_impl_err, Statistics};
 use datafusion::datasource::TableType;
+use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
@@ -197,6 +198,26 @@ impl TableProvider for BeaconIcebergTable {
 
     fn statistics(&self) -> Option<Statistics> {
         self.current().provider.statistics()
+    }
+
+    /// Beacon reads Iceberg; it writes none.
+    ///
+    /// Without this the caller gets DataFusion's default, "Insert into not
+    /// implemented for this table", which says nothing about why or what to do
+    /// instead. `STORED AS DELTA` right next to it *does* accept `INSERT INTO`,
+    /// so the difference is worth naming.
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        _input: Arc<dyn ExecutionPlan>,
+        _insert_op: InsertOp,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        not_impl_err!(
+            "Beacon reads Iceberg table '{}' read-only, so it accepts no INSERT. \
+             Write to it with an Iceberg writer such as Spark or PyIceberg, or use \
+             a managed table to change rows from Beacon.",
+            self.definition.name
+        )
     }
 }
 

@@ -360,3 +360,40 @@ async fn an_iceberg_table_survives_a_restart() {
         "the restored Iceberg table should still read its rows"
     );
 }
+
+/// Writes are out of scope, so `INSERT INTO` must fail with a reason a user can
+/// act on, and must leave the table exactly as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_insert_is_refused_with_a_reason_and_changes_nothing() {
+    let rt: TestRuntime = common::runtime("iceberg-readonly").await;
+    let (rel, location) = names("readonly");
+    let _fixture = IcebergFixture::create(rt.tmp_dir(), rt.datasets_dir(), &rel).await;
+    let table = format!("ice_ro_{}", std::process::id());
+
+    rt.sql(&format!(
+        "CREATE EXTERNAL TABLE {table} STORED AS ICEBERG LOCATION '{location}'"
+    ))
+    .await;
+
+    let error = rt
+        .try_sql(&format!("INSERT INTO {table} VALUES (9, 'x', 1.0)"))
+        .await
+        .expect_err("an Iceberg table should refuse an INSERT")
+        .to_string();
+    // Not DataFusion's bare "Insert into not implemented for this table": the
+    // message names the table and says what to do instead.
+    assert!(
+        error.contains(&table),
+        "the error should name the table: {error}"
+    );
+    assert!(
+        error.contains("read-only") && error.contains("PyIceberg"),
+        "the error should say why, and what to use instead: {error}"
+    );
+
+    assert_eq!(
+        scalar_i64(&rt.sql(&format!("SELECT count(*) FROM {table}")).await),
+        4,
+        "a refused INSERT must not change the table"
+    );
+}
