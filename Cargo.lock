@@ -1887,7 +1887,6 @@ dependencies = [
  "url",
  "zarrs",
  "zarrs_icechunk",
- "zarrs_storage",
 ]
 
 [[package]]

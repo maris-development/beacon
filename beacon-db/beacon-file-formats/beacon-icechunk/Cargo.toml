@@ -12,7 +12,6 @@ beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 
 zarrs = { workspace = true }
 zarrs_icechunk = { workspace = true }
-zarrs_storage = { workspace = true }
 
 arrow = { workspace = true }
 datafusion = { workspace = true }

@@ -104,6 +104,17 @@ async fn reads_a_local_repository_at_the_tip_of_main() {
 
     // The default version is the tip of `main`, i.e. the second commit.
     assert_eq!(max_sst(&ctx).await, fixture::SECOND_SST);
+
+    // A LIMIT reaches the scan without cutting the grid short: the scan carries
+    // whole arrays per row, so a row limit must be applied after the broadcast.
+    let limited = ctx
+        .sql("SELECT lat FROM repo LIMIT 3")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(rows(&limited), 3, "LIMIT 3 should yield exactly 3 rows");
 }
 
 #[tokio::test(flavor = "multi_thread")]
