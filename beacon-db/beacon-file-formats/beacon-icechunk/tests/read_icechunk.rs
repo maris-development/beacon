@@ -285,6 +285,28 @@ async fn a_missing_repository_is_an_error() {
     assert!(err.to_string().contains("Icechunk"), "{err:#}");
 }
 
+/// Pointing an Icechunk table at a plain zarr store says so, and names the
+/// function that does read it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_zarr_store_is_not_a_repository() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("plain.zarr");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(
+        store.join("zarr.json"),
+        r#"{"zarr_format":3,"node_type":"group"}"#,
+    )
+    .unwrap();
+
+    let ctx = session();
+    let err = IcechunkTable::try_new(&ctx.state(), definition(&store, &[]))
+        .await
+        .unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("no Icechunk repository"), "{message}");
+    assert!(message.contains("read_zarr"), "{message}");
+}
+
 /// The stated scope for virtual chunk references: Beacon authorizes none, so a
 /// chunk that lives in a file outside the repository does not read.
 #[tokio::test(flavor = "multi_thread")]

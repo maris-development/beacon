@@ -138,6 +138,30 @@ pub enum RepositoryBackend {
     Http { base_url: String },
 }
 
+impl std::fmt::Display for RepositoryBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let suffix = |prefix: &Option<String>| match prefix {
+            Some(prefix) => format!("/{prefix}"),
+            None => String::new(),
+        };
+        match self {
+            RepositoryBackend::LocalFileSystem(path) => write!(f, "{}", path.display()),
+            RepositoryBackend::S3 { bucket, prefix } => {
+                write!(f, "s3://{bucket}{}", suffix(prefix))
+            }
+            RepositoryBackend::Gcs { bucket, prefix } => {
+                write!(f, "gs://{bucket}{}", suffix(prefix))
+            }
+            RepositoryBackend::Azure {
+                account,
+                container,
+                prefix,
+            } => write!(f, "az://{account}/{container}{}", suffix(prefix)),
+            RepositoryBackend::Http { base_url } => write!(f, "{base_url}"),
+        }
+    }
+}
+
 /// Split a path into its leading segment and the rest, e.g. an Azure
 /// `az://account/container/prefix` into `("container", Some("prefix"))`.
 fn split_first_segment(path: &str) -> (String, Option<String>) {
@@ -236,9 +260,7 @@ impl RepositoryBackend {
             RepositoryBackend::LocalFileSystem(path) => {
                 storage::new_local_filesystem_storage(path)
                     .await
-                    .with_context(|| {
-                        format!("failed to open Icechunk storage at {}", path.display())
-                    })?
+                    .with_context(|| format!("failed to open Icechunk storage at {self}"))?
             }
             RepositoryBackend::S3 { bucket, prefix } => storage::new_s3_object_store_storage(
                 storage::S3Options::default(),
@@ -337,9 +359,22 @@ pub fn resolve_location(session: &dyn Session, location: &str) -> anyhow::Result
 /// deliberate — see the crate documentation.
 pub async fn open_repository(backend: &RepositoryBackend) -> anyhow::Result<Repository> {
     let storage = backend.build_storage().await?;
-    Repository::open(None, storage, HashMap::new())
-        .await
-        .with_context(|| format!("failed to open Icechunk repository at {backend:?}"))
+    let error = match Repository::open(None, storage.clone(), HashMap::new()).await {
+        Ok(repository) => return Ok(repository),
+        Err(error) => error,
+    };
+
+    // Separate "there is nothing here" from "it is here but would not open". The
+    // first is what pointing at a plain zarr store or a wrong path gives, and
+    // icechunk's own error does not say which of the two happened.
+    if let Ok(false) = Repository::exists(storage, None).await {
+        anyhow::bail!(
+            "no Icechunk repository at {backend}. An Icechunk repository keeps its \
+             metadata in snapshots; a plain Zarr store reads with read_zarr instead."
+        );
+    }
+    Err(anyhow::Error::new(error)
+        .context(format!("failed to open Icechunk repository at {backend}")))
 }
 
 /// Whether an Icechunk repository exists at `backend`.
@@ -351,7 +386,7 @@ pub async fn is_icechunk_repository(backend: &RepositoryBackend) -> anyhow::Resu
     let storage = backend.build_storage().await?;
     Repository::exists(storage, None)
         .await
-        .with_context(|| format!("failed to probe for an Icechunk repository at {backend:?}"))
+        .with_context(|| format!("failed to probe for an Icechunk repository at {backend}"))
 }
 
 /// Open `version` of `repository` as the storage a zarr group reads over.
@@ -488,6 +523,40 @@ mod tests {
         assert_eq!(
             RepositoryBackend::from_listing_url(&url("file:///data/argo")).unwrap(),
             RepositoryBackend::LocalFileSystem(PathBuf::from("/data/argo"))
+        );
+    }
+
+    #[test]
+    fn a_backend_displays_as_the_location_it_reads() {
+        assert_eq!(
+            RepositoryBackend::LocalFileSystem(PathBuf::from("/srv/datasets/argo")).to_string(),
+            "/srv/datasets/argo"
+        );
+        assert_eq!(
+            RepositoryBackend::S3 {
+                bucket: "bucket".to_string(),
+                prefix: Some("argo/repo".to_string())
+            }
+            .to_string(),
+            "s3://bucket/argo/repo"
+        );
+        // A bucket root has no trailing separator to show.
+        assert_eq!(
+            RepositoryBackend::S3 {
+                bucket: "bucket".to_string(),
+                prefix: None
+            }
+            .to_string(),
+            "s3://bucket"
+        );
+        assert_eq!(
+            RepositoryBackend::Azure {
+                account: "account".to_string(),
+                container: "container".to_string(),
+                prefix: Some("argo".to_string())
+            }
+            .to_string(),
+            "az://account/container/argo"
         );
     }
 
