@@ -280,12 +280,12 @@ read_iceberg(location, snapshot_id)
 ```
 
 Beacon reads an [Apache Iceberg](/docs/2.0.0-rc2/formats/iceberg) table. The `location`
-argument differs from the other functions. It is **one path to the Iceberg table directory**. That
-directory holds `metadata/`. It is not a glob and not a list. Beacon reads the schema from the table
-metadata, and finds the current metadata file itself.
+argument differs from the other functions. It gives **one path to the Iceberg table directory**.
+That directory holds `metadata/`. Give no glob and no list. Beacon reads the columns from the table
+metadata. Beacon also finds the current metadata file.
 
-The optional second argument gives an Iceberg **snapshot id** for time travel. It is a 64-bit
-integer, so write it quoted when your client cannot hold one.
+The second argument gives an Iceberg **snapshot id** for time travel. The id is a 64-bit integer.
+Write the id in quotes if your client holds no 64-bit integer.
 
 ```sql
 -- Current snapshot
@@ -296,4 +296,4 @@ SELECT count(*) FROM read_iceberg('iceberg/ocean_profiles', 3821550127947089060)
 ```
 
 Use [`CREATE EXTERNAL TABLE … STORED AS ICEBERG`](/docs/2.0.0-rc2/formats/iceberg)
-to register an Iceberg table permanently. Beacon reads an Iceberg table; it writes none.
+to keep an Iceberg table in the catalog. Beacon reads an Iceberg table. Beacon writes none.

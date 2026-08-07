@@ -49,9 +49,9 @@ CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
 
 `DELTA` points at an existing
 [Delta Lake](/docs/2.0.0-rc2/formats/delta-lake) table directory. It also
-supports time travel and `INSERT INTO`. `ICEBERG` points at an existing
-[Apache Iceberg](/docs/2.0.0-rc2/formats/iceberg) table directory. It supports time
-travel and follows the writer's later commits, and it is read-only.
+supports time travel and `INSERT INTO`. `ICEBERG` points to an [Apache Iceberg](/docs/2.0.0-rc2/formats/iceberg) table
+directory that already exists. It supports time travel. It reads each new snapshot. It is
+read-only.
 `REMOTE` federates a table on another Beacon server. See
 [Remote Tables](/docs/2.0.0-rc2/data-sources/remote-tables). `POSTGRES` and `MYSQL`
 federate a table in an external SQL database. See

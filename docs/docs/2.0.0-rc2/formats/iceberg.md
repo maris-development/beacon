@@ -1,5 +1,5 @@
 ---
-description: Read an Apache Iceberg table in place. Register it with CREATE EXTERNAL TABLE STORED AS ICEBERG, or query it ad-hoc with read_iceberg.
+description: Beacon reads an Apache Iceberg table in place. Register the table, or read it with read_iceberg.
 ---
 
 # Apache Iceberg
@@ -10,60 +10,58 @@ STORED AS ICEBERG
 LOCATION 'iceberg/ocean_profiles'
 ```
 
-An **Iceberg table** is a directory. It holds a `metadata` directory next to its Parquet data
-files. The metadata names the exact files of a snapshot. Beacon reads that metadata. You therefore
-get a consistent snapshot, file pruning from column statistics, and a schema that follows the
-table.
+An Iceberg table is a directory. The directory holds a `metadata` directory and Parquet data files.
+The metadata names the exact files of one snapshot. Beacon reads that metadata. Beacon then reads
+only the files that the snapshot names.
 
-Beacon **reads** an Iceberg table. Another system writes it. See
-[Limitations](#limitations).
+Beacon reads an Iceberg table. Another system writes the table. See [Limitations](#limitations).
 
-An Iceberg table works on local storage and on object storage. Beacon resolves the path against its
-dataset storage root, like every other source.
+An Iceberg table works on local storage and on object storage. Beacon resolves the location against
+the datasets root. Every other source works the same way.
 
-:::tip External vs managed vs Iceberg
+:::tip External, managed and Iceberg tables
 
-- An [**external table**](/docs/2.0.0-rc2/data-sources/external-tables) (`STORED AS
-  PARQUET`, `NETCDF`, …) reads a folder or a glob of files in place. It is read-only.
-- A [**managed table**](/docs/2.0.0-rc2/sql/managed-tables) belongs to Beacon. Lance holds the
-  data. You can change the rows with `INSERT`, `UPDATE` and `DELETE`.
-- An **Iceberg table** points at an existing Iceberg table directory. Beacon reads it in place, and
-  follows it as the writer commits new snapshots.
+- An [**external table**](/docs/2.0.0-rc2/data-sources/external-tables) reads a directory or a glob
+  of files in place. It is read-only.
+- A [**managed table**](/docs/2.0.0-rc2/sql/managed-tables) belongs to Beacon. Lance holds the data.
+  Change the rows with `INSERT`, `UPDATE` and `DELETE`.
+- An **Iceberg table** points to an Iceberg table directory. Beacon reads the table in place. Beacon
+  reads each new snapshot.
 :::
 
-:::info The Iceberg table must already exist
-Beacon registers and reads an **existing** Iceberg table. Beacon writes no Iceberg table. Create the
-table with any Iceberg writer, such as Spark, PyIceberg or iceberg-rust. Then register it in Beacon.
+:::info The Iceberg table must exist
+Beacon registers and reads a table that already exists. Beacon writes no Iceberg table. Create the
+table with an Iceberg writer. Spark, PyIceberg and iceberg-rust are examples. Then register the
+table in Beacon.
 :::
 
-## Two ways to query an Iceberg table
+## Two ways to read an Iceberg table
 
-### Ad-hoc with `read_iceberg`
+### Direct read with `read_iceberg`
 
-Query an Iceberg table directly in a `FROM` clause. You register nothing first. This helps during
-exploration. See the [`read_iceberg`](/docs/2.0.0-rc2/sql/table-functions#read-iceberg) table
-function.
+Read an Iceberg table in a `FROM` clause. You register nothing first. Use this form for one query.
+See the [`read_iceberg`](/docs/2.0.0-rc2/sql/table-functions#read-iceberg) table function.
 
 ```sql
 SELECT count(*) FROM read_iceberg('iceberg/ocean_profiles');
 ```
 
-### Persisted external table
+### Registered external table
 
-`CREATE EXTERNAL TABLE … STORED AS ICEBERG` puts the table in the catalog. You can then run `SELECT`
-and `JOIN` on it. Beacon reloads it after a restart, like any other table.
+`CREATE EXTERNAL TABLE … STORED AS ICEBERG` puts the table in the catalog. You then read the table
+by name. You also join the table with any other table. Beacon loads the table again after a restart.
 
-You can send the DDL through any SQL interface of Beacon:
+Send the statement through any SQL interface of Beacon:
 
 - **HTTP**: `POST /api/query` with `{ "sql": "CREATE EXTERNAL TABLE ... STORED AS ICEBERG ..." }`
-- **Arrow Flight SQL**: any Flight SQL client, such as DataGrip, ADBC or DBeaver
+- **Arrow Flight SQL**: any Flight SQL client. DataGrip, ADBC and DBeaver are examples.
 
 :::info
-Only an admin can create an external table. DDL over the HTTP API needs the SQL interface. That
+Only an admin creates an external table. A statement over the HTTP API needs the SQL interface. That
 interface is on by default (`BEACON_ENABLE_SQL`). Arrow Flight SQL does not need this flag.
 :::
 
-## Define an Iceberg external table
+## Register an Iceberg table
 
 ```sql
 CREATE EXTERNAL TABLE <name>
@@ -74,8 +72,8 @@ OPTIONS ('snapshot_id' '3821550127947089060')
 
 ### `LOCATION`
 
-The `LOCATION` points at the **Iceberg table directory**. That directory holds `metadata/`. This
-differs from a file format table. Do not give the metadata file, a folder of loose files, or a glob:
+`LOCATION` gives the Iceberg table directory. That directory holds `metadata`. A file format table
+takes a glob. An Iceberg table takes no glob. Give no metadata file:
 
 ```sql
 CREATE EXTERNAL TABLE ocean_profiles
@@ -83,83 +81,83 @@ STORED AS ICEBERG
 LOCATION 'iceberg/ocean_profiles'
 ```
 
-Beacon resolves the path against its dataset storage root. In the default Docker container the root
-is `/beacon/data/datasets`. On object storage the root is the S3 prefix. Beacon reads the schema
-from the table metadata. You declare no columns.
+Beacon resolves the location against the datasets root. The default Docker container uses
+`/beacon/data/datasets`. An object store uses the configured bucket and prefix. Beacon reads the
+columns from the table metadata. Declare no columns.
 
-Beacon finds the current metadata file itself. It reads `metadata/version-hint.text` when the writer
-keeps one. Otherwise it takes the highest-numbered `*.metadata.json` in the metadata directory.
+Beacon finds the current metadata file. Beacon reads `metadata/version-hint.text` first. Beacon
+takes the metadata file with the highest number if that file is absent.
 
-### A table written somewhere else
+### A table from another system
 
-Iceberg metadata records **absolute** paths. Those paths name the machine or the bucket the writer
-used, which is rarely how Beacon reaches the same bytes. Beacon rebases them: it strips the table
-root the metadata declares, and reads the remainder under the `LOCATION` you gave. A table written to
-`/warehouse/obs` and mounted at `datasets://obs` therefore reads with no rewrite of its metadata.
+Iceberg metadata holds absolute paths. Those paths name the machine or the bucket of the writer.
+Beacon rarely reads the files at those paths. Beacon maps each path onto your location. Beacon
+removes the table root from the path. Beacon reads the rest under `LOCATION`.
 
-### `OPTIONS`, time travel
+One example. A writer writes a table to `/warehouse/obs`. You mount the table at `datasets://obs`.
+Beacon reads the table. You change no metadata.
 
-Pin the table to an older snapshot:
+### `OPTIONS` and time travel
+
+Pin the table to one snapshot:
 
 | Option | Description |
 | ------------- | ------------------------------------------------------------------- |
-| `snapshot_id` | An Iceberg snapshot id, for example `'3821550127947089060'`. |
+| `snapshot_id` | An Iceberg snapshot id. Example: `'3821550127947089060'`. |
 
 ```sql
--- Register the table as it looked at one snapshot
+-- Read the table at one snapshot
 CREATE EXTERNAL TABLE ocean_profiles_v1
 STORED AS ICEBERG
 LOCATION 'iceberg/ocean_profiles'
 OPTIONS ('snapshot_id' '3821550127947089060');
 ```
 
-`read_iceberg` takes the same selector as a second argument:
+`read_iceberg` takes the same id as a second argument:
 
 ```sql
 SELECT count(*) FROM read_iceberg('iceberg/ocean_profiles', 3821550127947089060);
 ```
 
-Without a `snapshot_id`, the table always follows the current snapshot.
+Beacon reads the current snapshot if you set no `snapshot_id`.
 
-## The table follows its writer
+## Beacon reads each new snapshot
 
-A registered Iceberg table re-reads the table metadata on every query. A snapshot another system
-commits, **and a column it adds**, therefore show up on the next query. You restart nothing and you
-re-create nothing:
+Beacon reads the table metadata for each query. Another system commits a snapshot. Another system
+adds a column. The next query shows both changes. You restart nothing:
 
 ```sql
--- Spark appends a snapshot and adds a `qc_flag` column...
-SELECT qc_flag, count(*) FROM ocean_profiles GROUP BY qc_flag;  -- ...and Beacon sees both
+-- Spark commits a snapshot and adds a `qc_flag` column.
+SELECT qc_flag, count(*) FROM ocean_profiles GROUP BY qc_flag;
 ```
 
-Rows written before a column existed read as `NULL`.
+A row from an older snapshot holds no value in a new column. Beacon reads `NULL` for that row.
 
-## Pushdown
+## Filters and columns
 
-A `WHERE` clause reaches the Iceberg scan. Iceberg compares the predicate against the column
-statistics in its manifests and drops the data files that cannot match, before any Parquet file is
-opened. `EXPLAIN` shows the predicate on the scan node:
+Beacon sends a `WHERE` clause to the Iceberg scan. Iceberg compares the clause against the column
+statistics in the manifests. Iceberg drops each data file that cannot match. Beacon then opens fewer
+files. `EXPLAIN` shows the clause on the scan:
 
 ```sql
 EXPLAIN SELECT * FROM ocean_profiles WHERE depth < 100;
 -- IcebergTableScan projection:[...] predicate:[depth < 100]
 ```
 
-A narrow `SELECT` reads fewer columns the same way.
+A short `SELECT` list reads fewer columns.
 
-## Storage backends
+## Storage
 
-Beacon resolves an Iceberg table through its dataset store. An Iceberg table therefore works the same
-way on both backends:
+Beacon reads an Iceberg table through the datasets store. The table works the same way on both
+backends:
 
 - **Local file system**: under the configured datasets directory.
-- **Object storage**: under the configured bucket and prefix. A table on S3 reads with no local copy.
+- **Object storage**: under the configured bucket and prefix. Beacon makes no local copy.
 
-You need no Iceberg configuration and no separate credentials. Beacon reads the table location like
-any other dataset path. See [Configuration](/docs/2.0.0-rc2/server/configuration) for the storage
-setup.
+Beacon needs no Iceberg configuration. Beacon needs no second set of credentials. See
+[Configuration](/docs/2.0.0-rc2/server/configuration) for the storage setup.
 
-## Query and inspect
+## Table information
 
 An Iceberg table behaves like any other registered table:
 
@@ -169,12 +167,11 @@ GET /api/table-schema?table_name=ocean_profiles
 ```
 
 The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/sql/create-table#querying-and-inspecting)
-reference gives the SQL equivalents, `SHOW TABLES` and `DESCRIBE`.
+reference gives the SQL forms, `SHOW TABLES` and `DESCRIBE`.
 
 ## Remove an Iceberg table
 
-`DROP TABLE` removes the table from the catalog. Beacon does **not** delete the Iceberg table
-directory or its files.
+`DROP TABLE` removes the table from the catalog. Beacon deletes no file of the table:
 
 ```sql
 DROP TABLE ocean_profiles;
@@ -182,23 +179,23 @@ DROP TABLE ocean_profiles;
 
 ## Limitations
 
-- **Read only.** Beacon does not write an Iceberg table. `INSERT`, `UPDATE`, `DELETE`, `MERGE` and
-  snapshot expiry are not supported. Use a [managed table](/docs/2.0.0-rc2/sql/managed-tables) to
-  change rows, or write with Spark or PyIceberg.
-- **No catalog.** A table is named by its location. A REST catalog and a Glue catalog are not
-  supported yet, so a table a catalog manages must be addressed by its directory.
-- **The Iceberg table must already exist.** Beacon does not create an empty Iceberg table from a
-  column list, and does not support `CREATE TABLE AS … STORED AS ICEBERG`.
-- **One directory per table.** An Iceberg table maps to one table directory with `metadata/`. It is
-  not a glob over many tables.
+- **Read-only.** Beacon writes no Iceberg table. `INSERT`, `UPDATE`, `DELETE`, `MERGE` and snapshot
+  expiry fail. Use a [managed table](/docs/2.0.0-rc2/sql/managed-tables) to change rows. You also
+  write with Spark or PyIceberg.
+- **No catalog.** A location names a table. Beacon supports no REST catalog and no Glue catalog.
+  Give the directory of the table.
+- **The table must exist.** Beacon creates no empty table from a column list.
+  `CREATE TABLE AS … STORED AS ICEBERG` fails.
+- **One directory per table.** An Iceberg table maps to one directory with `metadata`. A glob over
+  many tables fails.
 
-## Inspect the schema
+## Read the columns first
 
-Check the columns and the types before you write a query:
+Read the columns and the types before you write a query:
 
 ```sql
 SELECT * FROM read_iceberg_schema('iceberg/ocean_profiles');
 ```
 
 [Inspect a schema](/docs/2.0.0-rc2/formats/inspect-a-schema) compares the `_schema` functions,
-`SUMMARIZE`, `DESCRIBE` and `LIMIT 0`, and says what each one costs.
+`SUMMARIZE`, `DESCRIBE` and `LIMIT 0`. It also gives the cost of each one.
