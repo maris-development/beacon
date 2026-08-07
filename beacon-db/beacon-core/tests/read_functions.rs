@@ -3,16 +3,37 @@
 
 mod common;
 
-use common::{runtime, scalar_i64, total_rows, write_file, TestRuntime};
+use beacon_arrow_hdf5::Hdf5Config;
+use common::{runtime, runtime_with, scalar_i64, total_rows, write_file, TestRuntime};
 
 async fn seeded(tag: &str) -> TestRuntime {
-    let rt = runtime(tag).await;
+    seed(runtime(tag).await)
+}
+
+/// The same fixtures on a runtime that reads HDF5 with the pure-Rust reader.
+async fn seeded_with_rust_hdf5(tag: &str) -> TestRuntime {
+    let rt = runtime_with(tag, |b| {
+        b.with_hdf5_config(Hdf5Config {
+            use_rust_reader: true,
+            ..Hdf5Config::default()
+        })
+    })
+    .await;
+    seed(rt)
+}
+
+fn seed(rt: TestRuntime) -> TestRuntime {
     write_file(&rt.datasets_dir().join("r/one.csv"), "v,name\n1,a\n2,b\n");
     write_file(&rt.datasets_dir().join("r/two.csv"), "v,name\n3,c\n");
     std::fs::copy(parquet_fixture(), rt.datasets_dir().join("pq.parquet"))
         .expect("copy parquet fixture");
     std::fs::copy(netcdf_fixture(), rt.datasets_dir().join("wod.nc"))
         .expect("copy netcdf fixture");
+    // A NetCDF-4 file *is* HDF5, so the same bytes serve `read_hdf5`.
+    std::fs::copy(netcdf_fixture(), rt.datasets_dir().join("wod.h5"))
+        .expect("copy netcdf fixture as hdf5");
+    std::fs::copy(nested_hdf5_fixture(), rt.datasets_dir().join("nested.h5"))
+        .expect("copy nested hdf5 fixture");
     rt
 }
 
@@ -30,6 +51,15 @@ fn netcdf_fixture() -> std::path::PathBuf {
         .parent()
         .unwrap()
         .join("beacon-file-formats/beacon-arrow-netcdf/test_files/wod_ctd_1964.nc")
+}
+
+/// A plain HDF5 fixture, shipped with the HDF5 reader: no netCDF convention,
+/// and its datasets two group levels deep.
+fn nested_hdf5_fixture() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("beacon-file-formats/beacon-arrow-hdf5/test_files/nested-groups.h5")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -84,6 +114,37 @@ async fn read_netcdf_scans_the_fixture() {
     assert!(
         total_rows(&rows) > 0,
         "the WOD CTD fixture should yield rows"
+    );
+}
+
+/// `read_hdf5` reads a NetCDF-4 file on either reader, and both count the same
+/// rows. The runtime default picks the reader.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_hdf5_counts_the_same_rows_on_either_reader() {
+    const COUNT: &str = "SELECT count(*) FROM read_hdf5('wod.h5')";
+
+    let netcdf_c = seeded("read-hdf5-netcdf-c").await;
+    let rows = scalar_i64(&netcdf_c.sql(COUNT).await);
+    assert!(rows > 0, "the WOD CTD fixture should yield rows");
+
+    let rust = seeded_with_rust_hdf5("read-hdf5-rust").await;
+    assert_eq!(scalar_i64(&rust.sql(COUNT).await), rows);
+}
+
+/// A plain HDF5 file whose datasets live two group levels deep. The netCDF
+/// reader reports only the root group, so the column exists on the Rust reader
+/// alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_hdf5_reaches_a_nested_group_on_the_rust_reader() {
+    const SQL: &str = r#"SELECT "observations/qc/flag" FROM read_hdf5('nested.h5')"#;
+
+    let rust = seeded_with_rust_hdf5("read-hdf5-nested-rust").await;
+    assert_eq!(total_rows(&rust.sql(SQL).await), 12, "3 stations x 4 samples");
+
+    let netcdf_c = seeded("read-hdf5-nested-netcdf-c").await;
+    assert!(
+        netcdf_c.try_sql(SQL).await.is_err(),
+        "netcdf-c reports only the root group, so the column is not there"
     );
 }
 
