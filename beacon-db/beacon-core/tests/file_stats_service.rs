@@ -71,6 +71,71 @@ fn write_parquet(path: &Path, min: f64, max: f64) {
     writer.close().unwrap();
 }
 
+/// The plain HDF5 fixture shipped with the HDF5 reader: `station_id` spans
+/// 11..33, and its datasets live two group levels deep.
+fn copy_hdf5(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("beacon-file-formats/beacon-arrow-hdf5/test_files/nested-groups.h5");
+    std::fs::copy(fixture, path).expect("copy the hdf5 fixture");
+}
+
+/// The collector records ranges for HDF5 only on the pure-Rust reader.
+///
+/// It resolves a format by file extension and calls `infer_stats`, so an HDF5
+/// file follows the same rule netCDF does: under netcdf-c the format reports
+/// unknown — every call there queues on a process-global lock — and under the
+/// Rust reader it computes. The pass succeeds either way; only the ranges
+/// differ.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hdf5_ranges_need_the_rust_reader() {
+    use beacon_arrow_hdf5::Hdf5Config;
+
+    async fn analyze(use_rust_reader: bool) -> u32 {
+        let root = tempfile::tempdir().unwrap();
+        copy_hdf5(&root.path().join("datasets/obs/nested.h5"));
+
+        let runtime = builder(root.path(), enabled())
+            .with_hdf5_config(Hdf5Config {
+                use_rust_reader,
+                ..Hdf5Config::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let service = runtime.file_stats().expect("the subsystem is enabled");
+
+        let pass = service.run_once().await.unwrap();
+        assert_eq!(pass.discovered, 1, "the listing found the .h5 file");
+        assert_eq!(pass.analyzed, 1, "and analyzed it: {pass:?}");
+        assert_eq!(pass.failed, 0);
+
+        let store = service.store();
+        let id = store
+            .registry()
+            .file_id("obs/nested.h5")
+            .unwrap()
+            .expect("the file was registered");
+        let record = store.registry().record(id).unwrap().unwrap();
+        assert_eq!(record.format, "hdf5", "the extension resolved to the HDF5 format");
+        record.column_count
+    }
+
+    let with_rust_reader = analyze(true).await;
+    assert!(
+        with_rust_reader > 0,
+        "the Rust reader must record a range for station_id"
+    );
+
+    let with_netcdf_c = analyze(false).await;
+    assert_eq!(
+        with_netcdf_c, 0,
+        "netcdf-c reports unknown, so no column carries a range"
+    );
+}
+
 /// The whole loop, through a runtime: discovery finds the files, the format
 /// reads their footers, and the ranges come back out of the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -38,12 +38,25 @@ pub async fn generate_statistics(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open NetCDF dataset {location}: {e}"))?;
 
+    statistics_for_dataset(&dataset, table_schema).await
+}
+
+/// Return DataFusion [`Statistics`] for an already-opened dataset.
+///
+/// [`generate_statistics`] opens a NetCDF object and calls this. Any other
+/// reader of the same [`AnyDataset`] model calls it directly, so every format
+/// built on ND arrays reports statistics the same way. `beacon-arrow-hdf5` does
+/// exactly that with its own reader.
+pub async fn statistics_for_dataset(
+    dataset: &AnyDataset,
+    table_schema: &arrow::datatypes::Schema,
+) -> anyhow::Result<Statistics> {
     match dataset {
         AnyDataset::Regular(dataset) => {
-            generate_statistics_regular_dataset(&dataset, table_schema).await
+            generate_statistics_regular_dataset(dataset, table_schema).await
         }
         AnyDataset::Ragged { ragged, .. } => {
-            generate_statistics_ragged_dataset(&ragged, table_schema).await
+            generate_statistics_ragged_dataset(ragged, table_schema).await
         }
     }
 }

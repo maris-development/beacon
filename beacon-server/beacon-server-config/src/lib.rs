@@ -12,6 +12,7 @@ use error::Result;
 // composes them here and fills them from the environment.
 pub use beacon_arrow_atlas::datafusion::AtlasConfig;
 pub use beacon_arrow_bbf::datafusion::BbfConfig;
+pub use beacon_arrow_hdf5::Hdf5Config;
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_common::FileStatsConfig;
 pub use beacon_common::CrawlerConfig;
@@ -27,6 +28,7 @@ pub struct Config {
     pub flight_sql: FlightSqlConfig,
     pub cors: CorsConfig,
     pub netcdf: NetcdfConfig,
+    pub hdf5: Hdf5Config,
     pub atlas: AtlasConfig,
     pub bbf: BbfConfig,
     pub crawler: CrawlerConfig,
@@ -414,6 +416,26 @@ struct RawConfig {
     #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER", default = "false")]
     netcdf_use_rust_reader: bool,
 
+    /// Read HDF5 with the pure-Rust reader instead of netcdf-c.
+    ///
+    /// Off by default: netcdf-c is the path this server has always used for
+    /// `.h5` and `.hdf5` files, because a NetCDF-4 file is an HDF5 file and
+    /// netcdf-c's HDF5 dispatch opens a plain one too. Turn it on for parallel
+    /// reads, for HDF5 files in an object store (s3, gs or az), for per-file
+    /// statistics, and for the two layouts netcdf-c cannot report: a nested
+    /// group and a compound dataset. Writes always use netcdf-c.
+    ///
+    /// This is separate from `BEACON_NETCDF_USE_RUST_READER`, so a server can
+    /// move one format at a time.
+    #[envconfig(from = "BEACON_HDF5_USE_RUST_READER", default = "false")]
+    hdf5_use_rust_reader: bool,
+    #[envconfig(from = "BEACON_HDF5_ENABLE_STATISTICS", default = "true")]
+    hdf5_enable_statistics: bool,
+    #[envconfig(from = "BEACON_HDF5_USE_READER_CACHE", default = "true")]
+    hdf5_use_reader_cache: bool,
+    #[envconfig(from = "BEACON_HDF5_READER_CACHE_SIZE", default = "128")]
+    hdf5_reader_cache_size: usize,
+
     #[envconfig(from = "BEACON_ATLAS_USE_READER_CACHE", default = "true")]
     atlas_use_reader_cache: bool,
     #[envconfig(from = "BEACON_ATLAS_READER_CACHE_SIZE", default = "32")]
@@ -562,6 +584,12 @@ impl From<RawConfig> for Config {
                 reader_cache_size: raw.netcdf_reader_cache_size,
                 enable_statistics: raw.netcdf_enable_statistics,
                 use_rust_reader: raw.netcdf_use_rust_reader,
+            },
+            hdf5: Hdf5Config {
+                use_rust_reader: raw.hdf5_use_rust_reader,
+                use_reader_cache: raw.hdf5_use_reader_cache,
+                reader_cache_size: raw.hdf5_reader_cache_size,
+                enable_statistics: raw.hdf5_enable_statistics,
             },
             atlas: AtlasConfig {
                 use_reader_cache: raw.atlas_use_reader_cache,

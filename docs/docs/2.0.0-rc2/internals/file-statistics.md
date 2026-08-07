@@ -16,9 +16,10 @@ does not open one million.
 Beacon does not enable this feature by default.
 
 :::warning Two variables, not one
-Set `BEACON_FILE_STATS_ENABLE=true`. For netCDF, also set `BEACON_NETCDF_USE_RUST_READER=true`.
-Without the second variable, Beacon reads each netCDF file and records no ranges. The
-[Check the result](#check-the-result) section shows how to find this condition.
+Set `BEACON_FILE_STATS_ENABLE=true`. For netCDF, also set `BEACON_NETCDF_USE_RUST_READER=true`;
+for HDF5, `BEACON_HDF5_USE_RUST_READER=true`. Without the second variable, Beacon reads each such
+file and records no ranges. The [Check the result](#check-the-result) section shows how to find
+this condition.
 :::
 
 ## What Beacon records
@@ -47,6 +48,7 @@ No row in them can match the query.
 ```bash
 BEACON_FILE_STATS_ENABLE=true
 BEACON_NETCDF_USE_RUST_READER=true   # netCDF servers only
+BEACON_HDF5_USE_RUST_READER=true     # HDF5 servers only
 ```
 
 Beacon then starts a pass every 15 minutes. Each pass finds new files and reads them.
@@ -87,6 +89,7 @@ GROUP BY format;
 
 ```
 netcdf  | 840000 | 840000    <- BEACON_NETCDF_USE_RUST_READER is off
+hdf5    |   4000 |   4000    <- BEACON_HDF5_USE_RUST_READER is off
 odv     |  12000 |  12000    <- ODV supplies no ranges
 parquet |  50000 |      0    <- correct
 ```
@@ -134,8 +137,9 @@ condition.
 | --- | --- | --- |
 | Parquet, GeoParquet | Yes | None. Beacon reads the file footer. |
 | netCDF | Yes, with `BEACON_NETCDF_USE_RUST_READER=true` | Beacon opens the file and reads the coordinate variables. |
+| HDF5 | Yes, with `BEACON_HDF5_USE_RUST_READER=true` | Beacon opens the file and reads the one-dimensional datasets. |
 | CSV, Arrow IPC | No | |
-| ODV, Zarr, TIFF, HDF5 | No | |
+| ODV, Zarr, TIFF | No | |
 
 A format that supplies no ranges costs nothing. Beacon always reads those files, as before.
 
@@ -164,9 +168,9 @@ the ranges of that file.
 Beacon never prunes it. An incomplete first pass is safe. It makes queries faster on the files that
 Beacon read. It changes nothing else.
 
-Set `BEACON_NETCDF_USE_RUST_READER=true` after a pass, and each netCDF file has a record with no
-ranges. The files did not change. Only the reader changed. Beacon does not read them again. Use
-`FORCE` for this condition:
+Set `BEACON_NETCDF_USE_RUST_READER=true` (or `BEACON_HDF5_USE_RUST_READER=true`) after a pass, and
+each such file has a record with no ranges. The files did not change. Only the reader changed.
+Beacon does not read them again. Use `FORCE` for this condition:
 
 ```sql
 ANALYZE FILES FORCE;

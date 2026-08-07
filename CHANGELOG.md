@@ -86,6 +86,13 @@ over MCP.
 
 ### Added
 
+- **An optional pure-Rust HDF5 reader.** `BEACON_HDF5_USE_RUST_READER=true`, or
+  `OPTIONS ('use_rust_reader' 'true')` on one table, reads `.h5`/`.hdf5` without the netCDF-C
+  library: no process-global lock, so scans run in parallel, and byte ranges through the object
+  store, so a file in S3, GCS or Azure needs no local copy. It also reads two layouts the netCDF
+  data model cannot express — a nested group, whose datasets take their path as their column name,
+  and a compound dataset, whose members each become a column. Off by default; a server that leaves
+  it off behaves exactly as before, and every write still uses the netCDF-C library.
 - **BeaconDB — the engine as an embeddable Python package.** `pip install beacondb`, `import
   beacondb`, and the whole engine runs in-process; no server, no HTTP. Results cross into Python
   over the Arrow PyCapsule protocol, so pyarrow/pandas/polars are only needed by the methods that

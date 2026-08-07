@@ -10,6 +10,7 @@ use beacon_arrow_atlas::datafusion::AtlasFormatFactory;
 use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
+use beacon_arrow_hdf5::Hdf5Config;
 use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
@@ -93,6 +94,7 @@ pub struct RuntimeBuilder {
     pub file_stats: beacon_common::FileStatsConfig,
 
     pub netcdf: NetcdfConfig,
+    pub hdf5: Hdf5Config,
 
     pub auth_provider: Option<Arc<dyn beacon_auth::AuthProvider>>,
     pub secrets_encryption_key: Option<[u8; 32]>,
@@ -218,6 +220,16 @@ impl RuntimeBuilder {
     /// Replaces the whole NetCDF reader configuration.
     pub fn with_netcdf_config(mut self, netcdf: NetcdfConfig) -> Self {
         self.netcdf = netcdf;
+        self
+    }
+
+    /// Replaces the whole HDF5 reader configuration.
+    ///
+    /// HDF5 has its own reader flag, separate from netCDF's. A NetCDF-4 file is
+    /// HDF5, so one runtime can read `.nc` through netcdf-c and `.h5` through
+    /// the Rust reader, or the other way round.
+    pub fn with_hdf5_config(mut self, hdf5: Hdf5Config) -> Self {
+        self.hdf5 = hdf5;
         self
     }
 
@@ -746,17 +758,19 @@ fn register_file_formats(
             NetcdfOptions::default(),
             builder.netcdf.clone(),
         )),
-        // HDF5 (its own crate, delegating to the netCDF reader — a NetCDF-4 file is HDF5). In the
-        // `formats` vec so beacon's format registry keys it by `.h5`/`.hdf5` and dataset
+        // HDF5 (its own crate — a NetCDF-4 file is HDF5). It reads through the netCDF reader
+        // unless `builder.hdf5.use_rust_reader` is on, and it writes through it either way. In
+        // the `formats` vec so beacon's format registry keys it by `.h5`/`.hdf5` and dataset
         // discovery picks those files up. Registered under `hdf5` in DataFusion's native registry
         // by the loop below.
-        Arc::new(beacon_arrow_hdf5::Hdf5FormatFactory::wrapping(
+        Arc::new(beacon_arrow_hdf5::Hdf5FormatFactory::new(
             NetCDFFormatFactory::new(
                 listing_factory.clone(),
                 netcdf_output_dir.clone(),
                 NetcdfOptions::default(),
                 builder.netcdf.clone(),
             ),
+            builder.hdf5.clone(),
         )),
     ];
     for format in &formats {
@@ -765,12 +779,15 @@ fn register_file_formats(
 
     // DataFusion's native registry keys a factory by its single `get_ext`, and the HDF5 factory
     // above registered `hdf5`. Register it once more under `h5` so `STORED AS H5` resolves too.
-    let hdf5_h5 = beacon_arrow_hdf5::Hdf5FormatFactory::wrapping(NetCDFFormatFactory::new(
-        listing_factory.clone(),
-        netcdf_output_dir.clone(),
-        NetcdfOptions::default(),
-        builder.netcdf.clone(),
-    ))
+    let hdf5_h5 = beacon_arrow_hdf5::Hdf5FormatFactory::new(
+        NetCDFFormatFactory::new(
+            listing_factory.clone(),
+            netcdf_output_dir.clone(),
+            NetcdfOptions::default(),
+            builder.netcdf.clone(),
+        ),
+        builder.hdf5.clone(),
+    )
     .with_ext("h5");
     state.register_file_format(Arc::new(hdf5_h5), true)?;
 

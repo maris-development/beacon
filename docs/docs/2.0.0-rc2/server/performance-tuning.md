@@ -145,6 +145,43 @@ LOCATION 's3://bucket/data/'
 OPTIONS ('use_rust_reader' 'true');
 ```
 
+## HDF5 pure-Rust reader
+
+### `BEACON_HDF5_USE_RUST_READER`
+
+A NetCDF-4 file is an HDF5 file, and the netCDF-C library opens a plain HDF5 file too. Beacon reads
+`.h5` and `.hdf5` through that library by default, and it carries the same three costs as netCDF: one
+lock for each call, a local path only, and no statistics.
+
+Set `BEACON_HDF5_USE_RUST_READER=true` to read HDF5 with the pure-Rust reader. The flag is separate
+from `BEACON_NETCDF_USE_RUST_READER`, so you move one format at a time.
+
+The reader adds two things the netCDF reader cannot give you, because the netCDF data model does not
+hold them:
+
+- **A nested group.** Beacon walks every group. A dataset outside the root group takes its path as
+  its column name, such as `observations/qc/flag`.
+- **A compound dataset.** Each member becomes its own column, named `dataset/member`. Beacon skips a
+  member that holds a pointer into a heap, such as a variable-length string, and it logs a message
+  that names the dataset and every member type. The netCDF-C library reports neither the dataset nor
+  an error.
+
+A NetCDF-4 file gives the same schema and the same values on either reader. Writes always use the
+netCDF-C library.
+
+Set the reader for one table:
+
+```sql
+CREATE EXTERNAL TABLE my_table STORED AS HDF5
+LOCATION 's3://bucket/data/'
+OPTIONS ('use_rust_reader' 'true');
+```
+
+Measure before you switch a local archive. On a warm local file the netCDF-C library is competitive,
+because it reads the file directly and Beacon reads byte ranges through the object store. The
+pure-Rust reader wins where the lock and the local copy cost the most: many files in one query, and
+files in S3, GCS or Azure.
+
 ## Zarr predicate pushdown
 
 The Zarr reader of Beacon applies predicate pushdown **automatically**. It uses the shared
