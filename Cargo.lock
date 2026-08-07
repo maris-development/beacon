@@ -1878,6 +1878,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "datafusion",
+ "object_store 0.13.2",
  "serde",
  "serde_json",
  "tempfile",

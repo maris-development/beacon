@@ -16,6 +16,7 @@ zarrs_storage = { workspace = true }
 
 arrow = { workspace = true }
 datafusion = { workspace = true }
+object_store = { workspace = true }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }

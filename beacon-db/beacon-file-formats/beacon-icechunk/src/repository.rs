@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use beacon_arrow_zarr::util::ZarrStorage;
-use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_datafusion_ext::listing_factory::{ListingFactory, RootStore};
 use datafusion::catalog::Session;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::object_store::ObjectStoreUrl;
@@ -130,6 +130,12 @@ pub enum RepositoryBackend {
         container: String,
         prefix: Option<String>,
     },
+    /// Read-only access over plain HTTP(S). Used when the datasets store is
+    /// remote and Beacon addresses it by its https base — the same view
+    /// netCDF-c reads through. Requests are unsigned, so this reaches a bucket
+    /// that serves reads without credentials; name the repository with an
+    /// explicit `s3://…` location to read a private one.
+    Http { base_url: String },
 }
 
 /// Split a path into its leading segment and the rest, e.g. an Azure
@@ -194,6 +200,31 @@ impl RepositoryBackend {
         }
     }
 
+    /// Map the physical root a configured datasets store resolves to, joined
+    /// with the repository's object path within that store.
+    ///
+    /// A configured store addresses its contents through Beacon's own URL
+    /// scheme rather than a backend's, so the root — not the scheme — is what
+    /// says where the bytes are.
+    pub fn from_root_store(root: &RootStore, prefix: &object_store::path::Path) -> Self {
+        match root {
+            RootStore::FileSystem(dir) => {
+                RepositoryBackend::LocalFileSystem(dir.join(prefix.as_ref()))
+            }
+            RootStore::HttpsStore(base) => {
+                let base = base.trim_end_matches('/');
+                let prefix = prefix.as_ref();
+                RepositoryBackend::Http {
+                    base_url: if prefix.is_empty() {
+                        base.to_string()
+                    } else {
+                        format!("{base}/{prefix}")
+                    },
+                }
+            }
+        }
+    }
+
     /// Build the icechunk storage this backend describes.
     ///
     /// Remote credentials are taken from the environment (`AWS_*`, `GOOGLE_*`,
@@ -243,6 +274,12 @@ impl RepositoryBackend {
             .with_context(|| {
                 format!("failed to open Icechunk storage at az://{account}/{container}")
             })?,
+            RepositoryBackend::Http { base_url } => storage::new_http_storage(
+                base_url,
+                None,
+                None,
+            )
+            .with_context(|| format!("failed to open Icechunk storage at {base_url}"))?,
         };
         Ok(storage)
     }
@@ -271,8 +308,20 @@ pub fn resolve_location(session: &dyn Session, location: &str) -> anyhow::Result
         .parse_listing_table_url(session, location)
         .with_context(|| format!("failed to resolve Icechunk location {location:?}"))?;
 
+    // A location that names its own backend (`s3://…`, `file://…`) maps straight
+    // onto it, with credentials from the environment. A location resolved
+    // against a *configured* datasets store carries Beacon's own scheme
+    // (`datasets://`) instead, so the physical root that store maps to is what
+    // decides the backend — the same root netCDF-c reads through.
+    let backend = match url.scheme() {
+        "file" | "s3" | "s3a" | "gs" | "gcs" | "az" | "abfs" | "abfss" | "azure" => {
+            RepositoryBackend::from_listing_url(&url)?
+        }
+        _ => RepositoryBackend::from_root_store(&listing_factory.native_read_root(&url)?, url.prefix()),
+    };
+
     Ok(ResolvedLocation {
-        backend: RepositoryBackend::from_listing_url(&url)?,
+        backend,
         object_store_url: url.object_store(),
     })
 }
@@ -448,6 +497,42 @@ mod tests {
         assert!(err.to_string().contains("s3"), "{err}");
         // Azure without a container is not a repository location.
         assert!(RepositoryBackend::from_listing_url(&url("az://account/")).is_err());
+    }
+
+    #[test]
+    fn a_configured_store_root_decides_the_backend() {
+        use object_store::path::Path as ObjectPath;
+
+        // Local datasets store: the repository is the prefix under its root.
+        assert_eq!(
+            RepositoryBackend::from_root_store(
+                &RootStore::FileSystem(PathBuf::from("/srv/datasets")),
+                &ObjectPath::from("argo/repo")
+            ),
+            RepositoryBackend::LocalFileSystem(PathBuf::from("/srv/datasets/argo/repo"))
+        );
+
+        // Remote datasets store: the prefix is appended to its https base.
+        assert_eq!(
+            RepositoryBackend::from_root_store(
+                &RootStore::HttpsStore("https://s3.example.com/bucket/".to_string()),
+                &ObjectPath::from("argo/repo")
+            ),
+            RepositoryBackend::Http {
+                base_url: "https://s3.example.com/bucket/argo/repo".to_string()
+            }
+        );
+
+        // The store root itself is a valid repository location.
+        assert_eq!(
+            RepositoryBackend::from_root_store(
+                &RootStore::HttpsStore("https://s3.example.com/bucket".to_string()),
+                &ObjectPath::from("")
+            ),
+            RepositoryBackend::Http {
+                base_url: "https://s3.example.com/bucket".to_string()
+            }
+        );
     }
 
     #[test]

@@ -20,9 +20,20 @@
 //!   OPTIONS ('branch' 'dev');
 //! ```
 //!
-//! A repository reads from wherever it lives — the local datasets store, S3, GCS
-//! or Azure — with no local copy. Remote credentials come from the environment,
-//! the same source the rest of Beacon's object stores use.
+//! # Where a repository may live
+//!
+//! A repository reads in place, with no local copy. Which backend is used
+//! follows the location, exactly as for every other reader:
+//!
+//! - A location that names its own backend — `s3://bucket/repo`,
+//!   `gs://…`, `az://account/container/…`, `file:///…` — is opened through that
+//!   backend, with credentials from the environment (`AWS_*`, `GOOGLE_*`,
+//!   `AZURE_*`), the same source Beacon's object stores use.
+//! - A location relative to a *configured* datasets store resolves against that
+//!   store's physical root: a local root reads from disk, a remote (https) root
+//!   reads over unsigned HTTP — the same view netCDF-c gets. To read a private
+//!   remote repository, name it with an explicit `s3://…` location so the
+//!   credentialed backend is used.
 //!
 //! # Read only
 //!
