@@ -177,8 +177,9 @@ Beacon records the value range of each column in each file. A query then prunes 
 cannot match. See [File statistics](/docs/2.0.0-rc2/internals/file-statistics).
 
 Beacon does not enable this feature by default. For netCDF, also set
-`BEACON_NETCDF_USE_RUST_READER=true` (see [File formats](#file-formats)). Without that variable,
-Beacon reads each netCDF file and records no ranges.
+`BEACON_NETCDF_USE_RUST_READER=true`; for HDF5, `BEACON_HDF5_USE_RUST_READER=true` (see
+[File formats](#file-formats)). Without that second variable, Beacon reads each such file and
+records no ranges.
 
 | Variable | Default | Description |
 | --- | --- | --- |
