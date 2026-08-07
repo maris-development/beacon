@@ -281,29 +281,32 @@ read_icechunk(location, branch, snapshot)
 read_icechunk(location, branch, snapshot, dimensions)
 ```
 
-Beacon reads an [Icechunk](/docs/2.0.0-rc2/formats/icechunk) repository as a Zarr store. The
-`location` argument is **one path to the repository directory**. It is not a glob and not a list.
+Beacon reads an [Icechunk](/docs/2.0.0-rc2/formats/icechunk) repository as a Zarr store. A
+repository is a Zarr store with commits, branches, tags and snapshots.
 
-The optional arguments select the version and the arrays:
+Give one `location`. The `location` is the path to the directory of the repository. The `location`
+is not a glob. The `location` is not a list.
 
-- `branch` reads the tip of that branch. The default is `main`.
-- `snapshot` reads that snapshot id. It is fixed, so the answer does not change after a later
-  commit. Pass `NULL` for `branch` to give a snapshot positionally.
-- `dimensions` selects the arrays. Beacon returns an array only if the list holds all of its
-  dimensions.
+The other arguments select the version and the arrays:
 
-A branch and a snapshot select different versions, so pass one of them.
+- `branch` reads the tip of that branch. The default branch is `main`.
+- `snapshot` reads that snapshot. The snapshot does not move after a later commit.
+- Give `NULL` for `branch` to set `snapshot` by position.
+- `dimensions` selects the arrays. Beacon reads an array only if the list holds all dimensions of
+  the array.
+
+A branch selects a different version than a snapshot. Give one of the two.
 
 ```sql
--- The tip of `main`
+-- Read the tip of `main`
 SELECT * FROM read_icechunk('sst/repo') LIMIT 100
 
--- The tip of another branch
+-- Read the tip of a different branch
 SELECT count(*) FROM read_icechunk('sst/repo', 'dev')
 
--- A fixed snapshot
+-- Read one snapshot
 SELECT avg(sst) FROM read_icechunk('sst/repo', NULL, 'NNNGCAX7Z99K7XTTYK8G')
 ```
 
-Use [`CREATE EXTERNAL TABLE … STORED AS ICECHUNK`](/docs/2.0.0-rc2/formats/icechunk)
-to register a repository permanently. Beacon reads Icechunk; it does not write it.
+[`CREATE EXTERNAL TABLE … STORED AS ICECHUNK`](/docs/2.0.0-rc2/formats/icechunk) adds a repository
+to the catalog. Beacon reads Icechunk. Beacon does not write Icechunk.

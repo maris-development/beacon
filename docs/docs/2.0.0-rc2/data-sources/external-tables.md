@@ -175,9 +175,11 @@ full reference.
 
 ### Icechunk
 
-`STORED AS ICECHUNK` registers an existing
-[Icechunk](/docs/2.0.0-rc2/formats/icechunk) repository — a Zarr store with commits, branches and
-snapshots. The `LOCATION` points at the **repository directory**. Do not give a glob of files:
+`STORED AS ICECHUNK` adds an [Icechunk](/docs/2.0.0-rc2/formats/icechunk) repository to the
+catalog. A repository is a Zarr store with commits, branches, tags and snapshots. The repository
+must exist.
+
+Set `LOCATION` to the directory of the repository. Do not give a glob of files:
 
 ```sql
 CREATE EXTERNAL TABLE sst
@@ -186,9 +188,10 @@ LOCATION 'sst/repo'
 OPTIONS ('branch' 'main')
 ```
 
-`OPTIONS` selects the version with `branch`, `tag` or `snapshot`. Set at most one of them. A tag or
-a snapshot is fixed, so the table returns the same rows after a later commit. The table is read
-only. See [Icechunk](/docs/2.0.0-rc2/formats/icechunk) for the full reference.
+`OPTIONS` selects the version. Use `branch`, `tag` or `snapshot`. Set one of the three. A tag and a
+snapshot do not move. The table reads the same rows after a later commit.
+
+The table is read only. See [Icechunk](/docs/2.0.0-rc2/formats/icechunk) for the full reference.
 
 ## Partitioned data
 
