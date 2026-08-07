@@ -9,7 +9,7 @@ use std::path::Path;
 use arrow::array::{Array, Float64Array};
 use arrow::record_batch::RecordBatch;
 use beacon_icechunk::fixture;
-use common::{TestRuntime, scalar_i64};
+use common::{scalar_i64, TestRuntime};
 
 /// Write the two-commit fixture repository under the datasets dir and return
 /// its datasets-relative location.
@@ -39,17 +39,13 @@ async fn icechunk_table_function_and_external_table() {
 
     // read_icechunk(): the tip of `main` is the second commit.
     let count = scalar_i64(
-        &rt.sql(&format!(
-            "SELECT count(*) FROM read_icechunk('{location}')"
-        ))
-        .await,
+        &rt.sql(&format!("SELECT count(*) FROM read_icechunk('{location}')"))
+            .await,
     );
     assert_eq!(count, fixture::ROWS as i64);
     let sst = scalar_f64(
-        &rt.sql(&format!(
-            "SELECT max(sst) FROM read_icechunk('{location}')"
-        ))
-        .await,
+        &rt.sql(&format!("SELECT max(sst) FROM read_icechunk('{location}')"))
+            .await,
     );
     assert_eq!(sst, fixture::SECOND_SST);
 
@@ -95,7 +91,11 @@ async fn icechunk_table_function_and_external_table() {
     ))
     .await;
     let count = scalar_i64(&rt.sql(&format!("SELECT count(*) FROM {table}")).await);
-    assert_eq!(count, fixture::ROWS as i64, "external table should expose the grid");
+    assert_eq!(
+        count,
+        fixture::ROWS as i64,
+        "external table should expose the grid"
+    );
 
     // A predicate on a coordinate prunes, as it does for a plain zarr store.
     let pruned = scalar_i64(

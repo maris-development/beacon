@@ -207,7 +207,11 @@ async fn a_coordinate_predicate_pushes_down() {
         .collect()
         .await
         .unwrap();
-    assert_eq!(rows(&none), 0, "an impossible predicate must prune all rows");
+    assert_eq!(
+        rows(&none),
+        0,
+        "an impossible predicate must prune all rows"
+    );
 
     // A selective one keeps a strict subset, and every row satisfies it.
     let some = ctx

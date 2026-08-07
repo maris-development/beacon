@@ -135,7 +135,9 @@ pub enum RepositoryBackend {
     /// netCDF-c reads through. Requests are unsigned, so this reaches a bucket
     /// that serves reads without credentials; name the repository with an
     /// explicit `s3://…` location to read a private one.
-    Http { base_url: String },
+    Http {
+        base_url: String,
+    },
 }
 
 impl std::fmt::Display for RepositoryBackend {
@@ -257,11 +259,9 @@ impl RepositoryBackend {
         use zarrs_icechunk::icechunk::storage;
 
         let storage = match self {
-            RepositoryBackend::LocalFileSystem(path) => {
-                storage::new_local_filesystem_storage(path)
-                    .await
-                    .with_context(|| format!("failed to open Icechunk storage at {self}"))?
-            }
+            RepositoryBackend::LocalFileSystem(path) => storage::new_local_filesystem_storage(path)
+                .await
+                .with_context(|| format!("failed to open Icechunk storage at {self}"))?,
             RepositoryBackend::S3 { bucket, prefix } => storage::new_s3_object_store_storage(
                 storage::S3Options::default(),
                 bucket.clone(),
@@ -296,12 +296,8 @@ impl RepositoryBackend {
             .with_context(|| {
                 format!("failed to open Icechunk storage at az://{account}/{container}")
             })?,
-            RepositoryBackend::Http { base_url } => storage::new_http_storage(
-                base_url,
-                None,
-                None,
-            )
-            .with_context(|| format!("failed to open Icechunk storage at {base_url}"))?,
+            RepositoryBackend::Http { base_url } => storage::new_http_storage(base_url, None, None)
+                .with_context(|| format!("failed to open Icechunk storage at {base_url}"))?,
         };
         Ok(storage)
     }
@@ -339,7 +335,10 @@ pub fn resolve_location(session: &dyn Session, location: &str) -> anyhow::Result
         "file" | "s3" | "s3a" | "gs" | "gcs" | "az" | "abfs" | "abfss" | "azure" => {
             RepositoryBackend::from_listing_url(&url)?
         }
-        _ => RepositoryBackend::from_root_store(&listing_factory.native_read_root(&url)?, url.prefix()),
+        _ => RepositoryBackend::from_root_store(
+            &listing_factory.native_read_root(&url)?,
+            url.prefix(),
+        ),
     };
 
     Ok(ResolvedLocation {
@@ -562,7 +561,8 @@ mod tests {
 
     #[test]
     fn unsupported_schemes_say_what_is_supported() {
-        let err = RepositoryBackend::from_listing_url(&url("https://example.com/argo")).unwrap_err();
+        let err =
+            RepositoryBackend::from_listing_url(&url("https://example.com/argo")).unwrap_err();
         assert!(err.to_string().contains("s3"), "{err}");
         // Azure without a container is not a repository location.
         assert!(RepositoryBackend::from_listing_url(&url("az://account/")).is_err());

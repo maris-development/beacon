@@ -49,7 +49,8 @@ fn attributes(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, se
 /// CF time decoding and attribute columns, exactly as a plain zarr store does.
 /// The second commit rewrites `sst`, leaving the first snapshot's values intact.
 pub async fn write_gridded_repository(path: &Path) -> anyhow::Result<FixtureSnapshots> {
-    std::fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
     let storage = storage::new_local_filesystem_storage(path)
         .await
         .context("failed to open local Icechunk storage")?;
@@ -127,8 +128,12 @@ async fn write_commit(
     array.async_store_metadata().await?;
     array.async_store_chunk(&[0], lon.as_slice()).await?;
 
-    let mut builder =
-        ArrayBuilder::new(vec![TIME as u64], vec![TIME as u64], data_type::int32(), 0i32);
+    let mut builder = ArrayBuilder::new(
+        vec![TIME as u64],
+        vec![TIME as u64],
+        data_type::int32(),
+        0i32,
+    );
     let array = builder
         .dimension_names(Some(["time"]))
         .attributes(attributes(&[(
@@ -182,7 +187,8 @@ pub async fn write_virtual_chunk_repository(
     std::fs::write(referenced_file, &bytes)
         .with_context(|| format!("failed to write {}", referenced_file.display()))?;
 
-    std::fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
     let storage = storage::new_local_filesystem_storage(path)
         .await
         .context("failed to open local Icechunk storage")?;

@@ -156,8 +156,9 @@ impl TableFunctionImpl for ReadIcechunkFunc {
         };
 
         let table = tokio::task::block_in_place(|| {
-            self.runtime_handle
-                .block_on(async move { IcechunkTable::try_new(&session_ctx.state(), definition).await })
+            self.runtime_handle.block_on(async move {
+                IcechunkTable::try_new(&session_ctx.state(), definition).await
+            })
         })
         .map_err(|e| datafusion::error::DataFusionError::External(e.into()))?;
 
