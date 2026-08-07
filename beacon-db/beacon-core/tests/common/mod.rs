@@ -13,6 +13,9 @@
 
 #![allow(dead_code)] // each test binary uses a different subset of these helpers.
 
+/// Builds Iceberg tables for the tests that read them.
+pub mod iceberg_fixture;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

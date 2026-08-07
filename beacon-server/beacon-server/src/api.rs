@@ -476,10 +476,10 @@ pub struct CreateExternalTableRequest {
     #[schema(example = "observations")]
     pub name: String,
     /// Datasets-store-relative location or glob (e.g. `obs/` or `data/**/*.parquet`),
-    /// or a scheme-qualified location for `REMOTE`/`DELTA` types.
+    /// or a scheme-qualified location for `REMOTE`/`DELTA`/`ICEBERG` types.
     #[schema(example = "obs/")]
     pub location: String,
-    /// Storage type, e.g. `PARQUET`, `CSV`, `DELTA`, `REMOTE`.
+    /// Storage type, e.g. `PARQUET`, `CSV`, `DELTA`, `ICEBERG`, `REMOTE`.
     #[schema(example = "PARQUET")]
     pub file_type: String,
     /// Hive-style partition columns, in path order.

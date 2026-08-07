@@ -20,8 +20,7 @@ dataset storage root, like every other source.
 - An [**external table**](/docs/2.0.0-rc2/data-sources/external-tables) (`STORED AS
   PARQUET`, `NETCDF`, …) reads a folder or a glob of files in place. It is read-only.
 - A [**managed table**](/docs/2.0.0-rc2/sql/managed-tables) belongs to Beacon. Lance holds
-  the data by default. Iceberg is the other option. You can change the rows with `INSERT`, `UPDATE`
-  and `DELETE`.
+  the data. You can change the rows with `INSERT`, `UPDATE` and `DELETE`.
 - A **Delta table** points at an existing Delta Lake table directory. Beacon reads it in place. It
   supports consistent snapshots and time travel. It accepts `INSERT INTO`, which commits a new Delta
   version.

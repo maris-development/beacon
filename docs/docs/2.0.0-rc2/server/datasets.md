@@ -25,11 +25,12 @@ The default local path in the Docker container is `/beacon/data/datasets/`.
 | [GeoTIFF / COG](/docs/2.0.0-rc2/formats/geotiff) | `.tif`, `.tiff` | `TIFF` | `read_tiff` | no |
 | [BBF](/docs/2.0.0-rc2/formats/bbf) | `.bbf` | `BBF` | `read_bbf` | no |
 | [Delta Lake](/docs/2.0.0-rc2/formats/delta-lake) | `_delta_log/` directory | `DELTA` | `read_delta` | no |
+| [Apache Iceberg](/docs/2.0.0-rc2/formats/iceberg) | `metadata/` directory | `ICEBERG` | `read_iceberg` | no |
 | [ODV ASCII](/docs/2.0.0-rc2/formats/odv) | `.txt` | not supported | `read_odv_ascii` | yes |
 
-Beacon finds every format above in the datasets store. **Delta Lake** and **ODV ASCII** are the
-exception. Point a [`read_*` function](/docs/2.0.0-rc2/formats/) at them. For
-Delta, `CREATE EXTERNAL TABLE … STORED AS DELTA LOCATION …` also works. The "Output format" column
+Beacon finds every format above in the datasets store. **Delta Lake**, **Apache Iceberg** and **ODV
+ASCII** are the exception. Point a [`read_*` function](/docs/2.0.0-rc2/formats/) at them. For
+Delta and Iceberg, `CREATE EXTERNAL TABLE … STORED AS DELTA|ICEBERG LOCATION …` also works. The "Output format" column
 marks the formats that
 [`output.format`](/docs/2.0.0-rc2/api/querying/#output-formats) can export a query result to.
 

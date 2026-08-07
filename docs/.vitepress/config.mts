@@ -218,6 +218,7 @@ export default defineConfig({
                 { text: 'GeoTIFF / COG', link: '/docs/2.0.0-rc2/formats/geotiff' },
                 { text: 'BBF', link: '/docs/2.0.0-rc2/formats/bbf' },
                 { text: 'Delta Lake', link: '/docs/2.0.0-rc2/formats/delta-lake' },
+                { text: 'Apache Iceberg', link: '/docs/2.0.0-rc2/formats/iceberg' },
                 { text: 'ODV ASCII', link: '/docs/2.0.0-rc2/formats/odv' },
               ]
             },

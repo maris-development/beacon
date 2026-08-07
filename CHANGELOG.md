@@ -10,7 +10,27 @@ tag. Releases before 2.0.0 are recorded in the
 
 ## [Unreleased]
 
+### Added
+
+- **Beacon reads Apache Iceberg tables.** `CREATE EXTERNAL TABLE … STORED AS ICEBERG LOCATION
+  'iceberg/obs'` registers an existing table, and `read_iceberg('iceberg/obs')` queries one
+  ad-hoc; both take an optional `snapshot_id` for time travel. A table is named by its directory,
+  with no catalog: Beacon finds the current metadata file from `metadata/version-hint.text`, or
+  from the highest-numbered `*.metadata.json`. Every byte is read through the datasets store, so a
+  table on S3 reads with no local copy and needs no separate credentials, and the absolute paths
+  the metadata records are rebased onto the location you gave — a table written elsewhere and
+  mounted here just reads. A registered table re-reads its metadata per query, so a snapshot or a
+  column another writer commits shows on the next query without a restart. A `WHERE` clause is
+  pushed into the Iceberg scan, which drops data files from the manifests' statistics. Reads only:
+  no `INSERT`, `MERGE` or snapshot expiry, and no REST or Glue catalog yet. See
+  [Apache Iceberg](docs/docs/2.0.0-rc2/formats/iceberg.md).
+
 ### Changed
+
+- **Minimum supported Rust is 1.94**, up from 1.91. `iceberg` and `iceberg-datafusion` 0.10 — the
+  only release line built against the DataFusion 53 and Arrow 58 this workspace unifies on —
+  declare `rust-version = "1.94"`, so the workspace floor follows. Beacon's own code uses no
+  feature newer than 1.91. CI builds the floor leg at 1.94.
 
 - **One product, one name.** "Beacon Data Lake" and "BeaconDB" are gone as marketed products.
   There is one thing, and it is called **Beacon**. Where the running process needs a name, the

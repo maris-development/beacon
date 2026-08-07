@@ -43,12 +43,16 @@ CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
 | `TIFF` | GeoTIFF / Cloud-Optimized GeoTIFF |
 | `BBF` | Beacon Binary Format |
 | `DELTA` | Delta Lake table directory (`_delta_log/`) |
+| `ICEBERG` | Apache Iceberg table directory (`metadata/`) |
 | `POSTGRES` | External PostgreSQL table (federated) |
 | `MYSQL` | External MySQL table (federated) |
 
 `DELTA` points at an existing
 [Delta Lake](/docs/2.0.0-rc2/formats/delta-lake) table directory. It also
-supports time travel and `INSERT INTO`. `REMOTE` federates a table on another Beacon server. See
+supports time travel and `INSERT INTO`. `ICEBERG` points at an existing
+[Apache Iceberg](/docs/2.0.0-rc2/formats/iceberg) table directory. It supports time
+travel and follows the writer's later commits, and it is read-only.
+`REMOTE` federates a table on another Beacon server. See
 [Remote Tables](/docs/2.0.0-rc2/data-sources/remote-tables). `POSTGRES` and `MYSQL`
 federate a table in an external SQL database. See
 [SQL Databases](/docs/2.0.0-rc2/data-sources/sql-databases). Their `LOCATION` is the remote

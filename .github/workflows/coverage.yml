@@ -38,10 +38,10 @@ jobs:
             sqlite3 \
             wget
 
-      - name: Install Rust (1.91)
+      - name: Install Rust (1.94)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.91"
+          toolchain: "1.94"
           components: llvm-tools-preview
 
       - name: Cargo cache

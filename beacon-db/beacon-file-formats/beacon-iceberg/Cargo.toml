@@ -1,0 +1,28 @@
+[package]
+name = "beacon-iceberg"
+version.workspace = true
+edition = "2021"
+
+rust-version.workspace = true
+[dependencies]
+beacon-common = { path = "../../beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+
+iceberg = { workspace = true }
+iceberg-datafusion = { workspace = true }
+datafusion = { workspace = true }
+arrow = { workspace = true }
+object_store = { workspace = true }
+
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+typetag = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }

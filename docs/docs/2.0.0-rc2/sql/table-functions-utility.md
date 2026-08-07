@@ -17,6 +17,7 @@ read_atlas_schema(glob_paths, dimensions)
 read_tiff_schema(glob_paths)
 read_bbf_schema(glob_paths)
 read_delta_schema(location)
+read_iceberg_schema(location)
 read_odv_ascii_schema(glob_paths)
 ```
 
