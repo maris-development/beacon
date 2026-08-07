@@ -262,6 +262,7 @@ async fn build_runtime(
         .with_crawler(config.crawler.clone())
         .with_file_stats(config.file_stats.clone())
         .with_netcdf_config(config.netcdf.clone())
+        .with_hdf5_config(config.hdf5.clone())
         .with_sql_settings(SqlSettings {
             default_table: config.sql.default_table.clone(),
             enable_pushdown_projection: config.sql.enable_pushdown_projection,
