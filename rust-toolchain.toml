@@ -1,11 +1,11 @@
 [toolchain]
-# What local development *uses*. The supported floor is separate: `rust-version = "1.91"` in the
+# What local development *uses*. The supported floor is separate: `rust-version = "1.94"` in the
 # workspace Cargo.toml, inherited by every member. rustup has no syntax for a range — `channel` is
-# one exact version or a channel name — so "1.91 or later" is expressed by the MSRV, not here.
+# one exact version or a channel name — so "1.94 or later" is expressed by the MSRV, not here.
 #
-# CI does not read this file: .github/workflows/ci.yml and coverage.yml pin `toolchain: "1.91"` on
+# CI does not read this file: .github/workflows/ci.yml and coverage.yml pin `toolchain: "1.94"` on
 # dtolnay/rust-toolchain explicitly. That is deliberate — building at the floor is what keeps the
-# declared MSRV honest, so a post-1.91 feature used here fails in CI rather than silently making
+# declared MSRV honest, so a post-1.94 feature used here fails in CI rather than silently making
 # `rust-version` a lie.
 #
 # Verified: the workspace checks clean on stable 1.97.1 (0 errors, all 28 crates).

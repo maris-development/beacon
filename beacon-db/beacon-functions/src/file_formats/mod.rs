@@ -79,6 +79,10 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
         )),
+        Arc::new(beacon_iceberg::ReadIcebergFunc::new(
+            runtime_handle.clone(),
+            Arc::downgrade(&session_ctx),
+        )),
         Arc::new(beacon_icechunk::ReadIcechunkFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),

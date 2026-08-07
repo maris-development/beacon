@@ -9,7 +9,7 @@ engine links. A Rust compiler alone is not enough:
 
 - **protoc**. Lance generates protobuf at build time.
 - **HDF5 and netCDF** headers and libraries. The netCDF reader and writer need them.
-- A Rust toolchain, **1.91 or later**. See `rust-version` in the workspace `Cargo.toml`. The
+- A Rust toolchain, **1.94 or later**. See `rust-version` in the workspace `Cargo.toml`. The
   `rust-toolchain.toml` file here selects stable for local development.
 
 ```bash
