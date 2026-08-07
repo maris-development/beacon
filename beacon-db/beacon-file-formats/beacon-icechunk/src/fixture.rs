@@ -112,7 +112,7 @@ async fn write_commit(
         .attributes(attributes(&[("units", serde_json::json!("degrees_north"))]))
         .build(store.clone(), "/lat")?;
     array.async_store_metadata().await?;
-    array.async_store_chunk_elements::<f32>(&[0], &lat).await?;
+    array.async_store_chunk(&[0], lat.as_slice()).await?;
 
     let mut builder = ArrayBuilder::new(
         vec![LONS as u64],
@@ -125,7 +125,7 @@ async fn write_commit(
         .attributes(attributes(&[("units", serde_json::json!("degrees_east"))]))
         .build(store.clone(), "/lon")?;
     array.async_store_metadata().await?;
-    array.async_store_chunk_elements::<f32>(&[0], &lon).await?;
+    array.async_store_chunk(&[0], lon.as_slice()).await?;
 
     let mut builder =
         ArrayBuilder::new(vec![TIME as u64], vec![TIME as u64], data_type::int32(), 0i32);
@@ -137,7 +137,7 @@ async fn write_commit(
         )]))
         .build(store.clone(), "/time")?;
     array.async_store_metadata().await?;
-    array.async_store_chunk_elements::<i32>(&[0], &time).await?;
+    array.async_store_chunk(&[0], time.as_slice()).await?;
 
     let mut builder = ArrayBuilder::new(
         vec![TIME as u64, LATS as u64, LONS as u64],
@@ -151,7 +151,7 @@ async fn write_commit(
         .build(store.clone(), "/sst")?;
     array.async_store_metadata().await?;
     array
-        .async_store_chunk_elements::<f64>(&[0, 0, 0], &vec![sst_value; ROWS])
+        .async_store_chunk(&[0, 0, 0], vec![sst_value; ROWS].as_slice())
         .await?;
 
     let snapshot = store

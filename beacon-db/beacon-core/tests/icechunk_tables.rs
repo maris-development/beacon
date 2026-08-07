@@ -6,7 +6,7 @@ mod common;
 
 use std::path::Path;
 
-use arrow::array::Float64Array;
+use arrow::array::{Array, Float64Array};
 use arrow::record_batch::RecordBatch;
 use beacon_icechunk::fixture;
 use common::{TestRuntime, scalar_i64};
@@ -62,6 +62,32 @@ async fn icechunk_table_function_and_external_table() {
         .await,
     );
     assert_eq!(pinned, fixture::FIRST_SST);
+
+    // read_icechunk_schema(): the columns, without a scan.
+    let columns = rt
+        .sql(&format!(
+            "SELECT column_name FROM read_icechunk_schema('{location}')"
+        ))
+        .await;
+    let names: Vec<String> = columns
+        .iter()
+        .flat_map(|batch| {
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .unwrap();
+            (0..column.len())
+                .map(|i| column.value(i).to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for expected in ["lat", "lon", "time", "sst"] {
+        assert!(
+            names.iter().any(|name| name == expected),
+            "read_icechunk_schema should list {expected}: {names:?}"
+        );
+    }
 
     // CREATE EXTERNAL TABLE ... STORED AS ICECHUNK, then SELECT.
     rt.sql(&format!(
