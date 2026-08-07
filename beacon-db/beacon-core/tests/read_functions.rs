@@ -148,6 +148,55 @@ async fn read_hdf5_reaches_a_nested_group_on_the_rust_reader() {
     );
 }
 
+/// The optional second argument sets the grid on the Rust reader too: a dataset
+/// comes back only when the list holds every one of its dimensions.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_hdf5_takes_a_dimensions_argument() {
+    let rt = seeded_with_rust_hdf5("read-hdf5-dimensions").await;
+
+    // `nested.h5` carries no dimension scales, so its axes are phony. The 1-d
+    // dataset lives on the first axis alone; the 2-d ones need both.
+    let narrowed = rt
+        .sql("SELECT * FROM read_hdf5(['nested.h5'], ['phony_dim_0'])")
+        .await;
+    let columns: Vec<String> = narrowed[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    assert!(columns.contains(&"station_id".to_string()), "{columns:?}");
+    assert!(
+        !columns.contains(&"observations/temperature".to_string()),
+        "a 2-d dataset does not fit a 1-d grid: {columns:?}"
+    );
+    assert_eq!(total_rows(&narrowed), 3, "one row for each station");
+}
+
+/// `read_hdf5_schema` names the columns without reading the data, and it sees
+/// the nested-group columns the Rust reader adds.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_hdf5_schema_lists_the_nested_columns() {
+    let rt = seeded_with_rust_hdf5("read-hdf5-schema").await;
+
+    let schema = rt
+        .sql("SELECT column_name FROM read_hdf5_schema('nested.h5')")
+        .await;
+    let names: Vec<String> = schema
+        .iter()
+        .flat_map(|batch| {
+            use arrow::array::Array;
+            let column = arrow::array::as_string_array(batch.column(0));
+            (0..column.len()).map(|i| column.value(i).to_string()).collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(names.contains(&"station_id".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"observations/qc/flag".to_string()),
+        "{names:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn read_of_a_missing_file_is_an_error_not_an_empty_result() {
     let rt = seeded("read-missing").await;
