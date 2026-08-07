@@ -177,8 +177,9 @@ Beacon records the value range of each column in each file. A query then prunes 
 cannot match. See [File statistics](/docs/2.0.0-rc2/internals/file-statistics).
 
 Beacon does not enable this feature by default. For netCDF, also set
-`BEACON_NETCDF_USE_RUST_READER=true` (see [File formats](#file-formats)). Without that variable,
-Beacon reads each netCDF file and records no ranges.
+`BEACON_NETCDF_USE_RUST_READER=true`; for HDF5, `BEACON_HDF5_USE_RUST_READER=true` (see
+[File formats](#file-formats)). Without that second variable, Beacon reads each such file and
+records no ranges.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -217,6 +218,23 @@ change them.
 | `BEACON_NETCDF_USE_READER_CACHE` | `true` | Cache opened NetCDF readers in memory. |
 | `BEACON_NETCDF_READER_CACHE_SIZE` | `128` | Max NetCDF reader entries to keep cached. |
 | `BEACON_NETCDF_USE_RUST_READER` | `false` | Read NetCDF with the pure-Rust reader instead of the netCDF-C library. |
+
+### HDF5
+
+A NetCDF-4 file is an HDF5 file, and the netCDF-C library opens a plain HDF5 file too. Beacon
+therefore reads `.h5` and `.hdf5` through the netCDF-C library by default. HDF5 carries its own
+reader flag, so you can move one format at a time.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_HDF5_USE_RUST_READER` | `false` | Read HDF5 with the pure-Rust reader instead of the netCDF-C library. |
+| `BEACON_HDF5_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. Needs the pure-Rust reader. |
+| `BEACON_HDF5_USE_READER_CACHE` | `true` | Cache opened HDF5 readers in memory. |
+| `BEACON_HDF5_READER_CACHE_SIZE` | `128` | Max HDF5 reader entries to keep cached. |
+
+The pure-Rust reader also reads two layouts the netCDF data model cannot express: a nested group,
+and a compound dataset. See
+[Performance Tuning](/docs/2.0.0-rc2/server/performance-tuning#hdf5-pure-rust-reader).
 
 ### Atlas
 

@@ -147,7 +147,11 @@ pub fn variable_to_nd_array(
     file: Arc<AsyncNetcdfFile>,
     variable: &AsyncVariable<'_>,
 ) -> anyhow::Result<Arc<dyn NdArrayD>> {
-    let name = variable.name.clone();
+    // The path, not the leaf name. `AsyncNetcdfFile::variable` takes either for
+    // a root variable, because it trims the leading slash, but only the path
+    // reaches a variable inside a group. This reader stays in the root group;
+    // `beacon-arrow-hdf5` walks every group with the same conversion.
+    let name = variable.path.clone();
     let shape: Vec<usize> = variable.shape.iter().map(|&len| len as usize).collect();
     let dimensions = variable.dimensions.clone();
 
