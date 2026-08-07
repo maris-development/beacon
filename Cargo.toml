@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
+members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
 
 [workspace.package]
 
@@ -145,6 +145,11 @@ wkt = {version = "0.12.0", features = ["geo-types"]}
 zarrs = {version = "0.23.12", features = ["async"]}
 zarrs_object_store = "0.6.0"
 zarrs_storage = "0.4.2"
+# `s3` (the AWS SDK backend) is left off: its aws-sdk-* chain requires rustc 1.94,
+# above this workspace's 1.91 MSRV. `object-store-s3` reaches S3 through icechunk's
+# object-store backend instead, which builds at 1.91 and matches how the rest of
+# Beacon talks to object stores.
+zarrs_icechunk = { version = "=0.5.1", default-features = false, features = ["object-store-s3", "object-store-gcs", "object-store-azure", "object-store-fs"] }
 zip = {version = "2.2.3", default-features = false, features = ["deflate"]}
 zstd = "0.13.2"
 

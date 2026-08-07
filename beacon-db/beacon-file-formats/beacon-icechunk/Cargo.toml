@@ -1,0 +1,29 @@
+[package]
+name = "beacon-icechunk"
+version.workspace = true
+edition = "2024"
+
+rust-version.workspace = true
+
+[dependencies]
+beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }
+beacon-common = { path = "../../beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+
+zarrs = { workspace = true }
+zarrs_icechunk = { workspace = true }
+zarrs_storage = { workspace = true }
+
+arrow = { workspace = true }
+datafusion = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+typetag = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
