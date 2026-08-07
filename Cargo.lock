@@ -1431,15 +1431,25 @@ dependencies = [
 name = "beacon-arrow-hdf5"
 version = "2.0.0-rc.2"
 dependencies = [
+ "anyhow",
  "arrow 58.3.0",
+ "async-trait",
  "beacon-arrow-netcdf",
  "beacon-common",
  "beacon-datafusion-ext",
+ "beacon-nd-array",
  "chrono",
  "datafusion",
+ "futures",
+ "indexmap 2.14.0",
+ "moka",
+ "ndarray 0.17.2",
  "object_store 0.13.2",
+ "oxcdf",
+ "oxcdf-hdf5",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2048,6 +2058,7 @@ dependencies = [
  "base64",
  "beacon-arrow-atlas",
  "beacon-arrow-bbf",
+ "beacon-arrow-hdf5",
  "beacon-arrow-netcdf",
  "beacon-common",
  "envconfig",

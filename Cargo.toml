@@ -82,6 +82,10 @@ object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] 
 # holds no global lock and reads through `object_store` by byte range. The
 # netcdf-c bindings do neither. See `beacon-arrow-netcdf`, which offers both.
 oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.1.0", features = ["async", "object-store", "ndarray"] }
+# The HDF5 container alone, with no netCDF layer on top. `beacon-arrow-hdf5` uses
+# it for the layouts the netCDF data model cannot express, such as a compound
+# dataset. Same repository as `oxcdf`, so cargo resolves one revision for both.
+oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", version = "0.1.0", features = ["async", "object-store"] }
 tonic = "0.14.1"
 
 
