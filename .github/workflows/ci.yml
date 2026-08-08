@@ -18,9 +18,9 @@ jobs:
       matrix:
         include:
           # The declared MSRV (`rust-version` in the workspace Cargo.toml). Building at the floor is
-          # what keeps that claim honest — a post-1.91 feature fails here rather than silently
+          # what keeps that claim honest — a post-1.94 feature fails here rather than silently
           # breaking source builds for anyone on distro Rust.
-          - toolchain: "1.91"
+          - toolchain: "1.94"
             lint: true
           # What the released wheels are actually compiled with: maturin-action defaults to stable
           # inside the manylinux container, and the host builds follow rust-toolchain.toml. Without

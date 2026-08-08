@@ -173,6 +173,23 @@ A Delta table supports consistent snapshots. It supports **time travel** through
 new Delta version. See [Delta Lake](/docs/2.0.0-rc2/formats/delta-lake) for the
 full reference.
 
+### Apache Iceberg
+
+`STORED AS ICEBERG` registers an [Apache Iceberg](/docs/2.0.0-rc2/formats/iceberg)
+table that already exists. `LOCATION` gives the Iceberg **table directory**. That directory holds
+`metadata/`. Give no glob of files:
+
+```sql
+CREATE EXTERNAL TABLE ocean_profiles
+STORED AS ICEBERG
+LOCATION 'iceberg/ocean_profiles'
+```
+
+Beacon **reads** an Iceberg table. Another system writes the table. Beacon reads each new snapshot
+and each new column. You restart nothing. `OPTIONS ('snapshot_id' '…')` pins the table to one
+snapshot. Beacon writes no Iceberg table, so the table accepts no `INSERT INTO`. See
+[Apache Iceberg](/docs/2.0.0-rc2/formats/iceberg) for the full reference.
+
 ### Icechunk
 
 `STORED AS ICECHUNK` adds an [Icechunk](/docs/2.0.0-rc2/formats/icechunk) repository to the

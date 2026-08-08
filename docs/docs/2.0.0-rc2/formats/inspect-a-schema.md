@@ -41,7 +41,8 @@ SELECT * FROM read_parquet_schema(['obs/2023/*.parquet', 'obs/2024/*.parquet']);
 The function name carries the format, so there is no format argument. One exists for every reader:
 `read_parquet_schema`, `read_geoparquet_schema`, `read_csv_schema`, `read_arrow_schema`,
 `read_netcdf_schema`, `read_hdf5_schema`, `read_zarr_schema`, `read_atlas_schema`,
-`read_tiff_schema`, `read_bbf_schema`, `read_delta_schema` and `read_odv_ascii_schema`.
+`read_tiff_schema`, `read_bbf_schema`, `read_delta_schema`, `read_iceberg_schema` and
+`read_odv_ascii_schema`.
 
 Because the result is an ordinary table, you can query it:
 

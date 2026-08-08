@@ -80,16 +80,18 @@ pytest -v
 | `test_concurrency.py` | many simultaneous queries return consistent results |
 | `test_errors.py` | unknown table/column, type mismatch, empty glob, bad output format, empty body → 4xx |
 | `test_persistence.py` | managed Lance table, external table, and crawler definition survive a container restart |
-| `test_iceberg_tables.py` | managed **Iceberg** engine (dedicated `BEACON_DEFAULT_TABLE_ENGINE=iceberg` container): create/insert/update/delete/alter/CTAS, engine identity |
 | `test_sql_disabled.py` | dedicated `BEACON_ENABLE_SQL=false` container: SQL rejected (400) but the JSON DSL still works |
 | `test_crawlers_advanced.py` | `format_filter` exclusion, `leaf_prefix` vs `crawler_prefixed` naming, re-run idempotency, SQL `CREATE`/`RUN`/`SHOW`/`DROP CRAWLER` |
 | `test_delta.py` | external Delta Lake (`read_delta`, `STORED AS DELTA`, INSERT) over a hand-written `_delta_log` (no `deltalake` dependency) |
+| `test_iceberg.py` | external **Apache Iceberg** (`read_iceberg`, `STORED AS ICEBERG`): reads, a join with Parquet, predicate pushdown, and a schema evolution landing with no restart, over the table committed under `test-datasets/iceberg-example` |
+| `test_iceberg_s3.py` | the same Iceberg table on an **S3 bucket**: a MinIO sidecar plus a Beacon with `BEACON_S3_DATASETS`; reads, an external table, and an assertion that the local datasets directory stays empty |
 | `test_flight_sql.py` | the Arrow **Flight SQL** transport over ADBC: auth handshake, queries, Arrow results, anonymous rejection (optional dep — skipped if `adbc-driver-flightsql` is absent) |
 | `test_remote_federation.py` | beacon-to-beacon `STORED AS REMOTE` federation against a second container (anonymous Flight SQL); pushdown + cross-source join |
 
 Several suites spin up **extra containers** from the same image (a second Beacon with a
-different engine / SQL disabled / anonymous Flight, plus PostgreSQL and MySQL sidecars)
-via `run_beacon_container` in `conftest.py`, all on the shared docker network.
+different engine / SQL disabled / anonymous Flight / an S3 datasets store, plus PostgreSQL,
+MySQL and MinIO sidecars) via `run_beacon_container` in `conftest.py`, all on the shared
+docker network.
 
 To run the Flight SQL suite, also install the optional deps:
 

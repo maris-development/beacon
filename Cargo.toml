@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
+members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-iceberg", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
 
 [workspace.package]
 
@@ -13,12 +13,17 @@ version = "2.0.0-rc.2"
 # See LICENSING.md.
 
 # Minimum supported Rust version, inherited by every member via `rust-version.workspace = true`.
-# This is the "1.91 or later" contract: cargo refuses to build on anything older with a clear
+# This is the "1.94 or later" contract: cargo refuses to build on anything older with a clear
 # message naming the version, instead of failing deep in a compile. A `rust-toolchain` file cannot
 # express a floor — its channel is one exact version (or `stable`/`beta`/`nightly`) — so the two
 # work together: rust-toolchain picks what CI and contributors *use*, this sets what the code
 # *requires*. It matters most for source builds from the sdist, which don't ship rust-toolchain.
-rust-version = "1.91"
+#
+# The floor was 1.91 until the Iceberg reader landed. `iceberg` / `iceberg-datafusion` 0.10 — the
+# only release line built against DataFusion 53 and Arrow 58, which this workspace unifies on —
+# declares `rust-version = "1.94"`, so the floor follows it. Beacon's own code uses nothing newer
+# than 1.91.
+rust-version = "1.94"
 
 [workspace.dependencies]
 tokio = {version = "1.47.1", features = ["full"]}
@@ -71,6 +76,12 @@ memmap2 = "=0.9.10"
 
 
 deltalake = { version = "=0.32.4", features = ["datafusion"] }
+# Apache iceberg-rust. Pinned exactly: the crate carries its own arrow/datafusion floors, and
+# 0.10 is the line that matches this workspace (DataFusion 53, Arrow 58). It is also what sets
+# the workspace MSRV to 1.94. No storage feature exists — `beacon-iceberg` supplies its own
+# `iceberg::io::Storage` over Beacon's object store, so local FS and S3 both work unchanged.
+iceberg = "=0.10.0"
+iceberg-datafusion = "=0.10.0"
 datafusion = "^53"
 
 datafusion-federation = { version = "=0.5.3", features = ["sql"] }

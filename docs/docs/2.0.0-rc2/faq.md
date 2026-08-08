@@ -63,13 +63,14 @@ Beacon supports **Zarr v3**. A `zarr.json` entry file marks a v3 store. Beacon d
 2 stores. A version 2 store uses `.zarray`, `.zgroup` and `.zattrs` files. Point at the `zarr.json`
 marker, not at the store directory or the chunks.
 
-### Why does Beacon not find my ODV or Delta Lake data?
+### Why does Beacon not find my ODV, Delta Lake or Iceberg data?
 
-These two formats are the exception. Beacon finds every other format in the dataset store
-automatically. Beacon does not find ODV ASCII and Delta Lake. Point
+These three formats are the exception. Beacon finds every other format in the dataset store
+automatically. Beacon does not find ODV ASCII, Delta Lake and Apache Iceberg. Point
 [`read_odv_ascii()`](/docs/2.0.0-rc2/formats/odv) or
-[`read_delta()`](/docs/2.0.0-rc2/formats/delta-lake) at the data. For Delta,
-you can also create an external table with `CREATE EXTERNAL TABLE … STORED AS DELTA`.
+[`read_delta()`](/docs/2.0.0-rc2/formats/delta-lake) or
+[`read_iceberg()`](/docs/2.0.0-rc2/formats/iceberg) at the data. For Delta and Iceberg,
+you can also create an external table with `CREATE EXTERNAL TABLE … STORED AS DELTA|ICEBERG`.
 
 ### Is there a `STORED AS ODV`?
 
