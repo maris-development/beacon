@@ -56,6 +56,14 @@ pub struct FileAnalysis {
 #[async_trait::async_trait]
 pub trait FileAnalyzer: Send + Sync {
     async fn analyze(&self, record: &FileRecord) -> Result<FileAnalysis>;
+
+    /// Called once per pass, before the first [`Self::analyze`] of that pass.
+    ///
+    /// The hook an implementation reports a whole-pass condition through. A
+    /// reader that cannot produce ranges is true of every file it opens, so
+    /// saying so per file would be a million identical lines on a backfill; the
+    /// analyzer clears a flag here and logs the reason once.
+    fn begin_pass(&self) {}
 }
 
 /// How hard the collector works.
@@ -156,6 +164,9 @@ impl StatsCollector {
         if pending.is_empty() {
             return Ok(CollectReport::default());
         }
+        // A pass with work in it. An idle one is not a pass, so a server that
+        // ticks all night does not repeat a condition nothing acted on.
+        self.analyzer.begin_pass();
 
         // `next_pending` hands out ascending ids, and every grouping below keeps
         // input order within a group, so each group stays ascending -- which is

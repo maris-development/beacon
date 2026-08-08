@@ -71,6 +71,17 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **File statistics pruned no netCDF or HDF5 file.** The ranges were recorded and then never used.
+  Pruning rewrites the file list of a built scan, and it looked for that list on the plan's root
+  node. A netCDF or HDF5 scan is not that node: its arrays reach the plan encoded, so the format
+  returns a decode and a broadcast above the scan, and the file list sits two nodes down. Pruning
+  now descends to it and rebuilds the plan over the shorter list. A `WHERE` clause on a recorded
+  column drops the files it rules out, exactly as it already did for Parquet. Requires the Rust
+  reader (`BEACON_HDF5_USE_RUST_READER`, `BEACON_NETCDF_USE_RUST_READER`), which is what records
+  the ranges in the first place.
+- **A pass on netcdf-c never said why it recorded nothing.** A `.nc`, `.h5` or `.hdf5` file read
+  through netcdf-c analyzes cleanly and contributes no ranges, which reads exactly like a file that
+  has none. Each pass now logs the reason once, and names the variable to set.
 - **A netCDF time variable kept its `_FillValue` cells as dates.** Both netCDF readers dropped the
   `_FillValue` of a CF time variable, so a fill cell reached a query as a real timestamp:
   `units = "days since 1970-01-01"` with `_FillValue = -32768` gave `1880-03-15`. Such a value
