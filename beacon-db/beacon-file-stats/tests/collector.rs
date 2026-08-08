@@ -21,6 +21,8 @@ struct FakeAnalyzer {
     /// Column names per file path. Missing paths get a default pair.
     columns: HashMap<String, Vec<&'static str>>,
     calls: AtomicUsize,
+    /// How often the collector announced the start of a pass.
+    passes: AtomicUsize,
 }
 
 impl FakeAnalyzer {
@@ -28,6 +30,7 @@ impl FakeAnalyzer {
         Self {
             columns: HashMap::new(),
             calls: AtomicUsize::new(0),
+            passes: AtomicUsize::new(0),
         }
     }
 
@@ -39,6 +42,10 @@ impl FakeAnalyzer {
 
 #[async_trait::async_trait]
 impl FileAnalyzer for FakeAnalyzer {
+    fn begin_pass(&self) {
+        self.passes.fetch_add(1, Ordering::SeqCst);
+    }
+
     async fn analyze(&self, record: &beacon_file_stats::FileRecord) -> Result<FileAnalysis> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if record.path.contains("bad") {
@@ -122,6 +129,40 @@ async fn a_pass_drains_the_queue_and_records_the_summary() {
 
     let temp = store.column_stats_by_name("TEMP", (0, 4)).await.unwrap();
     assert_eq!(temp[0].file_ids, vec![0, 1, 2, 3, 4]);
+}
+
+/// The analyzer is told when a pass starts, once, and only when there is work.
+///
+/// It is the hook a whole-pass condition is reported through. A reader that can
+/// produce no ranges is true of every file it opens, so the analyzer says it once
+/// per pass rather than once per file. An idle tick is not a pass, or a server
+/// that ticks all night would repeat a condition nothing acted on.
+#[tokio::test]
+async fn a_pass_with_work_in_it_is_announced_once() {
+    let (store, _dir) = store().await;
+    store
+        .registry()
+        .intern_files(&[ObservedFile::new("argo/2024/a.nc", 1, 1)])
+        .unwrap();
+
+    let analyzer = Arc::new(FakeAnalyzer::new());
+    let collector = StatsCollector::new(store.clone(), analyzer.clone(), config(2));
+
+    collector.run_once().await.unwrap();
+    assert_eq!(analyzer.passes.load(Ordering::SeqCst), 1);
+
+    // The queue is empty now, so this tick is not a pass.
+    let idle = collector.run_once().await.unwrap();
+    assert!(idle.is_idle());
+    assert_eq!(analyzer.passes.load(Ordering::SeqCst), 1);
+
+    // A new file makes the next tick a pass again.
+    store
+        .registry()
+        .intern_files(&[ObservedFile::new("argo/2024/b.nc", 1, 1)])
+        .unwrap();
+    collector.run_once().await.unwrap();
+    assert_eq!(analyzer.passes.load(Ordering::SeqCst), 2);
 }
 
 /// One segment per prefix group, not one per batch. This is the rule the
