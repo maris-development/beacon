@@ -40,6 +40,15 @@ use crate::error::{FileStatsError, Result};
 use crate::registry::{FILES_BY_ID, FILES_BY_PATH, read_path_entry, read_record};
 use crate::types::{FileId, FileRecord};
 
+/// What opening one file is worth, in bytes, when balancing partitions.
+///
+/// Opening a file is a round trip and a metadata read whatever it holds, so a
+/// partition of a thousand small files is not cheap merely because it holds
+/// few bytes. A megabyte is the order of magnitude that makes a file's fixed
+/// cost comparable to reading it: below that, count dominates the split; well
+/// above it, size does.
+const FILE_OPEN_COST: u64 = 1024 * 1024;
+
 /// One partition's worth of work: the files whose paths fall in `[start, end)`.
 ///
 /// The bounds are path bytes, so a shard is a range of the same B-tree the
@@ -96,16 +105,21 @@ impl RegistrySnapshot {
     /// no record is decoded and no path is allocated, so this stays a B-tree
     /// scan rather than a deserialization pass over the collection.
     ///
-    /// Shards close on **either** their share of the bytes or their share of
-    /// the files. Bytes alone is not enough: one large file among many small
-    /// ones takes its own shard and leaves every remaining file in the next,
-    /// which is a partition that reads 84 files while eleven others idle.
-    /// Whichever limit a shard reaches first closes it, so a skewed collection
-    /// still spreads across the partition budget.
+    /// Shards are balanced on *cost*, not on bytes: a file costs its size plus
+    /// [`FILE_OPEN_COST`], because opening one is a round trip whatever it
+    /// holds.
     ///
-    /// A collection whose entries predate sizes in the index reports zero
-    /// bytes and is divided by count alone, which is what the listing path
-    /// would have done anyway.
+    /// Balancing on bytes alone strands files. One large file among small ones
+    /// takes a whole shard's byte share by itself, so every remaining file
+    /// falls into the next shard — and once the shard budget is spent on such
+    /// shards, the last one absorbs the rest. Measured on 12 000 files with 11
+    /// large ones at the front, that produced partitions of 3, 3, 3, 27, seven
+    /// of 1000, and one of 4964. Counting files alone has the mirror problem:
+    /// one partition draws every large file.
+    ///
+    /// Adding the two together is what makes both cases work, and it retires
+    /// the special case for a collection whose index predates recorded sizes —
+    /// every file there costs [`FILE_OPEN_COST`], so it divides by count.
     pub fn shard_prefix(&self, prefix: &str, parts: usize) -> Result<PrefixShards> {
         let parts = parts.max(1);
         let table = self.by_path()?;
@@ -128,15 +142,19 @@ impl RegistrySnapshot {
             });
         }
 
-        // Second pass: cut where the running total crosses each share. Two
-        // walks rather than one because the shares cannot be known before the
-        // totals are, and a walk is far cheaper than holding the keys.
-        let share_bytes = (bytes > 0).then(|| bytes.div_ceil(parts as u64));
-        let share_files = files.div_ceil(parts as u64);
+        // Second pass: cut where the running cost crosses each share. Two
+        // walks rather than one because the share cannot be known before the
+        // total is, and a walk is far cheaper than holding the keys.
+        let total_cost = (bytes + files * FILE_OPEN_COST) as u128;
 
         let mut shards: Vec<PathShard> = Vec::with_capacity(parts);
         let mut start = prefix.as_bytes().to_vec();
         let (mut run_files, mut run_bytes) = (0u64, 0u64);
+        // Cut against cumulative boundaries rather than a per-shard budget
+        // that resets. A budget re-rounds every time and the error accumulates
+        // — four files of near-equal cost over four partitions came out as
+        // 1, 2, 1 — while boundaries at k/parts of the total stay exact.
+        let mut cumulative = 0u128;
         for entry in table.range(prefix.as_bytes()..)? {
             let (key, value) = entry?;
             let key = key.value();
@@ -146,9 +164,10 @@ impl RegistrySnapshot {
             let size = read_path_entry(value.value())?.1.unwrap_or(0);
             run_files += 1;
             run_bytes += size;
+            cumulative += (size + FILE_OPEN_COST) as u128;
 
-            let full = run_files >= share_files
-                || share_bytes.is_some_and(|share| run_bytes >= share);
+            // `cumulative >= (closed + 1) / parts * total`, without dividing.
+            let full = cumulative * parts as u128 >= (shards.len() as u128 + 1) * total_cost;
             // Never cut after the last file: that would leave a trailing shard
             // covering nothing.
             if full && shards.len() + 1 < parts {
@@ -357,14 +376,14 @@ mod tests {
         assert_eq!(seen, sorted, "and the walk stays in path order");
     }
 
-    /// A shard closes on whichever share it reaches first, bytes or files.
+    /// A shard closes on its share of the *cost*, so neither size nor count
+    /// alone decides.
     ///
-    /// Bytes alone would put the one large file in its own shard and every
-    /// other file in the next — a partition that reads three while two idle.
-    /// The file share splits those out; the byte share still keeps the large
-    /// one alone.
+    /// Four tiny files over four partitions is one each: their sizes are far
+    /// below a file's fixed cost, so count dominates. Over two partitions it
+    /// is two each.
     #[test]
-    fn shards_close_on_bytes_or_on_count() {
+    fn shards_close_on_cost() {
         let (registry, _dir) = registry();
         registry
             .intern_files(&[
@@ -377,36 +396,61 @@ mod tests {
 
         let snapshot = registry.snapshot().unwrap();
         let sharded = snapshot.shard_prefix("obs/", 4).unwrap();
-        assert_eq!(sharded.shards.len(), 4, "four files fill four partitions");
-        assert_eq!(sharded.shards[0].files, 1, "the large file stands alone");
-        assert_eq!(sharded.shards[0].bytes, 1000);
+        assert_eq!(
+            sharded.shards.iter().map(|s| s.files).collect::<Vec<_>>(),
+            vec![1, 1, 1, 1],
+            "four files below the open cost split one per partition"
+        );
 
-        // With a partition budget below the file count, the file share is what
-        // bounds a shard: 4 files over 2 partitions is 2 each, and the large
-        // file's own share still closes the first early.
         let sharded = snapshot.shard_prefix("obs/", 2).unwrap();
-        assert_eq!(sharded.shards.len(), 2);
-        assert_eq!(sharded.shards[0].files, 1);
-        assert_eq!(sharded.shards[1].files, 3);
+        assert_eq!(
+            sharded.shards.iter().map(|s| s.files).collect::<Vec<_>>(),
+            vec![2, 2]
+        );
     }
 
-    /// A skewed collection must still spread across the partition budget: the
-    /// regression this guards is one huge file leaving 84 of 100 in a single
-    /// partition.
+    /// A file large enough to dominate its own open cost still stands alone.
     #[test]
-    fn one_huge_file_does_not_strand_the_rest_in_one_shard() {
+    fn a_genuinely_large_file_takes_its_own_shard() {
         let (registry, _dir) = registry();
-        let mut files = vec![observed("obs/00000", 900_000)];
-        files.extend((1..100).map(|i| observed(&format!("obs/{i:05}"), 1_000)));
+        let mut files = vec![observed("obs/00000", 64 * 1024 * 1024)];
+        files.extend((1..12).map(|i| observed(&format!("obs/{i:05}"), 1_000)));
+        registry.intern_files(&files).unwrap();
+
+        let snapshot = registry.snapshot().unwrap();
+        let sharded = snapshot.shard_prefix("obs/", 4).unwrap();
+        assert_eq!(
+            sharded.shards[0].files, 1,
+            "64 MiB outweighs every small file's open cost"
+        );
+        assert_eq!(sharded.shards[0].bytes, 64 * 1024 * 1024);
+    }
+
+    /// A skewed collection must still spread across the partition budget.
+    ///
+    /// The regression this guards is front-loaded skew burning the shard
+    /// budget: closing on bytes alone, 12 000 files with 11 large ones at the
+    /// front produced partitions of 3, 3, 3, 27, seven of 1000 — and one of
+    /// 4964, which reads while eleven workers idle.
+    #[test]
+    fn front_loaded_skew_does_not_strand_the_rest_in_one_shard() {
+        let (registry, _dir) = registry();
+        let mut files: Vec<ObservedFile> = (0..11)
+            .map(|i| observed(&format!("obs/{i:06}"), 900_000))
+            .collect();
+        files.extend((11..1_200).map(|i| observed(&format!("obs/{i:06}"), 1_000)));
         registry.intern_files(&files).unwrap();
 
         let snapshot = registry.snapshot().unwrap();
         let sharded = snapshot.shard_prefix("obs/", 12).unwrap();
         assert_eq!(sharded.shards.len(), 12, "every partition gets work");
+
         let largest = sharded.shards.iter().map(|s| s.files).max().unwrap();
+        let smallest = sharded.shards.iter().map(|s| s.files).min().unwrap();
         assert!(
-            largest <= 100 / 12 + 1,
-            "no shard may hoard the small files, got {largest}"
+            largest <= smallest * 2,
+            "partitions must stay within a factor of two: {:?}",
+            sharded.shards.iter().map(|s| s.files).collect::<Vec<_>>()
         );
     }
 

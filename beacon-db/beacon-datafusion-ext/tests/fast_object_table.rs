@@ -539,6 +539,36 @@ async fn small_collections_fill_the_partition_budget() {
     }
 }
 
+/// At twelve thousand files a partition still holds one chunk, so it prunes
+/// once and then reads.
+///
+/// The chunk loop — prune, read, prune the next — only begins when a partition
+/// holds more than a chunk's worth, which at twelve partitions is about fifty
+/// thousand files. Below that the walk fills `pending` in a single step.
+#[tokio::test(flavor = "multi_thread")]
+async fn twelve_thousand_files_are_one_chunk_per_partition() {
+    let fixture = fixture_with(true, Some(12)).await;
+    let files: Vec<ObservedFile> = (0..12_000)
+        .map(|i| ObservedFile::new(format!("obs/{i:06}.parquet"), 1_000, 1))
+        .collect();
+    for batch in files.chunks(5_000) {
+        fixture.stats.registry().intern_files(batch).unwrap();
+    }
+
+    let snapshot = fixture.stats.registry().snapshot().unwrap();
+    let sharded = snapshot.shard_prefix("obs/", 12).unwrap();
+    assert_eq!(sharded.shards.len(), 12);
+    let per: Vec<u64> = sharded.shards.iter().map(|s| s.files).collect();
+    assert!(
+        per.iter().all(|files| *files == 1_000),
+        "twelve thousand files split evenly: {per:?}"
+    );
+    assert!(
+        per.iter().all(|files| *files <= 4_096),
+        "and each partition's share fits in one chunk, so it prunes once"
+    );
+}
+
 /// Every partition is a separate stream, so a real query over a hundred files
 /// reads them concurrently rather than one after another.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
