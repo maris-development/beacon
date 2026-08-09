@@ -399,18 +399,17 @@ async fn a_predicate_drops_hdf5_files_from_the_scan() {
         "no predicate reads everything:\n{all}"
     );
 
-    let hot = explain(
+    let hot = query(
         &runtime,
-        "SELECT * FROM read_hdf5('obs/*.h5') WHERE \"TEMP\" > 80",
+        "EXPLAIN ANALYZE SELECT * FROM read_hdf5('obs/*.h5') WHERE \"TEMP\" > 80",
     )
     .await;
     assert_eq!(
-        files_in_plan(&hot),
-        1,
+        counter(&hot, "file_stats_files_pruned"),
+        2,
         "only hot.h5 can hold a TEMP above 80:\n{hot}"
     );
-    // The plan holds cursors, not names, so identity is proven by reading:
-    // hot.h5's rows are 90 and 100.
+    // Identity is proven by reading: hot.h5's rows are 90 and 100.
 
     // Pruning changed which files are opened, not what the query answers.
     let rows = query(
@@ -612,6 +611,25 @@ fn files_in_plan(explain: &str) -> usize {
         .sum()
 }
 
+/// A metric's value from `EXPLAIN ANALYZE` output.
+///
+/// Pruning happens while the scan reads, so these counters — not the plan
+/// text — are where the numbers live.
+fn counter(analyzed: &str, name: &str) -> usize {
+    let marker = format!("{name}=");
+    analyzed
+        .split(&marker)
+        .skip(1)
+        .map(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<usize>()
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
 async fn explain(runtime: &Runtime, sql: &str) -> String {
     let batches = runtime
         .run_query(
@@ -647,18 +665,24 @@ async fn a_predicate_drops_files_from_the_scan() {
     let all = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
     assert_eq!(files_in_plan(&all), 3, "no predicate reads everything:\n{all}");
 
-    let hot = explain(
+    // Pruning runs while the scan reads, so the counters say what it dropped.
+    let hot = query(
         &runtime,
-        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+        "EXPLAIN ANALYZE SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
     )
     .await;
     assert_eq!(
-        files_in_plan(&hot),
-        1,
+        counter(&hot, "file_stats_files_considered"),
+        3,
+        "every file reaches the scan:\n{hot}"
+    );
+    assert_eq!(
+        counter(&hot, "file_stats_files_pruned"),
+        2,
         "only hot.parquet can hold a TEMP above 80:\n{hot}"
     );
-    // The plan holds cursors, not names, so identity is proven by reading:
-    // hot.parquet's rows are 90 and 100.
+
+    // And identity is proven by reading: hot.parquet's rows are 90 and 100.
     let rows = query(
         &runtime,
         "SELECT \"TEMP\" FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80 ORDER BY \"TEMP\"",
@@ -702,19 +726,20 @@ async fn an_unanalyzed_file_is_never_dropped() {
     // Appears after the pass, so it is in no segment.
     write_parquet(&root.path().join("datasets/obs/fresh.parquet"), 0.0, 5.0);
 
-    let plan = explain(
+    let analyzed = query(
         &runtime,
-        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+        "EXPLAIN ANALYZE SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
     )
     .await;
     assert_eq!(
-        files_in_plan(&plan),
-        1,
-        "the file with no statistics must survive:\n{plan}"
+        counter(&analyzed, "file_stats_files_considered"),
+        2,
+        "both files reach the scan:\n{analyzed}"
     );
-    assert!(
-        plan.contains("pruned=1"),
-        "while the analyzed one is still ruled out:\n{plan}"
+    assert_eq!(
+        counter(&analyzed, "file_stats_files_pruned"),
+        1,
+        "the analyzed one is ruled out, the one with no statistics survives:\n{analyzed}"
     );
 }
 
@@ -970,10 +995,17 @@ async fn a_pruned_scan_reports_its_metrics() {
         analyzed.contains("file_stats_files_pruned=2"),
         "and how many it dropped:\n{analyzed}"
     );
-    assert!(
-        analyzed.contains("file_stats_columns_used=1"),
-        "and that TEMP actually had statistics to prune on:\n{analyzed}"
-    );
+
+
+    // That TEMP had statistics to prune on is what `prune=stream` says: the
+    // scan only carries a predicate when the registry knows one of its
+    // columns.
+    let plan = explain(
+        &runtime,
+        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert!(plan.contains("prune=stream"), "{plan}");
 }
 
 // ── registry-backed listing ─────────────────────────────────────────────────
@@ -1023,7 +1055,7 @@ async fn registry_listing_plans_the_scan_from_the_registry() {
 /// reports what was considered and dropped — the only evidence there is, now
 /// that no file list is printed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn registry_listing_prunes_before_the_list_is_built() {
+async fn registry_listing_prunes_inside_the_stream() {
     let root = tempfile::tempdir().unwrap();
     write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
     write_parquet(&root.path().join("datasets/obs/mild.parquet"), 20.0, 25.0);
@@ -1032,14 +1064,16 @@ async fn registry_listing_prunes_before_the_list_is_built() {
     let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
     runtime.file_stats().unwrap().run_once().await.unwrap();
 
+    // The planner is never blocked by pruning: it plans the whole prefix and
+    // hands the predicate to the scan.
     let plan = explain(
         &runtime,
         "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
     )
     .await;
     assert!(
-        plan.contains("FastObjectScan") && plan.contains("files=1") && plan.contains("pruned=2"),
-        "two of three files cannot hold a TEMP above 80:\n{plan}"
+        plan.contains("mode=streaming") && plan.contains("prune=stream"),
+        "the plan carries the predicate rather than its result:\n{plan}"
     );
 
     let analyzed = query(
@@ -1047,13 +1081,15 @@ async fn registry_listing_prunes_before_the_list_is_built() {
         "EXPLAIN ANALYZE SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
     )
     .await;
-    assert!(
-        analyzed.contains("file_stats_files_considered=3"),
-        "the counters are the evidence the registry served the plan:\n{analyzed}"
+    assert_eq!(
+        counter(&analyzed, "file_stats_files_considered"),
+        3,
+        "every file reached the scan:\n{analyzed}"
     );
-    assert!(
-        analyzed.contains("file_stats_files_pruned=2"),
-        "and that pruning ran before the list was built:\n{analyzed}"
+    assert_eq!(
+        counter(&analyzed, "file_stats_files_pruned"),
+        2,
+        "and two were dropped without being opened:\n{analyzed}"
     );
 
     let rows = query(
@@ -1145,24 +1181,24 @@ async fn registry_listing_streams_a_predicate_it_cannot_prune_on() {
     let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
     runtime.file_stats().unwrap().run_once().await.unwrap();
 
-    // DEPTH is recorded, so pruning applies and the plan names its survivors.
+    // TEMP is recorded, so the scan carries the predicate.
     let known = explain(
         &runtime,
         "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
     )
     .await;
-    assert!(known.contains("mode=pruned"), "{known}");
+    assert!(known.contains("prune=stream"), "{known}");
 
     // A literal predicate names no column at all, so there is nothing to prune
-    // on and nothing to enumerate.
+    // on and the scan does not pay for a segment read per chunk.
     let unknown = explain(
         &runtime,
         "SELECT * FROM read_parquet('obs/*.parquet') WHERE 1 = 1",
     )
     .await;
     assert!(
-        unknown.contains("mode=streaming"),
-        "an unprunable predicate must not trigger an enumeration:\n{unknown}"
+        !unknown.contains("prune=stream"),
+        "an unprunable predicate must not set up pruning:\n{unknown}"
     );
 }
 

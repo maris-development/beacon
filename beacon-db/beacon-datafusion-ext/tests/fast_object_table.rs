@@ -191,16 +191,6 @@ fn planned_files(plan: &Arc<dyn ExecutionPlan>) -> Vec<String> {
                     .unwrap();
             }
         }
-        Identities::Ids { ids, .. } => {
-            let snapshot = source.snapshot().expect("an id cursor holds a snapshot");
-            paths.extend(
-                snapshot
-                    .records_for_ids(ids)
-                    .unwrap()
-                    .into_iter()
-                    .map(|record| record.expect("a planned id resolves").path),
-            );
-        }
         Identities::Listed { objects, .. } => {
             paths.extend(objects.iter().map(|meta| meta.location.to_string()));
         }
@@ -226,8 +216,14 @@ async fn a_scan_walks_the_registry_rather_than_listing_it() {
         "walking those ranges yields the registry's files, in path order"
     );
 
-    // The counters are the plan-time evidence `EXPLAIN ANALYZE` reports; there
-    // is no file list to read it from.
+    let batches = collect(Arc::clone(&plan), fixture.ctx.task_ctx())
+        .await
+        .unwrap();
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 5, "both files' rows come out of the walk");
+
+    // The counters are filled by the scan as it runs, which is the only place
+    // they exist now that nothing is decided at plan time.
     let metrics = plan.metrics().expect("the scan carries metrics");
     assert_eq!(
         metrics
@@ -236,15 +232,13 @@ async fn a_scan_walks_the_registry_rather_than_listing_it() {
             .as_usize(),
         2
     );
-
-    let batches = collect(plan, fixture.ctx.task_ctx()).await.unwrap();
-    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
-    assert_eq!(rows, 5, "both files' rows come out of the walk");
 }
 
-/// A `WHERE` on a recorded column names only the survivors.
+/// A `WHERE` on a recorded column prunes while the scan reads, not while it
+/// plans: the plan still covers the whole prefix, and the files that cannot
+/// match are dropped — and counted — during execution.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_predicate_prunes_before_the_file_list_exists() {
+async fn a_predicate_prunes_inside_the_stream() {
     let fixture = fixture(true).await;
     let a = put_parquet(&fixture.objects, "obs/a.parquet", &[1.0, 2.0, 3.0]).await;
     let b = put_parquet(&fixture.objects, "obs/b.parquet", &[100.0, 200.0]).await;
@@ -257,24 +251,46 @@ async fn a_predicate_prunes_before_the_file_list_exists() {
         .await
         .unwrap();
 
-    assert_eq!(mode(&plan), "pruned");
+    assert_eq!(mode(&plan), "streaming", "planning is never blocked by pruning");
+    assert!(
+        scan_source(&plan).prunes(),
+        "but the scan carries the predicate"
+    );
     assert_eq!(
         planned_files(&plan),
-        vec!["obs/b.parquet"],
-        "the file whose range cannot match never enters the plan"
+        vec!["obs/a.parquet", "obs/b.parquet"],
+        "the plan still covers the whole prefix"
     );
+    // Nothing has been pruned yet, so there is nothing to count.
     let metrics = plan.metrics().unwrap();
+    assert!(
+        metrics.sum_by_name("file_stats_files_pruned").is_none(),
+        "pruning has not run at plan time"
+    );
+
+    let batches = collect(Arc::clone(&plan), fixture.ctx.task_ctx())
+        .await
+        .unwrap();
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 2, "only the file that can match was read");
+
+    // And now the counters exist, filled by the stream as it went.
+    let metrics = plan.metrics().unwrap();
+    assert_eq!(
+        metrics
+            .sum_by_name("file_stats_files_considered")
+            .unwrap()
+            .as_usize(),
+        2
+    );
     assert_eq!(
         metrics
             .sum_by_name("file_stats_files_pruned")
             .unwrap()
             .as_usize(),
-        1
+        1,
+        "the cold file was dropped without being opened"
     );
-
-    let batches = collect(plan, fixture.ctx.task_ctx()).await.unwrap();
-    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
-    assert_eq!(rows, 2, "and only that file is read");
 }
 
 /// A predicate over a column the registry has never interned must not trigger

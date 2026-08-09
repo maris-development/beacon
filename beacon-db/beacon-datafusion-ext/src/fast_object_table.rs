@@ -57,12 +57,12 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use beacon_file_stats::{
-    FileId, FileState, FileStatsStore, PathShard, RegistrySnapshot, SharedSnapshot,
+    FileStatsStore, PathShard, RegistrySnapshot, SharedSnapshot,
 };
 use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::{Session, TableProvider},
-    common::{DFSchema, Statistics, plan_datafusion_err, project_schema, stats::Precision},
+    common::{DFSchema, Statistics, plan_datafusion_err, project_schema},
     datasource::{
         TableType,
         file_format::FileFormat,
@@ -76,14 +76,14 @@ use datafusion::{
     logical_expr::{TableProviderFilterPushDown, utils::conjunction},
     physical_expr::utils::collect_columns,
     physical_optimizer::pruning::PruningPredicate,
-    physical_plan::{ExecutionPlan, empty::EmptyExec, metrics::MetricBuilder},
+    physical_plan::{ExecutionPlan, empty::EmptyExec},
     prelude::Expr,
 };
 use futures::TryStreamExt;
 use object_store::ObjectMeta;
 
 use crate::fast_object_data_source::{
-    FastObjectDataSource, Identities, ShardQuery, projected_schema_of,
+    FastObjectDataSource, Identities, ShardQuery, StreamPruning, projected_schema_of,
 };
 use crate::type_widening::{ArrowTypeWidening, SuperTypeWidening};
 
@@ -286,7 +286,6 @@ impl TableProvider for FastObjectTable {
             state,
             &object_store_url,
             file_source,
-            projected_schema,
             projection,
             filters,
             limit,
@@ -398,7 +397,8 @@ impl FastObjectTable {
             return None;
         }
         let store = beacon_file_stats::try_file_stats_from_session(state)?;
-        // One view of the registry for the whole query.
+        // One view of the registry for the whole query, so a discovery pass
+        // landing mid-scan cannot change what a running partition reads.
         let snapshot: SharedSnapshot = Arc::new(store.registry().snapshot().ok()?);
 
         let ignore_subdirectory = state
@@ -406,28 +406,22 @@ impl FastObjectTable {
             .execution
             .listing_table_ignore_subdirectory;
 
-        // Enumerate only when pruning can drop something. Deciding this costs
-        // one lookup per predicate column; deciding it by enumerating would
-        // cost the whole collection.
-        let prunable = !filters.is_empty()
-            && predicate_columns(state, &self.schema, filters)
-                .is_some_and(|columns| knows_any(&snapshot, &columns));
-
-        let (identities, counts, considered, pruned) = if prunable {
-            self.pruned_identities(state, &store, &snapshot, filters, ignore_subdirectory)
-                .await?
-        } else {
-            self.streaming_identities(&snapshot, ignore_subdirectory)?
-        };
-
+        // Cut the prefix into path ranges. This reads the path index and
+        // nothing else: no record is decoded, no segment is opened, no file
+        // list is built.
+        let identities = self.shard_identities(&snapshot, ignore_subdirectory)?;
         if identities.partitions() == 0 {
-            // Every candidate was provably ruled out.
             return Some(Arc::new(EmptyExec::new(Arc::clone(projected_schema))));
         }
 
+        // Compile the predicate, and stop. Which files it rules out is decided
+        // by the partitions themselves, while they read — see `StreamPruning`.
+        let pruning = self.stream_pruning(state, &store, &snapshot, filters);
+
         tracing::debug!(
-            considered,
-            pruned,
+            files = identities.files(),
+            partitions = identities.partitions(),
+            prunes = pruning.is_some(),
             "planned a scan from the file-statistics registry"
         );
         self.build_plan(
@@ -436,14 +430,39 @@ impl FastObjectTable {
             Arc::clone(file_source),
             Some(snapshot),
             identities,
-            counts,
+            pruning,
             limit,
-            considered,
-            pruned,
-            self.columns_used(pruned),
         )
         .await
         .ok()
+    }
+
+    /// The pruning a partition will apply as it reads, or `None` when there is
+    /// none worth applying.
+    ///
+    /// Compiling a predicate is pure CPU. The check that follows is one index
+    /// lookup per predicate column: a predicate naming no column the registry
+    /// has ever interned cannot drop a file, and setting up pruning for it
+    /// would buy a segment read per chunk for nothing.
+    fn stream_pruning(
+        &self,
+        state: &dyn Session,
+        store: &Arc<FileStatsStore>,
+        snapshot: &RegistrySnapshot,
+        filters: &[Expr],
+    ) -> Option<StreamPruning> {
+        if filters.is_empty() {
+            return None;
+        }
+        let columns = predicate_columns(state, &self.schema, filters)?;
+        if !knows_any(snapshot, &columns) {
+            return None;
+        }
+        Some(StreamPruning {
+            store: Arc::clone(store),
+            predicate: physical_predicate(state, &self.schema, filters)?,
+            table_schema: Arc::clone(&self.schema),
+        })
     }
 
     /// Build the scan, under whatever nodes the format wants above it.
@@ -466,11 +485,8 @@ impl FastObjectTable {
         file_source: Arc<dyn FileSource>,
         snapshot: Option<SharedSnapshot>,
         identities: Identities,
-        counts: (Precision<usize>, Precision<usize>),
+        pruning: Option<StreamPruning>,
         limit: Option<usize>,
-        considered: usize,
-        pruned: usize,
-        columns_used: usize,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let probe =
             FileScanConfigBuilder::new(object_store_url.clone(), Arc::clone(&file_source)).build();
@@ -510,9 +526,9 @@ impl FastObjectTable {
             })
             .unwrap_or(file_source);
 
-        let mut statistics = Statistics::new_unknown(scan_schema.as_ref());
-        statistics.num_rows = counts.0;
-        statistics.total_byte_size = counts.1;
+        // Row and byte counts would have to be read per file, which is the
+        // enumeration this scan exists to avoid. Absent is the honest answer.
+        let statistics = Statistics::new_unknown(scan_schema.as_ref());
 
         let source = FastObjectDataSource::new(
             effective_source,
@@ -520,12 +536,10 @@ impl FastObjectTable {
             scan_schema,
             snapshot,
             identities,
+            pruning,
             limit,
             statistics,
-            considered,
-            pruned,
         );
-        record_counters(&source, considered, pruned, columns_used);
 
         let mut plan: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(source);
         for wrapper in wrappers.into_iter().rev() {
@@ -534,18 +548,12 @@ impl FastObjectTable {
         Ok(plan)
     }
 
-    /// Only a pruned plan can say how many predicate columns had statistics;
-    /// a streaming one never asked.
-    fn columns_used(&self, pruned: usize) -> usize {
-        usize::from(pruned > 0)
-    }
-
     /// Partitions as path ranges. Nothing is enumerated.
-    fn streaming_identities(
+    fn shard_identities(
         &self,
         snapshot: &RegistrySnapshot,
         ignore_subdirectory: bool,
-    ) -> Option<(Identities, (Precision<usize>, Precision<usize>), usize, usize)> {
+    ) -> Option<Identities> {
         // The partition budget is chosen, then divided between the URLs; it is
         // never derived from a file count.
         let per_url = (self.target_partitions / self.urls.len().max(1)).max(1);
@@ -587,97 +595,13 @@ impl FastObjectTable {
             return None;
         }
 
-        let identities = Identities::Shards {
+        let _ = estimate;
+        Some(Identities::Shards {
             extension: self.extension.clone(),
             urls: Arc::new(self.urls.clone()),
             ignore_subdirectory,
             shards: Arc::new(shards),
-        };
-        // Row counts would have to be read per file, which is the enumeration
-        // this mode exists to avoid. Absent is the honest answer.
-        Some((
-            identities,
-            (Precision::Absent, Precision::Absent),
-            estimate as usize,
-            0,
-        ))
-    }
-
-    /// Partitions as id slices, because a predicate had to be evaluated
-    /// against named candidates.
-    async fn pruned_identities(
-        &self,
-        state: &dyn Session,
-        store: &FileStatsStore,
-        snapshot: &RegistrySnapshot,
-        filters: &[Expr],
-        ignore_subdirectory: bool,
-    ) -> Option<(Identities, (Precision<usize>, Precision<usize>), usize, usize)> {
-        // Ids and sizes only: 16 bytes a file, no record, no path.
-        let mut candidates: Vec<(FileId, u64)> = Vec::new();
-        for url in &self.urls {
-            let before = candidates.len();
-            if url.is_collection() {
-                candidates.extend(snapshot.candidates_under_prefix(url.prefix().as_ref()).ok()?);
-            } else {
-                let path = url.prefix().as_ref().to_string();
-                let (id, record) = snapshot.record_by_path(&path).ok()??;
-                object_store::path::Path::parse(&record.path).ok()?;
-                candidates.push((id, record.size));
-            }
-            if candidates.len() == before {
-                return None; // nothing known here; only the store can say why
-            }
-        }
-
-        // Filter to this table's files. The glob needs the path, so one record
-        // read serves this and the statistics below.
-        let ids: Vec<FileId> = candidates.iter().map(|(id, _)| *id).collect();
-        let records = snapshot.records_for_ids(&ids).ok()?;
-        let mut matched: Vec<(FileId, u64)> = Vec::with_capacity(candidates.len());
-        for ((id, size), record) in candidates.iter().zip(&records) {
-            let Some(record) = record else { continue };
-            if record.state == FileState::Deleted {
-                continue;
-            }
-            let Ok(location) = object_store::path::Path::parse(&record.path) else {
-                return None; // a path that cannot be parsed is the listing's problem
-            };
-            if record.path.ends_with(&self.extension)
-                && self
-                    .urls
-                    .iter()
-                    .any(|url| url.contains(&location, ignore_subdirectory))
-            {
-                matched.push((*id, *size));
-            }
-        }
-        if matched.is_empty() {
-            return None;
-        }
-
-        let considered = matched.len();
-        if let Some(kept) = prune(state, store, &self.schema, filters, &matched).await {
-            matched.retain(|(id, _)| kept.binary_search(id).is_ok());
-        }
-        let pruned = considered - matched.len();
-
-        let counts = summarize(snapshot, &matched);
-        let ranges = byte_balanced_ranges(
-            matched.iter().map(|(_, size)| *size),
-            self.target_partitions,
-        );
-        let ids: Vec<FileId> = matched.iter().map(|(id, _)| *id).collect();
-
-        Some((
-            Identities::Ids {
-                ids: Arc::new(ids),
-                ranges: Arc::new(ranges),
-            },
-            counts,
-            considered,
-            pruned,
-        ))
+        })
     }
 
     /// Plan from a store listing: the shape a collection with no registry
@@ -688,7 +612,6 @@ impl FastObjectTable {
         state: &dyn Session,
         object_store_url: &ObjectStoreUrl,
         file_source: Arc<dyn FileSource>,
-        projected_schema: SchemaRef,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -713,20 +636,16 @@ impl FastObjectTable {
         // reproducible run to run, as the listing path's path sort does.
         objects.sort_by(|a, b| a.location.cmp(&b.location));
 
-        // Statistics prune here too. The registry may know these files' column
-        // ranges even when it cannot supply the file list — a store discovered
-        // but not opted into registry listing, or a prefix discovery has seen
-        // while the switch is off — and dropping a file that provably cannot
-        // match is worth having on every path, not only the fast one.
-        let considered = objects.len();
-        let (pruned, columns_used) = self.prune_listed(state, &mut objects, filters).await;
-
-        if objects.is_empty() {
-            return Ok(Arc::new(EmptyExec::new(project_schema(
-                &self.schema,
-                projection,
-            )?)));
-        }
+        // The registry may know these files' column ranges even when it
+        // cannot supply the file list — a store discovered but not opted into
+        // registry listing. Pruning on them is worth having here too, and it
+        // runs in the stream for the same reason it does there: the planner
+        // should not block on segment reads.
+        let pruning = beacon_file_stats::try_file_stats_from_session(state)
+            .and_then(|store| {
+                let snapshot = store.registry().snapshot().ok()?;
+                self.stream_pruning(state, &store, &snapshot, filters)
+            });
 
         let ranges =
             byte_balanced_ranges(objects.iter().map(|meta| meta.size), self.target_partitions);
@@ -739,91 +658,12 @@ impl FastObjectTable {
                 objects: Arc::new(objects),
                 ranges: Arc::new(ranges),
             },
-            (Precision::Absent, Precision::Absent),
+            pruning,
             limit,
-            considered,
-            pruned,
-            columns_used,
         )
         .await
     }
 
-    /// Drop the listed objects whose recorded ranges say they cannot match.
-    ///
-    /// Returns how many were dropped and how many predicate columns had
-    /// statistics. A path the registry has never seen has none, so it stays:
-    /// a partially backfilled store must not lose files.
-    async fn prune_listed(
-        &self,
-        state: &dyn Session,
-        objects: &mut Vec<ObjectMeta>,
-        filters: &[Expr],
-    ) -> (usize, usize) {
-        if filters.is_empty() {
-            return (0, 0);
-        }
-        let Some(store) = beacon_file_stats::try_file_stats_from_session(state) else {
-            return (0, 0);
-        };
-
-        let paths: Vec<String> = objects
-            .iter()
-            .map(|meta| meta.location.to_string())
-            .collect();
-        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
-        let Ok(ids) = store.registry().file_ids(&borrowed) else {
-            return (0, 0);
-        };
-        let mut candidates: Vec<FileId> = ids.iter().filter_map(|id| *id).collect();
-        if candidates.is_empty() {
-            return (0, 0); // nothing here is registered, so nothing is prunable
-        }
-        candidates.sort_unstable();
-        candidates.dedup();
-
-        let Some(predicate) = physical_predicate(state, &self.schema, filters) else {
-            return (0, 0);
-        };
-        let range = (candidates[0], candidates[candidates.len() - 1]);
-        let columns_used = beacon_file_stats::pruning::columns_with_statistics(
-            &store,
-            &predicate,
-            &self.schema,
-            range,
-        )
-        .await;
-        let kept: std::collections::HashSet<FileId> =
-            beacon_file_stats::prune_files(&store, &predicate, &self.schema, &candidates)
-                .await
-                .into_iter()
-                .collect();
-
-        let before = objects.len();
-        let mut position = 0usize;
-        objects.retain(|_| {
-            let keep = match ids[position] {
-                Some(id) => kept.contains(&id),
-                // Never seen by the registry: no statistics, so it stays.
-                None => true,
-            };
-            position += 1;
-            keep
-        });
-        (before - objects.len(), columns_used)
-    }
-}
-
-/// The `DataSourceExec` at the bottom of a single-child chain.
-fn find_scan(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
-    let mut node = Arc::clone(plan);
-    loop {
-        if node.as_any().is::<DataSourceExec>() {
-            return Some(node);
-        }
-        let children = node.children();
-        let [child] = children[..] else { return None };
-        node = Arc::clone(child);
-    }
 }
 
 /// Whether the operator opted into registry-planned scans.
@@ -832,29 +672,6 @@ fn registry_listing_enabled(state: &dyn Session) -> bool {
         .config()
         .get_extension::<RegistryListingSwitch>()
         .is_some_and(|switch| switch.enable)
-}
-
-/// The counters are known at plan time; the file source's metrics set is
-/// shared through an `Arc`, so registering here surfaces them under the scan
-/// node in `EXPLAIN ANALYZE`. With no file list in the plan, these are the
-/// evidence of what the scan considered.
-fn record_counters(
-    source: &FastObjectDataSource,
-    considered: usize,
-    pruned: usize,
-    columns_used: usize,
-) {
-    let metrics =
-        datafusion::datasource::source::DataSource::metrics(source);
-    MetricBuilder::new(&metrics)
-        .global_counter("file_stats_files_considered")
-        .add(considered);
-    MetricBuilder::new(&metrics)
-        .global_counter("file_stats_files_pruned")
-        .add(pruned);
-    MetricBuilder::new(&metrics)
-        .global_counter("file_stats_columns_used")
-        .add(columns_used);
 }
 
 /// The predicate `filters` form, as one physical expression over `schema`.
@@ -892,56 +709,6 @@ fn predicate_columns(
 fn knows_any(snapshot: &RegistrySnapshot, columns: &[String]) -> bool {
     let names: Vec<&str> = columns.iter().map(String::as_str).collect();
     snapshot.knows_any_column(&names).unwrap_or(false)
-}
-
-/// The candidate ids `filters` leave alive, ascending. `None` when pruning
-/// cannot apply, which keeps every file.
-async fn prune(
-    state: &dyn Session,
-    store: &FileStatsStore,
-    schema: &SchemaRef,
-    filters: &[Expr],
-    candidates: &[(FileId, u64)],
-) -> Option<Vec<FileId>> {
-    let predicate = physical_predicate(state, schema, filters)?;
-
-    let mut ids: Vec<FileId> = candidates.iter().map(|(id, _)| *id).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    // Ascending in, ascending out, so the caller may binary-search it.
-    Some(beacon_file_stats::prune_files(store, &predicate, schema, &ids).await)
-}
-
-/// Aggregate statistics for the survivors, read from their records.
-///
-/// Only the pruned path calls this: it has already enumerated, so reading the
-/// recorded counts costs one batch fetch rather than a new pass. Sums are
-/// exact only while every survivor's counts are trustworthy — an `Analyzed`
-/// record — because one unknown makes the total unknowable.
-fn summarize(
-    snapshot: &RegistrySnapshot,
-    survivors: &[(FileId, u64)],
-) -> (Precision<usize>, Precision<usize>) {
-    let ids: Vec<FileId> = survivors.iter().map(|(id, _)| *id).collect();
-    let Ok(records) = snapshot.records_for_ids(&ids) else {
-        return (Precision::Absent, Precision::Absent);
-    };
-
-    let mut rows: Option<usize> = Some(0);
-    let mut bytes: Option<usize> = Some(0);
-    for record in records.into_iter().flatten() {
-        let trusted = record.state == FileState::Analyzed;
-        rows = rows
-            .zip(record.num_rows.filter(|_| trusted))
-            .map(|(acc, n)| acc + n as usize);
-        bytes = bytes
-            .zip(record.total_byte_size.filter(|_| trusted))
-            .map(|(acc, n)| acc + n as usize);
-    }
-    (
-        rows.map_or(Precision::Absent, Precision::Exact),
-        bytes.map_or(Precision::Absent, Precision::Exact),
-    )
 }
 
 /// Divide `sizes` into at most `target` contiguous ranges of roughly equal
