@@ -26,9 +26,22 @@ use crate::types::{ColumnId, FileId, FileRecord, FileState, ObservedFile};
 // ascending file ids.
 type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 
-const FILES_BY_PATH: ByteTable = TableDefinition::new("fs_files_by_path");
-const FILES_BY_ID: ByteTable = TableDefinition::new("fs_files_by_id");
-const COLUMNS_BY_NAME: ByteTable = TableDefinition::new("fs_columns_by_name");
+/// Path to id, and — since the scan planner needed it — path to size.
+///
+/// The value is `id | id ++ size`, both big-endian. Sharding a scan into
+/// byte-balanced partitions needs every candidate's size, and reading it from
+/// the record costs a bincode decode and a `String` allocation per file, which
+/// at three million files is the plan-time stall this index exists to avoid.
+/// Carrying the size here makes the split a pure B-tree walk.
+///
+/// The two widths are a migration, not a variant: a database written before
+/// this holds 8-byte values, which [`read_path_entry`] reads as "size unknown".
+/// Such a collection shards by count until discovery next rewrites its entries,
+/// which happens on its own. Nothing needs converting, and an older Beacon
+/// reading a newer database takes the first 8 bytes it asked for.
+pub(crate) const FILES_BY_PATH: ByteTable = TableDefinition::new("fs_files_by_path");
+pub(crate) const FILES_BY_ID: ByteTable = TableDefinition::new("fs_files_by_id");
+pub(crate) const COLUMNS_BY_NAME: ByteTable = TableDefinition::new("fs_columns_by_name");
 const COLUMNS_BY_ID: ByteTable = TableDefinition::new("fs_columns_by_id");
 /// Files awaiting analysis. A dedicated table keeps the collector's next batch
 /// an O(batch) range scan instead of a full scan over every known file.
@@ -130,11 +143,18 @@ impl Registry {
 
             for file in observed {
                 let existing = match by_path.get(file.path.as_bytes())? {
-                    Some(value) => Some(read_u64(value.value())?),
+                    Some(value) => Some(read_path_entry(value.value())?.0),
                     None => None,
                 };
                 match existing {
                     Some(id) => {
+                        // Refresh the index entry whichever way the record
+                        // went: this is where a legacy 8-byte value gains its
+                        // size, and where a changed file's size is corrected.
+                        by_path.insert(
+                            file.path.as_bytes(),
+                            path_entry(id, file.size).as_slice(),
+                        )?;
                         let mut record = read_record(&by_id, id)?.ok_or_else(|| {
                             FileStatsError::Registry(format!(
                                 "file {id} has a path entry but no record"
@@ -172,7 +192,8 @@ impl Registry {
                             file.last_modified_millis,
                         );
                         record.e_tag = file.e_tag.clone();
-                        by_path.insert(file.path.as_bytes(), file_key(id).as_slice())?;
+                        by_path
+                            .insert(file.path.as_bytes(), path_entry(id, file.size).as_slice())?;
                         by_id.insert(file_key(id).as_slice(), encode_record(&record)?.as_slice())?;
                         pending.insert(file_key(id).as_slice(), [].as_slice())?;
                         ids.push(id);
@@ -225,7 +246,7 @@ impl Registry {
         let read = self.db.begin_read()?;
         let table = read.open_table(FILES_BY_PATH)?;
         match table.get(path.as_bytes())? {
-            Some(value) => Ok(Some(read_u64(value.value())?)),
+            Some(value) => Ok(Some(read_path_entry(value.value())?.0)),
             None => Ok(None),
         }
     }
@@ -243,7 +264,7 @@ impl Registry {
         let mut out = Vec::with_capacity(paths.len());
         for path in paths {
             out.push(match table.get(path.as_bytes())? {
-                Some(value) => Some(read_u64(value.value())?),
+                Some(value) => Some(read_path_entry(value.value())?.0),
                 None => None,
             });
         }
@@ -460,7 +481,7 @@ impl Registry {
                 if !path.starts_with(prefix) {
                     break; // the scan has walked past the prefix
                 }
-                out.push((path, read_u64(value.value())?));
+                out.push((path, read_path_entry(value.value())?.0));
             }
             out
         };
@@ -513,7 +534,7 @@ impl Registry {
             if !key.value().starts_with(prefix.as_bytes()) {
                 break; // the scan has walked past the prefix
             }
-            let id = read_u64(value.value())?;
+            let id = read_path_entry(value.value())?.0;
             let Some(record) = read_record(&by_id, id)? else {
                 return Err(FileStatsError::Registry(format!(
                     "file {id} has a path entry but no record"
@@ -601,7 +622,7 @@ impl Registry {
                 {
                     break; // the scan has walked past the prefix
                 }
-                let id = read_u64(value.value())?;
+                let id = read_path_entry(value.value())?.0;
                 if let Some(record) = read_record(&by_id, id)?
                     && record.state == FileState::Analyzed
                 {
@@ -618,12 +639,44 @@ impl Registry {
         let read = self.db.begin_read()?;
         Ok(read.open_table(PENDING)?.len()?)
     }
+
+    /// Open one fixed view of the registry, for a query to plan and execute
+    /// against.
+    ///
+    /// A scan whose partitions walk the registry while they run needs every
+    /// partition to see the same state; a read transaction is how redb gives
+    /// that. See [`RegistrySnapshot`](crate::snapshot::RegistrySnapshot).
+    pub fn snapshot(&self) -> Result<crate::snapshot::RegistrySnapshot> {
+        Ok(crate::snapshot::RegistrySnapshot::new(self.db.begin_read()?))
+    }
 }
 
 /// Big-endian, so redb's lexicographic byte ordering is numeric ordering. The
 /// collector's queue reads ascending file ids straight out of that.
 fn file_key(id: FileId) -> [u8; 8] {
     id.to_be_bytes()
+}
+
+/// The path index's value: id, then size.
+fn path_entry(id: FileId, size: u64) -> [u8; 16] {
+    let mut entry = [0u8; 16];
+    entry[..8].copy_from_slice(&id.to_be_bytes());
+    entry[8..].copy_from_slice(&size.to_be_bytes());
+    entry
+}
+
+/// Decode a path-index value, tolerating the 8-byte form written before sizes
+/// were carried here. `None` for the size means "not recorded", which shards a
+/// scan by count rather than by bytes — the pre-migration behaviour, for the
+/// files that have not been rediscovered yet.
+pub(crate) fn read_path_entry(bytes: &[u8]) -> Result<(FileId, Option<u64>)> {
+    match bytes.len() {
+        8 => Ok((read_u64(bytes)?, None)),
+        16 => Ok((read_u64(&bytes[..8])?, Some(read_u64(&bytes[8..])?))),
+        other => Err(FileStatsError::Registry(format!(
+            "a path entry is 8 or 16 bytes, got {other}"
+        ))),
+    }
 }
 
 fn column_key(id: ColumnId) -> [u8; 4] {
@@ -648,7 +701,7 @@ fn encode_record(record: &FileRecord) -> Result<Vec<u8>> {
     bincode::serialize(record).map_err(|e| FileStatsError::Registry(format!("file record: {e}")))
 }
 
-fn read_record<T>(table: &T, id: FileId) -> Result<Option<FileRecord>>
+pub(crate) fn read_record<T>(table: &T, id: FileId) -> Result<Option<FileRecord>>
 where
     T: ReadableTable<&'static [u8], &'static [u8]>,
 {

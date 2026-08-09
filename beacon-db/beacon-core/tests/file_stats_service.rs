@@ -1081,3 +1081,104 @@ async fn registry_listing_stays_off_by_default() {
     );
     assert_eq!(files_in_plan(&plan), 1, "{plan}");
 }
+
+/// A `SELECT *` plans as a walk, not as a list: the plan says `mode=streaming`
+/// and nothing was enumerated to build it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registry_listing_streams_when_there_is_nothing_to_prune() {
+    let root = tempfile::tempdir().unwrap();
+    for i in 0..5 {
+        write_parquet(
+            &root.path().join(format!("datasets/obs/{i}.parquet")),
+            i as f64,
+            i as f64 + 1.0,
+        );
+    }
+
+    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
+    assert!(
+        plan.contains("mode=streaming"),
+        "a scan with no predicate must walk the registry rather than list it:\n{plan}"
+    );
+
+    let rows = query(
+        &runtime,
+        "SELECT count(*) AS n FROM read_parquet('obs/*.parquet')",
+    )
+    .await;
+    assert!(rows.contains("10"), "five files of two rows each:\n{rows}");
+}
+
+/// A predicate the statistics cannot answer must not cost an enumeration: the
+/// scan streams instead of naming candidates it could never drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registry_listing_streams_a_predicate_it_cannot_prune_on() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/b.parquet"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    // DEPTH is recorded, so pruning applies and the plan names its survivors.
+    let known = explain(
+        &runtime,
+        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert!(known.contains("mode=pruned"), "{known}");
+
+    // A literal predicate names no column at all, so there is nothing to prune
+    // on and nothing to enumerate.
+    let unknown = explain(
+        &runtime,
+        "SELECT * FROM read_parquet('obs/*.parquet') WHERE 1 = 1",
+    )
+    .await;
+    assert!(
+        unknown.contains("mode=streaming"),
+        "an unprunable predicate must not trigger an enumeration:\n{unknown}"
+    );
+}
+
+/// A discovery pass landing mid-query must not change what a running scan
+/// reads. The snapshot is opened at plan time and every partition shares it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_planned_scan_ignores_files_discovered_after_it_planned() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let before = query(
+        &runtime,
+        "SELECT count(*) AS n FROM read_parquet('obs/*.parquet')",
+    )
+    .await;
+    assert!(before.contains('2'), "one file of two rows:\n{before}");
+
+    write_parquet(&root.path().join("datasets/obs/b.parquet"), 90.0, 100.0);
+    // Not discovered yet: the registry has never seen it, so the scan does not.
+    let unseen = query(
+        &runtime,
+        "SELECT count(*) AS n FROM read_parquet('obs/*.parquet')",
+    )
+    .await;
+    assert!(
+        unseen.contains('2'),
+        "a file the registry has not seen is not in a registry-planned scan:\n{unseen}"
+    );
+
+    // After discovery it is.
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+    let after = query(
+        &runtime,
+        "SELECT count(*) AS n FROM read_parquet('obs/*.parquet')",
+    )
+    .await;
+    assert!(after.contains('4'), "both files once discovery has run:\n{after}");
+}
