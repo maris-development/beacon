@@ -1,64 +1,47 @@
-//! [`FastObjectTable`]: Beacon's listing table, without the listing.
+//! [`FastObjectTable`]: Beacon's listing table.
 //!
-//! This is a `TableProvider` in its own right — there is no `ListingTable`
-//! inside it. It owns the four things such a table needs (a format, its URLs,
-//! a schema, a partition target) and it answers `scan` by building a
-//! [`FastObjectDataSource`], whose partitions are cursors rather than file
-//! lists.
+//! A `TableProvider` in its own right — there is no `ListingTable` inside it.
+//! It owns the four things such a table needs (a format, its URLs, a schema, a
+//! partition target) and answers `scan` by listing the store once and handing
+//! the result to a [`FastObjectDataSource`], which reads it a chunk at a time.
 //!
-//! # Where its files come from
+//! # Why not `ListingTable`
 //!
-//! In order of preference:
+//! `ListingTable` turns its listing into one `PartitionedFile` per file —
+//! ~280 bytes plus a path, fixed at plan time, and there is no way to give it a
+//! list or to make it lazy. At three million files that is over a gigabyte,
+//! per plan, per concurrent query. This provider keeps the store's own
+//! `ObjectMeta`s instead and builds a `PartitionedFile` only at the moment a
+//! file is opened.
 //!
-//! 1. **A registry walk.** [`shard_prefix`](beacon_file_stats::RegistrySnapshot::shard_prefix)
-//!    cuts the prefix into disjoint, byte-balanced path ranges by reading only
-//!    the path index — no record decoded, no path allocated, no list built. A
-//!    `SELECT *` over three million files plans in constant memory.
-//! 2. **A registry walk with pruning.** When a predicate can actually use the
-//!    stored statistics, [`prune_files`](beacon_file_stats::prune_files) names
-//!    the survivors and the plan carries their 8-byte ids. Enumeration is
-//!    inherent to pruning — a predicate is evaluated per candidate — so it is
-//!    paid only when it can pay off, decided by one index lookup per predicate
-//!    column rather than by enumerating to find out.
-//! 3. **A store listing.** A collection the registry has never seen, or one
-//!    whose operator has not opted into registry listing. The objects are
-//!    materialised, as they are on any listing path, and handed to the same
-//!    source; nothing becomes a `PartitionedFile` and nothing is grouped up
-//!    front. Recorded statistics still prune this list, so a store the
-//!    registry knows but does not list for is no worse off than before.
+//! # Pruning
 //!
-//! One [`RegistrySnapshot`](beacon_file_stats::RegistrySnapshot) is opened per
-//! scan and shared by every partition, so a discovery pass landing mid-query
-//! cannot change what a running scan reads.
+//! When the file-statistics store can answer a predicate, the scan carries it
+//! and applies it *while reading* — see [`StreamPruning`]. The planner compiles
+//! the predicate and stops; no segment is read to build the plan. Deciding
+//! whether it is worth carrying costs one index lookup per predicate column,
+//! because a predicate naming no recorded column cannot drop a file.
 //!
-//! # Schema
+//! # Formats that own their file list
 //!
-//! Inferred once, at construction, and merged across URLs through the
-//! session's [`ArrowTypeWidening`] strategy — Beacon's super typing unless a
-//! deployment registered its own. The files it infers from come from the
-//! registry when it knows them, which removes the listing but not the reads;
-//! removing those needs schema interning, which is not built yet.
+//! Zarr's `create_physical_plan` expands a store *directory* into partitions,
+//! so it has to see the objects itself. Those formats take
+//! [`plan_materialized`](FastObjectTable::plan_materialized), which hands the
+//! list over and prunes afterwards — pruning objects first could drop a store's
+//! `zarr.json` and orphan its children.
 //!
 //! # What `EXPLAIN` shows
 //!
-//! `FastObjectScan: mode=…, files=N, pruned=M, partitions=K`. There is no file
-//! list to print, so the `file_stats_files_considered` and `_pruned` counters
-//! under the node are the evidence that pruning ran.
-//!
-//! # The visibility trade
-//!
-//! A registry-planned scan sees a file once discovery has run, not the moment
-//! it lands. [`RegistryListingSwitch`] therefore defaults to off, and with it
-//! off this table lists the store like any other. Deletion is the exception: a
-//! tombstoned file drops out at once.
+//! `FastObjectScan: files=N, partitions=K[, prune=stream]`. How many files a
+//! predicate removes is not known until the scan runs, so the
+//! `file_stats_files_considered` and `_pruned` counters under the node report
+//! it in `EXPLAIN ANALYZE`.
 
 use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
 
-use beacon_file_stats::{
-    FileStatsStore, PathShard, RegistrySnapshot, SharedSnapshot,
-};
+use beacon_file_stats::FileStatsStore;
 use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::{Session, TableProvider},
@@ -82,26 +65,10 @@ use datafusion::{
 use futures::TryStreamExt;
 use object_store::ObjectMeta;
 
-use crate::fast_object_data_source::{
-    FastObjectDataSource, Identities, ShardQuery, StreamPruning, projected_schema_of,
-};
+use crate::fast_object_data_source::{FastObjectDataSource, StreamPruning, projected_schema_of};
 use crate::type_widening::{ArrowTypeWidening, SuperTypeWidening};
 
-/// Whether scans may plan their file lists from the registry.
-///
-/// A session-config extension, registered by the runtime builder from
-/// `FileStatsConfig`. Absent or disabled means every scan lists the store,
-/// which is today's behaviour.
-///
-/// A switch of its own rather than a field on the statistics-store handle: the
-/// store existing means pruning is *possible*, while this means the operator
-/// accepted the visibility trade documented on this module.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RegistryListingSwitch {
-    pub enable: bool,
-}
-
-/// A table over objects, scanned through cursors rather than file lists.
+/// A table over objects, read through a streaming scan.
 #[derive(Debug)]
 pub struct FastObjectTable {
     format: Arc<dyn FileFormat>,
@@ -157,11 +124,7 @@ impl FastObjectTable {
     }
 }
 
-/// Infer one URL's schema, from the registry's files when it knows them.
-///
-/// The registry carries every field an `ObjectMeta` needs, so this removes the
-/// listing. It does not remove the per-file reads the format performs — that
-/// needs schema interning, which is not built yet.
+/// Infer one URL's schema from the files it currently lists.
 async fn infer_schema(
     state: &SessionState,
     format: &dyn FileFormat,
@@ -169,29 +132,13 @@ async fn infer_schema(
     extension: &str,
 ) -> Result<SchemaRef, DataFusionError> {
     let store = state.runtime_env().object_store(url)?;
-
-    let ignore_subdirectory = state
-        .config_options()
-        .execution
-        .listing_table_ignore_subdirectory;
-    let from_registry = beacon_file_stats::try_file_stats_from_session(state)
-        .filter(|_| registry_listing_enabled(state))
-        .and_then(|store| store.registry().snapshot().ok())
-        .and_then(|snapshot| {
-            let objects = objects_under(&snapshot, url, extension, ignore_subdirectory)?;
-            (!objects.is_empty()).then_some(objects)
-        });
-
-    let objects = match from_registry {
-        Some(objects) => objects,
-        None => {
-            url.list_all_files(state, store.as_ref(), extension)
-                .await?
-                .try_filter(|meta| futures::future::ready(meta.size > 0))
-                .try_collect()
-                .await?
-        }
-    };
+    let objects: Vec<ObjectMeta> = url
+        .list_all_files(state, store.as_ref(), extension)
+        .await?
+        // An empty file cannot affect the schema but may throw when read for it.
+        .try_filter(|meta| futures::future::ready(meta.size > 0))
+        .try_collect()
+        .await?;
 
     format.infer_schema(state, &store, &objects).await
 }
@@ -250,7 +197,7 @@ impl TableProvider for FastObjectTable {
                 projection,
             )?)));
         };
-        let (file_source, projected_schema) = self.scan_parts(projection)?;
+        let (file_source, _) = self.scan_parts(projection)?;
 
         if self.format_owns_file_list() {
             return self
@@ -258,22 +205,6 @@ impl TableProvider for FastObjectTable {
                 .await;
         }
 
-        let plan = self
-            .plan_from_registry(
-                state,
-                &object_store_url,
-                &file_source,
-                &projected_schema,
-                filters,
-                limit,
-            )
-            .await;
-        if let Some(plan) = plan {
-            return Ok(plan);
-        }
-
-        // No registry for these paths: list the store, as any table must when
-        // nothing has recorded what is there.
         self.plan_from_listing(
             state,
             &object_store_url,
@@ -348,7 +279,7 @@ impl FastObjectTable {
         }
 
         let groups: Vec<FileGroup> =
-            byte_balanced_ranges(objects.iter().map(|meta| meta.size), self.target_partitions)
+            cost_balanced_ranges(objects.iter().map(|meta| meta.size), self.target_partitions)
                 .into_iter()
                 .map(|range| {
                     FileGroup::new(
@@ -375,60 +306,6 @@ impl FastObjectTable {
         Ok(beacon_file_stats::prune_scan(state, plan, filters, self.schema()).await)
     }
 
-    /// Plan from the registry, or `None` when it cannot serve these paths.
-    async fn plan_from_registry(
-        &self,
-        state: &dyn Session,
-        object_store_url: &ObjectStoreUrl,
-        file_source: &Arc<dyn FileSource>,
-        projected_schema: &SchemaRef,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Option<Arc<dyn ExecutionPlan>> {
-        if !registry_listing_enabled(state) {
-            return None;
-        }
-        let store = beacon_file_stats::try_file_stats_from_session(state)?;
-        // One view of the registry for the whole query, so a discovery pass
-        // landing mid-scan cannot change what a running partition reads.
-        let snapshot: SharedSnapshot = Arc::new(store.registry().snapshot().ok()?);
-
-        let ignore_subdirectory = state
-            .config_options()
-            .execution
-            .listing_table_ignore_subdirectory;
-
-        // Cut the prefix into path ranges. This reads the path index and
-        // nothing else: no record is decoded, no segment is opened, no file
-        // list is built.
-        let identities = self.shard_identities(&snapshot, ignore_subdirectory)?;
-        if identities.partitions() == 0 {
-            return Some(Arc::new(EmptyExec::new(Arc::clone(projected_schema))));
-        }
-
-        // Compile the predicate, and stop. Which files it rules out is decided
-        // by the partitions themselves, while they read — see `StreamPruning`.
-        let pruning = self.stream_pruning(state, &store, &snapshot, filters);
-
-        tracing::debug!(
-            files = identities.files(),
-            partitions = identities.partitions(),
-            prunes = pruning.is_some(),
-            "planned a scan from the file-statistics registry"
-        );
-        self.build_plan(
-            state,
-            object_store_url,
-            Arc::clone(file_source),
-            Some(snapshot),
-            identities,
-            pruning,
-            limit,
-        )
-        .await
-        .ok()
-    }
-
     /// The pruning a partition will apply as it reads, or `None` when there is
     /// none worth applying.
     ///
@@ -440,14 +317,13 @@ impl FastObjectTable {
         &self,
         state: &dyn Session,
         store: &Arc<FileStatsStore>,
-        snapshot: &RegistrySnapshot,
         filters: &[Expr],
     ) -> Option<StreamPruning> {
         if filters.is_empty() {
             return None;
         }
         let columns = predicate_columns(state, &self.schema, filters)?;
-        if !knows_any(snapshot, &columns) {
+        if !knows_any(store, &columns) {
             return None;
         }
         Some(StreamPruning {
@@ -475,8 +351,8 @@ impl FastObjectTable {
         state: &dyn Session,
         object_store_url: &ObjectStoreUrl,
         file_source: Arc<dyn FileSource>,
-        snapshot: Option<SharedSnapshot>,
-        identities: Identities,
+        objects: Arc<Vec<ObjectMeta>>,
+        ranges: Arc<Vec<Range<usize>>>,
         pruning: Option<StreamPruning>,
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
@@ -526,8 +402,8 @@ impl FastObjectTable {
             effective_source,
             object_store_url.clone(),
             scan_schema,
-            snapshot,
-            identities,
+            objects,
+            ranges,
             pruning,
             limit,
             statistics,
@@ -538,62 +414,6 @@ impl FastObjectTable {
             plan = wrapper.with_new_children(vec![plan])?;
         }
         Ok(plan)
-    }
-
-    /// Partitions as path ranges. Nothing is enumerated.
-    fn shard_identities(
-        &self,
-        snapshot: &RegistrySnapshot,
-        ignore_subdirectory: bool,
-    ) -> Option<Identities> {
-        // The partition budget is chosen, then divided between the URLs; it is
-        // never derived from a file count.
-        let per_url = (self.target_partitions / self.urls.len().max(1)).max(1);
-
-        let mut shards: Vec<ShardQuery> = Vec::new();
-        let mut estimate = 0u64;
-        for url in &self.urls {
-            let prefix = url.prefix().as_ref().to_string();
-            if !url.is_collection() {
-                // One named file: a range of one, so the same walk applies.
-                let (_, record) = snapshot.record_by_path(&prefix).ok()??;
-                object_store::path::Path::parse(&record.path).ok()?;
-                shards.push(ShardQuery {
-                    prefix: record.path.clone(),
-                    shard: PathShard {
-                        start: record.path.clone().into_bytes(),
-                        end: None,
-                        files: 1,
-                        bytes: record.size,
-                    },
-                });
-                estimate += 1;
-                continue;
-            }
-            let sharded = snapshot.shard_prefix(&prefix, per_url).ok()?;
-            if sharded.files == 0 {
-                // The registry knows nothing here. An empty directory and a
-                // never-discovered one are indistinguishable, and treating the
-                // second as empty would silently hide its files.
-                return None;
-            }
-            estimate += sharded.files;
-            shards.extend(sharded.shards.into_iter().map(|shard| ShardQuery {
-                prefix: prefix.clone(),
-                shard,
-            }));
-        }
-        if shards.is_empty() {
-            return None;
-        }
-
-        let _ = estimate;
-        Some(Identities::Shards {
-            extension: self.extension.clone(),
-            urls: Arc::new(self.urls.clone()),
-            ignore_subdirectory,
-            shards: Arc::new(shards),
-        })
     }
 
     /// Plan from a store listing: the shape a collection with no registry
@@ -634,36 +454,22 @@ impl FastObjectTable {
         // runs in the stream for the same reason it does there: the planner
         // should not block on segment reads.
         let pruning = beacon_file_stats::try_file_stats_from_session(state)
-            .and_then(|store| {
-                let snapshot = store.registry().snapshot().ok()?;
-                self.stream_pruning(state, &store, &snapshot, filters)
-            });
+            .and_then(|store| self.stream_pruning(state, &store, filters));
 
         let ranges =
-            byte_balanced_ranges(objects.iter().map(|meta| meta.size), self.target_partitions);
+            cost_balanced_ranges(objects.iter().map(|meta| meta.size), self.target_partitions);
         self.build_plan(
             state,
             object_store_url,
             file_source,
-            None,
-            Identities::Listed {
-                objects: Arc::new(objects),
-                ranges: Arc::new(ranges),
-            },
+            Arc::new(objects),
+            Arc::new(ranges),
             pruning,
             limit,
         )
         .await
     }
 
-}
-
-/// Whether the operator opted into registry-planned scans.
-fn registry_listing_enabled(state: &dyn Session) -> bool {
-    state
-        .config()
-        .get_extension::<RegistryListingSwitch>()
-        .is_some_and(|switch| switch.enable)
 }
 
 /// The predicate `filters` form, as one physical expression over `schema`.
@@ -698,18 +504,38 @@ fn predicate_columns(
 /// One lookup per column. A predicate over columns the registry has never seen
 /// cannot drop a file, and enumerating the collection to discover that would
 /// be the entire cost of pruning for none of its benefit.
-fn knows_any(snapshot: &RegistrySnapshot, columns: &[String]) -> bool {
-    let names: Vec<&str> = columns.iter().map(String::as_str).collect();
-    snapshot.knows_any_column(&names).unwrap_or(false)
+fn knows_any(store: &FileStatsStore, columns: &[String]) -> bool {
+    columns
+        .iter()
+        .any(|name| matches!(store.registry().column_id(name), Ok(Some(_))))
 }
 
-/// Divide `sizes` into at most `target` contiguous ranges of roughly equal
-/// bytes.
+/// What opening one file is worth, in bytes, when balancing partitions.
 ///
-/// By bytes rather than by count, because a count split lets one partition
-/// draw every large file — the straggler DataFusion's `FileGroupPartitioner`
-/// exists to prevent. Sizeless input falls back to an even count split.
-fn byte_balanced_ranges(
+/// Opening a file is a round trip and a metadata read whatever it holds, so a
+/// partition of a thousand small files is not cheap merely because it holds few
+/// bytes. A megabyte is the order of magnitude that makes a file's fixed cost
+/// comparable to reading it: below that, count dominates the split; well above
+/// it, size does.
+const FILE_OPEN_COST: u64 = 1024 * 1024;
+
+/// Divide `sizes` into at most `target` contiguous ranges of roughly equal
+/// *cost*, where a file costs its size plus [`FILE_OPEN_COST`].
+///
+/// Balancing on bytes alone strands files: one large file among small ones
+/// takes a whole partition's byte share by itself, so every remaining file
+/// falls into the next — and once the budget is spent on such partitions, the
+/// last one absorbs the rest. Measured on 12 000 files with 11 large ones at
+/// the front, that produced partitions of 3, 3, 3, 27, seven of 1000, and one
+/// of 4964. Counting files alone has the mirror problem: one partition draws
+/// every large file. Adding the two together handles both, and gives sizeless
+/// input a plain count split for free.
+///
+/// Ranges are cut against cumulative boundaries rather than a per-partition
+/// budget that resets, because a budget re-rounds on every cut and the error
+/// accumulates — four files of near-equal cost over four partitions came out
+/// as 1, 2, 1.
+fn cost_balanced_ranges(
     sizes: impl Iterator<Item = u64> + Clone,
     target: usize,
 ) -> Vec<Range<usize>> {
@@ -718,27 +544,23 @@ fn byte_balanced_ranges(
     if count == 0 {
         return Vec::new();
     }
-    let total: u64 = sizes.clone().sum();
-    if total == 0 {
-        let per_group = count.div_ceil(target);
-        return (0..count)
-            .step_by(per_group)
-            .map(|start| start..(start + per_group).min(count))
-            .collect();
-    }
+    let total: u128 = sizes
+        .clone()
+        .map(|size| (size + FILE_OPEN_COST) as u128)
+        .sum();
 
-    // Close a range once it holds its share of the bytes. Every closed range
-    // has at least `share` bytes, so at most `target` ranges form.
-    let share = total.div_ceil(target as u64);
     let mut ranges = Vec::with_capacity(target);
     let mut start = 0usize;
-    let mut run = 0u64;
+    let mut cumulative = 0u128;
     for (index, size) in sizes.enumerate() {
-        run += size;
-        if run >= share {
+        cumulative += (size + FILE_OPEN_COST) as u128;
+        // `cumulative >= (closed + 1) / target * total`, without dividing.
+        let full = cumulative * target as u128 >= (ranges.len() as u128 + 1) * total;
+        // Never cut after the last file: that would leave a trailing range
+        // covering nothing.
+        if full && ranges.len() + 1 < target {
             ranges.push(start..index + 1);
             start = index + 1;
-            run = 0;
         }
     }
     if start < count {
@@ -747,93 +569,62 @@ fn byte_balanced_ranges(
     ranges
 }
 
-/// The registry's objects under one URL, when it knows any.
-fn objects_under(
-    snapshot: &RegistrySnapshot,
-    url: &ListingTableUrl,
-    extension: &str,
-    ignore_subdirectory: bool,
-) -> Option<Vec<ObjectMeta>> {
-    let prefix = url.prefix().as_ref().to_string();
-    let mut objects = Vec::new();
-    if url.is_collection() {
-        let shards = snapshot.shard_prefix(&prefix, 1).ok()?;
-        for query in shards.shards {
-            snapshot
-                .for_each_in_shard(&prefix, &query, |_, record| {
-                    if record.size > 0
-                        && record.path.ends_with(extension)
-                        && let Ok(location) = object_store::path::Path::parse(&record.path)
-                        && url.contains(&location, ignore_subdirectory)
-                    {
-                        objects.push(ObjectMeta {
-                            location,
-                            last_modified: chrono::DateTime::from_timestamp_millis(
-                                record.last_modified_millis,
-                            )
-                            .unwrap_or_else(chrono::Utc::now),
-                            size: record.size,
-                            e_tag: record.e_tag.clone(),
-                            version: None,
-                        });
-                    }
-                    true
-                })
-                .ok()?;
-        }
-    } else {
-        let (_, record) = snapshot.record_by_path(&prefix).ok()??;
-        let location = object_store::path::Path::parse(&record.path).ok()?;
-        objects.push(ObjectMeta {
-            location,
-            last_modified: chrono::DateTime::from_timestamp_millis(record.last_modified_millis)
-                .unwrap_or_else(chrono::Utc::now),
-            size: record.size,
-            e_tag: record.e_tag.clone(),
-            version: None,
-        });
-    }
-    Some(objects)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ranges(sizes: &[u64], target: usize) -> Vec<Range<usize>> {
-        byte_balanced_ranges(sizes.iter().copied(), target)
+        cost_balanced_ranges(sizes.iter().copied(), target)
     }
 
-    /// The point of balancing on bytes: one large file must not drag every
-    /// small one into its partition.
+    /// Files far below the open cost split by count.
     #[test]
-    fn balancing_isolates_the_large_file() {
-        assert_eq!(ranges(&[1000, 10, 10, 10], 4), vec![0..1, 1..4]);
+    fn small_files_split_by_count() {
+        assert_eq!(ranges(&[1_000; 4], 4), vec![0..1, 1..2, 2..3, 3..4]);
+        assert_eq!(ranges(&[1_000; 4], 2), vec![0..2, 2..4]);
     }
 
-    /// Ranges stay contiguous, cover every file once, and never exceed the
+    /// A file large enough to dominate its own open cost stands alone.
+    #[test]
+    fn a_large_file_takes_its_own_partition() {
+        let mut sizes = vec![64 * 1024 * 1024];
+        sizes.extend([1_000u64; 11]);
+        let ranges = ranges(&sizes, 4);
+        assert_eq!(ranges[0], 0..1, "64 MiB outweighs eleven small files");
+    }
+
+    /// Front-loaded skew must not strand the rest in one partition — the
+    /// regression that produced 3, 3, 3, 27, ..., 4964.
+    #[test]
+    fn front_loaded_skew_spreads_across_the_budget() {
+        let mut sizes = vec![900_000u64; 11];
+        sizes.extend(vec![1_000u64; 1_189]);
+        let ranges = ranges(&sizes, 12);
+        assert_eq!(ranges.len(), 12, "every partition gets work");
+
+        let largest = ranges.iter().map(|r| r.len()).max().unwrap();
+        let smallest = ranges.iter().map(|r| r.len()).min().unwrap();
+        assert!(
+            largest <= smallest * 2,
+            "partitions must stay within a factor of two: {:?}",
+            ranges.iter().map(|r| r.len()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Ranges are contiguous, cover every file once, and never exceed the
     /// target.
     #[test]
-    fn balancing_respects_the_partition_target() {
-        let sizes = vec![100u64; 10];
-        let ranges = ranges(&sizes, 4);
-        assert!(ranges.len() <= 4, "got {} ranges", ranges.len());
+    fn ranges_tile_the_listing() {
+        let ranges = ranges(&[100; 10], 4);
+        assert!(ranges.len() <= 4);
         assert_eq!(ranges.iter().map(|r| r.len()).sum::<usize>(), 10);
         for pair in ranges.windows(2) {
-            assert_eq!(pair[0].end, pair[1].start, "ranges must be contiguous");
+            assert_eq!(pair[0].end, pair[1].start);
         }
     }
 
-    /// Sizeless input falls back to a count split rather than one giant range.
     #[test]
-    fn balancing_zero_bytes_falls_back_to_count() {
-        let ranges = ranges(&[0; 8], 4);
-        assert_eq!(ranges.len(), 4);
-        assert!(ranges.iter().all(|r| r.len() == 2));
-    }
-
-    #[test]
-    fn an_empty_input_yields_no_ranges() {
+    fn an_empty_listing_yields_no_ranges() {
         assert!(ranges(&[], 4).is_empty());
     }
 }

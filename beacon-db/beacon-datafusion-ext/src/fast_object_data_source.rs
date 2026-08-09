@@ -1,30 +1,25 @@
-//! [`FastObjectDataSource`]: a scan whose partitions are cursors, and whose
-//! pruning happens while it reads.
+//! [`FastObjectDataSource`]: a scan that prunes and reads at the same time.
 //!
 //! # What this replaces
 //!
 //! DataFusion's own [`DataSource`] for files is `FileScanConfig`, whose file
 //! list is `Vec<FileGroup>` of `Vec<PartitionedFile>` — ~280 bytes plus a path
-//! per file, fixed at plan time. At three million files that is over a
-//! gigabyte, per plan, per concurrent query, built before the first byte is
-//! read. This source holds none of it. A partition is a cursor: a path range
-//! of the registry, or a slice of an already-listed store. File identities are
-//! produced one chunk at a time while the scan runs, and dropped once opened.
+//! per file, fixed at plan time, and built before a byte is read. This source
+//! holds the listing's own [`ObjectMeta`]s instead, which are what the store
+//! reported and what a reader needs, and turns one into a `PartitionedFile`
+//! only at the moment it opens it.
 //!
-//! # Pruning is part of the stream
+//! # Pruning runs beside the reading, not before it
 //!
-//! Statistics pruning used to be a plan-time phase: name every candidate, read
-//! the segments its predicate columns live in, and hand the survivors to the
-//! plan. That blocks the planner on object-store reads, serially, before the
-//! query starts — and the work it does is exactly the work the scan is about
-//! to do anyway.
+//! Pruning used to be a plan-time phase: name every candidate, read the
+//! segments its predicate columns live in, and hand the survivors to the plan.
+//! That blocks the planner on reads, serially, before the query starts.
 //!
-//! So it moved into the stream. The planner compiles the predicate (pure CPU,
-//! no I/O) and stops. Each partition then walks its own range and, chunk by
-//! chunk, asks [`prune_files`](beacon_file_stats::prune_files) which of *those*
-//! files can match — reading only the segments that chunk needs, in parallel
-//! with every other partition and pipelined with the file reads. A predicate
-//! that rules out a whole chunk costs one segment read and no file opens.
+//! Here each partition takes its files a chunk at a time, and the chunk after
+//! the one being read is pruned *while* it is read: the prune is spawned, so it
+//! makes progress on another worker rather than waiting to be polled. A
+//! partition therefore alternates nothing — it reads continuously, and the next
+//! chunk's survivors are usually decided by the time it needs them.
 //!
 //! The visible consequence: `EXPLAIN` cannot say how many files were pruned,
 //! because nothing has been pruned yet. `EXPLAIN ANALYZE` reports it, from the
@@ -55,13 +50,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use beacon_file_stats::{FileId, FileRecord, FileStatsStore, PathShard, SharedSnapshot};
-use chrono::TimeZone;
+use beacon_file_stats::{FileId, FileStatsStore};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result, Statistics};
 use datafusion::config::ConfigOptions;
-use datafusion::datasource::listing::{ListingTableUrl, PartitionedFile};
+use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{
     FileOpenFuture, FileOpener, FileScanConfigBuilder, FileSource,
 };
@@ -76,12 +70,12 @@ use datafusion::physical_plan::execution_plan::SchedulingType;
 use datafusion::physical_plan::filter_pushdown::FilterPushdownPropagation;
 use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder};
 use datafusion::physical_plan::{DisplayFormatType, Partitioning};
-use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::{FutureExt, Stream};
+use futures::Stream;
 use object_store::ObjectMeta;
+use tokio::task::JoinHandle;
 
-/// Files a cursor produces per step, and so the batch one prune call covers.
+/// Files a partition takes per step, and so the batch one prune call covers.
 ///
 /// Sized against a segment rather than a page: the collector writes ~10 000
 /// files per segment, so a chunk this size reads about one segment's block per
@@ -89,72 +83,7 @@ use object_store::ObjectMeta;
 /// much larger and the first rows wait longer.
 const CHUNK: usize = 4096;
 
-/// One streaming partition: a path range, and the prefix that bounds it.
-///
-/// The prefix travels with the shard rather than with the scan, because a
-/// table over several URLs cuts each one's shards under its own prefix. A
-/// shared prefix would let the last shard of one URL — which has no end bound
-/// — walk into the next URL's range.
-#[derive(Debug, Clone)]
-pub struct ShardQuery {
-    pub prefix: String,
-    pub shard: PathShard,
-}
-
-/// How a partition learns which files it reads.
-#[derive(Debug, Clone)]
-pub enum Identities {
-    /// Walk a path range of the registry. Nothing was enumerated to plan this.
-    Shards {
-        /// The extension a walked path must carry, and the URLs whose globs
-        /// decide whether it belongs to this table. Any URL matching is
-        /// enough: a file under one table path must not be dropped for failing
-        /// another's glob.
-        extension: String,
-        urls: Arc<Vec<ListingTableUrl>>,
-        ignore_subdirectory: bool,
-        shards: Arc<Vec<ShardQuery>>,
-    },
-    /// Step through objects a store listing already reported. The shape a
-    /// collection with no registry gets: no worse than the listing path, and
-    /// still no `PartitionedFile` vector.
-    Listed {
-        objects: Arc<Vec<ObjectMeta>>,
-        ranges: Arc<Vec<Range<usize>>>,
-    },
-}
-
-impl Identities {
-    /// How many partitions this scan runs.
-    pub fn partitions(&self) -> usize {
-        match self {
-            Identities::Shards { shards, .. } => shards.len(),
-            Identities::Listed { ranges, .. } => ranges.len(),
-        }
-    }
-
-    /// Files this scan may read, before any predicate has been applied.
-    ///
-    /// An estimate while streaming: it is what the registry saw when the
-    /// shards were cut, before each URL's glob had its say per file and before
-    /// pruning ran — which now happens while the scan reads.
-    pub fn files(&self) -> u64 {
-        match self {
-            Identities::Shards { shards, .. } => shards.iter().map(|q| q.shard.files).sum(),
-            Identities::Listed { objects, .. } => objects.len() as u64,
-        }
-    }
-
-    /// How this scan learns its files, for `EXPLAIN`.
-    pub fn mode(&self) -> &'static str {
-        match self {
-            Identities::Shards { .. } => "streaming",
-            Identities::Listed { .. } => "listed",
-        }
-    }
-}
-
-/// Everything the stream needs to drop files a predicate rules out.
+/// Everything a partition needs to drop files a predicate rules out.
 ///
 /// Built at plan time, which costs no I/O: the predicate is compiled and the
 /// store handle cloned. Every read it implies happens while the scan runs.
@@ -175,7 +104,7 @@ impl fmt::Debug for StreamPruning {
     }
 }
 
-/// A file scan that holds cursors instead of files.
+/// A file scan that reads a listing and prunes as it goes.
 pub struct FastObjectDataSource {
     /// The format's reader, and the owner of projection and filter pushdown.
     file_source: Arc<dyn FileSource>,
@@ -183,10 +112,10 @@ pub struct FastObjectDataSource {
     object_store_url: ObjectStoreUrl,
     /// The scan's output schema, projection applied.
     projected_schema: SchemaRef,
-    /// One view of the registry for the whole query. Absent when the
-    /// identities came from a store listing.
-    snapshot: Option<SharedSnapshot>,
-    identities: Identities,
+    /// The listing, shared by every partition; a partition reads one range of
+    /// it. These are the store's own metadata, not per-file plan objects.
+    objects: Arc<Vec<ObjectMeta>>,
+    ranges: Arc<Vec<Range<usize>>>,
     /// Present when a predicate can be answered from stored statistics.
     pruning: Option<StreamPruning>,
     limit: Option<usize>,
@@ -199,8 +128,8 @@ impl FastObjectDataSource {
         file_source: Arc<dyn FileSource>,
         object_store_url: ObjectStoreUrl,
         projected_schema: SchemaRef,
-        snapshot: Option<SharedSnapshot>,
-        identities: Identities,
+        objects: Arc<Vec<ObjectMeta>>,
+        ranges: Arc<Vec<Range<usize>>>,
         pruning: Option<StreamPruning>,
         limit: Option<usize>,
         statistics: Statistics,
@@ -209,21 +138,22 @@ impl FastObjectDataSource {
             file_source,
             object_store_url,
             projected_schema,
-            snapshot,
-            identities,
+            objects,
+            ranges,
             pruning,
             limit,
             statistics,
         }
     }
 
-    /// How this scan learns its files. For diagnostics and tests.
-    pub fn identities(&self) -> &Identities {
-        &self.identities
+    /// The listing this scan reads. For diagnostics and tests.
+    pub fn objects(&self) -> &Arc<Vec<ObjectMeta>> {
+        &self.objects
     }
 
-    pub fn snapshot(&self) -> Option<&SharedSnapshot> {
-        self.snapshot.as_ref()
+    /// One index range per partition.
+    pub fn ranges(&self) -> &[Range<usize>] {
+        &self.ranges
     }
 
     /// Whether a predicate is applied while this scan reads.
@@ -244,8 +174,8 @@ impl FastObjectDataSource {
             file_source,
             object_store_url: self.object_store_url.clone(),
             projected_schema,
-            snapshot: self.snapshot.clone(),
-            identities: self.identities.clone(),
+            objects: Arc::clone(&self.objects),
+            ranges: Arc::clone(&self.ranges),
             pruning: self.pruning.clone(),
             limit: self.limit,
             statistics,
@@ -265,10 +195,9 @@ pub fn projected_schema_of(file_source: &Arc<dyn FileSource>) -> Result<SchemaRe
 impl fmt::Debug for FastObjectDataSource {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("FastObjectDataSource")
-            .field("mode", &self.identities.mode())
-            .field("files", &self.identities.files())
+            .field("files", &self.objects.len())
             .field("prunes", &self.prunes())
-            .field("partitions", &self.identities.partitions())
+            .field("partitions", &self.ranges.len())
             .field("file_type", &self.file_source.file_type())
             .finish()
     }
@@ -293,55 +222,37 @@ impl DataSource for FastObjectDataSource {
                 .build();
         let opener = file_source.create_file_opener(store, &opener_config, partition)?;
 
-        let out_of_range = || {
+        let range = self.ranges.get(partition).cloned().ok_or_else(|| {
             DataFusionError::Internal(format!(
                 "fast object scan asked for partition {partition} of {}",
-                self.identities.partitions()
+                self.ranges.len()
             ))
-        };
-        let cursor = match &self.identities {
-            Identities::Shards {
-                extension,
-                urls,
-                ignore_subdirectory,
-                shards,
-            } => {
-                let query = shards.get(partition).cloned().ok_or_else(out_of_range)?;
-                Cursor::Walk {
-                    prefix: query.prefix,
-                    extension: extension.clone(),
-                    urls: Arc::clone(urls),
-                    ignore_subdirectory: *ignore_subdirectory,
-                    shard: query.shard,
-                    resume: None,
-                    done: false,
-                }
-            }
-            Identities::Listed { objects, ranges } => Cursor::Listed {
-                objects: Arc::clone(objects),
-                range: ranges.get(partition).cloned().ok_or_else(out_of_range)?,
-            },
-        };
+        })?;
 
-        // Counted as the scan runs, not as it plans: with pruning in the
-        // stream, this is the only place the numbers exist.
+        // Counted as the scan runs, not as it plans: with pruning beside the
+        // reading, this is the only place the numbers exist.
         let metrics = self.file_source.metrics();
         let considered = MetricBuilder::new(metrics).global_counter("file_stats_files_considered");
         let pruned = MetricBuilder::new(metrics).global_counter("file_stats_files_pruned");
 
-        Ok(Box::pin(cooperative(FastObjectStream {
+        let mut stream = FastObjectStream {
             schema: Arc::clone(&self.projected_schema),
-            snapshot: self.snapshot.clone(),
-            cursor,
+            objects: Arc::clone(&self.objects),
+            cursor: range,
             pruning: self.pruning.clone(),
-            pending: Vec::new(),
+            inflight: None,
             queue: VecDeque::new(),
             opener,
             state: StreamState::Idle,
             remaining: self.limit,
             considered,
             pruned,
-        })))
+        };
+        // Start the first chunk now, so its pruning overlaps the plan's own
+        // start-up rather than the first poll.
+        stream.begin_chunk();
+
+        Ok(Box::pin(cooperative(stream)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -349,16 +260,14 @@ impl DataSource for FastObjectDataSource {
     }
 
     fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        // No file list to print: the plan holds cursors. `files` is what the
-        // scan may read; how many a predicate removes is not known until it
-        // runs, so `EXPLAIN ANALYZE`'s counters are what report that.
+        // `files` is what the scan may read; how many a predicate removes is
+        // not known until it runs, so `EXPLAIN ANALYZE`'s counters report that.
         write!(
             f,
-            "FastObjectScan: file_type={}, mode={}, files={}, partitions={}",
+            "FastObjectScan: file_type={}, files={}, partitions={}",
             self.file_source.file_type(),
-            self.identities.mode(),
-            self.identities.files(),
-            self.identities.partitions(),
+            self.objects.len(),
+            self.ranges.len(),
         )?;
         if self.prunes() {
             write!(f, ", prune=stream")?;
@@ -370,8 +279,7 @@ impl DataSource for FastObjectDataSource {
     }
 
     fn output_partitioning(&self) -> Partitioning {
-        // Chosen when the scan was planned, never derived from a file list.
-        Partitioning::UnknownPartitioning(self.identities.partitions())
+        Partitioning::UnknownPartitioning(self.ranges.len())
     }
 
     fn eq_properties(&self) -> EquivalenceProperties {
@@ -386,8 +294,6 @@ impl DataSource for FastObjectDataSource {
 
     fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
         match partition {
-            // Row counts are recorded per file, not per cursor; only the
-            // aggregate is claimed.
             Some(_) => Ok(Statistics::new_unknown(self.projected_schema.as_ref())),
             None => Ok(self.statistics.clone()),
         }
@@ -412,7 +318,7 @@ impl DataSource for FastObjectDataSource {
         projection: &ProjectionExprs,
     ) -> Result<Option<Arc<dyn DataSource>>> {
         // The file source owns projection pushdown; adopt its rewrite and keep
-        // the cursors. This is how a narrow `SELECT` reaches the file reader.
+        // the listing. This is how a narrow `SELECT` reaches the file reader.
         match self.file_source.try_pushdown_projection(projection)? {
             Some(file_source) => Ok(Some(Arc::new(self.with_file_source(file_source)?) as _)),
             None => Ok(None),
@@ -453,37 +359,29 @@ impl DataSource for FastObjectDataSource {
     }
 }
 
-/// Where a partition's next file identities come from.
-enum Cursor {
-    /// Walk a path range of the registry, resuming where the last step
-    /// stopped.
-    Walk {
-        prefix: String,
-        extension: String,
-        urls: Arc<Vec<ListingTableUrl>>,
-        ignore_subdirectory: bool,
-        shard: PathShard,
-        /// The key the next step starts at. `None` means the shard's start.
-        resume: Option<Vec<u8>>,
-        done: bool,
-    },
-    /// Step through objects a listing already reported.
-    Listed {
-        objects: Arc<Vec<ObjectMeta>>,
-        range: Range<usize>,
+/// A chunk of the partition's files, on its way to being read.
+enum Chunk {
+    /// Nothing to prune: these are ready to open.
+    Ready(Vec<ObjectMeta>),
+    /// Being decided on another worker, alongside the reading of the chunk
+    /// before it.
+    Pruning {
+        considered: usize,
+        handle: JoinHandle<Vec<ObjectMeta>>,
     },
 }
 
-/// One partition's reader: a cursor to file identities, pruned, opened, read —
-/// a chunk at a time.
+/// One partition's reader: a range of the listing, pruned a chunk ahead and
+/// read a file at a time.
 struct FastObjectStream {
     schema: SchemaRef,
-    snapshot: Option<SharedSnapshot>,
-    cursor: Cursor,
+    objects: Arc<Vec<ObjectMeta>>,
+    /// The part of the listing this partition has not taken yet.
+    cursor: Range<usize>,
     pruning: Option<StreamPruning>,
-    /// The chunk a prune call is deciding on. Empty otherwise.
-    pending: Vec<(Option<FileId>, ObjectMeta)>,
-    /// Files cleared to open. Never longer than [`CHUNK`].
+    /// The chunk after the one being read.
+    inflight: Option<Chunk>,
+    /// Files cleared to open.
     queue: VecDeque<ObjectMeta>,
     opener: Arc<dyn FileOpener>,
     state: StreamState,
@@ -494,10 +392,8 @@ struct FastObjectStream {
 }
 
 enum StreamState {
-    /// No file is open; the next identity in the queue is due.
+    /// No file is open; the next one in the queue is due.
     Idle,
-    /// A chunk's survivors are being decided.
-    Pruning(BoxFuture<'static, Vec<FileId>>),
     /// A file is being opened.
     Opening(FileOpenFuture),
     /// A file's batches are being read, while the next one opens alongside it.
@@ -511,152 +407,85 @@ enum StreamState {
 
 /// The file after the one being read.
 ///
-/// Opening it costs a round trip on object storage, so it starts while the
-/// current file is still being scanned and is waiting by the time it is due —
-/// the same overlap DataFusion's own `FileStream` performs.
+/// Opening it costs a round trip, so it starts while the current file is still
+/// being scanned and is waiting by the time it is due — the same overlap
+/// DataFusion's own `FileStream` performs.
 enum NextOpen {
     Pending(FileOpenFuture),
     Ready(Result<BoxStream<'static, Result<RecordBatch>>>),
 }
 
+/// Drop the files in `chunk` whose recorded ranges say they cannot match.
+///
+/// Runs on its own task, so it overlaps the reading of the previous chunk.
+/// A path the registry has never seen has no statistics and is kept: a
+/// partially analyzed store must not lose files.
+async fn prune_chunk(pruning: StreamPruning, chunk: Vec<ObjectMeta>) -> Vec<ObjectMeta> {
+    let paths: Vec<String> = chunk.iter().map(|m| m.location.to_string()).collect();
+    let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let Ok(ids) = pruning.store.registry().file_ids(&borrowed) else {
+        return chunk;
+    };
+
+    let mut candidates: Vec<FileId> = ids.iter().filter_map(|id| *id).collect();
+    if candidates.is_empty() {
+        return chunk; // nothing here is analyzed, so nothing is prunable
+    }
+    // `prune_files` wants them ascending, and answers ascending.
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let kept = beacon_file_stats::prune_files(
+        &pruning.store,
+        &pruning.predicate,
+        &pruning.table_schema,
+        &candidates,
+    )
+    .await;
+
+    chunk
+        .into_iter()
+        .zip(ids)
+        .filter(|(_, id)| match id {
+            Some(id) => kept.binary_search(id).is_ok(),
+            None => true,
+        })
+        .map(|(meta, _)| meta)
+        .collect()
+}
+
 impl FastObjectStream {
-    /// Take the next chunk of identities from the cursor into `pending`.
+    /// Take the next chunk off the cursor and start deciding it.
     ///
-    /// `Ok(false)` when the cursor is exhausted.
-    fn fill_pending(&mut self) -> Result<bool> {
-        match &mut self.cursor {
-            Cursor::Walk {
-                prefix,
-                extension,
-                urls,
-                ignore_subdirectory,
-                shard,
-                resume,
-                done,
-            } => {
-                if *done {
-                    return Ok(false);
-                }
-                let Some(snapshot) = &self.snapshot else {
-                    return Err(DataFusionError::Internal(
-                        "a registry walk needs a snapshot".to_string(),
-                    ));
-                };
-                // Walk from where the last step stopped, taking one chunk.
-                // `resume` narrows the shard rather than replacing it, so the
-                // shard's own end bound still applies.
-                let mut step = shard.clone();
-                if let Some(resume) = resume.take() {
-                    step.start = resume;
-                }
-                let pending = &mut self.pending;
-                let mut last: Option<Vec<u8>> = None;
-                let mut filled = 0usize;
-                snapshot
-                    .for_each_in_shard(prefix, &step, |id, record| {
-                        last = Some(record.path.as_bytes().to_vec());
-                        if let Some(meta) =
-                            object_meta(&record, urls, extension, *ignore_subdirectory)
-                        {
-                            pending.push((Some(id), meta));
-                            filled += 1;
-                        }
-                        filled < CHUNK
-                    })
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-                match last {
-                    // Resume just past the last key seen, so no file is read
-                    // twice and none is skipped.
-                    Some(key) if filled >= CHUNK => {
-                        let mut next = key;
-                        next.push(0);
-                        *resume = Some(next);
-                    }
-                    _ => *done = true,
-                }
-                Ok(!self.pending.is_empty())
-            }
-            Cursor::Listed { objects, range } => {
-                if range.start >= range.end {
-                    return Ok(false);
-                }
-                let take = (range.end - range.start).min(CHUNK);
-                let chunk = &objects[range.start..range.start + take];
-                range.start += take;
-
-                // A listed store may still be registered, and its ids are what
-                // pruning needs. One batched lookup per chunk; a path the
-                // registry has never seen keeps `None` and is never dropped.
-                let ids = match &self.pruning {
-                    Some(pruning) => {
-                        let paths: Vec<String> =
-                            chunk.iter().map(|meta| meta.location.to_string()).collect();
-                        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
-                        pruning
-                            .store
-                            .registry()
-                            .file_ids(&borrowed)
-                            .unwrap_or_else(|_| vec![None; chunk.len()])
-                    }
-                    None => vec![None; chunk.len()],
-                };
-                self.pending
-                    .extend(ids.into_iter().zip(chunk.iter().cloned()));
-                Ok(true)
-            }
+    /// Called as soon as the previous chunk lands, so the deciding happens
+    /// while that one is read.
+    fn begin_chunk(&mut self) {
+        if self.inflight.is_some() || self.cursor.start >= self.cursor.end {
+            return;
         }
+        let take = (self.cursor.end - self.cursor.start).min(CHUNK);
+        let chunk: Vec<ObjectMeta> = self.objects[self.cursor.start..self.cursor.start + take]
+            .to_vec();
+        self.cursor.start += take;
+
+        self.inflight = Some(match self.pruning.clone() {
+            Some(pruning) => Chunk::Pruning {
+                considered: chunk.len(),
+                handle: tokio::spawn(prune_chunk(pruning, chunk)),
+            },
+            None => Chunk::Ready(chunk),
+        });
     }
 
-    /// The prune call for the chunk now in `pending`, if there is one to make.
-    fn prune_pending(&mut self) -> Option<BoxFuture<'static, Vec<FileId>>> {
-        let pruning = self.pruning.clone()?;
-        let mut ids: Vec<FileId> = self.pending.iter().filter_map(|(id, _)| *id).collect();
-        if ids.is_empty() {
-            return None; // nothing here is registered, so nothing is prunable
-        }
-        // `prune_files` wants them ascending; a path walk is not id order.
-        ids.sort_unstable();
-        ids.dedup();
-        Some(
-            async move {
-                beacon_file_stats::prune_files(
-                    &pruning.store,
-                    &pruning.predicate,
-                    &pruning.table_schema,
-                    &ids,
-                )
-                .await
-            }
-            .boxed(),
-        )
-    }
-
-    /// Move `pending` into the queue, keeping only what `kept` names.
-    ///
-    /// A file the registry has never seen has no statistics, so it stays: a
-    /// partially backfilled store must not lose files. `kept` is ascending, so
-    /// membership is a binary search.
-    fn accept(&mut self, kept: &[FileId]) {
-        let mut dropped = 0usize;
-        for (id, meta) in self.pending.drain(..) {
-            let keep = match id {
-                Some(id) => kept.binary_search(&id).is_ok(),
-                None => true,
-            };
-            if keep {
-                self.queue.push_back(meta);
-            } else {
-                dropped += 1;
-            }
-        }
-        self.pruned.add(dropped);
+    /// Move a decided chunk into the queue and start the next one.
+    fn accept(&mut self, kept: Vec<ObjectMeta>, considered: usize) {
+        self.considered.add(considered);
+        self.pruned.add(considered - kept.len());
+        self.queue.extend(kept);
+        self.begin_chunk();
     }
 
     /// Begin opening the next queued file, if there is one.
-    ///
-    /// Only within a chunk: at a chunk boundary the queue is empty and the
-    /// next files are not known yet, so that one boundary has no overlap.
     fn begin_next_open(&mut self) -> Option<NextOpen> {
         let meta = self.queue.pop_front()?;
         match self.opener.open(PartitionedFile::from(meta)) {
@@ -664,53 +493,6 @@ impl FastObjectStream {
             Err(error) => Some(NextOpen::Ready(Err(error))),
         }
     }
-
-    /// Move `pending` into the queue unfiltered.
-    fn accept_all(&mut self) {
-        for (_, meta) in self.pending.drain(..) {
-            self.queue.push_back(meta);
-        }
-    }
-}
-
-/// The object metadata for a walked record, when it belongs to this table.
-///
-/// The shard bounds only say "in this path range"; the glob and the extension
-/// still decide, exactly as they do on the listing path. Any URL matching is
-/// enough — a table over several paths must not drop a file of one for failing
-/// another's glob.
-fn object_meta(
-    record: &FileRecord,
-    urls: &[ListingTableUrl],
-    extension: &str,
-    ignore_subdirectory: bool,
-) -> Option<ObjectMeta> {
-    if !record.path.ends_with(extension) {
-        return None;
-    }
-    let meta = meta_of(record)?;
-    urls.iter()
-        .any(|url| url.contains(&meta.location, ignore_subdirectory))
-        .then_some(meta)
-}
-
-/// Everything a reader needs to open the file, straight from the record.
-///
-/// The registry kept exactly these fields to decide whether a file changed, so
-/// no `head` request is made — avoiding that per-file round trip is the point.
-fn meta_of(record: &FileRecord) -> Option<ObjectMeta> {
-    let location = object_store::path::Path::parse(&record.path).ok()?;
-    let last_modified = chrono::Utc
-        .timestamp_millis_opt(record.last_modified_millis)
-        .single()
-        .unwrap_or_else(chrono::Utc::now);
-    Some(ObjectMeta {
-        location,
-        last_modified,
-        size: record.size,
-        e_tag: record.e_tag.clone(),
-        version: None,
-    })
 }
 
 impl Stream for FastObjectStream {
@@ -736,31 +518,34 @@ impl Stream for FastObjectStream {
                         }
                         continue;
                     }
-                    // The queue is dry: take the next chunk, and decide it.
-                    match this.fill_pending() {
-                        Ok(false) => {
-                            this.state = StreamState::Done;
-                            continue;
+                    // The queue is dry, so the next chunk is due. It has been
+                    // deciding since the last one landed.
+                    match this.inflight.take() {
+                        Some(Chunk::Ready(chunk)) => {
+                            let considered = chunk.len();
+                            this.accept(chunk, considered);
                         }
-                        Ok(true) => {}
-                        Err(error) => {
+                        Some(Chunk::Pruning {
+                            considered,
+                            mut handle,
+                        }) => match Pin::new(&mut handle).poll(cx) {
+                            Poll::Ready(Ok(kept)) => this.accept(kept, considered),
+                            Poll::Ready(Err(error)) => {
+                                this.state = StreamState::Done;
+                                return Poll::Ready(Some(Err(DataFusionError::Execution(
+                                    format!("a file-statistics prune task failed: {error}"),
+                                ))));
+                            }
+                            Poll::Pending => {
+                                this.inflight = Some(Chunk::Pruning { considered, handle });
+                                return Poll::Pending;
+                            }
+                        },
+                        None => {
                             this.state = StreamState::Done;
-                            return Poll::Ready(Some(Err(error)));
                         }
-                    }
-                    this.considered.add(this.pending.len());
-                    match this.prune_pending() {
-                        Some(future) => this.state = StreamState::Pruning(future),
-                        None => this.accept_all(),
                     }
                 }
-                StreamState::Pruning(future) => match future.as_mut().poll(cx) {
-                    Poll::Ready(kept) => {
-                        this.accept(&kept);
-                        this.state = StreamState::Idle;
-                    }
-                    Poll::Pending => return Poll::Pending,
-                },
                 StreamState::Opening(future) => match Pin::new(future).poll(cx) {
                     Poll::Ready(Ok(reader)) => {
                         // The next file starts opening now, so its round trip
@@ -814,7 +599,7 @@ impl Stream for FastObjectStream {
                                     return Poll::Ready(Some(Err(error)));
                                 }
                                 Some(NextOpen::Pending(future)) => StreamState::Opening(future),
-                                // Chunk boundary: refill, and prune, first.
+                                // Chunk boundary: the next chunk is due.
                                 None => StreamState::Idle,
                             };
                         }

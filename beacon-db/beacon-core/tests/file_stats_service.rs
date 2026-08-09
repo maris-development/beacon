@@ -33,7 +33,6 @@ fn enabled() -> FileStatsConfig {
         prefix_depth: None,
         scan_prefix: String::new(),
         discovery_chunk: 50,
-        registry_listing: false,
     }
 }
 
@@ -1008,142 +1007,11 @@ async fn a_pruned_scan_reports_its_metrics() {
     assert!(plan.contains("prune=stream"), "{plan}");
 }
 
-// ── registry-backed listing ─────────────────────────────────────────────────
+// ── the scan reads a listing and prunes as it goes ──────────────────────────
 
-/// The opt-in: scans plan their file lists from the registry.
-fn registry_listing() -> FileStatsConfig {
-    FileStatsConfig {
-        registry_listing: true,
-        ..enabled()
-    }
-}
-
-/// With the switch on and every file discovered, the scan node is the
-/// registry source: the plan holds file ids, not a file list, and the rows
-/// still come out.
+/// A `SELECT *` plans without touching a segment, and reads every file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn registry_listing_plans_the_scan_from_the_registry() {
-    let root = tempfile::tempdir().unwrap();
-    write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
-    write_parquet(&root.path().join("datasets/obs/hot.parquet"), 90.0, 100.0);
-
-    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
-    let pass = runtime.file_stats().unwrap().run_once().await.unwrap();
-    assert_eq!(pass.analyzed, 2);
-
-    let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
-    assert!(
-        plan.contains("FastObjectScan"),
-        "the scan must come from the registry, not a listing:\n{plan}"
-    );
-    assert!(
-        plan.contains("files=2"),
-        "and say how many files it planned:\n{plan}"
-    );
-
-    let rows = query(
-        &runtime,
-        "SELECT \"TEMP\" FROM read_parquet('obs/*.parquet') ORDER BY \"TEMP\"",
-    )
-    .await;
-    for value in ["0.0", "5.0", "90.0", "100.0"] {
-        assert!(rows.contains(value), "missing {value} in:\n{rows}");
-    }
-}
-
-/// A `WHERE` clause prunes before the file list exists, and `EXPLAIN ANALYZE`
-/// reports what was considered and dropped — the only evidence there is, now
-/// that no file list is printed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn registry_listing_prunes_inside_the_stream() {
-    let root = tempfile::tempdir().unwrap();
-    write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
-    write_parquet(&root.path().join("datasets/obs/mild.parquet"), 20.0, 25.0);
-    write_parquet(&root.path().join("datasets/obs/hot.parquet"), 90.0, 100.0);
-
-    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
-    runtime.file_stats().unwrap().run_once().await.unwrap();
-
-    // The planner is never blocked by pruning: it plans the whole prefix and
-    // hands the predicate to the scan.
-    let plan = explain(
-        &runtime,
-        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
-    )
-    .await;
-    assert!(
-        plan.contains("mode=streaming") && plan.contains("prune=stream"),
-        "the plan carries the predicate rather than its result:\n{plan}"
-    );
-
-    let analyzed = query(
-        &runtime,
-        "EXPLAIN ANALYZE SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
-    )
-    .await;
-    assert_eq!(
-        counter(&analyzed, "file_stats_files_considered"),
-        3,
-        "every file reached the scan:\n{analyzed}"
-    );
-    assert_eq!(
-        counter(&analyzed, "file_stats_files_pruned"),
-        2,
-        "and two were dropped without being opened:\n{analyzed}"
-    );
-
-    let rows = query(
-        &runtime,
-        "SELECT \"TEMP\" FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
-    )
-    .await;
-    assert!(rows.contains("90.0") && rows.contains("100.0"), "{rows}");
-    assert!(!rows.contains("20.0"), "{rows}");
-}
-
-/// A prefix discovery has never seen still answers from the store: only the
-/// store can tell an empty directory from an undiscovered one, so the listing
-/// path serves it and the file is read.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn registry_listing_falls_back_for_an_undiscovered_prefix() {
-    let root = tempfile::tempdir().unwrap();
-    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
-
-    // The switch is on, but no discovery pass has run.
-    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
-
-    let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
-    assert!(
-        plan.contains("mode=listed"),
-        "an undiscovered prefix must be listed:\n{plan}"
-    );
-
-    let rows = query(&runtime, "SELECT \"TEMP\" FROM read_parquet('obs/*.parquet')").await;
-    assert!(rows.contains("0.0") && rows.contains("5.0"), "{rows}");
-}
-
-/// With the switch off nothing changes: the listing path plans exactly as it
-/// always has, statistics or no statistics.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn registry_listing_stays_off_by_default() {
-    let root = tempfile::tempdir().unwrap();
-    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
-
-    let runtime = builder(root.path(), enabled()).build().await.unwrap();
-    runtime.file_stats().unwrap().run_once().await.unwrap();
-
-    let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
-    assert!(
-        plan.contains("mode=listed"),
-        "the default lists the store:\n{plan}"
-    );
-    assert_eq!(files_in_plan(&plan), 1, "{plan}");
-}
-
-/// A `SELECT *` plans as a walk, not as a list: the plan says `mode=streaming`
-/// and nothing was enumerated to build it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn registry_listing_streams_when_there_is_nothing_to_prune() {
+async fn a_scan_without_a_predicate_sets_up_no_pruning() {
     let root = tempfile::tempdir().unwrap();
     for i in 0..5 {
         write_parquet(
@@ -1153,13 +1021,13 @@ async fn registry_listing_streams_when_there_is_nothing_to_prune() {
         );
     }
 
-    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
     runtime.file_stats().unwrap().run_once().await.unwrap();
 
     let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
     assert!(
-        plan.contains("mode=streaming"),
-        "a scan with no predicate must walk the registry rather than list it:\n{plan}"
+        !plan.contains("prune=stream"),
+        "no predicate means no pruning to set up:\n{plan}"
     );
 
     let rows = query(
@@ -1170,15 +1038,15 @@ async fn registry_listing_streams_when_there_is_nothing_to_prune() {
     assert!(rows.contains("10"), "five files of two rows each:\n{rows}");
 }
 
-/// A predicate the statistics cannot answer must not cost an enumeration: the
-/// scan streams instead of naming candidates it could never drop.
+/// A predicate the statistics cannot answer must not set up pruning, which
+/// would cost a segment read per chunk for nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn registry_listing_streams_a_predicate_it_cannot_prune_on() {
+async fn a_predicate_it_cannot_prune_on_sets_up_no_pruning() {
     let root = tempfile::tempdir().unwrap();
     write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
     write_parquet(&root.path().join("datasets/obs/b.parquet"), 90.0, 100.0);
 
-    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
     runtime.file_stats().unwrap().run_once().await.unwrap();
 
     // TEMP is recorded, so the scan carries the predicate.
@@ -1189,27 +1057,23 @@ async fn registry_listing_streams_a_predicate_it_cannot_prune_on() {
     .await;
     assert!(known.contains("prune=stream"), "{known}");
 
-    // A literal predicate names no column at all, so there is nothing to prune
-    // on and the scan does not pay for a segment read per chunk.
+    // A literal predicate names no column at all.
     let unknown = explain(
         &runtime,
         "SELECT * FROM read_parquet('obs/*.parquet') WHERE 1 = 1",
     )
     .await;
-    assert!(
-        !unknown.contains("prune=stream"),
-        "an unprunable predicate must not set up pruning:\n{unknown}"
-    );
+    assert!(!unknown.contains("prune=stream"), "{unknown}");
 }
 
-/// A discovery pass landing mid-query must not change what a running scan
-/// reads. The snapshot is opened at plan time and every partition shares it.
+/// A file the store lists but has never analyzed is read: the scan sees it
+/// because it lists, and pruning cannot drop what it has no statistics for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_planned_scan_ignores_files_discovered_after_it_planned() {
+async fn a_file_written_after_the_pass_is_read_at_once() {
     let root = tempfile::tempdir().unwrap();
     write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
 
-    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
     runtime.file_stats().unwrap().run_once().await.unwrap();
 
     let before = query(
@@ -1219,24 +1083,15 @@ async fn a_planned_scan_ignores_files_discovered_after_it_planned() {
     .await;
     assert!(before.contains('2'), "one file of two rows:\n{before}");
 
+    // No discovery pass in between: the scan lists, so it sees the file now.
     write_parquet(&root.path().join("datasets/obs/b.parquet"), 90.0, 100.0);
-    // Not discovered yet: the registry has never seen it, so the scan does not.
-    let unseen = query(
-        &runtime,
-        "SELECT count(*) AS n FROM read_parquet('obs/*.parquet')",
-    )
-    .await;
-    assert!(
-        unseen.contains('2'),
-        "a file the registry has not seen is not in a registry-planned scan:\n{unseen}"
-    );
-
-    // After discovery it is.
-    runtime.file_stats().unwrap().run_once().await.unwrap();
     let after = query(
         &runtime,
         "SELECT count(*) AS n FROM read_parquet('obs/*.parquet')",
     )
     .await;
-    assert!(after.contains('4'), "both files once discovery has run:\n{after}");
+    assert!(
+        after.contains('4'),
+        "a file is queryable the moment it lands:\n{after}"
+    );
 }

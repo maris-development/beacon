@@ -29,7 +29,6 @@ use beacon_datafusion_ext::{
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
-    fast_object_table::RegistryListingSwitch,
     type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, SuperTypeWidening},
 };
 use beacon_functions::register_functions;
@@ -902,13 +901,6 @@ fn build_session_config(
                 .clone()
                 .unwrap_or_else(|| Arc::new(SuperTypeWidening)),
         )))
-        // Whether scans may plan their file lists from the file-statistics
-        // registry instead of listing the store. The store handle above says
-        // whether pruning is possible; this says the operator opted into the
-        // visibility trade (a file is queryable once discovery has seen it).
-        .with_extension(Arc::new(RegistryListingSwitch {
-            enable: builder.file_stats.registry_listing,
-        }))
         // Resolves user-supplied dataset paths (a `LOCATION`, a `read_*` argument)
         // to object-store URLs and to native reader paths. Configured against the
         // default datasets store when one is set, otherwise dynamic (schemed paths

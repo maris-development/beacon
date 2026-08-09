@@ -55,7 +55,6 @@ pub mod scan_pruning;
 pub mod registry;
 pub mod scalar;
 pub mod segment;
-pub mod snapshot;
 pub mod store;
 pub mod types;
 
@@ -69,6 +68,5 @@ pub use scan_pruning::{FileStatsHandle, new_file_stats_handle, prune_scan, try_f
 pub use registry::{AnalyzedFile, ReconcileReport, Registry};
 pub use scalar::{StatScalar, super_type};
 pub use segment::{ColumnStat, ColumnStats, SegmentBuilder, SegmentReader};
-pub use snapshot::{PathShard, PrefixShards, RegistrySnapshot, SharedSnapshot};
 pub use store::FileStatsStore;
 pub use types::{ColumnId, FileId, FileRecord, FileState, ObservedFile};
