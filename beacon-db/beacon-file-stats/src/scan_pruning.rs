@@ -81,12 +81,6 @@ pub async fn prune_scan(
     }
 }
 
-/// How far down a scan's single-child chain the `DataSourceExec` may sit.
-///
-/// Two today (`NdBroadcastExec` over `NdSourceExec`). The bound is here so an
-/// unfamiliar plan costs a short walk and a fail-open, never a deep one.
-const MAX_WRAPPER_DEPTH: usize = 8;
-
 /// The nodes standing above a scan, outermost first.
 type ScanWrappers = Vec<Arc<dyn ExecutionPlan>>;
 
@@ -95,10 +89,15 @@ type ScanWrappers = Vec<Arc<dyn ExecutionPlan>>;
 /// Returns the wrappers outermost-first. `None` when no `DataSourceExec` sits at
 /// the bottom of a single-child chain, which is the fail-open case: a plan shape
 /// this does not recognise keeps its file list.
+///
+/// The descent carries no depth limit. It terminates because a plan is a finite
+/// tree and every step moves to a child, and a limit could only ever turn a deep
+/// plan into a silently unpruned one. However many nodes a format stacks above
+/// its scan, the file list underneath is still the file list.
 fn split_at_scan(plan: &Arc<dyn ExecutionPlan>) -> Option<(ScanWrappers, Arc<dyn ExecutionPlan>)> {
     let mut wrappers: ScanWrappers = Vec::new();
     let mut node = Arc::clone(plan);
-    for _ in 0..MAX_WRAPPER_DEPTH {
+    loop {
         if node.as_any().is::<DataSourceExec>() {
             return Some((wrappers, node));
         }
@@ -110,7 +109,6 @@ fn split_at_scan(plan: &Arc<dyn ExecutionPlan>) -> Option<(ScanWrappers, Arc<dyn
         wrappers.push(node);
         node = child;
     }
-    None
 }
 
 /// Put `scan` back under the `wrappers` that stood above it.
@@ -305,13 +303,29 @@ mod tests {
         assert!(split_at_scan(&union).is_none());
     }
 
-    /// A chain longer than the bound is not walked to the end.
+    /// Depth is not a reason to give up. However many nodes stand above a scan,
+    /// the file list underneath is still prunable, and a limit here would only
+    /// turn a deep plan into a silently unpruned one.
     #[test]
-    fn the_descent_is_bounded() {
+    fn a_deep_chain_is_still_found_and_rebuilt() {
+        const DEPTH: usize = 512;
+
         let mut plan = scan();
-        for _ in 0..=MAX_WRAPPER_DEPTH {
+        for _ in 0..DEPTH {
             plan = Arc::new(CoalescePartitionsExec::new(plan));
         }
-        assert!(split_at_scan(&plan).is_none());
+
+        let (wrappers, found) = split_at_scan(&plan).expect("depth is not a failure");
+        assert_eq!(wrappers.len(), DEPTH);
+        assert!(found.as_any().is::<DataSourceExec>());
+
+        // And the whole stack comes back, with the replacement scan at the bottom.
+        let rebuilt = rebuild_over_scan(wrappers, scan()).expect("the wrappers rebuild");
+        let mut node = rebuilt;
+        for _ in 0..DEPTH {
+            assert!(node.as_any().is::<CoalescePartitionsExec>());
+            node = Arc::clone(node.children()[0]);
+        }
+        assert!(node.as_any().is::<DataSourceExec>());
     }
 }
