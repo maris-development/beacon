@@ -34,6 +34,8 @@ fn seed(rt: TestRuntime) -> TestRuntime {
         .expect("copy netcdf fixture as hdf5");
     std::fs::copy(nested_hdf5_fixture(), rt.datasets_dir().join("nested.h5"))
         .expect("copy nested hdf5 fixture");
+    std::fs::copy(tiff_fixture(), rt.datasets_dir().join("raster.tif"))
+        .expect("copy geotiff fixture");
     rt
 }
 
@@ -61,6 +63,19 @@ fn nested_hdf5_fixture() -> std::path::PathBuf {
         .unwrap()
         .join("beacon-file-formats/beacon-arrow-hdf5/test_files/nested-groups.h5")
 }
+
+/// A stripped single-band GeoTIFF, shipped with the TIFF reader: 1287 x 380
+/// float32 pixels on the axes `x` and `y`.
+fn tiff_fixture() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("beacon-file-formats/beacon-arrow-tiff/test-files/test.tif")
+}
+
+/// The GeoTIFF fixture's grid: `y` (image rows) x `x` (image columns).
+const TIFF_HEIGHT: i64 = 380;
+const TIFF_WIDTH: i64 = 1287;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn read_csv_scans_filters_and_projects() {
@@ -194,6 +209,68 @@ async fn read_hdf5_schema_lists_the_nested_columns() {
     assert!(
         names.contains(&"observations/qc/flag".to_string()),
         "{names:?}"
+    );
+}
+
+/// A GeoTIFF rides the same nd pipeline as netCDF, HDF5 and zarr: the raster is
+/// a `y` x `x` grid, and the 1-d coordinate axes broadcast over it.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_tiff_scans_the_fixture_as_a_grid() {
+    let rt = seeded("read-tiff").await;
+
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(*) FROM read_tiff('raster.tif')").await),
+        TIFF_HEIGHT * TIFF_WIDTH,
+        "the raster is one row per pixel"
+    );
+
+    // `geo.lat` lives on `y` alone, so it is a broadcast column of the grid the
+    // full-rank band establishes. The band is co-selected because, as for every
+    // nd format, the projected columns are what define the grid.
+    let broadcast = rt
+        .sql(
+            r#"SELECT count("geo.lat")          AS lat_rows,
+                      count(DISTINCT "geo.lat") AS lat_values,
+                      count("band.0")           AS band_values
+               FROM read_tiff('raster.tif')"#,
+        )
+        .await;
+    let column = |name: &str| {
+        let index = broadcast[0].schema().index_of(name).expect(name);
+        arrow::array::as_primitive_array::<arrow::datatypes::Int64Type>(broadcast[0].column(index))
+            .value(0)
+    };
+    assert_eq!(column("lat_rows"), TIFF_HEIGHT * TIFF_WIDTH);
+    assert_eq!(column("lat_values"), TIFF_HEIGHT);
+    // The band's nodata pixels come back as nulls, so it counts fewer.
+    assert!(column("band_values") > 0);
+    assert!(column("band_values") < column("lat_rows"));
+}
+
+/// The optional second argument sets the grid for a raster too: `['y']` keeps
+/// the latitude axis and drops the band, which needs both axes.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_tiff_takes_a_dimensions_argument() {
+    let rt = seeded("read-tiff-dimensions").await;
+
+    let narrowed = rt
+        .sql("SELECT * FROM read_tiff(['raster.tif'], ['y'])")
+        .await;
+    let columns: Vec<String> = narrowed[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    assert!(columns.contains(&"geo.lat".to_string()), "{columns:?}");
+    assert!(
+        !columns.contains(&"band.0".to_string()),
+        "a 2-d band does not fit a 1-d grid: {columns:?}"
+    );
+    assert_eq!(
+        total_rows(&narrowed) as i64,
+        TIFF_HEIGHT,
+        "one row for each image row"
     );
 }
 

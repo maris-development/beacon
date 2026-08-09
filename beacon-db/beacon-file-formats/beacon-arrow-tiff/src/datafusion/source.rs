@@ -1,16 +1,24 @@
+//! DataFusion [`FileSource`]/[`FileOpener`] for TIFF/GeoTIFF files.
+//!
+//! The opener builds an [`AnyDataset`](beacon_nd_array::dataset::AnyDataset)
+//! for the (projected) columns and emits `beacon.nd`-encoded batches, which the
+//! `NdSourceExec`/`NdBroadcastExec` pair above the scan decodes and broadcasts.
+//! This mirrors the netCDF, HDF5 and zarr sources.
+
 use std::sync::Arc;
 
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use arrow::{
+    datatypes::SchemaRef,
+    record_batch::{RecordBatch, RecordBatchOptions},
+};
 use beacon_nd_array::{
     arrow::{
-        batch::{any_dataset_as_record_batch_stream, any_dataset_as_row_size},
-        metrics::DatasetReadMetrics,
-        pushdown_filter::PushdownFilter,
+        batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
+        nd_provider::any_dataset_as_encoded_stream, pushdown_filter::PushdownFilter,
     },
     projection::DatasetProjection,
 };
 use datafusion::{
-    common::Statistics,
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
@@ -18,13 +26,12 @@ use datafusion::{
         schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    execution::SendableRecordBatchStream,
+    error::DataFusionError,
     physical_expr::{PhysicalExpr, conjunction, projection::ProjectionExprs},
     physical_expr_adapter::BatchAdapterFactory,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
-        metrics::{ExecutionPlanMetricsSet, SplitMetrics},
-        stream::{BatchSplitStream, RecordBatchStreamAdapter},
+        metrics::ExecutionPlanMetricsSet,
     },
 };
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
@@ -39,6 +46,8 @@ pub struct TiffSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// Explicit dimensions to read, or `None` to auto-select a default.
+    read_dimensions: Option<Vec<String>>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
 }
@@ -51,8 +60,16 @@ impl TiffSource {
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             batch_size: 128 * 1024,
             predicate: None,
+            read_dimensions: None,
             projection: None,
         }
+    }
+
+    /// Returns a copy of this source that reads only the variables belonging to
+    /// `read_dimensions` (or auto-selects a default when `None`).
+    pub fn with_read_dimensions(mut self, read_dimensions: Option<Vec<String>>) -> Self {
+        self.read_dimensions = read_dimensions;
+        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -71,13 +88,12 @@ impl FileSource for TiffSource {
         base_config: &FileScanConfig,
         partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
-        let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(TiffOpener::new(
-            file_schema,
             object_store,
             projected_schema,
+            self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
             self.execution_plan_metrics.clone(),
@@ -164,10 +180,12 @@ impl FileSource for TiffSource {
     }
 }
 
+// ─── FileOpener ──────────────────────────────────────────────────────────────
+
 struct TiffOpener {
-    table_schema: SchemaRef,
     object_store: Arc<dyn object_store::ObjectStore>,
     projected_schema: SchemaRef,
+    read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     partition: usize,
@@ -175,19 +193,20 @@ struct TiffOpener {
 }
 
 impl TiffOpener {
+    #[allow(clippy::too_many_arguments)]
     fn new(
-        table_schema: SchemaRef,
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
+        read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Self {
         Self {
-            table_schema,
             object_store,
             projected_schema,
+            read_dimensions,
             batch_size,
             predicate,
             partition,
@@ -195,10 +214,12 @@ impl TiffOpener {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn read_task(
         object: ObjectMeta,
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
+        read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: Option<DatasetReadMetrics>,
@@ -206,16 +227,34 @@ impl TiffOpener {
         let dataset = reader::open_dataset(object_store, object.clone())
             .await
             .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
+                DataFusionError::Execution(format!(
                     "Failed to open TIFF dataset {}: {e}",
                     object.location,
                 ))
             })?;
 
+        // Apply the dimension projection before deriving the file schema. With
+        // no explicit dimensions, fall back to the dataset's auto-selected
+        // default (matching `fetch_schema`). No log label here: this runs per
+        // file/partition, so logging would spam.
+        let read_dimensions =
+            beacon_nd_array::dataset::resolve_read_dimensions(&dataset, read_dimensions, None);
+        let dataset = if let Some(dims) = read_dimensions {
+            dataset
+                .project(&DatasetProjection::new_with_dimension_projection(dims))
+                .map_err(|e| {
+                    DataFusionError::Execution(format!(
+                        "Failed to project TIFF dataset with dimensions: {e}"
+                    ))
+                })?
+        } else {
+            dataset
+        };
+
         let file_schema: SchemaRef =
             beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
                 .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
+                    DataFusionError::Execution(format!(
                         "Failed to derive Arrow schema from TIFF dataset: {e}"
                     ))
                 })?
@@ -232,51 +271,92 @@ impl TiffOpener {
             .collect();
 
         if projection.is_empty() {
-            return Ok(any_dataset_as_row_size(dataset)
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to compute row size for empty projection on TIFF dataset: {e}"
-                    ))
-                })?
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to read TIFF dataset with empty projection: {e}"
-                    ))
+            // No output columns are needed (e.g. `COUNT(*)`). Reading zero
+            // columns would yield an empty stream and an incorrect count of 0.
+            // Drive the read with the highest-volume variable so the row count
+            // equals the full broadcast row count (a scalar like `image.width`
+            // would give just 1 row), plus any predicate columns so a
+            // pushed-down filter still applies (PushdownFilter matches by
+            // name). Emit zero-column batches carrying the correct row counts.
+            let driver_idx = dataset
+                .fields()
+                .keys()
+                .max_by_key(|name| {
+                    dataset
+                        .get_array(name)
+                        .map(|a| a.shape().iter().product::<usize>())
+                        .unwrap_or(0)
                 })
-                .boxed());
+                .and_then(|name| file_schema.index_of(name).ok())
+                .unwrap_or(0);
+            let mut driver: Vec<usize> = vec![driver_idx];
+            if let Some(pred) = &predicate {
+                for col in datafusion::physical_expr::utils::collect_columns(pred) {
+                    if let Ok(idx) = file_schema.index_of(col.name()) {
+                        driver.push(idx);
+                    }
+                }
+            }
+            driver.sort_unstable();
+            driver.dedup();
+
+            let dataset = dataset
+                .project(&DatasetProjection::new_with_index_projection(driver))
+                .map_err(|e| {
+                    DataFusionError::Execution(format!(
+                        "Failed to project TIFF dataset for count: {e}"
+                    ))
+                })?;
+
+            let pushdown_filter = predicate.map(PushdownFilter::new);
+            let count_schema = projected_schema.clone();
+            let stream =
+                any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
+                    .map(move |batch| {
+                        let batch = batch.map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "Error reading TIFF as Arrow stream: {e}"
+                            ))
+                        })?;
+                        RecordBatch::try_new_with_options(
+                            count_schema.clone(),
+                            vec![],
+                            &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+                        )
+                        .map_err(|e| {
+                            DataFusionError::Execution(format!("Failed to build count batch: {e}"))
+                        })
+                    })
+                    .boxed();
+            return Ok(stream);
         }
 
-        // Adapt batches (read with `projection`) onto the projected output
-        // schema: reorder, cast, and null-fill columns this file lacks.
-        let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
+        // The opener emits nd-encoded batches, so adaptation happens in the
+        // encoded (struct) domain: reorder, and null-fill columns this file
+        // lacks, onto the projected encoded schema.
+        let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+            &file_schema.project(&projection)?,
+        ));
         let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
 
         let dataset = if projection.len() < file_schema.fields().len() {
-            let proj = DatasetProjection {
-                dimension_projection: None,
-                index_projection: Some(projection),
-            };
-            dataset.project(&proj).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to project TIFF dataset: {e}"
-                ))
-            })?
+            dataset
+                .project(&DatasetProjection::new_with_index_projection(projection))
+                .map_err(|e| {
+                    DataFusionError::Execution(format!("Failed to project TIFF dataset: {e}"))
+                })?
         } else {
             dataset
         };
 
-        let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading TIFF as Arrow stream: {e}"
-                ))
-            })
+        // Emit nd-encoded batches (decoded/broadcast by the NdSourceExec /
+        // NdBroadcastExec above the scan), adapted onto the projected encoded
+        // schema.
+        let _ = metrics;
+        let stream = any_dataset_as_encoded_stream(dataset, batch_size)
             .and_then(move |batch| {
                 let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to adapt TIFF batch schema: {e}"
-                    ))
+                    DataFusionError::Execution(format!("Failed to adapt TIFF batch schema: {e}"))
                 });
                 futures::future::ready(mapped)
             })
@@ -293,6 +373,7 @@ impl FileOpener for TiffOpener {
             file.object_meta,
             self.object_store.clone(),
             self.projected_schema.clone(),
+            self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
             metrics,

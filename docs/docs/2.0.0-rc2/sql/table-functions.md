@@ -214,12 +214,20 @@ SELECT * FROM read_bbf('bbf/**/*.bbf')
 
 ```text
 read_tiff(glob_paths)
+read_tiff(glob_paths, dimensions)
 ```
 
-Beacon reads GeoTIFF and Cloud-Optimized GeoTIFF files.
+Beacon reads GeoTIFF and Cloud-Optimized GeoTIFF files. A raster is a grid over the axes `y` (image
+rows) and `x` (image columns).
+
+The optional `dimensions` argument selects the columns. Beacon returns a column only if the list
+holds all of its dimensions. Use `['y']` to read the latitude axis alone, without the full grid.
 
 ```sql
 SELECT * FROM read_tiff('rasters/elevation.tif')
+
+-- One row per image row, not one row per pixel
+SELECT "geo.lat" FROM read_tiff('rasters/elevation.tif', ['y'])
 ```
 
 ### Tag attributes

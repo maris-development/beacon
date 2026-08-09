@@ -5,7 +5,8 @@ use arrow::datatypes::{DataType, Field};
 use beacon_common::super_table::SuperListingTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
-    catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
+    catalog::TableFunctionImpl, common::plan_err, prelude::Expr, prelude::SessionContext,
+    scalar::ScalarValue,
 };
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
@@ -44,12 +45,38 @@ impl BeaconTableFunctionImpl for ReadTiffFunc {
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
-        Some(vec![Field::new(
-            "glob_paths",
-            DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
-            false,
-        )])
+        Some(vec![
+            Field::new(
+                "glob_paths",
+                DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
+                false,
+            ),
+            Field::new(
+                "dimensions",
+                DataType::List(Arc::new(Field::new("dimension", DataType::Utf8, false))),
+                true,
+            ),
+        ])
     }
+}
+
+/// The optional second argument: the dimensions to read.
+fn parse_dimensions_arg(args: &[Expr]) -> datafusion::error::Result<Vec<String>> {
+    let Some(Expr::Literal(ScalarValue::List(values), _)) = args.get(1) else {
+        return Ok(vec![]);
+    };
+    let Some(strings) = values
+        .as_ref()
+        .values()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+    else {
+        return plan_err!("read_tiff second argument must be a List<Utf8> of dimension names");
+    };
+    Ok(strings
+        .iter()
+        .filter_map(|value| value.map(|s| s.to_string()))
+        .collect())
 }
 
 impl TableFunctionImpl for ReadTiffFunc {
@@ -70,13 +97,15 @@ impl TableFunctionImpl for ReadTiffFunc {
                 )
             })?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_tiff")?;
+        let dimensions = parse_dimensions_arg(args)?;
 
         let mut listing_urls = vec![];
         for path in &glob_paths {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        let file_format = TiffFormat::new(Default::default());
+        let file_format = TiffFormat::new(Default::default())
+            .with_read_dimensions((!dimensions.is_empty()).then_some(dimensions));
 
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
