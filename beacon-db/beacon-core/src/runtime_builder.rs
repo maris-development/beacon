@@ -15,6 +15,7 @@ use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
+use beacon_arrow_zarr::ZarrConfig;
 use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
 use beacon_auth::{
     AuthContext, BasicAuthProvider, InMemoryUserStore, RoleProvider, RoleStore, UserDirectory,
@@ -95,6 +96,7 @@ pub struct RuntimeBuilder {
 
     pub netcdf: NetcdfConfig,
     pub hdf5: Hdf5Config,
+    pub zarr: ZarrConfig,
 
     pub auth_provider: Option<Arc<dyn beacon_auth::AuthProvider>>,
     pub secrets_encryption_key: Option<[u8; 32]>,
@@ -230,6 +232,12 @@ impl RuntimeBuilder {
     /// the Rust reader, or the other way round.
     pub fn with_hdf5_config(mut self, hdf5: Hdf5Config) -> Self {
         self.hdf5 = hdf5;
+        self
+    }
+
+    /// Replaces the whole Zarr reader configuration.
+    pub fn with_zarr_config(mut self, zarr: ZarrConfig) -> Self {
+        self.zarr = zarr;
         self
     }
 
@@ -745,7 +753,7 @@ fn register_file_formats(
         Arc::new(CsvFormatFactory),
         Arc::new(ArrowFormatFactory),
         Arc::new(TiffFormatFactory::new(Default::default())),
-        Arc::new(ZarrFormatFactory),
+        Arc::new(ZarrFormatFactory::new(builder.zarr.clone())),
         Arc::new(AtlasFormatFactory::new(
             Default::default(),
             Default::default(),

@@ -12,6 +12,14 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **Zarr stores supply column ranges for file pruning.** A Zarr store recorded nothing in
+  `beacon.system.file_stats`, so every query opened every store. It now reports a range per
+  coordinate: an array of rank 0 or rank 1 is read and measured, and an array of rank 2 or higher —
+  a data grid — reports unknown, so a scan costs what it always did. An array that states its own
+  `actual_range` is bounded from metadata alone, with no chunk read at all. `valid_min` and
+  `valid_max` are deliberately **not** used: they state which values are valid, not which values a
+  store holds, and a store may hold values outside them. `BEACON_ZARR_ENABLE_STATISTICS=false`
+  (or `OPTIONS (enable_statistics 'false')` on one table) turns the whole thing off.
 - **Icechunk repositories read through the Zarr reader.** An Icechunk repository is a Zarr v3 store
   with commits, branches and snapshots. `read_icechunk('sst/repo')` and `CREATE EXTERNAL TABLE …
   STORED AS ICECHUNK` read one version of it: the tip of a branch by default, or a fixed `tag` /
@@ -55,6 +63,12 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **File pruning never ran for netCDF, HDF5, Zarr or TIFF.** The pruner looked for the scan at the
+  root of the plan a table provider returned. Every format built on ND arrays returns its scan
+  wrapped in the nd spine, so the pruner found nothing and silently kept every file — for exactly
+  the formats whose files are largest, and whose ranges the collector had already recorded. It now
+  finds the scan inside the plan and rebuilds the nodes above it. A plan holding more than one scan
+  is still left alone, because pruning the wrong one would drop matching rows.
 - **A netCDF time variable kept its `_FillValue` cells as dates.** Both netCDF readers dropped the
   `_FillValue` of a CF time variable, so a fill cell reached a query as a real timestamp:
   `units = "days since 1970-01-01"` with `_FillValue = -32768` gave `1880-03-15`. Such a value

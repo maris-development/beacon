@@ -14,6 +14,10 @@
 //! in a physical optimizer rule is not possible at all, because those are
 //! synchronous and reading a segment is not.
 //!
+//! The scan is found inside the plan rather than assumed to be its root: a
+//! format built on ND arrays returns its `DataSourceExec` wrapped in the nd
+//! spine. See [`only_file_scan`].
+//!
 //! # Fail open
 //!
 //! Every uncertain path returns the plan untouched: no store, no statistics, an
@@ -84,7 +88,7 @@ async fn try_prune_scan(
     }
     let store = try_file_stats_from_session(state)?;
 
-    let exec = plan.as_any().downcast_ref::<DataSourceExec>()?;
+    let exec = only_file_scan(plan)?;
     let config = exec
         .data_source()
         .as_any()
@@ -184,5 +188,56 @@ async fn try_prune_scan(
         .global_counter("file_stats_columns_used")
         .add(columns_used);
 
-    Some(Arc::new(DataSourceExec::new(Arc::new(pruned))))
+    let scan: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(pruned)));
+    replace_file_scan(plan, &scan)
+}
+
+/// The one `DataSourceExec` in `plan`, or `None` unless there is exactly one.
+///
+/// A provider does not always hand back the scan itself. Every format built on
+/// ND arrays — netCDF, HDF5, Zarr, TIFF — wraps its `DataSourceExec` in the nd
+/// spine (`NdBroadcastExec` over `NdSourceExec`), so looking only at the root
+/// would skip pruning for exactly the formats whose files are largest.
+///
+/// "Exactly one" is the safety rule, not a convenience. A plan holding two scans
+/// is a shape this code does not understand, and pruning the wrong one drops
+/// rows from the answer.
+fn only_file_scan(plan: &Arc<dyn ExecutionPlan>) -> Option<&DataSourceExec> {
+    fn collect<'a>(plan: &'a Arc<dyn ExecutionPlan>, found: &mut Vec<&'a DataSourceExec>) {
+        if let Some(exec) = plan.as_any().downcast_ref::<DataSourceExec>() {
+            found.push(exec);
+            return;
+        }
+        for child in plan.children() {
+            collect(child, found);
+        }
+    }
+
+    let mut found = Vec::new();
+    collect(plan, &mut found);
+    match found.as_slice() {
+        [exec] => Some(exec),
+        _ => None,
+    }
+}
+
+/// Rebuild `plan` with its `DataSourceExec` swapped for `scan`.
+///
+/// Each node above the scan is rebuilt through `with_new_children`, which is how
+/// a node recomputes its own properties — an `NdSourceExec` over four file
+/// groups is not the same plan as one over two. `None` if any node refuses its
+/// new child, which leaves the caller with the unpruned plan.
+fn replace_file_scan(
+    plan: &Arc<dyn ExecutionPlan>,
+    scan: &Arc<dyn ExecutionPlan>,
+) -> Option<Arc<dyn ExecutionPlan>> {
+    if plan.as_any().is::<DataSourceExec>() {
+        return Some(scan.clone());
+    }
+    let children = plan
+        .children()
+        .into_iter()
+        .map(|child| replace_file_scan(child, scan))
+        .collect::<Option<Vec<_>>>()?;
+    plan.clone().with_new_children(children).ok()
 }
