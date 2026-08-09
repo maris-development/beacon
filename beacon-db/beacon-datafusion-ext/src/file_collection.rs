@@ -148,6 +148,21 @@ impl TableProvider for FileCollection {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // The registry path lists no store and opens no file, and prunes before
+        // the file list exists. `None` means it cannot serve this table, and
+        // the listing path below runs exactly as it would have.
+        if let Some(plan) = crate::registry_listing::try_scan_from_registry(
+            state,
+            &self.inner_table,
+            projection,
+            filters,
+            limit,
+        )
+        .await
+        {
+            return Ok(plan);
+        }
+
         // Apply the projection to the current schema and add is_not_null filters for every column
         let plan = self
             .inner_table
@@ -156,7 +171,7 @@ impl TableProvider for FileCollection {
 
         // Drop the files whose recorded ranges say they cannot match. The JSON
         // query API reaches its scans through here; SQL `read_*` functions reach
-        // theirs through `SuperListingTable`, which does the same.
+        // theirs through `CustomListingTable`, which does the same.
         Ok(beacon_file_stats::prune_scan(state, plan, filters, self.schema()).await)
     }
 
