@@ -25,7 +25,6 @@ use arrow::{
     datatypes::{DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit},
 };
 use datafusion::{
-    common::Statistics,
     error::{DataFusionError, Result},
     execution::{RecordBatchStream, SendableRecordBatchStream},
     physical_plan::{

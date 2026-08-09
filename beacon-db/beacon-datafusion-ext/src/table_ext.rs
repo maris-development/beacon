@@ -796,8 +796,7 @@ impl TableDefinition for MaterializedViewDefinition {
 //     use datafusion::arrow::array::{Array, Int64Array};
 //     use datafusion::arrow::datatypes::Field;
 //     use datafusion::arrow::record_batch::RecordBatch;
-//     use datafusion::datasource::file_format::parquet::ParquetFormat;
-//     use datafusion::parquet::arrow::ArrowWriter;
+// //     use datafusion::parquet::arrow::ArrowWriter;
 //     use object_store::local::LocalFileSystem;
 //     use std::time::Duration;
 //     use tokio::sync::broadcast;
@@ -1422,8 +1421,6 @@ impl TableDefinition for MaterializedViewDefinition {
 /// storage-event matching, location round-tripping, and schema/partition
 /// normalization.
 mod helper_tests {
-    use datafusion::datasource::file_format::csv::CsvFormat;
-    use datafusion::datasource::file_format::parquet::ParquetFormat;
 
     use super::*;
     use datafusion::arrow::datatypes::Field;

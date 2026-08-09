@@ -547,7 +547,7 @@ mod reader_backend_tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use beacon_common::super_table::SuperListingTable;
+    use beacon_datafusion_ext::fast_object_table::FastObjectTable;
     use beacon_datafusion_ext::listing_factory::RootStore;
     use datafusion::datasource::listing::ListingTableUrl;
     use datafusion::execution::session_state::SessionStateBuilder;
@@ -624,7 +624,7 @@ mod reader_backend_tests {
     /// Register one test file as a table read on `backend`.
     async fn register(ctx: &SessionContext, table: &str, backend: ReaderBackend, file: &str) {
         let url = ListingTableUrl::parse(test_file(file).to_string_lossy()).unwrap();
-        let listing = SuperListingTable::new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
+        let listing = FastObjectTable::try_new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
             .await
             .unwrap_or_else(|e| panic!("register {file} on {backend:?}: {e}"));
         ctx.register_table(table, Arc::new(listing)).unwrap();
@@ -1081,7 +1081,7 @@ mod reader_backend_tests {
             let ctx = SessionContext::new_with_state(state);
             let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
             let table =
-                SuperListingTable::new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
+                FastObjectTable::try_new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
                     .await
                     .unwrap();
             ctx.register_table("many", Arc::new(table)).unwrap();
@@ -1763,7 +1763,7 @@ mod reader_backend_tests {
 //     /// Register `gridded-example.nc` as a DataFusion table backed by
 //     /// [`NetcdfFormat`] over the `datasets://` object store.
 //     async fn register_example(ctx: &datafusion::prelude::SessionContext, datasets_root: PathBuf) {
-//         use beacon_common::super_table::SuperListingTable;
+//         use beacon_datafusion_ext::fast_object_table::FastObjectTable;
 //         use datafusion::datasource::file_format::FileFormat;
 //         use datafusion::datasource::listing::ListingTableUrl;
 
@@ -1780,7 +1780,7 @@ mod reader_backend_tests {
 //         let url =
 //             ListingTableUrl::parse("datasets:///beacon-arrow-netcdf-tests/gridded-example.nc")
 //                 .unwrap();
-//         let table = SuperListingTable::new(&ctx.state(), format, vec![url])
+//         let table = FastObjectTable::try_new(&ctx.state(), format, vec![url])
 //             .await
 //             .unwrap();
 //         ctx.register_table("gridded_nc", Arc::new(table)).unwrap();

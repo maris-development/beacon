@@ -155,10 +155,6 @@ impl FastObjectTable {
     pub fn table_paths(&self) -> &[ListingTableUrl] {
         &self.urls
     }
-
-    pub fn format(&self) -> &Arc<dyn FileFormat> {
-        &self.format
-    }
 }
 
 /// Infer one URL's schema, from the registry's files when it knows them.
@@ -204,10 +200,8 @@ impl FastObjectTable {
     /// Everything the scan needs that is not the file list.
     fn scan_parts(
         &self,
-        state: &dyn Session,
         projection: Option<&Vec<usize>>,
-    ) -> Result<(Arc<dyn FileSource>, SchemaRef), DataFusionError>
-    {
+    ) -> Result<(Arc<dyn FileSource>, SchemaRef), DataFusionError> {
         let table_schema = TableSchema::new(Arc::clone(&self.schema), vec![]);
         let mut file_source = self.format.file_source(table_schema);
 
@@ -218,12 +212,10 @@ impl FastObjectTable {
                 indices,
                 &self.schema,
             );
+            // A format that cannot narrow itself keeps the full schema, and
+            // the plan projects above the scan instead.
             if let Some(projected) = file_source.try_pushdown_projection(&exprs)? {
                 file_source = projected;
-            } else {
-                // The format cannot narrow itself; the plan projects above the
-                // scan instead, so the scan keeps the full schema.
-                let _ = state;
             }
         }
         let projected = projected_schema_of(&file_source)?;
@@ -258,7 +250,7 @@ impl TableProvider for FastObjectTable {
                 projection,
             )?)));
         };
-        let (file_source, projected_schema) = self.scan_parts(state, projection)?;
+        let (file_source, projected_schema) = self.scan_parts(projection)?;
 
         if self.format_owns_file_list() {
             return self

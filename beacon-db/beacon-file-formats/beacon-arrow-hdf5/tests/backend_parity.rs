@@ -15,7 +15,7 @@ use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use beacon_arrow_hdf5::{Hdf5Config, Hdf5FormatFactory};
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
-use beacon_common::super_table::SuperListingTable;
+use beacon_datafusion_ext::fast_object_table::FastObjectTable;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::common::stats::Precision;
@@ -112,7 +112,7 @@ async fn register(ctx: &SessionContext, table: &str, backend: Backend, path: &st
         .create_with_native_root(&ctx.state(), &backend.options(), &url, &listing)
         .unwrap_or_else(|e| panic!("build the {backend:?} format for {}: {e}", path.display()));
 
-    let table_provider = SuperListingTable::new(&ctx.state(), format, vec![url])
+    let table_provider = FastObjectTable::try_new(&ctx.state(), format, vec![url])
         .await
         .unwrap_or_else(|e| panic!("register {} on {backend:?}: {e}", path.display()));
     ctx.register_table(table, Arc::new(table_provider)).unwrap();

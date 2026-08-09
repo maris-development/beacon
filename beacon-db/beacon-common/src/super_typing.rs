@@ -51,37 +51,6 @@ pub fn super_type_schema(schemas: &[arrow::datatypes::SchemaRef]) -> Result<Sche
     )))
 }
 
-pub fn super_type_arrow_schema(
-    schemas: &[arrow::datatypes::Schema],
-) -> Option<arrow::datatypes::Schema> {
-    let mut fields = indexmap::IndexMap::new();
-    for schema in schemas {
-        for field in schema.fields.iter() {
-            let name = field.name().to_string();
-            let dtype = field.data_type().clone();
-            match fields.get_mut(&name) {
-                Some(existing_dtype) => {
-                    if let Some(supert_type) = super_type_arrow(existing_dtype, &dtype) {
-                        *existing_dtype = supert_type;
-                    } else {
-                        return None;
-                    }
-                }
-                None => {
-                    fields.insert(name, dtype.into());
-                }
-            }
-        }
-    }
-
-    Some(arrow::datatypes::Schema::new(Fields::from(
-        fields
-            .into_iter()
-            .map(|(name, dtype)| arrow::datatypes::Field::new(&name, dtype.into(), false))
-            .collect::<Vec<_>>(),
-    )))
-}
-
 /// Determine the smallest common super type for two Arrow data types.
 ///
 /// This function takes two data types (`left` and `right`) and returns an option
@@ -564,22 +533,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn super_type_arrow_schema_returns_non_nullable_fields() {
-        let s1 = Schema::new(vec![Field::new("a", DataType::Int32, true)]);
-        let s2 = Schema::new(vec![Field::new("a", DataType::Int64, true)]);
-
-        let merged = super_type_arrow_schema(&[s1, s2]).unwrap();
-        let field = merged.field_with_name("a").unwrap();
-        assert_eq!(field.data_type(), &DataType::Int64);
-        // This variant marks fields non-nullable, unlike super_type_schema.
-        assert!(!field.is_nullable());
-    }
-
-    #[test]
-    fn super_type_arrow_schema_returns_none_on_conflict() {
-        let s1 = Schema::new(vec![Field::new("a", DataType::Date32, true)]);
-        let s2 = Schema::new(vec![Field::new("a", DataType::Int32, true)]);
-        assert_eq!(super_type_arrow_schema(&[s1, s2]), None);
-    }
 }

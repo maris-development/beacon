@@ -1,10 +1,10 @@
 //! Removing files from a built scan.
 //!
-//! This lives here, rather than beside either table provider that uses it, so
-//! both can reach it: `SuperListingTable` in `beacon-common` backs every SQL
-//! `read_*` function, and `FileCollection` in `beacon-datafusion-ext` backs the
-//! JSON query API. Neither of those crates may depend on the other, and this one
-//! depends on neither.
+//! This lives here, rather than beside the table providers that use it, so all
+//! of them can reach it: `FileCollection` backs the JSON query API,
+//! `ExternalTable` backs `CREATE EXTERNAL TABLE`, and `FastObjectTable` uses it
+//! for the formats that plan their own file list. This crate depends on none of
+//! them.
 //!
 //! # Why after the plan, not before
 //!
