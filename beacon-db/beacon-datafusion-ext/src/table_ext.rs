@@ -280,22 +280,6 @@ impl TableProvider for ExternalTable {
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let inner = self.inner.read().clone();
 
-        // An external table pins its schema, so when the registry can also
-        // supply the file list, the whole plan touches no file at all. `None`
-        // means the registry cannot serve this table and the listing path
-        // below runs exactly as it would have.
-        if let Some(plan) = crate::registry_listing::try_scan_from_registry(
-            state,
-            inner.as_ref(),
-            projection,
-            filters,
-            limit,
-        )
-        .await
-        {
-            return Ok(plan);
-        }
-
         inner
             .scan(state, projection, filters, limit)
             .await

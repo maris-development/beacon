@@ -1,7 +1,8 @@
 pub mod ordered_union;
 pub mod analyzer_rules;
 pub mod consts;
-pub mod custom_listing_table;
+pub mod fast_object_data_source;
+pub mod fast_object_table;
 pub mod file_collection;
 pub mod format_ext;
 pub mod listing_factory;
@@ -9,8 +10,6 @@ pub mod listing_table_factory_ext;
 pub mod listing_url_resolver;
 pub mod nd;
 pub mod object_store_registry;
-pub mod registry_listing;
-pub mod registry_source;
 pub mod remote;
 pub mod secrets;
 pub mod stats_cache;

@@ -12,7 +12,7 @@ use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_arrow_netcdf::datafusion::ReadNetCDFFunc;
-use beacon_datafusion_ext::custom_listing_table::CustomListingTable;
+use beacon_datafusion_ext::fast_object_table::FastObjectTable;
 use beacon_common::table_function::BeaconTableFunctionImpl;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
@@ -138,13 +138,13 @@ impl TableFunctionImpl for ReadHdf5Func {
         }
         let file_format = hdf5_factory.create(&state, &format_options)?;
 
-        let custom_listing_table = tokio::task::block_in_place(|| {
+        let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async {
-                CustomListingTable::new(&session_ctx.state(), file_format, listing_urls).await
+                FastObjectTable::try_new(&session_ctx.state(), file_format, listing_urls).await
             })
         })?;
 
-        Ok(Arc::new(custom_listing_table))
+        Ok(Arc::new(fast_object_table))
     }
 }
 

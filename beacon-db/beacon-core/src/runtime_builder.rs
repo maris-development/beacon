@@ -29,7 +29,7 @@ use beacon_datafusion_ext::{
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
-    registry_listing::RegistryListingSwitch,
+    fast_object_table::RegistryListingSwitch,
     type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, SuperTypeWidening},
 };
 use beacon_functions::register_functions;
@@ -893,7 +893,7 @@ fn build_session_config(
         // subsystem is off rather than silently doing nothing.
         .with_extension(crate::file_stats::new_file_stats_service_handle())
         .with_extension(secrets_store.clone())
-        // How `CustomListingTable` merges the schemas of the files behind one
+        // How `FastObjectTable` merges the schemas of the files behind one
         // table. Super typing unless the embedder registered its own strategy,
         // which keeps `read_*` schema merging exactly what it has always been.
         .with_extension(Arc::new(ArrowTypeWidening::new(

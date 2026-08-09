@@ -2,7 +2,7 @@ use std::sync::{Arc, Weak};
 
 use crate::datafusion::OdvFormat;
 use arrow::datatypes::{DataType, Field};
-use beacon_datafusion_ext::custom_listing_table::CustomListingTable;
+use beacon_datafusion_ext::fast_object_table::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl,
@@ -84,13 +84,13 @@ impl TableFunctionImpl for ReadOdvAsciiFunc {
 
         let file_format = OdvFormat::new();
 
-        let custom_listing_table = tokio::task::block_in_place(|| {
+        let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                CustomListingTable::new(&session_ctx.state(), Arc::new(file_format), listing_urls)
+                FastObjectTable::try_new(&session_ctx.state(), Arc::new(file_format), listing_urls)
                     .await
             })
         })?;
 
-        Ok(Arc::new(custom_listing_table))
+        Ok(Arc::new(fast_object_table))
     }
 }

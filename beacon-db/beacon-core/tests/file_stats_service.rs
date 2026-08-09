@@ -394,7 +394,7 @@ async fn a_predicate_drops_hdf5_files_from_the_scan() {
 
     let all = explain(&runtime, "SELECT * FROM read_hdf5('obs/*.h5')").await;
     assert_eq!(
-        all.matches(".h5").count(),
+        files_in_plan(&all),
         3,
         "no predicate reads everything:\n{all}"
     );
@@ -405,11 +405,12 @@ async fn a_predicate_drops_hdf5_files_from_the_scan() {
     )
     .await;
     assert_eq!(
-        hot.matches(".h5").count(),
+        files_in_plan(&hot),
         1,
         "only hot.h5 can hold a TEMP above 80:\n{hot}"
     );
-    assert!(hot.contains("hot.h5"), "and it must be that one:\n{hot}");
+    // The plan holds cursors, not names, so identity is proven by reading:
+    // hot.h5's rows are 90 and 100.
 
     // Pruning changed which files are opened, not what the query answers.
     let rows = query(
@@ -596,9 +597,19 @@ async fn statistics_survive_a_restart() {
 
 /// The number of files a plan will actually open.
 fn files_in_plan(explain: &str) -> usize {
-    // The scan node lists its file groups; counting `.parquet` occurrences in the
-    // plan text is crude but it is what the plan actually says it will read.
-    explain.matches(".parquet").count()
+    // The scan holds cursors rather than a file list, so the plan states how
+    // many files it will read instead of naming them: `files=N`.
+    explain
+        .split("files=")
+        .skip(1)
+        .map(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<usize>()
+                .unwrap_or(0)
+        })
+        .sum()
 }
 
 async fn explain(runtime: &Runtime, sql: &str) -> String {
@@ -646,7 +657,17 @@ async fn a_predicate_drops_files_from_the_scan() {
         1,
         "only hot.parquet can hold a TEMP above 80:\n{hot}"
     );
-    assert!(hot.contains("hot.parquet"), "and it must be that one:\n{hot}");
+    // The plan holds cursors, not names, so identity is proven by reading:
+    // hot.parquet's rows are 90 and 100.
+    let rows = query(
+        &runtime,
+        "SELECT \"TEMP\" FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80 ORDER BY \"TEMP\"",
+    )
+    .await;
+    assert!(
+        rows.contains("90.0") && rows.contains("100.0"),
+        "and it must be that one:\n{rows}"
+    );
 }
 
 /// Pruning must never remove a file that could match. A predicate every file
@@ -686,12 +707,13 @@ async fn an_unanalyzed_file_is_never_dropped() {
         "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
     )
     .await;
-    assert!(
-        plan.contains("fresh.parquet"),
-        "a file with no statistics must survive:\n{plan}"
+    assert_eq!(
+        files_in_plan(&plan),
+        1,
+        "the file with no statistics must survive:\n{plan}"
     );
     assert!(
-        !plan.contains("analyzed.parquet"),
+        plan.contains("pruned=1"),
         "while the analyzed one is still ruled out:\n{plan}"
     );
 }
@@ -979,7 +1001,7 @@ async fn registry_listing_plans_the_scan_from_the_registry() {
 
     let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
     assert!(
-        plan.contains("RegistryScanExec"),
+        plan.contains("FastObjectScan"),
         "the scan must come from the registry, not a listing:\n{plan}"
     );
     assert!(
@@ -1016,7 +1038,7 @@ async fn registry_listing_prunes_before_the_list_is_built() {
     )
     .await;
     assert!(
-        plan.contains("RegistryScanExec") && plan.contains("files=1") && plan.contains("pruned=2"),
+        plan.contains("FastObjectScan") && plan.contains("files=1") && plan.contains("pruned=2"),
         "two of three files cannot hold a TEMP above 80:\n{plan}"
     );
 
@@ -1026,7 +1048,7 @@ async fn registry_listing_prunes_before_the_list_is_built() {
     )
     .await;
     assert!(
-        analyzed.contains("file_stats_files_listed=3"),
+        analyzed.contains("file_stats_files_considered=3"),
         "the counters are the evidence the registry served the plan:\n{analyzed}"
     );
     assert!(
@@ -1056,8 +1078,8 @@ async fn registry_listing_falls_back_for_an_undiscovered_prefix() {
 
     let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
     assert!(
-        !plan.contains("RegistryScanExec"),
-        "an undiscovered prefix must go to the listing path:\n{plan}"
+        plan.contains("mode=listed"),
+        "an undiscovered prefix must be listed:\n{plan}"
     );
 
     let rows = query(&runtime, "SELECT \"TEMP\" FROM read_parquet('obs/*.parquet')").await;
@@ -1076,8 +1098,8 @@ async fn registry_listing_stays_off_by_default() {
 
     let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
     assert!(
-        !plan.contains("RegistryScanExec"),
-        "the default is the listing path:\n{plan}"
+        plan.contains("mode=listed"),
+        "the default lists the store:\n{plan}"
     );
     assert_eq!(files_in_plan(&plan), 1, "{plan}");
 }

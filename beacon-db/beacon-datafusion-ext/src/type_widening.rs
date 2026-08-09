@@ -68,7 +68,7 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
 /// [`ArrowTypeWideningStrategy`] trait. A pair with no common representation
 /// (`Date32` + `Int32`) is an error rather than a guess.
 ///
-/// This is the strategy `CustomListingTable` merges its schemas with unless a
+/// This is the strategy `FastObjectTable` merges its schemas with unless a
 /// deployment registers another through `RuntimeBuilder::with_type_widening`,
 /// so a `read_*` over files that disagree on a column's width behaves exactly
 /// as it always has.
