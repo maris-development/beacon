@@ -81,6 +81,14 @@ pub async fn schema_from_group_path(
         .map_err(|e| anyhow::anyhow!("Failed to compute super schema for Zarr groups: {e}"))
 }
 
+/// The verbatim JSON attributes of a group's child arrays, keyed by the column
+/// name the array is surfaced under.
+///
+/// [`AttributeValue`] models only the scalars Beacon turns into columns, so it
+/// drops a JSON array such as `actual_range`. Statistics need that value, hence
+/// the untouched map.
+pub type ArrayAttributes = IndexMap<String, serde_json::Map<String, serde_json::Value>>;
+
 /// Build an [`AnyDataset`] from a zarr group.
 ///
 /// `projected_names`:
@@ -92,10 +100,24 @@ pub async fn dataset_from_group(
     group: &Group<dyn AsyncReadableListableStorageTraits>,
     projected_names: Option<&[String]>,
 ) -> anyhow::Result<AnyDataset> {
+    dataset_and_attributes_from_group(group, projected_names)
+        .await
+        .map(|(dataset, _)| dataset)
+}
+
+/// [`dataset_from_group`], also returning each child array's raw JSON attributes.
+///
+/// One walk of the group serves both: the arrays are listed and their metadata
+/// parsed exactly once, so statistics cost no extra metadata reads.
+pub async fn dataset_and_attributes_from_group(
+    group: &Group<dyn AsyncReadableListableStorageTraits>,
+    projected_names: Option<&[String]>,
+) -> anyhow::Result<(AnyDataset, ArrayAttributes)> {
     let included =
         |name: &str| projected_names.map_or(true, |names| names.iter().any(|n| n == name));
 
     let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
+    let mut array_attributes: ArrayAttributes = IndexMap::new();
 
     // ── Global group attributes ──────────────────────────────────────────
     for (attr_name, attr_value) in group.attributes() {
@@ -126,6 +148,8 @@ pub async fn dataset_from_group(
             .strip_prefix(&group_path)
             .unwrap_or(&array_node_path);
         let array_name = array_name.strip_prefix('/').unwrap_or(array_name).to_string();
+
+        array_attributes.insert(array_name.clone(), array.attributes().clone());
 
         // Parse the array's JSON attributes once: they drive both the
         // surfaced `{array}.{attr}` columns and CF decoding of the array.
@@ -158,9 +182,10 @@ pub async fn dataset_from_group(
     arrays.sort_keys();
 
     let dataset = Dataset::new(group_path, arrays).await;
-    AnyDataset::try_from_dataset(dataset)
+    let dataset = AnyDataset::try_from_dataset(dataset)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to wrap zarr group as AnyDataset: {e}"))
+        .map_err(|e| anyhow::anyhow!("Failed to wrap zarr group as AnyDataset: {e}"))?;
+    Ok((dataset, array_attributes))
 }
 
 #[cfg(test)]

@@ -163,6 +163,147 @@ async fn hdf5_ranges_need_the_rust_reader() {
     );
 }
 
+/// Copy the bundled Zarr v3 store under `dir`, keeping its layout.
+///
+/// A zarr store is a directory, not a file, so the listing reports every object
+/// in it. Only the store's top-level `zarr.json` resolves to a group with a
+/// dataset behind it; the rest is what the collector has to shrug off.
+fn copy_zarr(dir: &Path) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("beacon-file-formats/beacon-arrow-zarr/test_files/gridded-example.zarr");
+    for entry in walkdir(&fixture) {
+        let relative = entry.strip_prefix(&fixture).unwrap();
+        let target = dir.join(relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(&entry, &target).expect("copy the zarr fixture");
+    }
+}
+
+/// Every file under `root`, recursively.
+fn walkdir(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Write a minimal Zarr v3 store at `dir` holding one `lat` coordinate.
+///
+/// Hand-written rather than built through `zarrs`: the `bytes` codec makes a
+/// chunk a plain little-endian array, so the whole store is two JSON files and
+/// sixteen bytes, and the test stays readable.
+fn write_zarr_lat_store(dir: &Path, values: &[f32]) {
+    std::fs::create_dir_all(dir.join("lat/c")).unwrap();
+    std::fs::write(
+        dir.join("zarr.json"),
+        r#"{"zarr_format":3,"node_type":"group","attributes":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lat/zarr.json"),
+        format!(
+            r#"{{"zarr_format":3,"node_type":"array","shape":[{n}],"data_type":"float32",
+                 "chunk_grid":{{"name":"regular","configuration":{{"chunk_shape":[{n}]}}}},
+                 "chunk_key_encoding":{{"name":"default","configuration":{{"separator":"/"}}}},
+                 "fill_value":0.0,
+                 "codecs":[{{"name":"bytes","configuration":{{"endian":"little"}}}}],
+                 "attributes":{{"units":"degrees_north"}},
+                 "dimension_names":["lat"],"storage_transformers":[]}}"#,
+            n = values.len()
+        ),
+    )
+    .unwrap();
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    std::fs::write(dir.join("lat/c/0"), bytes).unwrap();
+}
+
+/// The point of the ranges: a `WHERE` on a coordinate drops the stores that
+/// cannot hold a matching row, before any chunk is opened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_zarr_scan_prunes_on_a_coordinate() {
+    let root = tempfile::tempdir().unwrap();
+    write_zarr_lat_store(
+        &root.path().join("datasets/sst/south.zarr"),
+        &[0.0, 1.0, 2.0, 3.0],
+    );
+    write_zarr_lat_store(
+        &root.path().join("datasets/sst/north.zarr"),
+        &[80.0, 81.0, 82.0, 83.0],
+    );
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let analyzed = query(
+        &runtime,
+        "EXPLAIN ANALYZE SELECT lat FROM read_zarr('sst/') WHERE lat > 50",
+    )
+    .await;
+
+    assert!(
+        analyzed.contains("file_stats_files_considered=2"),
+        "both stores should reach the scan:\n{analyzed}"
+    );
+    assert!(
+        analyzed.contains("file_stats_files_pruned=1"),
+        "the southern store cannot hold lat > 50 and must be dropped:\n{analyzed}"
+    );
+}
+
+/// A zarr store records ranges for its coordinates, and none for its grids.
+///
+/// This is the acceptance the format exists to meet: `column_count` above zero
+/// for a store, so a `WHERE` on a coordinate can prune it. The switch turns it
+/// back off, and then the store analyzes successfully with nothing in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn zarr_records_coordinate_ranges() {
+    use beacon_arrow_zarr::ZarrConfig;
+
+    async fn analyze(enable_statistics: bool) -> u32 {
+        let root = tempfile::tempdir().unwrap();
+        copy_zarr(&root.path().join("datasets/sst/gridded.zarr"));
+
+        let runtime = builder(root.path(), enabled())
+            .with_zarr_config(ZarrConfig { enable_statistics })
+            .build()
+            .await
+            .unwrap();
+        let service = runtime.file_stats().expect("the subsystem is enabled");
+        service.run_once().await.unwrap();
+
+        let store = service.store();
+        let id = store
+            .registry()
+            .file_id("sst/gridded.zarr/zarr.json")
+            .unwrap()
+            .expect("the store's metadata was registered");
+        let record = store.registry().record(id).unwrap().unwrap();
+        assert_eq!(record.format, "zarr", "zarr.json resolved to the Zarr format");
+        record.column_count
+    }
+
+    assert!(
+        analyze(true).await > 0,
+        "the coordinates lat, lon and time must each carry a range"
+    );
+    assert_eq!(
+        analyze(false).await,
+        0,
+        "with statistics off no column carries a range"
+    );
+}
+
 /// A NetCDF-4 file carries ranges under either HDF5 extension.
 ///
 /// The extension picks the format, not the reader's opinion of the bytes: `.h5`
