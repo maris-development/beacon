@@ -20,6 +20,18 @@ tag. Releases before 2.0.0 are recorded in the
   `valid_max` are deliberately **not** used: they state which values are valid, not which values a
   store holds, and a store may hold values outside them. `BEACON_ZARR_ENABLE_STATISTICS=false`
   (or `OPTIONS (enable_statistics 'false')` on one table) turns the whole thing off.
+- **Beacon reads Apache Iceberg tables.** `CREATE EXTERNAL TABLE … STORED AS ICEBERG LOCATION
+  'iceberg/obs'` registers an existing table, and `read_iceberg('iceberg/obs')` queries one
+  ad-hoc; both take an optional `snapshot_id` for time travel. A table is named by its directory,
+  with no catalog: Beacon finds the current metadata file from `metadata/version-hint.text`, or
+  from the highest-numbered `*.metadata.json`. Every byte is read through the datasets store, so a
+  table on S3 reads with no local copy and needs no separate credentials, and the absolute paths
+  the metadata records are rebased onto the location you gave — a table written elsewhere and
+  mounted here just reads. A registered table re-reads its metadata per query, so a snapshot or a
+  column another writer commits shows on the next query without a restart. A `WHERE` clause is
+  pushed into the Iceberg scan, which drops data files from the manifests' statistics. Reads only:
+  no `INSERT`, `MERGE` or snapshot expiry, and no REST or Glue catalog yet. See
+  [Apache Iceberg](docs/docs/2.0.0-rc2/formats/iceberg.md).
 - **Icechunk repositories read through the Zarr reader.** An Icechunk repository is a Zarr v3 store
   with commits, branches and snapshots. `read_icechunk('sst/repo')` and `CREATE EXTERNAL TABLE …
   STORED AS ICECHUNK` read one version of it: the tip of a branch by default, or a fixed `tag` /
@@ -33,6 +45,10 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **Minimum supported Rust is 1.94**, up from 1.91. `iceberg` and `iceberg-datafusion` 0.10 — the
+  only release line built against the DataFusion 53 and Arrow 58 this workspace unifies on —
+  declare `rust-version = "1.94"`, so the workspace floor follows. Beacon's own code uses no
+  feature newer than 1.91. CI builds the floor leg at 1.94.
 - **One product, one name.** "Beacon Data Lake" and "BeaconDB" are gone as marketed products.
   There is one thing, and it is called **Beacon**. Where the running process needs a name, the
   docs say "the Beacon server" in lowercase. The tagline is now "a query engine for scientific
@@ -63,12 +79,17 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
-- **File pruning never ran for netCDF, HDF5, Zarr or TIFF.** The pruner looked for the scan at the
-  root of the plan a table provider returned. Every format built on ND arrays returns its scan
-  wrapped in the nd spine, so the pruner found nothing and silently kept every file — for exactly
-  the formats whose files are largest, and whose ranges the collector had already recorded. It now
-  finds the scan inside the plan and rebuilds the nodes above it. A plan holding more than one scan
-  is still left alone, because pruning the wrong one would drop matching rows.
+- **File statistics pruned no netCDF or HDF5 file.** The ranges were recorded and then never used.
+  Pruning rewrites the file list of a built scan, and it looked for that list on the plan's root
+  node. A netCDF or HDF5 scan is not that node: its arrays reach the plan encoded, so the format
+  returns a decode and a broadcast above the scan, and the file list sits two nodes down. Pruning
+  now descends to it and rebuilds the plan over the shorter list. A `WHERE` clause on a recorded
+  column drops the files it rules out, exactly as it already did for Parquet. Requires the Rust
+  reader (`BEACON_HDF5_USE_RUST_READER`, `BEACON_NETCDF_USE_RUST_READER`), which is what records
+  the ranges in the first place.
+- **A pass on netcdf-c never said why it recorded nothing.** A `.nc`, `.h5` or `.hdf5` file read
+  through netcdf-c analyzes cleanly and contributes no ranges, which reads exactly like a file that
+  has none. Each pass now logs the reason once, and names the variable to set.
 - **A netCDF time variable kept its `_FillValue` cells as dates.** Both netCDF readers dropped the
   `_FillValue` of a CF time variable, so a fill cell reached a query as a real timestamp:
   `units = "days since 1970-01-01"` with `_FillValue = -32768` gave `1880-03-15`. Such a value

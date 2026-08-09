@@ -64,6 +64,7 @@ beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
+beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
 beacon-icechunk = { path = "../beacon-file-formats/beacon-icechunk" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
 beacon-redb-store = { path = "../beacon-redb-store" }
@@ -71,4 +72,7 @@ beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
 
 [dev-dependencies]
 deltalake = { workspace = true }
+# Writes the Iceberg fixtures the read tests read; Beacon itself never writes Iceberg.
+iceberg = { workspace = true }
+iceberg-datafusion = { workspace = true }
 tempfile = { workspace = true }

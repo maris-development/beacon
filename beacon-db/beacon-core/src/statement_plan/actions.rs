@@ -235,6 +235,14 @@ pub(crate) async fn create_external_table(
         return create_delta_table(session, cmd).await;
     }
 
+    // `STORED AS ICEBERG` registers an Apache Iceberg table. Like Delta it is a
+    // directory — a `metadata` directory plus data files — so it bypasses the
+    // listing-table factory and uses its own provider. Beacon reads it; Iceberg
+    // is not a managed-table engine here.
+    if cmd.file_type.eq_ignore_ascii_case("ICEBERG") {
+        return create_iceberg_table(session, cmd).await;
+    }
+
     // `STORED AS ICECHUNK` registers an Icechunk repository read through the zarr
     // reader. A repository keeps its metadata in snapshots rather than in listable
     // `zarr.json` objects, so it bypasses the listing-table factory too.
@@ -353,6 +361,28 @@ async fn create_delta_table(
     };
 
     // `build_provider` resolves the schema from the Delta log; registration
+    // persists `table.json` via the TableManager.
+    let provider = definition.build_provider(session.clone()).await?;
+    session.register_table(cmd.name.clone(), provider)?;
+    Ok(())
+}
+
+/// Build and register an Apache Iceberg table from
+/// `CREATE EXTERNAL TABLE … STORED AS ICEBERG LOCATION 'datasets://path/to/table'
+/// OPTIONS ('snapshot_id' '3821550127947089060')`. The Iceberg table must already
+/// exist at the location; its schema is read from the table metadata.
+async fn create_iceberg_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+) -> anyhow::Result<()> {
+    let definition = beacon_iceberg::IcebergTableDefinition {
+        name: cmd.name.to_string(),
+        location: cmd.location.clone(),
+        options: cmd.options.clone(),
+        definition: None,
+    };
+
+    // `build_provider` reads the schema from the table metadata; registration
     // persists `table.json` via the TableManager.
     let provider = definition.build_provider(session.clone()).await?;
     session.register_table(cmd.name.clone(), provider)?;

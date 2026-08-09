@@ -156,7 +156,7 @@ would drop a file that holds a matching row.
 Set `BEACON_ZARR_ENABLE_STATISTICS=false` to stop this work.
 :::
 
-:::warning netCDF needs the Rust reader
+:::warning netCDF and HDF5 need the Rust reader
 The netCDF-C library holds one lock for each call in the process. Beacon computes the ranges through
 one thread. Your core count does not change this. The work also blocks queries.
 
@@ -164,6 +164,12 @@ Beacon therefore computes netCDF ranges with its own Rust reader. That reader re
 object store and uses each core.
 
 With the default reader, netCDF files record `column_count = 0`. Beacon prunes no file.
+
+The rule applies to `.h5` and `.hdf5` files. The HDF5 format reads through netCDF-C by default.
+Set `BEACON_HDF5_USE_RUST_READER=true` for HDF5 ranges.
+
+Beacon writes the reason one time for each pass, at log level `info`. The line names the
+variable to set.
 :::
 
 ## Changed and deleted files

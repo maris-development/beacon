@@ -71,6 +71,33 @@ fn write_parquet(path: &Path, min: f64, max: f64) {
     writer.close().unwrap();
 }
 
+/// A NetCDF-4 file whose TEMP column spans `[min, max]`.
+///
+/// A NetCDF-4 file *is* an HDF5 file, so the caller picks the extension and with
+/// it which format reads the result: `.nc` is netCDF, `.h5` and `.hdf5` are the
+/// HDF5 format over the very same bytes.
+fn write_netcdf4(path: &Path, min: f64, max: f64) {
+    use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+    use beacon_arrow_netcdf::writer::ArrowRecordBatchWriter;
+
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("TEMP", DataType::Float64, false),
+        Field::new("DEPTH", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Float64Array::from(vec![min, max])),
+            Arc::new(Int64Array::from(vec![1, 2])),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowRecordBatchWriter::<DefaultEncoder>::new(path, schema).unwrap();
+    writer.write_record_batch(batch).unwrap();
+    writer.finish().unwrap();
+}
+
 /// The plain HDF5 fixture shipped with the HDF5 reader: `station_id` spans
 /// 11..33, and its datasets live two group levels deep.
 fn copy_hdf5(path: &Path) {
@@ -275,6 +302,139 @@ async fn zarr_records_coordinate_ranges() {
         0,
         "with statistics off no column carries a range"
     );
+}
+
+/// A NetCDF-4 file carries ranges under either HDF5 extension.
+///
+/// The extension picks the format, not the reader's opinion of the bytes: `.h5`
+/// and `.hdf5` both resolve to the HDF5 format, and with the Rust reader on it
+/// reads a NetCDF-4 container as readily as a plain HDF5 one. Both files here
+/// hold the same two rank-1 variables, and both must record a range for each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_netcdf4_file_under_an_hdf5_extension_records_its_ranges() {
+    use beacon_arrow_hdf5::Hdf5Config;
+
+    let root = tempfile::tempdir().unwrap();
+    write_netcdf4(&root.path().join("datasets/obs/cold.h5"), 0.0, 5.0);
+    write_netcdf4(&root.path().join("datasets/obs/hot.hdf5"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), enabled())
+        .with_hdf5_config(Hdf5Config {
+            use_rust_reader: true,
+            ..Hdf5Config::default()
+        })
+        .build()
+        .await
+        .unwrap();
+    let service = runtime.file_stats().expect("the subsystem is enabled");
+
+    let pass = service.run_once().await.unwrap();
+    assert_eq!(pass.analyzed, 2, "both files were read: {pass:?}");
+    assert_eq!(pass.failed, 0);
+
+    let store = service.store();
+    for path in ["obs/cold.h5", "obs/hot.hdf5"] {
+        let id = store
+            .registry()
+            .file_id(path)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{path} was registered"));
+        let record = store.registry().record(id).unwrap().unwrap();
+        assert_eq!(record.format, "hdf5", "{path} resolved to the HDF5 format");
+        assert!(
+            record.column_count >= 2,
+            "{path} must carry a range for TEMP and for DEPTH: {record:?}"
+        );
+    }
+
+    // And the ranges are the files' own, not a merged one.
+    let segments = store.column_stats_by_name("TEMP", (0, 10)).await.unwrap();
+    let mut ranges: Vec<(f64, f64)> = segments
+        .iter()
+        .flat_map(|segment| {
+            let min = arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(
+                segment.min.as_ref(),
+            );
+            let max = arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(
+                segment.max.as_ref(),
+            );
+            (0..segment.len()).map(move |i| (min.value(i), max.value(i)))
+        })
+        .collect();
+    ranges.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(ranges, vec![(0.0, 5.0), (90.0, 100.0)]);
+}
+
+/// The point of recording them: a predicate the ranges rule out leaves the file
+/// out of the scan.
+///
+/// An HDF5 scan is not a bare `DataSourceExec`. Its arrays reach the plan
+/// encoded, so the format returns `NdBroadcastExec(NdSourceExec(scan))`, and the
+/// file list under those nodes is what pruning rewrites.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_predicate_drops_hdf5_files_from_the_scan() {
+    use beacon_arrow_hdf5::Hdf5Config;
+
+    let root = tempfile::tempdir().unwrap();
+    write_netcdf4(&root.path().join("datasets/obs/cold.h5"), 0.0, 5.0);
+    write_netcdf4(&root.path().join("datasets/obs/mild.h5"), 20.0, 25.0);
+    write_netcdf4(&root.path().join("datasets/obs/hot.h5"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), enabled())
+        .with_hdf5_config(Hdf5Config {
+            use_rust_reader: true,
+            ..Hdf5Config::default()
+        })
+        .build()
+        .await
+        .unwrap();
+    let pass = runtime.file_stats().unwrap().run_once().await.unwrap();
+    assert_eq!(pass.analyzed, 3);
+
+    let all = explain(&runtime, "SELECT * FROM read_hdf5('obs/*.h5')").await;
+    assert_eq!(
+        all.matches(".h5").count(),
+        3,
+        "no predicate reads everything:\n{all}"
+    );
+
+    let hot = explain(
+        &runtime,
+        "SELECT * FROM read_hdf5('obs/*.h5') WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert_eq!(
+        hot.matches(".h5").count(),
+        1,
+        "only hot.h5 can hold a TEMP above 80:\n{hot}"
+    );
+    assert!(hot.contains("hot.h5"), "and it must be that one:\n{hot}");
+
+    // Pruning changed which files are opened, not what the query answers.
+    let rows = query(
+        &runtime,
+        "SELECT \"TEMP\" FROM read_hdf5('obs/*.h5') WHERE \"TEMP\" > 80 ORDER BY \"TEMP\"",
+    )
+    .await;
+    assert!(rows.contains("90.0"), "{rows}");
+    assert!(rows.contains("100.0"), "{rows}");
+    assert!(!rows.contains("25.0"), "{rows}");
+
+    // And a predicate no file can match leaves a scan with no files at all. The
+    // nd nodes above it have to rebuild over that, so this is the shape worth
+    // pinning: an empty scan, not an error.
+    let none = query(
+        &runtime,
+        "SELECT \"TEMP\" FROM read_hdf5('obs/*.h5') WHERE \"TEMP\" > 1000",
+    )
+    .await;
+    assert!(!none.contains("90.0"), "{none}");
+    let plan = explain(
+        &runtime,
+        "SELECT * FROM read_hdf5('obs/*.h5') WHERE \"TEMP\" > 1000",
+    )
+    .await;
+    assert_eq!(plan.matches(".h5").count(), 0, "no file survives:\n{plan}");
 }
 
 /// The whole loop, through a runtime: discovery finds the files, the format

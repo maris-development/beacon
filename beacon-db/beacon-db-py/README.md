@@ -382,7 +382,7 @@ links — not just a Rust compiler:
 
 - **protoc** (Lance generates protobuf at build time)
 - **HDF5 + netCDF** headers/libraries (the netCDF reader/writer)
-- a Rust toolchain — **1.91 or later**, enforced by `rust-version` in the workspace `Cargo.toml`
+- a Rust toolchain — **1.94 or later**, enforced by `rust-version` in the workspace `Cargo.toml`
 
 ```bash
 # macOS

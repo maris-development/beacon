@@ -745,6 +745,8 @@ const TABLE_FUNCTIONS: &[(&str, &[&str])] = &[
     ("read_geoparquet", &["glob_paths"]),
     ("read_geoparquet_schema", &["glob_paths"]),
     ("read_hdf5", &["glob_paths"]),
+    ("read_iceberg", &["location"]),
+    ("read_iceberg_schema", &["location"]),
     ("read_hdf5_schema", &["glob_paths"]),
     ("read_netcdf", &["glob_paths"]),
     ("read_netcdf_schema", &["glob_paths"]),

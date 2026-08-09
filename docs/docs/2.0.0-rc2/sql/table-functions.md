@@ -272,6 +272,32 @@ SELECT * FROM read_delta('delta/ocean_profiles', '2026-01-01T00:00:00Z')
 Use [`CREATE EXTERNAL TABLE … STORED AS DELTA`](/docs/2.0.0-rc2/formats/delta-lake)
 to register a Delta table permanently. That form also supports `INSERT INTO`.
 
+## `read_iceberg`
+
+```text
+read_iceberg(location)
+read_iceberg(location, snapshot_id)
+```
+
+Beacon reads an [Apache Iceberg](/docs/2.0.0-rc2/formats/iceberg) table. The `location`
+argument differs from the other functions. It gives **one path to the Iceberg table directory**.
+That directory holds `metadata/`. Give no glob and no list. Beacon reads the columns from the table
+metadata. Beacon also finds the current metadata file.
+
+The second argument gives an Iceberg **snapshot id** for time travel. The id is a 64-bit integer.
+Write the id in quotes if your client holds no 64-bit integer.
+
+```sql
+-- Current snapshot
+SELECT * FROM read_iceberg('iceberg/ocean_profiles') LIMIT 100
+
+-- Time travel to a specific snapshot
+SELECT count(*) FROM read_iceberg('iceberg/ocean_profiles', 3821550127947089060)
+```
+
+Use [`CREATE EXTERNAL TABLE … STORED AS ICEBERG`](/docs/2.0.0-rc2/formats/iceberg)
+to keep an Iceberg table in the catalog. Beacon reads an Iceberg table. Beacon writes none.
+
 ## `read_icechunk`
 
 ```text
