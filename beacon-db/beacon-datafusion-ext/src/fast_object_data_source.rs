@@ -500,10 +500,23 @@ enum StreamState {
     Pruning(BoxFuture<'static, Vec<FileId>>),
     /// A file is being opened.
     Opening(FileOpenFuture),
-    /// A file's batches are being read.
-    Reading(BoxStream<'static, Result<RecordBatch>>),
+    /// A file's batches are being read, while the next one opens alongside it.
+    Reading {
+        reader: BoxStream<'static, Result<RecordBatch>>,
+        next: Option<NextOpen>,
+    },
     /// Every file is read, or an error ended the stream.
     Done,
+}
+
+/// The file after the one being read.
+///
+/// Opening it costs a round trip on object storage, so it starts while the
+/// current file is still being scanned and is waiting by the time it is due —
+/// the same overlap DataFusion's own `FileStream` performs.
+enum NextOpen {
+    Pending(FileOpenFuture),
+    Ready(Result<BoxStream<'static, Result<RecordBatch>>>),
 }
 
 impl FastObjectStream {
@@ -640,6 +653,18 @@ impl FastObjectStream {
         self.pruned.add(dropped);
     }
 
+    /// Begin opening the next queued file, if there is one.
+    ///
+    /// Only within a chunk: at a chunk boundary the queue is empty and the
+    /// next files are not known yet, so that one boundary has no overlap.
+    fn begin_next_open(&mut self) -> Option<NextOpen> {
+        let meta = self.queue.pop_front()?;
+        match self.opener.open(PartitionedFile::from(meta)) {
+            Ok(future) => Some(NextOpen::Pending(future)),
+            Err(error) => Some(NextOpen::Ready(Err(error))),
+        }
+    }
+
     /// Move `pending` into the queue unfiltered.
     fn accept_all(&mut self) {
         for (_, meta) in self.pending.drain(..) {
@@ -737,36 +762,65 @@ impl Stream for FastObjectStream {
                     Poll::Pending => return Poll::Pending,
                 },
                 StreamState::Opening(future) => match Pin::new(future).poll(cx) {
-                    Poll::Ready(Ok(stream)) => this.state = StreamState::Reading(stream),
+                    Poll::Ready(Ok(reader)) => {
+                        // The next file starts opening now, so its round trip
+                        // overlaps this one's scan.
+                        let next = this.begin_next_open();
+                        this.state = StreamState::Reading { reader, next };
+                    }
                     Poll::Ready(Err(error)) => {
                         this.state = StreamState::Done;
                         return Poll::Ready(Some(Err(error)));
                     }
                     Poll::Pending => return Poll::Pending,
                 },
-                StreamState::Reading(stream) => match Pin::new(stream).poll_next(cx) {
-                    Poll::Ready(Some(Ok(batch))) => {
-                        let batch = match &mut this.remaining {
-                            Some(remaining) => {
-                                let take = batch.num_rows().min(*remaining);
-                                *remaining -= take;
-                                if take < batch.num_rows() {
-                                    batch.slice(0, take)
-                                } else {
-                                    batch
+                StreamState::Reading { reader, next } => {
+                    // Drive the next file's open forward, so it is ready — or
+                    // nearly — by the time this reader runs out.
+                    if let Some(NextOpen::Pending(future)) = next
+                        && let Poll::Ready(opened) = Pin::new(future).poll(cx)
+                    {
+                        *next = Some(NextOpen::Ready(opened));
+                    }
+
+                    match Pin::new(reader).poll_next(cx) {
+                        Poll::Ready(Some(Ok(batch))) => {
+                            let batch = match &mut this.remaining {
+                                Some(remaining) => {
+                                    let take = batch.num_rows().min(*remaining);
+                                    *remaining -= take;
+                                    if take < batch.num_rows() {
+                                        batch.slice(0, take)
+                                    } else {
+                                        batch
+                                    }
                                 }
-                            }
-                            None => batch,
-                        };
-                        return Poll::Ready(Some(Ok(batch)));
+                                None => batch,
+                            };
+                            return Poll::Ready(Some(Ok(batch)));
+                        }
+                        Poll::Ready(Some(Err(error))) => {
+                            this.state = StreamState::Done;
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                        Poll::Ready(None) => {
+                            this.state = match next.take() {
+                                Some(NextOpen::Ready(Ok(reader))) => {
+                                    let next = this.begin_next_open();
+                                    StreamState::Reading { reader, next }
+                                }
+                                Some(NextOpen::Ready(Err(error))) => {
+                                    this.state = StreamState::Done;
+                                    return Poll::Ready(Some(Err(error)));
+                                }
+                                Some(NextOpen::Pending(future)) => StreamState::Opening(future),
+                                // Chunk boundary: refill, and prune, first.
+                                None => StreamState::Idle,
+                            };
+                        }
+                        Poll::Pending => return Poll::Pending,
                     }
-                    Poll::Ready(Some(Err(error))) => {
-                        this.state = StreamState::Done;
-                        return Poll::Ready(Some(Err(error)));
-                    }
-                    Poll::Ready(None) => this.state = StreamState::Idle,
-                    Poll::Pending => return Poll::Pending,
-                },
+                }
             }
         }
     }

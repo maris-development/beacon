@@ -501,3 +501,72 @@ async fn a_streaming_plan_holds_shards_not_files() {
         "the partition count is chosen, not derived from a file list"
     );
 }
+
+/// Small collections still spread across the machine.
+///
+/// A hundred files is the ordinary case, and it must use every partition
+/// rather than reading in one thread. The skewed case is the regression: one
+/// large file among small ones once produced three partitions, one of which
+/// held 84 files.
+#[tokio::test(flavor = "multi_thread")]
+async fn small_collections_fill_the_partition_budget() {
+    for (label, sizes, want) in [
+        ("100 equal", vec![1_000u64; 100], 12),
+        ("100, one huge", {
+            let mut v = vec![1_000u64; 99];
+            v.insert(0, 900_000);
+            v
+        }, 12),
+        ("5 equal", vec![1_000u64; 5], 5),
+        ("1", vec![1_000u64; 1], 1),
+    ] {
+        let fixture = fixture_with(true, Some(12)).await;
+        let files: Vec<ObservedFile> = sizes
+            .iter()
+            .enumerate()
+            .map(|(i, size)| ObservedFile::new(format!("obs/{i:05}.parquet"), *size, 1))
+            .collect();
+        fixture.stats.registry().intern_files(&files).unwrap();
+
+        let snapshot = fixture.stats.registry().snapshot().unwrap();
+        let sharded = snapshot.shard_prefix("obs/", 12).unwrap();
+        assert_eq!(
+            sharded.shards.len(),
+            want,
+            "{label}: files per partition {:?}",
+            sharded.shards.iter().map(|s| s.files).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// Every partition is a separate stream, so a real query over a hundred files
+/// reads them concurrently rather than one after another.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hundred_files_are_read_across_every_partition() {
+    let fixture = fixture_with(true, Some(8)).await;
+
+    let mut observed = Vec::new();
+    for i in 0..100 {
+        observed.push(
+            put_parquet(&fixture.objects, &format!("obs/{i:05}.parquet"), &[i as f64]).await,
+        );
+    }
+    let pairs: Vec<(ObservedFile, &[f64])> = observed
+        .into_iter()
+        .map(|file| (file, &[0.0f64][..]))
+        .collect();
+    analyze(&fixture.stats, &pairs).await;
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let plan = table.scan(&fixture.ctx.state(), None, &[], None).await.unwrap();
+    assert_eq!(
+        plan.output_partitioning().partition_count(),
+        8,
+        "a hundred files use the whole partition budget"
+    );
+
+    // And every row still comes back, once each.
+    let batches = collect(plan, fixture.ctx.task_ctx()).await.unwrap();
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 100);
+}
