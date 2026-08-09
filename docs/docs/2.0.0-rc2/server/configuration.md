@@ -236,6 +236,20 @@ The pure-Rust reader also reads two layouts the netCDF data model cannot express
 and a compound dataset. See
 [Performance Tuning](/docs/2.0.0-rc2/server/performance-tuning#hdf5-pure-rust-reader).
 
+### Zarr
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_ZARR_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. |
+
+A store answers from its `actual_range` metadata where it can. Where it cannot, it reads only its
+rank-0 and rank-1 arrays — the coordinates a `WHERE` clause names. A data grid of rank 2 or higher
+is never read, so a scan costs what it always did. Turn statistics off for a collection of many
+small stores, where even a rank-1 read per store adds up.
+
+`valid_min` and `valid_max` are never used as a range. They state which values are *valid*, not
+which values a store holds, so a store may hold values outside them.
+
 ### Atlas
 
 | Variable | Default | Description |

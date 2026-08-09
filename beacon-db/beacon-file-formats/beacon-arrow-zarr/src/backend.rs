@@ -114,7 +114,7 @@ async fn read_raw_as_f64(
 }
 
 /// Convert a CF time offset (in `unit`s since `epoch`) to a nanosecond timestamp.
-fn cf_offset_to_timestamp(value: f64, epoch: Epoch, unit: hifitime::Unit) -> TimestampNanosecond {
+pub fn cf_offset_to_timestamp(value: f64, epoch: Epoch, unit: hifitime::Unit) -> TimestampNanosecond {
     let instant = epoch + (value * unit);
     TimestampNanosecond(instant.to_unix(hifitime::Unit::Nanosecond) as i64)
 }

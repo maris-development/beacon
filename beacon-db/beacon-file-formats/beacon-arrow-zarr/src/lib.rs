@@ -12,7 +12,10 @@
 pub mod attributes;
 pub mod backend;
 pub mod compat;
+pub mod config;
 pub mod data_types;
 pub mod datafusion;
 pub mod reader;
 pub mod util;
+
+pub use config::ZarrConfig;
