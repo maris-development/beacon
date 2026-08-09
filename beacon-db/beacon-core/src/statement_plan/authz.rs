@@ -8,6 +8,7 @@
 use beacon_auth::{AuthContext, AuthIdentity, ConcreteTarget, Privilege};
 use beacon_common::super_table::SuperListingTable;
 use beacon_datafusion_ext::{
+    custom_listing_table::CustomListingTable,
     file_collection::FileCollection,
     table_ext::{ExternalTable, INTERNAL_TABLE_PREFIX},
 };
@@ -142,7 +143,12 @@ fn scan_targets(scan: &TableScan, session_ctx: &SessionContext) -> Vec<ConcreteT
         return vec![];
     };
 
-    // A `read_*` table function resolves to a `SuperListingTable` over its glob paths.
+    // A `read_*` table function resolves to a `CustomListingTable` over its glob paths.
+    if let Some(table) = provider.as_any().downcast_ref::<CustomListingTable>() {
+        return paths_of(table.table_paths());
+    }
+    // `SuperListingTable` is the predecessor provider; callers outside the
+    // table functions may still build one.
     if let Some(table) = provider.as_any().downcast_ref::<SuperListingTable>() {
         return paths_of(table.table_paths());
     }

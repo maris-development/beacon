@@ -33,6 +33,7 @@ fn enabled() -> FileStatsConfig {
         prefix_depth: None,
         scan_prefix: String::new(),
         discovery_chunk: 50,
+        registry_listing: false,
     }
 }
 
@@ -951,4 +952,132 @@ async fn a_pruned_scan_reports_its_metrics() {
         analyzed.contains("file_stats_columns_used=1"),
         "and that TEMP actually had statistics to prune on:\n{analyzed}"
     );
+}
+
+// ── registry-backed listing ─────────────────────────────────────────────────
+
+/// The opt-in: scans plan their file lists from the registry.
+fn registry_listing() -> FileStatsConfig {
+    FileStatsConfig {
+        registry_listing: true,
+        ..enabled()
+    }
+}
+
+/// With the switch on and every file discovered, the scan node is the
+/// registry source: the plan holds file ids, not a file list, and the rows
+/// still come out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registry_listing_plans_the_scan_from_the_registry() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/hot.parquet"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
+    let pass = runtime.file_stats().unwrap().run_once().await.unwrap();
+    assert_eq!(pass.analyzed, 2);
+
+    let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
+    assert!(
+        plan.contains("RegistryScanExec"),
+        "the scan must come from the registry, not a listing:\n{plan}"
+    );
+    assert!(
+        plan.contains("files=2"),
+        "and say how many files it planned:\n{plan}"
+    );
+
+    let rows = query(
+        &runtime,
+        "SELECT \"TEMP\" FROM read_parquet('obs/*.parquet') ORDER BY \"TEMP\"",
+    )
+    .await;
+    for value in ["0.0", "5.0", "90.0", "100.0"] {
+        assert!(rows.contains(value), "missing {value} in:\n{rows}");
+    }
+}
+
+/// A `WHERE` clause prunes before the file list exists, and `EXPLAIN ANALYZE`
+/// reports what was considered and dropped — the only evidence there is, now
+/// that no file list is printed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registry_listing_prunes_before_the_list_is_built() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/mild.parquet"), 20.0, 25.0);
+    write_parquet(&root.path().join("datasets/obs/hot.parquet"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let plan = explain(
+        &runtime,
+        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert!(
+        plan.contains("RegistryScanExec") && plan.contains("files=1") && plan.contains("pruned=2"),
+        "two of three files cannot hold a TEMP above 80:\n{plan}"
+    );
+
+    let analyzed = query(
+        &runtime,
+        "EXPLAIN ANALYZE SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert!(
+        analyzed.contains("file_stats_files_listed=3"),
+        "the counters are the evidence the registry served the plan:\n{analyzed}"
+    );
+    assert!(
+        analyzed.contains("file_stats_files_pruned=2"),
+        "and that pruning ran before the list was built:\n{analyzed}"
+    );
+
+    let rows = query(
+        &runtime,
+        "SELECT \"TEMP\" FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert!(rows.contains("90.0") && rows.contains("100.0"), "{rows}");
+    assert!(!rows.contains("20.0"), "{rows}");
+}
+
+/// A prefix discovery has never seen still answers from the store: only the
+/// store can tell an empty directory from an undiscovered one, so the listing
+/// path serves it and the file is read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registry_listing_falls_back_for_an_undiscovered_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+
+    // The switch is on, but no discovery pass has run.
+    let runtime = builder(root.path(), registry_listing()).build().await.unwrap();
+
+    let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
+    assert!(
+        !plan.contains("RegistryScanExec"),
+        "an undiscovered prefix must go to the listing path:\n{plan}"
+    );
+
+    let rows = query(&runtime, "SELECT \"TEMP\" FROM read_parquet('obs/*.parquet')").await;
+    assert!(rows.contains("0.0") && rows.contains("5.0"), "{rows}");
+}
+
+/// With the switch off nothing changes: the listing path plans exactly as it
+/// always has, statistics or no statistics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registry_listing_stays_off_by_default() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
+    assert!(
+        !plan.contains("RegistryScanExec"),
+        "the default is the listing path:\n{plan}"
+    );
+    assert_eq!(files_in_plan(&plan), 1, "{plan}");
 }

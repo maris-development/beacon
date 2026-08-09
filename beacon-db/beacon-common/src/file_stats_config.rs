@@ -42,6 +42,14 @@ pub struct FileStatsConfig {
     /// Files registered per discovery transaction, so a listing of a large store
     /// does not have to be held whole.
     pub discovery_chunk: usize,
+    /// Let scans plan their file lists from the registry instead of listing
+    /// the store.
+    ///
+    /// Off by default because it trades visibility for plan speed: a file is
+    /// queryable once discovery has seen it, not the moment it lands in the
+    /// store. A store the registry does not cover keeps the listing path
+    /// regardless of this switch.
+    pub registry_listing: bool,
 }
 
 impl Default for FileStatsConfig {
@@ -61,6 +69,10 @@ impl Default for FileStatsConfig {
             prefix_depth: None,
             scan_prefix: String::new(),
             discovery_chunk: 10_000,
+            // Off: a registry-planned file list shows a file after discovery
+            // runs, not the moment it lands, and that trade is the operator's
+            // to make.
+            registry_listing: false,
         }
     }
 }

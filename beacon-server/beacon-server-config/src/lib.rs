@@ -505,6 +505,11 @@ struct RawConfig {
     file_stats_scan_prefix: String,
     #[envconfig(from = "BEACON_FILE_STATS_DISCOVERY_CHUNK", default = "10000")]
     file_stats_discovery_chunk: usize,
+    /// Let scans plan their file lists from the registry instead of listing
+    /// the store. Off by default: a file becomes queryable when discovery sees
+    /// it, not the moment it lands, and that trade is the operator's to make.
+    #[envconfig(from = "BEACON_FILE_STATS_REGISTRY_LISTING", default = "false")]
+    file_stats_registry_listing: bool,
 
     // OpenAPI documentation metadata
     #[envconfig(from = "BEACON_API_TITLE", default = "Beacon Rest API")]
@@ -628,6 +633,7 @@ impl From<RawConfig> for Config {
                 prefix_depth: raw.file_stats_prefix_depth,
                 scan_prefix: raw.file_stats_scan_prefix.clone(),
                 discovery_chunk: raw.file_stats_discovery_chunk.max(1),
+                registry_listing: raw.file_stats_registry_listing,
             },
             crawler: CrawlerConfig {
                 enable: raw.crawler_enable,

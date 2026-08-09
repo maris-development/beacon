@@ -2,7 +2,7 @@ use std::sync::{Arc, Weak};
 
 use crate::datafusion::CsvFormat;
 use arrow::datatypes::{DataType, Field};
-use beacon_common::super_table::SuperListingTable;
+use beacon_datafusion_ext::custom_listing_table::CustomListingTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl,
@@ -124,14 +124,14 @@ impl TableFunctionImpl for ReadCsvFunc {
 
         let file_format = CsvFormat::new(delimiter, infer_records);
 
-        let super_listing_table = tokio::task::block_in_place(|| {
+        let custom_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                SuperListingTable::new(&session_ctx.state(), Arc::new(file_format), listing_urls)
+                CustomListingTable::new(&session_ctx.state(), Arc::new(file_format), listing_urls)
                     .await
             })
         })?;
 
-        Ok(Arc::new(super_listing_table))
+        Ok(Arc::new(custom_listing_table))
     }
 }
 

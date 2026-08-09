@@ -29,7 +29,8 @@ use beacon_datafusion_ext::{
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
-    type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening},
+    registry_listing::RegistryListingSwitch,
+    type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, SuperTypeWidening},
 };
 use beacon_functions::register_functions;
 use beacon_redb_store::RedbStore;
@@ -892,12 +893,22 @@ fn build_session_config(
         // subsystem is off rather than silently doing nothing.
         .with_extension(crate::file_stats::new_file_stats_service_handle())
         .with_extension(secrets_store.clone())
+        // How `CustomListingTable` merges the schemas of the files behind one
+        // table. Super typing unless the embedder registered its own strategy,
+        // which keeps `read_*` schema merging exactly what it has always been.
         .with_extension(Arc::new(ArrowTypeWidening::new(
             builder
                 .type_widening
                 .clone()
-                .unwrap_or_else(|| Arc::new(DefaultArrowTypeWidening)),
+                .unwrap_or_else(|| Arc::new(SuperTypeWidening)),
         )))
+        // Whether scans may plan their file lists from the file-statistics
+        // registry instead of listing the store. The store handle above says
+        // whether pruning is possible; this says the operator opted into the
+        // visibility trade (a file is queryable once discovery has seen it).
+        .with_extension(Arc::new(RegistryListingSwitch {
+            enable: builder.file_stats.registry_listing,
+        }))
         // Resolves user-supplied dataset paths (a `LOCATION`, a `read_*` argument)
         // to object-store URLs and to native reader paths. Configured against the
         // default datasets store when one is set, otherwise dynamic (schemed paths
