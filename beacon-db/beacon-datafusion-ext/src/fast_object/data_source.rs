@@ -445,21 +445,29 @@ impl FastObjectDataSource {
         let mut live = self.live.lock();
         let stale = match live.as_ref() {
             None => true,
+            // A partition of the run already in progress joins it. Anything
+            // else starts a new one, including the same context arriving again
+            // once every partition has opened — pointer identity alone would
+            // hand that second run a drained queue.
             Some(previous) => {
-                let same = std::ptr::eq(previous.ctx.as_ptr(), Arc::as_ptr(context));
-                if same && previous.opened < self.partitions {
-                    // Replacing an execution that never opened every partition
-                    // means two of them are reading the same queue. Say so:
-                    // the rows are wrong, not just slow.
-                    tracing::warn!(
-                        opened = previous.opened,
-                        partitions = self.partitions,
-                        "a fast object scan started again before its previous run opened every partition"
-                    );
-                }
-                !same || previous.opened >= self.partitions
+                !std::ptr::eq(previous.ctx.as_ptr(), Arc::as_ptr(context))
+                    || previous.opened >= self.partitions
             }
         };
+        if stale
+            && let Some(previous) = live.as_ref()
+            && previous.opened < self.partitions
+        {
+            // The run being replaced never opened every partition: a cancelled
+            // query, or a client that hung up. Its rows were discarded and this
+            // one gets its own queue, so the cost is work done twice rather
+            // than rows read twice.
+            tracing::debug!(
+                opened = previous.opened,
+                partitions = self.partitions,
+                "a fast object scan replaced a run that had not opened every partition"
+            );
+        }
         if stale {
             *live = Some(Live {
                 ctx: Arc::downgrade(context),
