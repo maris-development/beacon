@@ -191,17 +191,6 @@ impl TableProvider for FastObjectTable {
 }
 
 impl FastObjectTable {
-    /// The object that stands for a whole store, when this format is
-    /// directory-oriented.
-    ///
-    /// Told apart by the shape of the extension: a marker format names a file
-    /// (`zarr.json`, `atlas.json`), a file format names a suffix (`parquet`,
-    /// `txt`, `bbf`). Nothing else in the trait distinguishes them.
-    fn store_marker(&self) -> Option<String> {
-        let ext = self.format.get_ext();
-        ext.contains('.').then_some(ext)
-    }
-
     /// The pruning a partition will apply as it reads, or `None` when there is
     /// none worth applying.
     ///
@@ -345,18 +334,6 @@ impl FastObjectTable {
         // `ORDER BY` returns the same rows run to run.
         objects.sort_by(|a, b| a.location.cmp(&b.location));
 
-        // A directory-oriented format is handed one object per store, not the
-        // store's contents. See `outermost_markers`.
-        if let Some(marker) = self.store_marker() {
-            objects = outermost_markers(objects, &marker);
-            if objects.is_empty() {
-                return Ok(Arc::new(EmptyExec::new(project_schema(
-                    &self.schema,
-                    projection,
-                )?)));
-            }
-        }
-
         // The registry may know these files' column ranges even when it
         // cannot supply the file list — a store discovered but not opted into
         // registry listing. Pruning on them is worth having here too, and it
@@ -375,50 +352,6 @@ impl FastObjectTable {
         )
         .await
     }
-}
-
-/// Reduce a listing to the outermost marker object of each store.
-///
-/// Zarr and Atlas call a store a directory but never open one: the reader takes
-/// the marker at its root and resolves the store from there. A listing reports
-/// everything under that directory — the arrays' own markers, every chunk — and
-/// all of it would be rejected by the reader, which is what
-/// `create_physical_plan` used to strip before it was handed an empty config.
-///
-/// A marker nested inside a store already taken belongs to that store, so it is
-/// dropped. Markers are considered shallowest first, so a store's own marker
-/// always decides before its arrays'.
-///
-/// A listing with no marker at all is returned untouched, so the format reports
-/// its own "no metadata found" rather than this silently scanning nothing.
-fn outermost_markers(objects: Vec<ObjectMeta>, marker: &str) -> Vec<ObjectMeta> {
-    let mut markers: Vec<ObjectMeta> = objects
-        .iter()
-        .filter(|meta| meta.location.filename() == Some(marker))
-        .cloned()
-        .collect();
-    if markers.is_empty() {
-        return objects;
-    }
-    markers.sort_by_key(|meta| meta.location.parts().count());
-
-    let mut roots: Vec<Vec<String>> = Vec::new();
-    let mut kept: Vec<ObjectMeta> = Vec::with_capacity(markers.len());
-    for meta in markers {
-        let mut store: Vec<String> = meta
-            .location
-            .parts()
-            .map(|part| part.as_ref().to_string())
-            .collect();
-        store.pop(); // the marker itself
-        if roots.iter().any(|root| store.starts_with(root)) {
-            continue; // inside a store already taken
-        }
-        roots.push(store);
-        kept.push(meta);
-    }
-    kept.sort_by(|a, b| a.location.cmp(&b.location));
-    kept
 }
 
 /// The predicate `filters` form, as one physical expression over `schema`.
@@ -457,80 +390,4 @@ fn knows_any(store: &FileStatsStore, columns: &[String]) -> bool {
     columns
         .iter()
         .any(|name| matches!(store.registry().column_id(name), Ok(Some(_))))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn meta(path: &str) -> ObjectMeta {
-        ObjectMeta {
-            location: object_store::path::Path::from(path),
-            last_modified: chrono::Utc::now(),
-            size: 1,
-            e_tag: None,
-            version: None,
-        }
-    }
-
-    fn paths(objects: Vec<ObjectMeta>) -> Vec<String> {
-        objects
-            .into_iter()
-            .map(|meta| meta.location.to_string())
-            .collect()
-    }
-
-    /// A store is one object to the reader: its root marker. Everything else it
-    /// contains — the arrays' own markers, every chunk — would be rejected.
-    #[test]
-    fn a_store_reduces_to_its_root_marker() {
-        let listing = vec![
-            meta("sst/north.zarr/zarr.json"),
-            meta("sst/north.zarr/lat/zarr.json"),
-            meta("sst/north.zarr/lat/c/0"),
-            meta("sst/south.zarr/zarr.json"),
-            meta("sst/south.zarr/lat/zarr.json"),
-            meta("sst/south.zarr/lat/c/0"),
-        ];
-        assert_eq!(
-            paths(outermost_markers(listing, "zarr.json")),
-            vec!["sst/north.zarr/zarr.json", "sst/south.zarr/zarr.json"],
-            "one marker per store, and nothing from inside one"
-        );
-    }
-
-    /// A nested marker sorts before its store's own by path, so depth decides
-    /// rather than order.
-    #[test]
-    fn depth_decides_which_marker_wins() {
-        let listing = vec![
-            meta("sst/store.zarr/lat/zarr.json"),
-            meta("sst/store.zarr/zarr.json"),
-        ];
-        assert_eq!(
-            paths(outermost_markers(listing, "zarr.json")),
-            vec!["sst/store.zarr/zarr.json"]
-        );
-    }
-
-    /// A URL naming the marker itself resolves to that store.
-    #[test]
-    fn a_marker_named_directly_is_kept() {
-        let listing = vec![meta("sst/north.zarr/zarr.json")];
-        assert_eq!(
-            paths(outermost_markers(listing, "zarr.json")),
-            vec!["sst/north.zarr/zarr.json"]
-        );
-    }
-
-    /// With no marker anywhere the listing passes through, so the format
-    /// reports its own error instead of this scanning nothing.
-    #[test]
-    fn a_listing_without_a_marker_is_untouched() {
-        let listing = vec![meta("sst/not-a-store/data.bin")];
-        assert_eq!(
-            paths(outermost_markers(listing, "zarr.json")),
-            vec!["sst/not-a-store/data.bin"]
-        );
-    }
 }

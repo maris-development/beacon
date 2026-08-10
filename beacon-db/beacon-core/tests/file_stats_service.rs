@@ -247,7 +247,9 @@ async fn a_zarr_scan_prunes_on_a_coordinate() {
 
     let analyzed = query(
         &runtime,
-        "EXPLAIN ANALYZE SELECT lat FROM read_zarr('sst/') WHERE lat > 50",
+        "EXPLAIN ANALYZE SELECT lat FROM \
+         read_zarr(['sst/north.zarr/zarr.json', 'sst/south.zarr/zarr.json']) \
+         WHERE lat > 50",
     )
     .await;
 

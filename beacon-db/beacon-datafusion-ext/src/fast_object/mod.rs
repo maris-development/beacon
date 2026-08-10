@@ -59,11 +59,17 @@
 //!
 //! Zarr and Atlas call a store a directory, but they never open one: their
 //! readers take the marker object at its root — `zarr.json`, `atlas.json` — and
-//! resolve the store from there. They need no plan of their own, only that one
-//! object, so the listing is reduced to the outermost marker per store and the
-//! scan hands it over like any other file. Everything else a store contains,
-//! including its arrays' own markers and every chunk, would be rejected by the
-//! reader.
+//! resolve the store from there. Nothing here treats them specially. The path
+//! names the marker, and the scan hands it over like any other file:
+//!
+//! ```sql
+//! SELECT * FROM read_zarr('sst/north.zarr/zarr.json')
+//! SELECT * FROM read_zarr(['sst/north.zarr/zarr.json', 'sst/south.zarr/zarr.json'])
+//! ```
+//!
+//! A glob cannot stand in for naming the stores. `*` in a listing URL matches
+//! across `/`, so `sst/*/zarr.json` also matches each array's own marker inside
+//! a store, and the reader rejects those — an array is not a group.
 //!
 //! # The one thing `FileScanConfig` is still needed for
 //!
