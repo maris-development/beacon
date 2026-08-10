@@ -130,13 +130,6 @@ fn even_ranges(count: usize, target: usize) -> Vec<Range<usize>> {
 ///
 /// Runs once per execution, behind [`Shared::ready`], so the cost is paid by
 /// the first partition to poll and shared by the rest.
-///
-/// The whole listing is pruned in one call. Cutting it into batches and running
-/// those concurrently looks like the faster shape and is not: the store already
-/// reads a predicate's columns together and each column's segments in parallel,
-/// and it reads only the segments covering the file-id range it is asked about.
-/// Narrowing that range per batch makes every segment that spans a boundary be
-/// read again for each batch touching it.
 pub(super) async fn prune_all(
     objects: Arc<Vec<ObjectMeta>>,
     split: Option<Arc<Vec<Work>>>,
@@ -176,18 +169,30 @@ pub(super) async fn prune_all(
     })
 }
 
+/// Candidates below which pruning stays one call.
+///
+/// A chunk pays for a task, its own id lookups and its own segment reads. Below
+/// this the whole listing is decided in one call, which is what a collection of
+/// ordinary size wants.
+const PRUNE_CHUNK: usize = 65_536;
+
+/// How many prune tasks to run at once.
+fn prune_tasks(candidates: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    (candidates / PRUNE_CHUNK).clamp(1, cores)
+}
+
 /// Drop the files whose recorded ranges say they cannot match.
 ///
 /// A path the registry has never seen has no statistics and is kept: a
 /// partially analyzed store must not lose files. Every failure keeps the whole
 /// list for the same reason, which is what makes this infallible.
-async fn prune(objects: &[ObjectMeta], pruning: &StreamPruning, work: Vec<Work>) -> Vec<Work> {
-    let paths: Vec<String> = work
-        .iter()
-        .map(|work| objects[work.index()].location.to_string())
-        .collect();
-    let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
-    let Ok(ids) = pruning.store.registry().file_ids(&borrowed) else {
+async fn prune(
+    objects: &Arc<Vec<ObjectMeta>>,
+    pruning: &StreamPruning,
+    work: Vec<Work>,
+) -> Vec<Work> {
+    let Some(ids) = resolve_ids(objects, pruning, &work).await else {
         return work;
     };
 
@@ -199,13 +204,7 @@ async fn prune(objects: &[ObjectMeta], pruning: &StreamPruning, work: Vec<Work>)
     candidates.sort_unstable();
     candidates.dedup();
 
-    let kept = beacon_file_stats::prune_files(
-        &pruning.store,
-        &pruning.predicate,
-        &pruning.table_schema,
-        &candidates,
-    )
-    .await;
+    let kept = prune_candidates(pruning, candidates).await;
 
     work.into_iter()
         .zip(ids)
@@ -215,6 +214,108 @@ async fn prune(objects: &[ObjectMeta], pruning: &StreamPruning, work: Vec<Work>)
         })
         .map(|(work, _)| work)
         .collect()
+}
+
+/// Every candidate's file id, in `work` order, `None` where the path is unknown.
+///
+/// Stringifying three million paths and looking each one up is real work with no
+/// await in it, so it runs on blocking threads, in chunks. `None` for the whole
+/// batch means the lookup failed and the caller keeps every file.
+///
+/// Each chunk opens its own read transaction, so a file interned between two of
+/// them can be resolved by the later one. That fails open: a freshly interned
+/// file has no rows in any segment yet, so pruning reads its statistics as
+/// unknown and keeps it.
+async fn resolve_ids(
+    objects: &Arc<Vec<ObjectMeta>>,
+    pruning: &StreamPruning,
+    work: &[Work],
+) -> Option<Vec<Option<FileId>>> {
+    let tasks = prune_tasks(work.len());
+    let size = work.len().div_ceil(tasks.max(1));
+
+    let mut lookups = Vec::with_capacity(tasks);
+    for chunk in work.chunks(size) {
+        let indices: Vec<usize> = chunk.iter().map(Work::index).collect();
+        let objects = Arc::clone(objects);
+        let store = Arc::clone(&pruning.store);
+        lookups.push(tokio::task::spawn_blocking(move || {
+            let paths: Vec<String> = indices
+                .iter()
+                .map(|index| objects[*index].location.to_string())
+                .collect();
+            let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
+            store.registry().file_ids(&borrowed).ok()
+        }));
+    }
+
+    let mut ids = Vec::with_capacity(work.len());
+    for lookup in lookups {
+        match lookup.await {
+            Ok(Some(chunk)) => ids.extend(chunk),
+            // A failed lookup or a panicked task keeps every file.
+            _ => return None,
+        }
+    }
+    Some(ids)
+}
+
+/// The candidates that survive the predicate, ascending.
+///
+/// Chunked over the *sorted* ids, never over the listing. That is the whole
+/// reason this can be parallel at all: the store skips a segment whose file-id
+/// range a chunk does not touch, so contiguous id chunks read nearly disjoint
+/// segments and only one spanning a boundary is read twice. Chunking the
+/// listing instead would scatter ids across the whole space, and every chunk
+/// would read every segment.
+///
+/// Each chunk is spawned, so the packing and the predicate evaluation — real
+/// CPU over a row per candidate — run on different threads. Within a chunk the
+/// store already fetches a predicate's columns together and each column's
+/// segments in parallel.
+async fn prune_candidates(pruning: &StreamPruning, candidates: Vec<FileId>) -> Vec<FileId> {
+    let tasks = prune_tasks(candidates.len());
+    if tasks <= 1 {
+        return beacon_file_stats::prune_files(
+            &pruning.store,
+            &pruning.predicate,
+            &pruning.table_schema,
+            &candidates,
+        )
+        .await;
+    }
+
+    let size = candidates.len().div_ceil(tasks);
+    let mut prunes = Vec::with_capacity(tasks);
+    for chunk in candidates.chunks(size) {
+        let chunk = chunk.to_vec();
+        let pruning = pruning.clone();
+        prunes.push(tokio::spawn(async move {
+            beacon_file_stats::prune_files(
+                &pruning.store,
+                &pruning.predicate,
+                &pruning.table_schema,
+                &chunk,
+            )
+            .await
+        }));
+    }
+
+    // Chunks are ascending and each answers ascending, so the concatenation is
+    // ascending and the caller may binary-search it.
+    let mut kept = Vec::with_capacity(candidates.len());
+    for (prune, chunk) in prunes.into_iter().zip(candidates.chunks(size)) {
+        match prune.await {
+            Ok(survivors) => kept.extend(survivors),
+            // A panicked task keeps its chunk, the same way every other
+            // failure here does.
+            Err(error) => {
+                tracing::debug!(%error, "a prune task panicked; keeping its files");
+                kept.extend_from_slice(chunk);
+            }
+        }
+    }
+    kept
 }
 
 #[cfg(test)]
@@ -383,6 +484,22 @@ mod tests {
             }
         }
         assert_eq!(expected, 100, "the lanes cover every file exactly once");
+    }
+
+    /// Chunking is decided by candidate count, and only above the threshold.
+    #[test]
+    fn pruning_stays_one_call_until_it_is_worth_splitting() {
+        assert_eq!(prune_tasks(0), 1);
+        assert_eq!(prune_tasks(1_000), 1, "an ordinary collection is one call");
+        assert_eq!(prune_tasks(PRUNE_CHUNK - 1), 1);
+
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert_eq!(prune_tasks(PRUNE_CHUNK * 4), 4.min(cores));
+        assert_eq!(
+            prune_tasks(PRUNE_CHUNK * 1_000),
+            cores,
+            "never more tasks than the machine has"
+        );
     }
 
     #[test]

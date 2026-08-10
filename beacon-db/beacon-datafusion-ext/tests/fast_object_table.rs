@@ -764,3 +764,85 @@ async fn the_shared_prune_runs_once() {
         8
     );
 }
+
+/// Chunked pruning answers exactly what one call answers.
+///
+/// The chunks are cut over sorted file ids, so each reads only the segments its
+/// own range touches. This drives enough files to cross that threshold and
+/// checks the survivors are the right ones — not merely the right number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_pruning_keeps_exactly_the_matching_files() {
+    let fixture = fixture_with(Some(4)).await;
+
+    // Every tenth file holds a value the predicate keeps; the rest cannot match.
+    let mut written = Vec::new();
+    for index in 0..200 {
+        let value = if index % 10 == 0 { 900.0 } else { index as f64 };
+        written.push((
+            put_parquet(
+                &fixture.objects,
+                &format!("obs/{index:05}.parquet"),
+                &[value],
+            )
+            .await,
+            value,
+        ));
+    }
+    let analyzed: Vec<(ObservedFile, &[f64])> = written
+        .iter()
+        .map(|(file, value)| {
+            (
+                file.clone(),
+                if *value >= 900.0 {
+                    &[900.0f64][..]
+                } else {
+                    &[0.0f64][..]
+                },
+            )
+        })
+        .collect();
+    analyze(&fixture.stats, &analyzed).await;
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let filters = vec![col("v").gt(lit(500.0))];
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &filters, None)
+        .await
+        .unwrap();
+    assert!(scan_source(&plan).prunes());
+
+    let batches = collect(Arc::clone(&plan), fixture.ctx.task_ctx())
+        .await
+        .unwrap();
+    let mut values: Vec<f64> = batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        })
+        .collect();
+    values.sort_by(f64::total_cmp);
+
+    assert_eq!(values, vec![900.0; 20], "every matching file, and only those");
+    let metrics = plan.metrics().unwrap();
+    assert_eq!(
+        metrics
+            .sum_by_name("file_stats_files_considered")
+            .unwrap()
+            .as_usize(),
+        200
+    );
+    assert_eq!(
+        metrics
+            .sum_by_name("file_stats_files_pruned")
+            .unwrap()
+            .as_usize(),
+        180,
+        "the 180 that cannot match were dropped without being opened"
+    );
+}
