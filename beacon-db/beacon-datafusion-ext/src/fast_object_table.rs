@@ -65,7 +65,9 @@ use datafusion::{
 use futures::TryStreamExt;
 use object_store::ObjectMeta;
 
-use crate::fast_object_data_source::{FastObjectDataSource, StreamPruning, projected_schema_of};
+use crate::fast_object_data_source::{
+    FastObjectDataSource, Partition, StreamPruning, projected_schema_of,
+};
 use crate::type_widening::{ArrowTypeWidening, SuperTypeWidening};
 
 /// A table over objects, read through a streaming scan.
@@ -352,7 +354,7 @@ impl FastObjectTable {
         object_store_url: &ObjectStoreUrl,
         file_source: Arc<dyn FileSource>,
         objects: Arc<Vec<ObjectMeta>>,
-        ranges: Arc<Vec<Range<usize>>>,
+        partitions: Arc<Vec<Partition>>,
         pruning: Option<StreamPruning>,
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
@@ -403,7 +405,7 @@ impl FastObjectTable {
             object_store_url.clone(),
             scan_schema,
             objects,
-            ranges,
+            partitions,
             pruning,
             limit,
             statistics,
@@ -456,14 +458,19 @@ impl FastObjectTable {
         let pruning = beacon_file_stats::try_file_stats_from_session(state)
             .and_then(|store| self.stream_pruning(state, &store, filters));
 
-        let ranges =
-            cost_balanced_ranges(objects.iter().map(|meta| meta.size), self.target_partitions);
+        // Whole files per partition. A format that can read part of one may
+        // have a large file split later, through `DataSource::repartitioned`.
+        let partitions: Vec<Partition> =
+            cost_balanced_ranges(objects.iter().map(|meta| meta.size), self.target_partitions)
+                .into_iter()
+                .map(Partition::Whole)
+                .collect();
         self.build_plan(
             state,
             object_store_url,
             file_source,
             Arc::new(objects),
-            Arc::new(ranges),
+            Arc::new(partitions),
             pruning,
             limit,
         )

@@ -55,9 +55,9 @@ use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result, Statistics};
 use datafusion::config::ConfigOptions;
-use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::listing::{FileRange, PartitionedFile};
 use datafusion::datasource::physical_plan::{
-    FileOpenFuture, FileOpener, FileScanConfigBuilder, FileSource,
+    FileGroup, FileOpenFuture, FileOpener, FileScanConfigBuilder, FileSource,
 };
 use datafusion::datasource::source::DataSource;
 use datafusion::execution::object_store::ObjectStoreUrl;
@@ -82,6 +82,30 @@ use tokio::task::JoinHandle;
 /// predicate column. Much smaller and the same block is read over and over;
 /// much larger and the first rows wait longer.
 const CHUNK: usize = 4096;
+
+/// What one partition reads.
+///
+/// Whole files, normally — a contiguous slice of the shared listing, which
+/// costs two indices however many files it covers. A format that can read part
+/// of a file (Parquet, by row group) may have one split across partitions to
+/// fill the machine, and those partitions carry the pieces instead. netCDF,
+/// HDF5, ODV and TIFF decline splitting in their own `FileSource`, because
+/// their readers cannot honour a byte range.
+#[derive(Debug, Clone)]
+pub enum Partition {
+    Whole(Range<usize>),
+    /// `(index into the listing, byte range)`, bounded by the partition count.
+    Parts(Vec<(usize, FileRange)>),
+}
+
+impl Partition {
+    fn len(&self) -> usize {
+        match self {
+            Partition::Whole(range) => range.end.saturating_sub(range.start),
+            Partition::Parts(parts) => parts.len(),
+        }
+    }
+}
 
 /// Everything a partition needs to drop files a predicate rules out.
 ///
@@ -115,7 +139,7 @@ pub struct FastObjectDataSource {
     /// The listing, shared by every partition; a partition reads one range of
     /// it. These are the store's own metadata, not per-file plan objects.
     objects: Arc<Vec<ObjectMeta>>,
-    ranges: Arc<Vec<Range<usize>>>,
+    partitions: Arc<Vec<Partition>>,
     /// Present when a predicate can be answered from stored statistics.
     pruning: Option<StreamPruning>,
     limit: Option<usize>,
@@ -129,7 +153,7 @@ impl FastObjectDataSource {
         object_store_url: ObjectStoreUrl,
         projected_schema: SchemaRef,
         objects: Arc<Vec<ObjectMeta>>,
-        ranges: Arc<Vec<Range<usize>>>,
+        partitions: Arc<Vec<Partition>>,
         pruning: Option<StreamPruning>,
         limit: Option<usize>,
         statistics: Statistics,
@@ -139,7 +163,7 @@ impl FastObjectDataSource {
             object_store_url,
             projected_schema,
             objects,
-            ranges,
+            partitions,
             pruning,
             limit,
             statistics,
@@ -151,9 +175,14 @@ impl FastObjectDataSource {
         &self.objects
     }
 
-    /// One index range per partition.
-    pub fn ranges(&self) -> &[Range<usize>] {
-        &self.ranges
+    /// What each partition reads.
+    pub fn partitions(&self) -> &[Partition] {
+        &self.partitions
+    }
+
+    /// The format's reader. For diagnostics and tests.
+    pub fn file_source(&self) -> &Arc<dyn FileSource> {
+        &self.file_source
     }
 
     /// Whether a predicate is applied while this scan reads.
@@ -175,7 +204,7 @@ impl FastObjectDataSource {
             object_store_url: self.object_store_url.clone(),
             projected_schema,
             objects: Arc::clone(&self.objects),
-            ranges: Arc::clone(&self.ranges),
+            partitions: Arc::clone(&self.partitions),
             pruning: self.pruning.clone(),
             limit: self.limit,
             statistics,
@@ -197,7 +226,7 @@ impl fmt::Debug for FastObjectDataSource {
         f.debug_struct("FastObjectDataSource")
             .field("files", &self.objects.len())
             .field("prunes", &self.prunes())
-            .field("partitions", &self.ranges.len())
+            .field("partitions", &self.partitions.len())
             .field("file_type", &self.file_source.file_type())
             .finish()
     }
@@ -222,10 +251,10 @@ impl DataSource for FastObjectDataSource {
                 .build();
         let opener = file_source.create_file_opener(store, &opener_config, partition)?;
 
-        let range = self.ranges.get(partition).cloned().ok_or_else(|| {
+        let assignment = self.partitions.get(partition).cloned().ok_or_else(|| {
             DataFusionError::Internal(format!(
                 "fast object scan asked for partition {partition} of {}",
-                self.ranges.len()
+                self.partitions.len()
             ))
         })?;
 
@@ -238,7 +267,7 @@ impl DataSource for FastObjectDataSource {
         let mut stream = FastObjectStream {
             schema: Arc::clone(&self.projected_schema),
             objects: Arc::clone(&self.objects),
-            cursor: range,
+            cursor: Cursor::new(assignment),
             pruning: self.pruning.clone(),
             inflight: None,
             queue: VecDeque::new(),
@@ -267,7 +296,7 @@ impl DataSource for FastObjectDataSource {
             "FastObjectScan: file_type={}, files={}, partitions={}",
             self.file_source.file_type(),
             self.objects.len(),
-            self.ranges.len(),
+            self.partitions.len(),
         )?;
         if self.prunes() {
             write!(f, ", prune=stream")?;
@@ -279,7 +308,99 @@ impl DataSource for FastObjectDataSource {
     }
 
     fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(self.ranges.len())
+        Partitioning::UnknownPartitioning(self.partitions.len())
+    }
+
+    /// Split a file across partitions when there are more partitions than
+    /// files and the format can read part of one.
+    ///
+    /// Without this a single large Parquet file scans on one thread, where
+    /// `ListingTable` would have spread its row groups across the machine.
+    /// The splitting itself is DataFusion's — `FileGroupPartitioner` decides
+    /// the byte ranges, and the result is mapped back onto the shared listing
+    /// so the plan still holds indices rather than a file list.
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        repartition_file_min_size: usize,
+        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+    ) -> Result<Option<Arc<dyn DataSource>>> {
+        if self.partitions.len() >= target_partitions {
+            return Ok(None);
+        }
+        // Only reached when files are scarcer than partitions, so building
+        // them is bounded by the partition count, not by the collection.
+        let by_path: std::collections::HashMap<&object_store::path::Path, usize> = self
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(index, meta)| (&meta.location, index))
+            .collect();
+        let groups: Vec<FileGroup> = self
+            .partitions
+            .iter()
+            .map(|partition| {
+                FileGroup::new(match partition {
+                    Partition::Whole(range) => self.objects[range.clone()]
+                        .iter()
+                        .cloned()
+                        .map(PartitionedFile::from)
+                        .collect(),
+                    Partition::Parts(parts) => parts
+                        .iter()
+                        .map(|(index, range)| {
+                            PartitionedFile::from(self.objects[*index].clone())
+                                .with_range(range.start, range.end)
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+
+        // The *format* decides whether its files may be split, and how. Asking
+        // it is the whole safety of this: netCDF, HDF5, ODV and TIFF answer
+        // `None` because their readers ignore a byte range, and splitting one
+        // of those would have every partition read the whole file and return
+        // its rows again. `supports_repartitioning()` is not that answer — it
+        // defaults to true, including for those formats.
+        let probe = FileScanConfigBuilder::new(
+            self.object_store_url.clone(),
+            Arc::clone(&self.file_source),
+        )
+        .with_file_groups(groups)
+        .build();
+        let Some(split) = self.file_source.repartitioned(
+            target_partitions,
+            repartition_file_min_size,
+            output_ordering,
+            &probe,
+        )?
+        else {
+            return Ok(None);
+        };
+        let split = split.file_groups;
+
+        let mut partitions = Vec::with_capacity(split.len());
+        for group in &split {
+            let mut parts = Vec::with_capacity(group.len());
+            for file in group.iter() {
+                let Some(index) = by_path.get(&file.object_meta.location) else {
+                    // A file the splitter produced that is not in the listing
+                    // cannot be mapped back; leave the plan as it is.
+                    return Ok(None);
+                };
+                let range = file.range.clone().unwrap_or(FileRange {
+                    start: 0,
+                    end: file.object_meta.size as i64,
+                });
+                parts.push((*index, range));
+            }
+            partitions.push(Partition::Parts(parts));
+        }
+
+        let mut next = self.with_file_source(Arc::clone(&self.file_source))?;
+        next.partitions = Arc::new(partitions);
+        Ok(Some(Arc::new(next)))
     }
 
     fn eq_properties(&self) -> EquivalenceProperties {
@@ -359,16 +480,68 @@ impl DataSource for FastObjectDataSource {
     }
 }
 
+/// One file a partition will read: the store's metadata, and which part of it
+/// when the file was split across partitions.
+type Piece = (ObjectMeta, Option<FileRange>);
+
 /// A chunk of the partition's files, on its way to being read.
 enum Chunk {
     /// Nothing to prune: these are ready to open.
-    Ready(Vec<ObjectMeta>),
+    Ready(Vec<Piece>),
     /// Being decided on another worker, alongside the reading of the chunk
     /// before it.
     Pruning {
         considered: usize,
-        handle: JoinHandle<Vec<ObjectMeta>>,
+        handle: JoinHandle<Vec<Piece>>,
     },
+}
+
+/// Where a partition's next files come from.
+enum Cursor {
+    /// Whole files: an index range into the shared listing.
+    Whole(Range<usize>),
+    /// Parts of files, already decided. `next` is how far it has read.
+    Parts { parts: Vec<(usize, FileRange)>, next: usize },
+}
+
+impl Cursor {
+    fn new(partition: Partition) -> Self {
+        match partition {
+            Partition::Whole(range) => Cursor::Whole(range),
+            Partition::Parts(parts) => Cursor::Parts { parts, next: 0 },
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        match self {
+            Cursor::Whole(range) => range.end.saturating_sub(range.start),
+            Cursor::Parts { parts, next } => parts.len() - next,
+        }
+    }
+
+    /// Take up to `CHUNK` files, resolving each against the listing.
+    fn take(&mut self, objects: &[ObjectMeta]) -> Vec<Piece> {
+        let take = self.remaining().min(CHUNK);
+        match self {
+            Cursor::Whole(range) => {
+                let start = range.start;
+                range.start += take;
+                objects[start..start + take]
+                    .iter()
+                    .cloned()
+                    .map(|meta| (meta, None))
+                    .collect()
+            }
+            Cursor::Parts { parts, next } => {
+                let start = *next;
+                *next += take;
+                parts[start..start + take]
+                    .iter()
+                    .map(|(index, range)| (objects[*index].clone(), Some(range.clone())))
+                    .collect()
+            }
+        }
+    }
 }
 
 /// One partition's reader: a range of the listing, pruned a chunk ahead and
@@ -376,13 +549,13 @@ enum Chunk {
 struct FastObjectStream {
     schema: SchemaRef,
     objects: Arc<Vec<ObjectMeta>>,
-    /// The part of the listing this partition has not taken yet.
-    cursor: Range<usize>,
+    /// The part of this partition's work not taken yet.
+    cursor: Cursor,
     pruning: Option<StreamPruning>,
     /// The chunk after the one being read.
     inflight: Option<Chunk>,
     /// Files cleared to open.
-    queue: VecDeque<ObjectMeta>,
+    queue: VecDeque<Piece>,
     opener: Arc<dyn FileOpener>,
     state: StreamState,
     /// Rows this partition may still emit under the scan's limit.
@@ -415,13 +588,23 @@ enum NextOpen {
     Ready(Result<BoxStream<'static, Result<RecordBatch>>>),
 }
 
+/// The file identity the opener reads, built at the moment it is opened and
+/// dropped after.
+fn partitioned_file((meta, range): Piece) -> PartitionedFile {
+    let file = PartitionedFile::from(meta);
+    match range {
+        Some(range) => file.with_range(range.start, range.end),
+        None => file,
+    }
+}
+
 /// Drop the files in `chunk` whose recorded ranges say they cannot match.
 ///
 /// Runs on its own task, so it overlaps the reading of the previous chunk.
 /// A path the registry has never seen has no statistics and is kept: a
 /// partially analyzed store must not lose files.
-async fn prune_chunk(pruning: StreamPruning, chunk: Vec<ObjectMeta>) -> Vec<ObjectMeta> {
-    let paths: Vec<String> = chunk.iter().map(|m| m.location.to_string()).collect();
+async fn prune_chunk(pruning: StreamPruning, chunk: Vec<Piece>) -> Vec<Piece> {
+    let paths: Vec<String> = chunk.iter().map(|(m, _)| m.location.to_string()).collect();
     let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
     let Ok(ids) = pruning.store.registry().file_ids(&borrowed) else {
         return chunk;
@@ -450,7 +633,7 @@ async fn prune_chunk(pruning: StreamPruning, chunk: Vec<ObjectMeta>) -> Vec<Obje
             Some(id) => kept.binary_search(id).is_ok(),
             None => true,
         })
-        .map(|(meta, _)| meta)
+        .map(|(piece, _)| piece)
         .collect()
 }
 
@@ -460,13 +643,10 @@ impl FastObjectStream {
     /// Called as soon as the previous chunk lands, so the deciding happens
     /// while that one is read.
     fn begin_chunk(&mut self) {
-        if self.inflight.is_some() || self.cursor.start >= self.cursor.end {
+        if self.inflight.is_some() || self.cursor.remaining() == 0 {
             return;
         }
-        let take = (self.cursor.end - self.cursor.start).min(CHUNK);
-        let chunk: Vec<ObjectMeta> = self.objects[self.cursor.start..self.cursor.start + take]
-            .to_vec();
-        self.cursor.start += take;
+        let chunk = self.cursor.take(&self.objects);
 
         self.inflight = Some(match self.pruning.clone() {
             Some(pruning) => Chunk::Pruning {
@@ -478,7 +658,7 @@ impl FastObjectStream {
     }
 
     /// Move a decided chunk into the queue and start the next one.
-    fn accept(&mut self, kept: Vec<ObjectMeta>, considered: usize) {
+    fn accept(&mut self, kept: Vec<Piece>, considered: usize) {
         self.considered.add(considered);
         self.pruned.add(considered - kept.len());
         self.queue.extend(kept);
@@ -487,8 +667,8 @@ impl FastObjectStream {
 
     /// Begin opening the next queued file, if there is one.
     fn begin_next_open(&mut self) -> Option<NextOpen> {
-        let meta = self.queue.pop_front()?;
-        match self.opener.open(PartitionedFile::from(meta)) {
+        let piece = self.queue.pop_front()?;
+        match self.opener.open(partitioned_file(piece)) {
             Ok(future) => Some(NextOpen::Pending(future)),
             Err(error) => Some(NextOpen::Ready(Err(error))),
         }
@@ -508,8 +688,8 @@ impl Stream for FastObjectStream {
                         this.state = StreamState::Done;
                         continue;
                     }
-                    if let Some(meta) = this.queue.pop_front() {
-                        match this.opener.open(PartitionedFile::from(meta)) {
+                    if let Some(piece) = this.queue.pop_front() {
+                        match this.opener.open(partitioned_file(piece)) {
                             Ok(future) => this.state = StreamState::Opening(future),
                             Err(error) => {
                                 this.state = StreamState::Done;

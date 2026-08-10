@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use beacon_datafusion_ext::fast_object_data_source::FastObjectDataSource;
+use beacon_datafusion_ext::fast_object_data_source::{FastObjectDataSource, Partition};
 use beacon_datafusion_ext::fast_object_table::FastObjectTable;
 use beacon_file_stats::segment::{ColumnStat, SegmentBuilder};
 use beacon_file_stats::{FileStatsStore, ObservedFile, Registry, StatScalar};
@@ -371,4 +371,181 @@ async fn a_hundred_files_are_read_across_every_partition() {
     let batches = collect(plan, fixture.ctx.task_ctx()).await.unwrap();
     let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
     assert_eq!(rows, 100);
+}
+
+/// One large Parquet file is split across partitions, so a single big file
+/// still fills the machine.
+///
+/// `ListingTable` does this through `FileGroupPartitioner`; a source that
+/// declined all repartitioning would scan a 500 MB file on one thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_large_parquet_file_is_split_across_partitions() {
+    let fixture = fixture_with(Some(4)).await;
+    // Comfortably past the 10 MB `repartition_file_min_size` default, and
+    // enough row groups to divide.
+    let values: Vec<f64> = (0..2_000_000).map(|i| i as f64).collect();
+    put_parquet(&fixture.objects, "obs/big.parquet", &values).await;
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &[], None)
+        .await
+        .unwrap();
+
+    // One file, so the scan starts with one partition...
+    assert_eq!(plan.output_partitioning().partition_count(), 1);
+
+    // ...and repartitioning splits it into byte ranges over the same listing.
+    let source = scan_source(&plan);
+    let split = datafusion::datasource::source::DataSource::repartitioned(
+        source,
+        4,
+        10 * 1024 * 1024,
+        None,
+    )
+    .unwrap()
+    .expect("a large parquet file can be split");
+    assert!(
+        split.output_partitioning().partition_count() > 1,
+        "a big file must reach more than one partition"
+    );
+
+    let split = split
+        .as_any()
+        .downcast_ref::<FastObjectDataSource>()
+        .expect("the split source is still ours");
+    assert_eq!(
+        split.objects().len(),
+        1,
+        "the listing is shared, not duplicated per part"
+    );
+    assert!(
+        split
+            .partitions()
+            .iter()
+            .all(|p| matches!(p, Partition::Parts(parts) if !parts.is_empty())),
+        "every partition reads a part of the file"
+    );
+
+    // And the rows are neither lost nor duplicated by the split: every
+    // partition is read and the total is exact.
+    let exec = DataSourceExec::new(
+        datafusion::datasource::source::DataSource::repartitioned(
+            scan_source(&plan),
+            4,
+            10 * 1024 * 1024,
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+    );
+    let batches = collect(Arc::new(exec), fixture.ctx.task_ctx()).await.unwrap();
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 2_000_000, "every row read exactly once");
+}
+
+/// A format that declines splitting is never split, however large its files.
+///
+/// netCDF, HDF5, ODV and TIFF all return `Ok(None)` from
+/// `FileSource::repartitioned` because their readers ignore a byte range —
+/// splitting one would have every partition read the whole file and return its
+/// rows again. Note that `supports_repartitioning()` is *not* that answer: it
+/// defaults to true, including for those formats, so the decision has to be
+/// delegated to the format itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_format_that_declines_splitting_is_never_split() {
+    use datafusion::datasource::physical_plan::{FileScanConfig, FileSource};
+
+    /// A `FileSource` that answers like netCDF's: never split me.
+    #[derive(Clone)]
+    struct Undividable(Arc<dyn FileSource>);
+
+    impl std::fmt::Debug for Undividable {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Undividable")
+        }
+    }
+
+    impl FileSource for Undividable {
+        fn create_file_opener(
+            &self,
+            store: Arc<dyn ObjectStore>,
+            config: &FileScanConfig,
+            partition: usize,
+        ) -> datafusion::error::Result<Arc<dyn datafusion::datasource::physical_plan::FileOpener>>
+        {
+            self.0.create_file_opener(store, config, partition)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn table_schema(&self) -> &datafusion::datasource::table_schema::TableSchema {
+            self.0.table_schema()
+        }
+        fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
+            Arc::new(Undividable(self.0.with_batch_size(batch_size)))
+        }
+        fn metrics(&self) -> &datafusion::physical_plan::metrics::ExecutionPlanMetricsSet {
+            self.0.metrics()
+        }
+        fn file_type(&self) -> &str {
+            "undividable"
+        }
+        // The override every nd format carries.
+        fn repartitioned(
+            &self,
+            _target_partitions: usize,
+            _repartition_file_min_size: usize,
+            _output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+            _config: &FileScanConfig,
+        ) -> datafusion::error::Result<Option<FileScanConfig>> {
+            Ok(None)
+        }
+    }
+
+    let fixture = fixture_with(Some(4)).await;
+    let values: Vec<f64> = (0..2_000_000).map(|i| i as f64).collect();
+    let meta = {
+        put_parquet(&fixture.objects, "obs/big.parquet", &values).await;
+        fixture
+            .objects
+            .head(&Path::from("obs/big.parquet"))
+            .await
+            .unwrap()
+    };
+    assert!(
+        meta.size > 10 * 1024 * 1024,
+        "the file must be past the split threshold to make this meaningful"
+    );
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &[], None)
+        .await
+        .unwrap();
+    let source = scan_source(&plan);
+
+    // The same listing, behind a source that declines to be divided.
+    let undividable = FastObjectDataSource::new(
+        Arc::new(Undividable(Arc::clone(source.file_source()))),
+        ObjectStoreUrl::parse(STORE_URL).unwrap(),
+        plan.schema(),
+        Arc::clone(source.objects()),
+        Arc::new(source.partitions().to_vec()),
+        None,
+        None,
+        datafusion::common::Statistics::new_unknown(&plan.schema()),
+    );
+
+    assert!(
+        datafusion::datasource::source::DataSource::repartitioned(
+            &undividable,
+            4,
+            10 * 1024 * 1024,
+            None,
+        )
+        .unwrap()
+        .is_none(),
+        "a format that declines splitting must keep its one partition"
+    );
 }
