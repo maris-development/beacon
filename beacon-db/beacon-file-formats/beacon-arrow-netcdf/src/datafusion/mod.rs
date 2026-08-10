@@ -547,7 +547,7 @@ mod reader_backend_tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use beacon_datafusion_ext::fast_object_table::FastObjectTable;
+    use beacon_datafusion_ext::fast_object::FastObjectTable;
     use beacon_datafusion_ext::listing_factory::RootStore;
     use datafusion::datasource::listing::ListingTableUrl;
     use datafusion::execution::session_state::SessionStateBuilder;
@@ -615,7 +615,15 @@ mod reader_backend_tests {
     /// A single-partition session, so a scan yields rows in a stable order.
     fn session() -> SessionContext {
         let state = SessionStateBuilder::new()
-            .with_config(SessionConfig::new().with_target_partitions(1))
+            .with_config(
+                SessionConfig::new()
+                    .with_target_partitions(1)
+                    // `FastObjectTable` merges its schemas through this. A
+                    // session that skips `RuntimeBuilder` registers it itself.
+                    .with_extension(
+                        beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+                    ),
+            )
             .with_default_features()
             .build();
         SessionContext::new_with_state(state)
@@ -1075,7 +1083,13 @@ mod reader_backend_tests {
 
         for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
             let state = SessionStateBuilder::new()
-                .with_config(SessionConfig::new().with_target_partitions(files))
+                .with_config(
+                    SessionConfig::new()
+                        .with_target_partitions(files)
+                        .with_extension(
+                            beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+                        ),
+                )
                 .with_default_features()
                 .build();
             let ctx = SessionContext::new_with_state(state);
@@ -1243,7 +1257,10 @@ mod reader_backend_tests {
                     .with_config(
                         SessionConfig::new()
                             .with_target_partitions(1)
-                            .with_batch_size(batch_size),
+                            .with_batch_size(batch_size)
+                            .with_extension(
+                                beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+                            ),
                     )
                     .with_default_features()
                     .build();
@@ -1763,7 +1780,7 @@ mod reader_backend_tests {
 //     /// Register `gridded-example.nc` as a DataFusion table backed by
 //     /// [`NetcdfFormat`] over the `datasets://` object store.
 //     async fn register_example(ctx: &datafusion::prelude::SessionContext, datasets_root: PathBuf) {
-//         use beacon_datafusion_ext::fast_object_table::FastObjectTable;
+//         use beacon_datafusion_ext::fast_object::FastObjectTable;
 //         use datafusion::datasource::file_format::FileFormat;
 //         use datafusion::datasource::listing::ListingTableUrl;
 

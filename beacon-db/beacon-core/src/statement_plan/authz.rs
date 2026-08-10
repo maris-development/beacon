@@ -7,7 +7,7 @@
 
 use beacon_auth::{AuthContext, AuthIdentity, ConcreteTarget, Privilege};
 use beacon_datafusion_ext::{
-    fast_object_table::FastObjectTable,
+    fast_object::FastObjectTable,
     file_collection::FileCollection,
     table_ext::{ExternalTable, INTERNAL_TABLE_PREFIX},
 };

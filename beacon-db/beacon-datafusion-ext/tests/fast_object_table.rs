@@ -6,8 +6,9 @@
 
 use std::sync::Arc;
 
-use beacon_datafusion_ext::fast_object_data_source::{FastObjectDataSource, Partition};
-use beacon_datafusion_ext::fast_object_table::FastObjectTable;
+use beacon_datafusion_ext::fast_object::{FastObjectDataSource, Work};
+use beacon_datafusion_ext::fast_object::FastObjectTable;
+use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
 use beacon_file_stats::segment::{ColumnStat, SegmentBuilder};
 use beacon_file_stats::{FileStatsStore, ObservedFile, Registry, StatScalar};
 use datafusion::arrow::array::{Float64Array, RecordBatch};
@@ -51,7 +52,11 @@ async fn fixture_with(target_partitions: Option<usize>) -> Fixture {
 
     let handle = beacon_file_stats::new_file_stats_handle();
     handle.set(stats.clone()).ok();
-    let mut config = SessionConfig::new().with_extension(handle);
+    let mut config = SessionConfig::new()
+        .with_extension(handle)
+        // `FastObjectTable` merges its schemas through this. `RuntimeBuilder`
+        // registers it for a server; a session built here registers it itself.
+        .with_extension(ArrowTypeWidening::default_extension());
     if let Some(partitions) = target_partitions {
         config = config.with_target_partitions(partitions);
     }
@@ -419,13 +424,23 @@ async fn one_large_parquet_file_is_split_across_partitions() {
         1,
         "the listing is shared, not duplicated per part"
     );
+    let pieces = split.split().expect("a split source carries its pieces");
+    assert!(pieces.len() > 1, "the file was divided");
     assert!(
-        split
-            .partitions()
-            .iter()
-            .all(|p| matches!(p, Partition::Parts(parts) if !parts.is_empty())),
-        "every partition reads a part of the file"
+        pieces.iter().all(|piece| piece.index() == 0),
+        "every piece is a part of the one listed file"
     );
+    let mut covered: Vec<(i64, i64)> = pieces
+        .iter()
+        .map(|piece| match piece {
+            Work::Part(_, range) => (range.start, range.end),
+            Work::Whole(_) => panic!("a divided file must produce parts, not whole files"),
+        })
+        .collect();
+    covered.sort_unstable();
+    for pair in covered.windows(2) {
+        assert_eq!(pair[0].1, pair[1].0, "the parts tile the file without a gap");
+    }
 
     // And the rows are neither lost nor duplicated by the split: every
     // partition is read and the total is exact.
@@ -531,7 +546,7 @@ async fn a_format_that_declines_splitting_is_never_split() {
         ObjectStoreUrl::parse(STORE_URL).unwrap(),
         plan.schema(),
         Arc::clone(source.objects()),
-        Arc::new(source.partitions().to_vec()),
+        4,
         None,
         None,
         datafusion::common::Statistics::new_unknown(&plan.schema()),
@@ -547,5 +562,205 @@ async fn a_format_that_declines_splitting_is_never_split() {
         .unwrap()
         .is_none(),
         "a format that declines splitting must keep its one partition"
+    );
+}
+
+/// The `v` values in `batches`, in the order they arrived.
+fn values(batches: &[RecordBatch]) -> Vec<f64> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("column v is Float64")
+                .values()
+                .to_vec()
+        })
+        .collect()
+}
+
+/// Every file is read once and only once, however the queue divides them.
+///
+/// The row count alone cannot see a double read: two partitions taking the same
+/// file and one taking none gives the same total. Every file carries its own
+/// value, so the multiset of values is the proof.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_file_is_read_exactly_once_from_the_queue() {
+    let fixture = fixture_with(Some(8)).await;
+    for i in 0..500 {
+        put_parquet(&fixture.objects, &format!("obs/{i:05}.parquet"), &[i as f64]).await;
+    }
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &[], None)
+        .await
+        .unwrap();
+
+    let batches = collect(plan, fixture.ctx.task_ctx()).await.unwrap();
+    let mut seen = values(&batches);
+    seen.sort_by(f64::total_cmp);
+    assert_eq!(
+        seen,
+        (0..500).map(|i| i as f64).collect::<Vec<_>>(),
+        "every file contributed its row exactly once"
+    );
+}
+
+/// A scan reports at most one partition per file, so no thread is opened to
+/// read nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn partitions_are_capped_by_the_listing() {
+    let fixture = fixture_with(Some(8)).await;
+    for i in 0..3 {
+        put_parquet(&fixture.objects, &format!("obs/{i}.parquet"), &[i as f64]).await;
+    }
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &[], None)
+        .await
+        .unwrap();
+
+    assert_eq!(plan.output_partitioning().partition_count(), 3);
+    let batches = collect(plan, fixture.ctx.task_ctx()).await.unwrap();
+    assert_eq!(values(&batches).len(), 3);
+}
+
+/// A plan may be executed more than once, and the second run must not find the
+/// queue the first one drained.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn re_executing_a_plan_returns_the_same_rows() {
+    let fixture = fixture_with(Some(4)).await;
+    for i in 0..20 {
+        put_parquet(&fixture.objects, &format!("obs/{i:03}.parquet"), &[i as f64]).await;
+    }
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &[], None)
+        .await
+        .unwrap();
+
+    let mut first = values(&collect(Arc::clone(&plan), fixture.ctx.task_ctx()).await.unwrap());
+    let mut second = values(&collect(Arc::clone(&plan), fixture.ctx.task_ctx()).await.unwrap());
+    first.sort_by(f64::total_cmp);
+    second.sort_by(f64::total_cmp);
+
+    assert_eq!(first.len(), 20);
+    assert_eq!(first, second, "the second execution read the whole listing");
+}
+
+/// The same again, sharing one task context between the two runs. Pointer
+/// identity alone would call that a single execution and hand the second run a
+/// drained queue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_task_context_used_twice_still_reads_everything() {
+    let fixture = fixture_with(Some(4)).await;
+    for i in 0..20 {
+        put_parquet(&fixture.objects, &format!("obs/{i:03}.parquet"), &[i as f64]).await;
+    }
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &[], None)
+        .await
+        .unwrap();
+
+    let ctx = fixture.ctx.task_ctx();
+    let mut first = values(&collect(Arc::clone(&plan), Arc::clone(&ctx)).await.unwrap());
+    let mut second = values(&collect(Arc::clone(&plan), ctx).await.unwrap());
+    first.sort_by(f64::total_cmp);
+    second.sort_by(f64::total_cmp);
+
+    assert_eq!(first.len(), 20);
+    assert_eq!(first, second, "the second execution read the whole listing");
+}
+
+/// A limited scan does not share its queue, so the rows a `LIMIT` sees are the
+/// same on every run.
+///
+/// Partitions are concatenated in index order here, which is what
+/// `OrderedUnionExec` does above a real scan. Sharing the queue would make that
+/// concatenation depend on which thread got to a file first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_limited_scan_returns_the_same_rows_on_every_run() {
+    let fixture = fixture_with(Some(4)).await;
+    for i in 0..40 {
+        put_parquet(&fixture.objects, &format!("obs/{i:03}.parquet"), &[i as f64]).await;
+    }
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+
+    let mut runs = std::collections::HashSet::new();
+    for _ in 0..20 {
+        let plan = table
+            .scan(&fixture.ctx.state(), None, &[], Some(3))
+            .await
+            .unwrap();
+        let partitioned =
+            datafusion::physical_plan::collect_partitioned(plan, fixture.ctx.task_ctx())
+                .await
+                .unwrap();
+        let ordered: Vec<String> = partitioned
+            .iter()
+            .flat_map(|batches| values(batches))
+            .map(|value| value.to_string())
+            .collect();
+        runs.insert(ordered.join(","));
+    }
+
+    assert_eq!(runs.len(), 1, "a limited scan gave a different answer: {runs:?}");
+}
+
+/// The listing is pruned once for the scan, not once per partition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_shared_prune_runs_once() {
+    let fixture = fixture_with(Some(8)).await;
+    let mut analyzed = Vec::new();
+    for i in 0..16 {
+        let file = put_parquet(&fixture.objects, &format!("obs/{i:03}.parquet"), &[i as f64]).await;
+        analyzed.push((file, i));
+    }
+    let owned: Vec<(ObservedFile, Vec<f64>)> = analyzed
+        .into_iter()
+        .map(|(file, i)| (file, vec![i as f64]))
+        .collect();
+    let borrowed: Vec<(ObservedFile, &[f64])> = owned
+        .iter()
+        .map(|(file, values)| (file.clone(), values.as_slice()))
+        .collect();
+    analyze(&fixture.stats, &borrowed).await;
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let filters = vec![col("v").gt_eq(lit(8.0))];
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &filters, None)
+        .await
+        .unwrap();
+
+    let batches = collect(Arc::clone(&plan), fixture.ctx.task_ctx())
+        .await
+        .unwrap();
+    let mut seen = values(&batches);
+    seen.sort_by(f64::total_cmp);
+    assert_eq!(seen, (8..16).map(|i| i as f64).collect::<Vec<_>>());
+
+    let metrics = plan.metrics().unwrap();
+    assert_eq!(
+        metrics
+            .sum_by_name("file_stats_files_considered")
+            .unwrap()
+            .as_usize(),
+        16,
+        "eight partitions must not prune the listing eight times"
+    );
+    assert_eq!(
+        metrics
+            .sum_by_name("file_stats_files_pruned")
+            .unwrap()
+            .as_usize(),
+        8
     );
 }

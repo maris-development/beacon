@@ -347,6 +347,14 @@ pub fn execute_stream_ordered(
 /// partitions in index order instead, which is reproducible; the partitions still
 /// execute concurrently, bounded by the memory pool.
 ///
+/// This only helps while a partition's *contents* are reproducible too. A
+/// [`FastObjectScan`](crate::fast_object) with no limit shares one
+/// queue between its partitions, so which one reads which file depends on
+/// scheduling and concatenating them in index order is not stable. A scan that
+/// carries a limit does not share: each partition reads its own contiguous
+/// slice of the listing, so the `LIMIT` case this rule exists for is exactly
+/// the case that stays reproducible.
+///
 /// A `fetch` on the original node is preserved by re-applying it above.
 #[derive(Debug, Default)]
 pub struct OrderedCoalesce;

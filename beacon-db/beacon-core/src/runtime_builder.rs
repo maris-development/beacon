@@ -15,8 +15,8 @@ use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
-use beacon_arrow_zarr::ZarrConfig;
 use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
+use beacon_arrow_zarr::ZarrConfig;
 use beacon_auth::{
     AuthContext, BasicAuthProvider, InMemoryUserStore, RoleProvider, RoleStore, UserDirectory,
 };
@@ -29,7 +29,7 @@ use beacon_datafusion_ext::{
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
-    type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, SuperTypeWidening},
+    type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening},
 };
 use beacon_functions::register_functions;
 use beacon_redb_store::RedbStore;
@@ -301,9 +301,10 @@ impl RuntimeBuilder {
         } = init_auth_context(&self, session_cell.clone()).await?;
         let auth_context = Arc::new(auth_context);
 
-        let (session_ctx, redb_store) = init_session_ctx(&self, auth_context.clone(), session_cell.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
+        let (session_ctx, redb_store) =
+            init_session_ctx(&self, auth_context.clone(), session_cell.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
 
         // Formats and functions FIRST — before any persisted table is rebuilt.
         //
@@ -406,7 +407,11 @@ async fn init_file_stats(
         );
         return Ok(None);
     };
-    let Some(datasets) = builder.default_store.as_ref().map(|store| store.url.clone()) else {
+    let Some(datasets) = builder
+        .default_store
+        .as_ref()
+        .map(|store| store.url.clone())
+    else {
         tracing::warn!(
             "file statistics are enabled but no datasets store is configured; \
              there is nothing to discover, so the subsystem stays off"
@@ -893,13 +898,14 @@ fn build_session_config(
         .with_extension(crate::file_stats::new_file_stats_service_handle())
         .with_extension(secrets_store.clone())
         // How `FastObjectTable` merges the schemas of the files behind one
-        // table. Super typing unless the embedder registered its own strategy,
-        // which keeps `read_*` schema merging exactly what it has always been.
+        // table. The table requires this extension, so a session that skips
+        // `RuntimeBuilder` must register `ArrowTypeWidening::default_extension`
+        // itself.
         .with_extension(Arc::new(ArrowTypeWidening::new(
             builder
                 .type_widening
                 .clone()
-                .unwrap_or_else(|| Arc::new(SuperTypeWidening)),
+                .unwrap_or_else(|| Arc::new(DefaultArrowTypeWidening)),
         )))
         // Resolves user-supplied dataset paths (a `LOCATION`, a `read_*` argument)
         // to object-store URLs and to native reader paths. Configured against the

@@ -15,7 +15,7 @@ use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use beacon_arrow_hdf5::{Hdf5Config, Hdf5FormatFactory};
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
-use beacon_datafusion_ext::fast_object_table::FastObjectTable;
+use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::common::stats::Precision;
@@ -94,7 +94,13 @@ fn factory(default_reader: Backend) -> Hdf5FormatFactory {
 /// A single-partition session, so a scan yields rows in a stable order.
 fn session() -> SessionContext {
     let state = SessionStateBuilder::new()
-        .with_config(SessionConfig::new().with_target_partitions(1))
+        .with_config(
+            SessionConfig::new()
+                .with_target_partitions(1)
+                // `FastObjectTable` merges its schemas through this. A session
+                // that skips `RuntimeBuilder` has to register it itself.
+                .with_extension(beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension()),
+        )
         .with_default_features()
         .build();
     SessionContext::new_with_state(state)

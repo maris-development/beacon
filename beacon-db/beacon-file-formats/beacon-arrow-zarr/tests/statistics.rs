@@ -470,3 +470,54 @@ async fn a_non_group_object_reports_unknown() {
         assert_unknown(&stats.column_statistics[0], location);
     }
 }
+
+// ─── The table provider path ────────────────────────────────────────────────
+
+/// A zarr store read through [`FastObjectTable`], the way `read_zarr` reads it.
+///
+/// A zarr store is a directory, but the reader never opens one: it takes the
+/// `zarr.json` marker at the root and resolves the store from there. So the
+/// table hands it that object like any other file, and no part of the plan has
+/// to know the shape of the directory.
+///
+/// Every other test here drives `ZarrFormat` directly, so nothing else would
+/// notice if the handover changed. This pins the rows it produces.
+#[tokio::test]
+async fn a_store_read_through_the_table_provider_returns_rows() {
+    use beacon_datafusion_ext::fast_object::FastObjectTable;
+    use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
+    use datafusion::catalog::TableProvider;
+    use datafusion::datasource::listing::ListingTableUrl;
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::physical_plan::{collect, ExecutionPlanProperties};
+    use datafusion::prelude::SessionConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_store(dir.path()).await.unwrap();
+
+    let state = SessionStateBuilder::new()
+        .with_config(
+            SessionConfig::new()
+                .with_target_partitions(4)
+                .with_extension(ArrowTypeWidening::default_extension()),
+        )
+        .with_default_features()
+        .build();
+    let ctx = SessionContext::new_with_state(state);
+
+    let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
+    let table = FastObjectTable::try_new(&ctx.state(), Arc::new(ZarrFormat::default()), vec![url])
+        .await
+        .expect("a zarr store registers as a table");
+
+    let plan = table.scan(&ctx.state(), None, &[], None).await.unwrap();
+    assert_eq!(plan.output_partitioning().partition_count(), 1, "one group, one partition");
+    let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 20, "the 4x5 grid reads back whole");
+    assert_eq!(
+        batches[0].num_columns(),
+        13,
+        "every array and coordinate reaches the output"
+    );
+}

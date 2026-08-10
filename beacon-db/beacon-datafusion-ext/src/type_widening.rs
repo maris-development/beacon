@@ -11,6 +11,16 @@ impl ArrowTypeWidening {
         Self { strategy }
     }
 
+    /// The strategy a session gets when nobody registers one.
+    ///
+    /// `FastObjectTable` reads this extension to merge the schemas of the files
+    /// behind one table, and it requires it. `RuntimeBuilder` registers it for a
+    /// server. A session built by hand, in a test or an embedded use, has to
+    /// register it too, and this is what it registers.
+    pub fn default_extension() -> Arc<Self> {
+        Arc::new(Self::new(Arc::new(DefaultArrowTypeWidening)))
+    }
+
     pub fn merge_schemas(&self, schema_refs: &[SchemaRef]) -> Result<SchemaRef, ArrowError> {
         self.strategy.merge_schemas(schema_refs)
     }

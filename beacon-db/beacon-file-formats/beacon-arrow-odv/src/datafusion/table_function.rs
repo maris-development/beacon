@@ -2,7 +2,7 @@ use std::sync::{Arc, Weak};
 
 use crate::datafusion::OdvFormat;
 use arrow::datatypes::{DataType, Field};
-use beacon_datafusion_ext::fast_object_table::FastObjectTable;
+use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl,
