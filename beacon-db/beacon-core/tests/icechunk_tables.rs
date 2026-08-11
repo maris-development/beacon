@@ -191,7 +191,7 @@ async fn a_plain_zarr_store_still_reads() {
     copy_dir(&source, &target);
 
     let count = scalar_i64(
-        &rt.sql("SELECT count(*) FROM read_zarr('gridded-example.zarr/zarr.json') LIMIT 1")
+        &rt.sql("SELECT count(*) FROM read_zarr('gridded-example.zarr') LIMIT 1")
             .await,
     );
     assert!(count > 0, "a plain zarr store must still read");

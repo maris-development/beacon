@@ -1822,7 +1822,6 @@ dependencies = [
  "beacon-common",
  "beacon-file-stats",
  "chrono",
- "crossbeam",
  "datafusion",
  "datafusion-federation",
  "futures",

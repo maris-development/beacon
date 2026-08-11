@@ -25,9 +25,6 @@ arrow = { workspace = true }
 # the feature is unified across a full workspace build.
 arrow-schema = { workspace = true, features = ["serde"] }
 ordered-float = { workspace = true }
-# `crossbeam::queue::SegQueue` is the shared work queue a fast object scan's
-# partitions pop from. See `fast_object_data_source`.
-crossbeam = { workspace = true }
 indexmap = { workspace = true }
 moka = { workspace = true }
 parking_lot = { workspace = true }

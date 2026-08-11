@@ -1,103 +1,61 @@
-//! Beacon's listing table and the scan under it.
+//! Beacon's listing table: a `ListingTable` that prunes before it scans.
 //!
-//! [`FastObjectTable`] is a `TableProvider` in its own right — there is no
-//! `ListingTable` inside it. It lists a store once and hands the result to
-//! [`FastObjectDataSource`], whose partitions share one queue of the files that
-//! survive pruning.
+//! [`FastObjectTable`] wraps one and adds two things to it.
 //!
-//! # Why not `ListingTable`
+//! # Schemas are merged, not required to agree
 //!
-//! `ListingTable` turns its listing into one `PartitionedFile` per file —
-//! ~280 bytes plus a path, fixed at plan time, and there is no way to give it a
-//! list or to make it lazy. At three million files that is over a gigabyte, per
-//! plan, per concurrent query. This keeps the store's own [`ObjectMeta`]s
-//! instead and builds a `PartitionedFile` only at the moment a file is opened.
+//! `ListingTable` takes one schema. The files behind a `read_*` need not agree
+//! on a column's width, so each URL's schema is inferred and the session's
+//! [`ArrowTypeWidening`](crate::type_widening::ArrowTypeWidening) strategy
+//! merges them into the one the table reports.
 //!
-//! [`ObjectMeta`]: object_store::ObjectMeta
+//! # Pruning happens inside `scan`
 //!
-//! # One queue, not a slice per partition
+//! `scan` asks the listing table what it would read — `list_files_for_scan`,
+//! which lists, collects each file's statistics and groups them — builds the
+//! `FileScanConfig`, lets the format turn it into a plan, and then drops the
+//! files whose recorded column ranges say they cannot match. The plan handed
+//! back scans only what is left, and `EXPLAIN` prints only those files.
 //!
-//! Partitions used to own a fixed range of the listing, cut at plan time. A
-//! range cannot answer skew the plan cannot see: file cost is not known before
-//! the read, so a partition that draws slow files, cold objects, or files a
-//! predicate keeps stalls while its peers finish and idle.
+//! Pruning runs after the format has planned, not before, because a format
+//! decides its own file list. Zarr and Atlas expand a store *directory* into
+//! the groups their reader opens and reduce it to the marker at its root:
+//! dropping files from the listing first would take a store's analysed root
+//! marker and leave its unanalysed children behind, and the format would then
+//! read one of those as a store. What is registered, and so what pruning can
+//! reason about, is the list the format settled on.
 //!
-//! Every partition now pops from one shared queue. A fast partition takes more.
-//! No partition can strand work another could do, and nothing has to be guessed
-//! at plan time.
+//! Pruning reads the statistics store, so it is work `scan` does rather than
+//! work the caller waits on before planning starts. It runs in parallel above
+//! 65 536 candidates: see [`prune`].
 //!
-//! # Pruning is the first step of the pipeline
+//! What it costs is peak memory. `list_files_for_scan` materialises a
+//! `PartitionedFile` per listed file — ~280 bytes plus a path — before pruning
+//! sees any of them, so a selective query over a very large collection still
+//! pays for the whole listing once. Pruning shrinks what the plan carries, not
+//! what building it touched.
 //!
-//! Pruning used to be a plan-time phase: name every candidate, read the
-//! segments its predicate columns live in, and hand the survivors to the plan.
-//! That blocks the planner on reads, serially, before the query starts.
+//! # The format still plans its own scan
 //!
-//! It now runs at the head of the *pipeline* instead. The first partition to
-//! poll prunes the whole listing behind a `OnceCell`, in parallel batches, and
-//! fills the queue with what survives. Every other partition awaits the same
-//! cell. The planner still reads nothing.
-//!
-//! The cost is the first row: it arrives after the whole listing is decided,
-//! where it used to arrive after one chunk. The queue is filled batch by batch
-//! as each one resolves, so releasing the cell early is a contained change if
-//! that ever matters. It is not done here, because a consumer that can find the
-//! queue empty has to park, and parking is what this design has none of.
-//!
-//! The visible consequence is unchanged: `EXPLAIN` cannot say how many files
-//! were pruned, because nothing is pruned until the scan runs. `EXPLAIN
-//! ANALYZE` reports it from the counters the shared prune increments.
-//!
-//! # Row order
-//!
-//! A shared queue decides which partition reads which file by scheduling, so
-//! the mapping is not reproducible. A scan carrying a limit therefore does not
-//! share: each partition reads one contiguous slice of the survivors, which
-//! keeps `read_parquet(...) LIMIT 5` returning the same rows on every run. See
-//! [`crate::ordered_union`], which is what makes that guarantee visible.
-//!
-//! # Directory-oriented formats
-//!
-//! Zarr and Atlas call a store a directory, but they never open one: their
-//! readers take the marker object at its root — `zarr.json`, `atlas.json` — and
-//! resolve the store from there. Nothing here treats them specially. The path
-//! names the marker, and the scan hands it over like any other file:
-//!
-//! ```sql
-//! SELECT * FROM read_zarr('sst/north.zarr/zarr.json')
-//! SELECT * FROM read_zarr(['sst/north.zarr/zarr.json', 'sst/south.zarr/zarr.json'])
-//! ```
-//!
-//! A glob cannot stand in for naming the stores. `*` in a listing URL matches
-//! across `/`, so `sst/*/zarr.json` also matches each array's own marker inside
-//! a store, and the reader rejects those — an array is not a group.
-//!
-//! # The one thing `FileScanConfig` is still needed for
-//!
-//! `FileSource::create_file_opener(&self, store, base_config: &FileScanConfig,
-//! partition)` is DataFusion's trait signature, implemented by every format —
-//! DataFusion's own and Beacon's ten. Beacon's read `projected_schema()` from
-//! it, Parquet reads `limit`, `preserve_order` and the expression adapter; none
-//! reads the file list. There is no other API in this version that turns a
-//! format into a `FileOpener`, so an empty one is built at `open()` purely as
-//! that call's argument. It is a parameter block, not state.
-//!
-//! # Pushdown
-//!
-//! Projections and filters are delegated straight to the `FileSource`, which
-//! owns them, so a narrow `SELECT` and a `WHERE` still reach the file reader
-//! and still drive Parquet's row-group and page pruning inside each file.
+//! `create_physical_plan` is what turns the config into a plan, so every format
+//! keeps the shape it wants: netCDF and HDF5 stack decode and broadcast nodes
+//! over their scan, and Zarr and Atlas expand a store directory into partitions
+//! and reduce it to the marker at its root. Nothing here knows about any of
+//! that.
 //!
 //! # What `EXPLAIN` shows
 //!
-//! `FastObjectScan: files=N, partitions=K[, split=S][, prune=stream]`. `split`
-//! appears only when a large file was divided across partitions, which is the
-//! one case where work items outnumber files.
+//! The format's own scan node, so its file groups are printed as ever — and
+//! pruning has already happened, so what it lists is what will be read.
+//! `EXPLAIN ANALYZE` adds `file_stats_files_considered` and
+//! `file_stats_files_pruned` under that node.
+//!
+//! Its statistics still describe every file the format planned, so after a
+//! prune they are an overestimate — the same one the plan-rewriting path has
+//! always reported.
 
-pub mod data_source;
-pub mod plan;
-mod stream;
+pub mod prune;
 pub mod table;
 
-pub use data_source::{FastObjectDataSource, projected_schema_of};
-pub use plan::{StreamPruning, Work};
+pub use prune::{Pruned, Pruning, prune_file_groups, prune_plan};
 pub use table::FastObjectTable;

@@ -247,9 +247,7 @@ async fn a_zarr_scan_prunes_on_a_coordinate() {
 
     let analyzed = query(
         &runtime,
-        "EXPLAIN ANALYZE SELECT lat FROM \
-         read_zarr(['sst/north.zarr/zarr.json', 'sst/south.zarr/zarr.json']) \
-         WHERE lat > 50",
+        "EXPLAIN ANALYZE SELECT lat FROM read_zarr('sst/') WHERE lat > 50",
     )
     .await;
 
@@ -597,18 +595,12 @@ async fn statistics_survive_a_restart() {
 
 /// The number of files a plan will actually open.
 fn files_in_plan(explain: &str) -> usize {
-    // The scan holds cursors rather than a file list, so the plan states how
-    // many files it will read instead of naming them: `files=N`.
-    explain
-        .split("files=")
-        .skip(1)
-        .map(|rest| {
-            rest.chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse::<usize>()
-                .unwrap_or(0)
-        })
+    // Pruning runs before the scan is built, so the file groups the plan prints
+    // are the files it will read. Counting the extensions in them is crude, but
+    // it is what the plan actually says.
+    [".parquet", ".h5", ".nc", "zarr.json"]
+        .iter()
+        .map(|extension| explain.matches(extension).count())
         .sum()
 }
 
@@ -997,16 +989,6 @@ async fn a_pruned_scan_reports_its_metrics() {
         "and how many it dropped:\n{analyzed}"
     );
 
-
-    // That TEMP had statistics to prune on is what `prune=stream` says: the
-    // scan only carries a predicate when the registry knows one of its
-    // columns.
-    let plan = explain(
-        &runtime,
-        "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
-    )
-    .await;
-    assert!(plan.contains("prune=stream"), "{plan}");
 }
 
 // ── the scan reads a listing and prunes as it goes ──────────────────────────
@@ -1026,10 +1008,15 @@ async fn a_scan_without_a_predicate_sets_up_no_pruning() {
     let runtime = builder(root.path(), enabled()).build().await.unwrap();
     runtime.file_stats().unwrap().run_once().await.unwrap();
 
-    let plan = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
-    assert!(
-        !plan.contains("prune=stream"),
-        "no predicate means no pruning to set up:\n{plan}"
+    let analyzed = query(
+        &runtime,
+        "EXPLAIN ANALYZE SELECT * FROM read_parquet('obs/*.parquet')",
+    )
+    .await;
+    assert_eq!(
+        counter(&analyzed, "file_stats_files_considered"),
+        0,
+        "no predicate means no pruning to report:\n{analyzed}"
     );
 
     let rows = query(
@@ -1051,21 +1038,23 @@ async fn a_predicate_it_cannot_prune_on_sets_up_no_pruning() {
     let runtime = builder(root.path(), enabled()).build().await.unwrap();
     runtime.file_stats().unwrap().run_once().await.unwrap();
 
-    // TEMP is recorded, so the scan carries the predicate.
+    // TEMP is recorded, so the file that cannot match is dropped before the
+    // scan is built and never appears in it.
     let known = explain(
         &runtime,
         "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
     )
     .await;
-    assert!(known.contains("prune=stream"), "{known}");
+    assert_eq!(files_in_plan(&known), 1, "{known}");
 
-    // A literal predicate names no column at all.
+    // A literal predicate names no column at all, so nothing is pruned and no
+    // segment is read to find that out.
     let unknown = explain(
         &runtime,
         "SELECT * FROM read_parquet('obs/*.parquet') WHERE 1 = 1",
     )
     .await;
-    assert!(!unknown.contains("prune=stream"), "{unknown}");
+    assert_eq!(files_in_plan(&unknown), 2, "{unknown}");
 }
 
 /// A file the store lists but has never analyzed is read: the scan sees it
