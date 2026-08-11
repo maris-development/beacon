@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use beacon_datafusion_ext::fast_object::FastObjectTable;
-use datafusion::datasource::physical_plan::FileScanConfig;
 use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
 use beacon_file_stats::segment::{ColumnStat, SegmentBuilder};
 use beacon_file_stats::{FileStatsStore, ObservedFile, Registry, StatScalar};
@@ -17,6 +16,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::ListingTableUrl;
+use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::parquet::arrow::ArrowWriter;
@@ -111,7 +111,13 @@ async fn analyze(stats: &FileStatsStore, files: &[(ObservedFile, &[f64])]) {
     for (id, (file, values)) in ids.iter().zip(files) {
         stats
             .registry()
-            .mark_analyzed(*id, "parquet", Some(values.len() as u64), Some(file.size), 1)
+            .mark_analyzed(
+                *id,
+                "parquet",
+                Some(values.len() as u64),
+                Some(file.size),
+                1,
+            )
             .unwrap();
         let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -158,7 +164,11 @@ fn scan_config(plan: &Arc<dyn ExecutionPlan>) -> &FileScanConfig {
                 .expect("a FastObjectTable scan is a file scan");
         }
         let children = node.children();
-        assert_eq!(children.len(), 1, "expected a single-child chain to the scan");
+        assert_eq!(
+            children.len(),
+            1,
+            "expected a single-child chain to the scan"
+        );
         node = children[0].as_ref();
     }
 }
@@ -178,7 +188,9 @@ fn planned_files(plan: &Arc<dyn ExecutionPlan>) -> Vec<String> {
 }
 
 fn counter(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Option<usize> {
-    plan.metrics()?.sum_by_name(name).map(|value| value.as_usize())
+    plan.metrics()?
+        .sum_by_name(name)
+        .map(|value| value.as_usize())
 }
 
 async fn rows(plan: Arc<dyn ExecutionPlan>, ctx: &SessionContext) -> usize {
@@ -223,7 +235,11 @@ async fn a_predicate_prunes_before_the_scan_is_built() {
     let fixture = fixture().await;
     let a = put_parquet(&fixture.objects, "obs/a.parquet", &[1.0, 2.0, 3.0]).await;
     let b = put_parquet(&fixture.objects, "obs/b.parquet", &[100.0, 200.0]).await;
-    analyze(&fixture.stats, &[(a, &[1.0, 2.0, 3.0]), (b, &[100.0, 200.0])]).await;
+    analyze(
+        &fixture.stats,
+        &[(a, &[1.0, 2.0, 3.0]), (b, &[100.0, 200.0])],
+    )
+    .await;
 
     let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
     let filters = vec![col("v").gt(lit(50.0))];
@@ -458,4 +474,191 @@ async fn pruning_keeps_exactly_the_matching_files() {
     assert_eq!(counter(&plan, "file_stats_files_considered"), Some(200));
     assert_eq!(counter(&plan, "file_stats_files_pruned"), Some(180));
     assert_eq!(rows(plan, &fixture.ctx).await, 20);
+}
+
+/// Write one Parquet object with an arbitrary schema, for the tests that care
+/// about columns rather than values.
+async fn put_typed(
+    objects: &InMemory,
+    path: &str,
+    schema: SchemaRef,
+    columns: Vec<datafusion::arrow::array::ArrayRef>,
+) {
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let mut bytes = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut bytes, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    objects.put(&Path::from(path), bytes.into()).await.unwrap();
+}
+
+/// The JSON query API names its columns up front, and narrowing the schema
+/// before planning keeps a wide collection from carrying columns nobody asked
+/// for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projection_narrows_the_schema() {
+    let fixture = fixture().await;
+    let schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Float64, false),
+        Field::new("b", DataType::Float64, false),
+        Field::new("c", DataType::Float64, false),
+    ]));
+    put_typed(
+        &fixture.objects,
+        "obs/wide.parquet",
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0])),
+            Arc::new(Float64Array::from(vec![2.0])),
+            Arc::new(Float64Array::from(vec![3.0])),
+        ],
+    )
+    .await;
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    assert_eq!(table.schema().fields().len(), 3);
+
+    let narrowed = table
+        .with_pushdown_projection(vec!["a".to_string(), "c".to_string()])
+        .unwrap();
+    let narrowed_schema = narrowed.schema();
+    let names: Vec<&str> = narrowed_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    assert_eq!(names, vec!["a", "c"], "only the named columns survive");
+
+    // And it still reads.
+    let plan = narrowed
+        .scan(&fixture.ctx.state(), None, &[], None)
+        .await
+        .unwrap();
+    assert_eq!(rows(plan, &fixture.ctx).await, 1);
+}
+
+/// Two ways a projection asks for nothing useful, both of which leave the table
+/// readable rather than producing one with no columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projection_that_names_nothing_leaves_the_schema_alone() {
+    let fixture = fixture().await;
+    put_parquet(&fixture.objects, "obs/a.parquet", &[1.0, 2.0]).await;
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+
+    // Empty: the caller asked for no projection at all.
+    let empty = table.with_pushdown_projection(vec![]).unwrap();
+    assert_eq!(empty.schema().fields().len(), 1);
+
+    // Named, but nothing matches. Narrowing to zero columns would make the
+    // table unreadable, so the schema is kept instead.
+    let unknown = table
+        .with_pushdown_projection(vec!["nope".to_string()])
+        .unwrap();
+    assert_eq!(unknown.schema().fields().len(), 1);
+}
+
+/// The merge rule is the caller's to choose. The default refuses a column two
+/// URLs disagree on; super typing widens it, which is what the JSON query API
+/// has always done.
+///
+/// Across URLs, note, not within one. A format merges the files behind a single
+/// URL itself — Parquet strictly, the nd formats by super typing — and the
+/// strategy here only decides how those per-URL results combine.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_caller_can_name_the_merge_rule() {
+    use beacon_datafusion_ext::type_widening::SuperTypeWidening;
+    use datafusion::arrow::array::{Int32Array, Int64Array};
+
+    let fixture = fixture().await;
+    put_typed(
+        &fixture.objects,
+        "obs/small.parquet",
+        Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)])),
+        vec![Arc::new(Int32Array::from(vec![1]))],
+    )
+    .await;
+    put_typed(
+        &fixture.objects,
+        "obs/big.parquet",
+        Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)])),
+        vec![Arc::new(Int64Array::from(vec![2]))],
+    )
+    .await;
+
+    // One URL each, so the conflict reaches the strategy rather than being
+    // settled inside the format's own merge.
+    let urls = vec![
+        ListingTableUrl::parse("test://stats/obs/small.parquet").unwrap(),
+        ListingTableUrl::parse("test://stats/obs/big.parquet").unwrap(),
+    ];
+    let state = fixture.ctx.state();
+
+    // The session's rule is the strict union, which has no answer for this.
+    assert!(
+        FastObjectTable::try_new(&state, Arc::new(ParquetFormat::default()), urls.clone())
+            .await
+            .is_err(),
+        "the default refuses a column with two types"
+    );
+
+    // Super typing promotes to the type that holds both.
+    let widened = FastObjectTable::try_new_with_widening(
+        &state,
+        Arc::new(ParquetFormat::default()),
+        urls,
+        &SuperTypeWidening,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        widened.schema().field_with_name("v").unwrap().data_type(),
+        &DataType::Int64
+    );
+}
+
+/// Everything the wrapped listing table declares reaches the caller through the
+/// wrapper, so a table built by `CREATE EXTERNAL TABLE` keeps what its DDL said.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrapped_listing_table_keeps_what_it_declared() {
+    use datafusion::common::Constraints;
+    use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
+
+    let fixture = fixture().await;
+    put_parquet(&fixture.objects, "obs/a.parquet", &[1.0]).await;
+
+    let options = ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension("");
+    let url = ListingTableUrl::parse("test://stats/obs/").unwrap();
+    let schema = options
+        .infer_schema(&fixture.ctx.state(), &url)
+        .await
+        .unwrap();
+    let inner = ListingTable::try_new(
+        ListingTableConfig::new(url)
+            .with_listing_options(options)
+            .with_schema(schema),
+    )
+    .unwrap()
+    .with_definition(Some("CREATE EXTERNAL TABLE obs ...".to_string()))
+    .with_constraints(Constraints::default());
+
+    let table = FastObjectTable::from_listing_table(inner);
+
+    assert_eq!(
+        table.get_table_definition(),
+        Some("CREATE EXTERNAL TABLE obs ..."),
+        "the definition passes through"
+    );
+    assert!(
+        table.get_logical_plan().is_none(),
+        "a listing table has none"
+    );
+    assert!(table.get_column_default("v").is_none());
+    assert_eq!(table.schema().fields().len(), 1);
+
+    // And the wrapper still scans.
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &[], None)
+        .await
+        .unwrap();
+    assert_eq!(rows(plan, &fixture.ctx).await, 1);
 }
