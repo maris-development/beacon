@@ -11,10 +11,10 @@ use std::sync::Arc;
 use arrow::array::{Float64Array, Int64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use beacon_common::FileStatsConfig;
-use beacon_core::AuthIdentity;
 use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
+use beacon_core::AuthIdentity;
 use beacon_datafusion_ext::listing_factory::RootStore;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::parquet::arrow::ArrowWriter;
@@ -146,7 +146,10 @@ async fn hdf5_ranges_need_the_rust_reader() {
             .unwrap()
             .expect("the file was registered");
         let record = store.registry().record(id).unwrap().unwrap();
-        assert_eq!(record.format, "hdf5", "the extension resolved to the HDF5 format");
+        assert_eq!(
+            record.format, "hdf5",
+            "the extension resolved to the HDF5 format"
+        );
         record.column_count
     }
 
@@ -289,7 +292,10 @@ async fn zarr_records_coordinate_ranges() {
             .unwrap()
             .expect("the store's metadata was registered");
         let record = store.registry().record(id).unwrap().unwrap();
-        assert_eq!(record.format, "zarr", "zarr.json resolved to the Zarr format");
+        assert_eq!(
+            record.format, "zarr",
+            "zarr.json resolved to the Zarr format"
+        );
         record.column_count
     }
 
@@ -472,10 +478,7 @@ async fn a_pass_discovers_analyzes_and_stores() {
     assert_eq!(record.column_count, 2, "TEMP and DEPTH both carry ranges");
 
     // And the ranges are readable back out, per column.
-    let temp = store
-        .column_stats_by_name("TEMP", (0, 10))
-        .await
-        .unwrap();
+    let temp = store.column_stats_by_name("TEMP", (0, 10)).await.unwrap();
     let rows: usize = temp.iter().map(|segment| segment.len()).sum();
     assert_eq!(rows, 3, "every file contributed a TEMP row");
 }
@@ -604,6 +607,30 @@ fn files_in_plan(explain: &str) -> usize {
         .sum()
 }
 
+/// One metric value, expanded from the abbreviated form `EXPLAIN ANALYZE` uses.
+///
+/// DataFusion prints a large count in SI style: `2000` is `2.00 K` and `99990`
+/// is `99.99 K`. Reading digits until the first non-digit would stop at the
+/// decimal point and report `2`, which looks like a plausible small number
+/// rather than a parse failure. The abbreviation also rounds to four
+/// significant digits, so a caller checking a large count has to allow for it.
+fn parse_metric_value(rest: &str) -> usize {
+    let digits: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let Ok(value) = digits.parse::<f64>() else {
+        return 0;
+    };
+    let scale = match rest[digits.len()..].trim_start().chars().next() {
+        Some('K') => 1_000.0,
+        Some('M') => 1_000_000.0,
+        Some('G') => 1_000_000_000.0,
+        _ => 1.0,
+    };
+    (value * scale).round() as usize
+}
+
 /// A metric's value from `EXPLAIN ANALYZE` output.
 ///
 /// Pruning happens while the scan reads, so these counters — not the plan
@@ -613,22 +640,13 @@ fn counter(analyzed: &str, name: &str) -> usize {
     analyzed
         .split(&marker)
         .skip(1)
-        .map(|rest| {
-            rest.chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse::<usize>()
-                .unwrap_or(0)
-        })
+        .map(parse_metric_value)
         .sum()
 }
 
 async fn explain(runtime: &Runtime, sql: &str) -> String {
     let batches = runtime
-        .run_query(
-            Query::sql(format!("EXPLAIN {sql}")),
-            AuthIdentity::system(),
-        )
+        .run_query(Query::sql(format!("EXPLAIN {sql}")), AuthIdentity::system())
         .await
         .unwrap_or_else(|e| panic!("EXPLAIN {sql}: {e}"))
         .into_record_stream()
@@ -656,7 +674,11 @@ async fn a_predicate_drops_files_from_the_scan() {
     assert_eq!(pass.analyzed, 3);
 
     let all = explain(&runtime, "SELECT * FROM read_parquet('obs/*.parquet')").await;
-    assert_eq!(files_in_plan(&all), 3, "no predicate reads everything:\n{all}");
+    assert_eq!(
+        files_in_plan(&all),
+        3,
+        "no predicate reads everything:\n{all}"
+    );
 
     // Pruning runs while the scan reads, so the counters say what it dropped.
     let hot = query(
@@ -754,7 +776,11 @@ async fn nothing_is_pruned_when_the_subsystem_is_off() {
         "SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
     )
     .await;
-    assert_eq!(files_in_plan(&plan), 2, "no statistics means no pruning:\n{plan}");
+    assert_eq!(
+        files_in_plan(&plan),
+        2,
+        "no statistics means no pruning:\n{plan}"
+    );
 }
 
 // ── the SQL surface ─────────────────────────────────────────────────────────
@@ -988,7 +1014,6 @@ async fn a_pruned_scan_reports_its_metrics() {
         analyzed.contains("file_stats_files_pruned=2"),
         "and how many it dropped:\n{analyzed}"
     );
-
 }
 
 // ── the scan reads a listing and prunes as it goes ──────────────────────────
@@ -1084,5 +1109,116 @@ async fn a_file_written_after_the_pass_is_read_at_once() {
     assert!(
         after.contains('4'),
         "a file is queryable the moment it lands:\n{after}"
+    );
+}
+
+/// A `CREATE EXTERNAL TABLE` prunes on the registry, the same as a `read_*`
+/// scan does.
+///
+/// It did not always. An external table builds its own listing table to hold
+/// the schema and options its DDL declares, and that table used to be the
+/// provider — so it never reached the pruning path at all. It is wrapped now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_external_table_drops_files_from_the_scan() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/mild.parquet"), 20.0, 25.0);
+    write_parquet(&root.path().join("datasets/obs/hot.parquet"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    let pass = runtime.file_stats().unwrap().run_once().await.unwrap();
+    assert_eq!(pass.analyzed, 3);
+
+    query(
+        &runtime,
+        "CREATE EXTERNAL TABLE obs STORED AS PARQUET LOCATION 'obs/'",
+    )
+    .await;
+
+    let all = explain(&runtime, "SELECT * FROM obs").await;
+    assert_eq!(
+        files_in_plan(&all),
+        3,
+        "no predicate reads everything:\n{all}"
+    );
+
+    let hot = query(
+        &runtime,
+        "EXPLAIN ANALYZE SELECT * FROM obs WHERE \"TEMP\" > 80",
+    )
+    .await;
+    assert_eq!(
+        counter(&hot, "file_stats_files_considered"),
+        3,
+        "every file reaches the scan:\n{hot}"
+    );
+    assert_eq!(
+        counter(&hot, "file_stats_files_pruned"),
+        2,
+        "only hot.parquet can hold a TEMP above 80:\n{hot}"
+    );
+
+    // Reading proves it kept the right one rather than merely the right count.
+    let rows = query(
+        &runtime,
+        "SELECT \"TEMP\" FROM obs WHERE \"TEMP\" > 80 ORDER BY \"TEMP\"",
+    )
+    .await;
+    assert!(
+        rows.contains("90.0") && rows.contains("100.0"),
+        "and it must be that one:\n{rows}"
+    );
+}
+
+/// A partitioned external table still reads its partition columns.
+///
+/// The wrapper plans through the listing table rather than around it, which is
+/// what keeps this working: a hand-built scan configuration would have to carry
+/// the partition columns itself, and the earlier one declared it had none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_partitioned_external_table_keeps_its_partition_columns() {
+    let root = tempfile::tempdir().unwrap();
+    // Hive layout: the year lives in the directory name, not in the files.
+    write_parquet(
+        &root.path().join("datasets/part/year=2023/a.parquet"),
+        0.0,
+        5.0,
+    );
+    write_parquet(
+        &root.path().join("datasets/part/year=2024/b.parquet"),
+        90.0,
+        100.0,
+    );
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    query(
+        &runtime,
+        "CREATE EXTERNAL TABLE part STORED AS PARQUET \
+         PARTITIONED BY (year) LOCATION 'part/'",
+    )
+    .await;
+
+    // The partition column is in the schema and carries the directory's value.
+    let years = query(&runtime, "SELECT DISTINCT year FROM part ORDER BY year").await;
+    assert!(
+        years.contains("2023") && years.contains("2024"),
+        "both partition values should be readable:\n{years}"
+    );
+
+    // And a predicate on it selects by directory.
+    let rows = query(
+        &runtime,
+        "SELECT \"TEMP\" FROM part WHERE year = '2024' ORDER BY \"TEMP\"",
+    )
+    .await;
+    assert!(
+        rows.contains("90.0") && rows.contains("100.0"),
+        "only the 2024 partition should be read:\n{rows}"
+    );
+    assert!(
+        !rows.contains("5.0"),
+        "the 2023 partition should not appear:\n{rows}"
     );
 }

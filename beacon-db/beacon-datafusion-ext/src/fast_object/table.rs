@@ -4,32 +4,32 @@
 //! [module docs](super).
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use beacon_file_stats::FileStatsStore;
 use datafusion::{
-    arrow::datatypes::SchemaRef,
+    arrow::datatypes::{Schema, SchemaRef},
     catalog::{Session, TableProvider},
-    common::{DFSchema, Statistics, plan_datafusion_err, project_schema},
+    common::{Constraints, DFSchema, Statistics, plan_datafusion_err},
     datasource::{
         TableType,
         file_format::FileFormat,
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
-        physical_plan::{FileScanConfig, FileScanConfigBuilder},
+        physical_plan::FileScanConfig,
         source::DataSourceExec,
-        table_schema::TableSchema,
     },
     error::DataFusionError,
     execution::SessionState,
-    logical_expr::{TableProviderFilterPushDown, utils::conjunction},
+    logical_expr::{LogicalPlan, TableProviderFilterPushDown, dml::InsertOp, utils::conjunction},
     physical_expr::utils::collect_columns,
     physical_optimizer::pruning::PruningPredicate,
-    physical_plan::{ExecutionPlan, empty::EmptyExec, metrics::MetricBuilder},
+    physical_plan::{ExecutionPlan, metrics::MetricBuilder},
     prelude::Expr,
 };
 
 use super::prune::{Pruning, prune_plan};
-use crate::type_widening::ArrowTypeWidening;
+use crate::type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy};
 
 /// A table over objects: a listing table that prunes before it scans.
 #[derive(Debug)]
@@ -39,17 +39,39 @@ pub struct FastObjectTable {
 
 impl FastObjectTable {
     /// Build a table over `urls`, inferring and merging their schemas.
+    ///
+    /// The session decides how a column's diverging types merge. Callers that
+    /// need a particular rule regardless of the session use
+    /// [`try_new_with_widening`](Self::try_new_with_widening).
     pub async fn try_new(
         state: &SessionState,
         format: Arc<dyn FileFormat>,
         urls: Vec<ListingTableUrl>,
+    ) -> Result<Self, DataFusionError> {
+        let widening = state.config().get_extension::<ArrowTypeWidening>().expect(
+            "ArrowTypeWidening extension missing from session config; this is a bug in Beacon",
+        );
+        Self::try_new_with_widening(state, format, urls, widening.strategy.as_ref()).await
+    }
+
+    /// The same, with the merge rule named rather than taken from the session.
+    ///
+    /// The JSON query API has always merged its schemas by Beacon's super
+    /// typing, which widens a column two files disagree on instead of refusing
+    /// it. SQL `read_*` follows whatever the session registered, which defaults
+    /// to the stricter union. Both reach this, and say which they want.
+    pub async fn try_new_with_widening(
+        state: &SessionState,
+        format: Arc<dyn FileFormat>,
+        urls: Vec<ListingTableUrl>,
+        widening: &dyn ArrowTypeWideningStrategy,
     ) -> Result<Self, DataFusionError> {
         let options = ListingOptions::new(format)
             // The format identifies its own files. A suffix here would also
             // have to match a directory-oriented format's marker.
             .with_file_extension("")
             .with_target_partitions(state.config_options().execution.target_partitions)
-            .with_collect_stat(true);
+            .with_collect_stat(false); // We rely on the statistics store, not the listing table, to collect stats.
 
         let mut schemas = Vec::with_capacity(urls.len());
         for url in &urls {
@@ -57,10 +79,6 @@ impl FastObjectTable {
             schemas.push(options.infer_schema(state, url).await?);
         }
 
-        // The session decides how a column's diverging types merge.
-        let widening = state.config().get_extension::<ArrowTypeWidening>().expect(
-            "ArrowTypeWidening extension missing from session config; this is a bug in Beacon",
-        );
         let schema = widening
             .merge_schemas(&schemas)
             .map_err(|e| plan_datafusion_err!("Failed to merge schemas for object table: {}", e))?;
@@ -71,6 +89,17 @@ impl FastObjectTable {
         Ok(Self {
             inner: ListingTable::try_new(config)?,
         })
+    }
+
+    /// Wrap a listing table the caller has already configured.
+    ///
+    /// `try_new` covers a `read_*` scan, which knows only a format and some
+    /// URLs. A `CREATE EXTERNAL TABLE` knows more — a declared schema, partition
+    /// columns, a sort order, constraints, column defaults, a statistics cache —
+    /// and builds its own listing table to hold them. This adds pruning to that
+    /// one without taking any of it apart.
+    pub fn from_listing_table(inner: ListingTable) -> Self {
+        Self { inner }
     }
 
     /// The URLs (including any globs) backing this table.
@@ -85,6 +114,43 @@ impl FastObjectTable {
     pub fn inner(&self) -> &ListingTable {
         &self.inner
     }
+
+    /// The same table with its schema narrowed to `projection`.
+    ///
+    /// The JSON query API names its columns up front, and narrowing the schema
+    /// before planning keeps a wide collection from carrying columns nobody
+    /// asked for. A name that is not in the schema is ignored, and a projection
+    /// that selects nothing leaves the schema alone rather than producing a
+    /// table with no columns.
+    ///
+    /// Rebuilds from the paths and options, so it suits a table built by
+    /// [`try_new`](Self::try_new). A table wrapped by
+    /// [`from_listing_table`](Self::from_listing_table) would lose the
+    /// constraints and column defaults its caller attached.
+    pub fn with_pushdown_projection(
+        &self,
+        projection: Vec<String>,
+    ) -> Result<Self, DataFusionError> {
+        let mut schema = self.inner.schema();
+        if !projection.is_empty() {
+            let kept: Vec<_> = schema
+                .fields()
+                .iter()
+                .filter(|field| projection.contains(field.name()))
+                .map(|field| field.as_ref().clone())
+                .collect();
+            if !kept.is_empty() {
+                schema = Arc::new(Schema::new(kept));
+            }
+        }
+
+        let config = ListingTableConfig::new_with_multi_paths(self.inner.table_paths().to_vec())
+            .with_listing_options(self.inner.options().clone())
+            .with_schema(schema);
+        Ok(Self {
+            inner: ListingTable::try_new(config)?,
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -98,7 +164,23 @@ impl TableProvider for FastObjectTable {
     }
 
     fn table_type(&self) -> TableType {
-        TableType::Base
+        self.inner.table_type()
+    }
+
+    fn constraints(&self) -> Option<&Constraints> {
+        self.inner.constraints()
+    }
+
+    fn get_table_definition(&self) -> Option<&str> {
+        self.inner.get_table_definition()
+    }
+
+    fn get_logical_plan(&self) -> Option<Cow<'_, LogicalPlan>> {
+        self.inner.get_logical_plan()
+    }
+
+    fn get_column_default(&self, column: &str) -> Option<&Expr> {
+        self.inner.get_column_default(column)
     }
 
     async fn scan(
@@ -108,50 +190,20 @@ impl TableProvider for FastObjectTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let Some(object_store_url) = self.table_paths().first().map(ListingTableUrl::object_store)
-        else {
-            return self.nothing(projection);
-        };
-
-        // What the listing table would have scanned: the files, their
-        // statistics, and the grouping it chose. Cutting the list short by a
-        // limit is only sound when no predicate has still to be applied above
-        // the scan — the rule `ListingTable::scan` follows.
-        let statistic_file_limit = filters.is_empty().then_some(limit).flatten();
-        let listed = self
-            .inner
-            .list_files_for_scan(state, &[], statistic_file_limit)
-            .await?;
-        if listed.file_groups.is_empty() {
-            return self.nothing(projection);
-        }
-
-        let table_schema = TableSchema::new(self.schema(), vec![]);
-        let file_source = self.inner.options().format.file_source(table_schema);
-        let mut builder = FileScanConfigBuilder::new(object_store_url, file_source)
-            .with_file_groups(listed.file_groups)
-            .with_statistics(listed.statistics)
-            .with_limit(limit);
-        if let Some(constraints) = self.inner.constraints() {
-            builder = builder.with_constraints(constraints.clone());
-        }
-        let config = builder.with_projection_indices(projection.cloned())?.build();
-
-        // The format turns the configuration into a scan, and decides its own
-        // file list while doing it: netCDF and HDF5 stack decode and broadcast
-        // nodes over theirs, and Zarr and Atlas expand a store directory into
-        // the groups their reader opens.
-        let plan = self
-            .inner
-            .options()
-            .format
-            .create_physical_plan(state, config)
-            .await?;
+        // The listing table plans the scan. Reimplementing it here would mean
+        // reimplementing everything it decides on the way: which filters prune
+        // partition directories, the ordering a `WITH ORDER` table promises,
+        // splitting groups by statistics to keep that ordering, the expression
+        // adapter, and the predicate a format pushes into its own reader.
+        let plan = self.inner.scan(state, projection, filters, limit).await?;
 
         // Then drop the files the predicate rules out, from the list the format
-        // settled on. Doing it to the listing first would drop a store's
-        // analysed root marker and leave its unanalysed children behind, and
-        // the format would read one of those as a store.
+        // settled on. It decides that list itself — netCDF and HDF5 stack decode
+        // and broadcast nodes over their scan, and Zarr and Atlas expand a store
+        // directory into the groups their reader opens — so pruning the listing
+        // beforehand would drop a store's analysed root marker, leave its
+        // unanalysed children behind, and the format would read one of those as
+        // a store.
         let Some(pruning) = self.pruning(state, filters) else {
             return Ok(plan);
         };
@@ -166,28 +218,33 @@ impl TableProvider for FastObjectTable {
         &self,
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
-        // Inexact: a predicate drops whole files here, but the rows that
-        // survive still have to be filtered above the scan.
-        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+        // The listing table's answer, unchanged. It reports `Exact` for a filter
+        // that partition directories alone settle, and `Inexact` otherwise.
+        // Pruning here only removes whole files, never rows, so it cannot turn
+        // an exact filter into an inexact one.
+        self.inner.supports_filters_pushdown(filters)
     }
 
     fn statistics(&self) -> Option<Statistics> {
         self.inner.statistics()
     }
+
+    /// Writing goes straight to the listing table.
+    ///
+    /// Pruning is a read-side concern: it decides which existing files a scan
+    /// opens, and has nothing to say about where new rows land. The listing
+    /// table already knows how its format writes.
+    async fn insert_into(
+        &self,
+        state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        self.inner.insert_into(state, input, insert_op).await
+    }
 }
 
 impl FastObjectTable {
-    /// The plan for a scan with no files to read.
-    fn nothing(
-        &self,
-        projection: Option<&Vec<usize>>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(EmptyExec::new(project_schema(
-            &self.schema(),
-            projection,
-        )?)))
-    }
-
     /// The pruning this scan will apply, or `None` when there is none worth
     /// applying.
     ///

@@ -29,6 +29,8 @@ use datafusion::{
 use object_store::path::Path as ObjectPath;
 use parking_lot::RwLock;
 
+use crate::fast_object::FastObjectTable;
+
 #[typetag::serde(tag = "definition_type")]
 #[async_trait::async_trait]
 /// A serializable table definition that can materialize a DataFusion provider.
@@ -53,7 +55,7 @@ pub trait TableDefinition: Debug + Send + Sync {
     }
 }
 
-/// Inputs needed to rebuild the inner [`ListingTable`] for an external table.
+/// Inputs needed to rebuild the inner provider for an external table.
 ///
 /// Captured once at creation so that the table can re-infer its schema and
 /// re-list its files on demand (manual `REFRESH`) or in response to storage
@@ -70,7 +72,13 @@ pub struct ExternalTableRebuild {
     pub(crate) definition_sql: Option<String>,
 }
 
-/// Build a fresh [`ListingTable`] from a rebuild spec.
+/// Build a fresh provider for an external table from a rebuild spec.
+///
+/// The listing table underneath holds everything the DDL declared — the schema,
+/// the partition columns, the sort order, the constraints, the column defaults,
+/// the statistics cache. [`FastObjectTable`] wraps it to add file-statistics
+/// pruning, so an external table drops the files a predicate rules out for the
+/// same reason a `read_*` scan does.
 ///
 /// When the schema is inferred and the location currently lists no files the
 /// schema falls back to empty, so a table whose objects are all deleted reports
@@ -78,7 +86,7 @@ pub struct ExternalTableRebuild {
 pub(crate) async fn build_listing_table(
     session: &dyn Session,
     spec: &ExternalTableRebuild,
-) -> datafusion::error::Result<ListingTable> {
+) -> datafusion::error::Result<FastObjectTable> {
     let resolved_schema = match &spec.provided_schema {
         Some(schema) => Arc::clone(schema),
         None => match spec
@@ -109,7 +117,7 @@ pub(crate) async fn build_listing_table(
         .with_constraints(spec.constraints.clone())
         .with_column_defaults(spec.column_defaults.clone());
 
-    Ok(table)
+    Ok(FastObjectTable::from_listing_table(table))
 }
 
 /// Reserved prefix in the tables store under which materialized-view Parquet
@@ -146,9 +154,9 @@ fn path_under_prefix(prefix: &ObjectPath, event: &ObjectPath) -> bool {
         .all(|(p, e)| p == e)
 }
 
-/// Rebuild the inner listing table from `rebuild` and swap it in.
+/// Rebuild the inner provider from `rebuild` and swap it in.
 async fn rebuild_into(
-    inner: &Arc<RwLock<Arc<ListingTable>>>,
+    inner: &Arc<RwLock<Arc<FastObjectTable>>>,
     rebuild: &ExternalTableRebuild,
     session: &dyn Session,
 ) -> anyhow::Result<()> {
@@ -166,7 +174,7 @@ async fn rebuild_into(
 #[derive(Clone)]
 pub struct ExternalTable {
     definition: ExternalTableDefinition,
-    inner: Arc<RwLock<Arc<ListingTable>>>,
+    inner: Arc<RwLock<Arc<FastObjectTable>>>,
     rebuild: Arc<ExternalTableRebuild>,
 }
 
@@ -192,7 +200,7 @@ impl ExternalTable {
     /// store holds on `beacon.db` — for the process lifetime.
     pub fn new(
         definition: ExternalTableDefinition,
-        initial: ListingTable,
+        initial: FastObjectTable,
         rebuild: ExternalTableRebuild,
     ) -> Self {
         Self {
@@ -206,8 +214,8 @@ impl ExternalTable {
         &self.definition
     }
 
-    /// A snapshot of the current inner listing table.
-    pub fn inner(&self) -> Arc<ListingTable> {
+    /// A snapshot of the current inner provider.
+    pub fn inner(&self) -> Arc<FastObjectTable> {
         self.inner.read().clone()
     }
 
@@ -327,7 +335,6 @@ pub struct ExternalTableDefinition {
     /// If true, creation should no-op when the target table already exists.
     pub if_not_exists: bool,
 }
-
 
 /// Partition column declarations represented as `(name, data_type)` tuples.
 type PartitionCols = Vec<(String, DataType)>;
@@ -1440,14 +1447,23 @@ mod helper_tests {
     fn path_under_prefix_is_segment_aware() {
         let prefix = ObjectPath::from("data/example");
 
-        assert!(path_under_prefix(&prefix, &ObjectPath::from("data/example/a.parquet")));
+        assert!(path_under_prefix(
+            &prefix,
+            &ObjectPath::from("data/example/a.parquet")
+        ));
         assert!(path_under_prefix(
             &prefix,
             &ObjectPath::from("data/example/nested/a.parquet")
         ));
         // A sibling sharing a *string* prefix must not match.
-        assert!(!path_under_prefix(&prefix, &ObjectPath::from("data/example_2/a.parquet")));
-        assert!(!path_under_prefix(&prefix, &ObjectPath::from("other/a.parquet")));
+        assert!(!path_under_prefix(
+            &prefix,
+            &ObjectPath::from("data/example_2/a.parquet")
+        ));
+        assert!(!path_under_prefix(
+            &prefix,
+            &ObjectPath::from("other/a.parquet")
+        ));
     }
 
     #[test]
@@ -1494,10 +1510,7 @@ mod helper_tests {
 
     #[test]
     fn explicit_schema_projects_out_partition_columns() {
-        let declared = schema(&[
-            ("value", DataType::Int32),
-            ("year", DataType::Utf8),
-        ]);
+        let declared = schema(&[("value", DataType::Int32), ("year", DataType::Utf8)]);
 
         let (resolved, partition_cols) =
             resolve_schema_and_partition_cols(&declared, &["year".to_string()]).unwrap();
