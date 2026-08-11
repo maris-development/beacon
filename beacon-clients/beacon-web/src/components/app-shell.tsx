@@ -17,6 +17,7 @@ import {
 const DOCS_URL = "https://maris-development.github.io/beacon/";
 
 import { cn } from "@/lib/utils";
+import { assetUrl } from "@/lib/base-path";
 import { useBeaconSession } from "@/lib/beacon-context";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -53,7 +54,7 @@ export function AppShell() {
       {/* Top navigation bar (AWS-console style). */}
       <header className="flex h-12 shrink-0 items-center gap-3 bg-topbar px-4 text-topbar-foreground">
         <div className="flex items-center gap-2">
-          <img src={`${import.meta.env.BASE_URL}beacon-logo-small.png`} alt="" className="h-7 w-7" />
+          <img src={assetUrl("beacon-logo-small.png")} alt="" className="h-7 w-7" />
           <span className="beacon-gradient-text text-[16px] font-bold tracking-tight">Beacon</span>
           <span className="rounded bg-topbar-foreground/10 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-topbar-foreground/70">
             Admin
