@@ -352,22 +352,41 @@ impl FileFormat for NetcdfFormat {
 
     async fn infer_schema(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let mut tasks = vec![];
+        use futures::{StreamExt, TryStreamExt};
+
         let cache = self.cache.as_ref();
+
+        // Resolving an input can fail, and doing it up front keeps the stream
+        // below infallible in its setup.
+        let mut inputs = Vec::with_capacity(objects.len());
         for object in objects {
-            let task = reader::fetch_schema(
-                cache,
-                self.access.input_for(store, object)?,
-                object.clone(),
-                self.options.read_dimensions.clone(),
-            );
-            tasks.push(task);
+            inputs.push((self.access.input_for(store, object)?, object.clone()));
         }
-        let schemas = futures::future::try_join_all(tasks).await?;
+
+        // Bounded, because each open holds a file descriptor until its schema is
+        // read. `try_join_all` polls every future at once, so a table over a
+        // hundred thousand objects opened a hundred thousand files before the
+        // first one closed and died with `Too many open files` — the crash in
+        // issue #361. `buffered` keeps the width to the session's
+        // `meta_fetch_concurrency`, the same knob Parquet's inference uses, and
+        // preserves order so the merged schema does not depend on which file
+        // finished first.
+        let width = state
+            .config_options()
+            .execution
+            .meta_fetch_concurrency
+            .max(1);
+        let schemas: Vec<SchemaRef> = futures::stream::iter(inputs)
+            .map(|(input, object)| {
+                reader::fetch_schema(cache, input, object, self.options.read_dimensions.clone())
+            })
+            .buffered(width)
+            .try_collect()
+            .await?;
         if schemas.is_empty() {
             // Return a default empty schema
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
@@ -621,7 +640,8 @@ mod reader_backend_tests {
                     // `FastObjectTable` merges its schemas through this. A
                     // session that skips `RuntimeBuilder` registers it itself.
                     .with_extension(
-                        beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+                        beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(
+                        ),
                     ),
             )
             .with_default_features()
@@ -632,9 +652,10 @@ mod reader_backend_tests {
     /// Register one test file as a table read on `backend`.
     async fn register(ctx: &SessionContext, table: &str, backend: ReaderBackend, file: &str) {
         let url = ListingTableUrl::parse(test_file(file).to_string_lossy()).unwrap();
-        let listing = FastObjectTable::try_new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
-            .await
-            .unwrap_or_else(|e| panic!("register {file} on {backend:?}: {e}"));
+        let listing =
+            FastObjectTable::try_new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
+                .await
+                .unwrap_or_else(|e| panic!("register {file} on {backend:?}: {e}"));
         ctx.register_table(table, Arc::new(listing)).unwrap();
     }
 
@@ -1087,8 +1108,9 @@ mod reader_backend_tests {
                     SessionConfig::new()
                         .with_target_partitions(files)
                         .with_extension(
-                            beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+                        beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(
                         ),
+                    ),
                 )
                 .with_default_features()
                 .build();
