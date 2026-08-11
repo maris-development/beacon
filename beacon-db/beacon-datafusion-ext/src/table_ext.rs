@@ -622,17 +622,22 @@ impl TableDefinition for ViewTableDefinition {
 /// A materialized view: a query whose result set is persisted as Parquet files
 /// and served directly from disk instead of being recomputed on every read.
 ///
-/// Wraps an inner [`ListingTable`] built over the persisted Parquet, mirroring how
-/// [`ExternalTable`] wraps a listing table. The wrapper is the downcast target used
-/// by catalog persistence and by refresh/drop detection.
+/// Wraps a [`FastObjectTable`] over the persisted Parquet, mirroring how
+/// [`ExternalTable`] does. The wrapper is the downcast target used by catalog
+/// persistence and by refresh/drop detection.
+///
+/// Going through [`FastObjectTable`] rather than the listing table directly is
+/// what gives a view's own files the same file-statistics pruning every other
+/// listing-backed table gets. A view large enough to be worth materializing is
+/// large enough to be worth pruning.
 #[derive(Clone, Debug)]
 pub struct MaterializedView {
     definition: MaterializedViewDefinition,
-    inner: ListingTable,
+    inner: FastObjectTable,
 }
 
 impl MaterializedView {
-    pub fn new(definition: MaterializedViewDefinition, inner: ListingTable) -> Self {
+    pub fn new(definition: MaterializedViewDefinition, inner: FastObjectTable) -> Self {
         Self { definition, inner }
     }
 
@@ -784,7 +789,10 @@ impl TableDefinition for MaterializedViewDefinition {
                 .get_file_statistic_cache(),
         );
 
-        Ok(Arc::new(MaterializedView::new(self.clone(), provider)))
+        Ok(Arc::new(MaterializedView::new(
+            self.clone(),
+            FastObjectTable::from_listing_table(provider),
+        )))
     }
 
     fn table_name(&self) -> &str {

@@ -32,7 +32,10 @@ use super::prune::{Pruning, prune_plan};
 use crate::type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy};
 
 /// A table over objects: a listing table that prunes before it scans.
-#[derive(Debug)]
+///
+/// `Clone` is as cheap as the listing table's own: a configuration and some
+/// `Arc`s, no files touched. `MaterializedView` holds one by value and needs it.
+#[derive(Clone, Debug)]
 pub struct FastObjectTable {
     inner: ListingTable,
 }

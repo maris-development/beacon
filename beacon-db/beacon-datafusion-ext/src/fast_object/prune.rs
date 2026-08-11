@@ -71,23 +71,18 @@ pub async fn prune_plan(
     // An nd format stacks decode and broadcast nodes over its scan, so descend
     // to it and rebuild the stack afterwards. Each node re-derives itself from
     // its new child, which differs only in which files it lists.
-    let mut wrappers: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
-    let mut node = Arc::clone(&plan);
-    let config = loop {
-        if let Some(exec) = node.as_any().downcast_ref::<DataSourceExec>() {
-            match exec.data_source().as_any().downcast_ref::<FileScanConfig>() {
-                Some(config) => break config.clone(),
-                None => return (plan, None),
-            }
-        }
-        let children = node.children();
-        let [child] = children[..] else {
-            return (plan, None);
-        };
-        let child = Arc::clone(child);
-        wrappers.push(node);
-        node = child;
+    let Some((wrappers, scan)) = split_at_scan(&plan) else {
+        return (plan, None);
     };
+    let Some(exec) = scan.as_any().downcast_ref::<DataSourceExec>() else {
+        return (plan, None);
+    };
+    let Some(config) = exec.data_source().as_any().downcast_ref::<FileScanConfig>() else {
+        // A `DataSourceExec` over something that is not a file scan has no file
+        // list to prune.
+        return (plan, None);
+    };
+    let config = config.clone();
 
     let pruned = prune_file_groups(pruning, config.file_groups.clone()).await;
     let counts = Some((pruned.considered, pruned.dropped));
@@ -103,15 +98,58 @@ pub async fn prune_plan(
     // has always reported.
     let mut config = config;
     config.file_groups = pruned.groups;
-    let mut rebuilt: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(config);
-    for wrapper in wrappers.into_iter().rev() {
-        match wrapper.with_new_children(vec![rebuilt]) {
-            Ok(node) => rebuilt = node,
-            // A node that will not rebuild leaves the plan as it was.
-            Err(_) => return (plan, counts),
-        }
+    let scan: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(config);
+    match rebuild_over_scan(wrappers, scan) {
+        Some(rebuilt) => (rebuilt, counts),
+        // A node that will not rebuild leaves the plan as it was.
+        None => (plan, counts),
     }
-    (rebuilt, counts)
+}
+
+/// The nodes standing above a scan, outermost first.
+type ScanWrappers = Vec<Arc<dyn ExecutionPlan>>;
+
+/// Split a plan into the nodes above its `DataSourceExec` and that node.
+///
+/// Returns the wrappers outermost-first. `None` when no `DataSourceExec` sits at
+/// the bottom of a single-child chain, which is the fail-open case: a shape this
+/// does not recognise keeps its file list.
+///
+/// The descent carries no depth limit. It terminates because a plan is a finite
+/// tree and every step moves to a child, and a limit could only ever turn a deep
+/// plan into a silently unpruned one. However many nodes a format stacks above
+/// its scan, the file list underneath is still the file list.
+fn split_at_scan(plan: &Arc<dyn ExecutionPlan>) -> Option<(ScanWrappers, Arc<dyn ExecutionPlan>)> {
+    let mut wrappers: ScanWrappers = Vec::new();
+    let mut node = Arc::clone(plan);
+    loop {
+        if node.as_any().is::<DataSourceExec>() {
+            return Some((wrappers, node));
+        }
+        // Only a single-child chain. A join or a union has more than one scan
+        // under it, and rewriting one of them here would be guesswork.
+        let children = node.children();
+        let [child] = children[..] else { return None };
+        let child = Arc::clone(child);
+        wrappers.push(node);
+        node = child;
+    }
+}
+
+/// Put `scan` back under the `wrappers` that stood above it.
+///
+/// Each node rebuilds itself from its new child, so an nd source re-derives its
+/// decoded schema and an nd broadcast its partitioning, from a child that differs
+/// only in which files it lists.
+fn rebuild_over_scan(
+    wrappers: ScanWrappers,
+    scan: Arc<dyn ExecutionPlan>,
+) -> Option<Arc<dyn ExecutionPlan>> {
+    let mut rebuilt = scan;
+    for wrapper in wrappers.into_iter().rev() {
+        rebuilt = wrapper.with_new_children(vec![rebuilt]).ok()?;
+    }
+    Some(rebuilt)
 }
 
 /// Drop the files whose recorded ranges say they cannot match.
@@ -282,6 +320,89 @@ async fn prune_candidates(pruning: &Pruning, candidates: Vec<FileId>) -> Vec<Fil
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+    use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::union::UnionExec;
+
+    fn schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("TEMP", DataType::Float64, true)]))
+    }
+
+    /// A `DataSourceExec`. Its data source is a memory one rather than a file
+    /// scan: these tests are about the plan shape above the node, not about what
+    /// it reads.
+    fn scan() -> Arc<dyn ExecutionPlan> {
+        MemorySourceConfig::try_new_exec(&[vec![]], schema(), None).unwrap()
+    }
+
+    #[test]
+    fn a_bare_scan_is_its_own_bottom() {
+        let (wrappers, found) = split_at_scan(&scan()).expect("a scan is a scan");
+        assert!(wrappers.is_empty());
+        assert!(found.as_any().is::<DataSourceExec>());
+    }
+
+    /// The nd shape: the file list lives under the nodes that decode and
+    /// broadcast it, and pruning has to reach through them. `CoalescePartitions`
+    /// stands in for those here.
+    #[test]
+    fn a_wrapped_scan_is_found_and_put_back() {
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(Arc::new(
+            CoalescePartitionsExec::new(scan()),
+        )));
+
+        let (wrappers, found) = split_at_scan(&plan).expect("two wrappers is still a scan");
+        assert_eq!(wrappers.len(), 2);
+        assert!(found.as_any().is::<DataSourceExec>());
+
+        // Rebuilding restores the shape, with the replacement scan underneath.
+        let rebuilt = rebuild_over_scan(wrappers, scan()).expect("the wrappers rebuild");
+        assert!(rebuilt.as_any().is::<CoalescePartitionsExec>());
+        assert!(rebuilt.children()[0].as_any().is::<CoalescePartitionsExec>());
+        assert!(
+            rebuilt.children()[0].children()[0]
+                .as_any()
+                .is::<DataSourceExec>()
+        );
+    }
+
+    /// Fail open, both ways: no scan at the bottom, and more than one scan under
+    /// a node. Rewriting either would be guesswork, so neither is pruned.
+    #[test]
+    fn an_unrecognised_shape_is_left_alone() {
+        let empty: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(schema()));
+        assert!(split_at_scan(&empty).is_none());
+
+        let union = UnionExec::try_new(vec![scan(), scan()]).unwrap();
+        assert!(split_at_scan(&union).is_none());
+    }
+
+    /// Depth is not a reason to give up. However many nodes stand above a scan,
+    /// the file list underneath is still prunable, and a limit here would only
+    /// turn a deep plan into a silently unpruned one.
+    #[test]
+    fn a_deep_chain_is_still_found_and_rebuilt() {
+        const DEPTH: usize = 512;
+
+        let mut plan = scan();
+        for _ in 0..DEPTH {
+            plan = Arc::new(CoalescePartitionsExec::new(plan));
+        }
+
+        let (wrappers, found) = split_at_scan(&plan).expect("depth is not a failure");
+        assert_eq!(wrappers.len(), DEPTH);
+        assert!(found.as_any().is::<DataSourceExec>());
+
+        let rebuilt = rebuild_over_scan(wrappers, scan()).expect("the wrappers rebuild");
+        let mut node = rebuilt;
+        for _ in 0..DEPTH {
+            assert!(node.as_any().is::<CoalescePartitionsExec>());
+            node = Arc::clone(node.children()[0]);
+        }
+        assert!(node.as_any().is::<DataSourceExec>());
+    }
 
     /// Chunking is decided by candidate count, and only above the threshold.
     #[test]
