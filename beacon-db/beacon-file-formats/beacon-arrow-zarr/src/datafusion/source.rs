@@ -11,9 +11,9 @@ use arrow::datatypes::SchemaRef;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use beacon_nd_array::{
     arrow::{
-        batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
-        nd_provider::any_dataset_as_encoded_stream, pushdown_filter::PushdownFilter,
-        schema::any_dataset_to_arrow_schema,
+        batch::any_dataset_as_record_batch_stream_split, metrics::DatasetReadMetrics,
+        nd_provider::any_dataset_as_encoded_stream_split, pushdown_filter::PushdownFilter,
+        schema::any_dataset_to_arrow_schema, split::ChunkSplit,
     },
     projection::DatasetProjection,
 };
@@ -22,7 +22,9 @@ use datafusion::{
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
-        physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
+        physical_plan::{
+            FileGroupPartitioner, FileOpenFuture, FileOpener, FileScanConfig, FileSource,
+        },
         schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
@@ -43,6 +45,19 @@ use crate::{
     reader::{dataset_from_group, project_read_dimensions},
     util::{ZarrPath, ZarrStorage},
 };
+
+/// The nominal size a zarr leaf group reports.
+///
+/// A leaf group is not one object. It is a node with a `zarr.json` and a tree of
+/// chunk files under it, so no byte count describes it, which is why it used to
+/// report zero. Zero has a cost: DataFusion divides a file by byte range, and it
+/// declines to divide a range of zero, so a group could never be split.
+///
+/// The value carries no meaning of its own. It only has to leave room for one
+/// range per partition. [`ZarrOpener`] reads its range as a fraction of the
+/// chunk list and never as bytes, so the fractions come out exact whatever this
+/// is. See [`beacon_nd_array::arrow::split`].
+pub(crate) const NOMINAL_GROUP_SIZE: u64 = 1 << 20;
 
 /// DataFusion [`FileSource`] for zarr groups.
 #[derive(Clone)]
@@ -136,6 +151,42 @@ impl FileSource for ZarrSource {
         })
     }
 
+    /// Split each group across partitions, whatever its `zarr.json` weighs.
+    ///
+    /// The default implementation declines a file below
+    /// `repartition_file_min_size` (10 MB), which is the right call for a format
+    /// whose object *is* its data. A zarr group's object is its `zarr.json`: a
+    /// metadata document of a few KB that can front terabytes of chunks. The
+    /// minimum would measure the wrong thing and decline every store, so this
+    /// ignores it.
+    ///
+    /// Over-splitting is cheap rather than wrong. The opener resolves its range
+    /// against the chunk list, so a share of a group with fewer chunks than
+    /// shares simply reads nothing.
+    ///
+    /// The byte ranges still come from `zarr.json` sizes, so a scan over several
+    /// groups balances by metadata weight rather than by data volume. Within one
+    /// group — the case this exists for — the shares are even.
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        _repartition_file_min_size: usize,
+        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+        config: &FileScanConfig,
+    ) -> datafusion::error::Result<Option<FileScanConfig>> {
+        let repartitioned = FileGroupPartitioner::new()
+            .with_target_partitions(target_partitions)
+            .with_repartition_file_min_size(0)
+            .with_preserve_order_within_groups(output_ordering.is_some())
+            .repartition_file_groups(&config.file_groups);
+
+        Ok(repartitioned.map(|file_groups| {
+            let mut config = config.clone();
+            config.file_groups = file_groups;
+            config
+        }))
+    }
+
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
     }
@@ -220,6 +271,16 @@ impl FileOpener for ZarrOpener {
             DataFusionError::Execution(format!("Failed to create ZarrPath from object metadata: {e}"))
         })?;
 
+        // This partition's share of the group. The range spans the group's
+        // `zarr.json`, which is metadata, not data. It is never read as bytes:
+        // it names a fraction of the chunk list the reader builds, and the
+        // fractions of a group tile that list. See
+        // [`beacon_nd_array::arrow::split`] and [`ZarrSource::repartitioned`].
+        //
+        // An unranged group gives `None`, which reads the whole dataset.
+        let (range_start, range_end) = file.range();
+        let split = ChunkSplit::from_byte_range(range_start..range_end, file.object_meta.size);
+
         let storage = self.storage.clone();
         let projected_schema = self.projected_schema.clone();
         let predicate = self.predicate.clone();
@@ -299,11 +360,15 @@ impl FileOpener for ZarrOpener {
                     })?;
                 let pushdown_filter = predicate.map(PushdownFilter::new);
                 let count_schema = projected_schema.clone();
-                let stream = any_dataset_as_record_batch_stream(
+                // The split applies here too. A count path that read the whole
+                // group in every partition would return the row count once per
+                // partition.
+                let stream = any_dataset_as_record_batch_stream_split(
                     projected,
                     batch_size,
                     pushdown_filter,
                     metrics,
+                    split,
                 )
                 .map(move |batch| {
                     let batch = batch.map_err(|e| {
@@ -343,7 +408,7 @@ impl FileOpener for ZarrOpener {
             // NdBroadcastExec above the scan), adapted onto the projected
             // encoded schema.
             let _ = metrics;
-            let stream = any_dataset_as_encoded_stream(projected, batch_size)
+            let stream = any_dataset_as_encoded_stream_split(projected, batch_size, split)
                 .and_then(move |batch| {
                     let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                         DataFusionError::Execution(format!(

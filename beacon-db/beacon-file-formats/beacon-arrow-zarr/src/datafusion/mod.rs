@@ -32,6 +32,7 @@ use crate::{
 pub mod source;
 pub mod statistics;
 
+use source::NOMINAL_GROUP_SIZE;
 pub use source::ZarrSource;
 
 /// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
@@ -423,7 +424,7 @@ impl ZarrFormat {
             .await
             .unwrap_or_default()
             .into_iter()
-            .map(|key| PartitionedFile::new(key, 0))
+            .map(|key| PartitionedFile::new(key, NOMINAL_GROUP_SIZE))
             .collect();
         Ok(FileGroup::new(files))
     }
@@ -440,7 +441,7 @@ mod tests {
     };
     use datafusion::prelude::SessionContext;
 
-    use super::{parse_bool_option, ZarrFormat, ZarrFormatFactory};
+    use super::{parse_bool_option, ZarrFormat, ZarrFormatFactory, ZarrSource};
 
     /// Register the bundled `gridded-example.zarr` store as a DataFusion table
     /// backed by [`ZarrFormat`] + [`ListingTable`].
@@ -461,6 +462,110 @@ mod tests {
             .unwrap();
         let table = ListingTable::try_new(config).unwrap();
         ctx.register_table("gridded", Arc::new(table)).unwrap();
+    }
+
+    // ── Splitting one group across partitions ──────────────────────────
+
+    /// A session that splits one zarr group across `target_partitions`.
+    fn splitting_ctx(target_partitions: usize) -> SessionContext {
+        use datafusion::prelude::SessionConfig;
+
+        SessionContext::new_with_config(
+            SessionConfig::new().with_target_partitions(target_partitions),
+        )
+    }
+
+    /// One group splits into shares that tile it.
+    ///
+    /// The default [`FileSource::repartitioned`] would decline: a leaf group's
+    /// nominal size is well under the 10 MB minimum split size. `ZarrSource`
+    /// ignores that minimum, because the size of a `zarr.json` says nothing
+    /// about the data behind it.
+    #[test]
+    fn one_group_splits_into_shares_that_tile_it() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let table_schema =
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+        let source = ZarrSource::new(table_schema);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new(
+            "store.zarr/zarr.json",
+            super::NOMINAL_GROUP_SIZE,
+        ))
+        .build();
+
+        // The minimum split size the caller passes is deliberately larger than
+        // the group, so a source that honoured it would decline.
+        let repartitioned = source
+            .repartitioned(4, 10 * 1024 * 1024, None, &config)
+            .unwrap()
+            .expect("a zarr group splits");
+
+        assert_eq!(repartitioned.file_groups.len(), 4);
+
+        let mut next = 0;
+        for group in &repartitioned.file_groups {
+            for file in group.iter() {
+                let range = file.range.as_ref().expect("a share carries a range");
+                assert_eq!(range.start, next, "shares must not gap");
+                next = range.end;
+            }
+        }
+        assert_eq!(
+            next as u64,
+            super::NOMINAL_GROUP_SIZE,
+            "shares must cover the group"
+        );
+    }
+
+    /// One group scans in several partitions and returns the same rows it
+    /// returns in one.
+    ///
+    /// The partition count is the point. The row check is the guard on it:
+    /// `count(*)` catches a share that overlapped another or a gap between two,
+    /// and `min`/`max` catch a share that read the wrong region.
+    #[tokio::test]
+    async fn one_group_splits_and_returns_the_same_rows() {
+        use datafusion::physical_plan::ExecutionPlanProperties;
+
+        let query = r#"SELECT count(*), count(analysed_sst),
+                              min(analysed_sst), max(analysed_sst)
+                       FROM gridded"#;
+
+        let whole = splitting_ctx(1);
+        register_example(&whole).await;
+
+        let split = splitting_ctx(4);
+        register_example(&split).await;
+
+        let plan = split
+            .sql("SELECT analysed_sst FROM gridded")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        assert_eq!(
+            plan.output_partitioning().partition_count(),
+            4,
+            "one group should scan in 4 partitions:\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+
+        let summary = async |ctx: &SessionContext| {
+            let batches = ctx.sql(query).await.unwrap().collect().await.unwrap();
+            format!("{:?}", batches[0].columns())
+        };
+
+        let split_summary = summary(&split).await;
+        assert_eq!(split_summary, summary(&whole).await);
     }
 
     /// A session with the nd projection-pushdown rule registered — the same

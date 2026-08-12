@@ -158,6 +158,27 @@ impl FileSource for AtlasSource {
         })
     }
 
+    /// Whether a scan may split one file across partitions. It may not.
+    ///
+    /// Atlas divides its own work, and it divides it by dataset name.
+    /// `create_physical_plan` opens each store, lists its datasets, and gives
+    /// every file group one slice of those names in
+    /// [`PartitionedFile::extensions`]. Every slice carries the *same*
+    /// `object_meta`, because they all name the same store.
+    ///
+    /// DataFusion's partitioner splits by byte range and copies the extensions
+    /// into each share. Two shares of one slice would therefore carry the same
+    /// [`AtlasDatasetSlice`], and the opener reads by name and never looks at a
+    /// byte range, so each share would return the same datasets over again.
+    ///
+    /// Declining the split does not cost parallelism. The name slices already
+    /// give one partition per share of a store's datasets.
+    ///
+    /// [`PartitionedFile::extensions`]: datafusion::datasource::listing::PartitionedFile::extensions
+    fn supports_repartitioning(&self) -> bool {
+        false
+    }
+
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
     }
@@ -530,6 +551,47 @@ impl FileOpener for AtlasOpener {
             self.prune_cache.clone(),
         );
         Ok(Box::pin(fut))
+    }
+}
+
+#[cfg(test)]
+mod repartition_tests {
+    //! Atlas divides its own work, by dataset name, so it must refuse
+    //! DataFusion's byte-range split.
+
+    use std::sync::Arc;
+
+    use datafusion::datasource::listing::PartitionedFile;
+    use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
+    use datafusion::datasource::table_schema::TableSchema;
+    use datafusion::execution::object_store::ObjectStoreUrl;
+
+    use super::AtlasSource;
+
+    /// A store never splits by byte range.
+    ///
+    /// Every name slice of a store carries the same `object_meta`, and the
+    /// partitioner copies `extensions` into each share it makes. Two shares of
+    /// one slice would therefore read the same datasets twice. The count would
+    /// grow with `target_partitions`, silently.
+    #[test]
+    fn a_store_never_splits_by_byte_range() {
+        let table_schema =
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+        let source = AtlasSource::new(None, table_schema);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        // Comfortably over the partitioner's minimum split size.
+        .with_file(PartitionedFile::new("store.atlas", 64 * 1024 * 1024))
+        .build();
+
+        assert!(!source.supports_repartitioning());
+        assert!(
+            source.repartitioned(4, 1, None, &config).unwrap().is_none(),
+            "an atlas store must not split by byte range"
+        );
     }
 }
 

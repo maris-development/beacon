@@ -129,6 +129,20 @@ impl FileSource for BBFSource {
             ..self.clone()
         })
     }
+
+    /// Whether a scan may split one file across partitions. It may not.
+    ///
+    /// The opener does not read a byte range. Shares of one path meet at the
+    /// same [`StreamShare`] and draw batches from one producer, so a split would
+    /// give one file several consumers of one stream rather than several readers
+    /// of separate regions. One consumer per file is the behaviour this format
+    /// keeps, so the source declines the split.
+    ///
+    /// File-level parallelism is unaffected. The listing table still spreads
+    /// files over `target_partitions` before this is consulted.
+    fn supports_repartitioning(&self) -> bool {
+        false
+    }
     /// Return execution plan metrics
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
@@ -214,6 +228,33 @@ mod tests {
 
     fn source() -> BBFSource {
         BBFSource::new(TableSchema::from_file_schema(schema()))
+    }
+
+    /// A BBF file never splits across partitions.
+    ///
+    /// The opener reads by entry, not by byte range, and shares of one path meet
+    /// at the same `StreamShare`. The source declines the split so one file gets
+    /// one consumer. File-level parallelism is untouched.
+    #[test]
+    fn a_file_never_splits_across_partitions() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::physical_plan::FileScanConfigBuilder;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let source = source();
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        // Comfortably over the partitioner's minimum split size.
+        .with_file(PartitionedFile::new("one.bbf", 64 * 1024 * 1024))
+        .build();
+
+        assert!(!source.supports_repartitioning());
+        assert!(
+            source.repartitioned(4, 1, None, &config).unwrap().is_none(),
+            "a BBF file must not split across partitions"
+        );
     }
 
     fn downcast(source: &Arc<dyn FileSource>) -> &BBFSource {
