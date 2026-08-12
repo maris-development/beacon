@@ -162,8 +162,7 @@ mod tests {
             let groups = interleaved_file_groups(&one_file(SIZE), target_partitions, 0, false)
                 .expect("a file this size splits");
 
-            let mut covered: Vec<(i64, i64)> =
-                groups.iter().flat_map(|group| ranges(group)).collect();
+            let mut covered: Vec<(i64, i64)> = groups.iter().flat_map(ranges).collect();
             covered.sort_unstable();
 
             let mut next = 0;
