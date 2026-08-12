@@ -24,9 +24,10 @@ use futures::{StreamExt, TryStreamExt};
 
 use crate::arrow::array::ndarray_to_arrow_array;
 use crate::arrow::batch::{
-    any_dataset_as_record_batch_stream, build_dataset_schema, c_order_chunk_shape,
-    extract_dataset_layout, generate_array_subset_from_chunk, generate_chunk_subsets,
+    ChunkGrid, any_dataset_as_record_batch_stream_split, build_dataset_schema, chunk_grid,
+    generate_array_subset_from_chunk,
 };
+use crate::arrow::split::{ChunkSplit, split_ordinals};
 use crate::dataset::{AnyDataset, Dataset};
 
 fn exec_err(e: impl std::fmt::Display) -> DataFusionError {
@@ -45,11 +46,25 @@ pub fn any_dataset_as_encoded_stream(
     dataset: AnyDataset,
     batch_size: usize,
 ) -> BoxStream<'static, Result<RecordBatch>> {
+    any_dataset_as_encoded_stream_split(dataset, batch_size, None)
+}
+
+/// The same, over one [`ChunkSplit`] of the dataset.
+///
+/// A `None` split reads the whole dataset, so this is a drop-in for
+/// [`any_dataset_as_encoded_stream`]. A `Some` split reads one share of it. The
+/// shares of a file tile it, so a scan that opens one file in several partitions
+/// returns each row exactly once. See [`crate::arrow::split`].
+pub fn any_dataset_as_encoded_stream_split(
+    dataset: AnyDataset,
+    batch_size: usize,
+    split: Option<ChunkSplit>,
+) -> BoxStream<'static, Result<RecordBatch>> {
     match dataset {
-        AnyDataset::Regular(regular) => dataset_as_nd_stream(regular, batch_size)
+        AnyDataset::Regular(regular) => dataset_as_nd_stream_split(regular, batch_size, split)
             .map(|nd| nd.and_then(|batch| encode_nd_record_batch(&batch)))
             .boxed(),
-        ragged => any_dataset_as_record_batch_stream(ragged, batch_size, None, None)
+        ragged => any_dataset_as_record_batch_stream_split(ragged, batch_size, None, None, split)
             .map_err(exec_err)
             .and_then(|flat| async move { encode_flat_batch_as_nd(&flat) })
             .boxed(),
@@ -62,20 +77,30 @@ pub fn dataset_as_nd_stream(
     dataset: Dataset,
     batch_size: usize,
 ) -> BoxStream<'static, Result<NdRecordBatch>> {
-    let (max_dims, max_shape, chunk_shape) = match extract_dataset_layout(&dataset) {
-        Ok(layout) => layout,
+    dataset_as_nd_stream_split(dataset, batch_size, None)
+}
+
+/// The same, over one [`ChunkSplit`] of the chunk list.
+pub fn dataset_as_nd_stream_split(
+    dataset: Dataset,
+    batch_size: usize,
+    split: Option<ChunkSplit>,
+) -> BoxStream<'static, Result<NdRecordBatch>> {
+    let ChunkGrid {
+        dims: max_dims,
+        chunks,
+    } = match chunk_grid(&dataset, batch_size) {
+        Ok(grid) => grid,
         Err(e) => return futures::stream::once(async move { Err(exec_err(e)) }).boxed(),
     };
 
-    // Honour a native chunk layout when present; otherwise fill a chunk from the
-    // last axis to approach `batch_size`.
-    let effective_chunk_shape = if chunk_shape != max_shape {
-        chunk_shape
-    } else {
-        c_order_chunk_shape(&max_shape, batch_size)
-    };
-
-    let subsets = generate_chunk_subsets(&max_shape, &effective_chunk_shape);
+    // This partition's share of the list.
+    let owned = split_ordinals(split, chunks.len());
+    let subsets: Vec<_> = chunks
+        .into_iter()
+        .skip(owned.start)
+        .take(owned.len())
+        .collect();
     let arrays = Arc::new(dataset.arrays);
     let max_dims = Arc::new(max_dims);
     let schema = build_dataset_schema(&arrays);
@@ -132,6 +157,8 @@ mod tests {
     use indexmap::IndexMap;
 
     use beacon_datafusion_ext::nd::decode_nd_record_batch;
+
+    use crate::arrow::split::byte_tiling_splits;
 
     use super::*;
     use crate::arrow::batch::dataset_as_record_batch_stream;
@@ -226,6 +253,56 @@ mod tests {
         arrays.insert("sst.units".to_string(), Arc::new(units));
         arrays.insert(".title".to_string(), Arc::new(title));
         Dataset::new("with-attrs".to_string(), arrays).await
+    }
+
+    /// Read one split of a dataset, decoded and broadcast.
+    async fn read_split(
+        dataset: &Dataset,
+        batch_size: usize,
+        split: Option<ChunkSplit>,
+    ) -> Vec<RecordBatch> {
+        let encoded: Vec<RecordBatch> = any_dataset_as_encoded_stream_split(
+            AnyDataset::Regular(dataset.clone()),
+            batch_size,
+            split,
+        )
+        .try_collect()
+        .await
+        .unwrap();
+
+        encoded
+            .iter()
+            .map(|b| decode_nd_record_batch(b).unwrap().materialize().unwrap())
+            .collect()
+    }
+
+    /// The splits of a dataset, read in order and concatenated, equal the
+    /// unsplit read.
+    ///
+    /// This is the property a parallel scan of one file rests on. A gap loses
+    /// rows. An overlap returns them twice. Neither shows up as an error, so it
+    /// has to be tested here.
+    #[tokio::test]
+    async fn the_splits_of_a_dataset_rebuild_the_whole_read() {
+        for batch_size in [usize::MAX, 6, 3, 1] {
+            let ds = test_dataset().await;
+            let schema = build_dataset_schema(&ds.arrays);
+
+            let whole = read_split(&ds, batch_size, None).await;
+            let expected = concat_batches(&schema, &whole).unwrap();
+            assert_eq!(expected.num_rows(), 12);
+
+            // Five parts over a 4x3 grid also covers the case of more parts than
+            // chunks, where some parts read nothing.
+            for parts in 1..=5 {
+                let mut batches = Vec::new();
+                for split in byte_tiling_splits(parts) {
+                    batches.extend(read_split(&ds, batch_size, split).await);
+                }
+                let actual = concat_batches(&schema, &batches).unwrap();
+                assert_eq!(actual, expected, "batch_size={batch_size} parts={parts}");
+            }
+        }
     }
 
     /// Rank-0 attributes decode and broadcast to a constant column spanning the
