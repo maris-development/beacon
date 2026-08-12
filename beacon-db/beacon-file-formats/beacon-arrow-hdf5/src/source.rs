@@ -61,11 +61,11 @@ use crate::cache::Hdf5ReaderCache;
 /// of a chunk list that has to be built first, so the two are not measuring the
 /// same cost.
 ///
-/// The check is on the scan total, not on one file: that is
-/// [`FileGroupPartitioner`](datafusion::datasource::physical_plan::FileGroupPartitioner)'s
-/// own rule, and a collection of small files is worth splitting when a single
-/// small file is not.
-pub const MIN_SPLIT_SIZE: usize = 8 * 1024 * 1024;
+/// The test is on one file, not on the scan total. A share pays to open a file,
+/// so a file is what has to be large enough to earn it: a collection of small
+/// files still scans in parallel, one file per partition, but none of them is
+/// cut into shares that would each re-open it for a fraction of its rows.
+pub const MIN_SPLIT_SIZE: u64 = 8 * 1024 * 1024;
 
 /// DataFusion [`FileSource`] for HDF5 (`.h5`/`.hdf5`) files.
 #[derive(Debug, Clone)]

@@ -13,11 +13,14 @@
 //! contiguous runs the early partitions have nothing to read and the late ones
 //! have everything, and the scan takes as long as its slowest partition.
 //!
-//! [`interleaved_file_groups`] keeps DataFusion's slicing and changes only the
-//! deal. It asks for several times as many slices as there are partitions, then
-//! deals them round-robin, so each partition holds slices spread across every
-//! region of every file. A prefix that prunes away now costs every partition the
-//! same.
+//! [`interleaved_file_groups`] cuts each file that is worth cutting into several
+//! times as many slices as there are partitions, then deals them round-robin, so
+//! each partition holds slices spread across every region of every file. A
+//! prefix that prunes away now costs every partition the same.
+//!
+//! It also differs from DataFusion's partitioner in where it applies the size
+//! test: per file rather than on the scan total. A share pays to open one file,
+//! so one file is what has to be large enough to earn the share.
 //!
 //! # What it costs
 //!
@@ -47,11 +50,23 @@ use datafusion::datasource::physical_plan::{FileGroup, FileGroupPartitioner};
 /// runs rather than one per chunk.
 pub const SLICES_PER_PARTITION: usize = 4;
 
-/// Cut the scan into `target_partitions * SLICES_PER_PARTITION` slices and deal
-/// them round-robin.
+/// Cut every file over `min_split_size` into
+/// `target_partitions * SLICES_PER_PARTITION` slices, and deal the result
+/// round-robin.
 ///
-/// Returns `None` when there is nothing to repartition, matching
-/// [`FileGroupPartitioner::repartition_file_groups`].
+/// The size test is **per file**, not on the scan total. A file is what a share
+/// pays to open, so a file is what has to be worth splitting: a thousand small
+/// files are not one large one, however they add up. DataFusion's own
+/// partitioner tests the total, which would slice every file of a large
+/// collection into shares that each re-open it for a fraction of its rows.
+///
+/// A file at or under the size is passed through whole. It still lands in some
+/// partition, alongside the slices of its larger neighbours.
+///
+/// Returns `None` when no file is worth splitting, which leaves the scan's
+/// existing grouping alone — the listing has already spread its files over
+/// `target_partitions`, and that is the right answer when none of them can be
+/// divided.
 ///
 /// `preserve_order` falls back to DataFusion's contiguous deal. A partition that
 /// must emit rows in order cannot hold slices that skip over one another, since
@@ -59,32 +74,55 @@ pub const SLICES_PER_PARTITION: usize = 4;
 pub fn interleaved_file_groups(
     file_groups: &[FileGroup],
     target_partitions: usize,
-    repartition_file_min_size: usize,
+    min_split_size: u64,
     preserve_order: bool,
 ) -> Option<Vec<FileGroup>> {
-    let partitioner = FileGroupPartitioner::new()
-        .with_repartition_file_min_size(repartition_file_min_size)
-        .with_preserve_order_within_groups(preserve_order);
-
     if preserve_order || target_partitions <= 1 {
-        return partitioner
+        return FileGroupPartitioner::new()
             .with_target_partitions(target_partitions)
+            .with_repartition_file_min_size(min_split_size as usize)
+            .with_preserve_order_within_groups(preserve_order)
             .repartition_file_groups(file_groups);
     }
 
-    // Ask for the finer cut. The slices come back in file order, one group per
-    // slice, and they tile the scan exactly as the coarse cut would: this only
-    // changes how many cuts there are, not where the bytes go.
-    let slices = partitioner
-        .with_target_partitions(target_partitions * SLICES_PER_PARTITION)
-        .repartition_file_groups(file_groups)?;
+    let slices_per_file = target_partitions * SLICES_PER_PARTITION;
+    let mut pieces = Vec::new();
+    let mut split_any = false;
 
-    let mut dealt: Vec<Vec<_>> = vec![Vec::new(); target_partitions];
-    for (index, slice) in slices.into_iter().enumerate() {
-        dealt[index % target_partitions].extend(slice.into_inner());
+    for file in file_groups.iter().flat_map(FileGroup::iter) {
+        let (start, end) = file.range();
+        if end.saturating_sub(start) <= min_split_size {
+            // Too small to be worth a share each. Keep it whole.
+            pieces.push(file.clone());
+            continue;
+        }
+
+        // Equal slices over the file's own range, so each partition takes the
+        // same count of chunks from it. The opener resolves a slice against the
+        // chunk list, so equal byte ranges mean equal work whatever the
+        // compression did in between.
+        let step = (end - start).div_ceil(slices_per_file as u64);
+        let mut at = start;
+        while at < end {
+            let stop = (at + step).min(end);
+            pieces.push(file.clone().with_range(at as i64, stop as i64));
+            at = stop;
+        }
+        split_any = true;
     }
 
-    // A scan with fewer slices than partitions leaves the tail empty. Keep the
+    if !split_any {
+        return None;
+    }
+
+    // Deal round-robin. A file's slices are `target_partitions` apart in this
+    // list, so each partition takes one from each region of it.
+    let mut dealt: Vec<Vec<_>> = vec![Vec::new(); target_partitions];
+    for (index, piece) in pieces.into_iter().enumerate() {
+        dealt[index % target_partitions].push(piece);
+    }
+
+    // A scan with fewer pieces than partitions leaves the tail empty. Keep the
     // empty groups: dropping them would change the partition count the caller
     // asked for, and an empty group is a partition that finishes at once.
     Some(dealt.into_iter().map(FileGroup::new).collect())
@@ -121,7 +159,7 @@ mod tests {
         const SIZE: u64 = 1_000_000;
 
         for target_partitions in 1..=8 {
-            let groups = interleaved_file_groups(&one_file(SIZE), target_partitions, 1, false)
+            let groups = interleaved_file_groups(&one_file(SIZE), target_partitions, 0, false)
                 .expect("a file this size splits");
 
             let mut covered: Vec<(i64, i64)> =
@@ -150,7 +188,7 @@ mod tests {
         const SIZE: u64 = 1_000_000;
         const PARTITIONS: usize = 4;
 
-        let groups = interleaved_file_groups(&one_file(SIZE), PARTITIONS, 1, false)
+        let groups = interleaved_file_groups(&one_file(SIZE), PARTITIONS, 0, false)
             .expect("a file this size splits");
 
         assert_eq!(groups.len(), PARTITIONS);
@@ -182,7 +220,7 @@ mod tests {
     /// relies on file order within a group.
     #[test]
     fn a_partition_reads_its_slices_in_file_order() {
-        let groups = interleaved_file_groups(&one_file(1_000_000), 3, 1, false)
+        let groups = interleaved_file_groups(&one_file(1_000_000), 3, 0, false)
             .expect("a file this size splits");
 
         for group in &groups {
@@ -196,7 +234,7 @@ mod tests {
     /// An ordered scan keeps DataFusion's contiguous deal.
     #[test]
     fn an_ordered_scan_keeps_contiguous_runs() {
-        let groups = interleaved_file_groups(&one_file(1_000_000), 4, 1, true)
+        let groups = interleaved_file_groups(&one_file(1_000_000), 4, 0, true)
             .expect("a file this size splits");
 
         for group in &groups {
@@ -208,9 +246,68 @@ mod tests {
         }
     }
 
-    /// A scan too small to divide is left alone, exactly as DataFusion leaves it.
+    /// A file too small to divide is left alone.
     #[test]
-    fn a_scan_below_the_minimum_is_not_divided() {
+    fn a_file_below_the_minimum_is_not_divided() {
         assert!(interleaved_file_groups(&one_file(1_000), 4, 10 * 1024 * 1024, false).is_none());
+    }
+
+    /// Many small files are not divided, however much they add up to.
+    ///
+    /// This is where the rule departs from DataFusion's, which tests the scan
+    /// total: a thousand 1 MB files clear any total-based minimum, and every one
+    /// of them would be cut into shares that each re-open it for a fraction of
+    /// its rows. A share pays to open one file, so one file is what has to earn
+    /// it. The listing has already spread these over the partitions.
+    #[test]
+    fn many_small_files_are_not_divided() {
+        const MIN: u64 = 8 * 1024 * 1024;
+
+        let files: Vec<_> = (0..200)
+            .map(|index| PartitionedFile::new(format!("small-{index}.nc"), 1024 * 1024))
+            .collect();
+        let groups = vec![FileGroup::new(files)];
+
+        assert!(
+            interleaved_file_groups(&groups, 4, MIN, false).is_none(),
+            "200 MB of 1 MB files must not be divided"
+        );
+    }
+
+    /// In a mixed scan, only the large file is cut. The small ones ride along
+    /// whole.
+    #[test]
+    fn only_the_large_file_of_a_mixed_scan_is_divided() {
+        const MIN: u64 = 8 * 1024 * 1024;
+        const LARGE: u64 = 64 * 1024 * 1024;
+
+        let mut files = vec![PartitionedFile::new("large.nc", LARGE)];
+        files.extend((0..3).map(|i| PartitionedFile::new(format!("small-{i}.nc"), 1024)));
+        let groups = vec![FileGroup::new(files)];
+
+        let dealt = interleaved_file_groups(&groups, 4, MIN, false).expect("the large file splits");
+
+        let mut whole = 0;
+        let mut sliced = 0;
+        for file in dealt.iter().flat_map(|group| group.iter()) {
+            let name = file.object_meta.location.to_string();
+            match file.range {
+                None => {
+                    assert!(name.starts_with("small-"), "{name} should have been sliced");
+                    whole += 1;
+                }
+                Some(_) => {
+                    assert_eq!(name, "large.nc", "{name} should have been left whole");
+                    sliced += 1;
+                }
+            }
+        }
+
+        assert_eq!(whole, 3, "every small file rides along whole");
+        assert_eq!(
+            sliced,
+            4 * SLICES_PER_PARTITION,
+            "the large file is cut once per partition slice"
+        );
     }
 }
