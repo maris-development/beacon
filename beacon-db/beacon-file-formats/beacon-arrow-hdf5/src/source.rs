@@ -149,6 +149,35 @@ impl FileSource for Hdf5Source {
         true
     }
 
+    /// Deal the file's slices to partitions round-robin rather than in one
+    /// contiguous run each.
+    ///
+    /// An nd chunk list is C-ordered, so a predicate on the outermost dimension
+    /// prunes a prefix of it. A contiguous deal would put that whole prefix in
+    /// the first partitions, leaving them idle while the last ones do the work.
+    /// See [`beacon_datafusion_ext::file_groups`] for the trade this makes.
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        repartition_file_min_size: usize,
+        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+        config: &FileScanConfig,
+    ) -> datafusion::error::Result<Option<FileScanConfig>> {
+        Ok(
+            beacon_datafusion_ext::file_groups::interleaved_file_groups(
+                &config.file_groups,
+                target_partitions,
+                repartition_file_min_size,
+                output_ordering.is_some(),
+            )
+            .map(|file_groups| {
+                let mut config = config.clone();
+                config.file_groups = file_groups;
+                config
+            }),
+        )
+    }
+
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
     }

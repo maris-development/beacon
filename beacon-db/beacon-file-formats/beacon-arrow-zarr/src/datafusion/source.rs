@@ -22,9 +22,7 @@ use datafusion::{
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
-        physical_plan::{
-            FileGroupPartitioner, FileOpenFuture, FileOpener, FileScanConfig, FileSource,
-        },
+        physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
         schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
@@ -167,6 +165,12 @@ impl FileSource for ZarrSource {
     /// The byte ranges still come from `zarr.json` sizes, so a scan over several
     /// groups balances by metadata weight rather than by data volume. Within one
     /// group — the case this exists for — the shares are even.
+    ///
+    /// The shares are dealt round-robin rather than as one contiguous run each.
+    /// An nd chunk list is C-ordered, so a predicate on the outermost dimension
+    /// prunes a prefix of it, and a contiguous deal would leave the first
+    /// partitions idle while the last ones do the work. See
+    /// [`beacon_datafusion_ext::file_groups`] for the trade that makes.
     fn repartitioned(
         &self,
         target_partitions: usize,
@@ -174,17 +178,21 @@ impl FileSource for ZarrSource {
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
-        let repartitioned = FileGroupPartitioner::new()
-            .with_target_partitions(target_partitions)
-            .with_repartition_file_min_size(0)
-            .with_preserve_order_within_groups(output_ordering.is_some())
-            .repartition_file_groups(&config.file_groups);
-
-        Ok(repartitioned.map(|file_groups| {
-            let mut config = config.clone();
-            config.file_groups = file_groups;
-            config
-        }))
+        Ok(
+            beacon_datafusion_ext::file_groups::interleaved_file_groups(
+                &config.file_groups,
+                target_partitions,
+                // A group's `zarr.json` says nothing about the data behind it,
+                // so no minimum applies.
+                0,
+                output_ordering.is_some(),
+            )
+            .map(|file_groups| {
+                let mut config = config.clone();
+                config.file_groups = file_groups;
+                config
+            }),
+        )
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {

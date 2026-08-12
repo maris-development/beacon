@@ -510,13 +510,24 @@ mod tests {
 
         assert_eq!(repartitioned.file_groups.len(), 4);
 
-        let mut next = 0;
-        for group in &repartitioned.file_groups {
-            for file in group.iter() {
+        // Sorted, not in group order: the shares are dealt round-robin, so a
+        // partition holds slices from across the group rather than one run of
+        // it. See `beacon_datafusion_ext::file_groups`, which pins the deal.
+        let mut shares: Vec<(i64, i64)> = repartitioned
+            .file_groups
+            .iter()
+            .flat_map(|group| group.iter())
+            .map(|file| {
                 let range = file.range.as_ref().expect("a share carries a range");
-                assert_eq!(range.start, next, "shares must not gap");
-                next = range.end;
-            }
+                (range.start, range.end)
+            })
+            .collect();
+        shares.sort_unstable();
+
+        let mut next = 0;
+        for (start, end) in &shares {
+            assert_eq!(*start, next, "shares must not gap or overlap");
+            next = *end;
         }
         assert_eq!(
             next as u64,
