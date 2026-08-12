@@ -47,6 +47,26 @@ use object_store::{ObjectMeta, ObjectStore};
 
 use crate::cache::Hdf5ReaderCache;
 
+/// The smallest scan worth splitting across partitions.
+///
+/// Every share of a file opens that file. The reader cache turns the repeat
+/// opens into hits, but each share still derives the schema, resolves the
+/// projection and builds the chunk list before it reads a byte, and it holds a
+/// partition open for as long as it runs. Below this, that setup costs more than
+/// the parallelism returns.
+///
+/// This replaces DataFusion's `repartition_file_min_size` rather than deferring
+/// to it. That default (10 MB) is a parquet number, where a byte range is a run
+/// of row groups the reader seeks straight to; an HDF5 byte range is a fraction
+/// of a chunk list that has to be built first, so the two are not measuring the
+/// same cost.
+///
+/// The check is on the scan total, not on one file: that is
+/// [`FileGroupPartitioner`](datafusion::datasource::physical_plan::FileGroupPartitioner)'s
+/// own rule, and a collection of small files is worth splitting when a single
+/// small file is not.
+pub const MIN_SPLIT_SIZE: usize = 8 * 1024 * 1024;
+
 /// DataFusion [`FileSource`] for HDF5 (`.h5`/`.hdf5`) files.
 #[derive(Debug, Clone)]
 pub struct Hdf5Source {
@@ -159,7 +179,7 @@ impl FileSource for Hdf5Source {
     fn repartitioned(
         &self,
         target_partitions: usize,
-        repartition_file_min_size: usize,
+        _repartition_file_min_size: usize,
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
@@ -167,7 +187,7 @@ impl FileSource for Hdf5Source {
             beacon_datafusion_ext::file_groups::interleaved_file_groups(
                 &config.file_groups,
                 target_partitions,
-                repartition_file_min_size,
+                MIN_SPLIT_SIZE,
                 output_ordering.is_some(),
             )
             .map(|file_groups| {

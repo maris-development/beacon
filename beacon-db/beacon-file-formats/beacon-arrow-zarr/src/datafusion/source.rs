@@ -149,14 +149,19 @@ impl FileSource for ZarrSource {
         })
     }
 
-    /// Split each group across partitions, whatever its `zarr.json` weighs.
+    /// Split every group across partitions, whatever its `zarr.json` weighs.
     ///
-    /// The default implementation declines a file below
-    /// `repartition_file_min_size` (10 MB), which is the right call for a format
-    /// whose object *is* its data. A zarr group's object is its `zarr.json`: a
-    /// metadata document of a few KB that can front terabytes of chunks. The
-    /// minimum would measure the wrong thing and decline every store, so this
-    /// ignores it.
+    /// No size threshold applies here, and that is the difference from netCDF
+    /// and HDF5. Those two hold a size back (see their `MIN_SPLIT_SIZE`) because
+    /// their object is their data, so its size says what a split would buy. A
+    /// zarr group's object is its `zarr.json`: a metadata document of a few KB
+    /// that can front terabytes of chunks. Any threshold on it would measure the
+    /// wrong thing and decline every store, however large.
+    ///
+    /// What makes that safe is the chunk grid. A group states its chunks in
+    /// metadata the open already read, so the shares fall out of a structure
+    /// that exists whether or not the scan splits, and a share of a group with
+    /// fewer chunks than shares simply reads nothing.
     ///
     /// Over-splitting is cheap rather than wrong. The opener resolves its range
     /// against the chunk list, so a share of a group with fewer chunks than

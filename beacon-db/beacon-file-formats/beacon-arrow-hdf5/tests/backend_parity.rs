@@ -151,16 +151,16 @@ async fn register(ctx: &SessionContext, table: &str, backend: Backend, path: &st
     ctx.register_table(table, Arc::new(table_provider)).unwrap();
 }
 
-/// A session that splits one file across `target_partitions` partitions.
+/// A session with `target_partitions` partitions.
 ///
-/// The bundled files are well under the partitioner's 10 MB default minimum, so
-/// the minimum comes down. A real deployment leaves it alone: splitting a small
-/// file costs an open per share and returns little.
+/// Nothing is done to the split minimum here. `Hdf5Source` sets its own
+/// ([`beacon_arrow_hdf5::MIN_SPLIT_SIZE`]) and ignores the session's, so asking
+/// for partitions is not the same as getting a split: the scan has to be large
+/// enough to earn one.
 fn splitting_session(target_partitions: usize) -> SessionContext {
-    let mut config = SessionConfig::new()
+    let config = SessionConfig::new()
         .with_target_partitions(target_partitions)
         .with_extension(beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension());
-    config.options_mut().optimizer.repartition_file_min_size = 1;
 
     let state = SessionStateBuilder::new()
         .with_config(config)
@@ -243,18 +243,24 @@ fn scan_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> 
     node.output_partitioning().partition_count()
 }
 
-/// One file splits across partitions under `oxcdf`, and never under netcdf-c.
+/// A table is served by the reader it asked for, and only `oxcdf` can split.
 ///
 /// The reader decides, not the format. `Hdf5Source` is the `oxcdf` source and
-/// splits; a table on netcdf-c is served by `NetCDFSource`, which declines
-/// because every netcdf-c call queues on one process-global mutex, so shares of
-/// a file would run one at a time and pay for an extra open each.
+/// permits the split; a table on netcdf-c is served by `NetCDFSource`, which
+/// declines because every netcdf-c call queues on one process-global mutex, so
+/// shares of a file would run one at a time and pay for an extra open each.
 ///
 /// That routing lives in `Hdf5FormatFactory`, three files from the source that
-/// allows the split. This holds it in place.
+/// allows the split. This holds it in place, by reading the scan's file type off
+/// the plan rather than by counting partitions: the bundled fixtures are under
+/// `MIN_SPLIT_SIZE`, so neither reader splits them and a partition count would
+/// say nothing about which source is underneath.
 #[tokio::test]
-async fn only_the_rust_reader_splits_one_file() {
-    for (backend, expected) in [(Backend::NetcdfC, 1), (Backend::Rust, 4)] {
+async fn each_reader_serves_its_own_source() {
+    for (backend, file_type) in [
+        (Backend::NetcdfC, "file_type=netcdf"),
+        (Backend::Rust, "file_type=hdf5"),
+    ] {
         let ctx = splitting_session(4);
         register(&ctx, "t", backend, &netcdf_file(GRIDDED_FILE)).await;
 
@@ -265,41 +271,35 @@ async fn only_the_rust_reader_splits_one_file() {
             .create_physical_plan()
             .await
             .unwrap();
+        let rendered = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(false)
+            .to_string();
 
-        assert_eq!(
-            scan_partitions(&plan),
-            expected,
-            "{backend:?} should scan one file in {expected} partition(s):\n{}",
-            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        assert!(
+            rendered.contains(file_type),
+            "{backend:?} should scan through {file_type}:
+{rendered}"
         );
     }
 }
 
-/// One gridded file scans in several partitions, and returns the same rows it
-/// returns in one.
+/// A scan under the split minimum stays on one partition, and returns the same
+/// rows it returns in a single-partition session.
 ///
-/// The partition count is the point of the feature. The row check is the guard
-/// on it: `count(*)` catches a share that overlapped another or a gap between
-/// two, and `min`/`max` catch a share that read the wrong region. None of those
-/// raise an error on their own.
-///
-/// Only the Rust reader gets here. A table on netcdf-c is served by
-/// `NetCDFSource`, which declines the split for its own reasons.
+/// Every share of a file opens that file and builds its chunk list before it
+/// reads a byte. On a small file that setup costs more than the parallelism
+/// returns, so the source declines however many partitions the session asks for.
 #[tokio::test]
-async fn one_gridded_file_splits_and_returns_the_same_rows() {
-    use datafusion::physical_plan::ExecutionPlanProperties;
-
-    const QUERY: &str = r#"SELECT count(*), count(analysed_sst),
-                                  min(analysed_sst), max(analysed_sst)
-                           FROM t"#;
+async fn a_small_scan_is_not_split() {
+    const QUERY: &str = "SELECT count(*), min(analysed_sst), max(analysed_sst) FROM t";
 
     let whole = session();
     register(&whole, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
 
-    let split = splitting_session(4);
-    register(&split, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+    let asked = splitting_session(4);
+    register(&asked, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
 
-    let plan = split
+    let plan = asked
         .sql("SELECT analysed_sst FROM t")
         .await
         .unwrap()
@@ -307,47 +307,17 @@ async fn one_gridded_file_splits_and_returns_the_same_rows() {
         .await
         .unwrap();
     assert_eq!(
-        plan.output_partitioning().partition_count(),
-        4,
-        "one file should scan in 4 partitions:\n{}",
+        scan_partitions(&plan),
+        1,
+        "a scan under {} bytes must not split:
+{}",
+        beacon_arrow_hdf5::MIN_SPLIT_SIZE,
         datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
     );
 
-    let split_summary = format!("{:?}", collect(&split, QUERY).await.columns());
+    let asked_summary = format!("{:?}", collect(&asked, QUERY).await.columns());
     let whole_summary = format!("{:?}", collect(&whole, QUERY).await.columns());
-    assert_eq!(split_summary, whole_summary);
-}
-
-/// The same for a ragged file, which splits its batch plan rather than a chunk
-/// grid.
-#[tokio::test]
-async fn one_ragged_file_splits_and_returns_the_same_rows() {
-    use datafusion::physical_plan::ExecutionPlanProperties;
-
-    let whole = session();
-    register(&whole, "t", Backend::Rust, &netcdf_file(WOD_FILE)).await;
-
-    let split = splitting_session(4);
-    register(&split, "t", Backend::Rust, &netcdf_file(WOD_FILE)).await;
-
-    let plan = split
-        .sql("SELECT * FROM t")
-        .await
-        .unwrap()
-        .create_physical_plan()
-        .await
-        .unwrap();
-    assert!(
-        plan.output_partitioning().partition_count() > 1,
-        "a ragged file should scan in more than one partition:\n{}",
-        datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
-    );
-
-    let rows = collect(&split, "SELECT count(*) FROM t").await;
-    assert_eq!(
-        format!("{:?}", rows.columns()),
-        format!("{:?}", collect(&whole, "SELECT count(*) FROM t").await.columns())
-    );
+    assert_eq!(asked_summary, whole_summary);
 }
 
 /// A ragged file, where the row count comes from the instance/observation

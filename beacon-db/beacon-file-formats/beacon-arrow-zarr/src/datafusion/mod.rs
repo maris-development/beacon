@@ -563,8 +563,15 @@ mod tests {
             .create_physical_plan()
             .await
             .unwrap();
+        // The count comes off the scan, not the plan root: DataFusion adds a
+        // round-robin above a single-partition scan, so the root would report
+        // four whether or not the group was split.
+        let mut scan: Arc<dyn datafusion::physical_plan::ExecutionPlan> = plan.clone();
+        while let Some(child) = scan.children().first() {
+            scan = Arc::clone(child);
+        }
         assert_eq!(
-            plan.output_partitioning().partition_count(),
+            scan.output_partitioning().partition_count(),
             4,
             "one group should scan in 4 partitions:\n{}",
             datafusion::physical_plan::displayable(plan.as_ref()).indent(false)

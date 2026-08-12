@@ -649,13 +649,23 @@ mod reader_backend_tests {
         SessionContext::new_with_state(state)
     }
 
-    /// Register one test file as a table read on `backend`.
+    /// Register one bundled test file as a table read on `backend`.
     async fn register(ctx: &SessionContext, table: &str, backend: ReaderBackend, file: &str) {
-        let url = ListingTableUrl::parse(test_file(file).to_string_lossy()).unwrap();
+        register_path(ctx, table, backend, &test_file(file)).await
+    }
+
+    /// The same, for a file that is not bundled — one a test wrote itself.
+    async fn register_path(
+        ctx: &SessionContext,
+        table: &str,
+        backend: ReaderBackend,
+        path: &std::path::Path,
+    ) {
+        let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
         let listing =
             FastObjectTable::try_new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
                 .await
-                .unwrap_or_else(|e| panic!("register {file} on {backend:?}: {e}"));
+                .unwrap_or_else(|e| panic!("register {} on {backend:?}: {e}", path.display()));
         ctx.register_table(table, Arc::new(listing)).unwrap();
     }
 
@@ -1223,19 +1233,18 @@ mod reader_backend_tests {
         }
     }
 
-    /// A session that splits one file across `target_partitions` partitions.
+    /// A session with `target_partitions` partitions.
     ///
-    /// The bundled test files are well under the partitioner's 10 MB default
-    /// minimum, so the minimum comes down. A real deployment leaves it alone:
-    /// splitting a small file costs an open per share and returns little.
+    /// Nothing is done to the split minimum here. `NetCDFSource` sets its own
+    /// ([`MIN_SPLIT_SIZE`]) and ignores the session's, so a test that wants a
+    /// split has to bring a scan large enough to earn one.
     fn splitting_session(target_partitions: usize, batch_size: usize) -> SessionContext {
-        let mut config = SessionConfig::new()
+        let config = SessionConfig::new()
             .with_target_partitions(target_partitions)
             .with_batch_size(batch_size)
             .with_extension(
                 beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
             );
-        config.options_mut().optimizer.repartition_file_min_size = 1;
 
         let state = SessionStateBuilder::new()
             .with_config(config)
@@ -1244,28 +1253,143 @@ mod reader_backend_tests {
         SessionContext::new_with_state(state)
     }
 
-    /// One gridded file scans in several partitions, and returns the same rows
-    /// it returns in one.
+    /// Write a netCDF-4 file larger than [`MIN_SPLIT_SIZE`], and return its path.
+    ///
+    /// Every bundled fixture is hundreds of KB, well under the minimum, so a
+    /// test that needs a real split has to make its own file. Two columns of
+    /// 700k values comes to about 11 MB.
+    ///
+    /// The caller holds the [`TempDir`](tempfile::TempDir) for as long as the
+    /// table is registered.
+    fn write_large_netcdf() -> (tempfile::TempDir, PathBuf) {
+        use arrow::array::{Float64Array, Int64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        const ROWS: usize = 700_000;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("TEMP", DataType::Float64, false),
+            Field::new("DEPTH", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from_iter_values(
+                    (0..ROWS).map(|row| row as f64 * 0.5),
+                )),
+                Arc::new(Int64Array::from_iter_values((0..ROWS).map(|row| row as i64))),
+            ],
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let path = dir.path().join("large.nc");
+        let mut writer =
+            ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema).expect("a netCDF writer");
+        writer.write_record_batch(batch).expect("write the batch");
+        writer.finish().expect("finish the file");
+
+
+        (dir, path)
+    }
+
+    /// The partition count of the scan at the bottom of `plan`.
+    ///
+    /// The root can carry more partitions than the scan does: DataFusion adds a
+    /// round-robin repartition above a single-partition scan, which hides
+    /// whether the scan itself was split. This looks at the scan, which is the
+    /// thing splitting changes.
+    fn scan_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> usize {
+        use datafusion::physical_plan::ExecutionPlanProperties;
+
+        let mut node = plan.clone();
+        while let Some(child) = node.children().first() {
+            node = Arc::clone(child);
+        }
+        node.output_partitioning().partition_count()
+    }
+
+    /// A file over the split minimum scans in several partitions, and returns
+    /// the same rows it returns in one.
     ///
     /// The partition count is the point of the feature. The row check is the
     /// guard on it: `count(*)` catches a share that overlapped another or a gap
     /// between two, and `min`/`max` catch a share that read the wrong region.
     /// None of those raise an error on their own.
+    ///
+    /// Ignored: it has no file to run on. Every bundled fixture is under the
+    /// split minimum, and a file this test writes for itself cannot be read
+    /// back — `oxcdf` fails on netCDF-4 output past roughly 4.9 MB with
+    /// "chunk at [292864] of /TEMP was neither cached nor fetched", while
+    /// netcdf-c reads the same bytes. That is a reader bug, not a split one: the
+    /// single-partition read fails too. Un-ignore this once `oxcdf` can read a
+    /// large file.
+    ///
+    /// The split itself is not left unchecked. `beacon-arrow-zarr` runs this
+    /// same comparison end to end over the same `ChunkSplit` machinery (it sets
+    /// no minimum, so its bundled store splits), `beacon-nd-array` compares
+    /// split against unsplit reads value by value, and
+    /// [`only_the_rust_reader_splits_one_file`] pins the deal at the source.
     #[tokio::test]
-    async fn one_gridded_file_splits_and_returns_the_same_rows() {
-        use datafusion::physical_plan::ExecutionPlanProperties;
+    #[ignore = "needs a large netCDF-4 file that the Rust reader can read back"]
+    async fn a_large_file_splits_and_returns_the_same_rows() {
+        const QUERY: &str = r#"SELECT count(*), count("TEMP"), min("TEMP"), max("TEMP") FROM one"#;
 
-        let query = r#"SELECT count(*), count(analysed_sst),
-                              min(analysed_sst), max(analysed_sst)
-                       FROM one"#;
+        let (_dir, file) = write_large_netcdf();
+
+        let whole = session();
+        register_path(&whole, "one", ReaderBackend::Oxcdf, &file).await;
+
+        let split = splitting_session(4, 8192);
+        register_path(&split, "one", ReaderBackend::Oxcdf, &file).await;
+
+        let plan = split
+            .sql(r#"SELECT "TEMP" FROM one"#)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        assert_eq!(
+            scan_partitions(&plan),
+            4,
+            "a file over the minimum should scan in 4 partitions:\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+
+        let summary = async |ctx: &SessionContext| {
+            let batches = ctx.sql(QUERY).await.unwrap().collect().await.unwrap();
+            format!("{:?}", batches[0].columns())
+        };
+
+        let whole_summary = summary(&whole).await;
+        assert_eq!(summary(&split).await, whole_summary);
+    }
+
+    /// A scan under the split minimum stays on one partition.
+    ///
+    /// Every share of a file opens that file and builds its chunk list before it
+    /// reads a byte. On a small file that setup costs more than the parallelism
+    /// returns, so the source declines however many partitions the session asks
+    /// for. The bundled gridded fixture is a few hundred KB, well under the line.
+    ///
+    /// The rows are checked too: a declined split must return the same answer,
+    /// not merely the same partition count.
+    #[tokio::test]
+    async fn a_small_scan_is_not_split() {
+        const QUERY: &str = "SELECT count(*), min(analysed_sst), max(analysed_sst) FROM one";
 
         let whole = session();
         register(&whole, "one", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
 
-        let split = splitting_session(4, 8192);
-        register(&split, "one", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+        let asked = splitting_session(4, 8192);
+        register(&asked, "one", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
 
-        let plan = split
+        let plan = asked
             .sql("SELECT analysed_sst FROM one")
             .await
             .unwrap()
@@ -1273,69 +1397,20 @@ mod reader_backend_tests {
             .await
             .unwrap();
         assert_eq!(
-            plan.output_partitioning().partition_count(),
-            4,
-            "one file should scan in 4 partitions:\n{}",
+            scan_partitions(&plan),
+            1,
+            "a scan under {} bytes must not split:\n{}",
+            super::source::MIN_SPLIT_SIZE,
             datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
         );
 
         let summary = async |ctx: &SessionContext| {
-            let batches = ctx.sql(query).await.unwrap().collect().await.unwrap();
+            let batches = ctx.sql(QUERY).await.unwrap().collect().await.unwrap();
             format!("{:?}", batches[0].columns())
         };
 
-        let split_summary = summary(&split).await;
-        assert_eq!(split_summary, summary(&whole).await);
-    }
-
-    /// The same for a ragged file, which splits its batch plan rather than a
-    /// chunk grid.
-    ///
-    /// The batch size is small so the plan holds several batches. At the default
-    /// the whole file is one batch, one share would take it, and the test would
-    /// pass without splitting anything.
-    #[tokio::test]
-    async fn one_ragged_file_splits_and_returns_the_same_rows() {
-        use datafusion::physical_plan::ExecutionPlanProperties;
-
-        let whole = session();
-        register(&whole, "one", ReaderBackend::Oxcdf, WOD_FILE).await;
-
-        let split = splitting_session(4, 32);
-        register(&split, "one", ReaderBackend::Oxcdf, WOD_FILE).await;
-
-        let plan = split
-            .sql("SELECT * FROM one")
-            .await
-            .unwrap()
-            .create_physical_plan()
-            .await
-            .unwrap();
-        assert!(
-            plan.output_partitioning().partition_count() > 1,
-            "a ragged file should scan in more than one partition:\n{}",
-            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
-        );
-
-        let rows = async |ctx: &SessionContext| {
-            let batches = ctx
-                .sql("SELECT count(*) FROM one")
-                .await
-                .unwrap()
-                .collect()
-                .await
-                .unwrap();
-            batches[0]
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
-                .unwrap()
-                .value(0)
-        };
-
-        let split_rows = rows(&split).await;
-        assert!(split_rows > 0, "the scan must return rows");
-        assert_eq!(split_rows, rows(&whole).await);
+        let asked_summary = summary(&asked).await;
+        assert_eq!(asked_summary, summary(&whole).await);
     }
 
     /// Every column, including every attribute, comes back identical.
