@@ -411,3 +411,54 @@ async fn is_not_null_still_drops_a_file_that_is_entirely_null() {
         "the all-null file is ruled out; the one with values is not"
     );
 }
+
+/// Pruning a candidate list in contiguous id chunks answers exactly what
+/// pruning it whole answers.
+///
+/// This is the invariant a parallel prune rests on: `FastObjectDataSource`
+/// cuts its candidates into sorted id chunks and runs them on separate tasks,
+/// then concatenates. That is only sound if each chunk decides its own files
+/// the same way the whole call would, and if the concatenation stays ascending
+/// so the caller can binary-search it.
+///
+/// Sorted ids are what makes the chunking cheap as well as correct: the store
+/// skips a segment whose file-id range a chunk does not touch. Chunking the
+/// *listing* instead would scatter ids across the whole space and every chunk
+/// would read every segment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chunked_pruning_matches_pruning_the_whole_list() {
+    let (store, _dir) = store().await;
+
+    // Enough files to span several segments, with a tenth of them matching.
+    const FILES: usize = 5_000;
+    let ranges: Vec<(f64, f64)> = (0..FILES)
+        .map(|i| {
+            if i % 10 == 0 {
+                (900.0, 1_000.0)
+            } else {
+                (0.0, 5.0)
+            }
+        })
+        .collect();
+    let ids = seed_temp(&store, &ranges).await;
+
+    let predicate = greater_than("TEMP", 500.0);
+    let whole = prune_files(&store, &predicate, &schema(), &ids).await;
+    assert_eq!(whole.len(), FILES / 10, "a tenth of the files can match");
+
+    for chunks in [2usize, 7, 64] {
+        let size = ids.len().div_ceil(chunks);
+        let mut stitched = Vec::new();
+        for chunk in ids.chunks(size) {
+            stitched.extend(prune_files(&store, &predicate, &schema(), chunk).await);
+        }
+        assert_eq!(
+            stitched, whole,
+            "{chunks} chunks must answer what one call answers, in the same order"
+        );
+        assert!(
+            stitched.windows(2).all(|pair| pair[0] < pair[1]),
+            "the concatenation stays ascending, so it can be binary-searched"
+        );
+    }
+}

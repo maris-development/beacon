@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use beacon_arrow_csv::datafusion::CsvFormat;
 use beacon_arrow_odv::datafusion::OdvFormat;
-use beacon_datafusion_ext::file_collection::FileCollection;
+use beacon_datafusion_ext::fast_object::FastObjectTable;
+use beacon_datafusion_ext::type_widening::SuperTypeWidening;
 use datafusion::{
     datasource::{file_format::FileFormat, listing::ListingTableUrl, provider_as_source},
     logical_expr::{LogicalPlanBuilder, TableSource},
@@ -49,11 +50,11 @@ impl From {
             From::Table(name) => {
                 // Use a registered table from the catalog.
                 if let Ok(mut table) = session_context.table_provider(name.as_str()).await {
-                    if let (Some(projection), Some(file_collection)) =
-                        (projection, table.as_any().downcast_ref::<FileCollection>())
+                    if let (Some(projection), Some(object_table)) =
+                        (projection, table.as_any().downcast_ref::<FastObjectTable>())
                     {
                         let projected_table =
-                            file_collection.with_pushdown_projection(projection.clone())?;
+                            object_table.with_pushdown_projection(projection.clone())?;
                         table = Arc::new(projected_table);
                     }
                     let source = provider_as_source(table);
@@ -123,9 +124,17 @@ impl FromFormat {
         let urls = self.listing_table_urls(session_context)?;
         let file_format = self.file_format(session_context, &urls).await?;
 
-        // Create a FileCollection as the table provider.
-        let table =
-            Arc::new(FileCollection::new(&session_context.state(), file_format, urls).await?);
+        // Super typing, not the session's rule: this API has always widened a
+        // column two files disagree on rather than refusing the collection.
+        let table = Arc::new(
+            FastObjectTable::try_new_with_widening(
+                &session_context.state(),
+                file_format,
+                urls,
+                &SuperTypeWidening,
+            )
+            .await?,
+        );
 
         Ok(provider_as_source(table))
     }

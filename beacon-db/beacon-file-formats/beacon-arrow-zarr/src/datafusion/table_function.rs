@@ -5,7 +5,7 @@ use std::{
 
 use crate::datafusion::ZarrFormat;
 use arrow::datatypes::{DataType, Field};
-use beacon_common::super_table::SuperListingTable;
+use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl,
@@ -116,13 +116,13 @@ impl TableFunctionImpl for ReadZarrFunc {
         let read_dimensions = (!dimensions.is_empty()).then_some(dimensions);
         let file_format = ZarrFormat::new(read_dimensions);
 
-        let super_listing_table = tokio::task::block_in_place(|| {
+        let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                SuperListingTable::new(&session_ctx.state(), Arc::new(file_format), listing_urls)
+                FastObjectTable::try_new(&session_ctx.state(), Arc::new(file_format), listing_urls)
                     .await
             })
         })?;
 
-        Ok(Arc::new(super_listing_table))
+        Ok(Arc::new(fast_object_table))
     }
 }

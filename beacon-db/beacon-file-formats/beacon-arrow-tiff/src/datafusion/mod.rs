@@ -120,17 +120,28 @@ impl FileFormat for TiffFormat {
 
     async fn infer_schema(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let mut tasks = vec![];
-        for object in objects {
-            let task = reader::fetch_schema(store.clone(), object.clone());
-            tasks.push(task);
-        }
+        use futures::{StreamExt, TryStreamExt};
 
-        let schemas = futures::future::try_join_all(tasks).await?;
+        // Bounded: each open holds a descriptor until its schema is read, and
+        // `try_join_all` would open every file in the listing at once. See the
+        // same fix in `beacon_arrow_netcdf`, and issue #361.
+        let width = state
+            .config_options()
+            .execution
+            .meta_fetch_concurrency
+            .max(1);
+        let tasks: Vec<_> = objects
+            .iter()
+            .map(|object| reader::fetch_schema(store.clone(), object.clone()))
+            .collect();
+        let schemas: Vec<SchemaRef> = futures::stream::iter(tasks)
+            .buffered(width)
+            .try_collect()
+            .await?;
         if schemas.is_empty() {
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
@@ -189,9 +200,9 @@ mod tests {
     use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
     use datafusion::execution::object_store::ObjectStoreUrl;
     use futures::StreamExt;
+    use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStoreExt;
 
     const TEST_TIF_BYTES: &[u8] = include_bytes!("../../test-files/test.tif");
 
@@ -262,7 +273,9 @@ mod tests {
         };
 
         let stream = file_opener
-            .open(datafusion::datasource::listing::PartitionedFile::from(object))
+            .open(datafusion::datasource::listing::PartitionedFile::from(
+                object,
+            ))
             .expect("open")
             .await
             .expect("stream");
@@ -373,7 +386,9 @@ mod tests {
         };
 
         let stream = file_opener
-            .open(datafusion::datasource::listing::PartitionedFile::from(object))
+            .open(datafusion::datasource::listing::PartitionedFile::from(
+                object,
+            ))
             .expect("open")
             .await
             .expect("stream");
@@ -466,7 +481,10 @@ mod tests {
             .iter()
             .map(|b| b.num_rows())
             .sum();
-        assert_eq!(rows, 0, "impossible latitude predicate should yield no rows");
+        assert_eq!(
+            rows, 0,
+            "impossible latitude predicate should yield no rows"
+        );
     }
 
     #[tokio::test]
@@ -490,7 +508,10 @@ mod tests {
                 .downcast_ref::<arrow::array::Float64Array>()
                 .expect("geo.lat is Float64");
             for i in 0..col.len() {
-                assert!(col.value(i) > 40.0, "every returned lat must satisfy the predicate");
+                assert!(
+                    col.value(i) > 40.0,
+                    "every returned lat must satisfy the predicate"
+                );
             }
             total += b.num_rows();
         }

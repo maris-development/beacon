@@ -11,6 +11,16 @@ impl ArrowTypeWidening {
         Self { strategy }
     }
 
+    /// The strategy a session gets when nobody registers one.
+    ///
+    /// `FastObjectTable` reads this extension to merge the schemas of the files
+    /// behind one table, and it requires it. `RuntimeBuilder` registers it for a
+    /// server. A session built by hand, in a test or an embedded use, has to
+    /// register it too, and this is what it registers.
+    pub fn default_extension() -> Arc<Self> {
+        Arc::new(Self::new(Arc::new(DefaultArrowTypeWidening)))
+    }
+
     pub fn merge_schemas(&self, schema_refs: &[SchemaRef]) -> Result<SchemaRef, ArrowError> {
         self.strategy.merge_schemas(schema_refs)
     }
@@ -55,6 +65,30 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
         }
 
         Ok(Arc::new(arrow_schema::Schema::new(merged_fields)))
+    }
+}
+
+/// Beacon's super typing as a widening strategy.
+///
+/// Fields union in first-seen order, and a field two files disagree on widens
+/// to the smallest type that holds both — `Int32` + `Int64` is `Int64`,
+/// `Int64` + `Float32` is `Float64`, anything + a string is the string. The
+/// rules follow Polars and Numpy and live in
+/// [`beacon_common::super_typing`]; this type only adapts them to the
+/// [`ArrowTypeWideningStrategy`] trait. A pair with no common representation
+/// (`Date32` + `Int32`) is an error rather than a guess.
+///
+/// This is the strategy `FastObjectTable` merges its schemas with unless a
+/// deployment registers another through `RuntimeBuilder::with_type_widening`,
+/// so a `read_*` over files that disagree on a column's width behaves exactly
+/// as it always has.
+pub struct SuperTypeWidening;
+
+impl ArrowTypeWideningStrategy for SuperTypeWidening {
+    fn merge_schemas(&self, schema_refs: &[SchemaRef]) -> Result<SchemaRef, ArrowError> {
+        beacon_common::super_typing::super_type_schema(schema_refs)
+            .map(Arc::new)
+            .map_err(|e| ArrowError::SchemaError(e.to_string()))
     }
 }
 
@@ -107,6 +141,43 @@ mod tests {
             .merge_schemas(&[
                 schema(&[("a", DataType::Int32)]),
                 schema(&[("a", DataType::Int64)]),
+            ])
+            .unwrap_err();
+
+        match err {
+            ArrowError::SchemaError(message) => {
+                assert!(message.contains('a'), "message should name the field: {message}");
+            }
+            other => panic!("expected SchemaError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn super_typing_widens_a_field_with_two_types() {
+        // The super-typing strategy promotes instead: the same conflict the
+        // default rejects widens to the type that holds both.
+        let widening = ArrowTypeWidening::new(Arc::new(SuperTypeWidening));
+        let merged = widening
+            .merge_schemas(&[
+                schema(&[("a", DataType::Int32)]),
+                schema(&[("a", DataType::Int64)]),
+            ])
+            .unwrap();
+        assert_eq!(
+            merged.field_with_name("a").unwrap().data_type(),
+            &DataType::Int64
+        );
+    }
+
+    #[test]
+    fn super_typing_still_rejects_a_field_with_no_common_type() {
+        // Widening never guesses: a pair with no common representation is an
+        // error rather than a silent cast.
+        let widening = ArrowTypeWidening::new(Arc::new(SuperTypeWidening));
+        let err = widening
+            .merge_schemas(&[
+                schema(&[("a", DataType::Date32)]),
+                schema(&[("a", DataType::Int32)]),
             ])
             .unwrap_err();
 
