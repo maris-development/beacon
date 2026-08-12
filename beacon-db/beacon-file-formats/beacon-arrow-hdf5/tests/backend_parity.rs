@@ -227,6 +227,54 @@ async fn both_backends_return_the_same_rows_for_a_gridded_file() {
 
 // ── Splitting one file across partitions ────────────────────────────────────
 
+/// The partition count of the scan at the bottom of `plan`.
+///
+/// The root can carry more partitions than the scan does: DataFusion adds a
+/// round-robin repartition above a single-partition scan, which hides whether
+/// the scan itself was split. This looks at the scan, which is the thing
+/// splitting changes.
+fn scan_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> usize {
+    use datafusion::physical_plan::ExecutionPlanProperties;
+
+    let mut node = plan.clone();
+    while let Some(child) = node.children().first() {
+        node = Arc::clone(child);
+    }
+    node.output_partitioning().partition_count()
+}
+
+/// One file splits across partitions under `oxcdf`, and never under netcdf-c.
+///
+/// The reader decides, not the format. `Hdf5Source` is the `oxcdf` source and
+/// splits; a table on netcdf-c is served by `NetCDFSource`, which declines
+/// because every netcdf-c call queues on one process-global mutex, so shares of
+/// a file would run one at a time and pay for an extra open each.
+///
+/// That routing lives in `Hdf5FormatFactory`, three files from the source that
+/// allows the split. This holds it in place.
+#[tokio::test]
+async fn only_the_rust_reader_splits_one_file() {
+    for (backend, expected) in [(Backend::NetcdfC, 1), (Backend::Rust, 4)] {
+        let ctx = splitting_session(4);
+        register(&ctx, "t", backend, &netcdf_file(GRIDDED_FILE)).await;
+
+        let plan = ctx
+            .sql("SELECT analysed_sst FROM t")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            scan_partitions(&plan),
+            expected,
+            "{backend:?} should scan one file in {expected} partition(s):\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+    }
+}
+
 /// One gridded file scans in several partitions, and returns the same rows it
 /// returns in one.
 ///

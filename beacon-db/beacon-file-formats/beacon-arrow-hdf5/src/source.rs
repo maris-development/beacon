@@ -129,13 +129,25 @@ impl FileSource for Hdf5Source {
         })
     }
 
-    // `supports_repartitioning` keeps DataFusion's default of `true`, so a file
-    // splits across partitions through the default `repartitioned`. The reader
-    // is pure Rust over the object store and holds no lock, so shares of one
-    // file run at the same time. The byte-range split is safe because the opener
-    // never reads the range as bytes: it reads it as a fraction of the chunk
-    // list, and the fractions of a file tile that list. See [`ChunkSplit`] and
-    // [`Hdf5Opener::read_task`].
+    /// Whether a scan may split one file across partitions. It may.
+    ///
+    /// This source is the `oxcdf` reader's, and only ever that one. A table on
+    /// netcdf-c never reaches here: `Hdf5FormatFactory` hands the whole call to
+    /// the netCDF factory when `use_rust_reader` is off, so it is served by
+    /// `NetCDFSource`, which declines the split because every netcdf-c call
+    /// queues on one process-global mutex. `Hdf5Format` has private fields and
+    /// one construction site, behind that same check, so the invariant is
+    /// structural rather than a convention. `only_the_rust_reader_splits_one_file`
+    /// in `tests/backend_parity.rs` holds it to that.
+    ///
+    /// `oxcdf` range-reads through the object store and holds no lock, so shares
+    /// of one file run at the same time. DataFusion's byte-range split is safe
+    /// here because the opener never reads the range as bytes: it reads it as a
+    /// fraction of the chunk list, and the fractions of a file tile that list.
+    /// See [`ChunkSplit`] and [`Hdf5Opener::read_task`].
+    fn supports_repartitioning(&self) -> bool {
+        true
+    }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
