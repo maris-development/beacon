@@ -557,6 +557,11 @@ mod split_tests {
     //! resolution and projection, to the encoded stream. Below it,
     //! `beacon-nd-array` checks the chunk-list slicing itself; above it,
     //! `beacon_datafusion_ext::file_groups` checks the deal.
+    //!
+    //! Both chunk layouts are covered. A file that stores its own chunking is
+    //! read on that grid, and `batch_size` is ignored; a file that stores none
+    //! is cut by `batch_size`. They reach the split through different arms of
+    //! `chunk_grid`, so a test on one says nothing about the other.
 
     use std::sync::Arc;
 
@@ -571,16 +576,13 @@ mod split_tests {
 
     /// A data variable on the full grid, so a share covers real chunks. The
     /// whole file would broadcast to gigabytes; one column is 2.3M rows.
-    const COLUMN: &str = "analysed_sst";
+    const GRIDDED_COLUMN: &str = "analysed_sst";
 
-    /// The bundled gridded fixture, through a local store.
-    fn gridded() -> (Arc<dyn ObjectStore>, ObjectMeta) {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test_files")
-            .join("gridded-example.nc");
+    /// The object metadata of a file on a local store.
+    fn local_object(path: &std::path::Path) -> (Arc<dyn ObjectStore>, ObjectMeta) {
         let location =
-            object_store::path::Path::from_absolute_path(&path).expect("an absolute object path");
-        let file_meta = std::fs::metadata(&path).expect("the bundled file exists");
+            object_store::path::Path::from_absolute_path(path).expect("an absolute object path");
+        let file_meta = std::fs::metadata(path).expect("the file exists");
 
         let store: Arc<dyn ObjectStore> = Arc::new(object_store::local::LocalFileSystem::new());
         let object = ObjectMeta {
@@ -593,32 +595,113 @@ mod split_tests {
         (store, object)
     }
 
-    /// Read `range` of the fixture through a real opener, decoded and broadcast.
+    /// The bundled gridded fixture: a 3-D grid that stores its own chunking.
+    fn gridded() -> (Arc<dyn ObjectStore>, ObjectMeta) {
+        local_object(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test_files")
+                .join("gridded-example.nc"),
+        )
+    }
+
+    /// A flat netCDF-4 file of `rows` rows, written for the test.
     ///
-    /// `None` reads the whole file, which is what an unsplit scan hands it.
+    /// The bundled fixtures store a chunk layout, which the reader honours over
+    /// `batch_size`. This one is written flat, so its chunk list comes from
+    /// `batch_size` instead — the other arm of `chunk_grid`, and the one a
+    /// classic-format file takes.
     ///
-    /// The result is empty when the share owns no chunk. That is not a failure:
-    /// the fixture stores four chunks, so a scan asking for more partitions than
-    /// that leaves the surplus with nothing to read.
-    async fn read_share(range: Option<(u64, u64)>) -> Vec<RecordBatch> {
-        let (store, object) = gridded();
+    /// Kept small on purpose. `oxcdf` cannot read this writer's output past
+    /// about 4.9 MB (see `a_large_file_splits_and_returns_the_same_rows`), and
+    /// this needs many chunks, not many bytes.
+    fn written_flat(rows: usize) -> (tempfile::TempDir, Arc<dyn ObjectStore>, ObjectMeta) {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "TEMP",
+            DataType::Float64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Float64Array::from_iter_values(
+                (0..rows).map(|row| row as f64 * 0.25),
+            ))],
+        )
+        .expect("a batch");
+
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let path = dir.path().join("flat.nc");
+        let mut writer =
+            ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema).expect("a netCDF writer");
+        writer.write_record_batch(batch).expect("write the batch");
+        writer.finish().expect("finish the file");
+
+        let (store, object) = local_object(&path);
+        (dir, store, object)
+    }
+
+    /// Read `range` of `object` through a real opener, decoded and broadcast.
+    ///
+    /// `None` reads the whole file, which is what an unsplit scan hands it. The
+    /// result is empty when the share owns no chunk: a file holds a fixed number
+    /// of chunks, so a scan asking for more shares than that leaves the surplus
+    /// with nothing to read.
+    async fn read_share(
+        store: &Arc<dyn ObjectStore>,
+        object: &ObjectMeta,
+        column: &str,
+        batch_size: usize,
+        range: Option<(u64, u64)>,
+    ) -> Vec<RecordBatch> {
         let input = FileAccess::Oxcdf
-            .input_for(&store, &object)
+            .input_for(store, object)
             .expect("an oxcdf input");
 
         // One column, in the encoded form the source carries. The opener emits
         // nd-encoded batches, so its table schema is the encoded schema.
         let full = reader::fetch_schema(None, input, object.clone(), None)
             .await
-            .expect("the fixture's schema");
-        let field = full.field_with_name(COLUMN).expect("the column").clone();
+            .expect("the file's schema");
+        let field = full
+            .field_with_name(column)
+            .unwrap_or_else(|_| panic!("the file has a column {column}"))
+            .clone();
         let logical = Arc::new(arrow::datatypes::Schema::new(vec![field]));
         let encoded = Arc::new(beacon_datafusion_ext::nd::encoded_schema(&logical));
 
+        let batches = read_encoded(store, object, encoded, batch_size, range).await;
+
+        batches
+            .iter()
+            .map(|batch| {
+                decode_nd_record_batch(batch)
+                    .expect("decodes")
+                    .materialize()
+                    .expect("broadcasts")
+            })
+            .collect()
+    }
+
+    /// The raw batches an opener produces for `range`, under `table_schema`.
+    ///
+    /// An empty schema drives the `COUNT(*)` path, which never decodes an nd
+    /// array and so has to honour the share on its own.
+    async fn read_encoded(
+        store: &Arc<dyn ObjectStore>,
+        object: &ObjectMeta,
+        table_schema: SchemaRef,
+        batch_size: usize,
+        range: Option<(u64, u64)>,
+    ) -> Vec<RecordBatch> {
         let source = NetCDFSource::new(
             FileAccess::Oxcdf,
             None,
-            TableSchema::from_file_schema(encoded),
+            TableSchema::from_file_schema(table_schema),
         );
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
@@ -627,71 +710,182 @@ mod split_tests {
         .build();
 
         let opener = source
-            .with_batch_size(8192)
-            .create_file_opener(store, &config, 0)
+            .with_batch_size(batch_size)
+            .create_file_opener(store.clone(), &config, 0)
             .expect("an opener");
 
-        let mut file = PartitionedFile::from(object);
+        let mut file = PartitionedFile::from(object.clone());
         if let Some((start, end)) = range {
             file = file.with_range(start as i64, end as i64);
         }
 
-        let encoded_batches: Vec<RecordBatch> = opener
+        opener
             .open(file)
             .expect("the open starts")
             .await
             .expect("the open finishes")
             .try_collect()
             .await
-            .expect("the stream reads");
-
-        let decoded: Vec<RecordBatch> = encoded_batches
-            .iter()
-            .map(|batch| {
-                decode_nd_record_batch(batch)
-                    .expect("decodes")
-                    .materialize()
-                    .expect("broadcasts")
-            })
-            .collect();
-
-        decoded
+            .expect("the stream reads")
     }
 
-    /// The shares of a file, read in order and concatenated, equal the whole.
+    /// Every share of `object`, over `parts`, concatenated in order.
+    async fn read_all_shares(
+        store: &Arc<dyn ObjectStore>,
+        object: &ObjectMeta,
+        column: &str,
+        batch_size: usize,
+        parts: u64,
+    ) -> Vec<RecordBatch> {
+        let step = object.size.div_ceil(parts);
+        let mut shares = Vec::new();
+        let mut at = 0;
+        while at < object.size {
+            let stop = (at + step).min(object.size);
+            shares.extend(read_share(store, object, column, batch_size, Some((at, stop))).await);
+            at = stop;
+        }
+        shares
+    }
+
+    /// A file that stores its own chunking: the shares rebuild the whole read.
     ///
     /// This is the netCDF answer to "does the split return the right rows". A
     /// gap loses rows and an overlap repeats them, and neither raises an error,
     /// so the comparison is the only thing that would notice.
     #[tokio::test]
-    async fn the_shares_of_a_file_rebuild_the_whole_read() {
-        let (_, object) = gridded();
-        let size = object.size;
+    async fn the_shares_of_a_chunked_file_rebuild_the_whole_read() {
+        let (store, object) = gridded();
 
-        let read = read_share(None).await;
+        let read = read_share(&store, &object, GRIDDED_COLUMN, 8192, None).await;
+        let chunks = read.len();
         let schema = read.first().expect("the fixture reads").schema();
         let whole = concat_batches(&schema, &read).expect("concatenates");
         assert!(whole.num_rows() > 0, "the fixture must return rows");
+        assert!(chunks > 1, "the fixture must hold several chunks to split");
 
-        // Five parts over 302 chunks also covers a share that lands on no chunk
-        // boundary, and 1 covers the degenerate case.
+        // Part counts either side of the chunk count, so this covers shares that
+        // land mid-chunk and shares that get nothing at all.
         for parts in [1_u64, 2, 3, 4, 5, 8] {
-            let step = size.div_ceil(parts);
-            let mut shares = Vec::new();
-            let mut at = 0;
-            while at < size {
-                let stop = (at + step).min(size);
-                shares.extend(read_share(Some((at, stop))).await);
-                at = stop;
-            }
-
+            let shares = read_all_shares(&store, &object, GRIDDED_COLUMN, 8192, parts).await;
             let actual = concat_batches(&schema, &shares).expect("concatenates");
             assert_eq!(
                 actual.num_rows(),
                 whole.num_rows(),
                 "parts={parts}: the shares must cover every row once"
             );
-            assert_eq!(actual, whole, "parts={parts}: the shares must read the same rows");
+            assert_eq!(
+                actual, whole,
+                "parts={parts}: the shares must read the same rows"
+            );
         }
+    }
+
+    /// A file that stores no chunking: the shares rebuild the whole read.
+    ///
+    /// Here the chunk list comes from `batch_size`, so the batch size sets how
+    /// many chunks there are to divide. Small batches give many chunks and fine
+    /// shares; a batch larger than the file gives one chunk, which one share
+    /// takes whole.
+    #[tokio::test]
+    async fn the_shares_of_a_contiguous_file_rebuild_the_whole_read() {
+        const ROWS: usize = 100_000;
+
+        let (_dir, store, object) = written_flat(ROWS);
+
+        for batch_size in [1_024, 8_192, usize::MAX] {
+            let read = read_share(&store, &object, "TEMP", batch_size, None).await;
+            let schema = read.first().expect("the file reads").schema();
+            let whole = concat_batches(&schema, &read).expect("concatenates");
+            assert_eq!(
+                whole.num_rows(),
+                ROWS,
+                "batch_size={batch_size}: the whole read must return every row"
+            );
+
+            for parts in [1_u64, 2, 3, 7] {
+                let shares = read_all_shares(&store, &object, "TEMP", batch_size, parts).await;
+                let actual = concat_batches(&schema, &shares).expect("concatenates");
+                assert_eq!(
+                    actual, whole,
+                    "batch_size={batch_size} parts={parts}: the shares must read the same rows"
+                );
+            }
+        }
+    }
+
+    /// `COUNT(*)` over the shares equals `COUNT(*)` over the whole file.
+    ///
+    /// The count path never decodes an nd array, so it cannot inherit the split
+    /// from the decode. It has to apply the share itself, and a miss there is
+    /// invisible: the answer is simply larger, by the number of partitions.
+    #[tokio::test]
+    async fn the_shares_of_a_file_count_its_rows_once() {
+        let (store, object) = gridded();
+        let empty: SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
+
+        let rows =
+            |batches: Vec<RecordBatch>| -> usize { batches.iter().map(|b| b.num_rows()).sum() };
+
+        let whole = rows(read_encoded(&store, &object, empty.clone(), 8192, None).await);
+        assert!(whole > 0, "the fixture must count some rows");
+
+        for parts in [2_u64, 4, 8] {
+            let step = object.size.div_ceil(parts);
+            let mut counted = 0;
+            let mut at = 0;
+            while at < object.size {
+                let stop = (at + step).min(object.size);
+                counted += rows(
+                    read_encoded(&store, &object, empty.clone(), 8192, Some((at, stop))).await,
+                );
+                at = stop;
+            }
+            assert_eq!(counted, whole, "parts={parts}: every row counted once");
+        }
+    }
+
+    /// The range names a fraction of the chunk list, not a region of the file.
+    ///
+    /// This is the invariant the whole design rests on, and it is worth stating
+    /// as a test rather than only in prose. A byte range of a netCDF file is not
+    /// a netCDF file: nothing seeks to `range.start`, and no byte is read
+    /// because it falls between `start` and `end`. The range is divided by the
+    /// file size to pick a run of chunks, and that is all it is for.
+    ///
+    /// The proof is to lie about the size. Reading `0..500` of a file the opener
+    /// is told is 1000 bytes long returns exactly what reading the true first
+    /// half returns — even though 500 is nowhere near the real midpoint, and the
+    /// real byte 500 of this file is somewhere in its header.
+    #[tokio::test]
+    async fn a_range_names_a_chunk_fraction_not_a_byte_region() {
+        let (store, object) = gridded();
+        assert_ne!(
+            500,
+            object.size / 2,
+            "the test only means something while the real and fictional halves differ"
+        );
+
+        let read_half = async |object: &ObjectMeta, range: (u64, u64)| {
+            let batches = read_share(&store, object, GRIDDED_COLUMN, 8192, Some(range)).await;
+            let schema = batches.first().expect("a share reads").schema();
+            concat_batches(&schema, &batches).expect("concatenates")
+        };
+
+        // The true first half, in real bytes.
+        let real = read_half(&object, (0, object.size / 2)).await;
+        assert!(real.num_rows() > 0, "half the file must hold rows");
+
+        // The same half of a file the opener is told is 1000 bytes long.
+        let fictional = ObjectMeta {
+            size: 1_000,
+            ..object.clone()
+        };
+        let scaled = read_half(&fictional, (0, 500)).await;
+
+        assert_eq!(
+            scaled, real,
+            "the range is a fraction of the chunk list; its absolute bytes carry no meaning"
+        );
     }
 }
