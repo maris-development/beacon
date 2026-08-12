@@ -320,6 +320,102 @@ async fn a_small_scan_is_not_split() {
     assert_eq!(asked_summary, whole_summary);
 }
 
+/// How many columns [`write_large_netcdf`] writes, and how many rows in each.
+const LARGE_COLUMNS: usize = 20;
+const LARGE_ROWS: usize = 100_000;
+
+/// Write a netCDF-4 file larger than [`beacon_arrow_hdf5::MIN_SPLIT_SIZE`].
+///
+/// A netCDF-4 file is an HDF5 file, so the Rust reader here reads it as one.
+/// Every bundled fixture is under the minimum, so a test that needs a real
+/// split has to make its own file.
+///
+/// It is written **wide** rather than long, and that is not a free choice.
+/// `oxcdf` cannot read this writer's output once a single variable grows past
+/// roughly 200k values: it fails with "chunk at […] was neither cached nor
+/// fetched" while netcdf-c reads the same bytes. The limit follows one
+/// variable's chunk count, not the file's size, so 20 columns of 100k values
+/// clears 8 MB three times over and still reads back.
+///
+/// The caller holds the [`TempDir`](tempfile::TempDir) for as long as the table
+/// is registered.
+fn write_large_netcdf() -> (tempfile::TempDir, PathBuf) {
+    use arrow::array::{ArrayRef, Float64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+    use beacon_arrow_netcdf::writer::ArrowRecordBatchWriter;
+
+    let schema = Arc::new(Schema::new(
+        (0..LARGE_COLUMNS)
+            .map(|column| Field::new(format!("V{column}"), DataType::Float64, false))
+            .collect::<Vec<_>>(),
+    ));
+    let columns: Vec<ArrayRef> = (0..LARGE_COLUMNS)
+        .map(|column| {
+            Arc::new(Float64Array::from_iter_values(
+                (0..LARGE_ROWS).map(|row| (row + column) as f64 * 0.25),
+            )) as ArrayRef
+        })
+        .collect();
+    let batch = RecordBatch::try_new(schema.clone(), columns).expect("a batch");
+
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("large.nc");
+    let mut writer =
+        ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema).expect("a netCDF writer");
+    writer.write_record_batch(batch).expect("write the batch");
+    writer.finish().expect("finish the file");
+
+    let size = std::fs::metadata(&path).expect("the written file").len();
+    assert!(
+        size > beacon_arrow_hdf5::MIN_SPLIT_SIZE,
+        "the generated file must clear the split minimum, got {size} bytes"
+    );
+
+    (dir, path)
+}
+
+/// A file over the split minimum scans in several partitions, and returns the
+/// same rows it returns in one.
+///
+/// This is the only HDF5 test that reaches the split the way a query does: a
+/// real file over the real minimum, planned and executed through SQL.
+///
+/// The partition count is the point of the feature. The row check is the guard
+/// on it: `count(*)` catches a share that overlapped another or a gap between
+/// two, and `min`/`max` catch a share that read the wrong region. None of those
+/// raise an error on their own.
+#[tokio::test]
+async fn a_large_file_splits_and_returns_the_same_rows() {
+    const QUERY: &str = r#"SELECT count(*), count("V0"), min("V0"), max("V0") FROM t"#;
+
+    let (_dir, file) = write_large_netcdf();
+
+    let whole = session();
+    register(&whole, "t", Backend::Rust, &file).await;
+
+    let split = splitting_session(4);
+    register(&split, "t", Backend::Rust, &file).await;
+
+    let plan = split
+        .sql(r#"SELECT "V0" FROM t"#)
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    assert_eq!(
+        scan_partitions(&plan),
+        4,
+        "a file over the minimum should scan in 4 partitions:\n{}",
+        datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+    );
+
+    let split_summary = format!("{:?}", collect(&split, QUERY).await.columns());
+    let whole_summary = format!("{:?}", collect(&whole, QUERY).await.columns());
+    assert_eq!(split_summary, whole_summary);
+}
+
 /// A ragged file, where the row count comes from the instance/observation
 /// layout rather than from a grid.
 #[tokio::test]

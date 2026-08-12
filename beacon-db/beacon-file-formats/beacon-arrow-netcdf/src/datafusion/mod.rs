@@ -1253,38 +1253,48 @@ mod reader_backend_tests {
         SessionContext::new_with_state(state)
     }
 
+    /// How many columns [`write_large_netcdf`] writes. They are named `V0`..,
+    /// and the tests read `V0`.
+    const LARGE_COLUMNS: usize = 20;
+    /// How many rows it writes in each.
+    const LARGE_ROWS: usize = 100_000;
+
     /// Write a netCDF-4 file larger than [`MIN_SPLIT_SIZE`], and return its path.
     ///
     /// Every bundled fixture is hundreds of KB, well under the minimum, so a
-    /// test that needs a real split has to make its own file. Two columns of
-    /// 700k values comes to about 11 MB.
+    /// test that needs a real split has to make its own file.
+    ///
+    /// It is written **wide** rather than long, and that is not a free choice.
+    /// `oxcdf` cannot read this writer's output once a single variable grows
+    /// past roughly 200k values: it fails with "chunk at […] was neither cached
+    /// nor fetched" while netcdf-c reads the same bytes. The limit follows one
+    /// variable's chunk count, not the file's size, so 20 columns of 100k values
+    /// clears 8 MB three times over and still reads back. Measured: 20x100k is
+    /// 16.3 MB and reads; 12x200k is 19.4 MB and does not.
     ///
     /// The caller holds the [`TempDir`](tempfile::TempDir) for as long as the
     /// table is registered.
     fn write_large_netcdf() -> (tempfile::TempDir, PathBuf) {
-        use arrow::array::{Float64Array, Int64Array};
+        use arrow::array::{ArrayRef, Float64Array};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
 
         use crate::encoders::default::DefaultEncoder;
         use crate::writer::ArrowRecordBatchWriter;
 
-        const ROWS: usize = 700_000;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("TEMP", DataType::Float64, false),
-            Field::new("DEPTH", DataType::Int64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
+        let schema = Arc::new(Schema::new(
+            (0..LARGE_COLUMNS)
+                .map(|column| Field::new(format!("V{column}"), DataType::Float64, false))
+                .collect::<Vec<_>>(),
+        ));
+        let columns: Vec<ArrayRef> = (0..LARGE_COLUMNS)
+            .map(|column| {
                 Arc::new(Float64Array::from_iter_values(
-                    (0..ROWS).map(|row| row as f64 * 0.5),
-                )),
-                Arc::new(Int64Array::from_iter_values((0..ROWS).map(|row| row as i64))),
-            ],
-        )
-        .unwrap();
+                    (0..LARGE_ROWS).map(|row| (row + column) as f64 * 0.25),
+                )) as ArrayRef
+            })
+            .collect();
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
 
         let dir = tempfile::tempdir().expect("a temp directory");
         let path = dir.path().join("large.nc");
@@ -1321,23 +1331,13 @@ mod reader_backend_tests {
     /// between two, and `min`/`max` catch a share that read the wrong region.
     /// None of those raise an error on their own.
     ///
-    /// Ignored: it has no file to run on. Every bundled fixture is under the
-    /// split minimum, and a file this test writes for itself cannot be read
-    /// back — `oxcdf` fails on netCDF-4 output past roughly 4.9 MB with
-    /// "chunk at [292864] of /TEMP was neither cached nor fetched", while
-    /// netcdf-c reads the same bytes. That is a reader bug, not a split one: the
-    /// single-partition read fails too. Un-ignore this once `oxcdf` can read a
-    /// large file.
-    ///
-    /// The split itself is not left unchecked. `beacon-arrow-zarr` runs this
-    /// same comparison end to end over the same `ChunkSplit` machinery (it sets
-    /// no minimum, so its bundled store splits), `beacon-nd-array` compares
-    /// split against unsplit reads value by value, and
-    /// [`only_the_rust_reader_splits_one_file`] pins the deal at the source.
+    /// This is the only test that reaches the split the way a query does: a real
+    /// file over the real minimum, planned and executed through SQL. The others
+    /// hand the opener its ranges directly, because no bundled fixture is large
+    /// enough for a scan to split one.
     #[tokio::test]
-    #[ignore = "needs a large netCDF-4 file that the Rust reader can read back"]
     async fn a_large_file_splits_and_returns_the_same_rows() {
-        const QUERY: &str = r#"SELECT count(*), count("TEMP"), min("TEMP"), max("TEMP") FROM one"#;
+        const QUERY: &str = r#"SELECT count(*), count("V0"), min("V0"), max("V0") FROM one"#;
 
         let (_dir, file) = write_large_netcdf();
 
@@ -1348,7 +1348,7 @@ mod reader_backend_tests {
         register_path(&split, "one", ReaderBackend::Oxcdf, &file).await;
 
         let plan = split
-            .sql(r#"SELECT "TEMP" FROM one"#)
+            .sql(r#"SELECT "V0" FROM one"#)
             .await
             .unwrap()
             .create_physical_plan()
