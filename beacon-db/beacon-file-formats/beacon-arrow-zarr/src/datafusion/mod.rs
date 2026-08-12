@@ -24,28 +24,45 @@ use object_store::{ObjectMeta, ObjectStore};
 use zarrs::group::Group;
 
 use crate::{
+    config::ZarrConfig,
     reader::schema_from_group_path,
     util::{ZarrPath, ZarrStorage, is_zarr_v3_metadata, leaf_group_keys, top_level_zarr_meta_v3},
 };
 
 pub mod source;
+pub mod statistics;
 
 pub use source::ZarrSource;
+
+/// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
+fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(datafusion::error::DataFusionError::Execution(format!(
+            "invalid boolean for Zarr option '{key}': '{other}'"
+        ))),
+    }
+}
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 #[derive(Default)]
-pub struct ZarrFormatFactory;
+pub struct ZarrFormatFactory {
+    pub config: ZarrConfig,
+}
 
 impl std::fmt::Debug for ZarrFormatFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ZarrFormatFactory").finish()
+        f.debug_struct("ZarrFormatFactory")
+            .field("config", &self.config)
+            .finish()
     }
 }
 
 impl ZarrFormatFactory {
-    pub fn new() -> Self {
-        Self
+    pub fn new(config: ZarrConfig) -> Self {
+        Self { config }
     }
 }
 
@@ -61,7 +78,8 @@ impl FileFormatFactory for ZarrFormatFactory {
         _state: &dyn Session,
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        // Per-table override from `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+        // Per-table overrides from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
+        // defaulting to the runtime config.
         let read_dimensions = format_options.get("read_dimensions").map(|value| {
             value
                 .split(',')
@@ -69,11 +87,17 @@ impl FileFormatFactory for ZarrFormatFactory {
                 .filter(|s| !s.is_empty())
                 .collect()
         });
-        Ok(Arc::new(ZarrFormat::new(read_dimensions)))
+        let mut enable_statistics = self.config.enable_statistics;
+        if let Some(value) = format_options.get("enable_statistics") {
+            enable_statistics = parse_bool_option("enable_statistics", value)?;
+        }
+        Ok(Arc::new(
+            ZarrFormat::new(read_dimensions).with_enable_statistics(enable_statistics),
+        ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(ZarrFormat::default())
+        Arc::new(ZarrFormat::default().with_enable_statistics(self.config.enable_statistics))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -118,7 +142,7 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
 
 // ─── Format ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ZarrFormat {
     /// Explicit dimensions requested via `read_zarr(paths, ['dims'])` or a
     /// `CREATE EXTERNAL TABLE ... OPTIONS (read_dimensions '...')`. When set,
@@ -128,6 +152,16 @@ pub struct ZarrFormat {
     /// Storage to open groups over, replacing the session's object store.
     /// Set by the Icechunk reader; `None` for a listed zarr store.
     storage: Option<ZarrStorage>,
+    /// Whether [`FileFormat::infer_stats`] measures the store's columns.
+    /// Defaults to [`ZarrConfig::default`]'s value, so a format built without a
+    /// runtime config — `read_zarr()` builds one — behaves the same as a table.
+    enable_statistics: bool,
+}
+
+impl Default for ZarrFormat {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl ZarrFormat {
@@ -137,6 +171,7 @@ impl ZarrFormat {
         Self {
             read_dimensions,
             storage: None,
+            enable_statistics: ZarrConfig::default().enable_statistics,
         }
     }
 
@@ -144,6 +179,12 @@ impl ZarrFormat {
     /// the session's object store.
     pub fn with_storage(mut self, storage: ZarrStorage) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Returns a copy of this format that does or does not measure statistics.
+    pub fn with_enable_statistics(mut self, enable_statistics: bool) -> Self {
+        self.enable_statistics = enable_statistics;
         self
     }
 
@@ -247,11 +288,47 @@ impl FileFormat for ZarrFormat {
     async fn infer_stats(
         &self,
         _state: &dyn Session,
-        _store: &Arc<dyn ObjectStore>,
+        store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
-        _object: &ObjectMeta,
+        object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
-        Ok(Statistics::new_unknown(&table_schema))
+        if !self.enable_statistics {
+            return Ok(Statistics::new_unknown(&table_schema));
+        }
+
+        // Reporting unknown rather than erroring is deliberate, here and below.
+        // Absent statistics are always a legal answer -- DataFusion prunes
+        // nothing and scans everything, which is correct, just slower.
+        //
+        // A listing hands this method every object it matched, which for a zarr
+        // table is one `zarr.json` per group *and* per array. Only a group has a
+        // dataset to measure; the rest fail cheaply on metadata alone.
+        let group_path = match ZarrPath::new_from_object_meta(object.clone()) {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::debug!(object = %object.location, "not a Zarr group: {e}");
+                return Ok(Statistics::new_unknown(&table_schema));
+            }
+        };
+
+        // The same storage the scan reads over, so statistics and scans can
+        // never disagree about a store.
+        let storage = self.storage(store.clone()).inner();
+        Ok(statistics::generate_statistics(
+            storage,
+            &group_path.as_zarr_path(),
+            self.read_dimensions.clone(),
+            &table_schema,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::debug!(
+                "Failed to generate statistics for object {}: {}",
+                object.location,
+                e
+            );
+            Statistics::new_unknown(&table_schema)
+        }))
     }
 
     async fn create_physical_plan(
@@ -363,7 +440,7 @@ mod tests {
     };
     use datafusion::prelude::SessionContext;
 
-    use super::{ZarrFormat, ZarrFormatFactory};
+    use super::{parse_bool_option, ZarrFormat, ZarrFormatFactory};
 
     /// Register the bundled `gridded-example.zarr` store as a DataFusion table
     /// backed by [`ZarrFormat`] + [`ListingTable`].
@@ -591,12 +668,54 @@ mod tests {
         check_pushdown("abs(CAST(lat AS DOUBLE)) * 2 AS x").await;
     }
 
+    /// `create()` layers the per-table option over the runtime default: an
+    /// absent option keeps the runtime value, a present one overrides it.
+    #[test]
+    fn create_layers_the_statistics_option_over_the_runtime_config() {
+        use crate::config::ZarrConfig;
+        use datafusion::datasource::file_format::FileFormatFactory;
+        use datafusion::prelude::SessionContext;
+        use std::collections::HashMap;
+
+        let statistics_of = |config: ZarrConfig, options: HashMap<String, String>| {
+            let ctx = SessionContext::new();
+            let format = ZarrFormatFactory::new(config)
+                .create(&ctx.state(), &options)
+                .unwrap();
+            format
+                .as_any()
+                .downcast_ref::<ZarrFormat>()
+                .unwrap()
+                .enable_statistics
+        };
+        let off = HashMap::from([("enable_statistics".to_string(), "false".to_string())]);
+
+        assert!(statistics_of(ZarrConfig::default(), HashMap::new()));
+        assert!(!statistics_of(ZarrConfig::default(), off.clone()));
+        // A runtime with statistics off stays off without an option …
+        let disabled = ZarrConfig {
+            enable_statistics: false,
+        };
+        assert!(!statistics_of(disabled.clone(), HashMap::new()));
+        // … and one table can still turn them back on.
+        let on = HashMap::from([("enable_statistics".to_string(), "yes".to_string())]);
+        assert!(statistics_of(disabled, on));
+    }
+
+    #[test]
+    fn an_unparseable_statistics_option_is_an_error() {
+        let err = parse_bool_option("enable_statistics", "maybe").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("enable_statistics"), "{message}");
+        assert!(message.contains("maybe"), "{message}");
+    }
+
     #[tokio::test]
     async fn factory_discovers_gridded_example() {
         use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
         use object_store::{ObjectMeta, path::Path};
 
-        let factory = ZarrFormatFactory::new();
+        let factory = ZarrFormatFactory::default();
         let objects = vec![
             ObjectMeta {
                 location: Path::from("gridded-example.zarr/zarr.json"),

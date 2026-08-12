@@ -1,7 +1,7 @@
 //! Crawler behaviour for Zarr stores.
 //!
 //! Zarr is a directory/marker-based store (`<name>.zarr/zarr.json`), read via
-//! `read_zarr`'s `SuperListingTable` — there is no `CREATE EXTERNAL TABLE STORED
+//! `read_zarr`'s `FastObjectTable` — there is no `CREATE EXTERNAL TABLE STORED
 //! AS ZARR` path. The crawler therefore intentionally **skips** Zarr stores (its
 //! v1 rule requires the file extension to equal the format). This test locks in
 //! that safe behaviour: a Zarr store under the crawled prefix is ignored without

@@ -17,12 +17,19 @@
 //!
 //! # Formats that yield nothing
 //!
-//! ODV, Zarr, TIFF and CSV return `Statistics::new_unknown`, so every column
-//! comes back `Absent`. Those files analyze successfully and contribute **zero
+//! ODV, TIFF and CSV return `Statistics::new_unknown`, so every column comes
+//! back `Absent`. Those files analyze successfully and contribute **zero
 //! columns**. That is deliberate: a row with a null range costs bytes and prunes
 //! nothing. [`FileAnalysis::columns`] being empty is the signal, and the
 //! collector records it so a format that yields nothing is visible rather than
 //! silently inert.
+//!
+//! Zarr is a partial case. A store reports ranges for its rank-0 and rank-1
+//! arrays — the coordinates — and unknown for its data grids, so its column
+//! count is above zero but well below its column *names*. A store is also a
+//! directory, so the listing reports every object in it and only the top-level
+//! `zarr.json` has a group behind it; the rest fail, which is why a zarr
+//! collection shows a large `failed` count on an otherwise healthy pass.
 //!
 //! **netCDF and HDF5 join that list unless the Rust reader is on.** Every
 //! netcdf-c call serialises on a process-global mutex and the read is

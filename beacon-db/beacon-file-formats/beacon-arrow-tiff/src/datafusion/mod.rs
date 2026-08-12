@@ -161,18 +161,30 @@ impl FileFormat for TiffFormat {
 
     async fn infer_schema(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let mut tasks = vec![];
-        for object in objects {
-            let task =
-                reader::fetch_schema(store.clone(), object.clone(), self.read_dimensions.clone());
-            tasks.push(task);
-        }
+        use futures::{StreamExt, TryStreamExt};
 
-        let schemas = futures::future::try_join_all(tasks).await?;
+        // Bounded: each open holds a descriptor until its schema is read, and
+        // `try_join_all` would open every file in the listing at once. See the
+        // same fix in `beacon_arrow_netcdf`, and issue #361.
+        let width = state
+            .config_options()
+            .execution
+            .meta_fetch_concurrency
+            .max(1);
+        let tasks: Vec<_> = objects
+            .iter()
+            .map(|object| {
+                reader::fetch_schema(store.clone(), object.clone(), self.read_dimensions.clone())
+            })
+            .collect();
+        let schemas: Vec<SchemaRef> = futures::stream::iter(tasks)
+            .buffered(width)
+            .try_collect()
+            .await?;
         if schemas.is_empty() {
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }

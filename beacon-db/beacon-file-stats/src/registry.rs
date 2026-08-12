@@ -26,6 +26,12 @@ use crate::types::{ColumnId, FileId, FileRecord, FileState, ObservedFile};
 // ascending file ids.
 type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 
+/// Path to id.
+///
+/// The value is the id, big-endian. A build of Beacon between #361 and its
+/// revision also appended the file size here, for a scan planner that cut
+/// partitions from this index; [`read_path_entry`] still accepts that width so
+/// a database written by one of those keeps opening.
 const FILES_BY_PATH: ByteTable = TableDefinition::new("fs_files_by_path");
 const FILES_BY_ID: ByteTable = TableDefinition::new("fs_files_by_id");
 const COLUMNS_BY_NAME: ByteTable = TableDefinition::new("fs_columns_by_name");
@@ -130,7 +136,7 @@ impl Registry {
 
             for file in observed {
                 let existing = match by_path.get(file.path.as_bytes())? {
-                    Some(value) => Some(read_u64(value.value())?),
+                    Some(value) => Some(read_path_entry(value.value())?),
                     None => None,
                 };
                 match existing {
@@ -225,7 +231,7 @@ impl Registry {
         let read = self.db.begin_read()?;
         let table = read.open_table(FILES_BY_PATH)?;
         match table.get(path.as_bytes())? {
-            Some(value) => Ok(Some(read_u64(value.value())?)),
+            Some(value) => Ok(Some(read_path_entry(value.value())?)),
             None => Ok(None),
         }
     }
@@ -243,7 +249,7 @@ impl Registry {
         let mut out = Vec::with_capacity(paths.len());
         for path in paths {
             out.push(match table.get(path.as_bytes())? {
-                Some(value) => Some(read_u64(value.value())?),
+                Some(value) => Some(read_path_entry(value.value())?),
                 None => None,
             });
         }
@@ -460,7 +466,7 @@ impl Registry {
                 if !path.starts_with(prefix) {
                     break; // the scan has walked past the prefix
                 }
-                out.push((path, read_u64(value.value())?));
+                out.push((path, read_path_entry(value.value())?));
             }
             out
         };
@@ -529,7 +535,7 @@ impl Registry {
                 {
                     break; // the scan has walked past the prefix
                 }
-                let id = read_u64(value.value())?;
+                let id = read_path_entry(value.value())?;
                 if let Some(record) = read_record(&by_id, id)?
                     && record.state == FileState::Analyzed
                 {
@@ -546,12 +552,24 @@ impl Registry {
         let read = self.db.begin_read()?;
         Ok(read.open_table(PENDING)?.len()?)
     }
+
 }
 
 /// Big-endian, so redb's lexicographic byte ordering is numeric ordering. The
 /// collector's queue reads ascending file ids straight out of that.
 fn file_key(id: FileId) -> [u8; 8] {
     id.to_be_bytes()
+}
+
+/// Decode a path-index value, accepting the 16-byte form a build between #361
+/// and its revision wrote (id followed by the file size). Only the id is used.
+fn read_path_entry(bytes: &[u8]) -> Result<FileId> {
+    match bytes.len() {
+        8 | 16 => read_u64(&bytes[..8]),
+        other => Err(FileStatsError::Registry(format!(
+            "a path entry is 8 or 16 bytes, got {other}"
+        ))),
+    }
 }
 
 fn column_key(id: ColumnId) -> [u8; 4] {

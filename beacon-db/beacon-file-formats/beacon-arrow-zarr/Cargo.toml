@@ -27,3 +27,4 @@ beacon-common = { path = "../../beacon-common" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+bytes = { workspace = true }

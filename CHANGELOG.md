@@ -12,6 +12,14 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **Zarr stores supply column ranges for file pruning.** A Zarr store recorded nothing in
+  `beacon.system.file_stats`, so every query opened every store. It now reports a range per
+  coordinate: an array of rank 0 or rank 1 is read and measured, and an array of rank 2 or higher —
+  a data grid — reports unknown, so a scan costs what it always did. An array that states its own
+  `actual_range` is bounded from metadata alone, with no chunk read at all. `valid_min` and
+  `valid_max` are deliberately **not** used: they state which values are valid, not which values a
+  store holds, and a store may hold values outside them. `BEACON_ZARR_ENABLE_STATISTICS=false`
+  (or `OPTIONS (enable_statistics 'false')` on one table) turns the whole thing off.
 - **Beacon reads Apache Iceberg tables.** `CREATE EXTERNAL TABLE … STORED AS ICEBERG LOCATION
   'iceberg/obs'` registers an existing table, and `read_iceberg('iceberg/obs')` queries one
   ad-hoc; both take an optional `snapshot_id` for time travel. A table is named by its directory,

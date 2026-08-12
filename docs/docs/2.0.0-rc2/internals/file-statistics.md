@@ -138,10 +138,23 @@ condition.
 | Parquet, GeoParquet | Yes | None. Beacon reads the file footer. |
 | netCDF | Yes, with `BEACON_NETCDF_USE_RUST_READER=true` | Beacon opens the file and reads the coordinate variables. |
 | HDF5 | Yes, with `BEACON_HDF5_USE_RUST_READER=true` | Beacon opens the file and reads the one-dimensional datasets. |
+| Zarr | Yes | Beacon reads the store metadata, and the coordinate arrays it does not describe. |
 | CSV, Arrow IPC | No | |
-| ODV, Zarr, TIFF | No | |
+| ODV, TIFF | No | |
 
 A format that supplies no ranges costs nothing. Beacon always reads those files, as before.
+
+:::info Zarr reads only its coordinates
+A Zarr array can state its range in its metadata, with the `actual_range` attribute. Beacon uses
+that attribute and reads no chunk. Beacon reads an array of rank 0 or rank 1 that does not state
+one. Beacon never reads a data grid of rank 2 or higher, and that array supplies no range.
+
+Beacon does not use `valid_min` and `valid_max`. Those attributes state which values are valid. A
+store can hold a value outside them, and Beacon returns that value. A range from those attributes
+would drop a file that holds a matching row.
+
+Set `BEACON_ZARR_ENABLE_STATISTICS=false` to stop this work.
+:::
 
 :::warning netCDF and HDF5 need the Rust reader
 The netCDF-C library holds one lock for each call in the process. Beacon computes the ranges through

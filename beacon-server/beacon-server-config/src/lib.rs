@@ -14,6 +14,7 @@ pub use beacon_arrow_atlas::datafusion::AtlasConfig;
 pub use beacon_arrow_bbf::datafusion::BbfConfig;
 pub use beacon_arrow_hdf5::Hdf5Config;
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
+pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::FileStatsConfig;
 pub use beacon_common::CrawlerConfig;
 
@@ -29,6 +30,7 @@ pub struct Config {
     pub cors: CorsConfig,
     pub netcdf: NetcdfConfig,
     pub hdf5: Hdf5Config,
+    pub zarr: ZarrConfig,
     pub atlas: AtlasConfig,
     pub bbf: BbfConfig,
     pub crawler: CrawlerConfig,
@@ -436,6 +438,17 @@ struct RawConfig {
     #[envconfig(from = "BEACON_HDF5_READER_CACHE_SIZE", default = "128")]
     hdf5_reader_cache_size: usize,
 
+    /// Compute per-file statistics for Zarr stores.
+    ///
+    /// On by default. A store answers from its `actual_range` metadata where it
+    /// can, and otherwise reads only its rank-0 and rank-1 arrays — the
+    /// coordinates a `WHERE` clause names. A data grid of rank 2 or higher is
+    /// never read, so a scan costs what it always did. Turn it off for a
+    /// collection of many small stores, where even a rank-1 read per store adds
+    /// up.
+    #[envconfig(from = "BEACON_ZARR_ENABLE_STATISTICS", default = "true")]
+    zarr_enable_statistics: bool,
+
     #[envconfig(from = "BEACON_ATLAS_USE_READER_CACHE", default = "true")]
     atlas_use_reader_cache: bool,
     #[envconfig(from = "BEACON_ATLAS_READER_CACHE_SIZE", default = "32")]
@@ -590,6 +603,9 @@ impl From<RawConfig> for Config {
                 use_reader_cache: raw.hdf5_use_reader_cache,
                 reader_cache_size: raw.hdf5_reader_cache_size,
                 enable_statistics: raw.hdf5_enable_statistics,
+            },
+            zarr: ZarrConfig {
+                enable_statistics: raw.zarr_enable_statistics,
             },
             atlas: AtlasConfig {
                 use_reader_cache: raw.atlas_use_reader_cache,
