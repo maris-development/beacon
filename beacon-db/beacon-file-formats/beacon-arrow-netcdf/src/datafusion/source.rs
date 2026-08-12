@@ -542,3 +542,156 @@ impl FileOpener for NetCDFOpener {
         Ok(fut)
     }
 }
+
+#[cfg(test)]
+mod split_tests {
+    //! The opener reading one share of a real netCDF file.
+    //!
+    //! [`NetCDFSource::repartitioned`] will not split a file under
+    //! [`MIN_SPLIT_SIZE`], and every bundled fixture is under it, so a scan
+    //! cannot reach this path in a test. The opener has no such rule — it reads
+    //! whatever range it is handed — so these hand it the ranges directly.
+    //!
+    //! That is the whole netCDF-specific path: `file.range()` to
+    //! [`ChunkSplit::from_byte_range`], through `read_task`'s dimension
+    //! resolution and projection, to the encoded stream. Below it,
+    //! `beacon-nd-array` checks the chunk-list slicing itself; above it,
+    //! `beacon_datafusion_ext::file_groups` checks the deal.
+
+    use std::sync::Arc;
+
+    use arrow::compute::concat_batches;
+    use arrow::record_batch::RecordBatch;
+    use beacon_datafusion_ext::nd::decode_nd_record_batch;
+    use datafusion::datasource::physical_plan::FileScanConfigBuilder;
+    use datafusion::execution::object_store::ObjectStoreUrl;
+    use object_store::ObjectStore;
+
+    use super::*;
+
+    /// A data variable on the full grid, so a share covers real chunks. The
+    /// whole file would broadcast to gigabytes; one column is 2.3M rows.
+    const COLUMN: &str = "analysed_sst";
+
+    /// The bundled gridded fixture, through a local store.
+    fn gridded() -> (Arc<dyn ObjectStore>, ObjectMeta) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test_files")
+            .join("gridded-example.nc");
+        let location =
+            object_store::path::Path::from_absolute_path(&path).expect("an absolute object path");
+        let file_meta = std::fs::metadata(&path).expect("the bundled file exists");
+
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::local::LocalFileSystem::new());
+        let object = ObjectMeta {
+            location,
+            last_modified: file_meta.modified().map(Into::into).unwrap_or_default(),
+            size: file_meta.len(),
+            e_tag: None,
+            version: None,
+        };
+        (store, object)
+    }
+
+    /// Read `range` of the fixture through a real opener, decoded and broadcast.
+    ///
+    /// `None` reads the whole file, which is what an unsplit scan hands it.
+    ///
+    /// The result is empty when the share owns no chunk. That is not a failure:
+    /// the fixture stores four chunks, so a scan asking for more partitions than
+    /// that leaves the surplus with nothing to read.
+    async fn read_share(range: Option<(u64, u64)>) -> Vec<RecordBatch> {
+        let (store, object) = gridded();
+        let input = FileAccess::Oxcdf
+            .input_for(&store, &object)
+            .expect("an oxcdf input");
+
+        // One column, in the encoded form the source carries. The opener emits
+        // nd-encoded batches, so its table schema is the encoded schema.
+        let full = reader::fetch_schema(None, input, object.clone(), None)
+            .await
+            .expect("the fixture's schema");
+        let field = full.field_with_name(COLUMN).expect("the column").clone();
+        let logical = Arc::new(arrow::datatypes::Schema::new(vec![field]));
+        let encoded = Arc::new(beacon_datafusion_ext::nd::encoded_schema(&logical));
+
+        let source = NetCDFSource::new(
+            FileAccess::Oxcdf,
+            None,
+            TableSchema::from_file_schema(encoded),
+        );
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .build();
+
+        let opener = source
+            .with_batch_size(8192)
+            .create_file_opener(store, &config, 0)
+            .expect("an opener");
+
+        let mut file = PartitionedFile::from(object);
+        if let Some((start, end)) = range {
+            file = file.with_range(start as i64, end as i64);
+        }
+
+        let encoded_batches: Vec<RecordBatch> = opener
+            .open(file)
+            .expect("the open starts")
+            .await
+            .expect("the open finishes")
+            .try_collect()
+            .await
+            .expect("the stream reads");
+
+        let decoded: Vec<RecordBatch> = encoded_batches
+            .iter()
+            .map(|batch| {
+                decode_nd_record_batch(batch)
+                    .expect("decodes")
+                    .materialize()
+                    .expect("broadcasts")
+            })
+            .collect();
+
+        decoded
+    }
+
+    /// The shares of a file, read in order and concatenated, equal the whole.
+    ///
+    /// This is the netCDF answer to "does the split return the right rows". A
+    /// gap loses rows and an overlap repeats them, and neither raises an error,
+    /// so the comparison is the only thing that would notice.
+    #[tokio::test]
+    async fn the_shares_of_a_file_rebuild_the_whole_read() {
+        let (_, object) = gridded();
+        let size = object.size;
+
+        let read = read_share(None).await;
+        let schema = read.first().expect("the fixture reads").schema();
+        let whole = concat_batches(&schema, &read).expect("concatenates");
+        assert!(whole.num_rows() > 0, "the fixture must return rows");
+
+        // Five parts over 302 chunks also covers a share that lands on no chunk
+        // boundary, and 1 covers the degenerate case.
+        for parts in [1_u64, 2, 3, 4, 5, 8] {
+            let step = size.div_ceil(parts);
+            let mut shares = Vec::new();
+            let mut at = 0;
+            while at < size {
+                let stop = (at + step).min(size);
+                shares.extend(read_share(Some((at, stop))).await);
+                at = stop;
+            }
+
+            let actual = concat_batches(&schema, &shares).expect("concatenates");
+            assert_eq!(
+                actual.num_rows(),
+                whole.num_rows(),
+                "parts={parts}: the shares must cover every row once"
+            );
+            assert_eq!(actual, whole, "parts={parts}: the shares must read the same rows");
+        }
+    }
+}
