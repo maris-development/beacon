@@ -47,6 +47,7 @@ No row in them can match the query.
 
 ```bash
 BEACON_FILE_STATS_ENABLE=true
+BEACON_FILE_STATS_ON_STARTUP=true    # collect at each boot, see below
 BEACON_NETCDF_USE_RUST_READER=true   # netCDF servers only
 BEACON_HDF5_USE_RUST_READER=true     # HDF5 servers only
 ```
@@ -54,12 +55,54 @@ BEACON_HDF5_USE_RUST_READER=true     # HDF5 servers only
 Beacon then starts a pass every 15 minutes. Each pass finds new files and reads them.
 [Configuration](/docs/2.0.0-rc2/server/configuration#file-statistics) lists each variable.
 
+The **first pass runs one interval after startup**, not at startup. A new server does nothing for
+15 minutes. It finds no file, and `beacon.system.file_stats` holds no row. This is correct. Beacon
+keeps startup free for your queries.
+
+:::warning A restart resets the timer
+Beacon starts the interval again on each boot, and records no due time. A server that restarts more
+often than the interval never runs a pass. A build-and-run loop has this shape. Set
+`BEACON_FILE_STATS_ON_STARTUP=true` there, which is what the next section covers.
+:::
+
+## Collect at every boot
+
+```bash
+BEACON_FILE_STATS_ON_STARTUP=true
+```
+
+Beacon then collects as soon as the runtime is up. It finds the files, reads every one that has no
+statistics, and stops when the queue is empty. The timer continues afterwards.
+
+The collection runs in the background. It does not hold up startup, and the server answers queries
+while it works. A file with no statistics yet is read in full, as it was before this feature.
+
+```
+INFO collecting file statistics at startup
+INFO startup file statistics collection finished discovered=2 analyzed=2 failed=0 segments=1
+```
+
+The work is not repeated. The registry survives a restart, so the next boot reads only the files
+that are new or changed. The first boot over a large archive is the expensive one.
+
+:::tip Which one do you need
+Set this flag for a server that restarts often, or for a fresh instance that must be useful at once.
+Leave it off for a long-lived server over a large archive, where an unattended backfill at boot
+competes with your queries. `ANALYZE FILES` covers that case, at a time you choose.
+:::
+
 Do not wait for the timer. Start a pass with SQL:
 
 ```sql
 ANALYZE FILES;              -- read every file now
 ANALYZE FILES 'argo/';      -- read one prefix only
+ANALYZE FILES FORCE;        -- read every file again, after a reader change
 ```
+
+`ANALYZE FILES` runs to completion and returns one row of counts: `discovered`, `requeued`,
+`analyzed`, `failed`, `segments`, and `pending`. A second run reports `analyzed=0`, because the
+files carry their statistics already. `discovered` counts every file of the listing, new or known,
+so it stays above zero.
 
 Beacon reads one million netCDF files in about 15 minutes on 8 cores. Parquet is faster. Parquet
 holds its ranges in the file footer, so Beacon reads no data.
@@ -71,7 +114,7 @@ your data before you enable the timer.
 
 ## Check the result
 
-Two tables show what Beacon knows. Use them. This feature fails quietly.
+Two tables and one function show what Beacon knows. Use them. This feature fails quietly.
 
 A format that supplies no ranges gives no error. Beacon reads the file and records nothing. Queries
 continue to read every file.
@@ -104,6 +147,51 @@ The `beacon.system.file_stats` table holds one row for each file:
 | `column_count` | The columns this file supplied. **A value of zero is important.** |
 | `num_rows`, `total_byte_size` | The values that the reader reported |
 | `stats_epoch` | The number of times that Beacon read this file |
+
+### One file, column by column
+
+`column_count` counts the columns of a file. It does not show their values. The `file_statistics`
+function opens the segments and reports each range that Beacon holds:
+
+```sql
+SELECT column, data_type, min, max, null_count, row_count
+FROM file_statistics('obs/2025/baltic_timeseries.parquet')
+ORDER BY column;
+```
+
+```
+JULD | Float64 | 24837.5 | 24838.0 |   0 | 2042
+PSAL | Float64 | 31.2    | 38.1    | 118 | 2042
+TEMP | Float64 | -1.84   | 29.7    |  12 | 2042
+```
+
+A netCDF file reports no counts, so `null_count` and `row_count` are empty for one. The bounds are
+there just the same.
+
+A dataset is usually a directory, so the function also takes a glob. Each row keeps its `path`:
+
+```sql
+-- The columns of a dataset that hold no usable bound
+SELECT path, count(*) AS columns, sum(CASE WHEN min IS NULL THEN 1 ELSE 0 END) AS no_range
+FROM file_statistics('argo/2024/**')
+GROUP BY path
+ORDER BY path;
+```
+
+| Column | Meaning |
+| --- | --- |
+| `path` | The file the row belongs to |
+| `column` | The column name, as the file declares it |
+| `data_type` | The type of the file's own column, not of a merged table |
+| `min`, `max` | The recorded bounds, in the type of that column. `NULL` means the bound is null |
+| `null_count`, `row_count` | The counts the reader reported. `NULL` where it reported none |
+| `segment` | The segment that holds this row |
+
+The function needs the super-user, like the `beacon.system` tables: a range is data. It reports on
+at most 1000 files in one call, so a wide glob returns an error instead of a very large result.
+
+An unknown path is an error, not an empty result. A file with no recorded range gives zero rows.
+The two conditions are different, and this keeps them apart.
 
 Two more queries:
 

@@ -162,8 +162,15 @@ impl StatsCollector {
             .registry()
             .next_pending(self.config.batch_files)?;
         if pending.is_empty() {
+            tracing::trace!("no files are pending analysis");
             return Ok(CollectReport::default());
         }
+        tracing::debug!(
+            files = pending.len(),
+            batch_files = self.config.batch_files,
+            concurrency = self.config.concurrency,
+            "taking a batch of pending files"
+        );
         // A pass with work in it. An idle one is not a pass, so a server that
         // ticks all night does not repeat a condition nothing acted on.
         self.analyzer.begin_pass();
@@ -179,6 +186,12 @@ impl StatsCollector {
                 self.config.min_group_files,
             ),
         };
+
+        tracing::debug!(
+            groups = groups.len(),
+            target_group_files = self.config.target_group_files,
+            "grouped the batch by prefix; one group becomes one segment"
+        );
 
         let mut report = CollectReport::default();
         for (prefix, files) in groups {
@@ -224,30 +237,34 @@ impl StatsCollector {
         // parse and scan. Measured on eight cores, `buffer_unordered(8)` alone
         // managed 296 files/s against 287 serial. Spawning the same work reached
         // 1193 -- see `statistics_backfill_cost` in beacon-arrow-netcdf.
+        tracing::debug!(prefix, files = files.len(), "analyzing a group");
+
         // The crate's `Result` alias fixes the error type, so the join result is spelled out.
-        type Joined = std::result::Result<(FileId, Result<FileAnalysis>), tokio::task::JoinError>;
-        let outcomes: Vec<Joined> =
-            stream::iter(files)
-                .map(|(id, record)| {
-                    let analyzer = self.analyzer.clone();
-                    tokio::spawn(async move {
-                        let outcome = analyzer.analyze(&record).await;
-                        (id, outcome)
-                    })
+        // The path travels with the outcome: a failure names the file, not an id
+        // the operator has no way to look up.
+        type Joined =
+            std::result::Result<(FileId, String, Result<FileAnalysis>), tokio::task::JoinError>;
+        let outcomes: Vec<Joined> = stream::iter(files)
+            .map(|(id, record)| {
+                let analyzer = self.analyzer.clone();
+                tokio::spawn(async move {
+                    let outcome = analyzer.analyze(&record).await;
+                    (id, record.path, outcome)
                 })
-                .buffer_unordered(self.config.concurrency)
-                .collect()
-                .await;
+            })
+            .buffer_unordered(self.config.concurrency)
+            .collect()
+            .await;
 
         let mut analyzed: Vec<(FileId, FileAnalysis)> = Vec::with_capacity(outcomes.len());
         let mut failed: Vec<FileId> = Vec::new();
         for outcome in outcomes {
             match outcome {
-                Ok((id, Ok(analysis))) => analyzed.push((id, analysis)),
-                Ok((id, Err(error))) => {
+                Ok((id, _, Ok(analysis))) => analyzed.push((id, analysis)),
+                Ok((id, path, Err(error))) => {
                     // A bad file must not stop the batch, and it must leave the
                     // queue: a failure that stays pending is retried forever.
-                    tracing::warn!(file_id = id, %error, "file statistics analysis failed");
+                    tracing::warn!(file_id = id, path, %error, "file statistics analysis failed");
                     failed.push(id);
                 }
                 Err(error) => {
@@ -264,6 +281,12 @@ impl StatsCollector {
             .set_state_batch(&failed, FileState::Failed)?;
 
         if analyzed.is_empty() {
+            // Every file of the group failed, so there is no segment to write.
+            tracing::debug!(
+                prefix,
+                failed = failed.len(),
+                "the group produced no statistics"
+            );
             return Ok(());
         }
 
@@ -318,6 +341,10 @@ impl StatsCollector {
         tracing::debug!(
             prefix,
             analyzed = analyzed.len(),
+            failed = failed.len(),
+            // Columns with a recorded range. Zero here, against a file that has
+            // columns, means the reader produced no ranges to prune on.
+            columns = column_ids.len(),
             "committed a file statistics segment"
         );
         Ok(())

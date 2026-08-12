@@ -30,6 +30,11 @@ mod auth;
 mod file_stats;
 mod table;
 
+pub(crate) use file_stats::{FileStatisticsFunc, FileStatisticsTable};
+
+/// The name `file_statistics(path)` is registered under.
+pub const FILE_STATISTICS_FUNCTION: &str = "file_statistics";
+
 use std::{any::Any, collections::HashMap, sync::Arc};
 
 use datafusion::{
