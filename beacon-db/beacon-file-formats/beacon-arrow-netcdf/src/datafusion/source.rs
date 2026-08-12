@@ -6,8 +6,11 @@ use arrow::{
 };
 use beacon_nd_array::{
     arrow::{
-        batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
-        nd_provider::any_dataset_as_encoded_stream, pushdown_filter::PushdownFilter,
+        batch::any_dataset_as_record_batch_stream_split,
+        metrics::DatasetReadMetrics,
+        nd_provider::any_dataset_as_encoded_stream_split,
+        pushdown_filter::PushdownFilter,
+        split::ChunkSplit,
     },
     projection::DatasetProjection,
 };
@@ -128,14 +131,25 @@ impl FileSource for NetCDFSource {
         })
     }
 
-    fn repartitioned(
-        &self,
-        _target_partitions: usize,
-        _repartition_file_min_size: usize,
-        _output_ordering: Option<datafusion::physical_expr::LexOrdering>,
-        _config: &FileScanConfig,
-    ) -> datafusion::error::Result<Option<FileScanConfig>> {
-        Ok(None)
+    /// Whether a scan may split one file across partitions.
+    ///
+    /// `oxcdf` may. It range-reads through the object store and holds no lock,
+    /// so partitions of one file run at the same time. DataFusion's byte-range
+    /// split is safe here because the opener never reads the range as bytes: it
+    /// reads it as a fraction of the chunk list, and the fractions of a file
+    /// tile that list. See [`ChunkSplit`] and [`NetCDFOpener::read_task`].
+    ///
+    /// netcdf-c may not. Every call it makes takes one process-global mutex
+    /// (`netcdf_sys::libnetcdf_lock`), which covers the read, the decompression
+    /// and the type conversion. Splitting a file would give one partition per
+    /// share, each queued on that mutex, plus one open per share. That costs
+    /// more than it returns.
+    ///
+    /// File-level parallelism is separate, and both readers get it: the listing
+    /// table spreads files over `target_partitions` before this is consulted.
+    /// What splitting adds is parallelism *inside* one file.
+    fn supports_repartitioning(&self) -> bool {
+        matches!(self.access, FileAccess::Oxcdf)
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -244,6 +258,16 @@ impl NetCDFOpener {
         }
     }
 
+    /// Read one file, or one [`ChunkSplit`] of it.
+    ///
+    /// `split` is this partition's share of the file. It is `None` for a whole
+    /// file, which is what an unsplit scan hands every opener.
+    ///
+    /// Every input below the split has to be identical in every partition of one
+    /// file, or the shares stop tiling the chunk list and rows go missing or come
+    /// back twice. They are: the dataset, `projected_schema`, `read_dimensions`,
+    /// `batch_size` and `predicate`. A scan takes all five from one place, so
+    /// they are. Keep it that way.
     #[allow(clippy::too_many_arguments)]
     async fn read_task(
         input: NetcdfInput,
@@ -254,6 +278,7 @@ impl NetCDFOpener {
         predicate: Option<Arc<dyn PhysicalExpr>>,
         cache: Option<NetcdfReaderCache>,
         metrics: Option<DatasetReadMetrics>,
+        split: Option<ChunkSplit>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(cache.as_ref(), input, object.clone())
             .await
@@ -346,26 +371,33 @@ impl NetCDFOpener {
 
             let pushdown_filter = predicate.map(PushdownFilter::new);
             let count_schema = projected_schema.clone();
-            let stream =
-                any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-                    .map(move |batch| {
-                        let batch = batch.map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Error reading NetCDF as Arrow stream: {e}"
-                            ))
-                        })?;
-                        RecordBatch::try_new_with_options(
-                            count_schema.clone(),
-                            vec![],
-                            &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
-                        )
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Failed to build count batch: {e}"
-                            ))
-                        })
-                    })
-                    .boxed();
+            // The split applies here too. A count path that read the whole file
+            // in every partition would return the row count once per partition.
+            let stream = any_dataset_as_record_batch_stream_split(
+                dataset,
+                batch_size,
+                pushdown_filter,
+                metrics,
+                split,
+            )
+            .map(move |batch| {
+                let batch = batch.map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Error reading NetCDF as Arrow stream: {e}"
+                    ))
+                })?;
+                RecordBatch::try_new_with_options(
+                    count_schema.clone(),
+                    vec![],
+                    &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+                )
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to build count batch: {e}"
+                    ))
+                })
+            })
+            .boxed();
             return Ok(stream);
         }
 
@@ -395,7 +427,7 @@ impl NetCDFOpener {
         // NdBroadcastExec above the scan), adapted onto the projected encoded
         // schema.
         let _ = metrics;
-        let stream = any_dataset_as_encoded_stream(dataset, batch_size)
+        let stream = any_dataset_as_encoded_stream_split(dataset, batch_size, split)
             .and_then(move |batch| {
                 let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
@@ -429,6 +461,17 @@ impl FileOpener for NetCDFOpener {
             }
         };
 
+        // This partition's share of the file. A byte range of a NetCDF file is
+        // not a NetCDF file, so it is never read as bytes. It is read as a
+        // fraction of the chunk list the reader builds, the same way a Parquet
+        // scan reads its range as a fraction of the row groups. See
+        // [`beacon_nd_array::arrow::split`].
+        //
+        // An unranged file gives `None`, which reads the whole dataset. That is
+        // every scan until the source starts to split files.
+        let (range_start, range_end) = file.range();
+        let split = ChunkSplit::from_byte_range(range_start..range_end, file.object_meta.size);
+
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let input = self
             .access
@@ -442,6 +485,7 @@ impl FileOpener for NetCDFOpener {
             self.predicate.clone(),
             self.cache.clone(),
             metrics,
+            split,
         )
         .boxed();
         Ok(fut)

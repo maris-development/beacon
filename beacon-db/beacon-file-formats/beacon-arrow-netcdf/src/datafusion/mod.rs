@@ -1092,6 +1092,9 @@ mod reader_backend_tests {
     /// needs a repartition rule to read files in parallel. What the Rust reader
     /// adds is that those partitions then run at the same time, because it
     /// holds no global lock.
+    ///
+    /// Splitting one file across partitions is the separate case, and only the
+    /// Rust reader does it. See [`only_the_rust_reader_splits_one_file`].
     #[tokio::test]
     async fn a_multi_file_scan_gets_one_partition_for_each_file() {
         use datafusion::physical_plan::ExecutionPlanProperties;
@@ -1137,20 +1140,28 @@ mod reader_backend_tests {
         }
     }
 
-    /// [`NetCDFSource::repartitioned`] must keep returning `None`, on either
-    /// reader. DataFusion's file-group partitioner splits a file by **byte
-    /// range**, and a byte range of a NetCDF file is not a NetCDF file. The
-    /// opener ignores [`PartitionedFile::range`] and opens the whole dataset, so
-    /// a range split would return every row once for each range. File-level
-    /// parallelism does not go through here (see the test above).
+    /// One file splits across partitions under the Rust reader, and never under
+    /// netcdf-c.
     ///
-    /// [`PartitionedFile::range`]: datafusion::datasource::listing::PartitionedFile::range
+    /// DataFusion's file-group partitioner splits a file by **byte range**, and
+    /// a byte range of a NetCDF file is not a NetCDF file. The opener never
+    /// reads the range as bytes. It reads it as a fraction of the chunk list the
+    /// reader builds, so the shares of a file tile it.
+    ///
+    /// netcdf-c opts out through
+    /// [`FileSource::supports_repartitioning`]: every call it makes queues on
+    /// one process-global mutex, so shares of a file would run one at a time and
+    /// pay for an extra open each.
     #[test]
-    fn the_source_never_splits_a_file_by_byte_range() {
+    fn only_the_rust_reader_splits_one_file() {
+        use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
 
-        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
+        // Comfortably over the partitioner's minimum split size.
+        const FILE_SIZE: u64 = 64 * 1024 * 1024;
+
+        for (backend, splits) in [(ReaderBackend::NetcdfC, false), (ReaderBackend::Oxcdf, true)] {
             let table_schema =
                 TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
             let source = NetCDFSource::new(access_on(backend), None, table_schema);
@@ -1158,13 +1169,152 @@ mod reader_backend_tests {
                 ObjectStoreUrl::local_filesystem(),
                 Arc::new(source.clone()) as Arc<dyn FileSource>,
             )
+            .with_file(PartitionedFile::new("one.nc", FILE_SIZE))
             .build();
 
-            assert!(
-                source.repartitioned(8, 1, None, &config).unwrap().is_none(),
-                "{backend:?} must not accept a byte-range repartition"
-            );
+            let repartitioned = source.repartitioned(4, 1, None, &config).unwrap();
+
+            match (splits, repartitioned) {
+                (false, result) => assert!(
+                    result.is_none(),
+                    "{backend:?} must not split a file across partitions"
+                ),
+                (true, None) => panic!("{backend:?} must split a file across partitions"),
+                (true, Some(config)) => {
+                    assert_eq!(
+                        config.file_groups.len(),
+                        4,
+                        "{backend:?} should split one file into 4 groups"
+                    );
+                    // Every share names a byte range, and the shares tile the
+                    // file with no gap and no overlap.
+                    let mut next = 0;
+                    for group in &config.file_groups {
+                        for file in group.iter() {
+                            let range = file.range.as_ref().expect("a share carries a range");
+                            assert_eq!(range.start, next, "{backend:?} shares must not gap");
+                            next = range.end;
+                        }
+                    }
+                    assert_eq!(next as u64, FILE_SIZE, "{backend:?} shares must cover the file");
+                }
+            }
         }
+    }
+
+    /// A session that splits one file across `target_partitions` partitions.
+    ///
+    /// The bundled test files are well under the partitioner's 10 MB default
+    /// minimum, so the minimum comes down. A real deployment leaves it alone:
+    /// splitting a small file costs an open per share and returns little.
+    fn splitting_session(target_partitions: usize, batch_size: usize) -> SessionContext {
+        let mut config = SessionConfig::new()
+            .with_target_partitions(target_partitions)
+            .with_batch_size(batch_size)
+            .with_extension(
+                beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+            );
+        config.options_mut().optimizer.repartition_file_min_size = 1;
+
+        let state = SessionStateBuilder::new()
+            .with_config(config)
+            .with_default_features()
+            .build();
+        SessionContext::new_with_state(state)
+    }
+
+    /// One gridded file scans in several partitions, and returns the same rows
+    /// it returns in one.
+    ///
+    /// The partition count is the point of the feature. The row check is the
+    /// guard on it: `count(*)` catches a share that overlapped another or a gap
+    /// between two, and `min`/`max` catch a share that read the wrong region.
+    /// None of those raise an error on their own.
+    #[tokio::test]
+    async fn one_gridded_file_splits_and_returns_the_same_rows() {
+        use datafusion::physical_plan::ExecutionPlanProperties;
+
+        let query = r#"SELECT count(*), count(analysed_sst),
+                              min(analysed_sst), max(analysed_sst)
+                       FROM one"#;
+
+        let whole = session();
+        register(&whole, "one", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        let split = splitting_session(4, 8192);
+        register(&split, "one", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        let plan = split
+            .sql("SELECT analysed_sst FROM one")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        assert_eq!(
+            plan.output_partitioning().partition_count(),
+            4,
+            "one file should scan in 4 partitions:\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+
+        let summary = async |ctx: &SessionContext| {
+            let batches = ctx.sql(query).await.unwrap().collect().await.unwrap();
+            format!("{:?}", batches[0].columns())
+        };
+
+        let split_summary = summary(&split).await;
+        assert_eq!(split_summary, summary(&whole).await);
+    }
+
+    /// The same for a ragged file, which splits its batch plan rather than a
+    /// chunk grid.
+    ///
+    /// The batch size is small so the plan holds several batches. At the default
+    /// the whole file is one batch, one share would take it, and the test would
+    /// pass without splitting anything.
+    #[tokio::test]
+    async fn one_ragged_file_splits_and_returns_the_same_rows() {
+        use datafusion::physical_plan::ExecutionPlanProperties;
+
+        let whole = session();
+        register(&whole, "one", ReaderBackend::Oxcdf, WOD_FILE).await;
+
+        let split = splitting_session(4, 32);
+        register(&split, "one", ReaderBackend::Oxcdf, WOD_FILE).await;
+
+        let plan = split
+            .sql("SELECT * FROM one")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        assert!(
+            plan.output_partitioning().partition_count() > 1,
+            "a ragged file should scan in more than one partition:\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+
+        let rows = async |ctx: &SessionContext| {
+            let batches = ctx
+                .sql("SELECT count(*) FROM one")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0)
+        };
+
+        let split_rows = rows(&split).await;
+        assert!(split_rows > 0, "the scan must return rows");
+        assert_eq!(split_rows, rows(&whole).await);
     }
 
     /// Every column, including every attribute, comes back identical.
