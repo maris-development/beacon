@@ -8,12 +8,22 @@ description: Read GeoTIFF and Cloud-Optimized GeoTIFF rasters with read_tiff(). 
 
 ```text
 read_tiff(glob_paths)
+read_tiff(glob_paths, dimensions)
 ```
 
 Beacon reads GeoTIFF and Cloud-Optimized GeoTIFF files.
 
+A raster is a grid over the axes `y` (image rows) and `x` (image columns). Beacon returns the bands
+on that grid, and broadcasts the coordinate axes `geo.lat` and `geo.lon` over it.
+
+The optional `dimensions` argument selects the columns. Beacon returns a column only if the list
+holds all of its dimensions. Use `['y']` to read the latitude axis alone, without the full grid.
+
 ```sql
 SELECT * FROM read_tiff('rasters/elevation.tif')
+
+-- One row per image row, not one row per pixel
+SELECT "geo.lat" FROM read_tiff('rasters/elevation.tif', ['y'])
 ```
 
 ## Inspect the schema

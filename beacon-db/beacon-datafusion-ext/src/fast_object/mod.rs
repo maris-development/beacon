@@ -38,10 +38,10 @@
 //! # The format still plans its own scan
 //!
 //! `create_physical_plan` is what turns the config into a plan, so every format
-//! keeps the shape it wants: netCDF and HDF5 stack decode and broadcast nodes
-//! over their scan, and Zarr and Atlas expand a store directory into partitions
-//! and reduce it to the marker at its root. Nothing here knows about any of
-//! that.
+//! keeps the shape it wants: netCDF, HDF5, Zarr and GeoTIFF stack decode and
+//! broadcast nodes over their scan, and Zarr and Atlas expand a store directory
+//! into partitions and reduce it to the marker at its root. Nothing here knows
+//! about any of that.
 //!
 //! # What `EXPLAIN` shows
 //!

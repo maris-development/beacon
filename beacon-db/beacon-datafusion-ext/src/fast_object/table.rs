@@ -281,8 +281,8 @@ impl FastObjectTable {
 /// blocking a later repartition or limit pushdown.
 ///
 /// The scan is found by descending the single-child chain, because an nd format
-/// returns a stack: netCDF and HDF5 hand back decode and broadcast nodes above
-/// their scan.
+/// returns a stack: netCDF, HDF5, Zarr and GeoTIFF hand back decode and
+/// broadcast nodes above their scan.
 fn record_counters(plan: &Arc<dyn ExecutionPlan>, considered: usize, dropped: usize) {
     let mut node: &dyn ExecutionPlan = plan.as_ref();
     loop {

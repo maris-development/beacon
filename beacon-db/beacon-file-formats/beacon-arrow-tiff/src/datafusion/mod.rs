@@ -39,9 +39,19 @@ impl FileFormatFactory for TiffFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(TiffFormat::new(self.options.clone())))
+        // Per-table override from `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+        let read_dimensions = format_options.get("read_dimensions").map(|value| {
+            value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        });
+        Ok(Arc::new(
+            TiffFormat::new(self.options.clone()).with_read_dimensions(read_dimensions),
+        ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
@@ -86,15 +96,46 @@ impl FileFormatFactoryExt for TiffFormatFactory {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TiffFormat {
     pub options: TiffOptions,
+    /// Explicit dimensions requested via `read_tiff(paths, ['dims'])` or a
+    /// `CREATE EXTERNAL TABLE ... OPTIONS (read_dimensions '...')`. When set,
+    /// only variables whose dimensions are a subset of these are read; when
+    /// `None`, a broadcast-compatible default is auto-selected.
+    pub read_dimensions: Option<Vec<String>>,
 }
 
 impl TiffFormat {
     pub fn new(options: TiffOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            read_dimensions: None,
+        }
     }
+
+    /// Returns a copy of this format that reads only the variables belonging to
+    /// `read_dimensions` (or auto-selects a default when `None`).
+    pub fn with_read_dimensions(mut self, read_dimensions: Option<Vec<String>>) -> Self {
+        self.read_dimensions = read_dimensions;
+        self
+    }
+}
+
+/// Wrap a TIFF file scan in the nd spine: `NdBroadcastExec` → `NdSourceExec` →
+/// `DataSourceExec`.
+///
+/// The scan carries nd data as `beacon.nd`-encoded struct columns, so
+/// `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it back to the
+/// logical table schema above the scan.
+fn nd_scan_plan(conf: FileScanConfig) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
+    let nd_source = Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(
+        data_source,
+    )?);
+    Ok(Arc::new(
+        beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?,
+    ))
 }
 
 #[async_trait::async_trait]
@@ -136,7 +177,9 @@ impl FileFormat for TiffFormat {
             .max(1);
         let tasks: Vec<_> = objects
             .iter()
-            .map(|object| reader::fetch_schema(store.clone(), object.clone()))
+            .map(|object| {
+                reader::fetch_schema(store.clone(), object.clone(), self.read_dimensions.clone())
+            })
             .collect();
         let schemas: Vec<SchemaRef> = futures::stream::iter(tasks)
             .buffered(width)
@@ -170,41 +213,51 @@ impl FileFormat for TiffFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // The scan carries nd data as `beacon.nd`-encoded struct columns, so the
+        // file source's schema is the encoded form of the logical table schema.
+        let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+            conf.file_schema(),
+        ));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
-            conf.file_schema().clone(),
+            encoded_file_schema,
             conf.table_partition_cols().clone(),
         );
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = TiffSource::new(table_schema).with_projection(projection);
+        let source = TiffSource::new(table_schema)
+            .with_read_dimensions(self.read_dimensions.clone())
+            .with_projection(projection);
 
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
 
-        Ok(DataSourceExec::from_data_source(conf))
+        nd_scan_plan(conf)
     }
 
     fn file_source(
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(TiffSource::new(table_schema))
+        Arc::new(TiffSource::new(table_schema).with_read_dimensions(self.read_dimensions.clone()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
-    use datafusion::execution::object_store::ObjectStoreUrl;
-    use futures::StreamExt;
+    use datafusion::physical_plan::displayable;
+    use datafusion::prelude::{SessionConfig, SessionContext};
     use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
 
     const TEST_TIF_BYTES: &[u8] = include_bytes!("../../test-files/test.tif");
+
+    /// The bundled `test.tif` is 1287 × 380, single band, float32.
+    const WIDTH: usize = 1287;
+    const HEIGHT: usize = 380;
 
     async fn put_fixture(store: &Arc<InMemory>, path: &Path, bytes: &[u8]) -> ObjectMeta {
         store
@@ -217,211 +270,9 @@ mod tests {
             .expect("should fetch object metadata")
     }
 
-    #[tokio::test]
-    async fn infer_schema_reads_real_stripped_geotiff_fixture() {
-        let store = Arc::new(InMemory::new());
-        let object_store: Arc<dyn ObjectStore> = store.clone();
-        let path = Path::from("tests/datafusion/test.tif");
-        let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
-
-        let schema = reader::fetch_schema(object_store, object)
-            .await
-            .expect("real stripped GeoTIFF should produce a schema");
-
-        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(
-            field_names.contains(&"band.0"),
-            "schema should contain band.0"
-        );
-        assert!(
-            field_names.contains(&"geo.lat"),
-            "schema should contain geo.lat"
-        );
-        assert!(
-            field_names.contains(&"geo.lon"),
-            "schema should contain geo.lon"
-        );
-        assert!(
-            field_names.contains(&"image.width"),
-            "schema should contain image.width"
-        );
-        println!("Schema is: {:?}", schema);
-    }
-
-    #[tokio::test]
-    async fn opener_streams_record_batches_for_real_fixture() {
-        let store = Arc::new(InMemory::new());
-        let object_store: Arc<dyn ObjectStore> = store.clone();
-        let path = Path::from("tests/datafusion/test2.tif");
-        let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
-
-        let table_schema = reader::fetch_schema(object_store.clone(), object.clone())
-            .await
-            .expect("schema");
-
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(table_schema);
-        let source = source::TiffSource::new(ts);
-        let file_opener = {
-            let conf = FileScanConfigBuilder::new(
-                ObjectStoreUrl::parse("memory://").expect("url"),
-                Arc::new(source.clone()) as Arc<dyn FileSource>,
-            )
-            .build();
-            source
-                .create_file_opener(object_store, &conf, 0)
-                .expect("file opener")
-        };
-
-        let stream = file_opener
-            .open(datafusion::datasource::listing::PartitionedFile::from(
-                object,
-            ))
-            .expect("open")
-            .await
-            .expect("stream");
-
-        let batches: Vec<_> = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("all batches should be ok");
-
-        assert!(!batches.is_empty(), "should produce at least one batch");
-
-        // Concatenate into a single batch for easy column access.
-        let full = arrow::compute::concat_batches(&batches[0].schema(), &batches).expect("concat");
-
-        let schema = full.schema();
-
-        // geo.lat column — values span ~30°N to ~46°N
-        let lat_idx = schema.index_of("geo.lat").expect("geo.lat column");
-        let lat_col = full
-            .column(lat_idx)
-            .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
-            .expect("geo.lat should be Float64");
-        assert!(lat_col.len() > 0);
-        // First value: lat[0] = 0.04166667002172143 * 0 + 30.16666666498914
-        assert!(
-            (lat_col.value(0) - 30.166_666_664_989_14).abs() < 1e-6,
-            "lat[0]={}",
-            lat_col.value(0)
-        );
-        // All values should be within the expected geographic range.
-        for i in 0..lat_col.len() {
-            let v = lat_col.value(i);
-            assert!(v >= 30.0 && v <= 47.0, "lat[{i}]={v} out of range");
-        }
-
-        // geo.lon column — values span ~-17°E to ~36°E
-        let lon_idx = schema.index_of("geo.lon").expect("geo.lon column");
-        let lon_col = full
-            .column(lon_idx)
-            .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
-            .expect("geo.lon should be Float64");
-        assert!(lon_col.len() > 0);
-        // First value: lon[0] = 0.0416666671610546 * 0 + -17.312499364464315
-        assert!(
-            (lon_col.value(0) - -17.312_499_364_464_315).abs() < 1e-6,
-            "lon[0]={}",
-            lon_col.value(0)
-        );
-        // All values should be within the expected geographic range.
-        for i in 0..lon_col.len() {
-            let v = lon_col.value(i);
-            assert!(v >= -18.0 && v <= 37.0, "lon[{i}]={v} out of range");
-        }
-    }
-
-    #[tokio::test]
-    async fn opener_with_predicate_filters_rows() {
-        use datafusion::config::ConfigOptions;
-        use datafusion::datasource::physical_plan::FileSource;
-        use datafusion::logical_expr::Operator;
-        use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
-        use datafusion::scalar::ScalarValue;
-
-        let store = Arc::new(InMemory::new());
-        let object_store: Arc<dyn ObjectStore> = store.clone();
-        let path = Path::from("tests/datafusion/test_pred.tif");
-        let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
-
-        let table_schema = reader::fetch_schema(object_store.clone(), object.clone())
-            .await
-            .expect("schema");
-
-        // Build predicate: geo.lat > 40.0
-        // The Column index must match geo.lat's position in the file schema.
-        let lat_idx = table_schema.index_of("geo.lat").expect("geo.lat field");
-        let predicate: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
-            Arc::new(BinaryExpr::new(
-                Arc::new(Column::new("geo.lat", lat_idx)),
-                Operator::Gt,
-                Arc::new(Literal::new(ScalarValue::Float64(Some(40.0)))),
-            ));
-
-        // Push the predicate into a TiffSource via try_pushdown_filters.
-        let source_with_predicate: Arc<dyn FileSource> = {
-            let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-                table_schema.clone(),
-            );
-            let base_source = source::TiffSource::new(ts);
-            let pushdown = base_source
-                .try_pushdown_filters(vec![predicate], &ConfigOptions::default())
-                .expect("try_pushdown_filters");
-            pushdown.updated_node.expect("updated node with predicate")
-        };
-
-        let file_opener = {
-            let conf = FileScanConfigBuilder::new(
-                ObjectStoreUrl::parse("memory://").expect("url"),
-                source_with_predicate.clone(),
-            )
-            .build();
-            source_with_predicate
-                .create_file_opener(object_store, &conf, 0)
-                .expect("file opener")
-        };
-
-        let stream = file_opener
-            .open(datafusion::datasource::listing::PartitionedFile::from(
-                object,
-            ))
-            .expect("open")
-            .await
-            .expect("stream");
-
-        let batches: Vec<_> = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("all batches should be ok");
-
-        assert!(!batches.is_empty(), "should produce at least one batch");
-
-        let full = arrow::compute::concat_batches(&batches[0].schema(), &batches).expect("concat");
-
-        // Predicate pushdown here is coarse-grained: entire chunks whose coordinate range
-        // falls entirely outside the predicate are skipped (no I/O). Chunks that partially
-        // overlap are emitted in full. We therefore only verify that I/O was reduced, not
-        // that every row satisfies the predicate.
-        let total_rows = 380 * 1287;
-        assert!(
-            full.num_rows() < total_rows,
-            "predicate should skip at least one chunk, reducing row count below {total_rows} (got {})",
-            full.num_rows()
-        );
-        assert!(full.num_rows() > 0, "predicate should keep some rows");
-    }
-
-    // ── End-to-end via SessionContext (projection + predicate pushdown) ──
-
     /// Register the bundled `test.tif` as a DataFusion table backed by
     /// [`TiffFormat`] + `ListingTable` over the local filesystem.
-    async fn register_example(ctx: &datafusion::prelude::SessionContext) {
+    async fn register_example_with(ctx: &SessionContext, format: TiffFormat) {
         use datafusion::datasource::file_format::FileFormat;
         use datafusion::datasource::listing::{
             ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
@@ -429,7 +280,7 @@ mod tests {
 
         let file = concat!(env!("CARGO_MANIFEST_DIR"), "/test-files/test.tif");
         let table_path = ListingTableUrl::parse(format!("file://{file}")).unwrap();
-        let format: Arc<dyn FileFormat> = Arc::new(TiffFormat::new(Default::default()));
+        let format: Arc<dyn FileFormat> = Arc::new(format);
         let listing_options = ListingOptions::new(format).with_file_extension("tif");
         let config = ListingTableConfig::new(table_path)
             .with_listing_options(listing_options)
@@ -440,9 +291,349 @@ mod tests {
         ctx.register_table("tiff_t", Arc::new(table)).unwrap();
     }
 
+    async fn register_example(ctx: &SessionContext) {
+        register_example_with(ctx, TiffFormat::new(Default::default())).await;
+    }
+
+    /// A session with the nd pushdown rules registered — the same wiring
+    /// beacon-core installs. Single partition so row order is deterministic
+    /// (the differential tests compare results positionally).
+    fn ctx_with_pushdown() -> SessionContext {
+        use datafusion::execution::session_state::SessionStateBuilder;
+
+        let state = SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_target_partitions(1))
+            .with_default_features()
+            .with_physical_optimizer_rule(Arc::new(
+                beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
+            ))
+            .with_physical_optimizer_rule(Arc::new(
+                beacon_datafusion_ext::nd::NdFilterPushdown::new(),
+            ))
+            .build();
+        SessionContext::new_with_state(state)
+    }
+
+    #[tokio::test]
+    async fn infer_schema_reads_real_stripped_geotiff_fixture() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let path = Path::from("tests/datafusion/test.tif");
+        let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
+
+        let schema = reader::fetch_schema(object_store, object, None)
+            .await
+            .expect("real stripped GeoTIFF should produce a schema");
+
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        for expected in ["band.0", "geo.lat", "geo.lon", "image.width"] {
+            assert!(
+                field_names.contains(&expected),
+                "schema should contain {expected}: {field_names:?}"
+            );
+        }
+    }
+
+    /// Explicit `read_dimensions` narrows the schema to the variables living on
+    /// the requested axis: `geo.lat` is on `y`, `geo.lon` on `x`, and the band on
+    /// both. Scalar metadata (rank-0) survives every narrowing.
+    #[tokio::test]
+    async fn read_dimensions_narrows_the_schema_to_one_axis() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let path = Path::from("tests/datafusion/test_dims.tif");
+        let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
+
+        let schema = reader::fetch_schema(object_store, object, Some(vec!["y".to_string()]))
+            .await
+            .expect("narrowed schema");
+
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"geo.lat"), "geo.lat is on y: {names:?}");
+        assert!(names.contains(&"image.width"), "scalars survive: {names:?}");
+        assert!(!names.contains(&"geo.lon"), "geo.lon is on x: {names:?}");
+        assert!(!names.contains(&"band.0"), "the band is on y,x: {names:?}");
+    }
+
+    /// Reading on the `y` axis alone makes the table one row per image row,
+    /// instead of the full `y × x` grid `count_star_counts_the_full_grid` sees.
+    #[tokio::test]
+    async fn read_dimensions_narrows_the_row_count_to_one_axis() {
+        use arrow::array::Int64Array;
+
+        let ctx = SessionContext::new();
+        register_example_with(
+            &ctx,
+            TiffFormat::new(Default::default()).with_read_dimensions(Some(vec!["y".to_string()])),
+        )
+        .await;
+
+        let batches = ctx
+            .sql("SELECT COUNT(*) AS n FROM tiff_t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let n = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(
+            n as usize, HEIGHT,
+            "the y axis alone has one row per image row"
+        );
+    }
+
+    // ── nd pipeline: plan shape ──────────────────────────────────────────
+
+    /// The physical plan is the nd spine over the standard file scan:
+    /// `NdBroadcastExec` → `NdSourceExec` → `DataSourceExec`, in that nesting
+    /// order (parent above child in the indented render).
+    #[tokio::test]
+    async fn physical_plan_is_nd_spine_over_scan() {
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        let plan = ctx
+            .sql("SELECT \"band.0\" FROM tiff_t")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+
+        let broadcast = rendered.find("NdBroadcastExec");
+        let source = rendered.find("NdSourceExec");
+        let scan = rendered.find("DataSourceExec");
+        assert!(
+            broadcast.is_some() && source.is_some() && scan.is_some(),
+            "plan must contain the nd spine over a DataSourceExec:\n{rendered}"
+        );
+        assert!(
+            broadcast < source && source < scan,
+            "expected NdBroadcastExec → NdSourceExec → DataSourceExec nesting:\n{rendered}"
+        );
+    }
+
+    /// With the projection rule registered, `SELECT "geo.lat" * 2` plans with an
+    /// `NdProjectionExec` *below* the `NdBroadcastExec` — so the arithmetic runs
+    /// on the 380-element latitude axis, not on all 380 × 1287 grid cells — and
+    /// produces the same values as a session without the rule.
+    #[tokio::test]
+    async fn projection_pushdown_fires_end_to_end() {
+        use arrow::compute::concat_batches;
+
+        let sql = "SELECT \"geo.lat\" * 2 AS lat2 FROM tiff_t";
+
+        let on = ctx_with_pushdown();
+        register_example(&on).await;
+        let df = on.sql(sql).await.unwrap();
+        let plan = df.clone().create_physical_plan().await.unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+
+        let broadcast = rendered.find("NdBroadcastExec");
+        let projection = rendered.find("NdProjectionExec");
+        let source = rendered.find("NdSourceExec");
+        assert!(
+            projection.is_some() && broadcast < projection && projection < source,
+            "expected NdBroadcastExec → NdProjectionExec → NdSourceExec:\n{rendered}"
+        );
+        let actual = df.collect().await.unwrap();
+
+        // Same single-partition config so row order matches positionally.
+        let off = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+        register_example(&off).await;
+        let expected = off.sql(sql).await.unwrap().collect().await.unwrap();
+
+        let schema = expected[0].schema();
+        assert_eq!(
+            concat_batches(&schema, &actual).unwrap(),
+            concat_batches(&schema, &expected).unwrap(),
+        );
+    }
+
+    /// With the filter rule registered, `WHERE "geo.lat" > 40` sinks into an
+    /// `NdFilterExec` below the broadcast — the grid is selected before it is
+    /// materialized — and the rows match the unoptimized session.
+    #[tokio::test]
+    async fn filter_pushdown_fires_end_to_end() {
+        use arrow::compute::concat_batches;
+
+        let sql = "SELECT \"geo.lat\" FROM tiff_t WHERE \"geo.lat\" > 40";
+
+        let on = ctx_with_pushdown();
+        register_example(&on).await;
+        let df = on.sql(sql).await.unwrap();
+        let plan = df.clone().create_physical_plan().await.unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+
+        let broadcast = rendered.find("NdBroadcastExec");
+        let filter = rendered.find("NdFilterExec");
+        let source = rendered.find("NdSourceExec");
+        assert!(
+            filter.is_some() && broadcast < filter && filter < source,
+            "expected NdBroadcastExec → NdFilterExec → NdSourceExec:\n{rendered}"
+        );
+        let actual = df.collect().await.unwrap();
+
+        let off = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+        register_example(&off).await;
+        let expected = off.sql(sql).await.unwrap().collect().await.unwrap();
+
+        let schema = expected[0].schema();
+        assert_eq!(
+            concat_batches(&schema, &actual).unwrap(),
+            concat_batches(&schema, &expected).unwrap(),
+        );
+    }
+
+    // ── end-to-end reads ─────────────────────────────────────────────────
+
+    /// The two coordinate axes — `geo.lat` on `y`, `geo.lon` on `x` — broadcast
+    /// against each other into their full cross product, with the values the
+    /// GeoTIFF's ModelTransformation tag defines.
+    ///
+    /// Assertions are order-independent on purpose: the nd spine derives the
+    /// grid's axis order from the widest projected column, so two same-rank
+    /// coordinates leave the row order unspecified (as for every nd format).
+    #[tokio::test]
+    async fn end_to_end_reads_broadcast_coordinates() {
+        use arrow::array::{Float64Array, Int64Array};
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        let batches = ctx
+            .sql(
+                r#"SELECT COUNT(*)                    AS rows,
+                          COUNT(DISTINCT "geo.lat")   AS lats,
+                          COUNT(DISTINCT "geo.lon")   AS lons,
+                          MIN("geo.lat")              AS lat_min,
+                          MAX("geo.lat")              AS lat_max,
+                          MIN("geo.lon")              AS lon_min
+                   FROM tiff_t"#,
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let row = &batches[0];
+        let int = |name: &str| {
+            row.column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0)
+        };
+        let float = |name: &str| {
+            row.column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0)
+        };
+
+        // Each axis contributes its own extent, and the table is their product.
+        assert_eq!(int("lats") as usize, HEIGHT);
+        assert_eq!(int("lons") as usize, WIDTH);
+        assert_eq!(int("rows") as usize, HEIGHT * WIDTH);
+
+        // ModelTransformationTag: lat[y] = 0.04166667002172143 * y + 30.16666666498914
+        //                         lon[x] = 0.0416666671610546  * x + -17.312499364464315
+        assert!((float("lat_min") - 30.166_666_664_989_14).abs() < 1e-6);
+        assert!((float("lat_max") - 45.958_334_603_221_566).abs() < 1e-6);
+        assert!((float("lon_min") - -17.312_499_364_464_315).abs() < 1e-6);
+    }
+
+    /// A rank-0 metadata scalar (`image.width`) rides the nd encoding and
+    /// broadcasts to a constant column over every row of the grid its
+    /// co-selected variable establishes — here `band.0`, the full `y × x` band.
+    #[tokio::test]
+    async fn end_to_end_broadcasts_scalar_metadata() {
+        use arrow::array::Int64Array;
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        let batches = ctx
+            .sql(
+                r#"SELECT COUNT(DISTINCT "image.width") AS distinct_widths,
+                          COUNT("image.width")          AS scalar_rows,
+                          COUNT("geo.lat")              AS coord_rows,
+                          COUNT("band.0")               AS band_values
+                   FROM tiff_t"#,
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let int = |name: &str| {
+            batches[0]
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0)
+        };
+        assert_eq!(int("distinct_widths"), 1, "a scalar is a single constant");
+        // `band.0` is the widest column, so the grid is the full image.
+        assert_eq!(
+            int("scalar_rows") as usize,
+            HEIGHT * WIDTH,
+            "the scalar must be broadcast onto every grid row"
+        );
+        assert_eq!(
+            int("coord_rows") as usize,
+            HEIGHT * WIDTH,
+            "the latitude axis must be broadcast onto every grid row"
+        );
+        // The band's nodata pixels come back as nulls, so it counts fewer.
+        assert!(int("band_values") > 0);
+        assert!(
+            int("band_values") < int("scalar_rows"),
+            "the fixture's nodata pixels must be null"
+        );
+    }
+
+    /// `COUNT(*)` projects no columns, so the opener drives the read with the
+    /// highest-volume variable and reports the full broadcast row count.
+    #[tokio::test]
+    async fn count_star_counts_the_full_grid() {
+        use arrow::array::Int64Array;
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        let batches = ctx
+            .sql("SELECT COUNT(*) AS n FROM tiff_t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let n = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(n as usize, HEIGHT * WIDTH);
+    }
+
     #[tokio::test]
     async fn projection_pushdown_through_datafusion() {
-        let ctx = datafusion::prelude::SessionContext::new();
+        let ctx = SessionContext::new();
         register_example(&ctx).await;
 
         let df = ctx
@@ -462,12 +653,12 @@ mod tests {
         let batches = df.collect().await.unwrap();
         assert_eq!(batches[0].num_columns(), 2);
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert!(rows > 0);
+        assert_eq!(rows, HEIGHT * WIDTH);
     }
 
     #[tokio::test]
-    async fn predicate_pushdown_prunes_through_datafusion() {
-        let ctx = datafusion::prelude::SessionContext::new();
+    async fn predicate_prunes_every_row_through_datafusion() {
+        let ctx = SessionContext::new();
         register_example(&ctx).await;
 
         // Latitude never exceeds ~47°, so this predicate excludes every row.
@@ -488,8 +679,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn predicate_pushdown_selects_subset_through_datafusion() {
-        let ctx = datafusion::prelude::SessionContext::new();
+    async fn predicate_selects_subset_through_datafusion() {
+        let ctx = SessionContext::new();
         register_example(&ctx).await;
 
         let batches = ctx
@@ -516,7 +707,7 @@ mod tests {
             total += b.num_rows();
         }
         assert!(total > 0, "satisfiable predicate should keep some rows");
-        assert!(total < 380 * 1287, "predicate should drop some rows");
+        assert!(total < HEIGHT * WIDTH, "predicate should drop some rows");
     }
 }
 

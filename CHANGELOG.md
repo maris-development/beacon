@@ -45,6 +45,19 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **GeoTIFF and TIFF read through the nd pipeline**, as netCDF, HDF5 and Zarr already did. A raster
+  is a grid over the axes `y` (image rows) and `x` (image columns), and the reader now hands the
+  plan its columns un-broadcast — the bands on `y × x`, `geo.lat` on `y`, `geo.lon` on `x`, and the
+  TIFF tags as scalars — for a decode and a broadcast above the scan. The pixel cross-product is
+  therefore built once, at the top of the plan, instead of per column in the reader, and the two nd
+  optimizer rules now reach a raster: a `WHERE` on a coordinate selects the grid before it is
+  materialized, and an element-wise `SELECT` expression on a coordinate is evaluated on that axis
+  alone rather than on every pixel. `read_tiff` also takes the optional `dimensions` argument the
+  other nd readers take: `read_tiff('raster.tif', ['y'])` returns one row per image row. The same
+  list is accepted as `OPTIONS (read_dimensions 'y')` on `CREATE EXTERNAL TABLE … STORED AS TIFF`.
+  As for every nd format, the projected columns define the grid, so selecting only 1-d coordinate
+  columns returns their own axes rather than the full pixel grid. See
+  [GeoTIFF](docs/docs/2.0.0-rc2/formats/geotiff.md).
 - **Minimum supported Rust is 1.94**, up from 1.91. `iceberg` and `iceberg-datafusion` 0.10 — the
   only release line built against the DataFusion 53 and Arrow 58 this workspace unifies on —
   declare `rust-version = "1.94"`, so the workspace floor follows. Beacon's own code uses no
