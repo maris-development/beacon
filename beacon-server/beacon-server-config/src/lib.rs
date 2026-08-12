@@ -90,6 +90,10 @@ pub struct ServerConfig {
     /// Maximum size, in bytes, accepted for a single dataset upload. `0` disables
     /// the cap. From `BEACON_MAX_UPLOAD_BYTES`.
     pub max_upload_bytes: u64,
+    /// Log level for Beacon's own crates, lowercase and already validated: one of
+    /// `trace`, `debug`, `info`, `warn`, `error`, `off`. From `BEACON_LOG_LEVEL`.
+    /// `RUST_LOG` overrides it when set.
+    pub log_level: String,
 }
 
 #[derive(Debug, Clone)]
@@ -300,6 +304,10 @@ struct RawConfig {
     port: u16,
     #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]
     host: String,
+    /// Level for Beacon's own crates. Validated in [`Config::load`], so a typo
+    /// stops the process instead of silently logging at the default level.
+    #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
+    log_level: String,
 
     //VM Settings
     /// Query memory pool size, in **megabytes**.
@@ -486,6 +494,10 @@ struct RawConfig {
     file_stats_enable: bool,
     #[envconfig(from = "BEACON_FILE_STATS_INTERVAL_SECS", default = "900")]
     file_stats_interval_secs: u64,
+    /// Collect at boot rather than one interval later. Off by default, so
+    /// enabling statistics does not turn the next restart into a backfill.
+    #[envconfig(from = "BEACON_FILE_STATS_ON_STARTUP", default = "false")]
+    file_stats_on_startup: bool,
     /// Files analyzed at once. Empty takes a quarter of the cores, which leaves
     /// room for queries. Raise it well above the core count for datasets in
     /// object storage, where the work is waiting rather than parsing.
@@ -557,6 +569,7 @@ impl From<RawConfig> for Config {
                 base_path: raw.base_path,
                 web_ui_dir: raw.web_ui_dir,
                 max_upload_bytes: raw.max_upload_bytes,
+                log_level: raw.log_level,
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
@@ -618,6 +631,7 @@ impl From<RawConfig> for Config {
             file_stats: FileStatsConfig {
                 enable: raw.file_stats_enable,
                 interval_secs: raw.file_stats_interval_secs,
+                on_startup: raw.file_stats_on_startup,
                 concurrency: raw
                     .file_stats_concurrency
                     .filter(|n| *n > 0)
@@ -681,6 +695,26 @@ fn validate_storage(s3: &S3Config) -> Result<()> {
     Ok(())
 }
 
+/// Levels accepted by `BEACON_LOG_LEVEL`, in the spelling `tracing` expects.
+const LOG_LEVELS: [&str; 6] = ["trace", "debug", "info", "warn", "error", "off"];
+
+/// Lowercases and validates `BEACON_LOG_LEVEL`, so `DEBUG`, `Debug`, and `debug`
+/// all work.
+///
+/// Errors on an unknown level instead of falling back to the default: a typo that
+/// silently keeps the server at `info` is the failure this variable exists to
+/// avoid.
+fn normalize_log_level(raw: &str) -> std::result::Result<String, String> {
+    let level = raw.trim().to_ascii_lowercase();
+    if LOG_LEVELS.contains(&level.as_str()) {
+        return Ok(level);
+    }
+    Err(format!(
+        "`{raw}` is not a log level; expected one of {}",
+        LOG_LEVELS.join(", ")
+    ))
+}
+
 /// Decode a base64-encoded 32-byte master key from `BEACON_SECRETS_KEY`.
 fn decode_master_key(b64: &str) -> std::result::Result<[u8; 32], String> {
     use base64::Engine;
@@ -734,6 +768,8 @@ impl Config {
         }
         config.server.base_path =
             normalize_base_path(&config.server.base_path).map_err(ConfigError::InvalidBasePath)?;
+        config.server.log_level =
+            normalize_log_level(&config.server.log_level).map_err(ConfigError::InvalidLogLevel)?;
 
         validate_storage(&config.s3)?;
 
@@ -826,7 +862,8 @@ fn create_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_master_key, normalize_base_path, validate_storage, Config, PathBuf, RawConfig,
+        decode_master_key, normalize_base_path, normalize_log_level, validate_storage, Config,
+        PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1039,6 +1076,37 @@ mod tests {
             !printed.contains("ab, ab"),
             "raw key bytes leaked: {printed}"
         );
+    }
+
+    /// The startup collection is opt-in: enabling statistics alone must not turn
+    /// the next restart of a large archive into a backfill.
+    #[test]
+    fn collecting_at_startup_is_opt_in() {
+        assert!(!config(&[]).file_stats.on_startup);
+        assert!(
+            config(&[("BEACON_FILE_STATS_ON_STARTUP", "true")])
+                .file_stats
+                .on_startup
+        );
+    }
+
+    #[test]
+    fn log_level_defaults_to_info() {
+        assert_eq!(config(&[]).server.log_level, "info");
+    }
+
+    #[test]
+    fn log_level_accepts_any_case() {
+        assert_eq!(normalize_log_level("DEBUG"), Ok("debug".to_string()));
+        assert_eq!(normalize_log_level("Trace"), Ok("trace".to_string()));
+        assert_eq!(normalize_log_level(" warn "), Ok("warn".to_string()));
+    }
+
+    /// A typo must stop the server, not leave it quietly at `info`.
+    #[test]
+    fn unknown_log_level_is_an_error() {
+        assert!(normalize_log_level("verbose").is_err());
+        assert!(normalize_log_level("").is_err());
     }
 
     #[test]

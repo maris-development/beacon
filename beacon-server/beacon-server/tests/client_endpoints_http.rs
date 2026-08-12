@@ -193,6 +193,35 @@ async fn query_rejects_malformed_body() {
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
 }
 
+/// A statement that fails on the first poll of its stream must still answer with
+/// a status and a message.
+///
+/// The Arrow output is lazy, so this class of failure used to arrive after the
+/// 200 was already sent. The server could then only drop the connection, and
+/// every client — the admin UI included — saw a broken socket carrying no
+/// reason. `ANALYZE FILES` against a runtime with no file statistics is exactly
+/// that shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_that_fails_before_its_first_batch_is_a_400_with_a_message() {
+    let (router, _lake, _cfg) = app(config(false)).await;
+    // The statement is super-user only, so anonymous stops at the privilege gate
+    // long before the stream this test is about.
+    let admin = basic(ADMIN_USERNAME, ADMIN_PASSWORD);
+
+    let res = send(
+        &router,
+        post_json("/api/query", json!({ "sql": "ANALYZE FILES" }), Some(&admin)),
+    )
+    .await;
+
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    let body = String::from_utf8_lossy(&res.body);
+    assert!(
+        body.contains("BEACON_FILE_STATS_ENABLE"),
+        "the response must carry the reason, got: {body}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sql_over_http_is_gated_by_sql_enable() {
     let mut cfg = config(false);

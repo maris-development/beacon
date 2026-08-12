@@ -25,6 +25,10 @@ pub enum ConfigError {
     #[error("invalid storage configuration: {0}")]
     InvalidStorage(String),
 
+    /// `BEACON_LOG_LEVEL` was set to something other than a known log level.
+    #[error("invalid BEACON_LOG_LEVEL: {0}")]
+    InvalidLogLevel(String),
+
     /// `BEACON_SECRETS_KEY` was set but is not a base64-encoded 32-byte key.
     #[error("invalid BEACON_SECRETS_KEY: {0}")]
     InvalidSecretsKey(String),

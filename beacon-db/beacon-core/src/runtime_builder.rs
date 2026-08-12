@@ -464,7 +464,12 @@ async fn init_file_stats(
     tracing::info!(
         interval_secs = builder.file_stats.interval_secs,
         concurrency = builder.file_stats.concurrency,
-        "file statistics subsystem started"
+        // The timer consumes its first tick, so nothing happens for one whole
+        // interval. Say so here: on the 900-second default, a quiet quarter of an
+        // hour otherwise reads as a subsystem that never started.
+        first_pass_in_secs = builder.file_stats.interval_secs,
+        on_startup = builder.file_stats.on_startup,
+        "file statistics subsystem started; run ANALYZE FILES to fill it now"
     );
     Ok(Some(service))
 }
@@ -726,12 +731,24 @@ fn register_system_schema(
         .config()
         .get_extension::<std::sync::OnceLock<Arc<beacon_file_stats::FileStatsStore>>>()
         .unwrap_or_else(beacon_file_stats::new_file_stats_handle);
-    let provider = Arc::new(SystemSchemaProvider::new(session_cell, auth, file_stats));
+    let provider = Arc::new(SystemSchemaProvider::new(
+        session_cell,
+        auth,
+        file_stats.clone(),
+    ));
 
     session_ctx
         .catalog("beacon")
         .ok_or_else(|| anyhow::anyhow!("Failed to get catalog 'beacon'"))?
         .register_schema(SYSTEM_SCHEMA_NAME, provider)?;
+
+    // `file_statistics(path)` reads the same handle. It is a function rather than
+    // a table because it takes the file to report on; the authorization walk
+    // covers it by its provider, since a function carries no schema name.
+    session_ctx.register_udtf(
+        crate::system_schema::FILE_STATISTICS_FUNCTION,
+        Arc::new(crate::system_schema::FileStatisticsFunc::new(file_stats)),
+    );
 
     Ok(())
 }

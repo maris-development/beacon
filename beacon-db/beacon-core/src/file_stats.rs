@@ -51,9 +51,9 @@ use std::time::Duration;
 
 use arrow::datatypes::{DataType, SchemaRef};
 use beacon_arrow_netcdf::datafusion::{NetcdfFormat, ReaderBackend};
+use beacon_common::FileStatsConfig;
 use beacon_datafusion_ext::format_ext::try_file_format_factory_ext;
 use beacon_datafusion_ext::listing_factory::try_listing_factory_from_session;
-use beacon_common::FileStatsConfig;
 use beacon_file_stats::segment::ColumnStat;
 use beacon_file_stats::{
     CollectorConfig, FileAnalysis, FileAnalyzer, FileRecord, FileStatsError, FileStatsStore,
@@ -66,9 +66,9 @@ use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use futures::StreamExt;
-use object_store::{ObjectMeta, ObjectStore, path::Path};
+use object_store::{path::Path, ObjectMeta, ObjectStore};
 
-use crate::statement_plan::{SessionCell, upgrade_session};
+use crate::statement_plan::{upgrade_session, SessionCell};
 
 /// A latch that fires once in a pass, however many files ask it.
 ///
@@ -149,10 +149,16 @@ impl FormatFileAnalyzer {
 #[async_trait::async_trait]
 impl FileAnalyzer for FormatFileAnalyzer {
     fn begin_pass(&self) {
+        tracing::debug!("beginning a file statistics pass");
         self.netcdf_c_reason.reset();
     }
 
     async fn analyze(&self, record: &FileRecord) -> beacon_file_stats::Result<FileAnalysis> {
+        // The entry line is TRACE and the outcome below is DEBUG. A file that
+        // hangs shows an entry with no outcome, which is the only thing the entry
+        // line tells you that the outcome line does not.
+        tracing::trace!(path = record.path.as_str(), "analyzing file");
+        let started = std::time::Instant::now();
         let session = self.session()?;
         let state = session.state();
 
@@ -173,18 +179,28 @@ impl FileAnalyzer for FormatFileAnalyzer {
         let schema = format
             .infer_schema(&state, &store, std::slice::from_ref(&object))
             .await
-            .map_err(|e| {
-                FileStatsError::Format(format!("schema for {}: {e}", record.path))
-            })?;
+            .map_err(|e| FileStatsError::Format(format!("schema for {}: {e}", record.path)))?;
 
         let statistics = format
             .infer_stats(&state, &store, schema.clone(), &object)
             .await
-            .map_err(|e| {
-                FileStatsError::Format(format!("statistics for {}: {e}", record.path))
-            })?;
+            .map_err(|e| FileStatsError::Format(format!("statistics for {}: {e}", record.path)))?;
 
-        Ok(to_analysis(&format_name, &schema, &statistics))
+        let analysis = to_analysis(&format_name, &schema, &statistics);
+        tracing::debug!(
+            path = record.path.as_str(),
+            format = format_name.as_str(),
+            rows = analysis.num_rows,
+            // `columns` counts the columns that got a range; `fields` counts the
+            // columns the file has. `columns = 0` against a non-zero `fields` is
+            // the signature of a reader that records no ranges, so the file
+            // analyzes cleanly and prunes nothing.
+            columns = analysis.columns.len(),
+            fields = schema.fields().len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "analyzed a file"
+        );
+        Ok(analysis)
     }
 }
 
@@ -243,14 +259,12 @@ fn resolve_format(
         FileStatsError::Format(format!("no file extension on {}", object.location))
     })?;
 
-    let factory = try_file_format_factory_ext(&state, &key).ok_or_else(|| {
-        FileStatsError::Format(format!("no format registered for '{key}'"))
-    })?;
+    let factory = try_file_format_factory_ext(&state, &key)
+        .ok_or_else(|| FileStatsError::Format(format!("no format registered for '{key}'")))?;
     let name = factory.file_format_name();
 
-    let listing = try_listing_factory_from_session(&state).ok_or_else(|| {
-        FileStatsError::Format("the session has no listing factory".to_string())
-    })?;
+    let listing = try_listing_factory_from_session(&state)
+        .ok_or_else(|| FileStatsError::Format("the session has no listing factory".to_string()))?;
     let url = ListingTableUrl::parse(format!("{}{}", datasets_url.as_str(), object.location))
         .map_err(|e| FileStatsError::Format(format!("bad listing url: {e}")))?;
 
@@ -346,7 +360,6 @@ fn to_column_stat(
     ))
 }
 
-
 // ── the background service ──────────────────────────────────────────────────
 
 /// Shared, late-filled handle to the service, registered as a session extension
@@ -384,7 +397,9 @@ pub struct FileStatsService {
     session: SessionCell,
     datasets_url: ObjectStoreUrl,
     config: FileStatsConfig,
-    task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The timer, and the startup collection when one was asked for. Both are
+    /// aborted on drop.
+    tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl FileStatsService {
@@ -412,7 +427,7 @@ impl FileStatsService {
             session,
             datasets_url,
             config,
-            task: parking_lot::Mutex::new(None),
+            tasks: parking_lot::Mutex::new(Vec::new()),
         })
     }
 
@@ -420,11 +435,21 @@ impl FileStatsService {
         &self.store
     }
 
-    /// Start the timer. The first pass runs one interval from now, so startup is
-    /// not competing with a backfill.
+    /// Start the timer, and the startup collection when `on_startup` asks for
+    /// one.
+    ///
+    /// The timer's first pass runs one interval from now, so startup is not
+    /// competing with a backfill by default. `on_startup` is the opt-out of that
+    /// trade: it collects immediately instead, which is what a short-lived or
+    /// frequently restarted server needs, since the interval starts again on
+    /// every boot.
     pub fn start(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         let interval = Duration::from_secs(self.config.interval_secs.max(1));
+        tracing::debug!(
+            interval_secs = interval.as_secs(),
+            "file statistics timer started; the first pass runs one interval from now"
+        );
         let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.tick().await; // consume the immediate first tick
@@ -438,7 +463,77 @@ impl FileStatsService {
                 }
             }
         });
-        *self.task.lock() = Some(handle);
+        self.tasks.lock().push(handle);
+
+        if self.config.on_startup {
+            self.collect_on_startup();
+        }
+    }
+
+    /// Collect now, in the background, until the queue is empty.
+    ///
+    /// What `BEACON_FILE_STATS_ON_STARTUP` turns on. It drains rather than taking
+    /// one batch: a restart is exactly when the store is behind, and a single
+    /// `batch_files` pass would leave a large archive short until the timer had
+    /// ticked its way through the rest.
+    ///
+    /// Spawned, never awaited, so boot is not held up by it. Queries run against
+    /// whatever statistics exist meanwhile; a file with none is read, as it was
+    /// before the subsystem existed.
+    fn collect_on_startup(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let handle = tokio::spawn(async move {
+            tracing::info!("collecting file statistics at startup");
+
+            // Discover once, not once per batch: a listing of a large store is
+            // the expensive half, and nothing new appears mid-backfill that the
+            // timer will not pick up afterwards.
+            let discovered = {
+                let Some(service) = weak.upgrade() else {
+                    return; // the runtime went away before this got a turn
+                };
+                match service.discover().await {
+                    Ok(discovered) => discovered,
+                    Err(error) => {
+                        tracing::warn!(%error, "startup file statistics discovery failed");
+                        return;
+                    }
+                }
+            };
+
+            // Then drain, one batch at a time, holding the service only for the
+            // batch. A backfill runs for minutes; keeping the handle across all
+            // of it would stop a dropped runtime from ever tearing this down.
+            let mut analyzed = 0;
+            let mut failed = 0;
+            let mut segments = 0;
+            for _ in 0..MAX_ON_DEMAND_PASSES {
+                let Some(service) = weak.upgrade() else {
+                    return;
+                };
+                match service.collector.run_once().await {
+                    Ok(report) if report.is_idle() => break,
+                    Ok(report) => {
+                        analyzed += report.analyzed;
+                        failed += report.failed;
+                        segments += report.segments;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "startup file statistics collection failed");
+                        break;
+                    }
+                }
+            }
+
+            tracing::info!(
+                discovered,
+                analyzed,
+                failed,
+                segments,
+                "startup file statistics collection finished"
+            );
+        });
+        self.tasks.lock().push(handle);
     }
 
     /// Run to completion now, rather than waiting for the timer.
@@ -456,6 +551,7 @@ impl FileStatsService {
         prefix: Option<&str>,
         force: bool,
     ) -> anyhow::Result<AnalyzePass> {
+        tracing::debug!(prefix = ?prefix, force, "ANALYZE FILES started");
         let requeued = if force {
             self.store.registry().requeue(prefix)?
         } else {
@@ -495,7 +591,17 @@ impl FileStatsService {
             segments: report.segments,
             pending: self.store.registry().num_pending().unwrap_or(0),
         };
-        if !report.is_idle() || discovered > 0 {
+        // `discovered` counts every file the listing reported, not just the new
+        // ones, so it is above zero on every pass over a store that holds
+        // anything. Only work is worth an INFO line; an idle tick is a DEBUG
+        // heartbeat, which is what tells you the timer is still running.
+        if report.is_idle() {
+            tracing::debug!(
+                discovered = pass.discovered,
+                pending = pass.pending,
+                "file statistics pass found nothing to do"
+            );
+        } else {
             tracing::info!(
                 discovered = pass.discovered,
                 analyzed = pass.analyzed,
@@ -554,6 +660,12 @@ impl FileStatsService {
             total += batch.len();
             self.store.registry().intern_files(&batch)?;
         }
+        tracing::debug!(
+            listed = total,
+            scan_prefix,
+            pending = self.store.registry().num_pending().unwrap_or(0),
+            "listed the datasets store"
+        );
         Ok(total)
     }
 
@@ -564,7 +676,7 @@ impl FileStatsService {
 
 impl Drop for FileStatsService {
     fn drop(&mut self) {
-        if let Some(task) = self.task.lock().take() {
+        for task in self.tasks.lock().drain(..) {
             task.abort();
         }
     }

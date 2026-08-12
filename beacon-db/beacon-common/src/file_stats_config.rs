@@ -13,6 +13,15 @@ pub struct FileStatsConfig {
     pub enable: bool,
     /// Seconds between passes.
     pub interval_secs: u64,
+    /// Collect at startup instead of waiting for the first tick.
+    ///
+    /// The timer's first pass lands one whole interval after boot, so a fresh
+    /// server holds no statistics for 15 minutes by default — and a server that
+    /// restarts more often than the interval never collects at all, because the
+    /// interval starts again on each boot. This runs a pass as soon as the
+    /// runtime is up, in the background, and keeps going until the queue is
+    /// empty. The timer takes over from there.
+    pub on_startup: bool,
     /// Files analyzed at once.
     ///
     /// Analysis is spawned, so this is real parallelism. It is also a background
@@ -54,6 +63,9 @@ impl Default for FileStatsConfig {
             // through every file to store nothing.
             enable: false,
             interval_secs: 900,
+            // Off, so enabling statistics alone does not turn boot into a
+            // backfill on an archive that has never been analyzed.
+            on_startup: false,
             concurrency: default_concurrency(),
             batch_files: 10_000,
             target_group_files: 10_000,
