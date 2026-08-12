@@ -1161,7 +1161,10 @@ mod reader_backend_tests {
         // Comfortably over the partitioner's minimum split size.
         const FILE_SIZE: u64 = 64 * 1024 * 1024;
 
-        for (backend, splits) in [(ReaderBackend::NetcdfC, false), (ReaderBackend::Oxcdf, true)] {
+        for (backend, splits) in [
+            (ReaderBackend::NetcdfC, false),
+            (ReaderBackend::Oxcdf, true),
+        ] {
             let table_schema =
                 TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
             let source = NetCDFSource::new(access_on(backend), None, table_schema);
@@ -1196,7 +1199,10 @@ mod reader_backend_tests {
                             next = range.end;
                         }
                     }
-                    assert_eq!(next as u64, FILE_SIZE, "{backend:?} shares must cover the file");
+                    assert_eq!(
+                        next as u64, FILE_SIZE,
+                        "{backend:?} shares must cover the file"
+                    );
                 }
             }
         }

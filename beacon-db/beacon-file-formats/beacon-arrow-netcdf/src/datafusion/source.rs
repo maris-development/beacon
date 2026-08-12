@@ -6,10 +6,8 @@ use arrow::{
 };
 use beacon_nd_array::{
     arrow::{
-        batch::any_dataset_as_record_batch_stream_split,
-        metrics::DatasetReadMetrics,
-        nd_provider::any_dataset_as_encoded_stream_split,
-        pushdown_filter::PushdownFilter,
+        batch::any_dataset_as_record_batch_stream_split, metrics::DatasetReadMetrics,
+        nd_provider::any_dataset_as_encoded_stream_split, pushdown_filter::PushdownFilter,
         split::ChunkSplit,
     },
     projection::DatasetProjection,

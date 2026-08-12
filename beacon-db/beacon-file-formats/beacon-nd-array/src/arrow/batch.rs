@@ -892,7 +892,10 @@ mod tests {
             let ragged = AnyDataset::try_from_dataset(make_ragged().await)
                 .await
                 .unwrap();
-            assert!(matches!(ragged, AnyDataset::Ragged { .. }), "fixture is ragged");
+            assert!(
+                matches!(ragged, AnyDataset::Ragged { .. }),
+                "fixture is ragged"
+            );
 
             let whole: Vec<RecordBatch> =
                 any_dataset_as_record_batch_stream(ragged.clone(), batch_size, None, None)
