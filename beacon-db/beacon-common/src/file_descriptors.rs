@@ -24,10 +24,15 @@ pub fn max_open_fd() -> u64 {
     u64::MAX
 }
 
+/// How many files may be open at once during schema inference.
+///
+/// Half the descriptor budget, capped at 128. The cap matters more than the
+/// halving: a macOS process may hold 61 440 descriptors, and "half of that"
+/// let a 100 000-file glob exhaust the table and fail with EMFILE, while
+/// beyond ~a hundred concurrent opens the work is disk-bound anyway.
 pub fn file_open_parallelism() -> usize {
-    let max = max_open_fd() as usize / 2; // use half of the available file descriptors for parallelism to be safe
-    //Make sure max is at least 1 to avoid zero parallelism
-    std::cmp::max(max, 1)
+    let max = max_open_fd() as usize / 2;
+    max.clamp(1, 128)
 }
 
 #[cfg(test)]
@@ -46,5 +51,9 @@ mod tests {
             parallelism <= limit.max(2) / 2 || parallelism == 1,
             "parallelism {parallelism} exceeds half of the {limit} descriptor budget"
         );
+        // And the cap holds however large the budget is: a 61 440-descriptor
+        // macOS budget once meant 30 720 concurrent opens, which is how a
+        // 100 000-file glob used to die with EMFILE.
+        assert!(parallelism <= 128, "parallelism {parallelism} exceeds the cap");
     }
 }

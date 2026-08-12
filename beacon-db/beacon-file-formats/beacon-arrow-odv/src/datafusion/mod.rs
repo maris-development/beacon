@@ -14,7 +14,7 @@ use datafusion::{
     physical_plan::{sorts::sort::SortExec, ExecutionPlan},
     prelude::Expr,
 };
-use futures::{future::try_join_all, TryStreamExt};
+use futures::TryStreamExt;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 
 use crate::datafusion::{sink::OdvSink, source::OdvSource};
@@ -144,39 +144,56 @@ impl FileFormat for OdvFormat {
 
     async fn infer_schema(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let schema_futures = objects.iter().map(|object| {
-            let store = Arc::clone(store);
-            let object = object.clone();
+        use futures::StreamExt;
 
-            let compression = Self::infer_compression(&object);
-            async move {
-                let stream = store
-                    .get(&object.location)
-                    .await?
-                    .into_stream()
-                    .map_err(Into::into);
+        let schema_futures: Vec<_> = objects
+            .iter()
+            .map(|object| {
+                let store = Arc::clone(store);
+                let object = object.clone();
 
-                let uncompressed_stream = compression.convert_stream(Box::pin(stream))?;
+                let compression = Self::infer_compression(&object);
+                async move {
+                    let stream = store
+                        .get(&object.location)
+                        .await?
+                        .into_stream()
+                        .map_err(Into::into);
 
-                let schema_mapper =
-                    AsyncOdvDecoder::decode_schema_mapper(uncompressed_stream.map_err(Into::into))
-                        .await
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Failed to decode schema: {}",
-                                e
-                            ))
-                        })?;
+                    let uncompressed_stream = compression.convert_stream(Box::pin(stream))?;
 
-                Ok::<_, datafusion::error::DataFusionError>(schema_mapper.output_schema())
-            }
-        });
+                    let schema_mapper = AsyncOdvDecoder::decode_schema_mapper(
+                        uncompressed_stream.map_err(Into::into),
+                    )
+                    .await
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to decode schema: {}",
+                            e
+                        ))
+                    })?;
 
-        let schemas = try_join_all(schema_futures).await?;
+                    Ok::<_, datafusion::error::DataFusionError>(schema_mapper.output_schema())
+                }
+            })
+            .collect();
+
+        // Bounded: each open holds a descriptor until its schema is read, and
+        // `try_join_all` would open every file in the listing at once. See the
+        // same fix in `beacon_arrow_netcdf`, and issue #361.
+        let width = state
+            .config_options()
+            .execution
+            .meta_fetch_concurrency
+            .max(1);
+        let schemas: Vec<SchemaRef> = futures::stream::iter(schema_futures)
+            .buffered(width)
+            .try_collect()
+            .await?;
 
         let super_schema = super_typing::super_type_schema(&schemas).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))

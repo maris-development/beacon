@@ -611,6 +611,59 @@ mod tests {
         assert_eq!(rows, 7);
     }
 
+    /// The same store through [`FastObjectTable`], which is what `read_atlas`
+    /// builds.
+    ///
+    /// An atlas store is a directory, but the reader never opens one: it takes
+    /// the `atlas.json` marker and resolves the store from there, reading every
+    /// dataset when no slice is attached. So the table hands it that object like
+    /// any other file. Every other test here goes through `ListingTable`, which
+    /// would not notice if that stopped being true.
+    #[tokio::test]
+    async fn reads_all_datasets_through_the_fast_object_table() {
+        use beacon_datafusion_ext::fast_object::FastObjectTable;
+        use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
+        use datafusion::execution::SessionStateBuilder;
+        use datafusion::prelude::SessionConfig;
+
+        let _ = test_store().await;
+        let store_dir = std::env::temp_dir()
+            .join("beacon-arrow-atlas-datasets")
+            .join(super::test_support::FIXTURE_DIR);
+        let store_dir = store_dir.to_string_lossy().replace('\\', "/");
+        let url = ListingTableUrl::parse(format!("file:///{store_dir}/")).unwrap();
+
+        let state = SessionStateBuilder::new()
+            .with_config(
+                SessionConfig::new()
+                    .with_target_partitions(4)
+                    .with_extension(ArrowTypeWidening::default_extension()),
+            )
+            .with_default_features()
+            .build();
+        let ctx = SessionContext::new_with_state(state);
+
+        let table = FastObjectTable::try_new(
+            &ctx.state(),
+            Arc::new(AtlasFormat::default()),
+            vec![url],
+        )
+        .await
+        .expect("an atlas store registers as a table");
+        ctx.register_table("atlas_fast", Arc::new(table)).unwrap();
+
+        let batches = ctx
+            .sql("SELECT temperature FROM atlas_fast")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        // The same winter (4) + summer (3) values the ListingTable path reads.
+        assert_eq!(rows, 7);
+    }
+
     #[tokio::test]
     async fn projection_prunes_columns_through_datafusion() {
         let ctx = SessionContext::new();

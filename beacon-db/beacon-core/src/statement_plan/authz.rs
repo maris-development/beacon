@@ -6,9 +6,8 @@
 //! check in [`validate_query_plan`](super::validate_query_plan).
 
 use beacon_auth::{AuthContext, AuthIdentity, ConcreteTarget, Privilege};
-use beacon_common::super_table::SuperListingTable;
 use beacon_datafusion_ext::{
-    file_collection::FileCollection,
+    fast_object::FastObjectTable,
     table_ext::{ExternalTable, INTERNAL_TABLE_PREFIX},
 };
 use datafusion::{
@@ -142,13 +141,10 @@ fn scan_targets(scan: &TableScan, session_ctx: &SessionContext) -> Vec<ConcreteT
         return vec![];
     };
 
-    // A `read_*` table function resolves to a `SuperListingTable` over its glob paths.
-    if let Some(table) = provider.as_any().downcast_ref::<SuperListingTable>() {
+    // A `read_*` table function, and the JSON query API's ad-hoc multi-glob
+    // scans, both resolve to a `FastObjectTable` over their glob paths.
+    if let Some(table) = provider.as_any().downcast_ref::<FastObjectTable>() {
         return paths_of(table.table_paths());
-    }
-    // Multi-glob ad-hoc scans merge their schemas behind a `FileCollection`.
-    if let Some(collection) = provider.as_any().downcast_ref::<FileCollection>() {
-        return paths_of(collection.table_paths());
     }
     // A single-glob `read_*` (and external tables) resolve to a self-refreshing `ExternalTable`
     // wrapping a `ListingTable`.
@@ -221,8 +217,8 @@ mod tests {
         let ctx =
             SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
         let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
-        let batch =
-            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))]).unwrap();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))])
+            .unwrap();
         let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
         ctx.register_table(name, Arc::new(table)).unwrap();
         ctx
@@ -247,10 +243,15 @@ mod tests {
         let plan = plan_for(&ctx, "SELECT * FROM observations").await;
 
         let denied = auth_with_reader_grant(None).await;
-        assert!(authorize_logical_plan(&plan, &ctx, &denied, &identity(&["reader"]), true).is_err());
+        assert!(
+            authorize_logical_plan(&plan, &ctx, &denied, &identity(&["reader"]), true).is_err()
+        );
 
-        let allowed = auth_with_reader_grant(Some(PrivilegeRule::new(Privilege::Select, None))).await;
-        assert!(authorize_logical_plan(&plan, &ctx, &allowed, &identity(&["reader"]), true).is_ok());
+        let allowed =
+            auth_with_reader_grant(Some(PrivilegeRule::new(Privilege::Select, None))).await;
+        assert!(
+            authorize_logical_plan(&plan, &ctx, &allowed, &identity(&["reader"]), true).is_ok()
+        );
     }
 
     #[tokio::test]
