@@ -59,11 +59,38 @@ impl Backend {
 /// Canonical, because `object_store::path::Path` rejects a `..` segment and
 /// this one reaches into a sibling crate.
 fn netcdf_file(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../beacon-arrow-netcdf/test_files")
         .join(name)
         .canonicalize()
-        .unwrap_or_else(|e| panic!("the bundled netCDF fixture {name} exists: {e}"))
+        .unwrap_or_else(|e| panic!("the bundled netCDF fixture {name} exists: {e}"));
+
+    strip_verbatim_prefix(path)
+}
+
+/// Drop the Windows verbatim prefix from a canonical path.
+///
+/// `canonicalize` returns `\\?\C:\...` on Windows, and `ListingTableUrl` cannot
+/// turn one of those back into a file path: it parses, then panics in
+/// `to_file_path`. Every test that registers a table from a canonical path needs
+/// this. On every other platform, and on a UNC path, it does nothing.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path;
+    };
+    // Only the drive form (`C:\...`) is safe to unwrap. `\\?\UNC\server\share`
+    // would lose its leading slashes and stop naming the same place.
+    let mut chars = rest.chars();
+    let is_drive = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && chars.next() == Some('\\');
+
+    if is_drive {
+        PathBuf::from(rest.to_string())
+    } else {
+        path
+    }
 }
 
 /// The absolute path of a bundled plain-HDF5 file.
@@ -124,6 +151,24 @@ async fn register(ctx: &SessionContext, table: &str, backend: Backend, path: &st
     ctx.register_table(table, Arc::new(table_provider)).unwrap();
 }
 
+/// A session that splits one file across `target_partitions` partitions.
+///
+/// The bundled files are well under the partitioner's 10 MB default minimum, so
+/// the minimum comes down. A real deployment leaves it alone: splitting a small
+/// file costs an open per share and returns little.
+fn splitting_session(target_partitions: usize) -> SessionContext {
+    let mut config = SessionConfig::new()
+        .with_target_partitions(target_partitions)
+        .with_extension(beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension());
+    config.options_mut().optimizer.repartition_file_min_size = 1;
+
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_default_features()
+        .build();
+    SessionContext::new_with_state(state)
+}
+
 /// Run `sql` and concatenate the result into one batch.
 ///
 /// A query that matches nothing still gives a batch, with the right schema and
@@ -177,6 +222,83 @@ async fn both_backends_return_the_same_rows_for_a_gridded_file() {
     assert_eq!(
         rust,
         collect(&ctx, "SELECT analysed_sst, lat, lon, time FROM netcdf_c").await
+    );
+}
+
+// ── Splitting one file across partitions ────────────────────────────────────
+
+/// One gridded file scans in several partitions, and returns the same rows it
+/// returns in one.
+///
+/// The partition count is the point of the feature. The row check is the guard
+/// on it: `count(*)` catches a share that overlapped another or a gap between
+/// two, and `min`/`max` catch a share that read the wrong region. None of those
+/// raise an error on their own.
+///
+/// Only the Rust reader gets here. A table on netcdf-c is served by
+/// `NetCDFSource`, which declines the split for its own reasons.
+#[tokio::test]
+async fn one_gridded_file_splits_and_returns_the_same_rows() {
+    use datafusion::physical_plan::ExecutionPlanProperties;
+
+    const QUERY: &str = r#"SELECT count(*), count(analysed_sst),
+                                  min(analysed_sst), max(analysed_sst)
+                           FROM t"#;
+
+    let whole = session();
+    register(&whole, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+
+    let split = splitting_session(4);
+    register(&split, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+
+    let plan = split
+        .sql("SELECT analysed_sst FROM t")
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    assert_eq!(
+        plan.output_partitioning().partition_count(),
+        4,
+        "one file should scan in 4 partitions:\n{}",
+        datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+    );
+
+    let split_summary = format!("{:?}", collect(&split, QUERY).await.columns());
+    let whole_summary = format!("{:?}", collect(&whole, QUERY).await.columns());
+    assert_eq!(split_summary, whole_summary);
+}
+
+/// The same for a ragged file, which splits its batch plan rather than a chunk
+/// grid.
+#[tokio::test]
+async fn one_ragged_file_splits_and_returns_the_same_rows() {
+    use datafusion::physical_plan::ExecutionPlanProperties;
+
+    let whole = session();
+    register(&whole, "t", Backend::Rust, &netcdf_file(WOD_FILE)).await;
+
+    let split = splitting_session(4);
+    register(&split, "t", Backend::Rust, &netcdf_file(WOD_FILE)).await;
+
+    let plan = split
+        .sql("SELECT * FROM t")
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    assert!(
+        plan.output_partitioning().partition_count() > 1,
+        "a ragged file should scan in more than one partition:\n{}",
+        datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+    );
+
+    let rows = collect(&split, "SELECT count(*) FROM t").await;
+    assert_eq!(
+        format!("{:?}", rows.columns()),
+        format!("{:?}", collect(&whole, "SELECT count(*) FROM t").await.columns())
     );
 }
 
