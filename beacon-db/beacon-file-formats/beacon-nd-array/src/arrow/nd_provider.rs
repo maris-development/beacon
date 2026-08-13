@@ -115,51 +115,6 @@ pub(crate) async fn read_nd_chunk(
     NdRecordBatch::try_new(schema, columns, target)
 }
 
-/// Stream a dataset as encoded batches, reading `in_flight` chunks at once.
-///
-/// [`any_dataset_as_encoded_stream`] reads one chunk at a time, which suits a
-/// caller that is one of several partitions each reading its own share. A shared
-/// stream has one reader for every partition, so the concurrency has to come
-/// from inside it instead.
-///
-/// A ragged dataset falls back to the sequential stream. Its batch plan is built
-/// from cumulative offsets that the plan itself depends on, so the reads are not
-/// independent the way chunk reads are.
-pub fn any_dataset_as_encoded_stream_concurrent(
-    dataset: AnyDataset,
-    batch_size: usize,
-    in_flight: usize,
-) -> BoxStream<'static, Result<RecordBatch>> {
-    let AnyDataset::Regular(regular) = dataset else {
-        return any_dataset_as_encoded_stream(dataset, batch_size);
-    };
-
-    let ChunkGrid {
-        dims: max_dims,
-        chunks,
-    } = match chunk_grid(&regular, batch_size) {
-        Ok(grid) => grid,
-        Err(e) => return futures::stream::once(async move { Err(exec_err(e)) }).boxed(),
-    };
-
-    let arrays = Arc::new(regular.arrays);
-    let max_dims = Arc::new(max_dims);
-    let schema = build_dataset_schema(&arrays);
-
-    futures::stream::iter(chunks)
-        .map(move |subset| {
-            let arrays = arrays.clone();
-            let max_dims = max_dims.clone();
-            let schema = schema.clone();
-            async move {
-                let nd = read_nd_chunk(&arrays, &max_dims, schema, subset).await?;
-                encode_nd_record_batch(&nd)
-            }
-        })
-        .buffered(in_flight.max(1))
-        .boxed()
-}
-
 /// Chunk a regular [`Dataset`] in C-order into a stream of un-broadcast
 /// [`NdRecordBatch`]es — each variable kept on its own dimensions.
 pub fn dataset_as_nd_stream(
