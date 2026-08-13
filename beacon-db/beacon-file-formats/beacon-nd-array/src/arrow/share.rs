@@ -51,9 +51,11 @@ use std::ops::Range;
 
 use crate::array::subset::ArraySubset;
 use crate::arrow::batch::{
-    ChunkGrid, RaggedPlan, build_dataset_schema, chunk_grid, plan_ragged_read, read_ragged_range,
+    ChunkGrid, RaggedPlan, build_dataset_schema, chunk_grid, compute_predicate_masks,
+    plan_ragged_read, read_chunk, read_ragged_range,
 };
 use crate::arrow::nd_provider::read_nd_chunk;
+use crate::arrow::pushdown_filter::PushdownFilter;
 use crate::dataset::AnyDataset;
 
 /// The work of one file, shared by the partitions reading it.
@@ -117,6 +119,22 @@ impl NdFileShare {
     }
 }
 
+/// Which batches a shared read produces.
+///
+/// A scan is one or the other throughout, so the mode is fixed when the queue is
+/// filled. The first partition to arrive chooses it, and every partition of a
+/// scan would choose the same, so whichever arrives first is the right one.
+#[derive(Debug, Clone)]
+pub enum ReadMode {
+    /// `beacon.nd`-encoded batches, which an `NdSourceExec` decodes above the
+    /// scan. This is what a column read produces.
+    Encoded,
+    /// Flat, broadcast batches. This is what the `COUNT(*)` path reads, and the
+    /// only path that prunes chunks, so it carries the predicate that prunes
+    /// them.
+    Flat(Option<PushdownFilter>),
+}
+
 /// One unit of work: what a partition reads for one pop.
 ///
 /// The two dataset shapes divide differently, so the queue carries whichever
@@ -141,6 +159,10 @@ enum Work {
 pub struct SharedRead {
     queue: ArrayQueue<Work>,
     read: ReadKind,
+    mode: ReadMode,
+    /// Per-dimension keep masks, computed once for the file rather than once per
+    /// partition. Empty unless the mode is [`ReadMode::Flat`] with a predicate.
+    dim_masks: Arc<Vec<(String, Vec<bool>)>>,
 }
 
 #[derive(Debug)]
@@ -161,11 +183,20 @@ impl SharedRead {
     /// A regular dataset is cut on its chunk grid, which is the same grid an
     /// unshared read walks. A ragged one is cut on its batch plan, which is the
     /// same plan an unshared read builds.
-    pub async fn build(dataset: AnyDataset, batch_size: usize) -> Result<Arc<Self>> {
+    pub async fn build(
+        dataset: AnyDataset,
+        batch_size: usize,
+        mode: ReadMode,
+    ) -> Result<Arc<Self>> {
+        let predicate = match &mode {
+            ReadMode::Flat(predicate) => predicate.clone(),
+            ReadMode::Encoded => None,
+        };
+
         let regular = match dataset {
             AnyDataset::Regular(regular) => regular,
             AnyDataset::Ragged { ragged, .. } => {
-                let plan = plan_ragged_read(ragged, batch_size, None)
+                let plan = plan_ragged_read(ragged, batch_size, predicate)
                     .await
                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
 
@@ -179,6 +210,8 @@ impl SharedRead {
                     read: ReadKind::Ragged {
                         plan: Arc::new(plan),
                     },
+                    mode,
+                    dim_masks: Arc::new(Vec::new()),
                 }));
             }
         };
@@ -197,6 +230,12 @@ impl SharedRead {
         let arrays = Arc::new(regular.arrays);
         let schema = build_dataset_schema(&arrays);
 
+        // Computed once for the file. An unshared read computes these per
+        // partition, which reads the coordinate arrays once per partition.
+        let dim_masks = compute_predicate_masks(&arrays, predicate)
+            .await
+            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+
         Ok(Arc::new(Self {
             queue,
             read: ReadKind::Grid {
@@ -204,6 +243,8 @@ impl SharedRead {
                 dims: Arc::new(dims),
                 schema,
             },
+            mode,
+            dim_masks: Arc::new(dim_masks),
         }))
     }
 
@@ -242,19 +283,37 @@ impl SharedRead {
                 let arrays = arrays.clone();
                 let dims = dims.clone();
                 let schema = schema.clone();
+                let masks = self.dim_masks.clone();
+                let flat = matches!(self.mode, ReadMode::Flat(_));
                 futures::stream::once(async move {
+                    if flat {
+                        // The flat path prunes: a chunk whose mask is all false
+                        // holds nothing the query wants, and is skipped.
+                        return read_chunk(&arrays, subset, schema, &dims, &masks)
+                            .await
+                            .map_err(|e| DataFusionError::Execution(e.to_string()));
+                    }
                     let nd = read_nd_chunk(&arrays, &dims, schema, subset).await?;
-                    beacon_datafusion_ext::nd::encode_nd_record_batch(&nd)
+                    beacon_datafusion_ext::nd::encode_nd_record_batch(&nd).map(Some)
                 })
+                .filter_map(|batch| futures::future::ready(batch.transpose()))
                 .boxed()
             }
             (Work::Ragged(range), ReadKind::Ragged { plan }) => {
                 let plan = plan.clone();
+                // A ragged read is flat already, and its plan applied the
+                // predicate when it chose which casts survive, so there is
+                // nothing left to prune here.
+                let encode = matches!(self.mode, ReadMode::Encoded);
                 futures::stream::once(async move {
                     let flat = read_ragged_range(&plan, range)
                         .await
                         .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-                    beacon_datafusion_ext::nd::encode_flat_batch_as_nd(&flat)
+                    if encode {
+                        beacon_datafusion_ext::nd::encode_flat_batch_as_nd(&flat)
+                    } else {
+                        Ok(flat)
+                    }
                 })
                 .boxed()
             }
@@ -322,7 +381,7 @@ mod tests {
             let source = source.clone();
             set.spawn(async move {
                 let shared = share
-                    .join(|| async move { SharedRead::build(source, batch_size).await })
+                    .join(|| async move { SharedRead::build(source, batch_size, ReadMode::Encoded).await })
                     .await
                     .expect("the share admits");
                 drain(shared.stream()).await
@@ -434,7 +493,7 @@ mod tests {
 
         // Build the plan first, so the test can say how many ranges there were
         // to divide before the partitions take them.
-        let shared = SharedRead::build(source.clone(), 8)
+        let shared = SharedRead::build(source.clone(), 8, ReadMode::Encoded)
             .await
             .expect("the plan builds");
         let ranges = shared.remaining();
@@ -450,6 +509,87 @@ mod tests {
             rows.iter().filter(|read| **read > 0).count() > 1,
             "more than one partition must read: {rows:?}"
         );
+    }
+
+/// Drain a flat stream into the rows it read.
+    ///
+    /// A flat batch is already broadcast, so it needs no decoding. This is what
+    /// the `COUNT(*)` path counts.
+    async fn drain_flat(stream: BoxStream<'static, Result<RecordBatch>>) -> usize {
+        let batches: Vec<RecordBatch> = stream.try_collect().await.unwrap();
+        batches.iter().map(|batch| batch.num_rows()).sum()
+    }
+
+    /// The partitions of a file count its rows once between them.
+    ///
+    /// `COUNT(*)` reads through the flat mode, which never decodes an nd array
+    /// and so cannot inherit the division from the decode. A file every
+    /// partition holds would be counted once per partition if this mode did not
+    /// take its work from the same queue: the answer would grow with
+    /// `target_partitions`, silently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_partitions_of_a_share_count_its_rows_once() {
+        const ROWS: usize = 10_000;
+
+        for consumers in [1_usize, 2, 4, 8] {
+            let share = Arc::new(NdFileShare::new(consumers));
+            let source = dataset(ROWS).await;
+
+            let mut set = tokio::task::JoinSet::new();
+            for _ in 0..consumers {
+                let share = share.clone();
+                let source = source.clone();
+                set.spawn(async move {
+                    let shared = share
+                        .join(|| async move {
+                            SharedRead::build(source, 512, ReadMode::Flat(None)).await
+                        })
+                        .await
+                        .expect("the share admits");
+                    drain_flat(shared.stream()).await
+                });
+            }
+
+            let mut counted = 0;
+            while let Some(rows) = set.join_next().await {
+                counted += rows.expect("a partition finishes");
+            }
+            assert_eq!(
+                counted, ROWS,
+                "consumers={consumers}: every row counted exactly once"
+            );
+        }
+    }
+
+    /// A ragged file counts its rows once too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_partitions_of_a_ragged_share_count_its_rows_once() {
+        const CASTS: usize = 60;
+        const CONSUMERS: usize = 4;
+
+        let share = Arc::new(NdFileShare::new(CONSUMERS));
+        let (source, observations) = ragged_dataset(CASTS).await;
+
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..CONSUMERS {
+            let share = share.clone();
+            let source = source.clone();
+            set.spawn(async move {
+                let shared = share
+                    .join(
+                        || async move { SharedRead::build(source, 8, ReadMode::Flat(None)).await },
+                    )
+                    .await
+                    .expect("the share admits");
+                drain_flat(shared.stream()).await
+            });
+        }
+
+        let mut counted = 0;
+        while let Some(rows) = set.join_next().await {
+            counted += rows.expect("a partition finishes");
+        }
+        assert_eq!(counted, observations, "every observation counted once");
     }
 
     /// The partitions of one file read every row once between them.
@@ -511,7 +651,7 @@ mod tests {
                 let shared = share
                     .join(|| async move {
                         builds.fetch_add(1, Ordering::SeqCst);
-                        SharedRead::build(source, 512).await
+                        SharedRead::build(source, 512, ReadMode::Encoded).await
                     })
                     .await
                     .expect("the share admits");
@@ -566,7 +706,7 @@ mod tests {
         let shared = share
             .join(|| {
                 let source = source.clone();
-                async move { SharedRead::build(source, BATCH).await }
+                async move { SharedRead::build(source, BATCH, ReadMode::Encoded).await }
             })
             .await
             .expect("the share admits");
@@ -608,7 +748,7 @@ mod tests {
 
         let source = dataset(1_000).await;
         let second = share
-            .join(|| async move { SharedRead::build(source, 512).await })
+            .join(|| async move { SharedRead::build(source, 512, ReadMode::Encoded).await })
             .await
             .expect("the next caller builds again");
         assert_eq!(drain(second.stream()).await, 1_000);

@@ -596,7 +596,7 @@ pub(crate) fn build_dataset_schema(arrays: &IndexMap<String, Arc<dyn NdArrayD>>)
     ))
 }
 
-async fn compute_predicate_masks(
+pub(crate) async fn compute_predicate_masks(
     arrays: &IndexMap<String, Arc<dyn NdArrayD>>,
     predicate: Option<PushdownFilter>,
 ) -> anyhow::Result<Vec<(String, Vec<bool>)>> {
@@ -616,7 +616,7 @@ async fn compute_predicate_masks(
     Ok(dim_masks)
 }
 
-async fn read_chunk(
+pub(crate) async fn read_chunk(
     arrays: &IndexMap<String, Arc<dyn NdArrayD>>,
     subset: ArraySubset,
     schema: Arc<Schema>,
