@@ -35,6 +35,10 @@ where
     /// *numeric* units of the variable; it goes through the same CF arithmetic
     /// so a raw fill cell maps exactly onto the decoded fill, which the engine
     /// then nulls.
+    ///
+    /// A variable that declares no fill still gets one: [`NO_TIME`]. Without it
+    /// a NaN cell would decode to a timestamp nothing nulls, and reach a query
+    /// as a date in the year -292277.
     pub fn new(
         variable_name: String,
         inner_decoder: Arc<dyn VariableDecoder<T>>,
@@ -47,7 +51,9 @@ where
             inner_decoder,
             epoch,
             unit,
-            fill_value: raw_fill_value.map(|f| cf_offset_to_timestamp(f, epoch, unit)),
+            fill_value: raw_fill_value
+                .map(|f| cf_offset_to_timestamp(f, epoch, unit))
+                .or(Some(NO_TIME)),
         }
     }
 }
@@ -62,7 +68,12 @@ where
         extents: netcdf::Extents,
     ) -> anyhow::Result<ndarray::ArrayD<TimestampNanosecond>> {
         let array = self.inner_decoder.read(variable, extents)?;
-        let ts_array = convert_to_timestamp_nanoseconds(array.view(), self.epoch, self.unit);
+        let ts_array = convert_to_timestamp_nanoseconds(
+            array.view(),
+            self.epoch,
+            self.unit,
+            self.fill_value,
+        );
         Ok(ts_array)
     }
 
@@ -74,6 +85,19 @@ where
         &self.variable_name
     }
 }
+
+/// The timestamp of a CF offset that is not a time.
+///
+/// A CF time variable is numbers plus a rule for turning them into instants.
+/// NaN and the infinities have no instant to turn into, and `hifitime` refuses
+/// them by panicking, so they need an answer of their own before they reach it.
+///
+/// The value is unreachable as a real date -- `i64::MIN` nanoseconds before 1970
+/// is the year -292277 -- so nothing a file could legitimately hold collides
+/// with it. A decoder reports it as its fill value when the file declares none,
+/// which is what makes such a cell arrive at a query as null rather than as that
+/// date.
+pub(crate) const NO_TIME: TimestampNanosecond = TimestampNanosecond(i64::MIN);
 
 /// Convert one numeric CF time offset into a nanosecond timestamp.
 ///
@@ -88,7 +112,16 @@ pub(crate) fn cf_offset_to_timestamp<T>(
 where
     T: num_traits::cast::AsPrimitive<f64>,
 {
-    let time = epoch + (value.as_() * unit);
+    let offset = value.as_();
+
+    // `hifitime` panics on a non-finite `Duration` rather than returning an
+    // error, and this runs on a file's `_FillValue` at open, so a NaN fill would
+    // take down the worker of any request that only wanted a schema.
+    if !offset.is_finite() {
+        return NO_TIME;
+    }
+
+    let time = epoch + (offset * unit);
     TimestampNanosecond(time.to_unix(hifitime::Unit::Nanosecond).as_())
 }
 
@@ -96,15 +129,28 @@ where
 ///
 /// Shared with the [`oxcdf`](crate::oxcdf_reader) path, so both readers apply
 /// the same arithmetic.
+///
+/// `fill` is the variable's decoded fill value. A cell that is not a time takes
+/// it, so a NaN in a file that marks its gaps some other way still nulls
+/// alongside the gaps the file marked itself. With no fill it takes
+/// [`NO_TIME`], which every decoder reports as its fill.
 pub(crate) fn convert_to_timestamp_nanoseconds<T>(
     array: ndarray::ArrayViewD<T>,
     epoch: hifitime::Epoch,
     unit: hifitime::Unit,
+    fill: Option<TimestampNanosecond>,
 ) -> ndarray::ArrayD<TimestampNanosecond>
 where
     T: num_traits::cast::AsPrimitive<f64>,
 {
-    array.mapv(|v| cf_offset_to_timestamp(v, epoch, unit))
+    let absent = fill.unwrap_or(NO_TIME);
+    array.mapv(|v| {
+        if v.as_().is_finite() {
+            cf_offset_to_timestamp(v, epoch, unit)
+        } else {
+            absent
+        }
+    })
 }
 
 /// Parse a CF `units` (and optional `calendar`) attribute into a reference
@@ -164,6 +210,126 @@ mod tests {
             var.put_values(values, netcdf::Extents::All).unwrap();
         }
         tmp
+    }
+
+// ── non-finite offsets ─────────────────────────────────────────────────
+
+    /// A `_FillValue` of NaN must not bring the process down.
+    ///
+    /// This decodes at open, not at read, so it reaches any request that only
+    /// wants a schema. `hifitime` panics when it is asked to build a `Duration`
+    /// from a non-finite number, so a NaN fill took out the worker thread rather
+    /// than returning an error.
+    #[test]
+    fn a_nan_fill_value_does_not_panic() {
+        let inner = Arc::new(DefaultVariableDecoder::<f64>::new("time".to_string(), None));
+
+        let decoder = CFTimeVariableDecoder::new(
+            "time".to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Day,
+            Some(f64::NAN),
+        );
+
+        assert_eq!(
+            decoder.fill_value(),
+            Some(super::NO_TIME),
+            "a fill that is not a time decodes to the absent timestamp"
+        );
+    }
+
+    /// Infinity is not a time either.
+    #[test]
+    fn an_infinite_fill_value_does_not_panic() {
+        for fill in [f64::INFINITY, f64::NEG_INFINITY] {
+            let inner = Arc::new(DefaultVariableDecoder::<f64>::new("time".to_string(), None));
+            let decoder = CFTimeVariableDecoder::new(
+                "time".to_string(),
+                inner,
+                unix_epoch(),
+                hifitime::Unit::Day,
+                Some(fill),
+            );
+            assert_eq!(decoder.fill_value(), Some(super::NO_TIME), "fill={fill}");
+        }
+    }
+
+    /// A NaN *cell* nulls, rather than reaching a query as a date.
+    ///
+    /// A file that marks its gaps with NaN and declares no `_FillValue` is the
+    /// common case this covers: the cells decode to the absent timestamp, and
+    /// the decoder reports that as its fill so the engine nulls them.
+    #[test]
+    fn nan_cells_decode_to_the_absent_timestamp() {
+        let var_name = "time";
+        let tmp = write_nc_f64(var_name, &[0.0, f64::NAN, 2.0]);
+
+        let file = netcdf::open(tmp.path()).unwrap();
+        let variable = file.variable(var_name).unwrap();
+
+        let inner = Arc::new(DefaultVariableDecoder::<f64>::new(
+            var_name.to_string(),
+            None,
+        ));
+        let decoder = CFTimeVariableDecoder::new(
+            var_name.to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Day,
+            None,
+        );
+
+        let array = decoder
+            .read(&variable, netcdf::Extents::All)
+            .expect("CF time decoder failed");
+        let ts: Vec<i64> = array.iter().map(|x| x.0).collect();
+
+        assert_eq!(ts[0], 0);
+        assert_eq!(ts[1], super::NO_TIME.0, "a NaN cell has no timestamp");
+        assert!(
+            (ts[2] - NANOS_PER_DAY * 2).abs() <= MAX_NS_ERROR,
+            "the cells either side of it decode normally: {}",
+            ts[2]
+        );
+
+        assert_eq!(
+            decoder.fill_value(),
+            Some(super::NO_TIME),
+            "so the engine nulls it"
+        );
+    }
+
+    /// A NaN cell takes the file's own fill value when it declares one, so it
+    /// nulls alongside the cells the file marked itself.
+    #[test]
+    fn a_nan_cell_takes_the_declared_fill() {
+        let var_name = "time";
+        let tmp = write_nc_f64(var_name, &[0.0, f64::NAN, 99999.0]);
+
+        let file = netcdf::open(tmp.path()).unwrap();
+        let variable = file.variable(var_name).unwrap();
+
+        let inner = Arc::new(DefaultVariableDecoder::<f64>::new(
+            var_name.to_string(),
+            None,
+        ));
+        let decoder = CFTimeVariableDecoder::new(
+            var_name.to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Day,
+            Some(99999.0),
+        );
+
+        let array = decoder
+            .read(&variable, netcdf::Extents::All)
+            .expect("CF time decoder failed");
+        let ts: Vec<i64> = array.iter().map(|x| x.0).collect();
+        let fill = decoder.fill_value().expect("a declared fill").0;
+
+        assert_eq!(ts[1], fill, "the NaN cell nulls with the declared fill");
+        assert_eq!(ts[2], fill, "and so does the fill cell itself");
     }
 
     // ── days-since-epoch (f64) ─────────────────────────────────────────────
@@ -405,9 +571,18 @@ mod tests {
         );
     }
 
-    /// A variable with no `_FillValue` masks nothing.
+    /// A time variable that declares no `_FillValue` still reports one.
+    ///
+    /// This used to be `None`, on the principle that a variable which masks
+    /// nothing should mask nothing. A CF time variable is the exception: its
+    /// values can be NaN, NaN is not an instant, and without a fill to map it to
+    /// such a cell reaches a query as a date in the year -292277 rather than as
+    /// null. So it reports [`NO_TIME`], which no real date collides with.
+    ///
+    /// Nothing is masked that a file did not already leave empty: only a cell
+    /// that is not a number decodes to this.
     #[test]
-    fn no_fill_stays_none() {
+    fn a_time_variable_without_a_declared_fill_still_masks_nan() {
         let inner = Arc::new(DefaultVariableDecoder::<f64>::new("time".to_string(), None));
 
         let decoder = CFTimeVariableDecoder::new(
@@ -418,7 +593,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(decoder.fill_value(), None);
+        assert_eq!(decoder.fill_value(), Some(super::NO_TIME));
     }
 
     #[test]
