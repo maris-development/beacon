@@ -6,7 +6,7 @@ use arrow::{
 };
 use beacon_nd_array::{
     arrow::{
-        batch::any_dataset_as_record_batch_stream_split,
+        batch::{any_dataset_as_record_batch_stream, any_dataset_as_record_batch_stream_split},
         metrics::DatasetReadMetrics,
         nd_provider::{any_dataset_as_encoded_stream, any_dataset_as_encoded_stream_split},
         pushdown_filter::PushdownFilter,
@@ -46,8 +46,6 @@ use super::reader::{self, FileAccess, NetcdfInput, NetcdfReaderCache};
 /// pipeline via a [`FileOpener`].
 #[derive(Debug, Clone)]
 pub struct NetCDFSource {
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
-    /// How this scan reaches its files, and which reader opens them.
     access: FileAccess,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
@@ -61,7 +59,8 @@ pub struct NetCDFSource {
     /// The shares of this scan. Cloned, not copied, so every partition of a file
     /// reaches the same one.
     partitions_shared_map:
-        Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedRead>>>>>,
+        Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>>,
+    nd_encoded: bool,
 }
 
 impl NetCDFSource {
@@ -69,9 +68,9 @@ impl NetCDFSource {
         access: FileAccess,
         read_dimensions: Option<Vec<String>>,
         table_schema: TableSchema,
+        nd_encoded: bool,
     ) -> Self {
         Self {
-            schema_adapter_factory: None,
             access,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
@@ -81,6 +80,7 @@ impl NetCDFSource {
             cache: None,
             projection: None,
             partitions_shared_map: Arc::new(HashMap::new()),
+            nd_encoded,
         }
     }
 
@@ -107,7 +107,6 @@ impl FileSource for NetCDFSource {
         base_config: &FileScanConfig,
         partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
-        let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(NetCDFOpener::new(
@@ -116,12 +115,12 @@ impl FileSource for NetCDFSource {
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
-            file_schema,
             self.cache.clone(),
             self.execution_plan_metrics.clone(),
             partition,
             object_store,
             self.partitions_shared_map.clone(),
+            self.nd_encoded,
         )))
     }
 
@@ -183,10 +182,6 @@ impl FileSource for NetCDFSource {
         "netcdf"
     }
 
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
-    }
-
     fn projection(&self) -> Option<&ProjectionExprs> {
         self.projection.as_ref()
     }
@@ -229,6 +224,12 @@ impl FileSource for NetCDFSource {
     }
 }
 
+#[derive(Debug)]
+struct SharedDataset {
+    read: Arc<SharedRead>,
+    table_adapter: Arc<BatchAdapter>,
+}
+
 /// Opens a single NetCDF file and streams its contents as Arrow
 /// [`RecordBatch`]es via [`any_dataset_as_record_batch_stream`].
 struct NetCDFOpener {
@@ -236,8 +237,6 @@ struct NetCDFOpener {
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    pruning_predicate: Option<PruningPredicate>,
-    table_schema: SchemaRef,
     cache: Option<NetcdfReaderCache>,
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
@@ -248,7 +247,8 @@ struct NetCDFOpener {
     object_store: Arc<dyn object_store::ObjectStore>,
     /// The shares of this scan, so the partitions of a file find each other.
     partition_shares:
-        Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedRead>>>>>,
+        Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>>,
+    nd_encoded: bool,
 }
 
 impl NetCDFOpener {
@@ -259,54 +259,98 @@ impl NetCDFOpener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        table_schema: SchemaRef,
         cache: Option<NetcdfReaderCache>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
         object_store: Arc<dyn object_store::ObjectStore>,
         partition_shares: Arc<
-            HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedRead>>>>,
+            HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>,
         >,
+        nd_encoded: bool,
     ) -> Self {
-        let pruning_predicate = predicate
-            .as_ref()
-            .and_then(|pred| PruningPredicate::try_new(pred.clone(), table_schema.clone()).ok());
-
         Self {
             projected_schema,
             read_dimensions,
             batch_size,
             predicate,
-            pruning_predicate,
-            table_schema,
             cache,
             metrics,
             partition,
             access,
             object_store,
             partition_shares,
+            nd_encoded,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn read_shared(
-        shared_ref: Arc<tokio::sync::OnceCell<Arc<SharedRead>>>,
+        shared_ref: Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>,
         input: NetcdfInput,
         object: ObjectMeta,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         cache: Option<NetcdfReaderCache>,
-        metrics: Option<DatasetReadMetrics>,
+        _metrics: Option<DatasetReadMetrics>, // TODO: use this to record the read metrics for the shared dataset, not just the partition that built it.
         _predicate: Option<Arc<dyn PhysicalExpr>>, // TODO: use this to filter the stream when creating the dataset up front on coordinate arrays.
+        nd_encoded: bool,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         // The first partition to arrive builds the shared read and fills its queue. The rest wait for it to finish.
-        let share = shared_ref
-            .get_or_try_init::<datafusion::error::DataFusionError, _, _>(async move || todo!())
+        let share : Arc<SharedDataset> = shared_ref
+            .get_or_try_init::<datafusion::error::DataFusionError, _, _>(async move || {
+                        let dataset = Self::open_dataset(input, object, cache, read_dimensions.clone()).await?;
+                        let dataset_arrow_schema = Self::arrow_schema(&dataset)?;
+
+                        let projection = Self::find_projection(&dataset_arrow_schema, &projected_schema)?;
+
+                        let source_schema = if nd_encoded {
+                            Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+                                &dataset_arrow_schema.project(&projection)?,
+                            ))
+                        } else {
+                            Arc::new(dataset_arrow_schema.project(&projection)?)
+                        };
+
+                        if projection.is_empty() {
+                            todo!("COUNT(*) path: read the highest-dimensionality variable and emit zero-column batches with the correct row counts")
+                        }
+
+                        let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
+                        let projected_dataset =
+                            Self::project_any_dataset(dataset, &dataset_arrow_schema, projection)?;
+
+                        let shared_read = if nd_encoded {
+                            SharedRead::build(projected_dataset, batch_size, ReadMode::Encoded).await?
+                        } else {
+                            SharedRead::build(projected_dataset, batch_size, ReadMode::Flat(None)).await? // TODO: support a flat read with a predicate, so the shared read can prune chunks that hold nothing the query wants.
+                        };
+
+                        let shared_dataset = SharedDataset {
+                            read: shared_read,
+                            table_adapter: Arc::new(adapter),
+                        };
+                        Ok(Arc::new(shared_dataset))
+            })
             .await?
             .clone();
 
-        Ok(share.stream())
+        let adapter = share.table_adapter.clone();
+        let shared_read = share.read.clone();
+
+        let stream = shared_read
+            .stream()
+            .and_then(move |batch| {
+                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to adapt NetCDF batch schema: {e}"
+                    ))
+                });
+                futures::future::ready(mapped)
+            })
+            .boxed();
+
+        Ok(stream)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -317,7 +361,9 @@ impl NetCDFOpener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         cache: Option<NetcdfReaderCache>,
+        _metrics: Option<DatasetReadMetrics>, // TODO: use this to record the read metrics for the dataset.
         _predicate: Option<Arc<dyn PhysicalExpr>>, // TODO: use this to filter the stream when creating the dataset up front on coordinate arrays.
+        nd_encoded: bool,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = Self::open_dataset(input, object, cache, read_dimensions.clone()).await?;
         let dataset_arrow_schema = Self::arrow_schema(&dataset)?;
@@ -335,9 +381,20 @@ impl NetCDFOpener {
         let projected_dataset =
             Self::project_any_dataset(dataset, &dataset_arrow_schema, projection)?;
 
-        let encoded = any_dataset_as_encoded_stream(projected_dataset, batch_size);
+        let raw_stream = if nd_encoded {
+            any_dataset_as_encoded_stream(projected_dataset, batch_size)
+        } else {
+            Box::pin(
+                any_dataset_as_record_batch_stream(projected_dataset, batch_size, None, None)
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to create NetCDF record batch stream: {e}"
+                        ))
+                    }),
+            )
+        };
 
-        let stream = encoded
+        let stream = raw_stream
             .and_then(move |batch| {
                 let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
@@ -456,6 +513,7 @@ impl FileOpener for NetCDFOpener {
                     self.cache.clone(),
                     metrics,
                     self.predicate.clone(),
+                    self.nd_encoded,
                 )
                 .boxed();
 
@@ -469,7 +527,9 @@ impl FileOpener for NetCDFOpener {
                     self.read_dimensions.clone(),
                     self.batch_size,
                     self.cache.clone(),
+                    metrics,
                     self.predicate.clone(),
+                    self.nd_encoded,
                 )
                 .boxed();
 
