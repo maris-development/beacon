@@ -472,7 +472,6 @@ impl FileFormat for NetcdfFormat {
             self.access.clone(),
             self.options.read_dimensions.clone(),
             table_schema,
-            true, // nd_encoded is on by default
         )
         .with_cache(self.cache.clone())
         .with_projection(projection);
@@ -555,7 +554,6 @@ impl FileFormat for NetcdfFormat {
                 self.access.clone(),
                 self.options.read_dimensions.clone(),
                 table_schema,
-                true, // nd_encoded is on by default
             )
             .with_cache(self.cache.clone()),
         )
@@ -1169,7 +1167,7 @@ mod reader_backend_tests {
 
         let table_schema =
             TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema, true);
+        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
@@ -1201,7 +1199,7 @@ mod reader_backend_tests {
 
         let table_schema =
             TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema, true);
+        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
@@ -1247,7 +1245,7 @@ mod reader_backend_tests {
             arrow::datatypes::Field::new("time", arrow::datatypes::DataType::Int64, true),
         ]));
         let table_schema = TableSchema::from_file_schema(schema.clone());
-        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema, true);
+        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
@@ -1279,12 +1277,7 @@ mod reader_backend_tests {
 
         let table_schema =
             TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-        let source = NetCDFSource::new(
-            access_on(ReaderBackend::NetcdfC),
-            None,
-            table_schema,
-            true,
-        );
+        let source = NetCDFSource::new(access_on(ReaderBackend::NetcdfC), None, table_schema);
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,

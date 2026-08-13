@@ -54,7 +54,6 @@ pub struct NetCDFSource {
     /// reaches the same one.
     partitions_shared_map:
         Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>>,
-    nd_encoded: bool,
 }
 
 impl NetCDFSource {
@@ -62,7 +61,6 @@ impl NetCDFSource {
         access: FileAccess,
         read_dimensions: Option<Vec<String>>,
         table_schema: TableSchema,
-        nd_encoded: bool,
     ) -> Self {
         Self {
             access,
@@ -74,7 +72,6 @@ impl NetCDFSource {
             cache: None,
             projection: None,
             partitions_shared_map: Arc::new(HashMap::new()),
-            nd_encoded,
         }
     }
 
@@ -121,7 +118,6 @@ impl FileSource for NetCDFSource {
             partition,
             object_store,
             self.partitions_shared_map.clone(),
-            self.nd_encoded,
         )))
     }
 
@@ -273,7 +269,6 @@ struct NetCDFOpener {
     /// The shares of this scan, so the partitions of a file find each other.
     partition_shares:
         Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>>,
-    nd_encoded: bool,
 }
 
 impl NetCDFOpener {
@@ -291,7 +286,6 @@ impl NetCDFOpener {
         partition_shares: Arc<
             HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>,
         >,
-        nd_encoded: bool,
     ) -> Self {
         Self {
             projected_schema,
@@ -304,7 +298,6 @@ impl NetCDFOpener {
             access,
             object_store,
             partition_shares,
-            nd_encoded,
         }
     }
 
@@ -319,7 +312,6 @@ impl NetCDFOpener {
         cache: Option<NetcdfReaderCache>,
         _metrics: Option<DatasetReadMetrics>, // TODO: use this to record the read metrics for the shared dataset, not just the partition that built it.
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        nd_encoded: bool,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         // The output schema is needed again after the build, which consumes the
         // copy it derives the projection from.
@@ -363,29 +355,27 @@ impl NetCDFOpener {
                             }));
                         }
 
-                        let source_schema = if nd_encoded {
-                            Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-                                &dataset_arrow_schema.project(&projection)?,
-                            ))
-                        } else {
-                            Arc::new(dataset_arrow_schema.project(&projection)?)
-                        };
+                        // The scan carries nd columns, so the adapter works in
+                        // the encoded (struct) domain.
+                        let source_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+                            &dataset_arrow_schema.project(&projection)?,
+                        ));
 
                         let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
                         let projected_dataset =
                             Self::project_any_dataset(dataset, &dataset_arrow_schema, projection)?;
 
-                        // Either way the read prunes on the predicate: a chunk no
-                        // row of which can meet it is never fetched. The scan
-                        // reports its filters as inexact, so the predicate is
-                        // applied again above and this only skips rows that
-                        // would have been dropped there.
-                        let mode = if nd_encoded {
-                            ReadMode::Encoded(pushdown)
-                        } else {
-                            ReadMode::Flat(pushdown)
-                        };
-                        let shared_read = SharedRead::build(projected_dataset, batch_size, mode).await?;
+                        // The read prunes on the predicate: a chunk no row of
+                        // which can meet it is never queued, so it is never
+                        // fetched. The scan reports its filters as inexact, so
+                        // the predicate is applied again above and this only
+                        // skips rows that would have been dropped there.
+                        let shared_read = SharedRead::build(
+                            projected_dataset,
+                            batch_size,
+                            ReadMode::Encoded(pushdown),
+                        )
+                        .await?;
 
                         let shared_dataset = SharedDataset {
                             read: shared_read,
@@ -427,7 +417,6 @@ impl NetCDFOpener {
         cache: Option<NetcdfReaderCache>,
         metrics: Option<DatasetReadMetrics>, // TODO: use this to record the read metrics for the dataset on the column path too; the count path already does.
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        nd_encoded: bool,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = Self::open_dataset(input, object, cache, read_dimensions.clone()).await?;
         let dataset_arrow_schema = Self::arrow_schema(&dataset)?;
@@ -458,13 +447,11 @@ impl NetCDFOpener {
             return Ok(stream);
         }
 
-        let source_schema: SchemaRef = if nd_encoded {
-            Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-                &dataset_arrow_schema.project(&projection)?,
-            ))
-        } else {
-            Arc::new(dataset_arrow_schema.project(&projection)?)
-        };
+        // The scan carries nd columns, so the adapter works in the encoded
+        // (struct) domain.
+        let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+            &dataset_arrow_schema.project(&projection)?,
+        ));
 
         let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
         let projected_dataset =
@@ -474,14 +461,13 @@ impl NetCDFOpener {
         // the same read a shared file gets, and the point of taking it here is
         // that the chunk pruning then has one implementation rather than two:
         // `any_dataset_as_encoded_stream` has nowhere to apply a predicate.
-        let mode = if nd_encoded {
-            ReadMode::Encoded(pushdown)
-        } else {
-            ReadMode::Flat(pushdown)
-        };
-        let raw_stream = SharedRead::build(projected_dataset, batch_size, mode)
-            .await?
-            .stream();
+        let raw_stream = SharedRead::build(
+            projected_dataset,
+            batch_size,
+            ReadMode::Encoded(pushdown),
+        )
+        .await?
+        .stream();
 
         let stream = raw_stream
             .and_then(move |batch| {
@@ -656,7 +642,6 @@ impl FileOpener for NetCDFOpener {
                     self.cache.clone(),
                     metrics,
                     self.predicate.clone(),
-                    self.nd_encoded,
                 )
                 .boxed();
 
@@ -672,7 +657,6 @@ impl FileOpener for NetCDFOpener {
                     self.cache.clone(),
                     metrics,
                     self.predicate.clone(),
-                    self.nd_encoded,
                 )
                 .boxed();
 

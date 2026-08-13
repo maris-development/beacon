@@ -26,9 +26,8 @@ use crate::dataset::AnyDataset;
 /// filled. The first partition to arrive chooses it, and every partition of a
 /// scan would choose the same, so whichever arrives first is the right one.
 ///
-/// Both modes carry the predicate, and both prune on it: the queue is filled
-/// with every chunk of the file either way, and a chunk no row of which can meet
-/// the predicate is dropped when it is popped, before it is read.
+/// Both modes carry the predicate, and both prune on it before the queue is
+/// filled: see [`SharedRead::build`].
 #[derive(Debug, Clone)]
 pub enum ReadMode {
     /// `beacon.nd`-encoded batches, which an `NdSourceExec` decodes above the
@@ -67,14 +66,15 @@ enum Work {
 }
 
 /// A file opened once, and the subsets left to read from it.
+///
+/// The queue holds only what the query needs: [`SharedRead::build`] applies the
+/// predicate as it fills it, so every unit in here is a read that will produce
+/// rows.
 #[derive(Debug)]
 pub struct SharedRead {
     queue: ArrayQueue<Work>,
     read: ReadKind,
     mode: ReadMode,
-    /// Per-dimension keep masks, computed once for the file rather than once per
-    /// partition. Empty unless the mode is [`ReadMode::Flat`] with a predicate.
-    dim_masks: Arc<Vec<(String, Vec<bool>)>>,
 }
 
 #[derive(Debug)]
@@ -90,11 +90,29 @@ enum ReadKind {
 }
 
 impl SharedRead {
-    /// Open `dataset` for sharing, and fill the queue with its subsets.
+    /// Open `dataset` for sharing, and fill the queue with the subsets that are
+    /// worth reading.
     ///
     /// A regular dataset is cut on its chunk grid, which is the same grid an
     /// unshared read walks. A ragged one is cut on its batch plan, which is the
     /// same plan an unshared read builds.
+    ///
+    /// # The predicate is applied here, not later
+    ///
+    /// The coordinate arrays are read once, before the queue is filled, and a
+    /// chunk no row of which can meet the predicate never enters it. So the
+    /// queue holds the work the query actually needs, and the partitions divide
+    /// *that*.
+    ///
+    /// Filtering as each chunk is popped would divide the file evenly and the
+    /// work unevenly: one partition can draw a run of chunks that are all
+    /// excluded and finish having read nothing, while another reads everything
+    /// the query wanted. It would also leave `remaining` counting work that does
+    /// not exist.
+    ///
+    /// A ragged dataset already works this way: `plan_ragged_read` applies the
+    /// predicate when it chooses which casts survive, so its plan holds only the
+    /// batches that have something in them.
     pub async fn build(
         dataset: AnyDataset,
         batch_size: usize,
@@ -120,7 +138,6 @@ impl SharedRead {
                         plan: Arc::new(plan),
                     },
                     mode,
-                    dim_masks: Arc::new(Vec::new()),
                 }));
             }
         };
@@ -128,22 +145,31 @@ impl SharedRead {
         let ChunkGrid { dims, chunks } = chunk_grid(&regular, batch_size)
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
 
-        // A dataset with no chunks still needs a queue, and `ArrayQueue` will
-        // not take a capacity of zero.
-        let queue = ArrayQueue::new(chunks.len().max(1));
-        for subset in chunks {
-            // The capacity is the chunk count, so this cannot fail.
-            let _ = queue.push(Work::Grid(subset));
-        }
-
         let arrays = Arc::new(regular.arrays);
         let schema = build_dataset_schema(&arrays);
 
-        // Computed once for the file. An unshared read computes these per
-        // partition, which reads the coordinate arrays once per partition.
+        // Read once for the file, before anything is queued. An unshared read
+        // computes these per partition, which reads the coordinate arrays once
+        // per partition.
         let dim_masks = compute_predicate_masks(&arrays, predicate)
             .await
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+
+        // Only the chunks that can hold a row the query wants. The predicate is
+        // applied again above the scan, so dropping one here only drops rows
+        // that would have been dropped there.
+        let wanted: Vec<ArraySubset> = chunks
+            .into_iter()
+            .filter(|subset| !chunk_is_pruned(&dim_masks, &dims, subset))
+            .collect();
+
+        // A dataset with no chunks left still needs a queue, and `ArrayQueue`
+        // will not take a capacity of zero.
+        let queue = ArrayQueue::new(wanted.len().max(1));
+        for subset in wanted {
+            // The capacity is the chunk count, so this cannot fail.
+            let _ = queue.push(Work::Grid(subset));
+        }
 
         Ok(Arc::new(Self {
             queue,
@@ -153,7 +179,6 @@ impl SharedRead {
                 schema,
             },
             mode,
-            dim_masks: Arc::new(dim_masks),
         }))
     }
 
@@ -192,23 +217,16 @@ impl SharedRead {
                 let arrays = arrays.clone();
                 let dims = dims.clone();
                 let schema = schema.clone();
-                let masks = self.dim_masks.clone();
                 let flat = matches!(self.mode, ReadMode::Flat(_));
                 futures::stream::once(async move {
+                    // No masks here: `build` applied them when it filled the
+                    // queue, so this chunk is one the query wants. Passing them
+                    // again would rebuild the same chunk mask per read and
+                    // always come to the same answer.
                     if flat {
-                        // `read_chunk` applies the masks itself, and returns
-                        // `None` for a chunk they exclude.
-                        return read_chunk(&arrays, subset, schema, &dims, &masks)
+                        return read_chunk(&arrays, subset, schema, &dims, &[])
                             .await
                             .map_err(|e| DataFusionError::Execution(e.to_string()));
-                    }
-                    // The nd path prunes on the same masks, and has to do it
-                    // here: a chunk no row of which can meet the predicate is
-                    // dropped before it is fetched, which is the whole saving.
-                    // The predicate is applied again above the scan, so this
-                    // only ever skips rows that would have been dropped there.
-                    if chunk_is_pruned(&masks, &dims, &subset) {
-                        return Ok(None);
                     }
                     let nd = read_nd_chunk(&arrays, &dims, schema, subset).await?;
                     beacon_datafusion_ext::nd::encode_nd_record_batch(&nd).map(Some)
@@ -418,15 +436,20 @@ mod tests {
         values
     }
 
-    /// The nd read skips chunks the predicate excludes, and keeps every row it
-    /// wants.
+    /// The queue holds only the chunks the predicate keeps, and keeps every row
+    /// the query wants.
     ///
     /// Both halves matter and neither implies the other. Reading everything is
     /// correct but pointless; reading less is pointless if it drops a row the
     /// query asked for, and nothing about that raises an error — the chunk is
     /// simply never fetched.
+    ///
+    /// The queue length is the first assertion because it is where the saving
+    /// is. A queue still holding the excluded chunks would give a partition a
+    /// run of work that turns out to be nothing, while another partition reads
+    /// everything the query wanted.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_nd_read_skips_the_chunks_the_predicate_excludes() {
+    async fn the_queue_holds_only_the_chunks_the_predicate_keeps() {
         const ROWS: usize = 10_000;
         const BATCH: usize = 512;
         const THRESHOLD: i64 = 8_000;
@@ -445,18 +468,22 @@ mod tests {
         )
         .await
         .expect("the read builds");
-        assert_eq!(
-            pruned.remaining(),
-            chunks,
-            "the queue still holds every chunk; a chunk is dropped when it is popped"
-        );
-        let kept = values_read(pruned.stream()).await;
 
         // The fixture counts up, so a chunk below the threshold holds nothing
-        // the query wants. Fifteen of the twenty chunks are entirely below it.
+        // the query wants, and it is left out before any partition can draw it.
+        let queued = pruned.remaining();
         assert!(
-            kept.len() < ROWS,
-            "the read must skip the chunks under the threshold, it returned all {ROWS} rows"
+            queued > 0 && queued < chunks,
+            "the queue should hold some of the {chunks} chunks, it holds {queued}"
+        );
+
+        // The rows read come from the queued chunks and no others. The last
+        // chunk of the file is short, so this is a bound rather than a product.
+        let kept = values_read(pruned.stream()).await;
+        assert!(
+            kept.len() <= queued * BATCH && kept.len() > (queued - 1) * BATCH,
+            "{} rows off {queued} chunks of at most {BATCH}",
+            kept.len()
         );
 
         // Nothing the predicate keeps may go missing. The read is allowed to
@@ -468,6 +495,26 @@ mod tests {
             wanted.iter().all(|value| returned.contains(value)),
             "the read dropped a row the predicate keeps"
         );
+    }
+
+    /// A predicate no row can meet leaves an empty queue.
+    ///
+    /// The partitions then find nothing to do, which is the point: the file is
+    /// never opened for reading at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_predicate_nothing_meets_queues_no_work() {
+        const ROWS: usize = 10_000;
+
+        let shared = SharedRead::build(
+            dataset(ROWS).await,
+            512,
+            ReadMode::Encoded(Some(greater_than("value", ROWS as i64 * 10))),
+        )
+        .await
+        .expect("the read builds");
+
+        assert_eq!(shared.remaining(), 0, "no chunk can hold a matching row");
+        assert_eq!(drain(shared.stream()).await, 0);
     }
 
     /// The flat read and the nd read skip the same chunks.
