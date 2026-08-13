@@ -20,6 +20,7 @@ rkyv = {workspace = true}
 crossbeam = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true }
+object_store = { workspace = true }
 tracing = { workspace = true }
 
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }

@@ -41,7 +41,7 @@ mod table_function;
 pub use cache::{fetch_schema, open_dataset, Hdf5ReaderCache};
 pub use config::Hdf5Config;
 pub use format::{Hdf5Format, Hdf5FormatFactory};
-pub use source::{Hdf5Source, MIN_SPLIT_SIZE};
+pub use source::Hdf5Source;
 pub use table_function::ReadHdf5Func;
 
 /// The canonical HDF5 format name (`STORED AS HDF5`) and `get_ext`.

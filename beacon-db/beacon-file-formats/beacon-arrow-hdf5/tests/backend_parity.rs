@@ -29,6 +29,10 @@ use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 /// crate. Both crates read it, so it is not copied into either.
 const WOD_FILE: &str = "wod_ctd_1964.nc";
 /// A NetCDF-4 file with a chunked grid, packed variables and CF time.
+/// The share minimum a scan takes from its session
+/// (`repartition_file_min_size`), which these tests leave at the default.
+const MIN_SHARE_SIZE: u64 = 10 * 1024 * 1024;
+
 const GRIDDED_FILE: &str = "gridded-example.nc";
 /// Plain HDF5: datasets two group levels deep, and no netCDF convention.
 const NESTED_FILE: &str = "nested-groups.h5";
@@ -155,10 +159,9 @@ async fn register(ctx: &SessionContext, table: &str, backend: Backend, path: &st
 
 /// A session with `target_partitions` partitions.
 ///
-/// Nothing is done to the split minimum here. `Hdf5Source` sets its own
-/// ([`beacon_arrow_hdf5::MIN_SPLIT_SIZE`]) and ignores the session's, so asking
-/// for partitions is not the same as getting a split: the scan has to be large
-/// enough to earn one.
+/// Nothing is done to the share minimum here, so it stays the session default
+/// ([`MIN_SHARE_SIZE`]). Asking for partitions is therefore not the same as
+/// getting a share: the file has to be large enough to earn one.
 fn splitting_session(target_partitions: usize) -> SessionContext {
     let config = SessionConfig::new()
         .with_target_partitions(target_partitions)
@@ -257,7 +260,7 @@ fn scan_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> 
 /// That routing lives in `Hdf5FormatFactory`, three files from the source that
 /// allows the split. This holds it in place, by reading the scan's file type off
 /// the plan rather than by counting partitions: the bundled fixtures are under
-/// `MIN_SPLIT_SIZE`, so neither reader splits them and a partition count would
+/// [`MIN_SHARE_SIZE`], so neither reader shares them and a partition count would
 /// say nothing about which source is underneath.
 #[tokio::test]
 async fn each_reader_serves_its_own_source() {
@@ -315,7 +318,7 @@ async fn a_small_scan_is_not_split() {
         1,
         "a scan under {} bytes must not split:
 {}",
-        beacon_arrow_hdf5::MIN_SPLIT_SIZE,
+        MIN_SHARE_SIZE,
         datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
     );
 
@@ -328,7 +331,7 @@ async fn a_small_scan_is_not_split() {
 const LARGE_COLUMNS: usize = 20;
 const LARGE_ROWS: usize = 100_000;
 
-/// Write a netCDF-4 file larger than [`beacon_arrow_hdf5::MIN_SPLIT_SIZE`].
+/// Write a netCDF-4 file larger than [`MIN_SHARE_SIZE`].
 ///
 /// A netCDF-4 file is an HDF5 file, so the Rust reader here reads it as one.
 /// Every bundled fixture is under the minimum, so a test that needs a real
@@ -372,8 +375,8 @@ fn write_large_netcdf() -> (tempfile::TempDir, PathBuf) {
 
     let size = std::fs::metadata(&path).expect("the written file").len();
     assert!(
-        size > beacon_arrow_hdf5::MIN_SPLIT_SIZE,
-        "the generated file must clear the split minimum, got {size} bytes"
+        size > MIN_SHARE_SIZE,
+        "the generated file must clear the share minimum, got {size} bytes"
     );
 
     (dir, path)

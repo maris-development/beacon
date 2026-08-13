@@ -4,12 +4,14 @@ use arrow::array::RecordBatchOptions;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use crossbeam::queue::ArrayQueue;
+use datafusion::datasource::physical_plan::FileGroup;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr_adapter::{BatchAdapter, BatchAdapterFactory};
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use indexmap::IndexMap;
+use tokio::sync::OnceCell;
 
 use crate::NdArrayD;
 use crate::projection::DatasetProjection;
@@ -20,33 +22,32 @@ use crate::arrow::batch::{
     ChunkGrid, RaggedPlan, build_dataset_schema, chunk_grid, chunk_is_pruned,
     compute_predicate_masks, plan_ragged_read, read_chunk, read_ragged_range,
 };
+use crate::arrow::metrics::SharedReadMetrics;
 use crate::arrow::nd_provider::read_nd_chunk;
 use crate::arrow::pushdown_filter::PushdownFilter;
 use crate::dataset::AnyDataset;
 
-/// Which batches a shared read produces.
+/// What the scan wants out of a file, and so what a batch off the queue becomes.
 ///
-/// A scan is one or the other throughout, so the mode is fixed when the queue is
-/// filled. The first partition to arrive chooses it, and every partition of a
-/// scan would choose the same, so whichever arrives first is the right one.
-///
-/// Both modes carry the predicate, and both prune on it before the queue is
-/// filled: see [`SharedRead::build`].
-#[derive(Debug, Clone)]
-pub enum ReadMode {
-    /// `beacon.nd`-encoded batches, which an `NdSourceExec` decodes above the
-    /// scan. This is what a column read produces.
-    Encoded(Option<PushdownFilter>),
-    /// Flat, broadcast batches. This is what the `COUNT(*)` path reads.
-    Flat(Option<PushdownFilter>),
+/// A scan is one or the other throughout: the first partition to arrive decides,
+/// and every partition of a scan would decide the same. The decision reaches
+/// down to the read itself, because the two want different batches — a column
+/// read wants `beacon.nd`-encoded chunks for the `NdSourceExec` above it to
+/// decode, and `COUNT(*)` wants flat ones it can take a row count off.
+#[derive(Debug)]
+enum Output {
+    /// Columns: nd-encoded batches, reordered and null-filled onto the
+    /// projected schema.
+    Columns(Arc<BatchAdapter>),
+    /// `COUNT(*)`: flat batches, of which only the row count leaves, under the
+    /// (empty) projected schema. See [`count_projection`].
+    Rows(SchemaRef),
 }
 
-impl ReadMode {
-    /// The predicate this mode prunes on, if it has one.
-    fn predicate(&self) -> Option<PushdownFilter> {
-        match self {
-            ReadMode::Encoded(predicate) | ReadMode::Flat(predicate) => predicate.clone(),
-        }
+impl Output {
+    /// Whether the read encodes its chunks, rather than broadcasting them flat.
+    fn encoded(&self) -> bool {
+        matches!(self, Output::Columns(_))
     }
 }
 
@@ -78,7 +79,8 @@ enum Work {
 pub struct SharedRead {
     queue: ArrayQueue<Work>,
     read: ReadKind,
-    mode: ReadMode,
+    /// Whether a chunk leaves nd-encoded. See [`Output`].
+    encoded: bool,
 }
 
 #[derive(Debug)]
@@ -117,19 +119,26 @@ impl SharedRead {
     /// A ragged dataset already works this way: `plan_ragged_read` applies the
     /// predicate when it chooses which casts survive, so its plan holds only the
     /// batches that have something in them.
-    pub async fn build(
+    async fn build(
         dataset: AnyDataset,
         batch_size: usize,
-        mode: ReadMode,
+        predicate: Option<PushdownFilter>,
+        encoded: bool,
+        metrics: Option<&SharedReadMetrics>,
     ) -> Result<Arc<Self>> {
-        let predicate = mode.predicate();
-
         let regular = match dataset {
             AnyDataset::Regular(regular) => regular,
             AnyDataset::Ragged { ragged, .. } => {
                 let plan = plan_ragged_read(ragged, batch_size, predicate)
                     .await
                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+
+                // Casts the predicate excluded before the plan existed. No batch
+                // can account for them, so they are counted here.
+                if let (Some(metrics), Some((casts, rows))) = (metrics, plan.pruned) {
+                    metrics.chunks_pruned.add(casts);
+                    metrics.rows_pruned.add(rows);
+                }
 
                 let queue = ArrayQueue::new(plan.ranges.len().max(1));
                 for range in plan.ranges.clone() {
@@ -141,7 +150,7 @@ impl SharedRead {
                     read: ReadKind::Ragged {
                         plan: Arc::new(plan),
                     },
-                    mode,
+                    encoded,
                 }));
             }
         };
@@ -162,10 +171,16 @@ impl SharedRead {
         // Only the chunks that can hold a row the query wants. The predicate is
         // applied again above the scan, so dropping one here only drops rows
         // that would have been dropped there.
-        let wanted: Vec<ArraySubset> = chunks
+        let (wanted, pruned): (Vec<ArraySubset>, Vec<ArraySubset>) = chunks
             .into_iter()
-            .filter(|subset| !chunk_is_pruned(&dim_masks, &dims, subset))
-            .collect();
+            .partition(|subset| !chunk_is_pruned(&dim_masks, &dims, subset));
+
+        if let Some(metrics) = metrics {
+            metrics.chunks_pruned.add(pruned.len());
+            metrics
+                .rows_pruned
+                .add(pruned.iter().map(|subset| subset.rows()).sum::<usize>());
+        }
 
         // A dataset with no chunks left still needs a queue, and `ArrayQueue`
         // will not take a capacity of zero.
@@ -182,7 +197,7 @@ impl SharedRead {
                 dims: Arc::new(dims),
                 schema,
             },
-            mode,
+            encoded,
         }))
     }
 
@@ -197,18 +212,25 @@ impl SharedRead {
     /// queue, so the batches divide between them as fast as each can take them.
     /// A partition that drops its stream stops popping, and whatever it had not
     /// taken is left for the others.
-    pub fn stream(self: Arc<Self>) -> BoxStream<'static, Result<RecordBatch>> {
-        futures::stream::unfold(self, |shared| async move {
+    fn stream(
+        self: Arc<Self>,
+        metrics: Option<SharedReadMetrics>,
+    ) -> BoxStream<'static, Result<RecordBatch>> {
+        futures::stream::unfold((self, metrics), |(shared, metrics)| async move {
             let work = shared.queue.pop()?;
-            let batches = shared.read(work);
-            Some((batches, shared))
+            let batches = shared.read(work, metrics.clone());
+            Some((batches, (shared, metrics)))
         })
         .flatten()
         .boxed()
     }
 
     /// The batches one unit of work produces.
-    fn read(&self, work: Work) -> BoxStream<'static, Result<RecordBatch>> {
+    fn read(
+        &self,
+        work: Work,
+        metrics: Option<SharedReadMetrics>,
+    ) -> BoxStream<'static, Result<RecordBatch>> {
         match (work, &self.read) {
             (
                 Work::Grid(subset),
@@ -221,7 +243,14 @@ impl SharedRead {
                 let arrays = arrays.clone();
                 let dims = dims.clone();
                 let schema = schema.clone();
-                let flat = matches!(self.mode, ReadMode::Flat(_));
+                let flat = !self.encoded;
+                // The rows this chunk holds, as the scan will broadcast them.
+                // An encoded batch carries the lot in one row, so counting the
+                // batch would say nothing.
+                if let Some(metrics) = &metrics {
+                    metrics.chunks_read.add(1);
+                    metrics.rows_read.add(subset.rows());
+                }
                 futures::stream::once(async move {
                     // No masks here: `build` applied them when it filled the
                     // queue, so this chunk is one the query wants. Passing them
@@ -243,11 +272,15 @@ impl SharedRead {
                 // A ragged read is flat already, and its plan applied the
                 // predicate when it chose which casts survive, so there is
                 // nothing left to prune here.
-                let encode = matches!(self.mode, ReadMode::Encoded(_));
+                let encode = self.encoded;
                 futures::stream::once(async move {
                     let flat = read_ragged_range(&plan, range)
                         .await
                         .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                    if let Some(metrics) = &metrics {
+                        metrics.chunks_read.add(1);
+                        metrics.rows_read.add(flat.num_rows());
+                    }
                     if encode {
                         beacon_datafusion_ext::nd::encode_flat_batch_as_nd(&flat)
                     } else {
@@ -268,6 +301,90 @@ impl SharedRead {
     }
 }
 
+/// The shares of one scan, keyed by object path.
+///
+/// A file in here is in *every* partition's file group, so it is read through
+/// its share and no other way: reading it whole would return every row once per
+/// partition. [`share_files`] builds the map and the groups together, so the two
+/// cannot disagree.
+pub type FileShares =
+    Arc<std::collections::HashMap<object_store::path::Path, Arc<OnceCell<Arc<SharedDataset>>>>>;
+
+/// How a scan's files are dealt to its partitions, and which of them are shared.
+pub struct SharedScan {
+    /// One group per partition, in partition order.
+    pub file_groups: Vec<FileGroup>,
+    /// The share of each file that landed in every group.
+    pub shares: FileShares,
+}
+
+/// Give every partition the files worth sharing, and one each of the rest.
+///
+/// A file worth sharing goes into *every* partition's group and gets a share.
+/// Nothing about it is divided here: the partitions divide it as they read it,
+/// by taking chunks from the one queue behind that share. Balance follows
+/// completion rather than a guess made at plan time, which matters most under a
+/// predicate — an nd chunk list is C-ordered, so `WHERE time > …` prunes a
+/// prefix of it, and a deal made at plan time would leave the early partitions
+/// idle.
+///
+/// `min_share_size` says which files those are. `Some(size)` leaves a file at or
+/// under it whole, dealt to one partition: every partition opening a small file
+/// to take a chunk or two would cost more than it returns, and the listing has
+/// already spread these across the scan. The test is on one file, not on the
+/// scan total — a share pays to open a file, so a file is what has to earn it,
+/// and a thousand small files are not one large one.
+///
+/// `None` shares every file. That is for a format whose object is not its data:
+/// a zarr group's object is a `zarr.json` of a few KB that can front terabytes
+/// of chunks, so any size test on it measures the wrong thing and would decline
+/// every store, however large.
+///
+/// Returns `None` when no file is worth sharing, which leaves the scan's
+/// grouping alone.
+pub fn share_files(
+    file_groups: &[FileGroup],
+    target_partitions: usize,
+    min_share_size: Option<u64>,
+) -> Option<SharedScan> {
+    if target_partitions <= 1 {
+        return None;
+    }
+
+    let (shared, whole): (Vec<_>, Vec<_>) = file_groups
+        .iter()
+        .flat_map(FileGroup::iter)
+        .cloned()
+        .partition(|file| match min_share_size {
+            None => true,
+            Some(min) => {
+                let (start, end) = file.range();
+                end.saturating_sub(start) > min
+            }
+        });
+    if shared.is_empty() {
+        return None;
+    }
+
+    let shares = shared
+        .iter()
+        .map(|file| (file.object_meta.location.clone(), Arc::new(OnceCell::new())))
+        .collect();
+
+    // Every partition starts with every shared file, and opens it first: a
+    // partition that reaches the share sooner starts drawing from its queue
+    // sooner. The rest are spread one per partition, as the listing would have.
+    let mut groups = vec![shared; target_partitions];
+    for (index, file) in whole.into_iter().enumerate() {
+        groups[index % target_partitions].push(file);
+    }
+
+    Some(SharedScan {
+        file_groups: groups.into_iter().map(FileGroup::new).collect(),
+        shares: Arc::new(shares),
+    })
+}
+
 /// One file, opened and planned once: the queue its partitions draw from, and
 /// what a batch off that queue becomes.
 ///
@@ -285,28 +402,22 @@ pub struct SharedDataset {
     output: Output,
 }
 
-/// What the scan does with a batch the queue produced.
-#[derive(Debug)]
-enum Output {
-    /// Reorder and null-fill the batch onto the projected schema. This is the
-    /// column read, and the batches are `beacon.nd`-encoded.
-    Adapt(Arc<BatchAdapter>),
-    /// Keep only the row count, under the (empty) projected schema. This is
-    /// `COUNT(*)`; see [`count_projection`].
-    Count(SchemaRef),
-}
-
 impl SharedDataset {
     /// Plan `dataset` for a scan that wants `projected_schema`.
     ///
     /// Resolves the projection, fills the queue, and decides what a batch off it
     /// becomes. `predicate` is a hint: it prunes chunks that cannot hold a row
     /// the query wants, and the scan is expected to apply it again above.
+    ///
+    /// `metrics` belong to the partition that plans. They take the counts made
+    /// here rather than per chunk: a chunk the predicate excluded is dropped
+    /// before the queue exists, so no reader of the queue can account for it.
     pub async fn plan(
         dataset: AnyDataset,
         projected_schema: SchemaRef,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        metrics: Option<&SharedReadMetrics>,
     ) -> Result<Arc<Self>> {
         let dataset_schema: SchemaRef = Arc::new(
             crate::arrow::schema::any_dataset_to_arrow_schema(&dataset).map_err(|e| {
@@ -327,31 +438,27 @@ impl SharedDataset {
 
         let pushdown = predicate.clone().map(PushdownFilter::new);
 
-        if projection.is_empty() {
-            // `COUNT(*)`: no column is wanted, so the read is driven by columns
-            // of its own and only the row counts leave.
-            let projection = count_projection(&dataset, &dataset_schema, &predicate);
-            let counted = project(dataset, &dataset_schema, projection)?;
-            let read = SharedRead::build(counted, batch_size, ReadMode::Flat(pushdown)).await?;
-            return Ok(Arc::new(Self {
-                read,
-                output: Output::Count(projected_schema),
-            }));
-        }
+        // No column is wanted, so this is `COUNT(*)`: the read is driven by
+        // columns of its own and only the row counts leave.
+        let (output, projection) = if projection.is_empty() {
+            let counted = count_projection(&dataset, &dataset_schema, &predicate);
+            (Output::Rows(projected_schema), counted)
+        } else {
+            // The scan carries nd columns, so adaptation happens in the encoded
+            // (struct) domain: reorder and null-fill onto the projected schema.
+            let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+                &dataset_schema.project(&projection)?,
+            ));
+            let adapter =
+                BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
+            (Output::Columns(Arc::new(adapter)), projection)
+        };
 
-        // The scan carries nd columns, so adaptation happens in the encoded
-        // (struct) domain: reorder and null-fill onto the projected schema.
-        let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-            &dataset_schema.project(&projection)?,
-        ));
-        let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
-        let projected = project(dataset, &dataset_schema, projection)?;
-        let read = SharedRead::build(projected, batch_size, ReadMode::Encoded(pushdown)).await?;
+        let dataset = project(dataset, &dataset_schema, projection)?;
+        let read =
+            SharedRead::build(dataset, batch_size, pushdown, output.encoded(), metrics).await?;
 
-        Ok(Arc::new(Self {
-            read,
-            output: Output::Adapt(Arc::new(adapter)),
-        }))
+        Ok(Arc::new(Self { read, output }))
     }
 
     /// How much of the file is left to read. For tests and diagnostics.
@@ -362,11 +469,15 @@ impl SharedDataset {
     /// One partition's stream over the file.
     ///
     /// Every partition of a shared file calls this on the same `SharedDataset`,
-    /// and they draw from the one queue behind it.
-    pub fn stream(&self) -> BoxStream<'static, Result<RecordBatch>> {
-        let batches = self.read.clone().stream();
+    /// and they draw from the one queue behind it. `metrics` are this
+    /// partition's, so what each one read is what it reports.
+    pub fn stream(
+        &self,
+        metrics: Option<SharedReadMetrics>,
+    ) -> BoxStream<'static, Result<RecordBatch>> {
+        let batches = self.read.clone().stream(metrics);
         match &self.output {
-            Output::Adapt(adapter) => {
+            Output::Columns(adapter) => {
                 let adapter = adapter.clone();
                 batches
                     .and_then(move |batch| {
@@ -379,7 +490,7 @@ impl SharedDataset {
                     })
                     .boxed()
             }
-            Output::Count(schema) => {
+            Output::Rows(schema) => {
                 let schema = schema.clone();
                 batches
                     .and_then(move |batch| {
@@ -574,9 +685,9 @@ mod tests {
             let shared = shared.clone();
             set.spawn(async move {
                 if encoded {
-                    drain(shared.stream()).await
+                    drain(shared.stream(None)).await
                 } else {
-                    drain_flat(shared.stream()).await
+                    drain_flat(shared.stream(None)).await
                 }
             });
         }
@@ -645,17 +756,19 @@ mod tests {
         const BATCH: usize = 512;
         const THRESHOLD: i64 = 8_000;
 
-        let whole = SharedRead::build(dataset(ROWS).await, BATCH, ReadMode::Encoded(None))
+        let whole = SharedRead::build(dataset(ROWS).await, BATCH, None, true, None)
             .await
             .expect("the read builds");
         let chunks = whole.remaining();
-        let all = values_read(whole.stream()).await;
+        let all = values_read(whole.stream(None)).await;
         assert_eq!(all.len(), ROWS, "the unfiltered read returns the file");
 
         let pruned = SharedRead::build(
             dataset(ROWS).await,
             BATCH,
-            ReadMode::Encoded(Some(greater_than("value", THRESHOLD))),
+            Some(greater_than("value", THRESHOLD)),
+            true,
+            None,
         )
         .await
         .expect("the read builds");
@@ -670,7 +783,7 @@ mod tests {
 
         // The rows read come from the queued chunks and no others. The last
         // chunk of the file is short, so this is a bound rather than a product.
-        let kept = values_read(pruned.stream()).await;
+        let kept = values_read(pruned.stream(None)).await;
         assert!(
             kept.len() <= queued * BATCH && kept.len() > (queued - 1) * BATCH,
             "{} rows off {queued} chunks of at most {BATCH}",
@@ -699,13 +812,15 @@ mod tests {
         let shared = SharedRead::build(
             dataset(ROWS).await,
             512,
-            ReadMode::Encoded(Some(greater_than("value", ROWS as i64 * 10))),
+            Some(greater_than("value", ROWS as i64 * 10)),
+            true,
+            None,
         )
         .await
         .expect("the read builds");
 
         assert_eq!(shared.remaining(), 0, "no chunk can hold a matching row");
-        assert_eq!(drain(shared.stream()).await, 0);
+        assert_eq!(drain(shared.stream(None)).await, 0);
     }
 
     /// The flat read and the nd read skip the same chunks.
@@ -721,20 +836,24 @@ mod tests {
         let nd = SharedRead::build(
             dataset(ROWS).await,
             BATCH,
-            ReadMode::Encoded(Some(greater_than("value", THRESHOLD))),
+            Some(greater_than("value", THRESHOLD)),
+            true,
+            None,
         )
         .await
         .expect("the read builds");
-        let nd_rows = drain(nd.stream()).await;
+        let nd_rows = drain(nd.stream(None)).await;
 
         let flat = SharedRead::build(
             dataset(ROWS).await,
             BATCH,
-            ReadMode::Flat(Some(greater_than("value", THRESHOLD))),
+            Some(greater_than("value", THRESHOLD)),
+            false,
+            None,
         )
         .await
         .expect("the read builds");
-        let flat_rows = drain_flat(flat.stream()).await;
+        let flat_rows = drain_flat(flat.stream(None)).await;
 
         assert_eq!(nd_rows, flat_rows, "the two modes read the same chunks");
         assert!(
@@ -751,12 +870,14 @@ mod tests {
         let shared = SharedRead::build(
             dataset(ROWS).await,
             512,
-            ReadMode::Encoded(Some(greater_than("no_such_column", 10))),
+            Some(greater_than("no_such_column", 10)),
+            true,
+            None,
         )
         .await
         .expect("the read builds");
 
-        assert_eq!(drain(shared.stream()).await, ROWS);
+        assert_eq!(drain(shared.stream(None)).await, ROWS);
     }
 
     /// The partitions of one file read every row once between them.
@@ -769,7 +890,7 @@ mod tests {
         const ROWS: usize = 10_000;
 
         for partitions in [1_usize, 2, 3, 8] {
-            let shared = SharedRead::build(dataset(ROWS).await, 512, ReadMode::Encoded(None))
+            let shared = SharedRead::build(dataset(ROWS).await, 512, None, true, None)
                 .await
                 .expect("the read builds");
             let rows = read_in_partitions(shared, partitions, true).await;
@@ -794,7 +915,7 @@ mod tests {
         const ROWS: usize = 10_000;
 
         for partitions in [1_usize, 2, 4, 8] {
-            let shared = SharedRead::build(dataset(ROWS).await, 512, ReadMode::Flat(None))
+            let shared = SharedRead::build(dataset(ROWS).await, 512, None, false, None)
                 .await
                 .expect("the read builds");
             let counted = read_in_partitions(shared, partitions, false).await;
@@ -820,7 +941,7 @@ mod tests {
         const BATCH: usize = 512;
         const PARTITIONS: usize = 4;
 
-        let shared = SharedRead::build(dataset(ROWS).await, BATCH, ReadMode::Encoded(None))
+        let shared = SharedRead::build(dataset(ROWS).await, BATCH, None, true, None)
             .await
             .expect("the read builds");
         let chunks = shared.remaining();
@@ -829,7 +950,9 @@ mod tests {
             "the fixture must hold at least one chunk per partition, it holds {chunks}"
         );
 
-        let mut streams: Vec<_> = (0..PARTITIONS).map(|_| shared.clone().stream()).collect();
+        let mut streams: Vec<_> = (0..PARTITIONS)
+            .map(|_| shared.clone().stream(None))
+            .collect();
         let mut taken = 0;
         for (partition, stream) in streams.iter_mut().enumerate() {
             let batch = stream
@@ -870,7 +993,7 @@ mod tests {
         for batch_size in [8_usize, 64, usize::MAX] {
             for partitions in [1_usize, 2, 3, 8] {
                 let (source, observations) = ragged_dataset(CASTS).await;
-                let shared = SharedRead::build(source, batch_size, ReadMode::Encoded(None))
+                let shared = SharedRead::build(source, batch_size, None, true, None)
                     .await
                     .expect("the plan builds");
                 let rows = read_in_partitions(shared, partitions, true).await;
@@ -891,7 +1014,7 @@ mod tests {
         const PARTITIONS: usize = 4;
 
         let (source, observations) = ragged_dataset(CASTS).await;
-        let shared = SharedRead::build(source, 8, ReadMode::Flat(None))
+        let shared = SharedRead::build(source, 8, None, false, None)
             .await
             .expect("the plan builds");
         let counted = read_in_partitions(shared, PARTITIONS, false).await;
@@ -915,7 +1038,7 @@ mod tests {
         const PARTITIONS: usize = 4;
 
         let (source, observations) = ragged_dataset(CASTS).await;
-        let shared = SharedRead::build(source, 8, ReadMode::Encoded(None))
+        let shared = SharedRead::build(source, 8, None, true, None)
             .await
             .expect("the plan builds");
         let ranges = shared.remaining();
@@ -924,7 +1047,9 @@ mod tests {
             "the fixture must hold at least one range per partition, got {ranges}"
         );
 
-        let mut streams: Vec<_> = (0..PARTITIONS).map(|_| shared.clone().stream()).collect();
+        let mut streams: Vec<_> = (0..PARTITIONS)
+            .map(|_| shared.clone().stream(None))
+            .collect();
         let mut taken = 0;
         for (partition, stream) in streams.iter_mut().enumerate() {
             let batch = stream
@@ -956,7 +1081,7 @@ mod tests {
         const ROWS: usize = 100;
 
         // One chunk, eight partitions.
-        let shared = SharedRead::build(dataset(ROWS).await, usize::MAX, ReadMode::Encoded(None))
+        let shared = SharedRead::build(dataset(ROWS).await, usize::MAX, None, true, None)
             .await
             .expect("the read builds");
         let rows = read_in_partitions(shared, 8, true).await;
@@ -979,12 +1104,12 @@ mod tests {
         const ROWS: usize = 10_000;
         const BATCH: usize = 500;
 
-        let shared = SharedRead::build(dataset(ROWS).await, BATCH, ReadMode::Encoded(None))
+        let shared = SharedRead::build(dataset(ROWS).await, BATCH, None, true, None)
             .await
             .expect("the read builds");
 
         // One partition takes a single batch and leaves.
-        let mut early = shared.clone().stream();
+        let mut early = shared.clone().stream(None);
         let first = early.next().await.expect("one batch").expect("it reads");
         let taken = beacon_datafusion_ext::nd::decode_nd_record_batch(&first)
             .unwrap()
@@ -992,11 +1117,137 @@ mod tests {
         drop(early);
 
         // The other reads what is left, and between them that is the file.
-        let rest = drain(shared.stream()).await;
+        let rest = drain(shared.stream(None)).await;
         assert_eq!(
             taken + rest,
             ROWS,
             "the subsets the leaver never popped are still there"
         );
+    }
+}
+
+#[cfg(test)]
+mod deal_tests {
+    use datafusion::datasource::listing::PartitionedFile;
+    use object_store::path::Path;
+
+    use super::*;
+
+    const MIN: u64 = 8 * 1024 * 1024;
+
+    /// A file worth sharing lands in every partition, and gets a share.
+    #[test]
+    fn a_shared_file_lands_in_every_partition() {
+        const PARTITIONS: usize = 4;
+
+        let groups = vec![FileGroup::new(vec![PartitionedFile::new(
+            "large.nc",
+            64 * 1024 * 1024,
+        )])];
+
+        let scan = share_files(&groups, PARTITIONS, Some(MIN)).expect("a large file is shared");
+
+        assert_eq!(scan.file_groups.len(), PARTITIONS);
+        for group in &scan.file_groups {
+            assert_eq!(group.len(), 1, "each partition holds the file once");
+            assert!(
+                group.iter().next().unwrap().range.is_none(),
+                "a shared file is not divided"
+            );
+        }
+        assert!(
+            scan.shares.contains_key(&Path::from("large.nc")),
+            "the file the partitions share must have a share"
+        );
+        assert_eq!(scan.shares.len(), 1);
+    }
+
+    /// Small files are dealt one per partition, undivided and unshared.
+    #[test]
+    fn small_files_are_dealt_whole_and_unshared() {
+        let mut files = vec![PartitionedFile::new("large.nc", 64 * 1024 * 1024)];
+        files.extend((0..4).map(|i| PartitionedFile::new(format!("small-{i}.nc"), 1024)));
+
+        let scan =
+            share_files(&[FileGroup::new(files)], 4, Some(MIN)).expect("the large file is shared");
+
+        let small: Vec<_> = scan
+            .file_groups
+            .iter()
+            .flat_map(|group| group.iter())
+            .filter(|file| file.object_meta.location.as_ref().starts_with("small-"))
+            .collect();
+
+        assert_eq!(small.len(), 4, "each small file appears once in the scan");
+        for file in small {
+            assert!(file.range.is_none(), "a whole file is not divided");
+        }
+        assert_eq!(scan.shares.len(), 1, "only the large file is shared");
+    }
+
+    /// Every partition opens the shared file before its own small files.
+    #[test]
+    fn the_shared_file_comes_first_in_every_group() {
+        let mut files = vec![PartitionedFile::new("large.nc", 64 * 1024 * 1024)];
+        files.extend((0..8).map(|i| PartitionedFile::new(format!("small-{i}.nc"), 1024)));
+
+        let scan =
+            share_files(&[FileGroup::new(files)], 4, Some(MIN)).expect("the large file is shared");
+
+        for group in &scan.file_groups {
+            let first = group.iter().next().expect("a group holds the shared file");
+            assert_eq!(
+                first.object_meta.location,
+                Path::from("large.nc"),
+                "the shared file is opened first"
+            );
+        }
+    }
+
+    /// A scan with nothing worth sharing is left alone.
+    ///
+    /// This is where the rule departs from DataFusion's, which tests the scan
+    /// total: 200 MB of 1 MB files clears any total-based minimum, and every one
+    /// of them would be opened by every partition for a fraction of its rows. A
+    /// share pays to open one file, so one file is what has to earn it.
+    #[test]
+    fn a_scan_with_no_large_file_is_left_alone() {
+        let files: Vec<_> = (0..200)
+            .map(|i| PartitionedFile::new(format!("small-{i}.nc"), 1024 * 1024))
+            .collect();
+
+        assert!(
+            share_files(&[FileGroup::new(files)], 4, Some(MIN)).is_none(),
+            "200 MB of 1 MB files is still no file worth sharing"
+        );
+    }
+
+    /// A single-partition scan shares nothing: there is nobody to share with.
+    #[test]
+    fn one_partition_is_left_alone() {
+        let groups = vec![FileGroup::new(vec![PartitionedFile::new(
+            "large.nc",
+            64 * 1024 * 1024,
+        )])];
+
+        assert!(share_files(&groups, 1, Some(MIN)).is_none());
+    }
+
+    /// Several large files are each shared by every partition.
+    #[test]
+    fn every_large_file_is_shared_by_every_partition() {
+        const PARTITIONS: usize = 3;
+
+        let files: Vec<_> = (0..2)
+            .map(|i| PartitionedFile::new(format!("large-{i}.nc"), 64 * 1024 * 1024))
+            .collect();
+
+        let scan = share_files(&[FileGroup::new(files)], PARTITIONS, Some(MIN))
+            .expect("both files are shared");
+
+        assert_eq!(scan.shares.len(), 2);
+        for group in &scan.file_groups {
+            assert_eq!(group.len(), 2, "every partition holds both files");
+        }
     }
 }

@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
-    arrow::{metrics::DatasetReadMetrics, share::SharedDataset},
+    arrow::{
+        metrics::SharedReadMetrics,
+        share::{share_files, FileShares, SharedDataset},
+    },
     projection::DatasetProjection,
 };
 use datafusion::{
@@ -21,17 +24,7 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt};
 use object_store::ObjectMeta;
 
-use std::collections::HashMap;
-
 use super::reader::{self, FileAccess, NetcdfInput, NetcdfReaderCache};
-
-/// The shares of one scan, keyed by object path.
-///
-/// Built by [`NetCDFSource::repartitioned`] and cloned into every opener, so the
-/// partitions of a file find each other. A scan builds its own source, so this
-/// does not outlive the plan.
-type FileShares =
-    Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>>;
 
 /// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
 ///
@@ -69,7 +62,7 @@ impl NetCDFSource {
             predicate: None,
             cache: None,
             projection: None,
-            partitions_shared_map: Arc::new(HashMap::new()),
+            partitions_shared_map: FileShares::default(),
         }
     }
 
@@ -163,28 +156,18 @@ impl FileSource for NetCDFSource {
             return Ok(None);
         }
 
-        Ok(beacon_datafusion_ext::file_groups::shared_file_groups(
+        Ok(share_files(
             &config.file_groups,
             target_partitions,
-            repartition_file_min_size as u64,
+            Some(repartition_file_min_size as u64),
         )
-        .map(|deal| {
-            // One cell per shared file. Every partition that holds the file
-            // reaches the same cell, so the first to arrive builds the read and
-            // the rest attach to what it built. A file with no cell here is one
-            // partition's alone and is read whole.
-            let shares = deal
-                .shared
-                .into_iter()
-                .map(|path| (path, Arc::new(tokio::sync::OnceCell::new())))
-                .collect();
-
+        .map(|scan| {
             let mut config = config.clone();
-            config.file_groups = deal.file_groups;
-            // The openers are built from the config's source, so the map has to
-            // travel with it.
+            config.file_groups = scan.file_groups;
+            // The openers are built from the config's source, so the shares
+            // have to travel with it.
             config.file_source = Arc::new(Self {
-                partitions_shared_map: Arc::new(shares),
+                partitions_shared_map: scan.shares,
                 ..self.clone()
             });
             config
@@ -308,12 +291,20 @@ impl NetCDFOpener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         cache: Option<NetcdfReaderCache>,
-        _metrics: Option<DatasetReadMetrics>, // TODO: record the read metrics for the dataset, not just for the partition that built it.
+        metrics: SharedReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
+        let planning = metrics.clone();
         let plan = async move || {
             let dataset = Self::open_dataset(input, object, cache, read_dimensions).await?;
-            SharedDataset::plan(dataset, projected_schema, batch_size, predicate).await
+            SharedDataset::plan(
+                dataset,
+                projected_schema,
+                batch_size,
+                predicate,
+                Some(&planning),
+            )
+            .await
         };
 
         // The first partition to arrive opens the file and fills its queue. The
@@ -326,7 +317,7 @@ impl NetCDFOpener {
             None => plan().await?,
         };
 
-        Ok(dataset.stream())
+        Ok(dataset.stream(Some(metrics)))
     }
 
     async fn open_dataset(
@@ -369,7 +360,7 @@ impl NetCDFOpener {
 
 impl FileOpener for NetCDFOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
-        let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
+        let metrics = SharedReadMetrics::new(&self.metrics, self.partition);
         let input = self
             .access
             .input_for(&self.object_store, &file.object_meta)?;

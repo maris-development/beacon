@@ -2,7 +2,6 @@ pub mod ordered_union;
 pub mod analyzer_rules;
 pub mod consts;
 pub mod fast_object;
-pub mod file_groups;
 pub mod format_ext;
 pub mod listing_factory;
 pub mod listing_table_factory_ext;

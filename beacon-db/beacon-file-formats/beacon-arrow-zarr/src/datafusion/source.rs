@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use beacon_nd_array::arrow::{metrics::DatasetReadMetrics, share::SharedDataset};
+use beacon_nd_array::arrow::{
+    metrics::SharedReadMetrics,
+    share::{FileShares, SharedDataset, share_files},
+};
 use datafusion::{
     config::ConfigOptions,
     datasource::{
@@ -30,20 +33,10 @@ use futures::{FutureExt, stream::BoxStream};
 use object_store::ObjectStore;
 use zarrs::group::Group;
 
-use std::collections::HashMap;
-
 use crate::{
     reader::{dataset_from_group, project_read_dimensions},
     util::{ZarrPath, ZarrStorage},
 };
-
-/// The shares of one scan, keyed by the object path of a group's `zarr.json`.
-///
-/// Built by [`ZarrSource::repartitioned`] and cloned into every opener, so the
-/// partitions of a group find each other. A scan builds its own source, so this
-/// does not outlive the plan.
-type FileShares =
-    Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>>;
 
 /// The nominal size a zarr leaf group reports.
 ///
@@ -89,7 +82,7 @@ impl ZarrSource {
             read_dimensions: None,
             projection: None,
             storage: None,
-            partitions_shared_map: Arc::new(HashMap::new()),
+            partitions_shared_map: FileShares::default(),
         }
     }
 
@@ -165,11 +158,11 @@ impl FileSource for ZarrSource {
     /// Share every group with every partition, whatever its `zarr.json` weighs.
     ///
     /// No size threshold applies here, and that is the difference from netCDF
-    /// and HDF5. Those two hold a size back (see their `MIN_SPLIT_SIZE`) because
-    /// their object is their data, so its size says what a share would buy. A
-    /// zarr group's object is its `zarr.json`: a metadata document of a few KB
-    /// that can front terabytes of chunks. Any threshold on it would measure the
-    /// wrong thing and decline every store, however large.
+    /// and HDF5. Those two hold the session's `repartition_file_min_size` back
+    /// because their object is their data, so its size says what a share would
+    /// buy. A zarr group's object is its `zarr.json`: a metadata document of a
+    /// few KB that can front terabytes of chunks. Any threshold on it would
+    /// measure the wrong thing and decline every store, however large.
     ///
     /// What makes that safe is the chunk grid. A group states its chunks in
     /// metadata the open already read, so the queue falls out of a structure
@@ -194,30 +187,20 @@ impl FileSource for ZarrSource {
             return Ok(None);
         }
 
-        Ok(beacon_datafusion_ext::file_groups::shared_file_groups(
-            &config.file_groups,
-            target_partitions,
-            // A group's `zarr.json` says nothing about the data behind it, so no
-            // minimum applies.
-            0,
+        // `None`: every group is shared, whatever its `zarr.json` weighs.
+        Ok(
+            share_files(&config.file_groups, target_partitions, None).map(|scan| {
+                let mut config = config.clone();
+                config.file_groups = scan.file_groups;
+                // The openers are built from the config's source, so the shares
+                // have to travel with it.
+                config.file_source = Arc::new(Self {
+                    partitions_shared_map: scan.shares,
+                    ..self.clone()
+                });
+                config
+            }),
         )
-        .map(|deal| {
-            let shares = deal
-                .shared
-                .into_iter()
-                .map(|path| (path, Arc::new(tokio::sync::OnceCell::new())))
-                .collect();
-
-            let mut config = config.clone();
-            config.file_groups = deal.file_groups;
-            // The openers are built from the config's source, so the map has to
-            // travel with it.
-            config.file_source = Arc::new(Self {
-                partitions_shared_map: Arc::new(shares),
-                ..self.clone()
-            });
-            config
-        }))
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -344,12 +327,20 @@ impl ZarrOpener {
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
-        _metrics: Option<DatasetReadMetrics>, // TODO: record the read metrics for the dataset, not just for the partition that built it.
+        metrics: SharedReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
+        let planning = metrics.clone();
         let plan = async move || {
             let dataset = Self::open_dataset(storage, zarr_path, read_dimensions).await?;
-            SharedDataset::plan(dataset, projected_schema, batch_size, predicate).await
+            SharedDataset::plan(
+                dataset,
+                projected_schema,
+                batch_size,
+                predicate,
+                Some(&planning),
+            )
+            .await
         };
 
         // The first partition to arrive opens the group and fills its queue. The
@@ -362,7 +353,7 @@ impl ZarrOpener {
             None => plan().await?,
         };
 
-        Ok(dataset.stream())
+        Ok(dataset.stream(Some(metrics)))
     }
 }
 
@@ -382,7 +373,7 @@ impl FileOpener for ZarrOpener {
             .get(&file.object_meta.location)
             .cloned();
 
-        let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
+        let metrics = SharedReadMetrics::new(&self.metrics, self.partition);
         Ok(Self::read(
             share,
             self.storage.clone(),

@@ -13,7 +13,10 @@ use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
-    arrow::{metrics::DatasetReadMetrics, share::SharedDataset},
+    arrow::{
+        metrics::SharedReadMetrics,
+        share::{share_files, FileShares, SharedDataset},
+    },
     projection::DatasetProjection,
 };
 use datafusion::{
@@ -34,36 +37,7 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt};
 use object_store::{ObjectMeta, ObjectStore};
 
-use std::collections::HashMap;
-
 use crate::cache::Hdf5ReaderCache;
-
-/// The shares of one scan, keyed by object path.
-///
-/// Built by [`Hdf5Source::repartitioned`] and cloned into every opener, so the
-/// partitions of a file find each other. A scan builds its own source, so this
-/// does not outlive the plan.
-type FileShares =
-    Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>>;
-
-/// The smallest file worth sharing across partitions.
-///
-/// Every share of a file opens that file. The reader cache turns the repeat
-/// opens into hits, but each share still derives the schema, resolves the
-/// projection and builds the chunk list before it reads a byte, and it holds a
-/// partition open for as long as it runs. Below this, that setup costs more than
-/// the parallelism returns.
-///
-/// This replaces DataFusion's `repartition_file_min_size` rather than deferring
-/// to it. That default (10 MB) is a parquet number, where a byte range is a run
-/// of row groups the reader seeks straight to; an HDF5 file is shared as a chunk
-/// list that has to be built first, so the two are not measuring the same cost.
-///
-/// The test is on one file, not on the scan total. A share pays to open a file,
-/// so a file is what has to be large enough to earn it: a collection of small
-/// files still scans in parallel, one file per partition, but none of them is
-/// opened by every partition for a fraction of its rows.
-pub const MIN_SPLIT_SIZE: u64 = 8 * 1024 * 1024;
 
 /// DataFusion [`FileSource`] for HDF5 (`.h5`/`.hdf5`) files.
 #[derive(Debug, Clone)]
@@ -94,7 +68,7 @@ impl Hdf5Source {
             predicate: None,
             cache: None,
             projection: None,
-            partitions_shared_map: Arc::new(HashMap::new()),
+            partitions_shared_map: FileShares::default(),
         }
     }
 
@@ -173,8 +147,8 @@ impl FileSource for Hdf5Source {
     /// Give every partition the files that are worth dividing, and one each of
     /// the files that are not.
     ///
-    /// A file over [`MIN_SPLIT_SIZE`] goes into every partition's group and gets
-    /// a cell in `partitions_shared_map`. Nothing about it is divided here: the
+    /// A file over the session's `repartition_file_min_size` goes into every
+    /// partition's group and gets a share. Nothing about it is divided here: the
     /// partitions divide it as they read it, by taking chunks from the one queue
     /// behind that cell. Balance then follows completion rather than a guess
     /// made at plan time, which matters most under a predicate: an nd chunk list
@@ -184,13 +158,10 @@ impl FileSource for Hdf5Source {
     /// A smaller file is left whole and dealt to one partition. Every partition
     /// opening it to take a chunk or two would cost more than it returns, and
     /// the listing has already spread these across the scan.
-    ///
-    /// `repartition_file_min_size` is DataFusion's parquet-shaped default and is
-    /// not used; see [`MIN_SPLIT_SIZE`].
     fn repartitioned(
         &self,
         target_partitions: usize,
-        _repartition_file_min_size: usize,
+        repartition_file_min_size: usize,
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
@@ -200,27 +171,18 @@ impl FileSource for Hdf5Source {
             return Ok(None);
         }
 
-        Ok(beacon_datafusion_ext::file_groups::shared_file_groups(
+        Ok(share_files(
             &config.file_groups,
             target_partitions,
-            MIN_SPLIT_SIZE,
+            Some(repartition_file_min_size as u64),
         )
-        .map(|deal| {
-            // One cell per shared file. Every partition that holds the file
-            // reaches the same cell, so the first to arrive builds the read and
-            // the rest attach to what it built.
-            let shares = deal
-                .shared
-                .into_iter()
-                .map(|path| (path, Arc::new(tokio::sync::OnceCell::new())))
-                .collect();
-
+        .map(|scan| {
             let mut config = config.clone();
-            config.file_groups = deal.file_groups;
-            // The openers are built from the config's source, so the map has to
-            // travel with it.
+            config.file_groups = scan.file_groups;
+            // The openers are built from the config's source, so the shares
+            // have to travel with it.
             config.file_source = Arc::new(Self {
-                partitions_shared_map: Arc::new(shares),
+                partitions_shared_map: scan.shares,
                 ..self.clone()
             });
             config
@@ -346,12 +308,20 @@ impl Hdf5Opener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         cache: Option<Hdf5ReaderCache>,
-        _metrics: Option<DatasetReadMetrics>, // TODO: record the read metrics for the dataset, not just for the partition that built it.
+        metrics: SharedReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
+        let planning = metrics.clone();
         let plan = async move || {
             let dataset = Self::open_dataset(store, object, cache, read_dimensions).await?;
-            SharedDataset::plan(dataset, projected_schema, batch_size, predicate).await
+            SharedDataset::plan(
+                dataset,
+                projected_schema,
+                batch_size,
+                predicate,
+                Some(&planning),
+            )
+            .await
         };
 
         // The first partition to arrive opens the file and fills its queue. The
@@ -364,7 +334,7 @@ impl Hdf5Opener {
             None => plan().await?,
         };
 
-        Ok(dataset.stream())
+        Ok(dataset.stream(Some(metrics)))
     }
 
     /// Open the file and narrow it to the dimensions this scan reads on.
@@ -420,7 +390,7 @@ impl FileOpener for Hdf5Opener {
             .get(&file.object_meta.location)
             .cloned();
 
-        let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
+        let metrics = SharedReadMetrics::new(&self.metrics, self.partition);
         Ok(Self::read(
             share,
             self.object_store.clone(),
