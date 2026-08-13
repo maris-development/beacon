@@ -1544,6 +1544,7 @@ dependencies = [
  "beacon-nd-array",
  "bytemuck",
  "chrono",
+ "crossbeam",
  "datafusion",
  "futures",
  "hifitime",

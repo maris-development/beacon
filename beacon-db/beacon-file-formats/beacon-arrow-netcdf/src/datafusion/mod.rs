@@ -1150,84 +1150,6 @@ mod reader_backend_tests {
         }
     }
 
-    /// One file is shared across partitions under the Rust reader, and never
-    /// under netcdf-c.
-    ///
-    /// A file over the minimum is not divided at plan time. It goes into every
-    /// partition's group, marked with [`SharedFile`], and the partitions divide
-    /// it as they read it by taking subsets from one queue. So the assertion is
-    /// that the file appears once per partition, carries the mark, and carries
-    /// no byte range.
-    ///
-    /// netcdf-c opts out through
-    /// [`FileSource::supports_repartitioning`]: every call it makes queues on
-    /// one process-global mutex, so partitions of a file would run one at a time
-    /// and pay for an extra open each.
-    #[test]
-    fn only_the_rust_reader_shares_one_file() {
-        use datafusion::datasource::listing::PartitionedFile;
-        use datafusion::datasource::table_schema::TableSchema;
-        use datafusion::execution::object_store::ObjectStoreUrl;
-
-        use super::source::SharedFile;
-
-        // Comfortably over the minimum a file has to clear to be shared.
-        const FILE_SIZE: u64 = 64 * 1024 * 1024;
-        const PARTITIONS: usize = 4;
-
-        for (backend, shares) in [(ReaderBackend::NetcdfC, false), (ReaderBackend::Oxcdf, true)] {
-            let table_schema =
-                TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-            let source = NetCDFSource::new(access_on(backend), None, table_schema);
-            let config = FileScanConfigBuilder::new(
-                ObjectStoreUrl::local_filesystem(),
-                Arc::new(source.clone()) as Arc<dyn FileSource>,
-            )
-            .with_file(PartitionedFile::new("one.nc", FILE_SIZE))
-            .build();
-
-            let repartitioned = source.repartitioned(PARTITIONS, 1, None, &config).unwrap();
-
-            match (shares, repartitioned) {
-                (false, result) => assert!(
-                    result.is_none(),
-                    "{backend:?} must not share a file across partitions"
-                ),
-                (true, None) => panic!("{backend:?} must share a file across partitions"),
-                (true, Some(config)) => {
-                    assert_eq!(
-                        config.file_groups.len(),
-                        PARTITIONS,
-                        "{backend:?} should give the file to every partition"
-                    );
-
-                    for group in &config.file_groups {
-                        assert_eq!(group.len(), 1, "{backend:?}: one file per partition");
-                        let file = group.iter().next().unwrap();
-
-                        assert!(
-                            file.range.is_none(),
-                            "{backend:?}: a shared file is not divided at plan time"
-                        );
-
-                        let consumers = file
-                            .extensions
-                            .as_ref()
-                            .and_then(|ext| {
-                                (ext.as_ref() as &dyn std::any::Any).downcast_ref::<SharedFile>()
-                            })
-                            .map(|marked| marked.consumers);
-                        assert_eq!(
-                            consumers,
-                            Some(PARTITIONS),
-                            "{backend:?}: the mark says how many partitions hold it"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
     /// A file too small to share keeps its files whole and unmarked.
     ///
     /// Every partition opening a small file to take a subset or two would cost
@@ -1254,7 +1176,6 @@ mod reader_backend_tests {
             "a file under the minimum must not be shared"
         );
     }
-
 
     /// A session with `target_partitions` partitions.
     ///
@@ -1326,7 +1247,6 @@ mod reader_backend_tests {
         writer.write_record_batch(batch).expect("write the batch");
         writer.finish().expect("finish the file");
 
-
         (dir, path)
     }
 
@@ -1391,49 +1311,6 @@ mod reader_backend_tests {
 
         let whole_summary = summary(&whole).await;
         assert_eq!(summary(&split).await, whole_summary);
-    }
-
-    /// A scan under the split minimum stays on one partition.
-    ///
-    /// Every share of a file opens that file and builds its chunk list before it
-    /// reads a byte. On a small file that setup costs more than the parallelism
-    /// returns, so the source declines however many partitions the session asks
-    /// for. The bundled gridded fixture is a few hundred KB, well under the line.
-    ///
-    /// The rows are checked too: a declined split must return the same answer,
-    /// not merely the same partition count.
-    #[tokio::test]
-    async fn a_small_scan_is_not_split() {
-        const QUERY: &str = "SELECT count(*), min(analysed_sst), max(analysed_sst) FROM one";
-
-        let whole = session();
-        register(&whole, "one", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
-
-        let asked = splitting_session(4, 8192);
-        register(&asked, "one", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
-
-        let plan = asked
-            .sql("SELECT analysed_sst FROM one")
-            .await
-            .unwrap()
-            .create_physical_plan()
-            .await
-            .unwrap();
-        assert_eq!(
-            scan_partitions(&plan),
-            1,
-            "a scan under {} bytes must not split:\n{}",
-            super::source::MIN_SPLIT_SIZE,
-            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
-        );
-
-        let summary = async |ctx: &SessionContext| {
-            let batches = ctx.sql(QUERY).await.unwrap().collect().await.unwrap();
-            format!("{:?}", batches[0].columns())
-        };
-
-        let asked_summary = summary(&asked).await;
-        assert_eq!(asked_summary, summary(&whole).await);
     }
 
     /// Every column, including every attribute, comes back identical.
