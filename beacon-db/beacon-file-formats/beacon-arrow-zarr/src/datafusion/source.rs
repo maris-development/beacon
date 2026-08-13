@@ -8,17 +8,9 @@
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use beacon_nd_array::{
-    arrow::{
-        batch::any_dataset_as_record_batch_stream_split, metrics::DatasetReadMetrics,
-        nd_provider::any_dataset_as_encoded_stream_split, pushdown_filter::PushdownFilter,
-        schema::any_dataset_to_arrow_schema, split::ChunkSplit,
-    },
-    projection::DatasetProjection,
-};
+use arrow::record_batch::RecordBatch;
+use beacon_nd_array::arrow::{metrics::DatasetReadMetrics, share::SharedDataset};
 use datafusion::{
-    common::Statistics,
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
@@ -28,21 +20,30 @@ use datafusion::{
     },
     error::DataFusionError,
     physical_expr::{conjunction, projection::ProjectionExprs},
-    physical_expr_adapter::BatchAdapterFactory,
     physical_plan::{
         PhysicalExpr,
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
     },
 };
-use futures::{FutureExt, StreamExt, TryStreamExt, future};
+use futures::{FutureExt, stream::BoxStream};
 use object_store::ObjectStore;
 use zarrs::group::Group;
+
+use std::collections::HashMap;
 
 use crate::{
     reader::{dataset_from_group, project_read_dimensions},
     util::{ZarrPath, ZarrStorage},
 };
+
+/// The shares of one scan, keyed by the object path of a group's `zarr.json`.
+///
+/// Built by [`ZarrSource::repartitioned`] and cloned into every opener, so the
+/// partitions of a group find each other. A scan builds its own source, so this
+/// does not outlive the plan.
+type FileShares =
+    Arc<HashMap<object_store::path::Path, Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>>;
 
 /// The nominal size a zarr leaf group reports.
 ///
@@ -72,6 +73,9 @@ pub struct ZarrSource {
     /// Storage to open groups over, replacing the session's object store.
     /// Set by the Icechunk reader; `None` for a listed zarr store.
     storage: Option<ZarrStorage>,
+    /// The shares of this scan. Cloned, not copied, so every partition of a
+    /// group reaches the same one.
+    partitions_shared_map: FileShares,
 }
 
 impl ZarrSource {
@@ -85,6 +89,7 @@ impl ZarrSource {
             read_dimensions: None,
             projection: None,
             storage: None,
+            partitions_shared_map: Arc::new(HashMap::new()),
         }
     }
 
@@ -109,6 +114,13 @@ impl ZarrSource {
         self.projection = projection;
         self
     }
+
+    /// Whether this scan reads `path` through a share, rather than as one
+    /// partition's own whole group.
+    #[cfg(test)]
+    pub(crate) fn shares_group(&self, path: &object_store::path::Path) -> bool {
+        self.partitions_shared_map.contains_key(path)
+    }
 }
 
 impl FileSource for ZarrSource {
@@ -131,6 +143,7 @@ impl FileSource for ZarrSource {
             read_dimensions: self.read_dimensions.clone(),
             metrics: self.execution_plan_metrics.clone(),
             partition,
+            partition_shares: self.partitions_shared_map.clone(),
         }))
     }
 
@@ -149,33 +162,25 @@ impl FileSource for ZarrSource {
         })
     }
 
-    /// Split every group across partitions, whatever its `zarr.json` weighs.
+    /// Share every group with every partition, whatever its `zarr.json` weighs.
     ///
     /// No size threshold applies here, and that is the difference from netCDF
     /// and HDF5. Those two hold a size back (see their `MIN_SPLIT_SIZE`) because
-    /// their object is their data, so its size says what a split would buy. A
+    /// their object is their data, so its size says what a share would buy. A
     /// zarr group's object is its `zarr.json`: a metadata document of a few KB
     /// that can front terabytes of chunks. Any threshold on it would measure the
     /// wrong thing and decline every store, however large.
     ///
     /// What makes that safe is the chunk grid. A group states its chunks in
-    /// metadata the open already read, so the shares fall out of a structure
-    /// that exists whether or not the scan splits, and a share of a group with
-    /// fewer chunks than shares simply reads nothing.
+    /// metadata the open already read, so the queue falls out of a structure
+    /// that exists whether or not the scan shares, and a partition that arrives
+    /// at an empty queue simply reads nothing.
     ///
-    /// Over-splitting is cheap rather than wrong. The opener resolves its range
-    /// against the chunk list, so a share of a group with fewer chunks than
-    /// shares simply reads nothing.
-    ///
-    /// The byte ranges still come from `zarr.json` sizes, so a scan over several
-    /// groups balances by metadata weight rather than by data volume. Within one
-    /// group — the case this exists for — the shares are even.
-    ///
-    /// The shares are dealt round-robin rather than as one contiguous run each.
-    /// An nd chunk list is C-ordered, so a predicate on the outermost dimension
-    /// prunes a prefix of it, and a contiguous deal would leave the first
-    /// partitions idle while the last ones do the work. See
-    /// [`beacon_datafusion_ext::file_groups`] for the trade that makes.
+    /// Nothing is divided here. The group goes into every partition's group and
+    /// gets a cell in `partitions_shared_map`, and the partitions divide it as
+    /// they read it. Balance follows completion rather than a guess made at plan
+    /// time, which matters most under a predicate: an nd chunk list is
+    /// C-ordered, so `WHERE time > …` prunes a prefix of it.
     fn repartitioned(
         &self,
         target_partitions: usize,
@@ -183,21 +188,36 @@ impl FileSource for ZarrSource {
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
-        Ok(
-            beacon_datafusion_ext::file_groups::interleaved_file_groups(
-                &config.file_groups,
-                target_partitions,
-                // A group's `zarr.json` says nothing about the data behind it,
-                // so no minimum applies.
-                0,
-                output_ordering.is_some(),
-            )
-            .map(|file_groups| {
-                let mut config = config.clone();
-                config.file_groups = file_groups;
-                config
-            }),
+        if output_ordering.is_some() || target_partitions <= 1 {
+            // An ordered scan cannot share: a partition holding an arbitrary
+            // subset of a group cannot emit its rows in group order.
+            return Ok(None);
+        }
+
+        Ok(beacon_datafusion_ext::file_groups::shared_file_groups(
+            &config.file_groups,
+            target_partitions,
+            // A group's `zarr.json` says nothing about the data behind it, so no
+            // minimum applies.
+            0,
         )
+        .map(|deal| {
+            let shares = deal
+                .shared
+                .into_iter()
+                .map(|path| (path, Arc::new(tokio::sync::OnceCell::new())))
+                .collect();
+
+            let mut config = config.clone();
+            config.file_groups = deal.file_groups;
+            // The openers are built from the config's source, so the map has to
+            // travel with it.
+            config.file_source = Arc::new(Self {
+                partitions_shared_map: Arc::new(shares),
+                ..self.clone()
+            });
+            config
+        }))
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -256,13 +276,11 @@ impl FileSource for ZarrSource {
             ..self.clone()
         };
 
-        Ok(
-            FilterPushdownPropagation::with_parent_pushdown_result(vec![
-                PushedDown::No;
-                filters.len()
-            ])
-            .with_updated_node(Arc::new(source)),
-        )
+        Ok(FilterPushdownPropagation::with_parent_pushdown_result(vec![
+            PushedDown::No;
+            filters.len()
+        ])
+        .with_updated_node(Arc::new(source)))
     }
 }
 
@@ -276,165 +294,105 @@ struct ZarrOpener {
     read_dimensions: Option<Vec<String>>,
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
+    /// The shares of this scan, so the partitions of a group find each other.
+    partition_shares: FileShares,
+}
+
+impl ZarrOpener {
+    /// Open one group and narrow it to the dimensions this scan reads on.
+    async fn open_dataset(
+        storage: ZarrStorage,
+        zarr_path: ZarrPath,
+        read_dimensions: Option<Vec<String>>,
+    ) -> datafusion::error::Result<beacon_nd_array::dataset::AnyDataset> {
+        let group = Group::async_open(storage.inner(), &zarr_path.as_zarr_path())
+            .await
+            .map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "Failed to open Zarr group at '{}': {e}",
+                    zarr_path.as_zarr_path()
+                ))
+            })?;
+
+        let dataset = dataset_from_group(&group, None).await.map_err(|e| {
+            DataFusionError::Execution(format!("Failed to read Zarr group as dataset: {e}"))
+        })?;
+
+        // Apply explicit dimensions, or narrow to a broadcast-compatible default
+        // so `SELECT *` cannot fail when variables live on incompatible
+        // dimension sets. No log label: this runs per group/partition (logging
+        // happens in schema inference).
+        project_read_dimensions(dataset, read_dimensions, None)
+            .map_err(|e| DataFusionError::Execution(e.to_string()))
+    }
+
+    /// Read one group, through its share when it has one.
+    ///
+    /// A shared group is opened and planned by whichever partition arrives
+    /// first; the rest attach to what it built and pull from the same queue. An
+    /// unshared group is planned by the one partition that holds it.
+    ///
+    /// Every input to the plan has to be identical in every partition of one
+    /// group, or the partitions would not be reading the same group the same
+    /// way. They are: the dataset, `projected_schema`, `batch_size` and
+    /// `predicate`. A scan takes all four from one place, so they are.
+    #[allow(clippy::too_many_arguments)]
+    async fn read(
+        share: Option<Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>,
+        storage: ZarrStorage,
+        zarr_path: ZarrPath,
+        projected_schema: SchemaRef,
+        read_dimensions: Option<Vec<String>>,
+        batch_size: usize,
+        _metrics: Option<DatasetReadMetrics>, // TODO: record the read metrics for the dataset, not just for the partition that built it.
+        predicate: Option<Arc<dyn PhysicalExpr>>,
+    ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
+        let plan = async move || {
+            let dataset = Self::open_dataset(storage, zarr_path, read_dimensions).await?;
+            SharedDataset::plan(dataset, projected_schema, batch_size, predicate).await
+        };
+
+        // The first partition to arrive opens the group and fills its queue. The
+        // rest wait for it, then draw from that same queue.
+        let dataset = match share {
+            Some(cell) => cell
+                .get_or_try_init::<DataFusionError, _, _>(plan)
+                .await?
+                .clone(),
+            None => plan().await?,
+        };
+
+        Ok(dataset.stream())
+    }
 }
 
 impl FileOpener for ZarrOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let zarr_path = ZarrPath::new_from_object_meta(file.object_meta.clone()).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to create ZarrPath from object metadata: {e}"))
+            DataFusionError::Execution(format!(
+                "Failed to create ZarrPath from object metadata: {e}"
+            ))
         })?;
 
-        // This partition's share of the group. The range spans the group's
-        // `zarr.json`, which is metadata, not data. It is never read as bytes:
-        // it names a fraction of the chunk list the reader builds, and the
-        // fractions of a group tile that list. See
-        // [`beacon_nd_array::arrow::split`] and [`ZarrSource::repartitioned`].
-        //
-        // An unranged group gives `None`, which reads the whole dataset.
-        let (range_start, range_end) = file.range();
-        let split = ChunkSplit::from_byte_range(range_start..range_end, file.object_meta.size);
+        // A group in the share map is in every partition's group, so it is read
+        // through its share and no other way. One that is not is this
+        // partition's alone.
+        let share = self
+            .partition_shares
+            .get(&file.object_meta.location)
+            .cloned();
 
-        let storage = self.storage.clone();
-        let projected_schema = self.projected_schema.clone();
-        let predicate = self.predicate.clone();
-        let batch_size = self.batch_size;
-        let read_dimensions = self.read_dimensions.clone();
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
-
-        let fut = async move {
-            let group = Group::async_open(storage.inner(), &zarr_path.as_zarr_path())
-                .await
-                .map_err(|e| {
-                    DataFusionError::Execution(format!(
-                        "Failed to open Zarr group at '{}': {e}",
-                        zarr_path.as_zarr_path()
-                    ))
-                })?;
-
-            // Derive the file schema from the full dataset, then ask the
-            // schema adapter which columns the query needs.
-            let full = dataset_from_group(&group, None).await.map_err(|e| {
-                DataFusionError::Execution(format!("Failed to read Zarr group as dataset: {e}"))
-            })?;
-
-            // Apply explicit dimensions, or narrow to a broadcast-compatible
-            // default so `SELECT *` cannot fail when variables live on
-            // incompatible dimension sets. No log label: this runs per
-            // file/partition (logging happens in schema inference).
-            let full = project_read_dimensions(full, read_dimensions, None)
-                .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-
-            let file_schema: SchemaRef = Arc::new(any_dataset_to_arrow_schema(&full).map_err(
-                |e| DataFusionError::Execution(format!("Failed to derive Zarr Arrow schema: {e}")),
-            )?);
-
-            // Columns of this group that the query needs, in file order — used
-            // both to prune the read and as the source schema for the adapter.
-            let projection: Vec<usize> = file_schema
-                .fields()
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
-                .map(|(i, _)| i)
-                .collect();
-            if projection.is_empty() {
-                // COUNT(*): reading zero columns yields an empty stream (count 0).
-                // Drive with the highest-dimensionality variable so the row count
-                // is the full broadcast count (a scalar attribute gives 1 row),
-                // plus any predicate columns (PushdownFilter matches by name), and
-                // emit zero-column batches carrying the row counts.
-                let driver_idx = full
-                    .fields()
-                    .keys()
-                    .max_by_key(|name| {
-                        full.get_array(name)
-                            .map(|a| a.shape().iter().product::<usize>())
-                            .unwrap_or(0)
-                    })
-                    .and_then(|name| file_schema.index_of(name).ok())
-                    .unwrap_or(0);
-                let mut driver: Vec<usize> = vec![driver_idx];
-                if let Some(pred) = &predicate {
-                    for col in datafusion::physical_expr::utils::collect_columns(pred) {
-                        if let Ok(idx) = file_schema.index_of(col.name()) {
-                            driver.push(idx);
-                        }
-                    }
-                }
-                driver.sort_unstable();
-                driver.dedup();
-
-                let projected = full
-                    .project(&DatasetProjection::new_with_index_projection(driver))
-                    .map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "Failed to project Zarr dataset for count: {e}"
-                        ))
-                    })?;
-                let pushdown_filter = predicate.map(PushdownFilter::new);
-                let count_schema = projected_schema.clone();
-                // The split applies here too. A count path that read the whole
-                // group in every partition would return the row count once per
-                // partition.
-                let stream = any_dataset_as_record_batch_stream_split(
-                    projected,
-                    batch_size,
-                    pushdown_filter,
-                    metrics,
-                    split,
-                )
-                .map(move |batch| {
-                    let batch = batch.map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "Error reading Zarr dataset as Arrow: {e}"
-                        ))
-                    })?;
-                    RecordBatch::try_new_with_options(
-                        count_schema.clone(),
-                        vec![],
-                        &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
-                    )
-                    .map_err(|e| {
-                        DataFusionError::Execution(format!("Failed to build count batch: {e}"))
-                    })
-                })
-                .boxed();
-                return Ok(stream);
-            }
-
-            // The opener emits nd-encoded batches, so adaptation happens in the
-            // encoded (struct) domain: reorder and null-fill columns the group
-            // lacks onto the projected encoded schema.
-            let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-                &file_schema.project(&projection)?,
-            ));
-            let adapter =
-                BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
-
-            let projected = full
-                .project(&DatasetProjection::new_with_index_projection(projection))
-                .map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to project Zarr dataset: {e}"))
-                })?;
-
-            // Emit nd-encoded batches (decoded/broadcast by the NdSourceExec /
-            // NdBroadcastExec above the scan), adapted onto the projected
-            // encoded schema.
-            let _ = metrics;
-            let stream = any_dataset_as_encoded_stream_split(projected, batch_size, split)
-                .and_then(move |batch| {
-                    let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "Failed to adapt Zarr batch schema: {e}"
-                        ))
-                    });
-                    future::ready(mapped)
-                })
-                .boxed();
-
-            Ok(stream)
-        };
-
-        Ok(fut.boxed())
+        Ok(Self::read(
+            share,
+            self.storage.clone(),
+            zarr_path,
+            self.projected_schema.clone(),
+            self.read_dimensions.clone(),
+            self.batch_size,
+            metrics,
+            self.predicate.clone(),
+        )
+        .boxed())
     }
 }

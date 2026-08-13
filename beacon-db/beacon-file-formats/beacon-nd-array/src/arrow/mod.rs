@@ -7,4 +7,3 @@ pub mod pushdown;
 pub mod pushdown_filter;
 pub mod schema;
 pub mod share;
-pub mod split;

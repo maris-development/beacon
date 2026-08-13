@@ -1,14 +1,18 @@
 use std::sync::Arc;
 
-use arrow::datatypes::Schema;
+use arrow::array::RecordBatchOptions;
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use crossbeam::queue::ArrayQueue;
 use datafusion::error::{DataFusionError, Result};
-use futures::StreamExt;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr_adapter::{BatchAdapter, BatchAdapterFactory};
 use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 use indexmap::IndexMap;
 
 use crate::NdArrayD;
+use crate::projection::DatasetProjection;
 use std::ops::Range;
 
 use crate::array::subset::ArraySubset;
@@ -262,6 +266,193 @@ impl SharedRead {
             .boxed(),
         }
     }
+}
+
+/// One file, opened and planned once: the queue its partitions draw from, and
+/// what a batch off that queue becomes.
+///
+/// This is what a file-format opener puts behind its share. A shared file builds
+/// one of these for all of its partitions; an unshared file builds one for the
+/// single partition that holds it, which is the same work without the sharing.
+///
+/// Every format that reads through the nd pipeline plans a file the same way, so
+/// the planning lives here rather than three times over. What differs between
+/// them — how a file is opened, which dimensions it reads on — happens before
+/// this and is handed in as an [`AnyDataset`].
+#[derive(Debug)]
+pub struct SharedDataset {
+    read: Arc<SharedRead>,
+    output: Output,
+}
+
+/// What the scan does with a batch the queue produced.
+#[derive(Debug)]
+enum Output {
+    /// Reorder and null-fill the batch onto the projected schema. This is the
+    /// column read, and the batches are `beacon.nd`-encoded.
+    Adapt(Arc<BatchAdapter>),
+    /// Keep only the row count, under the (empty) projected schema. This is
+    /// `COUNT(*)`; see [`count_projection`].
+    Count(SchemaRef),
+}
+
+impl SharedDataset {
+    /// Plan `dataset` for a scan that wants `projected_schema`.
+    ///
+    /// Resolves the projection, fills the queue, and decides what a batch off it
+    /// becomes. `predicate` is a hint: it prunes chunks that cannot hold a row
+    /// the query wants, and the scan is expected to apply it again above.
+    pub async fn plan(
+        dataset: AnyDataset,
+        projected_schema: SchemaRef,
+        batch_size: usize,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
+    ) -> Result<Arc<Self>> {
+        let dataset_schema: SchemaRef = Arc::new(
+            crate::arrow::schema::any_dataset_to_arrow_schema(&dataset).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "Failed to derive an Arrow schema from the dataset: {e}"
+                ))
+            })?,
+        );
+
+        // The columns of this file the query needs, in file order.
+        let projection: Vec<usize> = dataset_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| projected_schema.index_of(field.name()).is_ok())
+            .map(|(index, _)| index)
+            .collect();
+
+        let pushdown = predicate.clone().map(PushdownFilter::new);
+
+        if projection.is_empty() {
+            // `COUNT(*)`: no column is wanted, so the read is driven by columns
+            // of its own and only the row counts leave.
+            let projection = count_projection(&dataset, &dataset_schema, &predicate);
+            let counted = project(dataset, &dataset_schema, projection)?;
+            let read = SharedRead::build(counted, batch_size, ReadMode::Flat(pushdown)).await?;
+            return Ok(Arc::new(Self {
+                read,
+                output: Output::Count(projected_schema),
+            }));
+        }
+
+        // The scan carries nd columns, so adaptation happens in the encoded
+        // (struct) domain: reorder and null-fill onto the projected schema.
+        let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+            &dataset_schema.project(&projection)?,
+        ));
+        let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
+        let projected = project(dataset, &dataset_schema, projection)?;
+        let read = SharedRead::build(projected, batch_size, ReadMode::Encoded(pushdown)).await?;
+
+        Ok(Arc::new(Self {
+            read,
+            output: Output::Adapt(Arc::new(adapter)),
+        }))
+    }
+
+    /// How much of the file is left to read. For tests and diagnostics.
+    pub fn remaining(&self) -> usize {
+        self.read.remaining()
+    }
+
+    /// One partition's stream over the file.
+    ///
+    /// Every partition of a shared file calls this on the same `SharedDataset`,
+    /// and they draw from the one queue behind it.
+    pub fn stream(&self) -> BoxStream<'static, Result<RecordBatch>> {
+        let batches = self.read.clone().stream();
+        match &self.output {
+            Output::Adapt(adapter) => {
+                let adapter = adapter.clone();
+                batches
+                    .and_then(move |batch| {
+                        let adapted = adapter.adapt_batch(&batch).map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "Failed to adapt the batch onto the scan's schema: {e}"
+                            ))
+                        });
+                        futures::future::ready(adapted)
+                    })
+                    .boxed()
+            }
+            Output::Count(schema) => {
+                let schema = schema.clone();
+                batches
+                    .and_then(move |batch| {
+                        let counted = RecordBatch::try_new_with_options(
+                            schema.clone(),
+                            vec![],
+                            &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+                        )
+                        .map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "Failed to build a count batch: {e}"
+                            ))
+                        });
+                        futures::future::ready(counted)
+                    })
+                    .boxed()
+            }
+        }
+    }
+}
+
+/// The columns a `COUNT(*)` reads, out of a file the query wants no column of.
+///
+/// Reading no column at all would give an empty stream and a count of zero. The
+/// read is driven by the widest variable instead, so the row count is the full
+/// broadcast row count — a scalar attribute like `.Conventions` would give one
+/// row — plus any column the predicate names, so a pushed-down filter still
+/// applies ([`PushdownFilter`] matches by name).
+fn count_projection(
+    dataset: &AnyDataset,
+    dataset_schema: &SchemaRef,
+    predicate: &Option<Arc<dyn PhysicalExpr>>,
+) -> Vec<usize> {
+    let driver = dataset
+        .fields()
+        .keys()
+        .max_by_key(|name| {
+            dataset
+                .get_array(name)
+                .map(|array| array.shape().iter().product::<usize>())
+                .unwrap_or(0)
+        })
+        .and_then(|name| dataset_schema.index_of(name).ok())
+        .unwrap_or(0);
+
+    let mut projection = vec![driver];
+    if let Some(predicate) = predicate {
+        for column in datafusion::physical_expr::utils::collect_columns(predicate) {
+            if let Ok(index) = dataset_schema.index_of(column.name()) {
+                projection.push(index);
+            }
+        }
+    }
+    projection.sort_unstable();
+    projection.dedup();
+    projection
+}
+
+/// Keep only `projection` of `dataset`, or all of it when that is everything.
+fn project(
+    dataset: AnyDataset,
+    dataset_schema: &SchemaRef,
+    projection: Vec<usize>,
+) -> Result<AnyDataset> {
+    if projection.len() == dataset_schema.fields().len() {
+        return Ok(dataset);
+    }
+    dataset
+        .project(&DatasetProjection {
+            dimension_projection: None,
+            index_projection: Some(projection),
+        })
+        .map_err(|e| DataFusionError::Execution(format!("Failed to project the dataset: {e}")))
 }
 
 #[cfg(test)]

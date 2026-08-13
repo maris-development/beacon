@@ -19,7 +19,6 @@ use crate::{
             mask_is_all_false, mask_pushdown,
         },
         pushdown_filter::PushdownFilter,
-        split::{ChunkSplit, split_leads, split_ordinals},
     },
     dataset::{
         Dataset,
@@ -89,31 +88,12 @@ pub fn any_dataset_as_record_batch_stream(
     predicate: Option<PushdownFilter>,
     metrics: Option<DatasetReadMetrics>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
-    any_dataset_as_record_batch_stream_split(dataset, batch_size, predicate, metrics, None)
-}
-
-/// The same, over one [`ChunkSplit`] of the dataset.
-///
-/// A `None` split reads the whole dataset, so this is a drop-in for
-/// [`any_dataset_as_record_batch_stream`]. A `Some` split reads one share of it,
-/// and the shares of a file tile it exactly. See [`crate::arrow::split`].
-///
-/// Both dataset shapes honour the split. A regular dataset slices its chunk
-/// list; a ragged one slices its batch plan. A shape that ignored the split
-/// would return every row once per partition.
-pub fn any_dataset_as_record_batch_stream_split(
-    dataset: AnyDataset,
-    batch_size: usize,
-    predicate: Option<PushdownFilter>,
-    metrics: Option<DatasetReadMetrics>,
-    split: Option<ChunkSplit>,
-) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     match dataset {
         AnyDataset::Regular(ds) => {
-            dataset_as_record_batch_stream_split(ds, batch_size, predicate, metrics, split)
+            dataset_as_record_batch_stream(ds, batch_size, predicate, metrics)
         }
         AnyDataset::Ragged { ragged, .. } => {
-            ragged_dataset_as_record_batch_stream(ragged, batch_size, predicate, metrics, split)
+            ragged_dataset_as_record_batch_stream(ragged, batch_size, predicate, metrics)
         }
     }
 }
@@ -274,42 +254,25 @@ pub(crate) async fn read_ragged_range(
 /// reached. Casts are never split — a single cast that exceeds
 /// `batch_size` on its own is still emitted as one batch.
 ///
-/// `split` names this partition's share of the batch plan. A ragged dataset has
-/// no chunk grid, so the plan takes the place of one: it is built from the same
-/// offsets, the same predicate and the same `batch_size` in every partition, so
-/// every partition builds the same plan and the shares tile it.
 fn ragged_dataset_as_record_batch_stream(
     ragged: RaggedDataset,
     batch_size: usize,
     predicate: Option<PushdownFilter>,
     metrics: Option<DatasetReadMetrics>,
-    split: Option<ChunkSplit>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     futures::stream::once(async move { plan_ragged_read(ragged, batch_size, predicate).await })
         .map(move |planned| {
             let metrics = metrics.clone();
             match planned {
                 Ok(plan) => {
-                    // A cast is pruned before the batch plan exists, so no split
-                    // owns it. The leading split reports the lot. Every split
-                    // would otherwise report it, and the totals would grow with
-                    // the partition count.
-                    if let (Some(m), Some((batches, rows))) = (&metrics, plan.pruned)
-                        && split_leads(split)
-                    {
+                    // A cast the predicate excluded is dropped before the batch
+                    // plan exists, so no batch can account for it.
+                    if let (Some(m), Some((batches, rows))) = (&metrics, plan.pruned) {
                         m.batches_pruned.add(batches);
                         m.rows_pruned.add(rows);
                     }
 
-                    // This partition's share of the plan.
-                    let owned = split_ordinals(split, plan.ranges.len());
-                    let ranges: Vec<Range<usize>> = plan
-                        .ranges
-                        .iter()
-                        .skip(owned.start)
-                        .take(owned.len())
-                        .cloned()
-                        .collect();
+                    let ranges: Vec<Range<usize>> = plan.ranges.to_vec();
 
                     let plan = Arc::new(plan);
                     futures::stream::iter(ranges)
@@ -563,10 +526,9 @@ pub(crate) struct ChunkGrid {
 /// else. Two callers that pass the same dataset and the same `batch_size` get
 /// the same chunks, in the same order.
 ///
-/// [`ChunkSplit`](crate::arrow::split::ChunkSplit) rests on that: it hands each
-/// partition of one file a slice of this list, and the slices only tile the list
-/// if every partition builds the same one. Keep this function pure in its two
-/// inputs, and keep every reader on it.
+/// The shared queue rests on that: the partitions of one file draw chunks from
+/// one list, and it is built once. Keep this function pure in its two inputs,
+/// and keep every reader on it.
 pub(crate) fn chunk_grid(dataset: &Dataset, batch_size: usize) -> anyhow::Result<ChunkGrid> {
     let (dims, max_shape, chunk_shape) = extract_dataset_layout(dataset)?;
 
@@ -681,17 +643,6 @@ pub fn dataset_as_record_batch_stream(
     predicate: Option<PushdownFilter>,
     metrics: Option<DatasetReadMetrics>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
-    dataset_as_record_batch_stream_split(dataset, batch_size, predicate, metrics, None)
-}
-
-/// The same, over one [`ChunkSplit`] of the chunk list.
-pub fn dataset_as_record_batch_stream_split(
-    dataset: Dataset,
-    batch_size: usize,
-    predicate: Option<PushdownFilter>,
-    metrics: Option<DatasetReadMetrics>,
-    split: Option<ChunkSplit>,
-) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     let ChunkGrid {
         dims: max_dims,
         chunks,
@@ -702,14 +653,7 @@ pub fn dataset_as_record_batch_stream_split(
 
     let schema = build_dataset_schema(&dataset.arrays);
 
-    // This partition's share of the list. Pruning counters stay accurate: they
-    // are added per chunk, and each chunk belongs to one split.
-    let owned = split_ordinals(split, chunks.len());
-    let subsets: Vec<ArraySubset> = chunks
-        .into_iter()
-        .skip(owned.start)
-        .take(owned.len())
-        .collect();
+    let subsets: Vec<ArraySubset> = chunks;
     let arrays = Arc::new(dataset.arrays);
 
     futures::stream::once(async move {
@@ -883,9 +827,7 @@ pub(crate) fn generate_chunk_subsets(shape: &[usize], chunk_shape: &[usize]) -> 
 mod tests {
     use super::*;
     use crate::NdArray;
-    use crate::arrow::split::byte_tiling_splits;
     use arrow::array::{Array, Float64Array, Int32Array};
-    use arrow::compute::concat_batches;
     use futures::TryStreamExt;
     use indexmap::IndexMap;
 
@@ -895,100 +837,6 @@ mod tests {
             .map(|(name, arr)| (name.to_string(), arr))
             .collect();
         Dataset::new("test".to_string(), map).await
-    }
-
-    /// The splits of a regular dataset, concatenated, equal the unsplit read.
-    ///
-    /// [`crate::arrow::nd_provider`] tests the same property on the encoded
-    /// stream. This one covers the flat stream, which serves `COUNT(*)` and the
-    /// formats that do not ride the nd spine.
-    #[tokio::test]
-    async fn the_splits_of_a_regular_dataset_rebuild_the_whole_read() {
-        for batch_size in [usize::MAX, 6, 3, 1] {
-            let nd = NdArray::<i32>::try_new_from_vec_in_mem(
-                (0..24).collect(),
-                vec![4, 6],
-                vec!["x".to_string(), "y".to_string()],
-                None,
-            )
-            .unwrap();
-            let ds = make_dataset(vec![("values", Arc::new(nd))]).await;
-            let schema = build_dataset_schema(&ds.arrays);
-
-            let whole: Vec<RecordBatch> =
-                dataset_as_record_batch_stream(ds.clone(), batch_size, None, None)
-                    .try_collect()
-                    .await
-                    .unwrap();
-            let expected = concat_batches(&schema, &whole).unwrap();
-            assert_eq!(expected.num_rows(), 24);
-
-            for parts in 1..=5 {
-                let mut batches = Vec::new();
-                for split in byte_tiling_splits(parts) {
-                    let part: Vec<RecordBatch> = dataset_as_record_batch_stream_split(
-                        ds.clone(),
-                        batch_size,
-                        None,
-                        None,
-                        split,
-                    )
-                    .try_collect()
-                    .await
-                    .unwrap();
-                    batches.extend(part);
-                }
-                let actual = concat_batches(&schema, &batches).unwrap();
-                assert_eq!(actual, expected, "batch_size={batch_size} parts={parts}");
-            }
-        }
-    }
-
-    /// The same property for a ragged dataset, which has no chunk grid and
-    /// splits its batch plan instead.
-    ///
-    /// A ragged file that ignored the split would return every observation once
-    /// per partition, so this covers the shape that has the most to lose.
-    #[tokio::test]
-    async fn the_splits_of_a_ragged_dataset_rebuild_the_whole_read() {
-        for batch_size in [usize::MAX, 5, 3, 1] {
-            let ragged = AnyDataset::try_from_dataset(make_ragged().await)
-                .await
-                .unwrap();
-            assert!(
-                matches!(ragged, AnyDataset::Ragged { .. }),
-                "fixture is ragged"
-            );
-
-            let whole: Vec<RecordBatch> =
-                any_dataset_as_record_batch_stream(ragged.clone(), batch_size, None, None)
-                    .try_collect()
-                    .await
-                    .unwrap();
-            let schema = whole[0].schema();
-            let expected = concat_batches(&schema, &whole).unwrap();
-            // 3 casts of 2, 1 and 3 observations.
-            assert_eq!(expected.num_rows(), 6);
-
-            for parts in 1..=5 {
-                let mut batches = Vec::new();
-                for split in byte_tiling_splits(parts) {
-                    let part: Vec<RecordBatch> = any_dataset_as_record_batch_stream_split(
-                        ragged.clone(),
-                        batch_size,
-                        None,
-                        None,
-                        split,
-                    )
-                    .try_collect()
-                    .await
-                    .unwrap();
-                    batches.extend(part);
-                }
-                let actual = concat_batches(&schema, &batches).unwrap();
-                assert_eq!(actual, expected, "batch_size={batch_size} parts={parts}");
-            }
-        }
     }
 
     #[tokio::test]

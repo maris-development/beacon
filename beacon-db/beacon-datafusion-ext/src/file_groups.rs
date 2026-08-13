@@ -1,22 +1,6 @@
 use datafusion::datasource::physical_plan::FileGroup;
 use object_store::path::Path;
 
-/// Cut every file over `min_split_size` into slices and deal them round-robin.
-///
-/// Left for the two formats that still divide a file at plan time. Both move to
-/// [`shared_file_groups`], which divides as it reads instead, and this goes when
-/// the second of them does.
-pub fn interleaved_file_groups(
-    _file_groups: &[FileGroup],
-    _target_partitions: usize,
-    _min_split_size: u64,
-    _preserve_order: bool,
-) -> Option<Vec<FileGroup>> {
-    todo!(
-        "zarr and HDF5 move to the shared queue that netCDF reads through; see shared_file_groups"
-    )
-}
-
 /// The deal [`shared_file_groups`] made.
 #[derive(Debug, Clone)]
 pub struct SharedDeal {

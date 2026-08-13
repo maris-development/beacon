@@ -358,8 +358,9 @@ impl FileFormat for ZarrFormat {
 
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so the
         // file source's schema is the encoded form of the logical table schema.
-        let encoded_file_schema =
-            Arc::new(beacon_datafusion_ext::nd::encoded_schema(conf.file_schema()));
+        let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+            conf.file_schema(),
+        ));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
             encoded_file_schema,
             conf.table_partition_cols().clone(),
@@ -441,7 +442,7 @@ mod tests {
     };
     use datafusion::prelude::SessionContext;
 
-    use super::{parse_bool_option, ZarrFormat, ZarrFormatFactory, ZarrSource};
+    use super::{ZarrFormat, ZarrFormatFactory, ZarrSource, parse_bool_option};
 
     /// Register the bundled `gridded-example.zarr` store as a DataFusion table
     /// backed by [`ZarrFormat`] + [`ListingTable`].
@@ -464,6 +465,125 @@ mod tests {
         ctx.register_table("gridded", Arc::new(table)).unwrap();
     }
 
+    // ── The predicate reaches the scan ─────────────────────────────────
+
+    /// The predicate reaches the zarr scan through the nd spine, and skips
+    /// chunks.
+    ///
+    /// The scan sits under an `NdSourceExec` and an `NdBroadcastExec`. A node
+    /// that does not forward filters leaves the source with nothing to prune on,
+    /// and that failure is invisible in a result — every row still comes back,
+    /// the scan just reads the whole store. So it is asserted on the scan's own
+    /// output: one encoded batch carries one chunk, so the scan's output rows
+    /// *are* its chunk count.
+    #[tokio::test]
+    async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
+        use arrow::array::Float32Array;
+        use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        struct ScanRows(Option<usize>);
+        impl ExecutionPlanVisitor for ScanRows {
+            type Error = std::convert::Infallible;
+            fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> Result<bool, Self::Error> {
+                if plan.name().contains("DataSourceExec") {
+                    self.0 = plan.metrics().and_then(|metrics| metrics.output_rows());
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+        }
+
+        let chunks_read = async |sql: &str| {
+            let plan = ctx
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
+                .await
+                .unwrap();
+            let mut visitor = ScanRows(None);
+            datafusion::physical_plan::accept(plan.as_ref(), &mut visitor).unwrap();
+            visitor.0.expect("the scan reports its output rows")
+        };
+
+        // Every lat the store holds, with no predicate in the plan and so no
+        // pruning: the bounds below are picked from these.
+        let batches = ctx
+            .sql("SELECT lat FROM gridded")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let lats: Vec<f32> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .expect("lat is f32")
+                    .iter()
+                    .flatten()
+                    .collect::<Vec<f32>>()
+            })
+            .collect();
+        let above = lats.iter().cloned().fold(f32::MIN, f32::max);
+        let middle = (lats.iter().cloned().fold(f32::MAX, f32::min) + above) / 2.0;
+
+        let whole = chunks_read("SELECT lat FROM gridded").await;
+        assert!(whole > 1, "the fixture must hold several chunks");
+
+        assert_eq!(
+            chunks_read(&format!(
+                "SELECT lat FROM gridded WHERE lat > {}",
+                above + 1.0
+            ))
+            .await,
+            0,
+            "a predicate no row can meet must leave the scan nothing to read"
+        );
+        assert_eq!(
+            chunks_read("SELECT lat FROM gridded WHERE lat > -1000").await,
+            whole,
+            "a predicate every row meets must not skip a chunk"
+        );
+
+        let partial = chunks_read(&format!("SELECT lat FROM gridded WHERE lat > {middle}")).await;
+        assert!(
+            partial > 0 && partial < whole,
+            "lat > {middle} should read some of the {whole} chunks, it read {partial}"
+        );
+
+        // And the answer still matches the coordinate itself. A bound that is
+        // too tight loses rows and reports a smaller count, with no error.
+        let counted = ctx
+            .sql(&format!(
+                "SELECT count(*) FROM gridded WHERE lat > {middle}"
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            counted[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("int64 count")
+                .value(0) as usize,
+            lats.iter().filter(|lat| **lat > middle).count(),
+            "the pruned scan does not match the coordinate"
+        );
+    }
+
     // ── Splitting one group across partitions ──────────────────────────
 
     /// A session that splits one zarr group across `target_partitions`.
@@ -482,11 +602,13 @@ mod tests {
     /// ignores that minimum, because the size of a `zarr.json` says nothing
     /// about the data behind it.
     #[test]
-    fn one_group_splits_into_shares_that_tile_it() {
+    fn one_group_is_shared_by_every_partition() {
         use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
+
+        const PARTITIONS: usize = 4;
 
         let table_schema =
             TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
@@ -501,38 +623,32 @@ mod tests {
         ))
         .build();
 
-        // The minimum split size the caller passes is deliberately larger than
-        // the group, so a source that honoured it would decline.
-        let repartitioned = source
-            .repartitioned(4, 10 * 1024 * 1024, None, &config)
+        // The minimum the caller passes is deliberately larger than the group,
+        // so a source that honoured it would decline.
+        let shared = source
+            .repartitioned(PARTITIONS, 10 * 1024 * 1024, None, &config)
             .unwrap()
-            .expect("a zarr group splits");
+            .expect("a zarr group is shared");
 
-        assert_eq!(repartitioned.file_groups.len(), 4);
-
-        // Sorted, not in group order: the shares are dealt round-robin, so a
-        // partition holds slices from across the group rather than one run of
-        // it. See `beacon_datafusion_ext::file_groups`, which pins the deal.
-        let mut shares: Vec<(i64, i64)> = repartitioned
-            .file_groups
-            .iter()
-            .flat_map(|group| group.iter())
-            .map(|file| {
-                let range = file.range.as_ref().expect("a share carries a range");
-                (range.start, range.end)
-            })
-            .collect();
-        shares.sort_unstable();
-
-        let mut next = 0;
-        for (start, end) in &shares {
-            assert_eq!(*start, next, "shares must not gap or overlap");
-            next = *end;
+        assert_eq!(shared.file_groups.len(), PARTITIONS);
+        for group in &shared.file_groups {
+            assert_eq!(group.len(), 1, "every partition holds the group");
+            assert!(
+                group.iter().next().unwrap().range.is_none(),
+                "a shared group is not divided into byte ranges; the partitions \
+                 divide it as they read it"
+            );
         }
-        assert_eq!(
-            next as u64,
-            super::NOMINAL_GROUP_SIZE,
-            "shares must cover the group"
+
+        // The map is what stops every partition reading the whole group.
+        let source = shared
+            .file_source()
+            .as_any()
+            .downcast_ref::<ZarrSource>()
+            .expect("the config carries a ZarrSource");
+        assert!(
+            source.shares_group(&object_store::path::Path::from("store.zarr/zarr.json")),
+            "the source the openers come from must know the group is shared"
         );
     }
 
@@ -919,7 +1035,10 @@ mod tests {
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        assert!(names.contains(&"time".to_string()), "time present: {names:?}");
+        assert!(
+            names.contains(&"time".to_string()),
+            "time present: {names:?}"
+        );
         assert!(
             !names.contains(&"analysed_sst".to_string()),
             "analysed_sst depends on lat/lon and must be excluded: {names:?}"
@@ -1043,13 +1162,12 @@ mod tests {
             .unwrap();
         let mut kept = 0i64;
         for b in &batches {
-            let col = b
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .unwrap();
+            let col = b.column(0).as_any().downcast_ref::<Float32Array>().unwrap();
             for i in 0..col.len() {
-                assert!(col.value(i) > mid, "every returned lat must satisfy the predicate");
+                assert!(
+                    col.value(i) > mid,
+                    "every returned lat must satisfy the predicate"
+                );
             }
             kept += b.num_rows() as i64;
         }
@@ -1137,8 +1255,16 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         for i in 0..batch.num_rows() {
-            assert_eq!(units.value(i), "kelvin", "variable attribute must be constant");
-            assert_eq!(conventions.value(i), "CF-1.4", "global attribute must be constant");
+            assert_eq!(
+                units.value(i),
+                "kelvin",
+                "variable attribute must be constant"
+            );
+            assert_eq!(
+                conventions.value(i),
+                "CF-1.4",
+                "global attribute must be constant"
+            );
         }
     }
 
@@ -1175,8 +1301,15 @@ mod tests {
                 .unwrap()
                 .value(0)
         };
-        assert_eq!(int("distinct_units"), 1, "attribute must be a single constant");
-        assert!(int("grid_rows") > 1, "gridded variable must define a multi-row grid");
+        assert_eq!(
+            int("distinct_units"),
+            1,
+            "attribute must be a single constant"
+        );
+        assert!(
+            int("grid_rows") > 1,
+            "gridded variable must define a multi-row grid"
+        );
         assert_eq!(
             int("attr_rows"),
             int("grid_rows"),

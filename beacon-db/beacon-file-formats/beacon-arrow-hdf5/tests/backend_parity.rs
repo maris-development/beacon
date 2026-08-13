@@ -126,7 +126,9 @@ fn session() -> SessionContext {
                 .with_target_partitions(1)
                 // `FastObjectTable` merges its schemas through this. A session
                 // that skips `RuntimeBuilder` has to register it itself.
-                .with_extension(beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension()),
+                .with_extension(
+                    beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+                ),
         )
         .with_default_features()
         .build();
@@ -160,7 +162,9 @@ async fn register(ctx: &SessionContext, table: &str, backend: Backend, path: &st
 fn splitting_session(target_partitions: usize) -> SessionContext {
     let config = SessionConfig::new()
         .with_target_partitions(target_partitions)
-        .with_extension(beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension());
+        .with_extension(
+            beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+        );
 
     let state = SessionStateBuilder::new()
         .with_config(config)
@@ -700,7 +704,9 @@ async fn statistics_cover_a_plain_hdf5_file() {
         .unwrap();
 
     let range = |column: &str| {
-        let index = schema.index_of(column).unwrap_or_else(|e| panic!("{column}: {e}"));
+        let index = schema
+            .index_of(column)
+            .unwrap_or_else(|e| panic!("{column}: {e}"));
         let stats = &statistics.column_statistics[index];
         (stats.min_value.clone(), stats.max_value.clone())
     };
@@ -750,10 +756,130 @@ async fn disabling_statistics_wins_over_the_reader() {
         )
         .unwrap();
 
-    let statistics = off.infer_stats(&state, &store, schema, &object).await.unwrap();
+    let statistics = off
+        .infer_stats(&state, &store, schema, &object)
+        .await
+        .unwrap();
     assert_eq!(
         columns_with_a_range(&statistics),
         0,
         "enable_statistics=false must still mean no statistics"
+    );
+}
+
+/// The predicate reaches the HDF5 scan through the nd spine, and skips chunks.
+///
+/// The scan sits under an `NdSourceExec` and an `NdBroadcastExec`. A node that
+/// does not forward filters leaves the source with nothing to prune on, and that
+/// failure is invisible in a result — every row still comes back, the scan just
+/// reads the whole file. So it is asserted on the scan's own output.
+///
+/// One encoded batch carries one chunk, so the scan's output rows *are* its
+/// chunk count. The fixture's `lat` runs from about 38.8 to 48.8.
+#[tokio::test]
+async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
+    use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
+
+    let ctx = session();
+    register(&ctx, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+
+    struct ScanRows(Option<usize>);
+    impl ExecutionPlanVisitor for ScanRows {
+        type Error = std::convert::Infallible;
+        fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> Result<bool, Self::Error> {
+            if plan.name().contains("DataSourceExec") {
+                self.0 = plan.metrics().and_then(|metrics| metrics.output_rows());
+                return Ok(false);
+            }
+            Ok(true)
+        }
+    }
+
+    let chunks_read = async |sql: &str| {
+        let plan = ctx
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
+            .await
+            .unwrap();
+        let mut visitor = ScanRows(None);
+        datafusion::physical_plan::accept(plan.as_ref(), &mut visitor).unwrap();
+        visitor.0.expect("the scan reports its output rows")
+    };
+
+    let whole = chunks_read("SELECT lat FROM t").await;
+    assert!(whole > 1, "the fixture must hold several chunks");
+
+    assert_eq!(
+        chunks_read("SELECT lat FROM t WHERE lat > 1000").await,
+        0,
+        "a predicate no row can meet must leave the scan nothing to read"
+    );
+    assert_eq!(
+        chunks_read("SELECT lat FROM t WHERE lat > 0").await,
+        whole,
+        "a predicate every row meets must not skip a chunk"
+    );
+
+    let partial = chunks_read("SELECT lat FROM t WHERE lat > 44").await;
+    assert!(
+        partial > 0 && partial < whole,
+        "lat > 44 should read some of the {whole} chunks, it read {partial}"
+    );
+}
+
+/// The count under a pruned scan matches the coordinate itself.
+///
+/// A bound that is too tight loses rows and reports a smaller count, and nothing
+/// about that is an error. The expected answer comes from the coordinate column,
+/// read with no predicate in the plan and therefore with no pruning.
+#[tokio::test]
+async fn a_pruned_scan_counts_what_the_coordinate_says_it_should() {
+    use arrow::array::{Float32Array, Int64Array};
+
+    let ctx = session();
+    register(&ctx, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+
+    let lats: Vec<f32> = {
+        let batch = collect(&ctx, "SELECT lat FROM t").await;
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("lat is f32")
+            .iter()
+            .flatten()
+            .collect()
+    };
+    assert!(!lats.is_empty(), "the fixture must hold rows");
+
+    let count = async |sql: &str| {
+        collect(&ctx, sql)
+            .await
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("int64 count")
+            .value(0) as usize
+    };
+
+    for threshold in [0.0_f32, 44.0, 60.0] {
+        let expected = lats.iter().filter(|lat| **lat > threshold).count();
+        assert_eq!(
+            count(&format!("SELECT count(*) FROM t WHERE lat > {threshold}")).await,
+            expected,
+            "lat > {threshold}: the pruned scan does not match the coordinate"
+        );
+    }
+
+    // A disjunction implies no bound, so it must prune nothing and still answer.
+    assert_eq!(
+        count("SELECT count(*) FROM t WHERE lat > 0 OR lat > 60").await,
+        lats.iter().filter(|lat| **lat > 0.0).count(),
+        "a disjunction must not prune on one of its branches"
     );
 }

@@ -23,7 +23,10 @@ macro_rules! convert_ndarray {
             .as_any()
             .downcast_ref::<NdArray<$rust_ty>>()
             .ok_or_else(|| {
-                tracing::error!(target_type = $label, "failed to downcast NdArray for Arrow conversion");
+                tracing::error!(
+                    target_type = $label,
+                    "failed to downcast NdArray for Arrow conversion"
+                );
                 anyhow::anyhow!(
                     "Failed to downcast NdArray to NdArray<{}> for Arrow conversion.",
                     $label
@@ -461,8 +464,9 @@ mod tests {
             Bool, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Timestamp, Binary, String,
         ] {
             let arrow_dtype: arrow::datatypes::DataType = dtype.clone().into();
-            let back = NdArrayDataType::try_from(arrow_dtype.clone())
-                .unwrap_or_else(|e| panic!("{dtype:?} -> {arrow_dtype:?} did not convert back: {e}"));
+            let back = NdArrayDataType::try_from(arrow_dtype.clone()).unwrap_or_else(|e| {
+                panic!("{dtype:?} -> {arrow_dtype:?} did not convert back: {e}")
+            });
             assert_eq!(back, dtype, "round-trip changed {dtype:?}");
         }
     }
