@@ -294,8 +294,13 @@ mod tests {
         let (schema, _) = test_batch();
 
         // `lat * 2` references only `lat` (index 0) and is not a bare column.
-        let expr =
-            binary(col("lat", &schema).unwrap(), Operator::Multiply, lit(2i32), &schema).unwrap();
+        let expr = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Multiply,
+            lit(2i32),
+            &schema,
+        )
+        .unwrap();
         let column = NdExprColumn::build(&schema, &expr).unwrap();
         assert_eq!(column.input_indices, vec![0]);
         assert!(!column.passthrough);
@@ -318,8 +323,13 @@ mod tests {
     #[test]
     fn project_single_column_evaluates_on_native_footprint() {
         let (schema, batch) = test_batch();
-        let expr =
-            binary(col("lat", &schema).unwrap(), Operator::Multiply, lit(2i32), &schema).unwrap();
+        let expr = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Multiply,
+            lit(2i32),
+            &schema,
+        )
+        .unwrap();
         let column = NdExprColumn::build(&schema, &expr).unwrap();
         let m = metrics();
 

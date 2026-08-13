@@ -5,9 +5,13 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use datafusion::common::config::ConfigOptions;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterDescription, FilterPushdownPhase, FilterPushdownPropagation,
+};
 use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
 };
@@ -106,6 +110,26 @@ impl ExecutionPlan for NdSourceExec {
         NdBroadcastExec::try_new(Arc::new(self.clone()))?.execute(partition, context)
     }
 
+    /// Hand the filters to the file source below, which prunes on them.
+    fn gather_filters_for_pushdown(
+        &self,
+        _phase: FilterPushdownPhase,
+        parent_filters: Vec<Arc<dyn PhysicalExpr>>,
+        _config: &ConfigOptions,
+    ) -> Result<FilterDescription> {
+        super::offer_filters_to_child(parent_filters, &self.input)
+    }
+
+    /// A decoder applies no predicate, so the `FilterExec` above stays.
+    fn handle_child_pushdown_result(
+        &self,
+        _phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &ConfigOptions,
+    ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        Ok(super::filters_stay_above(child_pushdown_result))
+    }
+
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metrics.clone_inner())
     }
@@ -118,8 +142,7 @@ impl NdExecutionPlan for NdSourceExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableNdBatchStream> {
         let baseline = BaselineMetrics::new(&self.metrics, partition);
-        let nd_batches: Count =
-            MetricBuilder::new(&self.metrics).counter("nd_batches", partition);
+        let nd_batches: Count = MetricBuilder::new(&self.metrics).counter("nd_batches", partition);
 
         let input = self.input.execute(partition, context)?;
         let stream = input

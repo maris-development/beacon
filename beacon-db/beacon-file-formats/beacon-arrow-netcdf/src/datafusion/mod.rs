@@ -1582,6 +1582,166 @@ mod reader_backend_tests {
         }
     }
 
+    /// A pruned scan counts what the coordinate itself says it should.
+    ///
+    /// The scan skips chunks whose coordinates cannot meet the predicate, so a
+    /// bound that is too tight loses rows and reports a smaller count. Nothing
+    /// about that raises an error, and comparing the two readers would not catch
+    /// it — they share the pruning. So the expected answer comes from the
+    /// coordinate column itself, read with no predicate in the plan and
+    /// therefore with no pruning.
+    ///
+    /// The fixture's `lat` runs from about 38.8 to 48.8, so the thresholds below
+    /// prune nothing, some, and everything in turn. The middle one is the one
+    /// that matters: a chunk half inside the bound has to be read whole.
+    #[tokio::test]
+    async fn a_pruned_scan_counts_what_the_coordinate_says_it_should() {
+        use arrow::array::{Float32Array, Int64Array};
+
+        let ctx = session();
+        register(&ctx, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        // Every lat the file holds, with no predicate in the plan.
+        let batches = ctx
+            .sql("SELECT lat FROM gridded")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let lats: Vec<f32> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .expect("lat is f32")
+                    .iter()
+                    .flatten()
+                    .collect::<Vec<f32>>()
+            })
+            .collect();
+        assert!(!lats.is_empty(), "the fixture must hold rows");
+
+        let count = async |sql: &str| {
+            let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("int64 count")
+                .value(0) as usize
+        };
+
+        for threshold in [0.0_f32, 44.0, 60.0] {
+            let expected = lats.iter().filter(|lat| **lat > threshold).count();
+            assert_eq!(
+                count(&format!("SELECT count(*) FROM gridded WHERE lat > {threshold}")).await,
+                expected,
+                "lat > {threshold}: the pruned scan does not match the coordinate"
+            );
+        }
+
+        // The middle threshold has to be a partial prune, or the assertion above
+        // it never exercised a chunk that straddles the bound.
+        let partial = lats.iter().filter(|lat| **lat > 44.0).count();
+        assert!(
+            partial > 0 && partial < lats.len(),
+            "44.0 must cut the fixture in two, it kept {partial} of {}",
+            lats.len()
+        );
+
+        // A disjunction bounds nothing, so it must prune nothing and still
+        // answer. `lat > 60` is inside `lat > 0`, so the two agree. The bounds
+        // used to be intersected as if the `OR` were an `AND`, which pruned
+        // every chunk under 60 — the whole file, since nothing reaches it.
+        assert_eq!(
+            count("SELECT count(*) FROM gridded WHERE lat > 0 OR lat > 60").await,
+            lats.iter().filter(|lat| **lat > 0.0).count(),
+            "a disjunction must not prune on one of its branches"
+        );
+
+        // The same for a negation, which means the opposite of its child.
+        assert_eq!(
+            count("SELECT count(*) FROM gridded WHERE NOT (lat <= 44)").await,
+            partial,
+            "a negation must not prune on the child it negates"
+        );
+    }
+
+    /// The predicate reaches the file source through the nd pipeline.
+    ///
+    /// The scan sits under an `NdSourceExec` and an `NdBroadcastExec`, and a
+    /// node that does not forward filters leaves the source with nothing to
+    /// prune on. That failure is invisible in a result — every row still comes
+    /// back, the scan just reads the whole file — so it is asserted on the
+    /// scan's own output instead.
+    ///
+    /// One encoded batch carries one chunk, so the scan's output rows *are* its
+    /// chunk count.
+    #[tokio::test]
+    async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
+        use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
+
+        let ctx = session();
+        register(&ctx, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        /// The chunk count of the scan at the bottom of an executed plan.
+        struct ScanRows(Option<usize>);
+        impl ExecutionPlanVisitor for ScanRows {
+            type Error = std::convert::Infallible;
+            fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> Result<bool, Self::Error> {
+                if plan.name().contains("DataSourceExec") {
+                    self.0 = plan.metrics().and_then(|metrics| metrics.output_rows());
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+        }
+
+        let chunks_read = async |sql: &str| {
+            let plan = ctx
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
+                .await
+                .unwrap();
+            let mut visitor = ScanRows(None);
+            datafusion::physical_plan::accept(plan.as_ref(), &mut visitor).unwrap();
+            visitor.0.expect("the scan reports its output rows")
+        };
+
+        let whole = chunks_read("SELECT lat FROM gridded").await;
+        assert!(whole > 1, "the fixture must hold several chunks");
+
+        // `lat` runs from about 38.8 to 48.8, so nothing can satisfy this and
+        // every chunk is skipped before it is fetched.
+        assert_eq!(
+            chunks_read("SELECT lat FROM gridded WHERE lat > 1000").await,
+            0,
+            "a predicate no row can meet must leave the scan nothing to read"
+        );
+
+        // A bound the whole file satisfies prunes nothing.
+        assert_eq!(
+            chunks_read("SELECT lat FROM gridded WHERE lat > 0").await,
+            whole,
+            "a predicate every row meets must not skip a chunk"
+        );
+
+        // And one that cuts the file reads some of it.
+        let partial = chunks_read("SELECT lat FROM gridded WHERE lat > 44").await;
+        assert!(
+            partial > 0 && partial < whole,
+            "lat > 44 should read some of the {whole} chunks, it read {partial}"
+        );
+    }
+
     /// A projection and a predicate push down the same way on either reader.
     #[tokio::test]
     async fn a_pushed_down_predicate_gives_the_same_answer() {

@@ -110,7 +110,11 @@ impl NdFilterExec {
 
     /// Filter one nd batch: compute the retained target cells and attach them as
     /// the batch's selection (intersected with any inbound selection).
-    fn filter_batch(&self, batch: &NdRecordBatch, metrics: &FilterMetrics) -> Result<NdRecordBatch> {
+    fn filter_batch(
+        &self,
+        batch: &NdRecordBatch,
+        metrics: &FilterMetrics,
+    ) -> Result<NdRecordBatch> {
         metrics.input_rows.add(batch.num_rows());
         let retained = retained_indices(&self.columns, batch, &metrics.project)?;
         metrics
@@ -311,7 +315,11 @@ mod tests {
     }
 
     /// Build the per-conjunct evaluation plan and compute the retained cells.
-    fn select(schema: &SchemaRef, batch: &NdRecordBatch, preds: Vec<Arc<dyn PhysicalExpr>>) -> Vec<u64> {
+    fn select(
+        schema: &SchemaRef,
+        batch: &NdRecordBatch,
+        preds: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Vec<u64> {
         let columns = preds
             .iter()
             .map(|expr| NdExprColumn::build(schema, expr))
@@ -328,7 +336,13 @@ mod tests {
     #[test]
     fn single_axis_predicate_selects_slices() {
         let (schema, batch) = test_batch();
-        let pred = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(15i32), &schema).unwrap();
+        let pred = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Gt,
+            lit(15i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![pred]), vec![2, 3, 4, 5]);
 
         // Materializing the selected batch gathers exactly those cells.
@@ -374,8 +388,20 @@ mod tests {
     #[test]
     fn conjuncts_intersect() {
         let (schema, batch) = test_batch();
-        let p1 = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(15i32), &schema).unwrap();
-        let p2 = binary(col("lon", &schema).unwrap(), Operator::Eq, lit(2i32), &schema).unwrap();
+        let p1 = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Gt,
+            lit(15i32),
+            &schema,
+        )
+        .unwrap();
+        let p2 = binary(
+            col("lon", &schema).unwrap(),
+            Operator::Eq,
+            lit(2i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![p1, p2]), vec![3, 5]);
     }
 
@@ -388,7 +414,13 @@ mod tests {
             .with_selection(Some(UInt64Array::from(vec![0u64, 2, 4])))
             .unwrap();
         // lat > 15 keeps target rows 2,3,4,5; intersect with {0,2,4} → {2,4}.
-        let pred = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(15i32), &schema).unwrap();
+        let pred = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Gt,
+            lit(15i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![pred]), vec![2, 4]);
     }
 
@@ -397,8 +429,20 @@ mod tests {
     #[test]
     fn same_axis_conjuncts_form_a_range() {
         let (schema, batch) = test_batch();
-        let lo = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(10i32), &schema).unwrap();
-        let hi = binary(col("lat", &schema).unwrap(), Operator::Lt, lit(30i32), &schema).unwrap();
+        let lo = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Gt,
+            lit(10i32),
+            &schema,
+        )
+        .unwrap();
+        let hi = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Lt,
+            lit(30i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![lo, hi]), vec![2, 3]);
     }
 
@@ -407,7 +451,13 @@ mod tests {
     #[test]
     fn inner_axis_predicate_tiles() {
         let (schema, batch) = test_batch();
-        let pred = binary(col("lon", &schema).unwrap(), Operator::Eq, lit(2i32), &schema).unwrap();
+        let pred = binary(
+            col("lon", &schema).unwrap(),
+            Operator::Eq,
+            lit(2i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![pred]), vec![1, 3, 5]);
     }
 
@@ -416,8 +466,13 @@ mod tests {
     #[test]
     fn data_variable_predicate_selects_cells() {
         let (schema, batch) = test_batch();
-        let pred =
-            binary(col("temp", &schema).unwrap(), Operator::GtEq, lit(3i32), &schema).unwrap();
+        let pred = binary(
+            col("temp", &schema).unwrap(),
+            Operator::GtEq,
+            lit(3i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![pred]), vec![3, 4, 5]);
     }
 
@@ -427,9 +482,21 @@ mod tests {
     fn or_predicate_unions_branches() {
         let (schema, batch) = test_batch();
         let pred = binary(
-            binary(col("lat", &schema).unwrap(), Operator::Lt, lit(15i32), &schema).unwrap(),
+            binary(
+                col("lat", &schema).unwrap(),
+                Operator::Lt,
+                lit(15i32),
+                &schema,
+            )
+            .unwrap(),
             Operator::Or,
-            binary(col("lon", &schema).unwrap(), Operator::Eq, lit(2i32), &schema).unwrap(),
+            binary(
+                col("lon", &schema).unwrap(),
+                Operator::Eq,
+                lit(2i32),
+                &schema,
+            )
+            .unwrap(),
             &schema,
         )
         .unwrap();
@@ -454,7 +521,13 @@ mod tests {
             &schema,
         )
         .unwrap();
-        let inner = binary(col("lon", &schema).unwrap(), Operator::Eq, lit(1i32), &schema).unwrap();
+        let inner = binary(
+            col("lon", &schema).unwrap(),
+            Operator::Eq,
+            lit(1i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![cross, inner]), vec![4]);
     }
 
@@ -462,7 +535,13 @@ mod tests {
     #[test]
     fn predicate_selecting_nothing_is_empty() {
         let (schema, batch) = test_batch();
-        let pred = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(100i32), &schema).unwrap();
+        let pred = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Gt,
+            lit(100i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![pred]), Vec::<u64>::new());
     }
 
@@ -470,7 +549,13 @@ mod tests {
     #[test]
     fn predicate_selecting_everything_keeps_all() {
         let (schema, batch) = test_batch();
-        let pred = binary(col("lat", &schema).unwrap(), Operator::GtEq, lit(10i32), &schema).unwrap();
+        let pred = binary(
+            col("lat", &schema).unwrap(),
+            Operator::GtEq,
+            lit(10i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![pred]), vec![0, 1, 2, 3, 4, 5]);
     }
 
@@ -498,7 +583,13 @@ mod tests {
         )
         .unwrap();
 
-        let pred = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(15i32), &schema).unwrap();
+        let pred = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Gt,
+            lit(15i32),
+            &schema,
+        )
+        .unwrap();
         assert_eq!(select(&schema, &batch, vec![pred]), vec![4, 5]);
     }
 }

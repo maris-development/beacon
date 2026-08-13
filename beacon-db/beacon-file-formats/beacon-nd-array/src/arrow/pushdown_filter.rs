@@ -40,41 +40,48 @@ impl PushdownFilter {
 
 // ─── Expression tree walking ───────────────────────────────────────────────
 
+/// Collect the bounds the predicate *implies*.
+///
+/// Every range this produces has to be satisfied by every row that satisfies the
+/// predicate. A reader is then free to skip a chunk no row of which can meet the
+/// ranges, because no row of it could have met the predicate either.
+///
+/// That is why only two shapes contribute: a comparison against a literal, and
+/// an `AND` of things that contribute. A row can satisfy `a OR b` while failing
+/// `a`, and `NOT (time > 5)` means the opposite of what its child says, so
+/// nothing is taken from either. Ranges are only ever dropped by that rule, and
+/// dropping a range prunes less, never more.
 fn walk_expr(node: &Arc<dyn PhysicalExpr>, ranges: &mut HashMap<String, ValueRange>) {
-    if let Some(bin) = downcast::<BinaryExpr>(node) {
-        let op = bin.op();
+    let Some(bin) = downcast::<BinaryExpr>(node) else {
+        // A `NOT`, a `CASE`, an `IN` list: each gives its children a meaning this
+        // walk cannot read off them, so none of it is used.
+        return;
+    };
+    let op = bin.op();
 
-        if *op == Operator::And {
-            walk_expr(bin.left(), ranges);
-            walk_expr(bin.right(), ranges);
-            return;
-        }
-
-        // col op lit
-        if let (Some(col_name), Some(val)) =
-            (as_column_name(bin.left()), as_pushdown_scalar(bin.right()))
-        {
-            apply_op(ranges, &col_name, *op, val);
-            return;
-        }
-
-        // lit op col (flip)
-        if let (Some(val), Some(col_name)) =
-            (as_pushdown_scalar(bin.left()), as_column_name(bin.right()))
-        {
-            apply_op(ranges, &col_name, flip_op(*op), val);
-            return;
-        }
-
-        // Recurse into children for nested AND trees
+    if *op == Operator::And {
         walk_expr(bin.left(), ranges);
         walk_expr(bin.right(), ranges);
         return;
     }
 
-    for child in node.children() {
-        walk_expr(child, ranges);
+    // col op lit
+    if let (Some(col_name), Some(val)) =
+        (as_column_name(bin.left()), as_pushdown_scalar(bin.right()))
+    {
+        apply_op(ranges, &col_name, *op, val);
+        return;
     }
+
+    // lit op col (flip)
+    if let (Some(val), Some(col_name)) =
+        (as_pushdown_scalar(bin.left()), as_column_name(bin.right()))
+    {
+        apply_op(ranges, &col_name, flip_op(*op), val);
+    }
+
+    // Anything else — an `OR`, an arithmetic subtree, a comparison between two
+    // columns — implies no bound on its own, and its children imply none either.
 }
 
 fn apply_op(ranges: &mut HashMap<String, ValueRange>, col: &str, op: Operator, val: ScalarValue) {
@@ -308,19 +315,66 @@ mod tests {
         assert_eq!(bound(&range.max), None);
     }
 
+    /// `OR` yields no bound at all.
+    ///
+    /// Both sides used to be walked and intersected as if they were `AND`ed, so
+    /// `time > 10 OR time > 100` produced `time > 100`. A reader that skipped a
+    /// chunk on that range would drop the rows between 10 and 100, which satisfy
+    /// the predicate. Re-applying the predicate above the scan cannot bring back
+    /// a chunk the scan never read, so the range has to be implied by the
+    /// predicate, not merely suggested by part of it.
     #[test]
-    fn test_or_branches_are_walked_but_do_not_intersect_correctly() {
-        // NOTE: `OR` is not modelled — both sides are walked and their bounds
-        // are intersected as if they were `AND`ed. This is only sound because
-        // the caller re-applies the full predicate after pushdown; the mask is
-        // a *hint*, so an over-tight range here would drop rows. Recorded as a
-        // characterisation test so a future fix has to acknowledge it.
+    fn test_or_yields_no_bound() {
         let expr = binary(
             binary(col("time"), Operator::Gt, lit_i64(10)),
             Operator::Or,
             binary(col("time"), Operator::Gt, lit_i64(100)),
         );
-        assert_eq!(bound(&ranges_of(expr)["time"].min), Some((100, false)));
+        assert!(
+            ranges_of(expr).is_empty(),
+            "a disjunction implies no bound on either side"
+        );
+    }
+
+    /// The same, for a negation.
+    ///
+    /// `NOT (time > 5)` is `time <= 5`. The walk used to descend through the
+    /// `NOT` into its child and read off `time > 5` — the exact complement of
+    /// the rows the query wants.
+    #[test]
+    fn test_negation_yields_no_bound() {
+        use datafusion::physical_expr::expressions::NotExpr;
+
+        let inner = binary(col("time"), Operator::Gt, lit_i64(5));
+        let negated: Arc<dyn PhysicalExpr> = Arc::new(NotExpr::new(inner));
+        assert!(
+            ranges_of(negated).is_empty(),
+            "a negation implies no bound on its child"
+        );
+    }
+
+    /// An `AND` that holds an `OR` still contributes its own comparisons.
+    ///
+    /// Dropping the disjunction must not cost the bounds beside it: those are
+    /// implied by the predicate whatever the `OR` does.
+    #[test]
+    fn test_a_conjunction_keeps_the_bounds_beside_a_disjunction() {
+        // time >= 10 AND (depth > 1 OR depth > 900)
+        let expr = binary(
+            binary(col("time"), Operator::GtEq, lit_i64(10)),
+            Operator::And,
+            binary(
+                binary(col("depth"), Operator::Gt, lit_i64(1)),
+                Operator::Or,
+                binary(col("depth"), Operator::Gt, lit_i64(900)),
+            ),
+        );
+        let ranges = ranges_of(expr);
+        assert_eq!(bound(&ranges["time"].min), Some((10, true)));
+        assert!(
+            !ranges.contains_key("depth"),
+            "the disjunction gives nothing"
+        );
     }
 
     #[test]
@@ -332,9 +386,10 @@ mod tests {
 
     #[test]
     fn test_timestamp_literals_are_pushdown_candidates() {
-        let ts: Arc<dyn PhysicalExpr> = Arc::new(Literal::new(
-            ScalarValue::TimestampNanosecond(Some(1_600_000_000_000_000_000), None),
-        ));
+        let ts: Arc<dyn PhysicalExpr> = Arc::new(Literal::new(ScalarValue::TimestampNanosecond(
+            Some(1_600_000_000_000_000_000),
+            None,
+        )));
         let ranges = ranges_of(binary(col("time"), Operator::GtEq, ts));
         assert!(ranges.contains_key("time"));
         assert!(ranges["time"].min.is_some());

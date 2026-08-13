@@ -231,10 +231,8 @@ impl NdExecutionPlan for NdProjectionExec {
         let projection_metrics = ProjectMetrics {
             elements_evaluated: MetricBuilder::new(&self.metrics)
                 .counter("elements_evaluated", partition),
-            elements_saved: MetricBuilder::new(&self.metrics)
-                .counter("elements_saved", partition),
-            broadcasts: MetricBuilder::new(&self.metrics)
-                .counter("implicit_broadcasts", partition),
+            elements_saved: MetricBuilder::new(&self.metrics).counter("elements_saved", partition),
+            broadcasts: MetricBuilder::new(&self.metrics).counter("implicit_broadcasts", partition),
         };
         let this = self.clone();
         let stream = as_nd_plan(&self.input)
@@ -280,8 +278,9 @@ mod tests {
         let schema = test_schema();
         let flat = MemorySourceConfig::try_new_exec(&[vec![]], schema.clone(), None).unwrap();
 
-        let err = NdProjectionExec::try_new(flat, vec![(col("lat", &schema).unwrap(), "lat".into())])
-            .unwrap_err();
+        let err =
+            NdProjectionExec::try_new(flat, vec![(col("lat", &schema).unwrap(), "lat".into())])
+                .unwrap_err();
         assert!(
             err.to_string().contains("nd-aware"),
             "unexpected error: {err}"

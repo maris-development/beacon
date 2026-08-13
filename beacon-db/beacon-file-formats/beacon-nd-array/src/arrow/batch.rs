@@ -596,6 +596,12 @@ pub(crate) fn build_dataset_schema(arrays: &IndexMap<String, Arc<dyn NdArrayD>>)
     ))
 }
 
+/// The keep mask of each coordinate array the predicate bounds.
+///
+/// A mask that cannot be resolved is left out rather than raised. The masks only
+/// ever skip work — the predicate itself is applied above the scan — so a
+/// coordinate whose type the pushdown cannot read is a chunk that gets read, not
+/// a query that fails.
 pub(crate) async fn compute_predicate_masks(
     arrays: &IndexMap<String, Arc<dyn NdArrayD>>,
     predicate: Option<PushdownFilter>,
@@ -607,13 +613,33 @@ pub(crate) async fn compute_predicate_masks(
             if let Some(range) = ranges.get(name) {
                 if is_pushdown_candidate(array) {
                     let dim = array.dimensions()[0].clone();
-                    let mask = mask_pushdown(array.clone(), range).await?;
-                    dim_masks.push((dim, mask));
+                    match mask_pushdown(array.clone(), range).await {
+                        Ok(mask) => dim_masks.push((dim, mask)),
+                        Err(e) => tracing::debug!(
+                            "no pushdown mask for '{name}', reading every chunk of it: {e}"
+                        ),
+                    }
                 }
             }
         }
     }
     Ok(dim_masks)
+}
+
+/// Whether `subset` holds no row the predicate can keep.
+///
+/// The one place a chunk is tested against the masks, so the flat read and the
+/// nd read skip exactly the same chunks.
+pub(crate) fn chunk_is_pruned(
+    dim_masks: &[(String, Vec<bool>)],
+    max_dims: &[String],
+    subset: &ArraySubset,
+) -> bool {
+    if dim_masks.is_empty() {
+        return false;
+    }
+    let mask = compute_chunk_mask(dim_masks, max_dims, &subset.start, &subset.shape);
+    mask_is_all_false(&mask)
 }
 
 pub(crate) async fn read_chunk(
@@ -623,11 +649,8 @@ pub(crate) async fn read_chunk(
     max_dims: &[String],
     dim_masks: &[(String, Vec<bool>)],
 ) -> anyhow::Result<Option<RecordBatch>> {
-    if !dim_masks.is_empty() {
-        let mask = compute_chunk_mask(dim_masks, max_dims, &subset.start, &subset.shape);
-        if mask_is_all_false(&mask) {
-            return Ok(None);
-        }
+    if chunk_is_pruned(dim_masks, max_dims, &subset) {
+        return Ok(None);
     }
 
     let mut arrow_arrays: Vec<ArrayRef> = Vec::with_capacity(arrays.len());

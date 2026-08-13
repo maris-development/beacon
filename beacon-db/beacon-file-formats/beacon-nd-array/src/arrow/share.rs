@@ -13,8 +13,8 @@ use std::ops::Range;
 
 use crate::array::subset::ArraySubset;
 use crate::arrow::batch::{
-    ChunkGrid, RaggedPlan, build_dataset_schema, chunk_grid, compute_predicate_masks,
-    plan_ragged_read, read_chunk, read_ragged_range,
+    ChunkGrid, RaggedPlan, build_dataset_schema, chunk_grid, chunk_is_pruned,
+    compute_predicate_masks, plan_ragged_read, read_chunk, read_ragged_range,
 };
 use crate::arrow::nd_provider::read_nd_chunk;
 use crate::arrow::pushdown_filter::PushdownFilter;
@@ -25,15 +25,26 @@ use crate::dataset::AnyDataset;
 /// A scan is one or the other throughout, so the mode is fixed when the queue is
 /// filled. The first partition to arrive chooses it, and every partition of a
 /// scan would choose the same, so whichever arrives first is the right one.
+///
+/// Both modes carry the predicate, and both prune on it: the queue is filled
+/// with every chunk of the file either way, and a chunk no row of which can meet
+/// the predicate is dropped when it is popped, before it is read.
 #[derive(Debug, Clone)]
 pub enum ReadMode {
     /// `beacon.nd`-encoded batches, which an `NdSourceExec` decodes above the
     /// scan. This is what a column read produces.
-    Encoded,
-    /// Flat, broadcast batches. This is what the `COUNT(*)` path reads, and the
-    /// only path that prunes chunks, so it carries the predicate that prunes
-    /// them.
+    Encoded(Option<PushdownFilter>),
+    /// Flat, broadcast batches. This is what the `COUNT(*)` path reads.
     Flat(Option<PushdownFilter>),
+}
+
+impl ReadMode {
+    /// The predicate this mode prunes on, if it has one.
+    fn predicate(&self) -> Option<PushdownFilter> {
+        match self {
+            ReadMode::Encoded(predicate) | ReadMode::Flat(predicate) => predicate.clone(),
+        }
+    }
 }
 
 /// One unit of work: what a partition reads for one pop.
@@ -89,10 +100,7 @@ impl SharedRead {
         batch_size: usize,
         mode: ReadMode,
     ) -> Result<Arc<Self>> {
-        let predicate = match &mode {
-            ReadMode::Flat(predicate) => predicate.clone(),
-            ReadMode::Encoded => None,
-        };
+        let predicate = mode.predicate();
 
         let regular = match dataset {
             AnyDataset::Regular(regular) => regular,
@@ -188,11 +196,19 @@ impl SharedRead {
                 let flat = matches!(self.mode, ReadMode::Flat(_));
                 futures::stream::once(async move {
                     if flat {
-                        // The flat path prunes: a chunk whose mask is all false
-                        // holds nothing the query wants, and is skipped.
+                        // `read_chunk` applies the masks itself, and returns
+                        // `None` for a chunk they exclude.
                         return read_chunk(&arrays, subset, schema, &dims, &masks)
                             .await
                             .map_err(|e| DataFusionError::Execution(e.to_string()));
+                    }
+                    // The nd path prunes on the same masks, and has to do it
+                    // here: a chunk no row of which can meet the predicate is
+                    // dropped before it is fetched, which is the whole saving.
+                    // The predicate is applied again above the scan, so this
+                    // only ever skips rows that would have been dropped there.
+                    if chunk_is_pruned(&masks, &dims, &subset) {
+                        return Ok(None);
                     }
                     let nd = read_nd_chunk(&arrays, &dims, schema, subset).await?;
                     beacon_datafusion_ext::nd::encode_nd_record_batch(&nd).map(Some)
@@ -205,7 +221,7 @@ impl SharedRead {
                 // A ragged read is flat already, and its plan applied the
                 // predicate when it chose which casts survive, so there is
                 // nothing left to prune here.
-                let encode = matches!(self.mode, ReadMode::Encoded);
+                let encode = matches!(self.mode, ReadMode::Encoded(_));
                 futures::stream::once(async move {
                     let flat = read_ragged_range(&plan, range)
                         .await
@@ -363,6 +379,148 @@ mod tests {
         rows
     }
 
+    // ── pruning on the predicate ───────────────────────────────────────
+
+    /// `value > threshold`, as the scan would push it down.
+    fn greater_than(column: &str, threshold: i64) -> PushdownFilter {
+        use datafusion::logical_expr::Operator;
+        use datafusion::physical_expr::PhysicalExpr;
+        use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+        use datafusion::scalar::ScalarValue;
+
+        PushdownFilter::new(Arc::new(BinaryExpr::new(
+            Arc::new(Column::new(column, 0)),
+            Operator::Gt,
+            Arc::new(Literal::new(ScalarValue::Int64(Some(threshold)))),
+        )) as Arc<dyn PhysicalExpr>)
+    }
+
+    /// Every value an encoded read returned, decoded and broadcast.
+    async fn values_read(stream: BoxStream<'static, Result<RecordBatch>>) -> Vec<i64> {
+        use arrow::array::Int64Array;
+
+        let batches: Vec<RecordBatch> = stream.try_collect().await.unwrap();
+        let mut values = Vec::new();
+        for batch in &batches {
+            let flat = beacon_datafusion_ext::nd::decode_nd_record_batch(batch)
+                .unwrap()
+                .materialize()
+                .unwrap();
+            let column = flat
+                .column_by_name("value")
+                .expect("the fixture has one column")
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("an i64 column")
+                .clone();
+            values.extend(column.iter().flatten());
+        }
+        values
+    }
+
+    /// The nd read skips chunks the predicate excludes, and keeps every row it
+    /// wants.
+    ///
+    /// Both halves matter and neither implies the other. Reading everything is
+    /// correct but pointless; reading less is pointless if it drops a row the
+    /// query asked for, and nothing about that raises an error — the chunk is
+    /// simply never fetched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_nd_read_skips_the_chunks_the_predicate_excludes() {
+        const ROWS: usize = 10_000;
+        const BATCH: usize = 512;
+        const THRESHOLD: i64 = 8_000;
+
+        let whole = SharedRead::build(dataset(ROWS).await, BATCH, ReadMode::Encoded(None))
+            .await
+            .expect("the read builds");
+        let chunks = whole.remaining();
+        let all = values_read(whole.stream()).await;
+        assert_eq!(all.len(), ROWS, "the unfiltered read returns the file");
+
+        let pruned = SharedRead::build(
+            dataset(ROWS).await,
+            BATCH,
+            ReadMode::Encoded(Some(greater_than("value", THRESHOLD))),
+        )
+        .await
+        .expect("the read builds");
+        assert_eq!(
+            pruned.remaining(),
+            chunks,
+            "the queue still holds every chunk; a chunk is dropped when it is popped"
+        );
+        let kept = values_read(pruned.stream()).await;
+
+        // The fixture counts up, so a chunk below the threshold holds nothing
+        // the query wants. Fifteen of the twenty chunks are entirely below it.
+        assert!(
+            kept.len() < ROWS,
+            "the read must skip the chunks under the threshold, it returned all {ROWS} rows"
+        );
+
+        // Nothing the predicate keeps may go missing. The read is allowed to
+        // return more than that — it skips whole chunks, not rows — and the
+        // scan applies the predicate again above.
+        let wanted: Vec<i64> = all.iter().copied().filter(|v| *v > THRESHOLD).collect();
+        let returned: std::collections::HashSet<i64> = kept.iter().copied().collect();
+        assert!(
+            wanted.iter().all(|value| returned.contains(value)),
+            "the read dropped a row the predicate keeps"
+        );
+    }
+
+    /// The flat read and the nd read skip the same chunks.
+    ///
+    /// `COUNT(*)` goes one way and a column read the other. They must agree
+    /// about which chunks hold nothing, or a count stops matching its own rows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn both_modes_skip_the_same_chunks() {
+        const ROWS: usize = 10_000;
+        const BATCH: usize = 512;
+        const THRESHOLD: i64 = 8_000;
+
+        let nd = SharedRead::build(
+            dataset(ROWS).await,
+            BATCH,
+            ReadMode::Encoded(Some(greater_than("value", THRESHOLD))),
+        )
+        .await
+        .expect("the read builds");
+        let nd_rows = drain(nd.stream()).await;
+
+        let flat = SharedRead::build(
+            dataset(ROWS).await,
+            BATCH,
+            ReadMode::Flat(Some(greater_than("value", THRESHOLD))),
+        )
+        .await
+        .expect("the read builds");
+        let flat_rows = drain_flat(flat.stream()).await;
+
+        assert_eq!(nd_rows, flat_rows, "the two modes read the same chunks");
+        assert!(
+            nd_rows > 0 && nd_rows < ROWS,
+            "and they pruned some of them"
+        );
+    }
+
+    /// A predicate on a column the file does not bound prunes nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unrelated_predicate_reads_the_whole_file() {
+        const ROWS: usize = 4_000;
+
+        let shared = SharedRead::build(
+            dataset(ROWS).await,
+            512,
+            ReadMode::Encoded(Some(greater_than("no_such_column", 10))),
+        )
+        .await
+        .expect("the read builds");
+
+        assert_eq!(drain(shared.stream()).await, ROWS);
+    }
+
     /// The partitions of one file read every row once between them.
     ///
     /// This is the property the whole design rests on. A subset popped by two
@@ -373,7 +531,7 @@ mod tests {
         const ROWS: usize = 10_000;
 
         for partitions in [1_usize, 2, 3, 8] {
-            let shared = SharedRead::build(dataset(ROWS).await, 512, ReadMode::Encoded)
+            let shared = SharedRead::build(dataset(ROWS).await, 512, ReadMode::Encoded(None))
                 .await
                 .expect("the read builds");
             let rows = read_in_partitions(shared, partitions, true).await;
@@ -411,27 +569,52 @@ mod tests {
         }
     }
 
-    /// A file large enough to hold several chunks is read by several partitions,
-    /// not drained by whichever one got there first.
+    /// Several partitions draw from one file's queue, and each gets its own
+    /// work.
+    ///
+    /// Every partition takes a batch before any of them drains, so what is
+    /// asserted is the division and not the scheduling. Letting them race and
+    /// counting afterwards says nothing: a queue this small is often emptied by
+    /// whichever partition is polled first, and that is correct behaviour.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_shared_file_divides_across_partitions() {
         const ROWS: usize = 10_000;
+        const BATCH: usize = 512;
         const PARTITIONS: usize = 4;
 
-        let shared = SharedRead::build(dataset(ROWS).await, 512, ReadMode::Encoded)
+        let shared = SharedRead::build(dataset(ROWS).await, BATCH, ReadMode::Encoded(None))
             .await
             .expect("the read builds");
+        let chunks = shared.remaining();
         assert!(
-            shared.remaining() >= PARTITIONS,
-            "the fixture must hold at least one chunk per partition"
+            chunks >= PARTITIONS,
+            "the fixture must hold at least one chunk per partition, it holds {chunks}"
         );
 
-        let rows = read_in_partitions(shared, PARTITIONS, true).await;
-        assert_eq!(rows.iter().sum::<usize>(), ROWS);
-        assert!(
-            rows.iter().filter(|read| **read > 0).count() > 1,
-            "more than one partition must read: {rows:?}"
+        let mut streams: Vec<_> = (0..PARTITIONS).map(|_| shared.clone().stream()).collect();
+        let mut taken = 0;
+        for (partition, stream) in streams.iter_mut().enumerate() {
+            let batch = stream
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("partition {partition} gets a chunk of its own"))
+                .expect("it reads");
+            taken += beacon_datafusion_ext::nd::decode_nd_record_batch(&batch)
+                .unwrap()
+                .num_rows();
+        }
+        assert_eq!(
+            shared.remaining(),
+            chunks - PARTITIONS,
+            "each partition took one chunk, and no chunk went to two of them"
         );
+
+        // The rest divides between them, and between them they read the file.
+        let mut rest = 0;
+        for stream in streams {
+            rest += drain(stream).await;
+        }
+        assert_eq!(taken + rest, ROWS, "every row is read exactly once");
     }
 
     /// The partitions of a ragged file read every observation once between them.
@@ -449,7 +632,7 @@ mod tests {
         for batch_size in [8_usize, 64, usize::MAX] {
             for partitions in [1_usize, 2, 3, 8] {
                 let (source, observations) = ragged_dataset(CASTS).await;
-                let shared = SharedRead::build(source, batch_size, ReadMode::Encoded)
+                let shared = SharedRead::build(source, batch_size, ReadMode::Encoded(None))
                     .await
                     .expect("the plan builds");
                 let rows = read_in_partitions(shared, partitions, true).await;
@@ -486,28 +669,46 @@ mod tests {
     ///
     /// The queue used to hold a ragged file as a single unit, so one partition
     /// read it and the rest found the queue empty. This is the assertion that
-    /// says it no longer does.
+    /// says it no longer does — and, as above, it takes a batch per partition
+    /// up front so that it asserts the division rather than the scheduling.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_ragged_file_divides_across_partitions() {
         const CASTS: usize = 60;
         const PARTITIONS: usize = 4;
 
         let (source, observations) = ragged_dataset(CASTS).await;
-        let shared = SharedRead::build(source, 8, ReadMode::Encoded)
+        let shared = SharedRead::build(source, 8, ReadMode::Encoded(None))
             .await
             .expect("the plan builds");
+        let ranges = shared.remaining();
         assert!(
-            shared.remaining() >= PARTITIONS,
-            "the fixture must hold at least one range per partition, got {}",
-            shared.remaining()
+            ranges >= PARTITIONS,
+            "the fixture must hold at least one range per partition, got {ranges}"
         );
 
-        let rows = read_in_partitions(shared, PARTITIONS, true).await;
-        assert_eq!(rows.iter().sum::<usize>(), observations);
-        assert!(
-            rows.iter().filter(|read| **read > 0).count() > 1,
-            "more than one partition must read: {rows:?}"
+        let mut streams: Vec<_> = (0..PARTITIONS).map(|_| shared.clone().stream()).collect();
+        let mut taken = 0;
+        for (partition, stream) in streams.iter_mut().enumerate() {
+            let batch = stream
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("partition {partition} gets a range of its own"))
+                .expect("it reads");
+            taken += beacon_datafusion_ext::nd::decode_nd_record_batch(&batch)
+                .unwrap()
+                .num_rows();
+        }
+        assert_eq!(
+            shared.remaining(),
+            ranges - PARTITIONS,
+            "each partition took one range, and no range went to two of them"
         );
+
+        let mut rest = 0;
+        for stream in streams {
+            rest += drain(stream).await;
+        }
+        assert_eq!(taken + rest, observations, "every row is read exactly once");
     }
 
     /// More partitions than subsets is not an error. The surplus find the queue
@@ -517,7 +718,7 @@ mod tests {
         const ROWS: usize = 100;
 
         // One chunk, eight partitions.
-        let shared = SharedRead::build(dataset(ROWS).await, usize::MAX, ReadMode::Encoded)
+        let shared = SharedRead::build(dataset(ROWS).await, usize::MAX, ReadMode::Encoded(None))
             .await
             .expect("the read builds");
         let rows = read_in_partitions(shared, 8, true).await;
@@ -540,7 +741,7 @@ mod tests {
         const ROWS: usize = 10_000;
         const BATCH: usize = 500;
 
-        let shared = SharedRead::build(dataset(ROWS).await, BATCH, ReadMode::Encoded)
+        let shared = SharedRead::build(dataset(ROWS).await, BATCH, ReadMode::Encoded(None))
             .await
             .expect("the read builds");
 

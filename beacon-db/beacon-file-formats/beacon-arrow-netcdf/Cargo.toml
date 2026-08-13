@@ -36,11 +36,9 @@ julian = {workspace = true}
 tracing = { workspace = true }
 serde = { workspace = true }
 object_store = { workspace = true }
-parking_lot = { workspace = true }
 datafusion = { workspace = true }
 moka = { workspace = true }
 chrono = { workspace = true }
-crossbeam = { workspace = true }
 
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-array = { path = "../beacon-nd-array" }
