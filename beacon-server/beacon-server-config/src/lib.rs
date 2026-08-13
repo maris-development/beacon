@@ -14,8 +14,8 @@ pub use beacon_arrow_bbf::datafusion::BbfConfig;
 pub use beacon_arrow_hdf5::Hdf5Config;
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
-pub use beacon_common::FileStatsConfig;
 pub use beacon_common::CrawlerConfig;
+pub use beacon_common::FileStatsConfig;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -421,7 +421,7 @@ struct RawConfig {
     /// Off by default: netcdf-c is the path this server has always used. Turn
     /// it on for parallel reads and for netCDF files in an object store (s3, gs
     /// or az), which netcdf-c cannot open. Writes always use netcdf-c.
-    #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER", default = "false")]
+    #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER", default = "true")]
     netcdf_use_rust_reader: bool,
 
     /// Read HDF5 with the pure-Rust reader instead of netcdf-c.
@@ -435,7 +435,7 @@ struct RawConfig {
     ///
     /// This is separate from `BEACON_NETCDF_USE_RUST_READER`, so a server can
     /// move one format at a time.
-    #[envconfig(from = "BEACON_HDF5_USE_RUST_READER", default = "false")]
+    #[envconfig(from = "BEACON_HDF5_USE_RUST_READER", default = "true")]
     hdf5_use_rust_reader: bool,
     #[envconfig(from = "BEACON_HDF5_ENABLE_STATISTICS", default = "true")]
     hdf5_enable_statistics: bool,
