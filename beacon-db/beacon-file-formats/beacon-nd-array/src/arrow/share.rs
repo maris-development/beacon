@@ -119,7 +119,7 @@ impl SharedRead {
     /// A ragged dataset already works this way: `plan_ragged_read` applies the
     /// predicate when it chooses which casts survive, so its plan holds only the
     /// batches that have something in them.
-    async fn build(
+    pub(crate) async fn build(
         dataset: AnyDataset,
         batch_size: usize,
         predicate: Option<PushdownFilter>,
@@ -212,7 +212,7 @@ impl SharedRead {
     /// queue, so the batches divide between them as fast as each can take them.
     /// A partition that drops its stream stops popping, and whatever it had not
     /// taken is left for the others.
-    fn stream(
+    pub(crate) fn stream(
         self: Arc<Self>,
         metrics: Option<SharedReadMetrics>,
     ) -> BoxStream<'static, Result<RecordBatch>> {
@@ -383,6 +383,25 @@ pub fn share_files(
         file_groups: groups.into_iter().map(FileGroup::new).collect(),
         shares: Arc::new(shares),
     })
+}
+
+/// Read a whole dataset as flat, broadcast batches, in file order.
+///
+/// This is the [`SharedRead`] a `COUNT(*)` builds, minus the counting: one
+/// consumer, the whole queue, and the predicate pruning chunks it cannot use.
+/// It is the only way to get flat batches out of a dataset, and it exists for
+/// the readers' own tests — a scan goes through [`SharedDataset::plan`], which
+/// resolves a projection and encodes.
+pub async fn flat_stream(
+    dataset: AnyDataset,
+    batch_size: usize,
+    predicate: Option<PushdownFilter>,
+) -> Result<BoxStream<'static, Result<RecordBatch>>> {
+    Ok(
+        SharedRead::build(dataset, batch_size, predicate, false, None)
+            .await?
+            .stream(None),
+    )
 }
 
 /// One file, opened and planned once: the queue its partitions draw from, and

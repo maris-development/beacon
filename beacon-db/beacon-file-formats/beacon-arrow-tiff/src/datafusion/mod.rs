@@ -5,10 +5,10 @@ use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use datafusion::{
-    catalog::{Session, memory::DataSourceExec},
-    common::{GetExt, Statistics, exec_datafusion_err},
+    catalog::{memory::DataSourceExec, Session},
+    common::{exec_datafusion_err, GetExt, Statistics},
     datasource::{
-        file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
+        file_format::{file_compression_type::FileCompressionType, FileFormat, FileFormatFactory},
         physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSource},
     },
     physical_plan::ExecutionPlan,
@@ -170,8 +170,15 @@ impl FileFormat for TiffFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // The scan carries nd data as `beacon.nd`-encoded struct columns, so
+        // the file source's schema is the encoded form of the logical table
+        // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
+        // back to the logical schema above the scan.
+        let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+            conf.file_schema(),
+        ));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
-            conf.file_schema().clone(),
+            encoded_file_schema,
             conf.table_partition_cols().clone(),
         );
         // Preserve a projection that the scan pushed down into the incoming
@@ -183,7 +190,12 @@ impl FileFormat for TiffFormat {
             .with_source(Arc::new(source))
             .build();
 
-        Ok(DataSourceExec::from_data_source(conf))
+        let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
+        let nd_source = Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(
+            data_source,
+        )?);
+        let broadcast = beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?;
+        Ok(Arc::new(broadcast))
     }
 
     fn file_source(
@@ -200,11 +212,39 @@ mod tests {
     use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
     use datafusion::execution::object_store::ObjectStoreUrl;
     use futures::StreamExt;
-    use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use object_store::ObjectStoreExt;
 
     const TEST_TIF_BYTES: &[u8] = include_bytes!("../../test-files/test.tif");
+
+    /// Drain an opener's stream and decode it.
+    ///
+    /// The opener emits `beacon.nd`-encoded batches for the `NdSourceExec`
+    /// above it, so a test that reads the opener directly does that node's job
+    /// itself: decode each batch, then broadcast it to the flat rows a query
+    /// would see.
+    async fn decoded<S>(stream: S) -> Vec<arrow::record_batch::RecordBatch>
+    where
+        S: futures::Stream<Item = datafusion::error::Result<arrow::record_batch::RecordBatch>>,
+    {
+        let encoded: Vec<_> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("all batches should be ok");
+
+        encoded
+            .iter()
+            .map(|batch| {
+                beacon_datafusion_ext::nd::decode_nd_record_batch(batch)
+                    .expect("the opener emits nd batches")
+                    .materialize()
+                    .expect("they broadcast")
+            })
+            .collect()
+    }
 
     async fn put_fixture(store: &Arc<InMemory>, path: &Path, bytes: &[u8]) -> ObjectMeta {
         store
@@ -259,7 +299,11 @@ mod tests {
             .await
             .expect("schema");
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(table_schema);
+        // The opener emits nd-encoded batches, so its source carries the encoded
+        // schema — the same one `create_physical_plan` builds.
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&table_schema),
+        ));
         let source = source::TiffSource::new(ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
@@ -280,13 +324,7 @@ mod tests {
             .await
             .expect("stream");
 
-        let batches: Vec<_> = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("all batches should be ok");
-
+        let batches = decoded(stream).await;
         assert!(!batches.is_empty(), "should produce at least one batch");
 
         // Concatenate into a single batch for easy column access.
@@ -364,9 +402,11 @@ mod tests {
 
         // Push the predicate into a TiffSource via try_pushdown_filters.
         let source_with_predicate: Arc<dyn FileSource> = {
-            let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-                table_schema.clone(),
-            );
+            // The opener emits nd-encoded batches, so its source carries the
+            // encoded schema — the same one `create_physical_plan` builds.
+            let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+                beacon_datafusion_ext::nd::encoded_schema(&table_schema),
+            ));
             let base_source = source::TiffSource::new(ts);
             let pushdown = base_source
                 .try_pushdown_filters(vec![predicate], &ConfigOptions::default())
@@ -393,13 +433,7 @@ mod tests {
             .await
             .expect("stream");
 
-        let batches: Vec<_> = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("all batches should be ok");
-
+        let batches = decoded(stream).await;
         assert!(!batches.is_empty(), "should produce at least one batch");
 
         let full = arrow::compute::concat_batches(&batches[0].schema(), &batches).expect("concat");

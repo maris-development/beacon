@@ -1,62 +1,23 @@
-//! Bridge from a [`Dataset`] to the nd execution-plan spine.
+//! Reading one chunk of a dataset into an un-broadcast [`NdRecordBatch`].
 //!
-//! [`dataset_as_nd_stream`] chunks a regular dataset in C-order and yields one
-//! un-broadcast [`NdRecordBatch`] per chunk. [`any_dataset_as_broadcast_stream`]
-//! is the drop-in the file-format openers use: it broadcasts a regular dataset
-//! through the nd spine ([`NdRecordBatch::materialize`], the operation
-//! [`beacon_datafusion_ext::nd::exec::NdBroadcastExec`] performs) and falls back
-//! to the v1 stream for ragged datasets (no rectangular grid).
-//!
-//! Predicate pushdown (chunk pruning) is intentionally not applied — the nd
-//! spine has no filter node yet, and the scan reports filters as inexact so
-//! DataFusion keeps a `FilterExec` above it. Filtering will return later.
+//! [`read_nd_chunk`] is what a shared read does with a chunk it pops off the
+//! queue (see [`crate::arrow::share`]). Each variable is sliced on its own axes,
+//! so a coordinate is read once per chunk rather than once per row of it, and
+//! the broadcast to flat Arrow happens above the scan in
+//! [`beacon_datafusion_ext::nd::exec::NdBroadcastExec`].
 
 use std::sync::Arc;
 
-use arrow::record_batch::RecordBatch;
-use beacon_datafusion_ext::nd::{
-    Dimension, Dimensions, NdArrowArray, NdRecordBatch, encode_flat_batch_as_nd,
-    encode_nd_record_batch,
-};
+use beacon_datafusion_ext::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
 use datafusion::error::{DataFusionError, Result};
-use futures::stream::BoxStream;
-use futures::{StreamExt, TryStreamExt};
 use indexmap::IndexMap;
 
 use crate::arrow::array::ndarray_to_arrow_array;
-use crate::arrow::batch::{
-    ChunkGrid, any_dataset_as_record_batch_stream, build_dataset_schema, chunk_grid,
-    generate_array_subset_from_chunk,
-};
-use crate::dataset::{AnyDataset, Dataset};
+use crate::arrow::batch::generate_array_subset_from_chunk;
 
 fn exec_err(e: impl std::fmt::Display) -> DataFusionError {
     DataFusionError::Execution(e.to_string())
 }
-
-/// Stream a dataset as `beacon.nd`-encoded `RecordBatch`es — the form a file
-/// opener returns so the data can ride a `DataSourceExec` up to an
-/// `NdSourceExec`, which decodes it, and an `NdBroadcastExec`, which broadcasts.
-///
-/// A regular dataset is chunked into un-broadcast [`NdRecordBatch`]es and
-/// encoded. A ragged dataset is run-length expanded by the v1 stream, then each
-/// flat batch is wrapped on a synthetic `row` dimension and encoded (so the
-/// later broadcast is the identity).
-pub fn any_dataset_as_encoded_stream(
-    dataset: AnyDataset,
-    batch_size: usize,
-) -> BoxStream<'static, Result<RecordBatch>> {
-    match dataset {
-        AnyDataset::Regular(regular) => dataset_as_nd_stream(regular, batch_size)
-            .map(|nd| nd.and_then(|batch| encode_nd_record_batch(&batch)))
-            .boxed(),
-        ragged => any_dataset_as_record_batch_stream(ragged, batch_size, None, None)
-            .map_err(exec_err)
-            .and_then(|flat| async move { encode_flat_batch_as_nd(&flat) })
-            .boxed(),
-    }
-}
-
 /// Read one chunk of a regular dataset into an un-broadcast [`NdRecordBatch`].
 ///
 /// Each variable is sliced on its own axes: a variable of lower rank than the
@@ -99,36 +60,6 @@ pub(crate) async fn read_nd_chunk(
 
     NdRecordBatch::try_new(schema, columns, target)
 }
-
-/// Chunk a regular [`Dataset`] in C-order into a stream of un-broadcast
-/// [`NdRecordBatch`]es — each variable kept on its own dimensions.
-pub fn dataset_as_nd_stream(
-    dataset: Dataset,
-    batch_size: usize,
-) -> BoxStream<'static, Result<NdRecordBatch>> {
-    let ChunkGrid {
-        dims: max_dims,
-        chunks,
-    } = match chunk_grid(&dataset, batch_size) {
-        Ok(grid) => grid,
-        Err(e) => return futures::stream::once(async move { Err(exec_err(e)) }).boxed(),
-    };
-
-    let subsets: Vec<_> = chunks;
-    let arrays = Arc::new(dataset.arrays);
-    let max_dims = Arc::new(max_dims);
-    let schema = build_dataset_schema(&arrays);
-
-    futures::stream::iter(subsets)
-        .then(move |subset| {
-            let arrays = arrays.clone();
-            let max_dims = max_dims.clone();
-            let schema = schema.clone();
-            async move { read_nd_chunk(&arrays, &max_dims, schema, subset).await }
-        })
-        .boxed()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -140,9 +71,32 @@ mod tests {
 
     use beacon_datafusion_ext::nd::decode_nd_record_batch;
 
-    use super::*;
-    use crate::arrow::batch::dataset_as_record_batch_stream;
+    use crate::arrow::batch::build_dataset_schema;
+    use crate::arrow::share::{SharedRead, flat_stream};
+    use crate::dataset::{AnyDataset, Dataset};
     use crate::{NdArray, NdArrayD};
+
+    /// Read `dataset` as the scan would: encoded, then broadcast back.
+    async fn read_encoded(dataset: Dataset, batch_size: usize) -> Vec<RecordBatch> {
+        let encoded: Vec<RecordBatch> =
+            SharedRead::build(AnyDataset::Regular(dataset), batch_size, None, true, None)
+                .await
+                .unwrap()
+                .stream(None)
+                .try_collect()
+                .await
+                .unwrap();
+
+        encoded
+            .iter()
+            .map(|batch| {
+                decode_nd_record_batch(batch)
+                    .unwrap()
+                    .materialize()
+                    .unwrap()
+            })
+            .collect()
+    }
 
     async fn test_dataset() -> Dataset {
         let time = NdArray::<i64>::try_new_from_vec_in_mem(
@@ -174,30 +128,27 @@ mod tests {
         Dataset::new("test".to_string(), arrays).await
     }
 
-    /// The encoded stream, decoded and broadcast, matches the v1 broadcast
-    /// stream (i.e. encode → decode → materialize is faithful).
+    /// An encoded read, decoded and broadcast, is the flat read.
+    ///
+    /// The two modes take the same chunks off the same queue and differ only in
+    /// what they do with each one, so `encode → decode → materialize` has to be
+    /// the identity on the rows.
     #[tokio::test]
-    async fn encoded_stream_matches_v1_broadcast() {
+    async fn an_encoded_read_matches_a_flat_one() {
         for batch_size in [usize::MAX, 6, 3] {
             let ds = test_dataset().await;
             let schema = build_dataset_schema(&ds.arrays);
 
-            let v1: Vec<RecordBatch> =
-                dataset_as_record_batch_stream(ds.clone(), batch_size, None, None)
+            let flat: Vec<RecordBatch> =
+                flat_stream(AnyDataset::Regular(ds.clone()), batch_size, None)
+                    .await
+                    .unwrap()
                     .try_collect()
                     .await
                     .unwrap();
-            let expected = concat_batches(&schema, &v1).unwrap();
+            let expected = concat_batches(&schema, &flat).unwrap();
 
-            let encoded: Vec<RecordBatch> =
-                any_dataset_as_encoded_stream(AnyDataset::Regular(ds), batch_size)
-                    .try_collect()
-                    .await
-                    .unwrap();
-            let materialized: Vec<RecordBatch> = encoded
-                .iter()
-                .map(|b| decode_nd_record_batch(b).unwrap().materialize().unwrap())
-                .collect();
+            let materialized = read_encoded(ds, batch_size).await;
             let actual = concat_batches(&schema, &materialized).unwrap();
 
             assert_eq!(actual, expected, "batch_size={batch_size}");
@@ -245,15 +196,7 @@ mod tests {
             let ds = test_dataset_with_attrs().await;
             let schema = build_dataset_schema(&ds.arrays);
 
-            let encoded: Vec<RecordBatch> =
-                any_dataset_as_encoded_stream(AnyDataset::Regular(ds), batch_size)
-                    .try_collect()
-                    .await
-                    .unwrap();
-            let materialized: Vec<RecordBatch> = encoded
-                .iter()
-                .map(|b| decode_nd_record_batch(b).unwrap().materialize().unwrap())
-                .collect();
+            let materialized = read_encoded(ds, batch_size).await;
             let actual = concat_batches(&schema, &materialized).unwrap();
 
             assert_eq!(actual.num_rows(), 12, "batch_size={batch_size}");

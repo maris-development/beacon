@@ -288,27 +288,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "array-format"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7379c3303a9b9f0693ccd040d85da31e302a601efeafae8a6cb69341e42de41"
-dependencies = [
- "bytes",
- "futures",
- "indexmap 2.14.0",
- "lz4_flex 0.11.6",
- "moka",
- "ndarray 0.17.2",
- "object_store 0.13.2",
- "rkyv 0.8.10",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "zerocopy",
- "zstd",
-]
-
-[[package]]
 name = "array-init"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1175,30 +1154,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atlas-rust"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7a1d869e138e920030d87dc4dc54f78d6c84cbd9e78ffbdbbd793f887dee3b9"
-dependencies = [
- "array-format",
- "chrono",
- "futures",
- "indexmap 2.14.0",
- "lz4_flex 0.11.6",
- "ndarray 0.17.2",
- "num_cpus",
- "object_store 0.13.2",
- "parking_lot",
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "zstd",
-]
-
-[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1409,30 +1364,6 @@ dependencies = [
  "bb8",
  "tokio",
  "tokio-postgres",
-]
-
-[[package]]
-name = "beacon-arrow-atlas"
-version = "2.0.0-rc.2"
-dependencies = [
- "anyhow",
- "arrow 58.4.0",
- "async-trait",
- "atlas-rust",
- "beacon-common",
- "beacon-datafusion-ext",
- "beacon-nd-array",
- "chrono",
- "crossbeam",
- "datafusion",
- "futures",
- "indexmap 2.14.0",
- "moka",
- "ndarray 0.17.2",
- "object_store 0.13.2",
- "tempfile",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1759,7 +1690,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64",
- "beacon-arrow-atlas",
  "beacon-arrow-bbf",
  "beacon-arrow-csv",
  "beacon-arrow-geoparquet",
@@ -1911,7 +1841,6 @@ version = "2.0.0-rc.2"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
- "beacon-arrow-atlas",
  "beacon-arrow-bbf",
  "beacon-arrow-csv",
  "beacon-arrow-geoparquet",
@@ -2153,7 +2082,6 @@ name = "beacon-server-config"
 version = "2.0.0-rc.2"
 dependencies = [
  "base64",
- "beacon-arrow-atlas",
  "beacon-arrow-bbf",
  "beacon-arrow-hdf5",
  "beacon-arrow-netcdf",

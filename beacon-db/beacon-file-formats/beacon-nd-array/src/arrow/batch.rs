@@ -3,12 +3,11 @@ use std::{collections::HashMap, ops::Range, sync::Arc};
 use indexmap::IndexMap;
 
 use arrow::{
-    array::{ArrayRef, RecordBatchOptions, new_null_array},
+    array::{ArrayRef, new_null_array},
     compute::concat,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
-use futures::{StreamExt, stream::BoxStream};
 
 use crate::{
     NdArrayD,
@@ -22,82 +21,11 @@ use crate::{
     },
     dataset::{
         Dataset,
-        any::AnyDataset,
         ragged::{RaggedArray, RaggedDataset},
     },
 };
 
-use super::{array::ndarray_to_arrow_array, metrics::DatasetReadMetrics};
-
-pub fn any_dataset_as_row_size(
-    dataset: AnyDataset,
-) -> anyhow::Result<BoxStream<'static, anyhow::Result<RecordBatch>>> {
-    match dataset {
-        AnyDataset::Regular(dataset) => {
-            // Find max array and use its shape to determine the number of rows using the product.
-            let max_array = dataset
-                .arrays
-                .values()
-                .max_by_key(|array| array.shape().len())
-                .ok_or_else(|| anyhow::anyhow!("Dataset contains no arrays"))?;
-
-            let shape = max_array.shape();
-            if shape.is_empty() {
-                Ok(futures::stream::once(async {
-                    let schema = Arc::new(Schema::empty());
-                    let record_batch_options = RecordBatchOptions::new().with_row_count(Some(1));
-                    RecordBatch::try_new_with_options(schema, vec![], &record_batch_options)
-                        .map_err(|e| e.into())
-                })
-                .boxed())
-            } else {
-                Ok(futures::stream::once(async move {
-                    let schema = Arc::new(Schema::empty());
-                    let record_batch_options =
-                        RecordBatchOptions::new().with_row_count(Some(shape.iter().product()));
-                    RecordBatch::try_new_with_options(schema, vec![], &record_batch_options)
-                        .map_err(|e| e.into())
-                })
-                .boxed())
-            }
-        }
-        AnyDataset::Ragged { ragged, .. } => {
-            // The ragged dataset row count is the size of the largest obs variable.
-            let max_obs_rows = ragged
-                .observation_dimensions()
-                .filter_map(|dim| ragged.variables.get(dim))
-                .filter_map(|var| var.array().shape().first().cloned())
-                .max()
-                .unwrap_or(0);
-
-            Ok(futures::stream::once(async move {
-                let schema = Arc::new(Schema::empty());
-                let record_batch_options =
-                    RecordBatchOptions::new().with_row_count(Some(max_obs_rows));
-                RecordBatch::try_new_with_options(schema, vec![], &record_batch_options)
-                    .map_err(|e| e.into())
-            })
-            .boxed())
-        }
-    }
-}
-
-pub fn any_dataset_as_record_batch_stream(
-    dataset: AnyDataset,
-    batch_size: usize,
-    predicate: Option<PushdownFilter>,
-    metrics: Option<DatasetReadMetrics>,
-) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
-    match dataset {
-        AnyDataset::Regular(ds) => {
-            dataset_as_record_batch_stream(ds, batch_size, predicate, metrics)
-        }
-        AnyDataset::Ragged { ragged, .. } => {
-            ragged_dataset_as_record_batch_stream(ragged, batch_size, predicate, metrics)
-        }
-    }
-}
-
+use super::array::ndarray_to_arrow_array;
 /// A ragged dataset's read, planned once.
 ///
 /// This is the ragged answer to a chunk grid. A regular dataset states its
@@ -248,55 +176,6 @@ pub(crate) async fn read_ragged_range(
     )
     .await
 }
-
-/// Stream [`RecordBatch`]es from a ragged dataset, grouping multiple
-/// casts into each batch until `batch_size` observation rows are
-/// reached. Casts are never split — a single cast that exceeds
-/// `batch_size` on its own is still emitted as one batch.
-///
-fn ragged_dataset_as_record_batch_stream(
-    ragged: RaggedDataset,
-    batch_size: usize,
-    predicate: Option<PushdownFilter>,
-    metrics: Option<DatasetReadMetrics>,
-) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
-    futures::stream::once(async move { plan_ragged_read(ragged, batch_size, predicate).await })
-        .map(move |planned| {
-            let metrics = metrics.clone();
-            match planned {
-                Ok(plan) => {
-                    // A cast the predicate excluded is dropped before the batch
-                    // plan exists, so no batch can account for it.
-                    if let (Some(m), Some((batches, rows))) = (&metrics, plan.pruned) {
-                        m.batches_pruned.add(batches);
-                        m.rows_pruned.add(rows);
-                    }
-
-                    let ranges: Vec<Range<usize>> = plan.ranges.to_vec();
-
-                    let plan = Arc::new(plan);
-                    futures::stream::iter(ranges)
-                        .then(move |range| {
-                            let plan = plan.clone();
-                            let metrics = metrics.clone();
-                            async move {
-                                let batch = read_ragged_range(&plan, range).await?;
-                                if let Some(m) = &metrics {
-                                    m.output_rows.add(batch.num_rows());
-                                    m.output_batches.add(1);
-                                }
-                                Ok(batch)
-                            }
-                        })
-                        .boxed()
-                }
-                Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
-            }
-        })
-        .flatten()
-        .boxed()
-}
-
 /// Build a unified Arrow [`Schema`] for all variables that appear in
 /// any cast of a ragged dataset. This includes instance variables,
 /// observation variables (all obs-dim groups), variable attributes,
@@ -636,81 +515,6 @@ pub(crate) async fn read_chunk(
     }
     Ok(Some(RecordBatch::try_new(schema, arrow_arrays)?))
 }
-
-pub fn dataset_as_record_batch_stream(
-    dataset: Dataset,
-    batch_size: usize,
-    predicate: Option<PushdownFilter>,
-    metrics: Option<DatasetReadMetrics>,
-) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
-    let ChunkGrid {
-        dims: max_dims,
-        chunks,
-    } = match chunk_grid(&dataset, batch_size) {
-        Ok(grid) => grid,
-        Err(e) => return futures::stream::once(async move { Err(e) }).boxed(),
-    };
-
-    let schema = build_dataset_schema(&dataset.arrays);
-
-    let subsets: Vec<ArraySubset> = chunks;
-    let arrays = Arc::new(dataset.arrays);
-
-    futures::stream::once(async move {
-        let dim_masks = Arc::new(compute_predicate_masks(&arrays, predicate).await?);
-        Ok((arrays, subsets, schema, max_dims, dim_masks))
-    })
-    .map(move |result| {
-        // Create locals from the captured `metrics` field so they can be moved
-        // into the inner closures (you cannot move a captured FnMut field directly).
-        let metrics_for_then = metrics.clone();
-        let metrics_for_filter = metrics.clone();
-        match result {
-            Ok((arrays, subsets, schema, max_dims, dim_masks)) => futures::stream::iter(subsets)
-                .then(move |subset| {
-                    let arrays = arrays.clone();
-                    let schema = schema.clone();
-                    let max_dims = max_dims.clone();
-                    let dim_masks = dim_masks.clone();
-                    let metrics = metrics_for_then.clone();
-                    let chunk_rows: usize = subset.shape.iter().product();
-                    async move {
-                        let result =
-                            read_chunk(&arrays, subset, schema, &max_dims, &dim_masks).await;
-                        if let Ok(None) = &result {
-                            if let Some(m) = &metrics {
-                                m.batches_pruned.add(1);
-                                m.rows_pruned.add(chunk_rows);
-                            }
-                        }
-                        result
-                    }
-                })
-                .filter_map(move |result| {
-                    let metrics = metrics_for_filter.clone();
-                    async move {
-                        match result {
-                            Ok(Some(batch)) if batch.num_rows() > 0 => {
-                                if let Some(m) = &metrics {
-                                    m.output_rows.add(batch.num_rows());
-                                    m.output_batches.add(1);
-                                }
-                                // tracing::debug!("Emitting batch with {} rows", batch.num_rows());
-                                Some(Ok(batch))
-                            }
-                            Ok(_) => None,
-                            Err(e) => Some(Err(e)),
-                        }
-                    }
-                })
-                .boxed(),
-            Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
-        }
-    })
-    .flatten()
-    .boxed()
-}
-
 /// For a given chunk subset (expressed in max_dims space), compute the corresponding
 /// subset for an individual array that may have fewer dimensions.
 pub(crate) fn generate_array_subset_from_chunk(
@@ -826,6 +630,29 @@ pub(crate) fn generate_chunk_subsets(shape: &[usize], chunk_shape: &[usize]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flat read of a regular dataset, as the `COUNT(*)` path performs one.
+    async fn flat_of(
+        dataset: Dataset,
+        batch_size: usize,
+        predicate: Option<PushdownFilter>,
+    ) -> Vec<RecordBatch> {
+        flat_of_any(AnyDataset::Regular(dataset), batch_size, predicate).await
+    }
+
+    /// The same, for a dataset of either shape.
+    async fn flat_of_any(
+        dataset: AnyDataset,
+        batch_size: usize,
+        predicate: Option<PushdownFilter>,
+    ) -> Vec<RecordBatch> {
+        crate::arrow::share::flat_stream(dataset, batch_size, predicate)
+            .await
+            .expect("the read builds")
+            .try_collect()
+            .await
+            .expect("the read succeeds")
+    }
     use crate::NdArray;
     use arrow::array::{Array, Float64Array, Int32Array};
     use futures::TryStreamExt;
@@ -849,10 +676,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("values", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, usize::MAX, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of(ds, usize::MAX, None).await;
         assert_eq!(batches.len(), 1);
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 6);
@@ -884,10 +708,7 @@ mod tests {
 
         let ds = make_dataset(vec![("data", Arc::new(nd_2d)), ("scale", Arc::new(nd_1d))]).await;
 
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, usize::MAX, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of(ds, usize::MAX, None).await;
         assert_eq!(batches.len(), 1);
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 6);
@@ -949,11 +770,7 @@ mod tests {
         // (replicated along `a,c`), which is rarely what the caller wants. (In
         // production this path is never hit un-narrowed: `resolve_read_dimensions`
         // always narrows first.)
-        let naive: Vec<RecordBatch> =
-            dataset_as_record_batch_stream(ds.clone(), usize::MAX, None, None)
-                .try_collect()
-                .await
-                .expect("union-grid fallback broadcasts every variable onto (a,b,c,d)");
+        let naive = flat_of(ds.clone(), usize::MAX, None).await;
         let naive_rows: usize = naive.iter().map(|b| b.num_rows()).sum();
         assert_eq!(naive_rows, 16); // 2 * 2 * 2 * 2 — the (a,b,c,d) cross-product
         assert!(
@@ -969,11 +786,7 @@ mod tests {
         assert_eq!(default_dims, vec!["a", "b", "c"]);
 
         let projected = ds.project_with_dimensions(&default_dims).unwrap();
-        let batches: Vec<RecordBatch> =
-            dataset_as_record_batch_stream(projected, usize::MAX, None, None)
-                .try_collect()
-                .await
-                .expect("SELECT * succeeds after default dimension narrowing");
+        let batches = flat_of(projected, usize::MAX, None).await;
 
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 8); // 2 * 2 * 2
@@ -999,23 +812,23 @@ mod tests {
         let mut ds = make_dataset(vec![("a", Arc::new(nd1))]).await;
         ds.dimensions.clear();
 
-        let results: Vec<anyhow::Result<RecordBatch>> =
-            dataset_as_record_batch_stream(ds, usize::MAX, None, None)
-                .collect()
-                .await;
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_err());
+        // The chunk list is built before anything streams, so a dataset that
+        // cannot be laid out fails there rather than on the first batch.
+        assert!(
+            crate::arrow::share::flat_stream(AnyDataset::Regular(ds), usize::MAX, None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn test_empty_dataset_error() {
         let ds = make_dataset(vec![]).await;
-        let results: Vec<anyhow::Result<RecordBatch>> =
-            dataset_as_record_batch_stream(ds, usize::MAX, None, None)
-                .collect()
-                .await;
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_err());
+        assert!(
+            crate::arrow::share::flat_stream(AnyDataset::Regular(ds), usize::MAX, None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1028,10 +841,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, usize::MAX, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of(ds, usize::MAX, None).await;
         let col = batches[0]
             .column(0)
             .as_any()
@@ -1152,10 +962,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 6, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of(ds, 6, None).await;
 
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].num_rows(), 6);
@@ -1187,10 +994,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 2, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of(ds, 2, None).await;
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].num_rows(), 2);
         assert_eq!(batches[1].num_rows(), 2);
@@ -1208,10 +1012,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("v", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 3, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of(ds, 3, None).await;
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[2].num_rows(), 1);
         let col = batches[2]
@@ -1240,10 +1041,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("data", Arc::new(nd_2d)), ("scale", Arc::new(nd_1d))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 6, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of(ds, 6, None).await;
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].num_rows(), 6);
         assert_eq!(batches[1].num_rows(), 6);
@@ -1362,11 +1160,7 @@ mod tests {
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> =
-            any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
-                .try_collect()
-                .await
-                .unwrap();
+        let batches: Vec<RecordBatch> = flat_of_any(any, usize::MAX, None).await;
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 3);
         let col = batches[0]
@@ -1382,10 +1176,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of_any(any, 1, None).await;
 
         // One batch per cast.
         assert_eq!(batches.len(), 3);
@@ -1409,10 +1200,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of_any(any, 1, None).await;
 
         let schema = batches[0].schema();
         let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -1425,10 +1213,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of_any(any, 1, None).await;
 
         // Cast 0: station_id=100, obs_len=2 → [100, 100]
         let sid = batches[0]
@@ -1454,10 +1239,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of_any(any, 1, None).await;
 
         // Cast 0 has obs_len=2. Global attr `Conventions` should be repeated.
         let conv = batches[0]
@@ -1549,10 +1331,7 @@ mod tests {
         .await;
 
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of_any(any, 1, None).await;
 
         assert_eq!(batches.len(), 2);
 
@@ -1630,10 +1409,7 @@ mod tests {
         .await;
 
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> = flat_of_any(any, 1, None).await;
 
         assert_eq!(batches.len(), 2);
         // First cast: 0 observations → 0-row batch.

@@ -1,16 +1,8 @@
 use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
-use beacon_nd_array::{
-    arrow::{
-        batch::{any_dataset_as_record_batch_stream, any_dataset_as_row_size},
-        metrics::DatasetReadMetrics,
-        pushdown_filter::PushdownFilter,
-    },
-    projection::DatasetProjection,
-};
+use beacon_nd_array::arrow::{metrics::SharedReadMetrics, share::SharedDataset};
 use datafusion::{
-    common::Statistics,
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
@@ -18,16 +10,13 @@ use datafusion::{
         schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    execution::SendableRecordBatchStream,
-    physical_expr::{PhysicalExpr, conjunction, projection::ProjectionExprs},
-    physical_expr_adapter::BatchAdapterFactory,
+    physical_expr::{conjunction, projection::ProjectionExprs, PhysicalExpr},
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
-        metrics::{ExecutionPlanMetricsSet, SplitMetrics},
-        stream::{BatchSplitStream, RecordBatchStreamAdapter},
+        metrics::ExecutionPlanMetricsSet,
     },
 };
-use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
+use futures::{stream::BoxStream, FutureExt};
 use object_store::ObjectMeta;
 
 use super::reader;
@@ -71,11 +60,9 @@ impl FileSource for TiffSource {
         base_config: &FileScanConfig,
         partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
-        let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(TiffOpener::new(
-            file_schema,
             object_store,
             projected_schema,
             self.batch_size,
@@ -165,7 +152,6 @@ impl FileSource for TiffSource {
 }
 
 struct TiffOpener {
-    table_schema: SchemaRef,
     object_store: Arc<dyn object_store::ObjectStore>,
     projected_schema: SchemaRef,
     batch_size: usize,
@@ -176,7 +162,6 @@ struct TiffOpener {
 
 impl TiffOpener {
     fn new(
-        table_schema: SchemaRef,
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
         batch_size: usize,
@@ -185,7 +170,6 @@ impl TiffOpener {
         partition: usize,
     ) -> Self {
         Self {
-            table_schema,
             object_store,
             projected_schema,
             batch_size,
@@ -195,13 +179,19 @@ impl TiffOpener {
         }
     }
 
-    async fn read_task(
+    /// Read one file.
+    ///
+    /// TIFF has no share map: a GeoTIFF is one raster per object and the listing
+    /// spreads objects across the partitions, so each file is one partition's
+    /// alone. The planning below is the same one a shared file gets — see
+    /// [`SharedDataset::plan`].
+    async fn read(
         object: ObjectMeta,
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        metrics: Option<DatasetReadMetrics>,
+        metrics: SharedReadMetrics,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(object_store, object.clone())
             .await
@@ -212,93 +202,29 @@ impl TiffOpener {
                 ))
             })?;
 
-        let file_schema: SchemaRef =
-            beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to derive Arrow schema from TIFF dataset: {e}"
-                    ))
-                })?
-                .into();
+        let dataset = SharedDataset::plan(
+            dataset,
+            projected_schema,
+            batch_size,
+            predicate,
+            Some(&metrics),
+        )
+        .await?;
 
-        // Columns of this file that the query needs, in file order — used both
-        // to prune the read and as the source schema for the batch adapter.
-        let projection: Vec<usize> = file_schema
-            .fields()
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
-            .map(|(i, _)| i)
-            .collect();
-
-        if projection.is_empty() {
-            return Ok(any_dataset_as_row_size(dataset)
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to compute row size for empty projection on TIFF dataset: {e}"
-                    ))
-                })?
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to read TIFF dataset with empty projection: {e}"
-                    ))
-                })
-                .boxed());
-        }
-
-        // Adapt batches (read with `projection`) onto the projected output
-        // schema: reorder, cast, and null-fill columns this file lacks.
-        let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
-        let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
-
-        let dataset = if projection.len() < file_schema.fields().len() {
-            let proj = DatasetProjection {
-                dimension_projection: None,
-                index_projection: Some(projection),
-            };
-            dataset.project(&proj).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to project TIFF dataset: {e}"
-                ))
-            })?
-        } else {
-            dataset
-        };
-
-        let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading TIFF as Arrow stream: {e}"
-                ))
-            })
-            .and_then(move |batch| {
-                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to adapt TIFF batch schema: {e}"
-                    ))
-                });
-                futures::future::ready(mapped)
-            })
-            .boxed();
-
-        Ok(stream)
+        Ok(dataset.stream(Some(metrics)))
     }
 }
 
 impl FileOpener for TiffOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
-        let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
-        let fut = Self::read_task(
+        Ok(Self::read(
             file.object_meta,
             self.object_store.clone(),
             self.projected_schema.clone(),
             self.batch_size,
             self.predicate.clone(),
-            metrics,
+            SharedReadMetrics::new(&self.metrics, self.partition),
         )
-        .boxed();
-
-        Ok(fut)
+        .boxed())
     }
 }

@@ -69,12 +69,6 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
         )),
-        Arc::new(
-            beacon_arrow_atlas::datafusion::table_function::ReadAtlasFunc::new(
-                runtime_handle.clone(),
-                Arc::downgrade(&session_ctx),
-            ),
-        ),
         Arc::new(beacon_delta::ReadDeltaFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
