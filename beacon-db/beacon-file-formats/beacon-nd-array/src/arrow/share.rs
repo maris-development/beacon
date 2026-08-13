@@ -47,9 +47,13 @@ use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 
 use crate::NdArrayD;
+use std::ops::Range;
+
 use crate::array::subset::ArraySubset;
-use crate::arrow::batch::{ChunkGrid, build_dataset_schema, chunk_grid};
-use crate::arrow::nd_provider::{any_dataset_as_encoded_stream, read_nd_chunk};
+use crate::arrow::batch::{
+    ChunkGrid, RaggedPlan, build_dataset_schema, chunk_grid, plan_ragged_read, read_ragged_range,
+};
+use crate::arrow::nd_provider::read_nd_chunk;
 use crate::dataset::AnyDataset;
 
 /// The work of one file, shared by the partitions reading it.
@@ -114,18 +118,22 @@ impl NdFileShare {
 }
 
 /// One unit of work: what a partition reads for one pop.
+///
+/// The two dataset shapes divide differently, so the queue carries whichever
+/// unit its file is made of. Both are read once and by one partition, which is
+/// all the queue needs of them.
 #[derive(Debug)]
 enum Work {
     /// One hyperslab of a regular dataset's chunk grid.
     Grid(ArraySubset),
-    /// A ragged dataset, whole.
+    /// One batch of a ragged dataset's plan, as a range of passing casts.
     ///
-    /// A ragged read plans its batches from cumulative offsets that the plan
-    /// itself depends on, so its batches are not independent the way chunk reads
-    /// are. It stays one unit: whichever partition pops it reads the file, and
-    /// the others find the queue empty and finish. The file is still read once,
-    /// and still exactly once.
-    Ragged,
+    /// A ragged dataset has no chunk grid. Its batches are cut where the cast
+    /// boundaries fall, which takes the cumulative offsets and the predicate
+    /// masks to work out, so the plan is built once by whichever partition
+    /// arrives first. After that a range reads on its own, exactly as a chunk
+    /// does.
+    Ragged(Range<usize>),
 }
 
 /// A file opened once, and the subsets left to read from it.
@@ -142,11 +150,8 @@ enum ReadKind {
         dims: Arc<Vec<String>>,
         schema: Arc<Schema>,
     },
-    /// Boxed: an `AnyDataset` is far larger than the grid variant, and a
-    /// `ReadKind` is held for as long as the file is open.
     Ragged {
-        dataset: Box<AnyDataset>,
-        batch_size: usize,
+        plan: Arc<RaggedPlan>,
     },
 }
 
@@ -154,18 +159,25 @@ impl SharedRead {
     /// Open `dataset` for sharing, and fill the queue with its subsets.
     ///
     /// A regular dataset is cut on its chunk grid, which is the same grid an
-    /// unshared read walks. A ragged one becomes a single unit.
-    pub fn build(dataset: AnyDataset, batch_size: usize) -> Result<Arc<Self>> {
+    /// unshared read walks. A ragged one is cut on its batch plan, which is the
+    /// same plan an unshared read builds.
+    pub async fn build(dataset: AnyDataset, batch_size: usize) -> Result<Arc<Self>> {
         let regular = match dataset {
             AnyDataset::Regular(regular) => regular,
-            ragged => {
-                let queue = ArrayQueue::new(1);
-                let _ = queue.push(Work::Ragged);
+            AnyDataset::Ragged { ragged, .. } => {
+                let plan = plan_ragged_read(ragged, batch_size, None)
+                    .await
+                    .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+
+                let queue = ArrayQueue::new(plan.ranges.len().max(1));
+                for range in plan.ranges.clone() {
+                    // The capacity is the range count, so this cannot fail.
+                    let _ = queue.push(Work::Ragged(range));
+                }
                 return Ok(Arc::new(Self {
                     queue,
                     read: ReadKind::Ragged {
-                        dataset: Box::new(ragged),
-                        batch_size,
+                        plan: Arc::new(plan),
                     },
                 }));
             }
@@ -236,13 +248,16 @@ impl SharedRead {
                 })
                 .boxed()
             }
-            (
-                Work::Ragged,
-                ReadKind::Ragged {
-                    dataset,
-                    batch_size,
-                },
-            ) => any_dataset_as_encoded_stream(dataset.as_ref().clone(), *batch_size),
+            (Work::Ragged(range), ReadKind::Ragged { plan }) => {
+                let plan = plan.clone();
+                futures::stream::once(async move {
+                    let flat = read_ragged_range(&plan, range)
+                        .await
+                        .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                    beacon_datafusion_ext::nd::encode_flat_batch_as_nd(&flat)
+                })
+                .boxed()
+            }
             // `build` pairs the unit with the kind, so a mismatch would be a bug
             // in this file rather than bad input.
             _ => futures::stream::once(async {
@@ -307,7 +322,7 @@ mod tests {
             let source = source.clone();
             set.spawn(async move {
                 let shared = share
-                    .join(|| async move { SharedRead::build(source, batch_size) })
+                    .join(|| async move { SharedRead::build(source, batch_size).await })
                     .await
                     .expect("the share admits");
                 drain(shared.stream()).await
@@ -319,6 +334,122 @@ mod tests {
             rows.push(read.expect("a partition finishes"));
         }
         rows
+    }
+
+/// A CF contiguous ragged-array dataset of `casts` casts, each holding one
+    /// more observation than the last.
+    ///
+    /// Uneven on purpose: a plan over equal casts would divide the same way
+    /// whatever the batch size, and hide a mistake in the mapping back to the
+    /// dataset's own indices.
+    async fn ragged_dataset(casts: usize) -> (AnyDataset, usize) {
+        let sizes: Vec<i32> = (1..=casts as i32).collect();
+        let observations: usize = sizes.iter().map(|size| *size as usize).sum();
+
+        let row_size = NdArray::<i32>::try_new_from_vec_in_mem(
+            sizes,
+            vec![casts],
+            vec!["casts".to_string()],
+            None,
+        )
+        .unwrap();
+        // The attribute that marks the dataset as ragged and names the
+        // observation dimension `row_size` counts into.
+        let sample_dimension = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["obs".to_string()],
+            vec![],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let station = NdArray::<f64>::try_new_from_vec_in_mem(
+            (0..casts).map(|cast| cast as f64).collect(),
+            vec![casts],
+            vec!["casts".to_string()],
+            None,
+        )
+        .unwrap();
+        let temperature = NdArray::<f64>::try_new_from_vec_in_mem(
+            (0..observations).map(|obs| obs as f64 * 0.5).collect(),
+            vec![observations],
+            vec!["obs".to_string()],
+            None,
+        )
+        .unwrap();
+
+        let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
+        arrays.insert("row_size".to_string(), Arc::new(row_size));
+        arrays.insert(
+            "row_size.sample_dimension".to_string(),
+            Arc::new(sample_dimension),
+        );
+        arrays.insert("station".to_string(), Arc::new(station));
+        arrays.insert("temperature".to_string(), Arc::new(temperature));
+
+        let dataset = Dataset::new("ragged".to_string(), arrays).await;
+        let any = AnyDataset::try_from_dataset(dataset).await.unwrap();
+        assert!(matches!(any, AnyDataset::Ragged { .. }), "fixture is ragged");
+        (any, observations)
+    }
+
+    /// The partitions of a ragged file read every observation once between them.
+    ///
+    /// A ragged dataset has no chunk grid, so its queue holds ranges of its
+    /// batch plan instead. The property is the same and so is the risk: a range
+    /// popped twice is an observation returned twice, and one popped by nobody
+    /// is an observation lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_partitions_of_a_ragged_share_read_every_row_once() {
+        const CASTS: usize = 60;
+
+        // A batch size well under the file, so the plan holds many ranges to
+        // divide, and one over it, so it holds one.
+        for batch_size in [8_usize, 64, usize::MAX] {
+            for consumers in [1_usize, 2, 3, 8] {
+                let share = Arc::new(NdFileShare::new(consumers));
+                let (source, observations) = ragged_dataset(CASTS).await;
+                let rows = read_in_partitions(share, source, consumers, batch_size).await;
+
+                assert_eq!(
+                    rows.iter().sum::<usize>(),
+                    observations,
+                    "batch_size={batch_size} consumers={consumers}: every row once"
+                );
+            }
+        }
+    }
+
+    /// A ragged file divides across partitions rather than falling to one.
+    ///
+    /// The queue used to hold a ragged file as a single unit, so one partition
+    /// read it and the rest found the queue empty. This is the assertion that
+    /// says it no longer does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_ragged_file_divides_across_partitions() {
+        const CASTS: usize = 60;
+        const CONSUMERS: usize = 4;
+
+        let share = Arc::new(NdFileShare::new(CONSUMERS));
+        let (source, observations) = ragged_dataset(CASTS).await;
+
+        // Build the plan first, so the test can say how many ranges there were
+        // to divide before the partitions take them.
+        let shared = SharedRead::build(source.clone(), 8)
+            .await
+            .expect("the plan builds");
+        let ranges = shared.remaining();
+        drop(shared);
+        assert!(
+            ranges >= CONSUMERS,
+            "the fixture must hold at least one range per partition, got {ranges}"
+        );
+
+        let rows = read_in_partitions(share, source, CONSUMERS, 8).await;
+        assert_eq!(rows.iter().sum::<usize>(), observations);
+        assert!(
+            rows.iter().filter(|read| **read > 0).count() > 1,
+            "more than one partition must read: {rows:?}"
+        );
     }
 
     /// The partitions of one file read every row once between them.
@@ -380,7 +511,7 @@ mod tests {
                 let shared = share
                     .join(|| async move {
                         builds.fetch_add(1, Ordering::SeqCst);
-                        SharedRead::build(source, 512)
+                        SharedRead::build(source, 512).await
                     })
                     .await
                     .expect("the share admits");
@@ -435,7 +566,7 @@ mod tests {
         let shared = share
             .join(|| {
                 let source = source.clone();
-                async move { SharedRead::build(source, BATCH) }
+                async move { SharedRead::build(source, BATCH).await }
             })
             .await
             .expect("the share admits");
@@ -477,7 +608,7 @@ mod tests {
 
         let source = dataset(1_000).await;
         let second = share
-            .join(|| async move { SharedRead::build(source, 512) })
+            .join(|| async move { SharedRead::build(source, 512).await })
             .await
             .expect("the next caller builds again");
         assert_eq!(drain(second.stream()).await, 1_000);

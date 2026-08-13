@@ -118,6 +118,157 @@ pub fn any_dataset_as_record_batch_stream_split(
     }
 }
 
+/// A ragged dataset's read, planned once.
+///
+/// This is the ragged answer to a chunk grid. A regular dataset states its
+/// chunks in metadata; a ragged one has to be planned, because the batches are
+/// cut where the cast boundaries fall and that needs the cumulative offsets and
+/// the predicate masks first.
+///
+/// The plan is what makes a ragged file divisible. Every range in it reads on
+/// its own, so partitions can take one each, exactly as they take chunks.
+#[derive(Debug)]
+pub(crate) struct RaggedPlan {
+    ragged: RaggedDataset,
+    schema: Arc<Schema>,
+    obs_dims: std::collections::HashSet<String>,
+    offsets: HashMap<String, Vec<usize>>,
+    /// Original instance indices that passed the predicate, in order.
+    passing_indices: Vec<usize>,
+    /// The batches to read, each a range over `passing_indices`.
+    pub(crate) ranges: Vec<Range<usize>>,
+    /// Casts the predicate excluded, and the observation rows they held.
+    ///
+    /// Counted here because it happens before any batch exists, so no reader of
+    /// one batch can account for it.
+    pub(crate) pruned: Option<(usize, usize)>,
+}
+
+/// Plan a ragged read: which casts survive the predicate, and how they group
+/// into batches of about `batch_size` observation rows.
+///
+/// The cumulative offsets and the predicate masks are read here, once. A caller
+/// that plans per partition pays for both per partition.
+pub(crate) async fn plan_ragged_read(
+    ragged: RaggedDataset,
+    batch_size: usize,
+    predicate: Option<PushdownFilter>,
+) -> anyhow::Result<RaggedPlan> {
+    let schema = ragged_record_batch_schema(&ragged);
+    let obs_dims: std::collections::HashSet<String> =
+        ragged.observation_dimensions().map(String::from).collect();
+    let instance_dim = ragged.instance_dimension().to_string();
+
+    let offsets = ragged.cumulative_offsets().await?.clone();
+    let n = ragged.len();
+
+    let mut mask = vec![true; n];
+    for (name, array) in &ragged.variables {
+        if let RaggedArray::InstanceVariable(array) = array
+            && is_pushdown_candidate_ragged(array, &instance_dim)
+            && let Some(value_range) = predicate.as_ref().and_then(|f| f.ranges().get(name))
+        {
+            let array_mask = mask_pushdown(array.clone(), value_range).await?;
+            assert_eq!(
+                array_mask.len(),
+                n,
+                "Pushdown mask length must match number of casts in the ragged dataset"
+            );
+            for (i, keep) in array_mask.iter().enumerate() {
+                if !keep {
+                    mask[i] = false;
+                }
+            }
+        }
+    }
+
+    // Determine which instance indices pass the instance mask.
+    let passing_indices: Vec<usize> = mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &keep)| if keep { Some(i) } else { None })
+        .collect();
+
+    // Casts the predicate excluded, and the rows they held.
+    let excluded = n - passing_indices.len();
+    let pruned = (excluded > 0).then(|| {
+        // Sum max-obs-dim rows for each excluded cast.
+        let rows = offsets
+            .iter()
+            .filter(|(dim, _)| obs_dims.contains(dim.as_str()))
+            .map(|(_, cum)| {
+                mask.iter()
+                    .enumerate()
+                    .filter(|(_, keep)| !**keep)
+                    .map(|(i, _)| cum[i + 1] - cum[i])
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0);
+        (excluded, rows)
+    });
+
+    // Replan batches using only passing instances.
+    // Build filtered offsets for batch planning.
+    let filtered_offsets: HashMap<String, Vec<usize>> = offsets
+        .iter()
+        .filter(|(dim, _)| obs_dims.contains(dim.as_str()))
+        .map(|(dim, cum)| {
+            let mut new_cum = Vec::with_capacity(passing_indices.len() + 1);
+            new_cum.push(0usize);
+            let mut running = 0usize;
+            for &idx in &passing_indices {
+                running += cum[idx + 1] - cum[idx];
+                new_cum.push(running);
+            }
+            (dim.clone(), new_cum)
+        })
+        .collect();
+
+    let n_filtered = passing_indices.len();
+    let ranges = plan_ragged_batches(&filtered_offsets, &obs_dims, n_filtered, batch_size);
+
+    Ok(RaggedPlan {
+        ragged,
+        schema,
+        obs_dims,
+        offsets,
+        passing_indices,
+        ranges,
+        pruned,
+    })
+}
+
+/// Read one range of a [`RaggedPlan`] into a [`RecordBatch`].
+///
+/// The range indexes the passing casts, so it is mapped back to the dataset's
+/// own indices before the read.
+pub(crate) async fn read_ragged_range(
+    plan: &RaggedPlan,
+    range: Range<usize>,
+) -> anyhow::Result<RecordBatch> {
+    // Map filtered range back to original indices for reading.
+    let batch_indices: Vec<usize> = plan.passing_indices[range.start..range.end].to_vec();
+
+    let (Some(&first), Some(&last)) = (batch_indices.first(), batch_indices.last()) else {
+        anyhow::bail!("Empty batch range");
+    };
+
+    // Contiguous or not, the bounding range is what is read. A predicate that
+    // leaves gaps therefore reads a little more than it keeps, and the gaps are
+    // dropped when the batch is built from the original offsets.
+    let cast_data = plan.ragged.get_casts_range(first, last + 1).await?;
+
+    ragged_batch_to_record_batch(
+        &cast_data,
+        &plan.schema,
+        &plan.obs_dims,
+        &plan.offsets,
+        &(first..last + 1),
+    )
+    .await
+}
+
 /// Stream [`RecordBatch`]es from a ragged dataset, grouping multiple
 /// casts into each batch until `batch_size` observation rows are
 /// reached. Casts are never split — a single cast that exceeds
@@ -134,164 +285,53 @@ fn ragged_dataset_as_record_batch_stream(
     metrics: Option<DatasetReadMetrics>,
     split: Option<ChunkSplit>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
-    let schema = ragged_record_batch_schema(&ragged);
-    let obs_dims: std::collections::HashSet<String> =
-        ragged.observation_dimensions().map(String::from).collect();
-    let instance_dim = ragged.instance_dimension().to_string();
-
-    futures::stream::once(async move {
-        let offsets = ragged.cumulative_offsets().await?.clone();
-        let n = ragged.len();
-
-        let mut mask = vec![true; n];
-        for (name, array) in &ragged.variables {
-            if let RaggedArray::InstanceVariable(array) = array
-                && is_pushdown_candidate_ragged(array, &instance_dim)
-                && let Some(value_range) = predicate.as_ref().and_then(|f| f.ranges().get(name))
-            {
-                let array_mask = mask_pushdown(array.clone(), value_range).await?;
-                assert_eq!(
-                    array_mask.len(),
-                    n,
-                    "Pushdown mask length must match number of casts in the ragged dataset"
-                );
-                for (i, keep) in array_mask.iter().enumerate() {
-                    if !keep {
-                        mask[i] = false;
+    futures::stream::once(async move { plan_ragged_read(ragged, batch_size, predicate).await })
+        .map(move |planned| {
+            let metrics = metrics.clone();
+            match planned {
+                Ok(plan) => {
+                    // A cast is pruned before the batch plan exists, so no split
+                    // owns it. The leading split reports the lot. Every split
+                    // would otherwise report it, and the totals would grow with
+                    // the partition count.
+                    if let (Some(m), Some((batches, rows))) = (&metrics, plan.pruned)
+                        && split_leads(split)
+                    {
+                        m.batches_pruned.add(batches);
+                        m.rows_pruned.add(rows);
                     }
-                }
-            }
-        }
 
-        // Determine which instance indices pass the instance mask.
-        let passing_indices: Vec<usize> = mask
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &keep)| if keep { Some(i) } else { None })
-            .collect();
+                    // This partition's share of the plan.
+                    let owned = split_ordinals(split, plan.ranges.len());
+                    let ranges: Vec<Range<usize>> = plan
+                        .ranges
+                        .iter()
+                        .skip(owned.start)
+                        .take(owned.len())
+                        .cloned()
+                        .collect();
 
-        // Track pruned casts and their observation row count.
-        //
-        // A cast is pruned before the batch plan exists, so no split owns it.
-        // The leading split reports the lot. Every split would otherwise report
-        // it, and the totals would grow with the partition count.
-        if let Some(m) = &metrics
-            && split_leads(split)
-        {
-            let excluded = n - passing_indices.len();
-            if excluded > 0 {
-                m.batches_pruned.add(excluded);
-                // Sum max-obs-dim rows for each excluded cast.
-                let pruned_rows: usize = offsets
-                    .iter()
-                    .filter(|(dim, _)| obs_dims.contains(dim.as_str()))
-                    .map(|(_, cum)| {
-                        mask.iter()
-                            .enumerate()
-                            .filter(|(_, keep)| !**keep)
-                            .map(|(i, _)| cum[i + 1] - cum[i])
-                            .sum::<usize>()
-                    })
-                    .max()
-                    .unwrap_or(0);
-                m.rows_pruned.add(pruned_rows);
-            }
-        }
-
-        // Replan batches using only passing instances.
-        // Build filtered offsets for batch planning.
-        let filtered_offsets: HashMap<String, Vec<usize>> = offsets
-            .iter()
-            .filter(|(dim, _)| obs_dims.contains(dim.as_str()))
-            .map(|(dim, cum)| {
-                let mut new_cum = Vec::with_capacity(passing_indices.len() + 1);
-                new_cum.push(0usize);
-                let mut running = 0usize;
-                for &idx in &passing_indices {
-                    running += cum[idx + 1] - cum[idx];
-                    new_cum.push(running);
-                }
-                (dim.clone(), new_cum)
-            })
-            .collect();
-
-        let n_filtered = passing_indices.len();
-        let ranges = plan_ragged_batches(&filtered_offsets, &obs_dims, n_filtered, batch_size);
-
-        // This partition's share of the plan.
-        let owned = split_ordinals(split, ranges.len());
-        let ranges: Vec<Range<usize>> = ranges
-            .into_iter()
-            .skip(owned.start)
-            .take(owned.len())
-            .collect();
-
-        Ok((
-            ragged,
-            schema,
-            obs_dims,
-            offsets,
-            passing_indices,
-            ranges,
-            metrics,
-        ))
-    })
-    .map(|init| match init {
-        Ok((ragged, schema, obs_dims, offsets, passing_indices, ranges, metrics)) => {
-            futures::stream::iter(ranges)
-                .then(move |range| {
-                    let ragged = ragged.clone();
-                    let schema = schema.clone();
-                    let obs_dims = obs_dims.clone();
-                    let offsets = offsets.clone();
-                    let passing_indices = passing_indices.clone();
-                    let metrics = metrics.clone();
-                    async move {
-                        // Map filtered range back to original indices for reading.
-                        let batch_indices: Vec<usize> =
-                            passing_indices[range.start..range.end].to_vec();
-
-                        // Read each cast and merge (can't use get_casts_range since indices may not be contiguous).
-                        let cast_data = if let (Some(&first), Some(&last)) =
-                            (batch_indices.first(), batch_indices.last())
-                        {
-                            // If indices are contiguous, use range read.
-                            if last - first + 1 == batch_indices.len() {
-                                ragged.get_casts_range(first, last + 1).await?
-                            } else {
-                                // Non-contiguous: read the bounding range (conservative).
-                                ragged.get_casts_range(first, last + 1).await?
+                    let plan = Arc::new(plan);
+                    futures::stream::iter(ranges)
+                        .then(move |range| {
+                            let plan = plan.clone();
+                            let metrics = metrics.clone();
+                            async move {
+                                let batch = read_ragged_range(&plan, range).await?;
+                                if let Some(m) = &metrics {
+                                    m.output_rows.add(batch.num_rows());
+                                    m.output_batches.add(1);
+                                }
+                                Ok(batch)
                             }
-                        } else {
-                            anyhow::bail!("Empty batch range");
-                        };
-
-                        // Build the record batch using original offsets for the bounding range.
-                        let first = *batch_indices.first().unwrap();
-                        let last = *batch_indices.last().unwrap();
-                        let bounding_range = first..last + 1;
-                        let batch = ragged_batch_to_record_batch(
-                            &cast_data,
-                            &schema,
-                            &obs_dims,
-                            &offsets,
-                            &bounding_range,
-                        )
-                        .await?;
-
-                        if let Some(m) = &metrics {
-                            m.output_rows.add(batch.num_rows());
-                            m.output_batches.add(1);
-                        }
-                        Ok(batch)
-                    }
-                })
-                .boxed()
-        }
-        Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
-    })
-    .flatten()
-    .boxed()
+                        })
+                        .boxed()
+                }
+                Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
+            }
+        })
+        .flatten()
+        .boxed()
 }
 
 /// Build a unified Arrow [`Schema`] for all variables that appear in
