@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
+use indexmap::IndexMap;
 use beacon_datafusion_ext::nd::{
     Dimension, Dimensions, NdArrowArray, NdRecordBatch, encode_flat_batch_as_nd,
     encode_nd_record_batch,
@@ -71,6 +72,94 @@ pub fn any_dataset_as_encoded_stream_split(
     }
 }
 
+/// Read one chunk of a regular dataset into an un-broadcast [`NdRecordBatch`].
+///
+/// Each variable is sliced on its own axes: a variable of lower rank than the
+/// chunk reads only the axes it has, so a coordinate is read once per chunk
+/// rather than once per row of it.
+pub(crate) async fn read_nd_chunk(
+    arrays: &IndexMap<String, Arc<dyn crate::NdArrayD>>,
+    max_dims: &[String],
+    schema: Arc<arrow::datatypes::Schema>,
+    subset: crate::array::subset::ArraySubset,
+) -> Result<NdRecordBatch> {
+    let target = Dimensions::try_new(
+        max_dims
+            .iter()
+            .zip(subset.shape.iter())
+            .map(|(name, &size)| Dimension::new(name.as_str(), size))
+            .collect(),
+    )?;
+
+    let mut columns = Vec::with_capacity(arrays.len());
+    for (name, array) in arrays.iter() {
+        let array_subset = generate_array_subset_from_chunk(&subset, max_dims, array.as_ref());
+        let sliced = array.subset(array_subset).await.map_err(exec_err)?;
+        let values = ndarray_to_arrow_array(sliced.as_ref())
+            .await
+            .map_err(exec_err)?;
+        let dims = Dimensions::try_new(
+            sliced
+                .dimensions()
+                .iter()
+                .zip(sliced.shape().iter())
+                .map(|(dim, &size)| Dimension::new(dim.as_str(), size))
+                .collect(),
+        )?;
+        columns.push(
+            NdArrowArray::try_new(values, dims)
+                .map_err(|e| exec_err(format!("nd column '{name}': {e}")))?,
+        );
+    }
+
+    NdRecordBatch::try_new(schema, columns, target)
+}
+
+/// Stream a dataset as encoded batches, reading `in_flight` chunks at once.
+///
+/// [`any_dataset_as_encoded_stream`] reads one chunk at a time, which suits a
+/// caller that is one of several partitions each reading its own share. A shared
+/// stream has one reader for every partition, so the concurrency has to come
+/// from inside it instead.
+///
+/// A ragged dataset falls back to the sequential stream. Its batch plan is built
+/// from cumulative offsets that the plan itself depends on, so the reads are not
+/// independent the way chunk reads are.
+pub fn any_dataset_as_encoded_stream_concurrent(
+    dataset: AnyDataset,
+    batch_size: usize,
+    in_flight: usize,
+) -> BoxStream<'static, Result<RecordBatch>> {
+    let AnyDataset::Regular(regular) = dataset else {
+        return any_dataset_as_encoded_stream(dataset, batch_size);
+    };
+
+    let ChunkGrid {
+        dims: max_dims,
+        chunks,
+    } = match chunk_grid(&regular, batch_size) {
+        Ok(grid) => grid,
+        Err(e) => return futures::stream::once(async move { Err(exec_err(e)) }).boxed(),
+    };
+
+    let arrays = Arc::new(regular.arrays);
+    let max_dims = Arc::new(max_dims);
+    let schema = build_dataset_schema(&arrays);
+
+    futures::stream::iter(chunks)
+        .map(move |subset| {
+            let arrays = arrays.clone();
+            let max_dims = max_dims.clone();
+            let schema = schema.clone();
+            async move {
+                let nd = read_nd_chunk(&arrays, &max_dims, schema, subset).await?;
+                encode_nd_record_batch(&nd)
+            }
+        })
+        .buffered(in_flight.max(1))
+        .boxed()
+}
+
 /// Chunk a regular [`Dataset`] in C-order into a stream of un-broadcast
 /// [`NdRecordBatch`]es — each variable kept on its own dimensions.
 pub fn dataset_as_nd_stream(
@@ -110,39 +199,7 @@ pub fn dataset_as_nd_stream_split(
             let arrays = arrays.clone();
             let max_dims = max_dims.clone();
             let schema = schema.clone();
-            async move {
-                let target = Dimensions::try_new(
-                    max_dims
-                        .iter()
-                        .zip(subset.shape.iter())
-                        .map(|(name, &size)| Dimension::new(name.as_str(), size))
-                        .collect(),
-                )?;
-
-                let mut columns = Vec::with_capacity(arrays.len());
-                for (name, array) in arrays.iter() {
-                    let array_subset =
-                        generate_array_subset_from_chunk(&subset, &max_dims, array.as_ref());
-                    let sliced = array.subset(array_subset).await.map_err(exec_err)?;
-                    let values = ndarray_to_arrow_array(sliced.as_ref())
-                        .await
-                        .map_err(exec_err)?;
-                    let dims = Dimensions::try_new(
-                        sliced
-                            .dimensions()
-                            .iter()
-                            .zip(sliced.shape().iter())
-                            .map(|(dim, &size)| Dimension::new(dim.as_str(), size))
-                            .collect(),
-                    )?;
-                    columns.push(
-                        NdArrowArray::try_new(values, dims)
-                            .map_err(|e| exec_err(format!("nd column '{name}': {e}")))?,
-                    );
-                }
-
-                NdRecordBatch::try_new(schema, columns, target)
-            }
+            async move { read_nd_chunk(&arrays, &max_dims, schema, subset).await }
         })
         .boxed()
 }

@@ -17,6 +17,8 @@ futures = { workspace=true }
 indexmap = { workspace=true }
 bytemuck = {workspace = true}
 rkyv = {workspace = true}
+flume = { workspace = true }
+parking_lot = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
