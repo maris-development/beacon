@@ -98,6 +98,12 @@ impl NetCDFSource {
         self.projection = projection;
         self
     }
+
+    /// Whether this scan reads `path` through a share, rather than as one
+    /// partition's own whole file.
+    pub(crate) fn shares_file(&self, path: &object_store::path::Path) -> bool {
+        self.partitions_shared_map.contains_key(path)
+    }
 }
 
 impl FileSource for NetCDFSource {
@@ -146,6 +152,12 @@ impl FileSource for NetCDFSource {
     /// Give every partition the files that are worth dividing, and one each of
     /// the files that are not.
     ///
+    /// A file worth dividing goes into every partition's group and gets a cell
+    /// in `partitions_shared_map`. Nothing about it is divided here: the
+    /// partitions divide it as they read it, by taking subsets from the one
+    /// queue behind that cell. Balance then follows completion rather than a
+    /// guess made at plan time.
+    ///
     /// A smaller file is left whole and dealt to one partition. Every partition
     /// opening it to take a subset or two would cost more than it returns, and
     /// the listing has already spread these across the scan.
@@ -167,9 +179,25 @@ impl FileSource for NetCDFSource {
             target_partitions,
             repartition_file_min_size as u64,
         )
-        .map(|file_groups| {
+        .map(|deal| {
+            // One cell per shared file. Every partition that holds the file
+            // reaches the same cell, so the first to arrive builds the read and
+            // the rest attach to what it built. A file with no cell here is one
+            // partition's alone and is read whole.
+            let shares = deal
+                .shared
+                .into_iter()
+                .map(|path| (path, Arc::new(tokio::sync::OnceCell::new())))
+                .collect();
+
             let mut config = config.clone();
-            config.file_groups = file_groups;
+            config.file_groups = deal.file_groups;
+            // The openers are built from the config's source, so the map has to
+            // travel with it.
+            config.file_source = Arc::new(Self {
+                partitions_shared_map: Arc::new(shares),
+                ..self.clone()
+            });
             config
         }))
     }
@@ -227,7 +255,9 @@ impl FileSource for NetCDFSource {
 #[derive(Debug)]
 struct SharedDataset {
     read: Arc<SharedRead>,
-    table_adapter: Arc<BatchAdapter>,
+    /// `None` on the `COUNT(*)` path: there is no column to adapt, only a row
+    /// count to carry. See [`NetCDFOpener::count_projection`].
+    table_adapter: Option<Arc<BatchAdapter>>,
 }
 
 /// Opens a single NetCDF file and streams its contents as Arrow
@@ -296,6 +326,10 @@ impl NetCDFOpener {
         _predicate: Option<Arc<dyn PhysicalExpr>>, // TODO: use this to filter the stream when creating the dataset up front on coordinate arrays.
         nd_encoded: bool,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
+        // The output schema is needed again after the build, which consumes the
+        // copy it derives the projection from.
+        let output_schema = projected_schema.clone();
+
         // The first partition to arrive builds the shared read and fills its queue. The rest wait for it to finish.
         let share : Arc<SharedDataset> = shared_ref
             .get_or_try_init::<datafusion::error::DataFusionError, _, _>(async move || {
@@ -304,6 +338,31 @@ impl NetCDFOpener {
 
                         let projection = Self::find_projection(&dataset_arrow_schema, &projected_schema)?;
 
+                        if projection.is_empty() {
+                            // `COUNT(*)`: no column is wanted, so the read is
+                            // driven by columns of its own and only the row
+                            // counts leave. It shares the queue like any other
+                            // read — a file every partition holds would
+                            // otherwise be counted once per partition.
+                            let projection = Self::count_projection(
+                                &dataset,
+                                &dataset_arrow_schema,
+                                &_predicate,
+                            );
+                            let counted =
+                                Self::project_any_dataset(dataset, &dataset_arrow_schema, projection)?;
+                            let read = SharedRead::build(
+                                counted,
+                                batch_size,
+                                ReadMode::Flat(_predicate.map(PushdownFilter::new)),
+                            )
+                            .await?;
+                            return Ok(Arc::new(SharedDataset {
+                                read,
+                                table_adapter: None,
+                            }));
+                        }
+
                         let source_schema = if nd_encoded {
                             Arc::new(beacon_datafusion_ext::nd::encoded_schema(
                                 &dataset_arrow_schema.project(&projection)?,
@@ -311,10 +370,6 @@ impl NetCDFOpener {
                         } else {
                             Arc::new(dataset_arrow_schema.project(&projection)?)
                         };
-
-                        if projection.is_empty() {
-                            todo!("COUNT(*) path: read the highest-dimensionality variable and emit zero-column batches with the correct row counts")
-                        }
 
                         let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
                         let projected_dataset =
@@ -328,7 +383,7 @@ impl NetCDFOpener {
 
                         let shared_dataset = SharedDataset {
                             read: shared_read,
-                            table_adapter: Arc::new(adapter),
+                            table_adapter: Some(Arc::new(adapter)),
                         };
                         Ok(Arc::new(shared_dataset))
             })
@@ -341,11 +396,14 @@ impl NetCDFOpener {
         let stream = shared_read
             .stream()
             .and_then(move |batch| {
-                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to adapt NetCDF batch schema: {e}"
-                    ))
-                });
+                let mapped = match &adapter {
+                    Some(adapter) => adapter.adapt_batch(&batch).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to adapt NetCDF batch schema: {e}"
+                        ))
+                    }),
+                    None => Self::count_batch(&output_schema, batch.num_rows()),
+                };
                 futures::future::ready(mapped)
             })
             .boxed();
@@ -361,21 +419,47 @@ impl NetCDFOpener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         cache: Option<NetcdfReaderCache>,
-        _metrics: Option<DatasetReadMetrics>, // TODO: use this to record the read metrics for the dataset.
-        _predicate: Option<Arc<dyn PhysicalExpr>>, // TODO: use this to filter the stream when creating the dataset up front on coordinate arrays.
+        metrics: Option<DatasetReadMetrics>, // TODO: use this to record the read metrics for the dataset on the column path too; the count path already does.
+        predicate: Option<Arc<dyn PhysicalExpr>>, // TODO: use this to filter the stream when creating the dataset up front on coordinate arrays.
         nd_encoded: bool,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = Self::open_dataset(input, object, cache, read_dimensions.clone()).await?;
         let dataset_arrow_schema = Self::arrow_schema(&dataset)?;
 
         let projection = Self::find_projection(&dataset_arrow_schema, &projected_schema)?;
-        let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-            &dataset_arrow_schema.project(&projection)?,
-        ));
 
         if projection.is_empty() {
-            todo!("COUNT(*) path: read the highest-dimensionality variable and emit zero-column batches with the correct row counts")
+            // `COUNT(*)`: no column is wanted, so the read is driven by columns
+            // of its own and only the row counts leave.
+            let count_projection =
+                Self::count_projection(&dataset, &dataset_arrow_schema, &predicate);
+            let counted =
+                Self::project_any_dataset(dataset, &dataset_arrow_schema, count_projection)?;
+            let stream = any_dataset_as_record_batch_stream(
+                counted,
+                batch_size,
+                predicate.map(PushdownFilter::new),
+                metrics,
+            )
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to create NetCDF record batch stream: {e}"
+                ))
+            })
+            .and_then(move |batch| {
+                futures::future::ready(Self::count_batch(&projected_schema, batch.num_rows()))
+            })
+            .boxed();
+            return Ok(stream);
         }
+
+        let source_schema: SchemaRef = if nd_encoded {
+            Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+                &dataset_arrow_schema.project(&projection)?,
+            ))
+        } else {
+            Arc::new(dataset_arrow_schema.project(&projection)?)
+        };
 
         let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
         let projected_dataset =
@@ -406,6 +490,60 @@ impl NetCDFOpener {
             .boxed();
 
         Ok(stream)
+    }
+
+    /// The columns a `COUNT(*)` reads, out of a file the query wants no column
+    /// of.
+    ///
+    /// Reading no column at all would give an empty stream and a count of zero.
+    /// The read is driven by the highest-dimensionality variable instead, so the
+    /// row count is the full broadcast row count — a scalar attribute like
+    /// `.Conventions` would give one row — plus any column the predicate names,
+    /// so a pushed-down filter still applies ([`PushdownFilter`] matches by
+    /// name).
+    fn count_projection(
+        dataset: &beacon_nd_array::dataset::AnyDataset,
+        dataset_schema: &SchemaRef,
+        predicate: &Option<Arc<dyn PhysicalExpr>>,
+    ) -> Vec<usize> {
+        let driver = dataset
+            .fields()
+            .keys()
+            .max_by_key(|name| {
+                dataset
+                    .get_array(name)
+                    .map(|array| array.shape().iter().product::<usize>())
+                    .unwrap_or(0)
+            })
+            .and_then(|name| dataset_schema.index_of(name).ok())
+            .unwrap_or(0);
+
+        let mut projection = vec![driver];
+        if let Some(predicate) = predicate {
+            for column in datafusion::physical_expr::utils::collect_columns(predicate) {
+                if let Ok(index) = dataset_schema.index_of(column.name()) {
+                    projection.push(index);
+                }
+            }
+        }
+        projection.sort_unstable();
+        projection.dedup();
+        projection
+    }
+
+    /// One `COUNT(*)` batch: no columns, and the row count of the batch it was
+    /// counted from.
+    fn count_batch(schema: &SchemaRef, rows: usize) -> datafusion::error::Result<RecordBatch> {
+        RecordBatch::try_new_with_options(
+            schema.clone(),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(rows)),
+        )
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to build count batch: {e}"
+            ))
+        })
     }
 
     fn arrow_schema(

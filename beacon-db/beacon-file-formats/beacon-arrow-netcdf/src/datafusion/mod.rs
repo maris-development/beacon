@@ -1152,7 +1152,11 @@ mod reader_backend_tests {
         }
     }
 
-    /// A file too small to share keeps its files whole and unmarked.
+    /// The split minimum a scan takes from its session
+    /// (`repartition_file_min_size`), and what these tests pass by hand.
+    const MIN_SHARE_SIZE: usize = 10 * 1024 * 1024;
+
+    /// A file too small to share is left whole.
     ///
     /// Every partition opening a small file to take a subset or two would cost
     /// more than it returns, and the listing has already spread these across the
@@ -1174,16 +1178,134 @@ mod reader_backend_tests {
         .build();
 
         assert!(
-            source.repartitioned(4, 1, None, &config).unwrap().is_none(),
+            source
+                .repartitioned(4, MIN_SHARE_SIZE, None, &config)
+                .unwrap()
+                .is_none(),
             "a file under the minimum must not be shared"
+        );
+    }
+
+    /// A file over the minimum lands in every partition's group, and the source
+    /// that comes back knows it has to be read through a share.
+    ///
+    /// The group count is what the scan runs on; the share is what keeps that
+    /// from returning every row once per partition.
+    #[test]
+    fn a_large_file_is_shared_by_every_partition() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        const PARTITIONS: usize = 4;
+
+        let table_schema =
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema, true);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new("large.nc", 64 * 1024 * 1024))
+        .build();
+
+        let shared = source
+            .repartitioned(PARTITIONS, MIN_SHARE_SIZE, None, &config)
+            .unwrap()
+            .expect("a file over the minimum is shared");
+
+        assert_eq!(shared.file_groups.len(), PARTITIONS);
+        for group in &shared.file_groups {
+            assert_eq!(group.len(), 1, "every partition holds the file");
+            assert!(
+                group.iter().next().unwrap().range.is_none(),
+                "a shared file is not divided into byte ranges"
+            );
+        }
+
+        let source = shared
+            .file_source()
+            .as_any()
+            .downcast_ref::<NetCDFSource>()
+            .expect("the config carries a NetCDFSource");
+        assert!(
+            source.shares_file(&object_store::path::Path::from("large.nc")),
+            "the source the openers come from must know the file is shared"
+        );
+    }
+
+    /// An ordered scan is left alone: a partition holding an arbitrary subset of
+    /// a file cannot emit its rows in file order.
+    #[test]
+    fn an_ordered_scan_is_not_shared() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("time", arrow::datatypes::DataType::Int64, true),
+        ]));
+        let table_schema = TableSchema::from_file_schema(schema.clone());
+        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema, true);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new("large.nc", 64 * 1024 * 1024))
+        .build();
+
+        let ordering = LexOrdering::new(vec![PhysicalSortExpr::new_default(
+            datafusion::physical_expr::expressions::col("time", &schema).unwrap(),
+        )])
+        .unwrap();
+
+        assert!(
+            source
+                .repartitioned(4, MIN_SHARE_SIZE, Some(ordering), &config)
+                .unwrap()
+                .is_none(),
+            "an ordered scan must keep its single group"
+        );
+    }
+
+    /// netcdf-c never shares a file, whatever its size: every call it makes
+    /// queues on one process-global mutex, so the partitions would serialise.
+    #[test]
+    fn only_the_rust_reader_shares_one_file() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let table_schema =
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+        let source = NetCDFSource::new(
+            access_on(ReaderBackend::NetcdfC),
+            None,
+            table_schema,
+            true,
+        );
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new("large.nc", 64 * 1024 * 1024))
+        .build();
+
+        assert!(
+            source
+                .repartitioned(4, MIN_SHARE_SIZE, None, &config)
+                .unwrap()
+                .is_none(),
+            "netcdf-c must not share a file"
         );
     }
 
     /// A session with `target_partitions` partitions.
     ///
-    /// Nothing is done to the split minimum here. `NetCDFSource` sets its own
-    /// ([`MIN_SPLIT_SIZE`]) and ignores the session's, so a test that wants a
-    /// split has to bring a scan large enough to earn one.
+    /// Nothing is done to the split minimum here, so a test that wants a share
+    /// has to bring a file large enough to earn one under the session default
+    /// ([`MIN_SHARE_SIZE`]).
     fn splitting_session(target_partitions: usize, batch_size: usize) -> SessionContext {
         let config = SessionConfig::new()
             .with_target_partitions(target_partitions)
@@ -1205,7 +1327,7 @@ mod reader_backend_tests {
     /// How many rows it writes in each.
     const LARGE_ROWS: usize = 100_000;
 
-    /// Write a netCDF-4 file larger than [`MIN_SPLIT_SIZE`], and return its path.
+    /// Write a netCDF-4 file larger than [`MIN_SHARE_SIZE`], and return its path.
     ///
     /// Every bundled fixture is hundreds of KB, well under the minimum, so a
     /// test that needs a real split has to make its own file.
@@ -1215,8 +1337,8 @@ mod reader_backend_tests {
     /// past roughly 200k values: it fails with "chunk at […] was neither cached
     /// nor fetched" while netcdf-c reads the same bytes. The limit follows one
     /// variable's chunk count, not the file's size, so 20 columns of 100k values
-    /// clears 8 MB three times over and still reads back. Measured: 20x100k is
-    /// 16.3 MB and reads; 12x200k is 19.4 MB and does not.
+    /// clears the minimum with room to spare and still reads back. Measured:
+    /// 20x100k is 16.3 MB and reads; 12x200k is 19.4 MB and does not.
     ///
     /// The caller holds the [`TempDir`](tempfile::TempDir) for as long as the
     /// table is registered.
@@ -1313,6 +1435,77 @@ mod reader_backend_tests {
 
         let whole_summary = summary(&whole).await;
         assert_eq!(summary(&split).await, whole_summary);
+    }
+
+    /// A bare `count(*)` over a shared file counts every row once.
+    ///
+    /// This is the one read that cannot inherit its division from the decode: it
+    /// projects no column, so it drives the read with a column of its own and
+    /// never builds an nd array. It has to take that work from the same queue as
+    /// everything else. A share that read the file whole would count it once per
+    /// partition, and the answer would grow with `target_partitions` — silently,
+    /// because nothing about it is an error.
+    ///
+    /// The whole-file session answers in one partition, so it is the count to
+    /// match.
+    #[tokio::test]
+    async fn a_shared_count_star_counts_every_row_once() {
+        let (_dir, file) = write_large_netcdf();
+
+        let whole = session();
+        register_path(&whole, "one", ReaderBackend::Oxcdf, &file).await;
+
+        let count = async |ctx: &SessionContext| {
+            let batches = ctx
+                .sql("SELECT count(*) FROM one")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("int64 count")
+                .value(0)
+        };
+
+        let expected = count(&whole).await;
+        assert_eq!(
+            expected, LARGE_ROWS as i64,
+            "the fixture holds one row per value of each column"
+        );
+
+        // Several partition counts, because a file read once per partition
+        // returns a multiple of the truth and 2 is easy to mistake for a
+        // coincidence.
+        for target_partitions in [2_usize, 4, 7] {
+            let split = splitting_session(target_partitions, 8192);
+            register_path(&split, "one", ReaderBackend::Oxcdf, &file).await;
+
+            // Guard the guard: the count below proves nothing if the scan under
+            // it was never shared in the first place.
+            let plan = split
+                .sql("SELECT count(*) FROM one")
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            assert_eq!(
+                scan_partitions(&plan),
+                target_partitions,
+                "the count(*) scan must be shared:\n{}",
+                datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+            );
+
+            assert_eq!(
+                count(&split).await,
+                expected,
+                "target_partitions={target_partitions}: the shared file is counted once"
+            );
+        }
     }
 
     /// Every column, including every attribute, comes back identical.
