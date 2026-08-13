@@ -36,6 +36,7 @@ julian = {workspace = true}
 tracing = { workspace = true }
 serde = { workspace = true }
 object_store = { workspace = true }
+parking_lot = { workspace = true }
 datafusion = { workspace = true }
 moka = { workspace = true }
 chrono = { workspace = true }

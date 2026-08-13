@@ -1557,6 +1557,7 @@ dependencies = [
  "object_store 0.13.2",
  "ordered-float 5.3.0",
  "oxcdf",
+ "parking_lot",
  "serde",
  "tempfile",
  "tokio",

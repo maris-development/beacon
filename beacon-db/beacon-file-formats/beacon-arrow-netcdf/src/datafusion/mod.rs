@@ -1103,8 +1103,8 @@ mod reader_backend_tests {
     /// adds is that those partitions then run at the same time, because it
     /// holds no global lock.
     ///
-    /// Splitting one file across partitions is the separate case, and only the
-    /// Rust reader does it. See [`only_the_rust_reader_splits_one_file`].
+    /// Sharing one file across partitions is the separate case, and only the
+    /// Rust reader does it. See [`only_the_rust_reader_shares_one_file`].
     #[tokio::test]
     async fn a_multi_file_scan_gets_one_partition_for_each_file() {
         use datafusion::physical_plan::ExecutionPlanProperties;
@@ -1150,31 +1150,32 @@ mod reader_backend_tests {
         }
     }
 
-    /// One file splits across partitions under the Rust reader, and never under
-    /// netcdf-c.
+    /// One file is shared across partitions under the Rust reader, and never
+    /// under netcdf-c.
     ///
-    /// DataFusion's file-group partitioner splits a file by **byte range**, and
-    /// a byte range of a NetCDF file is not a NetCDF file. The opener never
-    /// reads the range as bytes. It reads it as a fraction of the chunk list the
-    /// reader builds, so the shares of a file tile it.
+    /// A file over the minimum is not divided at plan time. It goes into every
+    /// partition's group, marked with [`SharedFile`], and the partitions divide
+    /// it as they read it by taking subsets from one queue. So the assertion is
+    /// that the file appears once per partition, carries the mark, and carries
+    /// no byte range.
     ///
     /// netcdf-c opts out through
     /// [`FileSource::supports_repartitioning`]: every call it makes queues on
-    /// one process-global mutex, so shares of a file would run one at a time and
-    /// pay for an extra open each.
+    /// one process-global mutex, so partitions of a file would run one at a time
+    /// and pay for an extra open each.
     #[test]
-    fn only_the_rust_reader_splits_one_file() {
+    fn only_the_rust_reader_shares_one_file() {
         use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
 
-        // Comfortably over the partitioner's minimum split size.
-        const FILE_SIZE: u64 = 64 * 1024 * 1024;
+        use super::source::SharedFile;
 
-        for (backend, splits) in [
-            (ReaderBackend::NetcdfC, false),
-            (ReaderBackend::Oxcdf, true),
-        ] {
+        // Comfortably over the minimum a file has to clear to be shared.
+        const FILE_SIZE: u64 = 64 * 1024 * 1024;
+        const PARTITIONS: usize = 4;
+
+        for (backend, shares) in [(ReaderBackend::NetcdfC, false), (ReaderBackend::Oxcdf, true)] {
             let table_schema =
                 TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
             let source = NetCDFSource::new(access_on(backend), None, table_schema);
@@ -1185,53 +1186,75 @@ mod reader_backend_tests {
             .with_file(PartitionedFile::new("one.nc", FILE_SIZE))
             .build();
 
-            let repartitioned = source.repartitioned(4, 1, None, &config).unwrap();
+            let repartitioned = source.repartitioned(PARTITIONS, 1, None, &config).unwrap();
 
-            match (splits, repartitioned) {
+            match (shares, repartitioned) {
                 (false, result) => assert!(
                     result.is_none(),
-                    "{backend:?} must not split a file across partitions"
+                    "{backend:?} must not share a file across partitions"
                 ),
-                (true, None) => panic!("{backend:?} must split a file across partitions"),
+                (true, None) => panic!("{backend:?} must share a file across partitions"),
                 (true, Some(config)) => {
                     assert_eq!(
                         config.file_groups.len(),
-                        4,
-                        "{backend:?} should split one file into 4 groups"
+                        PARTITIONS,
+                        "{backend:?} should give the file to every partition"
                     );
 
-                    // Every share names a byte range, and the shares tile the
-                    // file with no gap and no overlap.
-                    //
-                    // Sorted, not in group order: the shares are dealt
-                    // round-robin, so a partition holds slices from across the
-                    // file rather than one run of it. See
-                    // `beacon_datafusion_ext::file_groups`, which pins the deal
-                    // itself.
-                    let mut shares: Vec<(i64, i64)> = config
-                        .file_groups
-                        .iter()
-                        .flat_map(|group| group.iter())
-                        .map(|file| {
-                            let range = file.range.as_ref().expect("a share carries a range");
-                            (range.start, range.end)
-                        })
-                        .collect();
-                    shares.sort_unstable();
+                    for group in &config.file_groups {
+                        assert_eq!(group.len(), 1, "{backend:?}: one file per partition");
+                        let file = group.iter().next().unwrap();
 
-                    let mut next = 0;
-                    for (start, end) in &shares {
-                        assert_eq!(*start, next, "{backend:?} shares must not gap or overlap");
-                        next = *end;
+                        assert!(
+                            file.range.is_none(),
+                            "{backend:?}: a shared file is not divided at plan time"
+                        );
+
+                        let consumers = file
+                            .extensions
+                            .as_ref()
+                            .and_then(|ext| {
+                                (ext.as_ref() as &dyn std::any::Any).downcast_ref::<SharedFile>()
+                            })
+                            .map(|marked| marked.consumers);
+                        assert_eq!(
+                            consumers,
+                            Some(PARTITIONS),
+                            "{backend:?}: the mark says how many partitions hold it"
+                        );
                     }
-                    assert_eq!(
-                        next as u64, FILE_SIZE,
-                        "{backend:?} shares must cover the file"
-                    );
                 }
             }
         }
     }
+
+    /// A file too small to share keeps its files whole and unmarked.
+    ///
+    /// Every partition opening a small file to take a subset or two would cost
+    /// more than it returns, and the listing has already spread these across the
+    /// scan.
+    #[test]
+    fn a_small_file_is_not_shared() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let table_schema =
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new("small.nc", 1024 * 1024))
+        .build();
+
+        assert!(
+            source.repartitioned(4, 1, None, &config).unwrap().is_none(),
+            "a file under the minimum must not be shared"
+        );
+    }
+
 
     /// A session with `target_partitions` partitions.
     ///

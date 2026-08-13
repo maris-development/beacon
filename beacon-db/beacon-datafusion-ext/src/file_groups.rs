@@ -36,6 +36,8 @@
 //!
 //! So this is a trade, and [`SLICES_PER_PARTITION`] is where it is priced.
 
+use std::sync::Arc;
+
 use datafusion::datasource::physical_plan::{FileGroup, FileGroupPartitioner};
 
 /// How many slices of a scan each partition is dealt.
@@ -125,6 +127,73 @@ pub fn interleaved_file_groups(
     // A scan with fewer pieces than partitions leaves the tail empty. Keep the
     // empty groups: dropping them would change the partition count the caller
     // asked for, and an empty group is a partition that finishes at once.
+    Some(dealt.into_iter().map(FileGroup::new).collect())
+}
+
+/// Give every partition the files worth sharing, and one each of the rest.
+///
+/// A file over `min_share_size` goes into *every* partition's group, carrying
+/// the mark `mark` builds for it. Nothing about it is divided here: the
+/// partitions divide it as they read it, by taking subsets from one queue they
+/// share. Balance then follows completion rather than a guess made at plan time.
+///
+/// A file at or under the size is left whole and dealt to one partition. Every
+/// partition opening it to take a subset or two would cost more than it returns,
+/// and the listing has already spread these across the scan.
+///
+/// Returns `None` when no file is worth sharing, which leaves the scan's
+/// grouping alone.
+///
+/// # The mark matters
+///
+/// A shared file is in every group. A reader that ignores the mark and reads it
+/// whole therefore returns every row once per partition. The mark is not a hint
+/// but an instruction, and the opener that receives it must refuse to read the
+/// file any other way.
+pub fn shared_file_groups<M>(
+    file_groups: &[FileGroup],
+    target_partitions: usize,
+    min_share_size: u64,
+    mark: M,
+) -> Option<Vec<FileGroup>>
+where
+    M: Fn(usize) -> Arc<dyn std::any::Any + Send + Sync>,
+{
+    if target_partitions <= 1 {
+        return None;
+    }
+
+    let mut shared = Vec::new();
+    let mut whole = Vec::new();
+    for file in file_groups.iter().flat_map(FileGroup::iter) {
+        let (start, end) = file.range();
+        if end.saturating_sub(start) > min_share_size {
+            shared.push(file.clone());
+        } else {
+            whole.push(file.clone());
+        }
+    }
+
+    if shared.is_empty() {
+        return None;
+    }
+
+    let mut dealt: Vec<Vec<_>> = vec![Vec::new(); target_partitions];
+
+    // Every partition holds every shared file, and knows how many others do.
+    for file in shared {
+        for group in dealt.iter_mut() {
+            let mut copy = file.clone();
+            copy.extensions = Some(mark(target_partitions));
+            group.push(copy);
+        }
+    }
+
+    // The rest are spread one per partition, as the listing would have.
+    for (index, file) in whole.into_iter().enumerate() {
+        dealt[index % target_partitions].push(file);
+    }
+
     Some(dealt.into_iter().map(FileGroup::new).collect())
 }
 
@@ -243,6 +312,79 @@ mod tests {
                 "an ordered partition holds one contiguous run"
             );
         }
+    }
+
+/// A file worth sharing lands in every partition, marked.
+    #[test]
+    fn a_shared_file_lands_in_every_partition() {
+        const MIN: u64 = 8 * 1024 * 1024;
+        const PARTITIONS: usize = 4;
+
+        let groups = vec![FileGroup::new(vec![PartitionedFile::new(
+            "large.nc",
+            64 * 1024 * 1024,
+        )])];
+
+        let dealt = shared_file_groups(&groups, PARTITIONS, MIN, |consumers| Arc::new(consumers))
+            .expect("a large file is shared");
+
+        assert_eq!(dealt.len(), PARTITIONS);
+        for group in &dealt {
+            assert_eq!(group.len(), 1, "each partition holds the file once");
+            let file = group.iter().next().unwrap();
+            assert!(file.range.is_none(), "a shared file is not divided");
+            let consumers = file
+                .extensions
+                .as_ref()
+                .and_then(|ext| (ext.as_ref() as &dyn std::any::Any).downcast_ref::<usize>())
+                .copied();
+            assert_eq!(
+                consumers,
+                Some(PARTITIONS),
+                "the mark says how many partitions hold it"
+            );
+        }
+    }
+
+    /// Small files are dealt one per partition, unmarked and undivided.
+    #[test]
+    fn small_files_are_dealt_whole_and_unmarked() {
+        const MIN: u64 = 8 * 1024 * 1024;
+
+        let mut files = vec![PartitionedFile::new("large.nc", 64 * 1024 * 1024)];
+        files.extend((0..4).map(|i| PartitionedFile::new(format!("small-{i}.nc"), 1024)));
+        let groups = vec![FileGroup::new(files)];
+
+        let dealt = shared_file_groups(&groups, 4, MIN, |consumers| Arc::new(consumers))
+            .expect("the large file is shared");
+
+        let small: Vec<_> = dealt
+            .iter()
+            .flat_map(|group| group.iter())
+            .filter(|file| file.object_meta.location.to_string().starts_with("small-"))
+            .collect();
+
+        assert_eq!(small.len(), 4, "each small file appears once in the scan");
+        for file in small {
+            assert!(file.extensions.is_none(), "a whole file carries no mark");
+            assert!(file.range.is_none(), "a whole file is not divided");
+        }
+    }
+
+    /// A scan with nothing worth sharing is left alone.
+    #[test]
+    fn a_scan_with_no_large_file_is_left_alone() {
+        const MIN: u64 = 8 * 1024 * 1024;
+
+        let files: Vec<_> = (0..200)
+            .map(|i| PartitionedFile::new(format!("small-{i}.nc"), 1024 * 1024))
+            .collect();
+        let groups = vec![FileGroup::new(files)];
+
+        assert!(
+            shared_file_groups(&groups, 4, MIN, |consumers| Arc::new(consumers)).is_none(),
+            "200 MB of 1 MB files is still no file worth sharing"
+        );
     }
 
     /// A file too small to divide is left alone.

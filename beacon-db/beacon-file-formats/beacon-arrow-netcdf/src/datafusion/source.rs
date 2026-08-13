@@ -6,8 +6,11 @@ use arrow::{
 };
 use beacon_nd_array::{
     arrow::{
-        batch::any_dataset_as_record_batch_stream_split, metrics::DatasetReadMetrics,
-        nd_provider::any_dataset_as_encoded_stream_split, pushdown_filter::PushdownFilter,
+        batch::any_dataset_as_record_batch_stream_split,
+        metrics::DatasetReadMetrics,
+        nd_provider::any_dataset_as_encoded_stream_split,
+        pushdown_filter::PushdownFilter,
+        share::{NdFileShare, ReadMode, SharedRead},
         split::ChunkSplit,
     },
     projection::DatasetProjection,
@@ -33,7 +36,36 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectMeta;
 
+use std::collections::HashMap;
+
+use parking_lot::Mutex;
+
 use super::reader::{self, FileAccess, NetcdfInput, NetcdfReaderCache};
+
+/// Marks a file that every partition of the scan holds.
+///
+/// A file over [`MIN_SPLIT_SIZE`] is not divided into byte ranges. It is put
+/// into every partition's group, and the partitions divide it as they read it
+/// by taking subsets from one shared queue. See
+/// [`beacon_nd_array::arrow::share`].
+///
+/// The mark is what makes that safe. Without it the opener would read the file
+/// whole, and a file in every group read whole is every row returned once per
+/// partition. [`NetCDFOpener::open`] treats a marked file as unreadable except
+/// through its share, so the mark cannot be lost and leave the read silently
+/// multiplied.
+#[derive(Debug, Clone)]
+pub struct SharedFile {
+    /// How many partitions hold this file, and so how many join its share.
+    pub consumers: usize,
+}
+
+/// The shares of one scan, keyed by object path.
+///
+/// Held by the source and cloned into every opener, so the partitions of a file
+/// find each other. A scan builds its own source, so this does not outlive the
+/// plan.
+type FileShares = Arc<Mutex<HashMap<object_store::path::Path, Arc<NdFileShare>>>>;
 
 /// The smallest scan worth splitting across partitions.
 ///
@@ -73,6 +105,9 @@ pub struct NetCDFSource {
     cache: Option<NetcdfReaderCache>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
+    /// The shares of this scan. Cloned, not copied, so every partition of a file
+    /// reaches the same one.
+    shares: FileShares,
 }
 
 impl NetCDFSource {
@@ -91,6 +126,7 @@ impl NetCDFSource {
             predicate: None,
             cache: None,
             projection: None,
+            shares: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -131,6 +167,7 @@ impl FileSource for NetCDFSource {
             self.execution_plan_metrics.clone(),
             partition,
             object_store,
+            self.shares.clone(),
         )))
     }
 
@@ -170,13 +207,18 @@ impl FileSource for NetCDFSource {
         matches!(self.access, FileAccess::Oxcdf)
     }
 
-    /// Deal the file's slices to partitions round-robin rather than in one
-    /// contiguous run each.
+    /// Give every partition the files that are worth dividing, and one each of
+    /// the files that are not.
     ///
-    /// An nd chunk list is C-ordered, so a predicate on the outermost dimension
-    /// prunes a prefix of it. A contiguous deal would put that whole prefix in
-    /// the first partitions, leaving them idle while the last ones do the work.
-    /// See [`beacon_datafusion_ext::file_groups`] for the trade this makes.
+    /// Nothing is divided here. A file over [`MIN_SPLIT_SIZE`] goes into every
+    /// partition's group, marked with [`SharedFile`], and the partitions divide
+    /// it as they read it by taking subsets from one queue. Balance then follows
+    /// completion rather than any guess made at plan time, and no partition has
+    /// to agree with any other about the chunk list.
+    ///
+    /// A smaller file is left whole and dealt to one partition. Every partition
+    /// opening it to take a subset or two would cost more than it returns, and
+    /// the listing has already spread these across the scan.
     fn repartitioned(
         &self,
         target_partitions: usize,
@@ -184,23 +226,23 @@ impl FileSource for NetCDFSource {
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
-        if !self.supports_repartitioning() {
+        if !self.supports_repartitioning() || output_ordering.is_some() || target_partitions <= 1 {
+            // An ordered scan cannot share: a partition holding an arbitrary
+            // subset of a file cannot emit its rows in file order.
             return Ok(None);
         }
 
-        Ok(
-            beacon_datafusion_ext::file_groups::interleaved_file_groups(
-                &config.file_groups,
-                target_partitions,
-                MIN_SPLIT_SIZE,
-                output_ordering.is_some(),
-            )
-            .map(|file_groups| {
-                let mut config = config.clone();
-                config.file_groups = file_groups;
-                config
-            }),
+        Ok(beacon_datafusion_ext::file_groups::shared_file_groups(
+            &config.file_groups,
+            target_partitions,
+            MIN_SPLIT_SIZE,
+            |consumers| Arc::new(SharedFile { consumers }),
         )
+        .map(|file_groups| {
+            let mut config = config.clone();
+            config.file_groups = file_groups;
+            config
+        }))
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -274,6 +316,8 @@ struct NetCDFOpener {
     /// The store the scan lists from. The `oxcdf` reader reads through it; the
     /// netcdf-c reader ignores it and opens a resolved native path instead.
     object_store: Arc<dyn object_store::ObjectStore>,
+    /// The shares of this scan, so the partitions of a file find each other.
+    shares: FileShares,
 }
 
 impl NetCDFOpener {
@@ -289,6 +333,7 @@ impl NetCDFOpener {
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
         object_store: Arc<dyn object_store::ObjectStore>,
+        shares: FileShares,
     ) -> Self {
         let pruning_predicate = predicate
             .as_ref()
@@ -306,6 +351,7 @@ impl NetCDFOpener {
             partition,
             access,
             object_store,
+            shares,
         }
     }
 
@@ -330,6 +376,7 @@ impl NetCDFOpener {
         cache: Option<NetcdfReaderCache>,
         metrics: Option<DatasetReadMetrics>,
         split: Option<ChunkSplit>,
+        share: Option<Arc<NdFileShare>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(cache.as_ref(), input, object.clone())
             .await
@@ -422,21 +469,42 @@ impl NetCDFOpener {
 
             let pushdown_filter = predicate.map(PushdownFilter::new);
             let count_schema = projected_schema.clone();
-            // The split applies here too. A count path that read the whole file
-            // in every partition would return the row count once per partition.
-            let stream = any_dataset_as_record_batch_stream_split(
-                dataset,
-                batch_size,
-                pushdown_filter,
-                metrics,
-                split,
-            )
-            .map(move |batch| {
-                let batch = batch.map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Error reading NetCDF as Arrow stream: {e}"
-                    ))
-                })?;
+
+            // This path never decodes an nd array, so it cannot inherit the
+            // division from the decode. It has to take its work from the same
+            // queue, or a file every partition holds is counted once per
+            // partition and the answer grows with `target_partitions`.
+            let counted: BoxStream<'static, datafusion::error::Result<RecordBatch>> =
+                if let Some(share) = share {
+                    let shared = share
+                        .join(|| async move {
+                            SharedRead::build(
+                                dataset,
+                                batch_size,
+                                ReadMode::Flat(pushdown_filter),
+                            )
+                            .await
+                        })
+                        .await?;
+                    shared.stream()
+                } else {
+                    any_dataset_as_record_batch_stream_split(
+                        dataset,
+                        batch_size,
+                        pushdown_filter,
+                        metrics,
+                        split,
+                    )
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Error reading NetCDF as Arrow stream: {e}"
+                        ))
+                    })
+                    .boxed()
+                };
+
+            let stream = counted.map(move |batch| {
+                let batch = batch?;
                 RecordBatch::try_new_with_options(
                     count_schema.clone(),
                     vec![],
@@ -478,7 +546,19 @@ impl NetCDFOpener {
         // NdBroadcastExec above the scan), adapted onto the projected encoded
         // schema.
         let _ = metrics;
-        let stream = any_dataset_as_encoded_stream_split(dataset, batch_size, split)
+        let encoded: BoxStream<'static, datafusion::error::Result<RecordBatch>> =
+            if let Some(share) = share {
+                let shared = share
+                    .join(|| async move {
+                        SharedRead::build(dataset, batch_size, ReadMode::Encoded).await
+                    })
+                    .await?;
+                shared.stream()
+            } else {
+                any_dataset_as_encoded_stream_split(dataset, batch_size, split)
+            };
+
+        let stream = encoded
             .and_then(move |batch| {
                 let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
@@ -512,14 +592,28 @@ impl FileOpener for NetCDFOpener {
             }
         };
 
-        // This partition's share of the file. A byte range of a NetCDF file is
-        // not a NetCDF file, so it is never read as bytes. It is read as a
-        // fraction of the chunk list the reader builds, the same way a Parquet
-        // scan reads its range as a fraction of the row groups. See
-        // [`beacon_nd_array::arrow::split`].
+        // Is this a file every partition holds?
         //
-        // An unranged file gives `None`, which reads the whole dataset. That is
-        // every scan until the source starts to split files.
+        // A marked file must be read through its share and cannot be read any
+        // other way: it is in every partition's group, so reading it whole would
+        // return every row once per partition. The mark is an instruction, not a
+        // hint. See [`SharedFile`].
+        let share = file
+            .extensions
+            .as_ref()
+            .and_then(|ext| (ext.as_ref() as &dyn std::any::Any).downcast_ref::<SharedFile>())
+            .map(|marked| {
+                let mut shares = self.shares.lock();
+                shares
+                    .entry(file.object_meta.location.clone())
+                    .or_insert_with(|| Arc::new(NdFileShare::new(marked.consumers)))
+                    .clone()
+            });
+
+        // An unshared file may still carry a byte range, which names a fraction
+        // of the chunk list rather than a region of the file. See
+        // [`beacon_nd_array::arrow::split`]. A file with neither a mark nor a
+        // range is read whole.
         let (range_start, range_end) = file.range();
         let split = ChunkSplit::from_byte_range(range_start..range_end, file.object_meta.size);
 
@@ -537,6 +631,7 @@ impl FileOpener for NetCDFOpener {
             self.cache.clone(),
             metrics,
             split,
+            share,
         )
         .boxed();
         Ok(fut)
