@@ -290,20 +290,29 @@ async fn each_reader_serves_its_own_source() {
     }
 }
 
-/// A scan under the split minimum stays on one partition, and returns the same
-/// rows it returns in a single-partition session.
+/// A small scan runs on every partition, and returns the same rows it returns
+/// in a single-partition session.
 ///
-/// Every share of a file opens that file and builds its chunk list before it
-/// reads a byte. On a small file that setup costs more than the parallelism
-/// returns, so the source declines however many partitions the session asks for.
+/// File size decides nothing here any more. It used to: a file under the split
+/// minimum was left on one partition, because a share of it opened the file and
+/// built its chunk list before reading a byte, and on a small file that setup
+/// cost more than the parallelism returned.
+///
+/// The scan is planned morsel-driven now — one standing entry per partition and
+/// one queue behind them — so a partition that finds the queue empty simply
+/// finishes. There is nothing to decline, and no size at which declining helps.
+///
+/// The row check is what matters and it is unchanged: whatever the partitions
+/// divide between them, the answer must equal a single partition's.
 #[tokio::test]
-async fn a_small_scan_is_not_split() {
+async fn a_small_scan_runs_on_every_partition_and_returns_the_same_rows() {
     const QUERY: &str = "SELECT count(*), min(analysed_sst), max(analysed_sst) FROM t";
+    const PARTITIONS: usize = 4;
 
     let whole = session();
     register(&whole, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
 
-    let asked = splitting_session(4);
+    let asked = splitting_session(PARTITIONS);
     register(&asked, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
 
     let plan = asked
@@ -315,16 +324,18 @@ async fn a_small_scan_is_not_split() {
         .unwrap();
     assert_eq!(
         scan_partitions(&plan),
-        1,
-        "a scan under {} bytes must not split:
+        PARTITIONS,
+        "the scan is planned on every partition:
 {}",
-        MIN_SHARE_SIZE,
         datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
     );
 
     let asked_summary = format!("{:?}", collect(&asked, QUERY).await.columns());
     let whole_summary = format!("{:?}", collect(&whole, QUERY).await.columns());
-    assert_eq!(asked_summary, whole_summary);
+    assert_eq!(
+        asked_summary, whole_summary,
+        "{PARTITIONS} partitions over one queue read the file exactly once"
+    );
 }
 
 /// How many columns [`write_large_netcdf`] writes, and how many rows in each.

@@ -11,6 +11,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use beacon_nd_array::arrow::{
     metrics::SharedReadMetrics,
+    morsel::{MorselSource, OpenFile, morsel_scan},
     share::{FileShares, SharedDataset, share_files},
 };
 use datafusion::{
@@ -69,6 +70,9 @@ pub struct ZarrSource {
     /// The shares of this scan. Cloned, not copied, so every partition of a
     /// group reaches the same one.
     partitions_shared_map: FileShares,
+    /// The scan's group queue, when it is planned morsel-driven. See
+    /// [`morsel_scan`].
+    morsel: Option<Arc<MorselSource>>,
 }
 
 impl ZarrSource {
@@ -83,6 +87,7 @@ impl ZarrSource {
             projection: None,
             storage: None,
             partitions_shared_map: FileShares::default(),
+            morsel: None,
         }
     }
 
@@ -114,6 +119,12 @@ impl ZarrSource {
     pub(crate) fn shares_group(&self, path: &object_store::path::Path) -> bool {
         self.partitions_shared_map.contains_key(path)
     }
+
+    /// The groups this scan's queue holds, when it is planned morsel-driven.
+    #[cfg(test)]
+    pub(crate) fn morsel_groups(&self) -> Option<usize> {
+        self.morsel.as_ref().map(|source| source.files())
+    }
 }
 
 impl FileSource for ZarrSource {
@@ -125,16 +136,28 @@ impl FileSource for ZarrSource {
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
         let projected_schema = base_config.projected_schema()?;
 
+        let storage = self
+            .storage
+            .clone()
+            .unwrap_or_else(|| ZarrStorage::from_object_store(object_store));
+        let read_metrics = SharedReadMetrics::new(&self.execution_plan_metrics, partition);
+
         Ok(Arc::new(ZarrOpener {
-            storage: self
-                .storage
-                .clone()
-                .unwrap_or_else(|| ZarrStorage::from_object_store(object_store)),
+            groups: Arc::new(ZarrGroups {
+                storage: storage.clone(),
+                projected_schema: projected_schema.clone(),
+                read_dimensions: self.read_dimensions.clone(),
+                batch_size: self.batch_size,
+                predicate: self.predicate.clone(),
+                metrics: read_metrics.clone(),
+            }),
+            morsel: self.morsel.clone(),
+            storage,
             projected_schema,
             predicate: self.predicate.clone(),
             batch_size: self.batch_size,
             read_dimensions: self.read_dimensions.clone(),
-            read_metrics: SharedReadMetrics::new(&self.execution_plan_metrics, partition),
+            read_metrics,
             partition,
             partition_shares: self.partitions_shared_map.clone(),
         }))
@@ -185,6 +208,20 @@ impl FileSource for ZarrSource {
             // An ordered scan cannot share: a partition holding an arbitrary
             // subset of a group cannot emit its rows in group order.
             return Ok(None);
+        }
+
+        if let Some((morsel, file_groups)) = morsel_scan(&config.file_groups, target_partitions) {
+            tracing::debug!(
+                "ZarrSource morsel scan: {} groups over {target_partitions} partitions",
+                morsel.files()
+            );
+            let mut config = config.clone();
+            config.file_groups = file_groups;
+            config.file_source = Arc::new(Self {
+                morsel: Some(morsel),
+                ..self.clone()
+            });
+            return Ok(Some(config));
         }
 
         // `None`: every group is shared, whatever its `zarr.json` weighs.
@@ -280,6 +317,57 @@ struct ZarrOpener {
     partition: usize,
     /// The shares of this scan, so the partitions of a group find each other.
     partition_shares: FileShares,
+    /// The scan's group queue, when it is planned morsel-driven. `Some` means
+    /// the entry `FileStream` hands this opener is the scan, not a group.
+    morsel: Option<Arc<MorselSource>>,
+    /// How one group is opened, for the queue to call.
+    groups: Arc<dyn OpenFile>,
+}
+
+/// How one Zarr group becomes a planned [`SharedDataset`].
+///
+/// This is everything a [`MorselSource`] needs of the format: the queue holds
+/// the groups, and this says what opening one means.
+struct ZarrGroups {
+    storage: ZarrStorage,
+    projected_schema: SchemaRef,
+    read_dimensions: Option<Vec<String>>,
+    batch_size: usize,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
+    metrics: SharedReadMetrics,
+}
+
+impl std::fmt::Debug for ZarrGroups {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZarrGroups").finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenFile for ZarrGroups {
+    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<SharedDataset>> {
+        let zarr_path = ZarrPath::new_from_object_meta(file.object_meta.clone()).map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Failed to create ZarrPath from object metadata: {e}"
+            ))
+        })?;
+
+        let dataset = ZarrOpener::open_dataset(
+            self.storage.clone(),
+            zarr_path,
+            self.read_dimensions.clone(),
+        )
+        .await?;
+
+        SharedDataset::plan(
+            dataset,
+            self.projected_schema.clone(),
+            self.batch_size,
+            self.predicate.clone(),
+            Some(&self.metrics),
+        )
+        .await
+    }
 }
 
 impl ZarrOpener {
@@ -361,6 +449,18 @@ impl ZarrOpener {
 
 impl FileOpener for ZarrOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
+        // A morsel-driven scan hands every partition the same standing entry.
+        // It is not a group: the groups are in the queue, and this partition
+        // reads whatever it hands out until the scan is done.
+        if let Some(morsel) = &self.morsel {
+            let stream = morsel.stream(
+                self.partition,
+                Arc::clone(&self.groups),
+                Some(self.read_metrics.clone()),
+            );
+            return Ok(futures::future::ready(Ok(stream)).boxed());
+        }
+
         let zarr_path = ZarrPath::new_from_object_meta(file.object_meta.clone()).map_err(|e| {
             DataFusionError::Execution(format!(
                 "Failed to create ZarrPath from object metadata: {e}"

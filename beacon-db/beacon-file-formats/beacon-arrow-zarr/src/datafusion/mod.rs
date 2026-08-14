@@ -637,14 +637,19 @@ mod tests {
         )
     }
 
-    /// One group splits into shares that tile it.
+    /// One group is planned across every partition, through the queue.
     ///
-    /// The default [`FileSource::repartitioned`] would decline: a leaf group's
-    /// nominal size is well under the 10 MB minimum split size. `ZarrSource`
-    /// ignores that minimum, because the size of a `zarr.json` says nothing
-    /// about the data behind it.
+    /// Size decides nothing here, and never did for Zarr: a leaf group's nominal
+    /// size is a `zarr.json` of a few KB that can front terabytes of chunks, so
+    /// the 10 MB minimum below would decline a store of any size. The caller
+    /// passes one anyway, and it must still be ignored.
+    ///
+    /// What changed is *how* the partitions divide it. They used to each hold
+    /// the group with a share between them; now the scan plans one standing
+    /// entry per partition and the group sits in a [`MorselSource`] they all
+    /// draw from. Either way one group reaches every partition and is read once.
     #[test]
-    fn one_group_is_shared_by_every_partition() {
+    fn one_group_is_planned_across_every_partition() {
         use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
         use datafusion::datasource::table_schema::TableSchema;
@@ -667,30 +672,31 @@ mod tests {
 
         // The minimum the caller passes is deliberately larger than the group,
         // so a source that honoured it would decline.
-        let shared = source
+        let planned = source
             .repartitioned(PARTITIONS, 10 * 1024 * 1024, None, &config)
             .unwrap()
-            .expect("a zarr group is shared");
+            .expect("a zarr group is planned across the partitions");
 
-        assert_eq!(shared.file_groups.len(), PARTITIONS);
-        for group in &shared.file_groups {
-            assert_eq!(group.len(), 1, "every partition holds the group");
+        assert_eq!(planned.file_groups.len(), PARTITIONS);
+        for group in &planned.file_groups {
+            assert_eq!(group.len(), 1, "one standing entry per partition");
             assert!(
                 group.iter().next().unwrap().range.is_none(),
-                "a shared group is not divided into byte ranges; the partitions \
-                 divide it as they read it"
+                "nothing is divided at plan time; the partitions divide it as \
+                 they read it"
             );
         }
 
-        // The map is what stops every partition reading the whole group.
-        let source = shared
+        // The queue is what stops every partition reading the whole group.
+        let planned_source = planned
             .file_source()
             .as_any()
             .downcast_ref::<ZarrSource>()
             .expect("the config carries a ZarrSource");
-        assert!(
-            source.shares_group(&object_store::path::Path::from("store.zarr/zarr.json")),
-            "the source the openers come from must know the group is shared"
+        assert_eq!(
+            planned_source.morsel_groups(),
+            Some(1),
+            "the group is in the queue the openers draw from"
         );
     }
 

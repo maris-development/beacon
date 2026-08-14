@@ -97,7 +97,8 @@ where
 /// with it. A decoder reports it as its fill value when the file declares none,
 /// which is what makes such a cell arrive at a query as null rather than as that
 /// date.
-pub(crate) const NO_TIME: TimestampNanosecond = TimestampNanosecond(i64::MIN);
+pub(crate) const NO_TIME: TimestampNanosecond =
+    TimestampNanosecond(beacon_common::cf_time::NO_TIME_NANOS);
 
 /// Convert one numeric CF time offset into a nanosecond timestamp.
 ///
@@ -112,17 +113,22 @@ pub(crate) fn cf_offset_to_timestamp<T>(
 where
     T: num_traits::cast::AsPrimitive<f64>,
 {
-    let offset = value.as_();
+    // One value at a time, so the scale is built and thrown away. That suits the
+    // callers: a `_FillValue` is decoded once per variable. An array goes
+    // through `convert_to_timestamp_nanoseconds`, which builds it once for all
+    // of them.
+    scale_of(epoch, unit)
+        .nanos(value.as_())
+        .map_or(NO_TIME, TimestampNanosecond)
+}
 
-    // `hifitime` panics on a non-finite `Duration` rather than returning an
-    // error, and this runs on a file's `_FillValue` at open, so a NaN fill would
-    // take down the worker of any request that only wanted a schema.
-    if !offset.is_finite() {
-        return NO_TIME;
-    }
-
-    let time = epoch + (offset * unit);
-    TimestampNanosecond(time.to_unix(hifitime::Unit::Nanosecond).as_())
+/// The linear map a CF variable's epoch and unit describe.
+///
+/// Resolving it per value cost 16.8% of a CORA query, all of it in
+/// `hifitime::Epoch::to_time_scale`, so it is resolved per array instead. See
+/// [`beacon_common::cf_time::CfScale`].
+fn scale_of(epoch: hifitime::Epoch, unit: hifitime::Unit) -> beacon_common::cf_time::CfScale {
+    beacon_common::cf_time::CfScale::new(epoch, unit)
 }
 
 /// Convert numeric CF time offsets into nanosecond timestamps.
@@ -144,13 +150,11 @@ where
     T: num_traits::cast::AsPrimitive<f64>,
 {
     let absent = fill.unwrap_or(NO_TIME);
-    array.mapv(|v| {
-        if v.as_().is_finite() {
-            cf_offset_to_timestamp(v, epoch, unit)
-        } else {
-            absent
-        }
-    })
+    // Once for the array, not once per cell. The epoch and the unit are the
+    // variable's, so every cell resolved the same two constants and paid a
+    // calendar conversion to do it.
+    let scale = scale_of(epoch, unit);
+    array.mapv(|v| scale.nanos(v.as_()).map_or(absent, TimestampNanosecond))
 }
 
 /// Parse a CF `units` (and optional `calendar`) attribute into a reference

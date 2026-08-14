@@ -15,6 +15,7 @@ use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
         metrics::SharedReadMetrics,
+        morsel::{morsel_scan, MorselSource, OpenFile},
         share::{share_files, FileShares, SharedDataset},
     },
     projection::DatasetProjection,
@@ -55,6 +56,9 @@ pub struct Hdf5Source {
     /// The shares of this scan. Cloned, not copied, so every partition of a file
     /// reaches the same one.
     partitions_shared_map: FileShares,
+    /// The scan's file queue, when it is planned morsel-driven. See
+    /// [`morsel_scan`].
+    morsel: Option<Arc<MorselSource>>,
 }
 
 impl Hdf5Source {
@@ -69,6 +73,7 @@ impl Hdf5Source {
             cache: None,
             projection: None,
             partitions_shared_map: FileShares::default(),
+            morsel: None,
         }
     }
 
@@ -107,6 +112,7 @@ impl FileSource for Hdf5Source {
             partition,
             object_store,
             self.partitions_shared_map.clone(),
+            self.morsel.clone(),
         )))
     }
 
@@ -169,6 +175,20 @@ impl FileSource for Hdf5Source {
             // An ordered scan cannot share: a partition holding an arbitrary
             // subset of a file cannot emit its rows in file order.
             return Ok(None);
+        }
+
+        if let Some((morsel, file_groups)) = morsel_scan(&config.file_groups, target_partitions) {
+            tracing::debug!(
+                "Hdf5Source morsel scan: {} files over {target_partitions} partitions",
+                morsel.files()
+            );
+            let mut config = config.clone();
+            config.file_groups = file_groups;
+            config.file_source = Arc::new(Self {
+                morsel: Some(morsel),
+                ..self.clone()
+            });
+            return Ok(Some(config));
         }
 
         Ok(share_files(
@@ -261,6 +281,52 @@ struct Hdf5Opener {
     object_store: Arc<dyn ObjectStore>,
     /// The shares of this scan, so the partitions of a file find each other.
     partition_shares: FileShares,
+    /// The scan's file queue, when it is planned morsel-driven. `Some` means the
+    /// entry `FileStream` hands this opener is the scan, not a file.
+    morsel: Option<Arc<MorselSource>>,
+    /// How one file is opened, for the queue to call.
+    files: Arc<dyn OpenFile>,
+}
+
+/// How one HDF5 file becomes a planned [`SharedDataset`].
+///
+/// This is everything a [`MorselSource`] needs of the format.
+struct Hdf5Files {
+    object_store: Arc<dyn ObjectStore>,
+    projected_schema: SchemaRef,
+    read_dimensions: Option<Vec<String>>,
+    batch_size: usize,
+    cache: Option<Hdf5ReaderCache>,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
+    metrics: SharedReadMetrics,
+}
+
+impl std::fmt::Debug for Hdf5Files {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hdf5Files").finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenFile for Hdf5Files {
+    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<SharedDataset>> {
+        let dataset = Hdf5Opener::open_dataset(
+            self.object_store.clone(),
+            file.object_meta.clone(),
+            self.cache.clone(),
+            self.read_dimensions.clone(),
+        )
+        .await?;
+
+        SharedDataset::plan(
+            dataset,
+            self.projected_schema.clone(),
+            self.batch_size,
+            self.predicate.clone(),
+            Some(&self.metrics),
+        )
+        .await
+    }
 }
 
 impl Hdf5Opener {
@@ -275,14 +341,28 @@ impl Hdf5Opener {
         partition: usize,
         object_store: Arc<dyn ObjectStore>,
         partition_shares: FileShares,
+        morsel: Option<Arc<MorselSource>>,
     ) -> Self {
+        let read_metrics = SharedReadMetrics::new(&metrics, partition);
+        let files = Arc::new(Hdf5Files {
+            object_store: object_store.clone(),
+            projected_schema: projected_schema.clone(),
+            read_dimensions: read_dimensions.clone(),
+            batch_size,
+            cache: cache.clone(),
+            predicate: predicate.clone(),
+            metrics: read_metrics.clone(),
+        });
+
         Self {
+            morsel,
+            files,
             projected_schema,
             read_dimensions,
             batch_size,
             predicate,
             cache,
-            read_metrics: SharedReadMetrics::new(&metrics, partition),
+            read_metrics,
             partition,
             object_store,
             partition_shares,
@@ -379,6 +459,18 @@ impl Hdf5Opener {
 
 impl FileOpener for Hdf5Opener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
+        // A morsel-driven scan hands every partition the same standing entry.
+        // It is not a file: the files are in the queue, and this partition reads
+        // whatever it hands out until the scan is done.
+        if let Some(morsel) = &self.morsel {
+            let stream = morsel.stream(
+                self.partition,
+                Arc::clone(&self.files),
+                Some(self.read_metrics.clone()),
+            );
+            return Ok(futures::future::ready(Ok(stream)).boxed());
+        }
+
         // A file whose statistics cannot satisfy the predicate never reaches
         // here: the plan prunes it, off the statistics the file registry already
         // holds. Testing them again per opener would repeat that work on the one
