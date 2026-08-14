@@ -43,6 +43,9 @@ enum Output {
     /// `COUNT(*)`: flat batches, of which only the row count leaves, under the
     /// (empty) projected schema. See [`count_projection`].
     Rows(SchemaRef),
+    /// The file holds none of the columns the query projects, so it has nothing
+    /// to contribute and is not read at all.
+    Nothing,
 }
 
 impl Output {
@@ -688,7 +691,9 @@ pub async fn flat_stream(
 /// this and is handed in as an [`AnyDataset`].
 #[derive(Debug)]
 pub struct SharedDataset {
-    read: Arc<SharedRead>,
+    /// `None` when the file holds none of the projected columns. There is
+    /// nothing to queue, so nothing is opened for reading either.
+    read: Option<Arc<SharedRead>>,
     output: Output,
 }
 
@@ -728,9 +733,33 @@ impl SharedDataset {
 
         let pushdown = predicate.clone().map(PushdownFilter::new);
 
-        // No column is wanted, so this is `COUNT(*)`: the read is driven by
-        // columns of its own and only the row counts leave.
+        // Nothing of this file was projected. That is two different situations,
+        // and they must not be confused: the query wanted no column at all, or
+        // it wanted columns this file does not have.
         let (output, projection) = if projection.is_empty() {
+            if !projected_schema.fields().is_empty() {
+                // The query named columns and this file has none of them. A
+                // collection is not obliged to be uniform — of one CORA year, 2%
+                // of the files carry no `TEMP` and 10% no `DEPH` — so this is an
+                // ordinary file, not a broken one.
+                //
+                // It contributes no rows. Its row count is a property of the
+                // arrays being read, and there are none; inventing one would
+                // mean picking a grid from variables the query never asked for
+                // and returning that many nulls.
+                //
+                // Reading it as a `COUNT(*)` instead, which is what this used to
+                // do, built a batch of no columns against a schema that has
+                // some, and the scan failed outright with "number of columns(0)
+                // must match number of fields(1)".
+                return Ok(Arc::new(Self {
+                    read: None,
+                    output: Output::Nothing,
+                }));
+            }
+
+            // `COUNT(*)`: no column is wanted, so the read is driven by columns
+            // of its own and only the row counts leave.
             let counted = count_projection(&dataset, &dataset_schema, &predicate);
             (Output::Rows(projected_schema), counted)
         } else {
@@ -748,12 +777,15 @@ impl SharedDataset {
         let read =
             SharedRead::build(dataset, batch_size, pushdown, output.encoded(), metrics).await?;
 
-        Ok(Arc::new(Self { read, output }))
+        Ok(Arc::new(Self {
+            read: Some(read),
+            output,
+        }))
     }
 
     /// How much of the file is left to read. For tests and diagnostics.
     pub fn remaining(&self) -> usize {
-        self.read.remaining()
+        self.read.as_ref().map_or(0, |read| read.remaining())
     }
 
     /// One partition's stream over the file.
@@ -765,7 +797,12 @@ impl SharedDataset {
         &self,
         metrics: Option<SharedReadMetrics>,
     ) -> BoxStream<'static, Result<RecordBatch>> {
-        let batches = self.read.clone().stream(metrics);
+        let Some(read) = self.read.clone() else {
+            // The file holds none of the projected columns. See
+            // [`SharedDataset::plan`].
+            return futures::stream::empty().boxed();
+        };
+        let batches = read.stream(metrics);
         match &self.output {
             Output::Columns(adapter) => {
                 let adapter = adapter.clone();
@@ -798,6 +835,9 @@ impl SharedDataset {
                     })
                     .boxed()
             }
+            // Unreachable: `plan` pairs `Nothing` with no read, and the early
+            // return above covers it.
+            Output::Nothing => futures::stream::empty().boxed(),
         }
     }
 }
@@ -1370,6 +1410,52 @@ mod tests {
             rest += drain(stream).await;
         }
         assert_eq!(taken + rest, observations, "every row is read exactly once");
+    }
+
+    /// A file holding none of the projected columns contributes nothing.
+    ///
+    /// A collection is not obliged to be uniform. Of one CORA year, 2% of the
+    /// files carry no `TEMP` and 10% no `DEPH`, so `SELECT TEMP` meets files
+    /// that have none of what it asked for. Those are ordinary files.
+    ///
+    /// This used to be read as a `COUNT(*)` — the projection resolves empty
+    /// either way — which built a batch of no columns against a schema that has
+    /// one, and failed the whole scan with "number of columns(0) must match
+    /// number of fields(1)".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_without_any_projected_column_is_read_as_nothing() {
+        let wanted: SchemaRef = Arc::new(Schema::new(vec![arrow::datatypes::Field::new(
+            // The dataset holds "value" and nothing else.
+            "absent",
+            arrow::datatypes::DataType::Float64,
+            true,
+        )]));
+
+        let planned = SharedDataset::plan(dataset(64).await, wanted, 16, None, None)
+            .await
+            .expect("a file without the column is planned, not rejected");
+
+        assert_eq!(planned.remaining(), 0, "nothing is queued to read");
+        let batches: Vec<RecordBatch> = planned
+            .stream(None)
+            .try_collect()
+            .await
+            .expect("and the stream is clean, not an error");
+        assert!(batches.is_empty(), "it contributes no rows");
+    }
+
+    /// A `COUNT(*)` still counts. It projects no column *because it wants none*,
+    /// which is the case the check above has to keep telling apart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_count_over_the_same_file_still_counts_it() {
+        const ROWS: usize = 64;
+
+        let planned = SharedDataset::plan(dataset(ROWS).await, no_columns(), 16, None, None)
+            .await
+            .expect("a count is planned");
+
+        assert!(planned.remaining() > 0, "a count has work to do");
+        assert_eq!(drain_flat(planned.stream(None)).await, ROWS);
     }
 
     /// A claimed file goes to one partition; the rest are turned away at once.

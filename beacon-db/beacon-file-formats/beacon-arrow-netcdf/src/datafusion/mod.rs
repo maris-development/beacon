@@ -1540,6 +1540,72 @@ mod reader_backend_tests {
         );
     }
 
+    /// A collection where only some files carry the column the query selects.
+    ///
+    /// Real collections are not uniform: of one CORA year, 2% of the files hold
+    /// no `TEMP` and 10% no `DEPH`. `SELECT "TEMP"` therefore meets files that
+    /// have none of what it asked for, and those must be skipped, not fail the
+    /// scan.
+    ///
+    /// The failure this guards is not a wrong number, it is a dead query:
+    /// planning such a file as a `COUNT(*)` — its projection resolves empty
+    /// either way — built a batch of no columns against a one-field schema and
+    /// returned "number of columns(0) must match number of fields(1)".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_collection_where_only_some_files_have_the_column_still_reads() {
+        use arrow::array::{ArrayRef, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        const ROWS: usize = 32;
+        const WITH: usize = 3;
+        const WITHOUT: usize = 2;
+
+        let dir = tempfile::tempdir().expect("a temp directory");
+
+        // Files that hold "V0", and files that hold only "OTHER".
+        for (count, column, base) in [(WITH, "V0", 0.0), (WITHOUT, "OTHER", 1000.0)] {
+            let schema = Arc::new(Schema::new(vec![Field::new(column, DataType::Float64, false)]));
+            for file in 0..count {
+                let values: ArrayRef = Arc::new(Float64Array::from_iter_values(
+                    (0..ROWS).map(|row| base + (file * ROWS + row) as f64),
+                ));
+                let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+                let path = dir.path().join(format!("{column}-{file}.nc"));
+                let mut writer =
+                    ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema.clone())
+                        .expect("a netCDF writer");
+                writer.write_record_batch(batch).expect("write the batch");
+                writer.finish().expect("finish the file");
+            }
+        }
+
+        let ctx = splitting_session(4, 1024);
+        register_path(&ctx, "mixed", ReaderBackend::Oxcdf, dir.path()).await;
+
+        // Every file lacking "V0" is skipped; the ones holding it are read whole.
+        let batches = ctx
+            .sql(r#"SELECT count("V0"), min("V0"), max("V0") FROM mixed"#)
+            .await
+            .expect("the query plans")
+            .collect()
+            .await
+            .expect("a file without the column does not fail the scan");
+
+        let summary = format!("{:?}", batches[0].columns());
+        assert!(
+            summary.contains(&format!("{}", WITH * ROWS)),
+            "every row of the {WITH} files that have the column: {summary}"
+        );
+        assert!(
+            summary.contains(&format!("{}", (WITH * ROWS - 1) as f64)),
+            "and its largest value, so nothing was truncated: {summary}"
+        );
+    }
+
     /// The partition count of the scan at the bottom of `plan`.
     ///
     /// The root can carry more partitions than the scan does: DataFusion adds a

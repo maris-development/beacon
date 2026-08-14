@@ -50,11 +50,49 @@
 //! [Julian Day Number]: https://en.wikipedia.org/wiki/Julian_day
 
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use hifitime::{Epoch, Unit};
 use regex::Regex;
 
 use crate::error::{CommonError, Result};
+
+/// The patterns below, compiled once for the process.
+///
+/// They are constants, and building one costs far more than matching it. A
+/// reader calls [`parse_cf_time`] once per time variable per file, so a
+/// collection of a few thousand files rebuilt them tens of thousands of times:
+/// on one CORA year that was **8.9% of the whole query**, spent in
+/// `regex::Regex::new` and nothing else.
+///
+/// The patterns compile unconditionally, so `expect` here is infallible — and
+/// now it fails at first use rather than on every call.
+mod patterns {
+    use super::{LazyLock, Regex};
+
+    /// `since <date>` where `<date>` is `[-]Y-M-D`.
+    pub(super) static GREGORIAN_EPOCH: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})")
+            .expect("static CF-time epoch regex must compile")
+    });
+
+    /// `since <date>[ T]<time>` where the `H:M:S` part is optional and a
+    /// trailing timezone marker (e.g. `Z`) is ignored. Examples:
+    ///   `days since 1950-01-01`
+    ///   `days since 1950-01-01T00:00:00`
+    ///   `days since -4713-01-01T00:00:00Z`
+    pub(super) static JULIAN_EPOCH: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"since\s+(?P<year>-?\d{1,4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})(?:[ T](?P<hour>\d{1,2}):(?P<minute>\d{1,2}):(?P<second>\d{1,2}))?",
+        )
+        .expect("static CF-time Julian regex must compile")
+    });
+
+    /// The leading unit word, as in `seconds since`.
+    pub(super) static UNIT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?P<units>\w+) since").expect("static CF-time unit regex must compile")
+    });
+}
 
 /// Parse a CF time `units` string into a reference epoch and unit.
 ///
@@ -124,11 +162,7 @@ pub fn parse_cf_time(units: &str, calendar: Option<&str>) -> Result<(Epoch, Unit
 /// Returns `Err` if the reference date cannot be parsed, or if the leading
 /// time unit is missing or unrecognised (see [`extract_units`]).
 fn parse_cf_time_epoch_gregorian(units: &str) -> Result<(Epoch, Unit)> {
-    // Static pattern: compiles unconditionally, so an `expect` here is infallible.
-    let re = Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})")
-        .expect("static CF-time epoch regex must compile");
-
-    let epoch = match re.captures(units) {
+    let epoch = match patterns::GREGORIAN_EPOCH.captures(units) {
         Some(caps) => {
             let epoch_str = caps["epoch"].to_string();
             // Previously the parse error was discarded with `.ok()`, hiding *why*
@@ -187,20 +221,7 @@ fn parse_cf_time_epoch_gregorian(units: &str) -> Result<(Epoch, Unit)> {
 /// [Julian Date]: https://en.wikipedia.org/wiki/Julian_day
 /// [Julian Day Number]: https://en.wikipedia.org/wiki/Julian_day
 fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit)> {
-    // Match `... since <date>[ T]<time>` where `<date>` is `[-]Y-M-D` and the
-    // optional `<time>` is `H:M:S`. Any trailing timezone marker (e.g. `Z`) is
-    // ignored. Examples:
-    //   `days since 1950-01-01`
-    //   `days since 1950-01-01T00:00:00`
-    //   `days since -4713-01-01T00:00:00Z`
-    //
-    // Static pattern: compiles unconditionally, so an `expect` here is infallible.
-    let re = Regex::new(
-        r"since\s+(?P<year>-?\d{1,4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})(?:[ T](?P<hour>\d{1,2}):(?P<minute>\d{1,2}):(?P<second>\d{1,2}))?",
-    )
-    .expect("static CF-time Julian regex must compile");
-
-    let caps = re.captures(units).ok_or_else(|| {
+    let caps = patterns::JULIAN_EPOCH.captures(units).ok_or_else(|| {
         tracing::warn!(units, "failed to match CF Julian epoch date");
         CommonError::CfTime(format!(
             "Failed to parse Julian epoch from units string: {units}"
@@ -270,10 +291,9 @@ fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit)> {
 ///
 /// Example accepted prefixes: `seconds since`, `days since`, `weeks since`.
 fn extract_units(input: &str) -> Option<hifitime::Unit> {
-    // Static pattern: compiles unconditionally, so an `expect` here is infallible.
-    let re = Regex::new(r"^(?P<units>\w+) since").expect("static CF-time unit regex must compile");
-    re.captures(input)
-        .and_then(|caps| match caps["units"].to_string().as_str() {
+    patterns::UNIT
+        .captures(input)
+        .and_then(|caps| match &caps["units"] {
             "seconds" => Some(hifitime::Unit::Second),
             "milliseconds" => Some(hifitime::Unit::Millisecond),
             "microseconds" => Some(hifitime::Unit::Microsecond),

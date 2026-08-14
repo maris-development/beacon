@@ -614,13 +614,20 @@ mod tests {
         assert_eq!(source.files(), 0);
     }
 
-    /// Few files and many workers: the last files are divided by chunk.
+    /// Few files and many workers: the file is opened once and read once.
     ///
     /// This is level 2, and the case a deal of whole files cannot serve at all.
-    /// One file over eight workers has to be shared or seven of them read
-    /// nothing.
+    /// Eight workers reach one file; between them they read it exactly once,
+    /// however the eight happen to interleave.
+    ///
+    /// That the work actually *divides* is asserted by
+    /// [`a_worker_waits_for_a_file_another_is_still_opening`], which slows the
+    /// open so the workers are guaranteed to meet in flight. Asserting it here
+    /// would be a race: with a fast open the first worker can drain the queue
+    /// before the other seven are scheduled, and reading it alone is correct
+    /// behaviour, not a failure.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn one_big_file_is_divided_between_the_workers() {
+    async fn one_big_file_is_read_once_by_whichever_workers_reach_it() {
         const ROWS: usize = 1_024;
         const BATCH: usize = 16;
         const WORKERS: usize = 8;
@@ -632,10 +639,6 @@ mod tests {
 
         assert_eq!(rows.iter().sum::<usize>(), ROWS, "the file is read once over");
         assert_eq!(opener.opened().len(), 1, "and opened once");
-        assert!(
-            rows.iter().filter(|read| **read > 0).count() > 1,
-            "more than one worker read part of it: {rows:?}"
-        );
     }
 
     /// A worker waits for a file another one is still opening.
