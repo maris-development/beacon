@@ -65,6 +65,21 @@ impl ZarrFormatFactory {
     pub fn new(config: ZarrConfig) -> Self {
         Self { config }
     }
+
+    /// Whether this table wants file statistics computed at all.
+    ///
+    /// Only the file analyzer computes them, through
+    /// [`FileFormatFactoryExt::create_for_analysis`]. This is the switch that
+    /// turns even that off, per table or per runtime.
+    fn statistics_wanted(
+        &self,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<bool> {
+        match format_options.get("enable_statistics") {
+            Some(value) => parse_bool_option("enable_statistics", value),
+            None => Ok(self.config.enable_statistics),
+        }
+    }
 }
 
 impl GetExt for ZarrFormatFactory {
@@ -88,17 +103,18 @@ impl FileFormatFactory for ZarrFormatFactory {
                 .filter(|s| !s.is_empty())
                 .collect()
         });
-        let mut enable_statistics = self.config.enable_statistics;
-        if let Some(value) = format_options.get("enable_statistics") {
-            enable_statistics = parse_bool_option("enable_statistics", value)?;
-        }
+        // Parsed here only so a bad value is an error at `CREATE EXTERNAL
+        // TABLE` rather than at the first analysis pass. A query computes no
+        // statistics whatever it says: see `create_for_analysis`.
+        self.statistics_wanted(format_options)?;
         Ok(Arc::new(
-            ZarrFormat::new(read_dimensions).with_enable_statistics(enable_statistics),
+            ZarrFormat::new(read_dimensions).with_enable_statistics(false),
         ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(ZarrFormat::default().with_enable_statistics(self.config.enable_statistics))
+        // A query never computes statistics. See `create_for_analysis`.
+        Arc::new(ZarrFormat::default().with_enable_statistics(false))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -138,6 +154,32 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
 
     fn file_format_name(&self) -> String {
         self.get_ext()
+    }
+
+    /// The same format, with statistics switched on.
+    ///
+    /// `infer_stats` opens the store and measures its coordinate arrays, so only
+    /// the file analyzer asks for this. See
+    /// [`FileFormatFactoryExt::create_for_analysis`].
+    fn create_for_analysis(
+        &self,
+        state: &dyn Session,
+        format_options: &std::collections::HashMap<String, String>,
+        url: &datafusion::datasource::listing::ListingTableUrl,
+        listing: &beacon_datafusion_ext::listing_factory::ListingFactory,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        let wanted = self.statistics_wanted(format_options)?;
+        let format = self.create_with_native_root(state, format_options, url, listing)?;
+        let zarr = format
+            .as_any()
+            .downcast_ref::<ZarrFormat>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "the Zarr factory did not produce a ZarrFormat".to_string(),
+                )
+            })?
+            .clone();
+        Ok(Arc::new(zarr.with_enable_statistics(wanted)))
     }
 }
 
@@ -907,19 +949,59 @@ mod tests {
         check_pushdown("abs(CAST(lat AS DOUBLE)) * 2 AS x").await;
     }
 
-    /// `create()` layers the per-table option over the runtime default: an
-    /// absent option keeps the runtime value, a present one overrides it.
+/// A query never measures a store, whatever the option says.
+    ///
+    /// `infer_stats` opens the store and reads its coordinate arrays, and
+    /// `ListingTable::scan` would do that for every file while planning. Only
+    /// the file analyzer asks, through `create_for_analysis`, and a scan prunes
+    /// from what it recorded.
     #[test]
-    fn create_layers_the_statistics_option_over_the_runtime_config() {
+    fn a_query_never_measures_a_store() {
         use crate::config::ZarrConfig;
         use datafusion::datasource::file_format::FileFormatFactory;
         use datafusion::prelude::SessionContext;
         use std::collections::HashMap;
 
+        let ctx = SessionContext::new();
+        let on = HashMap::from([("enable_statistics".to_string(), "true".to_string())]);
+
+        for options in [HashMap::new(), on] {
+            let format = ZarrFormatFactory::new(ZarrConfig::default())
+                .create(&ctx.state(), &options)
+                .unwrap();
+            assert!(
+                !format
+                    .as_any()
+                    .downcast_ref::<ZarrFormat>()
+                    .unwrap()
+                    .enable_statistics,
+                "a format built for a query measures nothing"
+            );
+        }
+    }
+
+    /// `create_for_analysis()` layers the per-table option over the runtime
+    /// default: an absent option keeps the runtime value, a present one
+    /// overrides it.
+    ///
+    /// The option decides whether the *analyzer* measures a store. A query never
+    /// measures one whatever it says, which
+    /// [`a_query_never_measures_a_store`] holds.
+    #[test]
+    fn analysis_layers_the_statistics_option_over_the_runtime_config() {
+        use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+
+        use crate::config::ZarrConfig;
+        use datafusion::prelude::SessionContext;
+        use std::collections::HashMap;
+
         let statistics_of = |config: ZarrConfig, options: HashMap<String, String>| {
             let ctx = SessionContext::new();
+            let listing = Arc::new(beacon_datafusion_ext::listing_factory::ListingFactory::dynamic());
+            let url = datafusion::datasource::listing::ListingTableUrl::parse("file:///tmp/")
+                .unwrap();
             let format = ZarrFormatFactory::new(config)
-                .create(&ctx.state(), &options)
+                .create_for_analysis(&ctx.state(), &options, &url, &listing)
                 .unwrap();
             format
                 .as_any()

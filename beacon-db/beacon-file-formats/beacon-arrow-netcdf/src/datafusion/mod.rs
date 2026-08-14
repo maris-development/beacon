@@ -116,6 +116,21 @@ impl NetCDFFormatFactory {
         }
     }
 
+    /// Whether this table wants file statistics computed at all.
+    ///
+    /// Only the file analyzer computes them, through
+    /// [`FileFormatFactoryExt::create_for_analysis`]. This is the switch that
+    /// turns even that off, per table or per runtime.
+    fn statistics_wanted(
+        &self,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<bool> {
+        match format_options.get("enable_statistics") {
+            Some(value) => parse_bool_option("enable_statistics", value),
+            None => Ok(self.config.enable_statistics),
+        }
+    }
+
     /// Build a [`NetcdfFormat`] with the given per-table effective settings,
     /// wiring in the shared reader cache when caching is enabled.
     fn build_format(
@@ -158,7 +173,6 @@ impl FileFormatFactory for NetCDFFormatFactory {
         // defaulting to the runtime config.
         let mut options = self.options.clone();
         let mut use_reader_cache = self.config.use_reader_cache;
-        let mut enable_statistics = self.config.enable_statistics;
         let mut use_rust_reader = self.config.use_rust_reader;
 
         if let Some(value) = format_options.get("read_dimensions") {
@@ -173,9 +187,11 @@ impl FileFormatFactory for NetCDFFormatFactory {
         if let Some(value) = format_options.get("use_reader_cache") {
             use_reader_cache = parse_bool_option("use_reader_cache", value)?;
         }
-        if let Some(value) = format_options.get("enable_statistics") {
-            enable_statistics = parse_bool_option("enable_statistics", value)?;
-        }
+        // Parsed here only so a bad value is an error at `CREATE EXTERNAL
+        // TABLE` rather than at the first analysis pass. The value itself is
+        // read by `create_for_analysis`; a format built for a query computes no
+        // statistics whatever it says.
+        self.statistics_wanted(format_options)?;
         if let Some(value) = format_options.get("use_rust_reader") {
             use_rust_reader = parse_bool_option("use_rust_reader", value)?;
         }
@@ -183,7 +199,8 @@ impl FileFormatFactory for NetCDFFormatFactory {
         Ok(Arc::new(self.build_format(
             options,
             use_reader_cache,
-            enable_statistics,
+            // A query never computes statistics. See `create_for_analysis`.
+            false,
             access_for(use_rust_reader),
         )))
     }
@@ -192,7 +209,8 @@ impl FileFormatFactory for NetCDFFormatFactory {
         Arc::new(self.build_format(
             self.options.clone(),
             self.config.use_reader_cache,
-            self.config.enable_statistics,
+            // A query never computes statistics. See `create_for_analysis`.
+            false,
             access_for(self.config.use_rust_reader),
         ))
     }
@@ -222,6 +240,30 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
     /// [`FileAccess::Oxcdf`] reads through the object store, so it needs no
     /// resolver and no native root. It is returned as it is, which is what lets
     /// a table live in s3, gs or az.
+    /// The same format, with statistics switched on.
+    ///
+    /// `infer_stats` opens the file and reads every coordinate array, so only
+    /// the file analyzer asks for this. See
+    /// [`FileFormatFactoryExt::create_for_analysis`].
+    fn create_for_analysis(
+        &self,
+        state: &dyn Session,
+        format_options: &std::collections::HashMap<String, String>,
+        url: &datafusion::datasource::listing::ListingTableUrl,
+        listing: &ListingFactory,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        let wanted = self.statistics_wanted(format_options)?;
+        let format = self.create_with_native_root(state, format_options, url, listing)?;
+        let netcdf = format
+            .as_any()
+            .downcast_ref::<NetcdfFormat>()
+            .ok_or_else(|| {
+                exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
+            })?
+            .clone();
+        Ok(Arc::new(netcdf.with_enable_statistics(wanted)))
+    }
+
     fn create_with_native_root(
         &self,
         state: &dyn Session,
@@ -433,6 +475,10 @@ impl FileFormat for NetcdfFormat {
             );
             return Ok(Statistics::new_unknown(&table_schema));
         }
+        tracing::trace!(
+            object = %object.location,
+            "generating statistics for NetCDF file"
+        );
 
         // Built the same way the reader builds it, so statistics and scans
         // can never disagree about where a file is or which reader opens it.
@@ -1154,49 +1200,93 @@ mod reader_backend_tests {
     /// (`repartition_file_min_size`), and what these tests pass by hand.
     const MIN_SHARE_SIZE: usize = 10 * 1024 * 1024;
 
-    /// A file too small to share is left whole.
+    /// A scan of any size plans one entry per partition, and one queue.
     ///
-    /// Every partition opening a small file to take a subset or two would cost
-    /// more than it returns, and the listing has already spread these across the
-    /// scan.
+    /// Size decides nothing here. It used to: a file under the minimum was left
+    /// whole, and one over it went into every partition's group with a share.
+    /// Both were guesses made at plan time, and both were measured losing to no
+    /// guess at all. A queue does not guess — whoever is free takes the next
+    /// file, and a partition with nothing left helps divide an open one.
     #[test]
-    fn a_small_file_is_not_shared() {
-        use datafusion::datasource::listing::PartitionedFile;
-        use datafusion::datasource::table_schema::TableSchema;
-        use datafusion::execution::object_store::ObjectStoreUrl;
-
-        let table_schema =
-            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
-        let config = FileScanConfigBuilder::new(
-            ObjectStoreUrl::local_filesystem(),
-            Arc::new(source.clone()) as Arc<dyn FileSource>,
-        )
-        .with_file(PartitionedFile::new("small.nc", 1024 * 1024))
-        .build();
-
-        assert!(
-            source
-                .repartitioned(4, MIN_SHARE_SIZE, None, &config)
-                .unwrap()
-                .is_none(),
-            "a file under the minimum must not be shared"
-        );
-    }
-
-    /// A file over the minimum lands in every partition's group, and the source
-    /// that comes back knows it has to be read through a share.
-    ///
-    /// The group count is what the scan runs on; the share is what keeps that
-    /// from returning every row once per partition.
-    #[test]
-    fn a_large_file_is_shared_by_every_partition() {
+    fn a_scan_plans_one_entry_per_partition_whatever_its_files() {
         use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
 
         const PARTITIONS: usize = 4;
 
+        // One file well under the old minimum, one well over, and a collection.
+        let scans: Vec<(&str, Vec<PartitionedFile>)> = vec![
+            ("one small file", vec![PartitionedFile::new("small.nc", 1024 * 1024)]),
+            ("one large file", vec![PartitionedFile::new("large.nc", 64 * 1024 * 1024)]),
+            (
+                "many files",
+                (0..500)
+                    .map(|i| PartitionedFile::new(format!("f-{i}.nc"), 1024 * 1024))
+                    .collect(),
+            ),
+        ];
+
+        for (what, files) in scans {
+            let table_schema =
+                TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+            let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
+            let count = files.len();
+            let mut builder = FileScanConfigBuilder::new(
+                ObjectStoreUrl::local_filesystem(),
+                Arc::new(source.clone()) as Arc<dyn FileSource>,
+            );
+            for file in files {
+                builder = builder.with_file(file);
+            }
+            let config = builder.build();
+
+            let planned = source
+                .repartitioned(PARTITIONS, MIN_SHARE_SIZE, None, &config)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{what}: a scan is planned morsel-driven"));
+
+            assert_eq!(planned.file_groups.len(), PARTITIONS, "{what}");
+            for group in &planned.file_groups {
+                assert_eq!(
+                    group.len(),
+                    1,
+                    "{what}: one standing entry, not a file list"
+                );
+            }
+
+            let planned_source = planned
+                .file_source()
+                .as_any()
+                .downcast_ref::<NetCDFSource>()
+                .expect("the config carries a NetCDFSource");
+            assert_eq!(
+                planned_source.morsel_files(),
+                Some(count),
+                "{what}: every file is in the queue the openers draw from"
+            );
+        }
+    }
+
+    /// A partitioned table keeps its file list, and shares as it used to.
+    ///
+    /// `FileStream` appends a file's `PARTITIONED BY` values to its batches, and
+    /// it can do that only because it knows which file each batch came from.
+    /// Behind one standing entry it does not, so those values would be dropped
+    /// without a word. Such a scan is left to the older path until the morsel
+    /// loop applies them itself.
+    #[test]
+    fn a_partitioned_table_keeps_its_file_list() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        use datafusion::scalar::ScalarValue;
+
+        const PARTITIONS: usize = 4;
+
+        let mut large = PartitionedFile::new("year=2023/large.nc", 64 * 1024 * 1024);
+        large.partition_values = vec![ScalarValue::Utf8(Some("2023".to_string()))];
+
         let table_schema =
             TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
         let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
@@ -1204,31 +1294,27 @@ mod reader_backend_tests {
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
         )
-        .with_file(PartitionedFile::new("large.nc", 64 * 1024 * 1024))
+        .with_file(large)
         .build();
 
-        let shared = source
+        let planned = source
             .repartitioned(PARTITIONS, MIN_SHARE_SIZE, None, &config)
             .unwrap()
-            .expect("a file over the minimum is shared");
+            .expect("one large file over four partitions is still shared");
 
-        assert_eq!(shared.file_groups.len(), PARTITIONS);
-        for group in &shared.file_groups {
-            assert_eq!(group.len(), 1, "every partition holds the file");
-            assert!(
-                group.iter().next().unwrap().range.is_none(),
-                "a shared file is not divided into byte ranges"
-            );
-        }
-
-        let source = shared
+        let planned_source = planned
             .file_source()
             .as_any()
             .downcast_ref::<NetCDFSource>()
             .expect("the config carries a NetCDFSource");
+        assert_eq!(
+            planned_source.morsel_files(),
+            None,
+            "a partitioned table does not go through the queue"
+        );
         assert!(
-            source.shares_file(&object_store::path::Path::from("large.nc")),
-            "the source the openers come from must know the file is shared"
+            planned_source.shares_file(&object_store::path::Path::from("year=2023/large.nc")),
+            "it shares the file the old way instead"
         );
     }
 
@@ -1365,6 +1451,93 @@ mod reader_backend_tests {
         writer.finish().expect("finish the file");
 
         (dir, path)
+    }
+
+    /// `count` netCDF files in one directory, each holding `rows` rows of a
+    /// single column, numbered so that no two files hold the same values.
+    ///
+    /// Uneven on purpose: a scan of equal files divides the same way however it
+    /// is divided, and would hide a queue that handed one file out twice.
+    fn write_netcdf_collection(count: usize, rows: usize) -> (tempfile::TempDir, PathBuf) {
+        use arrow::array::{ArrayRef, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let schema = Arc::new(Schema::new(vec![Field::new("V0", DataType::Float64, false)]));
+
+        for file in 0..count {
+            // Each file is a different length and a different range of values.
+            let held = rows + file % 7;
+            let base = (file * 10_000) as f64;
+            let values: ArrayRef = Arc::new(Float64Array::from_iter_values(
+                (0..held).map(|row| base + row as f64),
+            ));
+            let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+
+            let path = dir.path().join(format!("part-{file:04}.nc"));
+            let mut writer = ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema.clone())
+                .expect("a netCDF writer");
+            writer.write_record_batch(batch).expect("write the batch");
+            writer.finish().expect("finish the file");
+        }
+
+        let path = dir.path().to_path_buf();
+        (dir, path)
+    }
+
+    /// A collection scanned on many partitions returns exactly what one
+    /// partition returns.
+    ///
+    /// This is the shape the morsel queue exists for, and the guard on it. The
+    /// partitions take files from one queue, so nothing at plan time says which
+    /// partition reads what — and nothing but the answer says whether a file was
+    /// handed out twice or not at all. `count(*)` catches both. `sum` catches a
+    /// file read from the wrong place, and `min`/`max` catch a partial read.
+    /// None of those raise an error on their own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_collection_scanned_on_many_partitions_returns_the_same_rows() {
+        const FILES: usize = 40;
+        const ROWS: usize = 64;
+        const QUERY: &str =
+            r#"SELECT count(*), count("V0"), min("V0"), max("V0"), sum("V0") FROM many"#;
+
+        let (_dir, dir) = write_netcdf_collection(FILES, ROWS);
+
+        let whole = session();
+        register_path(&whole, "many", ReaderBackend::Oxcdf, &dir).await;
+
+        let split = splitting_session(8, 1024);
+        register_path(&split, "many", ReaderBackend::Oxcdf, &dir).await;
+
+        let plan = split
+            .sql(r#"SELECT "V0" FROM many"#)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        assert_eq!(
+            scan_partitions(&plan),
+            8,
+            "a collection scans on every partition:\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+
+        let summary = async |ctx: &SessionContext| {
+            let batches = ctx.sql(QUERY).await.unwrap().collect().await.unwrap();
+            format!("{:?}", batches[0].columns())
+        };
+
+        let whole_summary = summary(&whole).await;
+        assert_eq!(
+            summary(&split).await,
+            whole_summary,
+            "eight partitions over one queue read the collection exactly once"
+        );
     }
 
     /// The partition count of the scan at the bottom of `plan`.

@@ -37,6 +37,14 @@ pub struct SharedReadMetrics {
 }
 
 impl SharedReadMetrics {
+    /// Register this partition's counters.
+    ///
+    /// Once per partition, not once per file. Every call here takes four
+    /// `MetricBuilder`s, and each one ends in `register`, which locks the scan's
+    /// one `ExecutionPlanMetricsSet` and pushes onto a `Vec` that is never
+    /// pruned. Calling it per file made 24 partitions contend on that lock tens
+    /// of thousands of times and left a metrics set to match; the counters are
+    /// per partition anyway, so a file gets a [`Clone`] of its partition's.
     pub fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
         Self {
             chunks_read: MetricBuilder::new(metrics).counter("chunks_read", partition),

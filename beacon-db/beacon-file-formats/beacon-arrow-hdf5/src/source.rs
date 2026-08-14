@@ -253,7 +253,8 @@ struct Hdf5Opener {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     cache: Option<Hdf5ReaderCache>,
-    metrics: ExecutionPlanMetricsSet,
+    /// This partition's counters, registered once. See [`SharedReadMetrics::new`].
+    read_metrics: SharedReadMetrics,
     partition: usize,
     /// The store the scan lists from. The reader reads its byte ranges through
     /// it, so s3, gs and az work with no local copy.
@@ -281,7 +282,7 @@ impl Hdf5Opener {
             batch_size,
             predicate,
             cache,
-            metrics,
+            read_metrics: SharedReadMetrics::new(&metrics, partition),
             partition,
             object_store,
             partition_shares,
@@ -301,7 +302,7 @@ impl Hdf5Opener {
     /// A scan takes all four from one place, so they are. Keep it that way.
     #[allow(clippy::too_many_arguments)]
     async fn read(
-        share: Option<Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>,
+        share: Option<Arc<beacon_nd_array::arrow::share::FileShare>>,
         store: Arc<dyn ObjectStore>,
         object: ObjectMeta,
         projected_schema: SchemaRef,
@@ -324,13 +325,14 @@ impl Hdf5Opener {
             .await
         };
 
-        // The first partition to arrive opens the file and fills its queue. The
-        // rest wait for it, then draw from that same queue.
+        // The first partition to arrive opens the file and fills its queue.
+        // What the rest do depends on the share's mode: draw from the same queue,
+        // or leave this one to whoever claimed it and move on.
         let dataset = match share {
-            Some(cell) => cell
-                .get_or_try_init::<DataFusionError, _, _>(plan)
-                .await?
-                .clone(),
+            Some(share) => match share.open(plan).await? {
+                Some(dataset) => dataset,
+                None => return Ok(Box::pin(futures::stream::empty())),
+            },
             None => plan().await?,
         };
 
@@ -390,7 +392,7 @@ impl FileOpener for Hdf5Opener {
             .get(&file.object_meta.location)
             .cloned();
 
-        let metrics = SharedReadMetrics::new(&self.metrics, self.partition);
+        let metrics = self.read_metrics.clone();
         Ok(Self::read(
             share,
             self.object_store.clone(),

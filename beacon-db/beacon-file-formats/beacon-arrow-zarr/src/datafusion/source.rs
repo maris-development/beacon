@@ -134,7 +134,7 @@ impl FileSource for ZarrSource {
             predicate: self.predicate.clone(),
             batch_size: self.batch_size,
             read_dimensions: self.read_dimensions.clone(),
-            metrics: self.execution_plan_metrics.clone(),
+            read_metrics: SharedReadMetrics::new(&self.execution_plan_metrics, partition),
             partition,
             partition_shares: self.partitions_shared_map.clone(),
         }))
@@ -275,7 +275,8 @@ struct ZarrOpener {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     batch_size: usize,
     read_dimensions: Option<Vec<String>>,
-    metrics: ExecutionPlanMetricsSet,
+    /// This partition's counters, registered once. See [`SharedReadMetrics::new`].
+    read_metrics: SharedReadMetrics,
     partition: usize,
     /// The shares of this scan, so the partitions of a group find each other.
     partition_shares: FileShares,
@@ -321,7 +322,7 @@ impl ZarrOpener {
     /// `predicate`. A scan takes all four from one place, so they are.
     #[allow(clippy::too_many_arguments)]
     async fn read(
-        share: Option<Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>,
+        share: Option<Arc<beacon_nd_array::arrow::share::FileShare>>,
         storage: ZarrStorage,
         zarr_path: ZarrPath,
         projected_schema: SchemaRef,
@@ -343,13 +344,14 @@ impl ZarrOpener {
             .await
         };
 
-        // The first partition to arrive opens the group and fills its queue. The
-        // rest wait for it, then draw from that same queue.
+        // The first partition to arrive opens the group and fills its queue.
+        // What the rest do depends on the share's mode: draw from the same queue,
+        // or leave this one to whoever claimed it and move on.
         let dataset = match share {
-            Some(cell) => cell
-                .get_or_try_init::<DataFusionError, _, _>(plan)
-                .await?
-                .clone(),
+            Some(share) => match share.open(plan).await? {
+                Some(dataset) => dataset,
+                None => return Ok(Box::pin(futures::stream::empty())),
+            },
             None => plan().await?,
         };
 
@@ -373,7 +375,7 @@ impl FileOpener for ZarrOpener {
             .get(&file.object_meta.location)
             .cloned();
 
-        let metrics = SharedReadMetrics::new(&self.metrics, self.partition);
+        let metrics = self.read_metrics.clone();
         Ok(Self::read(
             share,
             self.storage.clone(),

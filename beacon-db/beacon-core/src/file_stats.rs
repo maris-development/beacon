@@ -268,8 +268,12 @@ fn resolve_format(
     let url = ListingTableUrl::parse(format!("{}{}", datasets_url.as_str(), object.location))
         .map_err(|e| FileStatsError::Format(format!("bad listing url: {e}")))?;
 
+    // The analysis form: a format built any other way reports unknown
+    // statistics, so that a query never pays to compute them. This is the one
+    // caller that wants them, and what it finds goes to the store the scan
+    // prunes from.
     let format = factory
-        .create_with_native_root(&state, &HashMap::new(), &url, &listing)
+        .create_for_analysis(&state, &HashMap::new(), &url, &listing)
         .map_err(|e| FileStatsError::Format(format!("cannot open {}: {e}", object.location)))?;
     Ok((name, format))
 }

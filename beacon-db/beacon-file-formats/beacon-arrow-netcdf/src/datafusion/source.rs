@@ -4,6 +4,7 @@ use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
         metrics::SharedReadMetrics,
+        morsel::{morsel_scan, MorselSource, OpenFile},
         share::{share_files, FileShares, SharedDataset},
     },
     projection::DatasetProjection,
@@ -45,6 +46,12 @@ pub struct NetCDFSource {
     /// The shares of this scan. Cloned, not copied, so every partition of a file
     /// reaches the same one.
     partitions_shared_map: FileShares,
+    /// The scan's file queue, when it is planned morsel-driven.
+    ///
+    /// `Some` means every partition's group holds one standing entry and the
+    /// files are all in here, so the openers read whatever the queue hands them.
+    /// `None` means the groups are the file list, as DataFusion planned them.
+    morsel: Option<Arc<MorselSource>>,
 }
 
 impl NetCDFSource {
@@ -63,6 +70,7 @@ impl NetCDFSource {
             cache: None,
             projection: None,
             partitions_shared_map: FileShares::default(),
+            morsel: None,
         }
     }
 
@@ -87,6 +95,12 @@ impl NetCDFSource {
     pub(crate) fn shares_file(&self, path: &object_store::path::Path) -> bool {
         self.partitions_shared_map.contains_key(path)
     }
+
+    /// The files this scan's queue holds, when it is planned morsel-driven.
+    #[cfg(test)]
+    pub(crate) fn morsel_files(&self) -> Option<usize> {
+        self.morsel.as_ref().map(|source| source.files())
+    }
 }
 
 impl FileSource for NetCDFSource {
@@ -109,6 +123,7 @@ impl FileSource for NetCDFSource {
             partition,
             object_store,
             self.partitions_shared_map.clone(),
+            self.morsel.clone(),
         )))
     }
 
@@ -128,21 +143,24 @@ impl FileSource for NetCDFSource {
     }
 
     fn supports_repartitioning(&self) -> bool {
+        tracing::trace!(
+            "NetCDFSource supports_repartitioning: access={:?}",
+            self.access
+        );
         matches!(self.access, FileAccess::Oxcdf)
     }
 
-    /// Give every partition the files that are worth dividing, and one each of
-    /// the files that are not.
+    /// Put the scan's files in one queue, and point every partition at it.
     ///
-    /// A file worth dividing goes into every partition's group and gets a cell
-    /// in `partitions_shared_map`. Nothing about it is divided here: the
-    /// partitions divide it as they read it, by taking subsets from the one
-    /// queue behind that cell. Balance then follows completion rather than a
-    /// guess made at plan time.
+    /// Nothing is assigned here. Each partition's group holds one standing entry
+    /// and the files go into a [`MorselSource`]; a partition takes the next file
+    /// when it is free, and helps divide an open one when no file is left. So
+    /// balance follows completion, and the plan holds one entry per partition
+    /// rather than one per file.
     ///
-    /// A smaller file is left whole and dealt to one partition. Every partition
-    /// opening it to take a subset or two would cost more than it returns, and
-    /// the listing has already spread these across the scan.
+    /// A scan the queue cannot take — a partitioned table, whose per-file
+    /// `PARTITIONED BY` values only `FileStream` can apply — falls back to
+    /// sharing whichever files are worth dividing, and dealing the rest.
     fn repartitioned(
         &self,
         target_partitions: usize,
@@ -150,10 +168,28 @@ impl FileSource for NetCDFSource {
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
+        tracing::trace!(
+            "NetCDFSource repartitioned: access={:?}, target_partitions={target_partitions}",
+            self.access,
+        );
         if !self.supports_repartitioning() || output_ordering.is_some() || target_partitions <= 1 {
-            // An ordered scan cannot share: a partition holding an arbitrary
-            // subset of a file cannot emit its rows in file order.
             return Ok(None);
+        }
+
+        if let Some((morsel, file_groups)) = morsel_scan(&config.file_groups, target_partitions) {
+            tracing::debug!(
+                "NetCDFSource morsel scan: {} files over {target_partitions} partitions",
+                morsel.files()
+            );
+            let mut config = config.clone();
+            config.file_groups = file_groups;
+            // The openers are built from the config's source, so the queue has
+            // to travel with it.
+            config.file_source = Arc::new(Self {
+                morsel: Some(morsel),
+                ..self.clone()
+            });
+            return Ok(Some(config));
         }
 
         Ok(share_files(
@@ -164,8 +200,6 @@ impl FileSource for NetCDFSource {
         .map(|scan| {
             let mut config = config.clone();
             config.file_groups = scan.file_groups;
-            // The openers are built from the config's source, so the shares
-            // have to travel with it.
             config.file_source = Arc::new(Self {
                 partitions_shared_map: scan.shares,
                 ..self.clone()
@@ -232,7 +266,8 @@ struct NetCDFOpener {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     cache: Option<NetcdfReaderCache>,
-    metrics: ExecutionPlanMetricsSet,
+    /// This partition's counters, registered once. See [`SharedReadMetrics::new`].
+    read_metrics: SharedReadMetrics,
     partition: usize,
     /// How this opener reaches its files, and which reader opens them.
     access: FileAccess,
@@ -241,6 +276,11 @@ struct NetCDFOpener {
     object_store: Arc<dyn object_store::ObjectStore>,
     /// The shares of this scan, so the partitions of a file find each other.
     partition_shares: FileShares,
+    /// The scan's file queue, when it is planned morsel-driven. `Some` means the
+    /// entry `FileStream` hands this opener is the scan, not a file.
+    morsel: Option<Arc<MorselSource>>,
+    /// How one file is opened, for the queue to call.
+    files: Arc<dyn OpenFile>,
 }
 
 impl NetCDFOpener {
@@ -256,14 +296,29 @@ impl NetCDFOpener {
         partition: usize,
         object_store: Arc<dyn object_store::ObjectStore>,
         partition_shares: FileShares,
+        morsel: Option<Arc<MorselSource>>,
     ) -> Self {
+        let read_metrics = SharedReadMetrics::new(&metrics, partition);
+        let files = Arc::new(NetCDFFiles {
+            access: access.clone(),
+            object_store: object_store.clone(),
+            projected_schema: projected_schema.clone(),
+            read_dimensions: read_dimensions.clone(),
+            batch_size,
+            cache: cache.clone(),
+            predicate: predicate.clone(),
+            metrics: read_metrics.clone(),
+        });
+
         Self {
+            morsel,
+            files,
             projected_schema,
             read_dimensions,
             batch_size,
             predicate,
             cache,
-            metrics,
+            read_metrics,
             partition,
             access,
             object_store,
@@ -284,7 +339,7 @@ impl NetCDFOpener {
     /// A scan takes all four from one place, so they are. Keep it that way.
     #[allow(clippy::too_many_arguments)]
     async fn read(
-        share: Option<Arc<tokio::sync::OnceCell<Arc<SharedDataset>>>>,
+        share: Option<Arc<beacon_nd_array::arrow::share::FileShare>>,
         input: NetcdfInput,
         object: ObjectMeta,
         projected_schema: SchemaRef,
@@ -307,13 +362,14 @@ impl NetCDFOpener {
             .await
         };
 
-        // The first partition to arrive opens the file and fills its queue. The
-        // rest wait for it, then draw from that same queue.
+        // The first partition to arrive opens the file and fills its queue.
+        // What the rest do depends on the share's mode: draw from the same queue,
+        // or leave this one to whoever claimed it and move on.
         let dataset = match share {
-            Some(cell) => cell
-                .get_or_try_init::<datafusion::error::DataFusionError, _, _>(plan)
-                .await?
-                .clone(),
+            Some(share) => match share.open(plan).await? {
+                Some(dataset) => dataset,
+                None => return Ok(Box::pin(futures::stream::empty())),
+            },
             None => plan().await?,
         };
 
@@ -358,9 +414,78 @@ impl NetCDFOpener {
     }
 }
 
+/// How one netCDF file becomes a planned [`SharedDataset`].
+///
+/// This is everything a [`MorselSource`] needs of the format. The queue holds
+/// the files; this says what opening one means.
+struct NetCDFFiles {
+    access: FileAccess,
+    object_store: Arc<dyn object_store::ObjectStore>,
+    projected_schema: SchemaRef,
+    read_dimensions: Option<Vec<String>>,
+    batch_size: usize,
+    cache: Option<NetcdfReaderCache>,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
+    metrics: SharedReadMetrics,
+}
+
+impl std::fmt::Debug for NetCDFFiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetCDFFiles")
+            .field("access", &self.access)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenFile for NetCDFFiles {
+    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<SharedDataset>> {
+        let input = self.access.input_for(&self.object_store, &file.object_meta)?;
+        let dataset = NetCDFOpener::open_dataset(
+            input,
+            file.object_meta.clone(),
+            self.cache.clone(),
+            self.read_dimensions.clone(),
+        )
+        .await?;
+
+        SharedDataset::plan(
+            dataset,
+            self.projected_schema.clone(),
+            self.batch_size,
+            self.predicate.clone(),
+            Some(&self.metrics),
+        )
+        .await
+    }
+}
+
 impl FileOpener for NetCDFOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
-        let metrics = SharedReadMetrics::new(&self.metrics, self.partition);
+        // A morsel-driven scan hands every partition the same standing entry.
+        // It is not a file: the files are in the queue, and this partition reads
+        // whatever it hands out until the scan is done.
+        if let Some(morsel) = &self.morsel {
+            tracing::trace!(
+                "NetCDFOpener morsel scan: {} files, partition={}",
+                morsel.files(),
+                self.partition
+            );
+            let stream = morsel.stream(
+                self.partition,
+                Arc::clone(&self.files),
+                Some(self.read_metrics.clone()),
+            );
+            return Ok(futures::future::ready(Ok(stream)).boxed());
+        }
+
+        tracing::trace!(
+            "NetCDFOpener open: access={:?}, file={:?}, partition={}",
+            self.access,
+            file.object_meta.location,
+            self.partition
+        );
+        let metrics = self.read_metrics.clone();
         let input = self
             .access
             .input_for(&self.object_store, &file.object_meta)?;

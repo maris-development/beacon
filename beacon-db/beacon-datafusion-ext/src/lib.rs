@@ -1,4 +1,3 @@
-pub mod ordered_union;
 pub mod analyzer_rules;
 pub mod consts;
 pub mod fast_object;

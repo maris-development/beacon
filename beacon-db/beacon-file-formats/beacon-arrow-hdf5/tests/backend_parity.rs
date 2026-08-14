@@ -635,6 +635,22 @@ fn format_on(
         .unwrap_or_else(|e| panic!("build the {backend:?} format: {e}"))
 }
 
+/// The analysis form of a format: the one that measures files.
+///
+/// A format built any other way reports unknown statistics, so that a query
+/// never pays to compute them. Only the file analyzer asks for this one.
+fn analysis_format_on(
+    ctx: &SessionContext,
+    backend: Backend,
+    path: &std::path::Path,
+) -> Arc<dyn datafusion::datasource::file_format::FileFormat> {
+    let listing = Arc::new(ListingFactory::dynamic());
+    let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
+    factory(Backend::NetcdfC)
+        .create_for_analysis(&ctx.state(), &backend.options(), &url, &listing)
+        .unwrap_or_else(|e| panic!("build the {backend:?} analysis format: {e}"))
+}
+
 /// How many columns came back with a real minimum.
 fn columns_with_a_range(statistics: &datafusion::common::Statistics) -> usize {
     statistics
@@ -655,7 +671,7 @@ async fn statistics_come_from_the_rust_reader_only() {
     let path = netcdf_file(WOD_FILE);
     let (store, object) = local_object(&path);
 
-    let rust = format_on(&ctx, Backend::Rust, &path);
+    let rust = analysis_format_on(&ctx, Backend::Rust, &path);
     let schema = rust
         .infer_schema(&state, &store, std::slice::from_ref(&object))
         .await
@@ -671,7 +687,7 @@ async fn statistics_come_from_the_rust_reader_only() {
 
     // netcdf-c reports unknown rather than erroring, so a deployment on it keeps
     // working and simply prunes nothing.
-    let netcdf_c = format_on(&ctx, Backend::NetcdfC, &path);
+    let netcdf_c = analysis_format_on(&ctx, Backend::NetcdfC, &path);
     let without_rust_reader = netcdf_c
         .infer_stats(&state, &store, schema.clone(), &object)
         .await
@@ -696,7 +712,7 @@ async fn statistics_cover_a_plain_hdf5_file() {
     let path = hdf5_file(NESTED_FILE);
     let (store, object) = local_object(&path);
 
-    let format = format_on(&ctx, Backend::Rust, &path);
+    let format = analysis_format_on(&ctx, Backend::Rust, &path);
     let schema = format
         .infer_schema(&state, &store, std::slice::from_ref(&object))
         .await
