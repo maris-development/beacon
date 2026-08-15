@@ -6,7 +6,6 @@ use std::{
 
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
-use beacon_arrow_atlas::datafusion::AtlasFormatFactory;
 use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
@@ -464,7 +463,12 @@ async fn init_file_stats(
     tracing::info!(
         interval_secs = builder.file_stats.interval_secs,
         concurrency = builder.file_stats.concurrency,
-        "file statistics subsystem started"
+        // The timer consumes its first tick, so nothing happens for one whole
+        // interval. Say so here: on the 900-second default, a quiet quarter of an
+        // hour otherwise reads as a subsystem that never started.
+        first_pass_in_secs = builder.file_stats.interval_secs,
+        on_startup = builder.file_stats.on_startup,
+        "file statistics subsystem started; run ANALYZE FILES to fill it now"
     );
     Ok(Some(service))
 }
@@ -726,12 +730,24 @@ fn register_system_schema(
         .config()
         .get_extension::<std::sync::OnceLock<Arc<beacon_file_stats::FileStatsStore>>>()
         .unwrap_or_else(beacon_file_stats::new_file_stats_handle);
-    let provider = Arc::new(SystemSchemaProvider::new(session_cell, auth, file_stats));
+    let provider = Arc::new(SystemSchemaProvider::new(
+        session_cell,
+        auth,
+        file_stats.clone(),
+    ));
 
     session_ctx
         .catalog("beacon")
         .ok_or_else(|| anyhow::anyhow!("Failed to get catalog 'beacon'"))?
         .register_schema(SYSTEM_SCHEMA_NAME, provider)?;
+
+    // `file_statistics(path)` reads the same handle. It is a function rather than
+    // a table because it takes the file to report on; the authorization walk
+    // covers it by its provider, since a function carries no schema name.
+    session_ctx.register_udtf(
+        crate::system_schema::FILE_STATISTICS_FUNCTION,
+        Arc::new(crate::system_schema::FileStatisticsFunc::new(file_stats)),
+    );
 
     Ok(())
 }
@@ -759,10 +775,6 @@ fn register_file_formats(
         Arc::new(ArrowFormatFactory),
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory::new(builder.zarr.clone())),
-        Arc::new(AtlasFormatFactory::new(
-            Default::default(),
-            Default::default(),
-        )),
         Arc::new(BBFFormatFactory::new(Default::default())),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
@@ -849,14 +861,6 @@ fn build_session_state(
             .with_physical_optimizer_rule(Arc::new(NdFilterPushdown::new()))
             .with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()));
     }
-
-    // Make every partition merge order-preserving so query results are
-    // reproducible run to run. Appended last so it sees the CoalescePartitionsExec
-    // nodes the built-in rules insert (notably under a LIMIT).
-    // See beacon_datafusion_ext::ordered_union::OrderedCoalesce.
-    state_builder = state_builder.with_physical_optimizer_rule(Arc::new(
-        beacon_datafusion_ext::ordered_union::OrderedCoalesce,
-    ));
 
     Ok(state_builder.build())
 }

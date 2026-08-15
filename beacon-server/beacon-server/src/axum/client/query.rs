@@ -15,7 +15,7 @@ use beacon_core::{
     query_result::QueryOutputFile,
     AuthIdentity,
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use std::sync::Arc;
 
 /// Executes a query against the runtime and streams the result to the client.
@@ -106,10 +106,34 @@ pub(crate) async fn query(
 
             let schema = arrow_output_stream.schema();
 
+            // Pull the first item before committing to a status code.
+            //
+            // The stream is lazy, so a plan that cannot run fails on its first
+            // poll — and by then the 200 is already on the wire. All the server
+            // can do at that point is drop the connection, which reaches the
+            // caller as a broken socket with no message at all. `ANALYZE FILES`
+            // on a runtime without file statistics is the case that found this:
+            // the same statement returns a clean 400 when the output is a file,
+            // because that path runs eagerly.
+            //
+            // Peeking costs one batch of buffering and delays the headers until
+            // the query produces something. An error *after* the first batch is
+            // still unreportable as a status; no HTTP response can take that
+            // back.
+            let mut arrow_output_stream = arrow_output_stream;
+            let first = match arrow_output_stream.next().await {
+                Some(Err(err)) => {
+                    tracing::error!("Error running beacon query: {}", err);
+                    return Err((StatusCode::BAD_REQUEST, Json(err.to_string())));
+                }
+                first => first,
+            };
+            let batches = futures::stream::iter(first).chain(arrow_output_stream);
+
             // Stream Arrow IPC directly so large result sets do not need to be buffered in memory.
             let axum_stream = axum_streams::StreamBodyAs::arrow_ipc_with_options_errors(
                 schema,
-                arrow_output_stream.map_err(|e| ::axum::Error::new(Box::new(e))),
+                batches.map_err(|e| ::axum::Error::new(Box::new(e))),
                 ipc_options,
             )
             .header("x-beacon-query-id", query_id_header)

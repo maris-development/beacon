@@ -156,6 +156,9 @@ impl Hdf5FormatFactory {
             ext: self.ext.clone(),
             read_dimensions: options.read_dimensions,
             cache: options.use_reader_cache.then(|| self.cache.clone()),
+            // Carried from the effective options. Every caller but
+            // `create_for_analysis` clears it first, so a query computes
+            // nothing.
             enable_statistics: options.enable_statistics,
             writer,
         }
@@ -174,7 +177,9 @@ impl FileFormatFactory for Hdf5FormatFactory {
         state: &dyn Session,
         format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        let options = self.effective_options(format_options)?;
+        let mut options = self.effective_options(format_options)?;
+        // A query never computes statistics. See `create_for_analysis`.
+        options.enable_statistics = false;
         // netcdf-c: hand the whole call to the netCDF factory, exactly as this
         // crate did before a second reader existed.
         if !options.use_rust_reader {
@@ -191,7 +196,8 @@ impl FileFormatFactory for Hdf5FormatFactory {
         let options = EffectiveOptions {
             use_rust_reader: true,
             use_reader_cache: self.config.use_reader_cache,
-            enable_statistics: self.config.enable_statistics,
+            // A query never computes statistics. See `create_for_analysis`.
+            enable_statistics: false,
             read_dimensions: None,
         };
         Arc::new(self.build_format(options, self.inner.default()))
@@ -219,6 +225,31 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
         }
         self.inner
             .create_with_native_root(state, format_options, url, listing)
+    }
+
+    /// The same format, with statistics switched on.
+    ///
+    /// `infer_stats` opens the file and reads every coordinate array, so only
+    /// the file analyzer asks for this. See
+    /// [`FileFormatFactoryExt::create_for_analysis`].
+    ///
+    /// netcdf-c keeps its own answer: the netCDF factory decides what statistics
+    /// mean for the reader it owns.
+    fn create_for_analysis(
+        &self,
+        state: &dyn Session,
+        format_options: &HashMap<String, String>,
+        url: &ListingTableUrl,
+        listing: &ListingFactory,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        let options = self.effective_options(format_options)?;
+        if !options.use_rust_reader {
+            return self
+                .inner
+                .create_for_analysis(state, format_options, url, listing);
+        }
+        let writer = self.inner.create(state, format_options)?;
+        Ok(Arc::new(self.build_format(options, writer)))
     }
 
     fn file_extensions(&self) -> Vec<String> {
@@ -397,6 +428,8 @@ impl FileFormat for Hdf5Format {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        beacon_nd_array::arrow::morsel::reject_partition_columns("HDF5", &conf)?;
+
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
         // the file source's schema is the encoded form of the logical table
         // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it

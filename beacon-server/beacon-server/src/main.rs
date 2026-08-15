@@ -40,10 +40,12 @@ fn main() -> anyhow::Result<()> {
 
 /// Initializes shared services and starts all configured API transports.
 async fn async_main(config: Arc<beacon_server_config::Config>) -> anyhow::Result<()> {
-    setup_tracing();
+    let log_filter = setup_tracing(&config);
     install_panic_hook();
 
     tracing::info!("Beacon v{}", BEACON_VERSION);
+    // This line only prints when DEBUG is on, so it confirms the level took effect.
+    tracing::debug!(filter = %log_filter, "debug logging is on");
     // The server owns the datasets store and hosts the runtime that queries it.
     let server = Arc::new(Server::open(config.clone()).await?);
     // Keep both transports on the same server so metadata and access rules stay aligned.
@@ -95,23 +97,77 @@ fn install_panic_hook() {
     }));
 }
 
+/// Third-party crates whose `DEBUG`/`TRACE` events bury Beacon's own logs. They
+/// stay at `INFO` when `BEACON_LOG_LEVEL` asks for `debug` or `trace`. Set
+/// `RUST_LOG` to see them.
+const NOISY_DEPENDENCIES: &[&str] = &[
+    "arrow",
+    "aws_config",
+    "aws_smithy_runtime",
+    "datafusion",
+    "deltalake",
+    "h2",
+    "hyper",
+    "hyper_util",
+    "iceberg",
+    "lance",
+    "mio",
+    "object_store",
+    "parquet",
+    "reqwest",
+    "rustls",
+    "sqlparser",
+    "tokio_util",
+    "tonic",
+    "want",
+    "zarrs",
+];
+
+/// Builds the tracing filter for a validated `BEACON_LOG_LEVEL` value.
+///
+/// The level is the global directive, so it covers every Beacon crate, including
+/// crates added later. The filter names no Beacon crate, which is what keeps it
+/// from going stale.
+fn log_filter(level: &str) -> String {
+    match level {
+        // Beacon logs at the requested level; the loud dependencies do not.
+        "debug" | "trace" => {
+            let mut filter = String::from(level);
+            for dependency in NOISY_DEPENDENCIES {
+                filter.push_str(&format!(",{dependency}=info"));
+            }
+            filter
+        }
+        // Axum logs rejections from built-in extractors on the `axum::rejection`
+        // target at `TRACE`.
+        "info" => String::from("info,tower_http=debug,axum::rejection=trace"),
+        // `warn`, `error`, and `off` ask for less, so nothing is raised here.
+        _ => String::from(level),
+    }
+}
+
 /// Configures stdout and rolling-file tracing subscribers for the API process.
-fn setup_tracing() {
+///
+/// `RUST_LOG` takes precedence when it is set, for the full `EnvFilter` syntax.
+/// `BEACON_LOG_LEVEL` (through `config`) sets the level otherwise. Returns the
+/// filter it applied, for the startup log.
+fn setup_tracing(config: &beacon_server_config::Config) -> String {
     let file_appender = tracing_appender::rolling::daily("logs", "beacon.log");
     let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
 
+    let default_filter = log_filter(&config.server.log_level);
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(rust_log) => tracing_subscriber::EnvFilter::try_new(&rust_log).unwrap_or_else(|err| {
+            // Tracing is not up yet, so this warning goes straight to stderr.
+            eprintln!("ignoring invalid RUST_LOG (`{rust_log}`): {err}");
+            tracing_subscriber::EnvFilter::new(&default_filter)
+        }),
+        Err(_) => tracing_subscriber::EnvFilter::new(&default_filter),
+    };
+
+    let applied = filter.to_string();
     tracing_subscriber::registry()
-        .with(
-            // Fallback filter is only used when `RUST_LOG` is unset. Axum logs rejections from
-            // built-in extractors with the `axum::rejection` target at `TRACE` level.
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                format!(
-                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_server=debug,beacon_arrow_ipc=debug,beacon_arrow_csv=debug,beacon_arrow_parquet=debug,beacon_arrow_geoparquet=debug,beacon_arrow_bbf=debug,beacon_common=debug,beacon_functions=debug,beacon_nd_array=debug,beacon_arrow_atlas=debug",
-                    env!("CARGO_CRATE_NAME")
-                )
-                .into()
-            }),
-        )
+        .with(filter)
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::fmt::layer().with_writer(file_writer).with_ansi(false))
         .init();
@@ -119,4 +175,26 @@ fn setup_tracing() {
     // The non-blocking writer must outlive the subscriber, so keep the guard for the
     // lifetime of the process.
     std::mem::forget(_guard);
+
+    applied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_filter;
+
+    #[test]
+    fn debug_level_covers_every_beacon_crate() {
+        let filter = log_filter("debug");
+        // A global `debug` directive, so a new Beacon crate needs no filter change.
+        assert!(filter.starts_with("debug,"));
+        assert!(!filter.contains("beacon_"));
+        assert!(filter.contains("datafusion=info"));
+    }
+
+    #[test]
+    fn quiet_levels_raise_nothing() {
+        assert_eq!(log_filter("warn"), "warn");
+        assert_eq!(log_filter("off"), "off");
+    }
 }

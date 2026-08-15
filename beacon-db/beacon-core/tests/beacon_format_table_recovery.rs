@@ -98,7 +98,6 @@ async fn beacon_file_formats_are_registered_on_the_session() {
     // format that does not resolve fails here the same way it fails on restart.
     for (name, format) in [
         ("f_bbf", "BBF"),
-        ("f_atlas", "ATLAS"),
         ("f_zarr", "ZARR"),
         ("f_tiff", "TIFF"),
         ("f_geoparquet", "GEOPARQUET"),

@@ -147,7 +147,10 @@ pub async fn dataset_and_attributes_from_group(
         let array_name = array_node_path
             .strip_prefix(&group_path)
             .unwrap_or(&array_node_path);
-        let array_name = array_name.strip_prefix('/').unwrap_or(array_name).to_string();
+        let array_name = array_name
+            .strip_prefix('/')
+            .unwrap_or(array_name)
+            .to_string();
 
         array_attributes.insert(array_name.clone(), array.attributes().clone());
 
@@ -241,8 +244,8 @@ mod tests {
     #[tokio::test]
     async fn predicate_pushdown_prunes_chunks() {
         use beacon_nd_array::arrow::{
-            batch::any_dataset_as_record_batch_stream, pushdown_filter::PushdownFilter,
-            schema::any_dataset_to_arrow_schema,
+            pushdown_filter::PushdownFilter, schema::any_dataset_to_arrow_schema,
+            file_read::flat_stream,
         };
         use datafusion::logical_expr::Operator;
         use datafusion::physical_expr::expressions::{binary, col, lit};
@@ -252,7 +255,9 @@ mod tests {
 
         async fn row_count(predicate: Option<PushdownFilter>) -> usize {
             let any = open_example().await;
-            any_dataset_as_record_batch_stream(any, usize::MAX, predicate, None)
+            flat_stream(any, usize::MAX, predicate)
+                .await
+                .unwrap()
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap()

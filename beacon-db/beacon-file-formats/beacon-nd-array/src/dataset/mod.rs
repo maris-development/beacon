@@ -271,7 +271,7 @@ pub fn resolve_read_dimensions(
             .map(|(name, _)| name)
             .collect();
         if !dropped.is_empty() {
-            tracing::info!(
+            tracing::trace!(
                 "{label}: SELECT * auto-selected dimensions {:?}; excluded variables {:?} \
                  have incompatible dimensions and were omitted.",
                 default_dims,

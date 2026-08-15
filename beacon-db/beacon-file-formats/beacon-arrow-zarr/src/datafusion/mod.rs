@@ -32,6 +32,7 @@ use crate::{
 pub mod source;
 pub mod statistics;
 
+use source::NOMINAL_GROUP_SIZE;
 pub use source::ZarrSource;
 
 /// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
@@ -64,6 +65,21 @@ impl ZarrFormatFactory {
     pub fn new(config: ZarrConfig) -> Self {
         Self { config }
     }
+
+    /// Whether this table wants file statistics computed at all.
+    ///
+    /// Only the file analyzer computes them, through
+    /// [`FileFormatFactoryExt::create_for_analysis`]. This is the switch that
+    /// turns even that off, per table or per runtime.
+    fn statistics_wanted(
+        &self,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<bool> {
+        match format_options.get("enable_statistics") {
+            Some(value) => parse_bool_option("enable_statistics", value),
+            None => Ok(self.config.enable_statistics),
+        }
+    }
 }
 
 impl GetExt for ZarrFormatFactory {
@@ -87,17 +103,18 @@ impl FileFormatFactory for ZarrFormatFactory {
                 .filter(|s| !s.is_empty())
                 .collect()
         });
-        let mut enable_statistics = self.config.enable_statistics;
-        if let Some(value) = format_options.get("enable_statistics") {
-            enable_statistics = parse_bool_option("enable_statistics", value)?;
-        }
+        // Parsed here only so a bad value is an error at `CREATE EXTERNAL
+        // TABLE` rather than at the first analysis pass. A query computes no
+        // statistics whatever it says: see `create_for_analysis`.
+        self.statistics_wanted(format_options)?;
         Ok(Arc::new(
-            ZarrFormat::new(read_dimensions).with_enable_statistics(enable_statistics),
+            ZarrFormat::new(read_dimensions).with_enable_statistics(false),
         ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(ZarrFormat::default().with_enable_statistics(self.config.enable_statistics))
+        // A query never computes statistics. See `create_for_analysis`.
+        Arc::new(ZarrFormat::default().with_enable_statistics(false))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -137,6 +154,32 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
 
     fn file_format_name(&self) -> String {
         self.get_ext()
+    }
+
+    /// The same format, with statistics switched on.
+    ///
+    /// `infer_stats` opens the store and measures its coordinate arrays, so only
+    /// the file analyzer asks for this. See
+    /// [`FileFormatFactoryExt::create_for_analysis`].
+    fn create_for_analysis(
+        &self,
+        state: &dyn Session,
+        format_options: &std::collections::HashMap<String, String>,
+        url: &datafusion::datasource::listing::ListingTableUrl,
+        listing: &beacon_datafusion_ext::listing_factory::ListingFactory,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        let wanted = self.statistics_wanted(format_options)?;
+        let format = self.create_with_native_root(state, format_options, url, listing)?;
+        let zarr = format
+            .as_any()
+            .downcast_ref::<ZarrFormat>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "the Zarr factory did not produce a ZarrFormat".to_string(),
+                )
+            })?
+            .clone();
+        Ok(Arc::new(zarr.with_enable_statistics(wanted)))
     }
 }
 
@@ -336,6 +379,8 @@ impl FileFormat for ZarrFormat {
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        beacon_nd_array::arrow::morsel::reject_partition_columns("Zarr", &conf)?;
+
         let mut object_metas: Vec<ObjectMeta> = Vec::new();
         for group in &conf.file_groups {
             for file in group.files() {
@@ -357,8 +402,9 @@ impl FileFormat for ZarrFormat {
 
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so the
         // file source's schema is the encoded form of the logical table schema.
-        let encoded_file_schema =
-            Arc::new(beacon_datafusion_ext::nd::encoded_schema(conf.file_schema()));
+        let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+            conf.file_schema(),
+        ));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
             encoded_file_schema,
             conf.table_partition_cols().clone(),
@@ -423,7 +469,7 @@ impl ZarrFormat {
             .await
             .unwrap_or_default()
             .into_iter()
-            .map(|key| PartitionedFile::new(key, 0))
+            .map(|key| PartitionedFile::new(key, NOMINAL_GROUP_SIZE))
             .collect();
         Ok(FileGroup::new(files))
     }
@@ -440,7 +486,7 @@ mod tests {
     };
     use datafusion::prelude::SessionContext;
 
-    use super::{parse_bool_option, ZarrFormat, ZarrFormatFactory};
+    use super::{ZarrFormat, ZarrFormatFactory, ZarrSource, parse_bool_option};
 
     /// Register the bundled `gridded-example.zarr` store as a DataFusion table
     /// backed by [`ZarrFormat`] + [`ListingTable`].
@@ -461,6 +507,249 @@ mod tests {
             .unwrap();
         let table = ListingTable::try_new(config).unwrap();
         ctx.register_table("gridded", Arc::new(table)).unwrap();
+    }
+
+    // ── The predicate reaches the scan ─────────────────────────────────
+
+    /// The predicate reaches the zarr scan through the nd spine, and skips
+    /// chunks.
+    ///
+    /// The scan sits under an `NdSourceExec` and an `NdBroadcastExec`. A node
+    /// that does not forward filters leaves the source with nothing to prune on,
+    /// and that failure is invisible in a result — every row still comes back,
+    /// the scan just reads the whole store. So it is asserted on the scan's own
+    /// output: one encoded batch carries one chunk, so the scan's output rows
+    /// *are* its chunk count.
+    #[tokio::test]
+    async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
+        use arrow::array::Float32Array;
+        use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        struct ScanRows(Option<usize>);
+        impl ExecutionPlanVisitor for ScanRows {
+            type Error = std::convert::Infallible;
+            fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> Result<bool, Self::Error> {
+                if plan.name().contains("DataSourceExec") {
+                    self.0 = plan.metrics().and_then(|metrics| metrics.output_rows());
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+        }
+
+        let chunks_read = async |sql: &str| {
+            let plan = ctx
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
+                .await
+                .unwrap();
+            let mut visitor = ScanRows(None);
+            datafusion::physical_plan::accept(plan.as_ref(), &mut visitor).unwrap();
+            visitor.0.expect("the scan reports its output rows")
+        };
+
+        // Every lat the store holds, with no predicate in the plan and so no
+        // pruning: the bounds below are picked from these.
+        let batches = ctx
+            .sql("SELECT lat FROM gridded")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let lats: Vec<f32> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .expect("lat is f32")
+                    .iter()
+                    .flatten()
+                    .collect::<Vec<f32>>()
+            })
+            .collect();
+        let above = lats.iter().cloned().fold(f32::MIN, f32::max);
+        let middle = (lats.iter().cloned().fold(f32::MAX, f32::min) + above) / 2.0;
+
+        let whole = chunks_read("SELECT lat FROM gridded").await;
+        assert!(whole > 1, "the fixture must hold several chunks");
+
+        assert_eq!(
+            chunks_read(&format!(
+                "SELECT lat FROM gridded WHERE lat > {}",
+                above + 1.0
+            ))
+            .await,
+            0,
+            "a predicate no row can meet must leave the scan nothing to read"
+        );
+        assert_eq!(
+            chunks_read("SELECT lat FROM gridded WHERE lat > -1000").await,
+            whole,
+            "a predicate every row meets must not skip a chunk"
+        );
+
+        let partial = chunks_read(&format!("SELECT lat FROM gridded WHERE lat > {middle}")).await;
+        assert!(
+            partial > 0 && partial < whole,
+            "lat > {middle} should read some of the {whole} chunks, it read {partial}"
+        );
+
+        // And the answer still matches the coordinate itself. A bound that is
+        // too tight loses rows and reports a smaller count, with no error.
+        let counted = ctx
+            .sql(&format!(
+                "SELECT count(*) FROM gridded WHERE lat > {middle}"
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            counted[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("int64 count")
+                .value(0) as usize,
+            lats.iter().filter(|lat| **lat > middle).count(),
+            "the pruned scan does not match the coordinate"
+        );
+    }
+
+    // ── Splitting one group across partitions ──────────────────────────
+
+    /// A session that splits one zarr group across `target_partitions`.
+    fn splitting_ctx(target_partitions: usize) -> SessionContext {
+        use datafusion::prelude::SessionConfig;
+
+        SessionContext::new_with_config(
+            SessionConfig::new().with_target_partitions(target_partitions),
+        )
+    }
+
+    /// One group is planned across every partition, through the queue.
+    ///
+    /// Size decides nothing here, and never did for Zarr: a leaf group's nominal
+    /// size is a `zarr.json` of a few KB that can front terabytes of chunks, so
+    /// the 10 MB minimum below would decline a store of any size. The caller
+    /// passes one anyway, and it must still be ignored.
+    ///
+    /// What changed is *how* the partitions divide it. They used to each hold
+    /// the group with a share between them; now the scan plans one standing
+    /// entry per partition and the group sits in a [`MorselSource`] they all
+    /// draw from. Either way one group reaches every partition and is read once.
+    #[test]
+    fn one_group_is_planned_across_every_partition() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        const PARTITIONS: usize = 4;
+
+        let table_schema =
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+        let source = ZarrSource::new(table_schema);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new(
+            "store.zarr/zarr.json",
+            super::NOMINAL_GROUP_SIZE,
+        ))
+        .build();
+
+        // The minimum the caller passes is deliberately larger than the group,
+        // so a source that honoured it would decline.
+        let planned = source
+            .repartitioned(PARTITIONS, 10 * 1024 * 1024, None, &config)
+            .unwrap()
+            .expect("a zarr group is planned across the partitions");
+
+        assert_eq!(planned.file_groups.len(), PARTITIONS);
+        for group in &planned.file_groups {
+            assert_eq!(group.len(), 1, "one standing entry per partition");
+            assert!(
+                group.iter().next().unwrap().range.is_none(),
+                "nothing is divided at plan time; the partitions divide it as \
+                 they read it"
+            );
+        }
+
+        // The queue is what stops every partition reading the whole group.
+        let planned_source = planned
+            .file_source()
+            .as_any()
+            .downcast_ref::<ZarrSource>()
+            .expect("the config carries a ZarrSource");
+        assert_eq!(
+            planned_source.morsel_groups(),
+            Some(1),
+            "the group is in the queue the openers draw from"
+        );
+    }
+
+    /// One group scans in several partitions and returns the same rows it
+    /// returns in one.
+    ///
+    /// The partition count is the point. The row check is the guard on it:
+    /// `count(*)` catches a share that overlapped another or a gap between two,
+    /// and `min`/`max` catch a share that read the wrong region.
+    #[tokio::test]
+    async fn one_group_splits_and_returns_the_same_rows() {
+        use datafusion::physical_plan::ExecutionPlanProperties;
+
+        let query = r#"SELECT count(*), count(analysed_sst),
+                              min(analysed_sst), max(analysed_sst)
+                       FROM gridded"#;
+
+        let whole = splitting_ctx(1);
+        register_example(&whole).await;
+
+        let split = splitting_ctx(4);
+        register_example(&split).await;
+
+        let plan = split
+            .sql("SELECT analysed_sst FROM gridded")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        // The count comes off the scan, not the plan root: DataFusion adds a
+        // round-robin above a single-partition scan, so the root would report
+        // four whether or not the group was split.
+        let mut scan: Arc<dyn datafusion::physical_plan::ExecutionPlan> = plan.clone();
+        while let Some(child) = scan.children().first() {
+            scan = Arc::clone(child);
+        }
+        assert_eq!(
+            scan.output_partitioning().partition_count(),
+            4,
+            "one group should scan in 4 partitions:\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+
+        let summary = async |ctx: &SessionContext| {
+            let batches = ctx.sql(query).await.unwrap().collect().await.unwrap();
+            format!("{:?}", batches[0].columns())
+        };
+
+        let split_summary = summary(&split).await;
+        assert_eq!(split_summary, summary(&whole).await);
     }
 
     /// A session with the nd projection-pushdown rule registered — the same
@@ -668,19 +957,59 @@ mod tests {
         check_pushdown("abs(CAST(lat AS DOUBLE)) * 2 AS x").await;
     }
 
-    /// `create()` layers the per-table option over the runtime default: an
-    /// absent option keeps the runtime value, a present one overrides it.
+/// A query never measures a store, whatever the option says.
+    ///
+    /// `infer_stats` opens the store and reads its coordinate arrays, and
+    /// `ListingTable::scan` would do that for every file while planning. Only
+    /// the file analyzer asks, through `create_for_analysis`, and a scan prunes
+    /// from what it recorded.
     #[test]
-    fn create_layers_the_statistics_option_over_the_runtime_config() {
+    fn a_query_never_measures_a_store() {
         use crate::config::ZarrConfig;
         use datafusion::datasource::file_format::FileFormatFactory;
         use datafusion::prelude::SessionContext;
         use std::collections::HashMap;
 
+        let ctx = SessionContext::new();
+        let on = HashMap::from([("enable_statistics".to_string(), "true".to_string())]);
+
+        for options in [HashMap::new(), on] {
+            let format = ZarrFormatFactory::new(ZarrConfig::default())
+                .create(&ctx.state(), &options)
+                .unwrap();
+            assert!(
+                !format
+                    .as_any()
+                    .downcast_ref::<ZarrFormat>()
+                    .unwrap()
+                    .enable_statistics,
+                "a format built for a query measures nothing"
+            );
+        }
+    }
+
+    /// `create_for_analysis()` layers the per-table option over the runtime
+    /// default: an absent option keeps the runtime value, a present one
+    /// overrides it.
+    ///
+    /// The option decides whether the *analyzer* measures a store. A query never
+    /// measures one whatever it says, which
+    /// [`a_query_never_measures_a_store`] holds.
+    #[test]
+    fn analysis_layers_the_statistics_option_over_the_runtime_config() {
+        use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+
+        use crate::config::ZarrConfig;
+        use datafusion::prelude::SessionContext;
+        use std::collections::HashMap;
+
         let statistics_of = |config: ZarrConfig, options: HashMap<String, String>| {
             let ctx = SessionContext::new();
+            let listing = Arc::new(beacon_datafusion_ext::listing_factory::ListingFactory::dynamic());
+            let url = datafusion::datasource::listing::ListingTableUrl::parse("file:///tmp/")
+                .unwrap();
             let format = ZarrFormatFactory::new(config)
-                .create(&ctx.state(), &options)
+                .create_for_analysis(&ctx.state(), &options, &url, &listing)
                 .unwrap();
             format
                 .as_any()
@@ -796,7 +1125,10 @@ mod tests {
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        assert!(names.contains(&"time".to_string()), "time present: {names:?}");
+        assert!(
+            names.contains(&"time".to_string()),
+            "time present: {names:?}"
+        );
         assert!(
             !names.contains(&"analysed_sst".to_string()),
             "analysed_sst depends on lat/lon and must be excluded: {names:?}"
@@ -920,13 +1252,12 @@ mod tests {
             .unwrap();
         let mut kept = 0i64;
         for b in &batches {
-            let col = b
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .unwrap();
+            let col = b.column(0).as_any().downcast_ref::<Float32Array>().unwrap();
             for i in 0..col.len() {
-                assert!(col.value(i) > mid, "every returned lat must satisfy the predicate");
+                assert!(
+                    col.value(i) > mid,
+                    "every returned lat must satisfy the predicate"
+                );
             }
             kept += b.num_rows() as i64;
         }
@@ -1014,8 +1345,16 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         for i in 0..batch.num_rows() {
-            assert_eq!(units.value(i), "kelvin", "variable attribute must be constant");
-            assert_eq!(conventions.value(i), "CF-1.4", "global attribute must be constant");
+            assert_eq!(
+                units.value(i),
+                "kelvin",
+                "variable attribute must be constant"
+            );
+            assert_eq!(
+                conventions.value(i),
+                "CF-1.4",
+                "global attribute must be constant"
+            );
         }
     }
 
@@ -1052,8 +1391,15 @@ mod tests {
                 .unwrap()
                 .value(0)
         };
-        assert_eq!(int("distinct_units"), 1, "attribute must be a single constant");
-        assert!(int("grid_rows") > 1, "gridded variable must define a multi-row grid");
+        assert_eq!(
+            int("distinct_units"),
+            1,
+            "attribute must be a single constant"
+        );
+        assert!(
+            int("grid_rows") > 1,
+            "gridded variable must define a multi-row grid"
+        );
         assert_eq!(
             int("attr_rows"),
             int("grid_rows"),

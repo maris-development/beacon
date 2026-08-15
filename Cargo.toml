@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-iceberg", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
+# Atlas is temporarily out of the build. The crate is still on disk; putting it
+# back means restoring it to `members` and re-wiring the four sites listed in
+# its own Cargo.toml comment.
+exclude = ["beacon-db/beacon-file-formats/beacon-arrow-atlas"]
+members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-iceberg", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
 
 [workspace.package]
 
@@ -92,11 +96,11 @@ object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] 
 # Pure-Rust netCDF-4 / classic reader. It parses the HDF5 container itself, so it
 # holds no global lock and reads through `object_store` by byte range. The
 # netcdf-c bindings do neither. See `beacon-arrow-netcdf`, which offers both.
-oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.1.0", features = ["async", "object-store", "ndarray"] }
+oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.3.0", features = ["async", "object-store", "ndarray"] }
 # The HDF5 container alone, with no netCDF layer on top. `beacon-arrow-hdf5` uses
 # it for the layouts the netCDF data model cannot express, such as a compound
 # dataset. Same repository as `oxcdf`, so cargo resolves one revision for both.
-oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", version = "0.1.0", features = ["async", "object-store"] }
+oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", version = "0.3.0", features = ["async", "object-store"] }
 tonic = "0.14.1"
 
 

@@ -68,5 +68,5 @@ pub use handle::{FileStatsHandle, new_file_stats_handle, try_file_stats_from_ses
 pub use registry::{AnalyzedFile, ReconcileReport, Registry};
 pub use scalar::{StatScalar, super_type};
 pub use segment::{ColumnStat, ColumnStats, SegmentBuilder, SegmentReader};
-pub use store::FileStatsStore;
+pub use store::{FileColumnStat, FileStatsStore};
 pub use types::{ColumnId, FileId, FileRecord, FileState, ObservedFile};

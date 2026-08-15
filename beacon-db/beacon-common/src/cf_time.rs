@@ -50,11 +50,132 @@
 //! [Julian Day Number]: https://en.wikipedia.org/wiki/Julian_day
 
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use hifitime::{Epoch, Unit};
 use regex::Regex;
 
 use crate::error::{CommonError, Result};
+
+/// The patterns below, compiled once for the process.
+///
+/// They are constants, and building one costs far more than matching it. A
+/// reader calls [`parse_cf_time`] once per time variable per file, so a
+/// collection of a few thousand files rebuilt them tens of thousands of times:
+/// on one CORA year that was **8.9% of the whole query**, spent in
+/// `regex::Regex::new` and nothing else.
+///
+/// The patterns compile unconditionally, so `expect` here is infallible — and
+/// now it fails at first use rather than on every call.
+mod patterns {
+    use super::{LazyLock, Regex};
+
+    /// `since <date>` where `<date>` is `[-]Y-M-D`.
+    pub(super) static GREGORIAN_EPOCH: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})")
+            .expect("static CF-time epoch regex must compile")
+    });
+
+    /// `since <date>[ T]<time>` where the `H:M:S` part is optional and a
+    /// trailing timezone marker (e.g. `Z`) is ignored. Examples:
+    ///   `days since 1950-01-01`
+    ///   `days since 1950-01-01T00:00:00`
+    ///   `days since -4713-01-01T00:00:00Z`
+    pub(super) static JULIAN_EPOCH: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"since\s+(?P<year>-?\d{1,4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})(?:[ T](?P<hour>\d{1,2}):(?P<minute>\d{1,2}):(?P<second>\d{1,2}))?",
+        )
+        .expect("static CF-time Julian regex must compile")
+    });
+
+    /// The leading unit word, as in `seconds since`.
+    pub(super) static UNIT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?P<units>\w+) since").expect("static CF-time unit regex must compile")
+    });
+}
+
+/// The nanosecond timestamp of a CF value that is not a time.
+///
+/// A CF time variable is numbers plus a rule for turning them into instants.
+/// NaN and the infinities have no instant to turn into, and `hifitime` refuses
+/// them by *panicking* rather than erroring, so they need an answer of their own
+/// before they reach it.
+///
+/// The value is unreachable as a real date — `i64::MIN` nanoseconds before 1970
+/// is the year -292277 — so nothing a file could legitimately hold collides with
+/// it. A reader reports it as its fill value when the file declares none, and
+/// that is what makes such a cell arrive at a query as null rather than as that
+/// date.
+///
+/// It lives here so every reader agrees on it. netCDF and Zarr both decode CF
+/// time and both need it.
+pub const NO_TIME_NANOS: i64 = i64::MIN;
+
+/// The linear map from a CF offset to a Unix nanosecond timestamp.
+///
+/// A CF time variable is numbers plus a `units` string, and that string fixes
+/// one epoch and one unit for the whole variable. Resolving them per value costs
+/// a calendar conversion each time and produces the same two constants every
+/// time. Building this once and calling [`nanos`](Self::nanos) per value turns
+/// that into a multiply and an add.
+///
+/// It is worth the type. Decoding a CF variable value-by-value through
+/// `hifitime::Epoch + Duration` was measured at **16.8% of a CORA query**, with
+/// `Epoch::to_time_scale` the single hottest named frame in the profile.
+///
+/// # Precision
+///
+/// The constants are integers, and so is the whole-unit part of the arithmetic.
+/// That makes this *more* exact than the code it replaces, not less: the old
+/// path went through `Epoch::to_unix(Unit::Nanosecond)`, an `f64`, and
+/// nanoseconds since 1970 for a recent date need about 61 bits — more than an
+/// `f64`'s 53, so it resolved them only to about 256 ns.
+///
+/// Only the sub-unit remainder is left to floating point, where it is small and
+/// the arithmetic is accurate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CfScale {
+    /// The reference epoch, as Unix nanoseconds.
+    epoch_nanos: i64,
+    /// Nanoseconds in one of the variable's units. Every CF unit — second,
+    /// millisecond, minute, hour, day, week — is a whole number of them.
+    unit_nanos: i64,
+}
+
+impl CfScale {
+    /// Resolve `epoch` and `unit` into the two constants a value needs.
+    pub fn new(epoch: Epoch, unit: Unit) -> Self {
+        Self {
+            epoch_nanos: epoch.to_unix_duration().total_nanoseconds() as i64,
+            unit_nanos: (1.0 * unit).total_nanoseconds() as i64,
+        }
+    }
+
+    /// The Unix nanosecond timestamp of `offset`, or `None` when it is not a
+    /// time.
+    ///
+    /// NaN and the infinities have no instant to become. They are a caller's to
+    /// name — a CF variable marks its gaps with a fill value, and a decoder
+    /// substitutes that — so they come back as `None` rather than as some
+    /// sentinel chosen here.
+    ///
+    /// The offset is split so the large part stays exact. `offset * unit_nanos`
+    /// in floating point would reach ~1e18 for a modern date and lose the low
+    /// hundreds of nanoseconds; the whole units multiply as integers instead,
+    /// and only the fraction of a unit goes through `f64`.
+    pub fn nanos(&self, offset: f64) -> Option<i64> {
+        if !offset.is_finite() {
+            return None;
+        }
+        let whole = offset.trunc();
+        let fraction = offset - whole;
+        Some(
+            self.epoch_nanos
+                .saturating_add((whole as i64).saturating_mul(self.unit_nanos))
+                .saturating_add((fraction * self.unit_nanos as f64) as i64),
+        )
+    }
+}
 
 /// Parse a CF time `units` string into a reference epoch and unit.
 ///
@@ -124,11 +245,7 @@ pub fn parse_cf_time(units: &str, calendar: Option<&str>) -> Result<(Epoch, Unit
 /// Returns `Err` if the reference date cannot be parsed, or if the leading
 /// time unit is missing or unrecognised (see [`extract_units`]).
 fn parse_cf_time_epoch_gregorian(units: &str) -> Result<(Epoch, Unit)> {
-    // Static pattern: compiles unconditionally, so an `expect` here is infallible.
-    let re = Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})")
-        .expect("static CF-time epoch regex must compile");
-
-    let epoch = match re.captures(units) {
+    let epoch = match patterns::GREGORIAN_EPOCH.captures(units) {
         Some(caps) => {
             let epoch_str = caps["epoch"].to_string();
             // Previously the parse error was discarded with `.ok()`, hiding *why*
@@ -187,20 +304,7 @@ fn parse_cf_time_epoch_gregorian(units: &str) -> Result<(Epoch, Unit)> {
 /// [Julian Date]: https://en.wikipedia.org/wiki/Julian_day
 /// [Julian Day Number]: https://en.wikipedia.org/wiki/Julian_day
 fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit)> {
-    // Match `... since <date>[ T]<time>` where `<date>` is `[-]Y-M-D` and the
-    // optional `<time>` is `H:M:S`. Any trailing timezone marker (e.g. `Z`) is
-    // ignored. Examples:
-    //   `days since 1950-01-01`
-    //   `days since 1950-01-01T00:00:00`
-    //   `days since -4713-01-01T00:00:00Z`
-    //
-    // Static pattern: compiles unconditionally, so an `expect` here is infallible.
-    let re = Regex::new(
-        r"since\s+(?P<year>-?\d{1,4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})(?:[ T](?P<hour>\d{1,2}):(?P<minute>\d{1,2}):(?P<second>\d{1,2}))?",
-    )
-    .expect("static CF-time Julian regex must compile");
-
-    let caps = re.captures(units).ok_or_else(|| {
+    let caps = patterns::JULIAN_EPOCH.captures(units).ok_or_else(|| {
         tracing::warn!(units, "failed to match CF Julian epoch date");
         CommonError::CfTime(format!(
             "Failed to parse Julian epoch from units string: {units}"
@@ -270,10 +374,9 @@ fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit)> {
 ///
 /// Example accepted prefixes: `seconds since`, `days since`, `weeks since`.
 fn extract_units(input: &str) -> Option<hifitime::Unit> {
-    // Static pattern: compiles unconditionally, so an `expect` here is infallible.
-    let re = Regex::new(r"^(?P<units>\w+) since").expect("static CF-time unit regex must compile");
-    re.captures(input)
-        .and_then(|caps| match caps["units"].to_string().as_str() {
+    patterns::UNIT
+        .captures(input)
+        .and_then(|caps| match &caps["units"] {
             "seconds" => Some(hifitime::Unit::Second),
             "milliseconds" => Some(hifitime::Unit::Millisecond),
             "microseconds" => Some(hifitime::Unit::Microsecond),
@@ -294,6 +397,115 @@ mod tests {
     /// f64 arithmetic in the conversion chain. ~1e-6 days is well below a
     /// second.
     const JD_EPS: f64 = 1e-6;
+
+    /// [`CfScale`] answers exactly what the per-value `hifitime` arithmetic it
+    /// replaces answered.
+    ///
+    /// This is the guard on the optimisation. The old path built a `Duration`
+    /// per value, added it to the epoch and converted the result to Unix
+    /// nanoseconds; this precomputes the epoch and the unit and does a multiply
+    /// and an add. The two must not disagree, because a shift here moves every
+    /// timestamp beacon reads out of a netCDF file.
+    ///
+    /// Leap seconds are the reason this is asserted rather than assumed:
+    /// `hifitime` tracks them, so `(epoch + d).to_unix()` and
+    /// `epoch.to_unix() + d` could in principle differ across one. The epochs
+    /// below span 1900 to 2000 and the offsets reach a century either way, which
+    /// covers every leap second there has been.
+    ///
+    /// The offsets are scaled per unit so they stay inside a plausible range of
+    /// dates. A CF variable counting *hours* does not hold 2.5 billion of them —
+    /// that is the year 287,000, and the nanoseconds for it do not fit in an
+    /// `i64` at all.
+    #[test]
+    fn the_scale_answers_what_hifitime_answered() {
+        // (units, one century expressed in that unit)
+        let cases = [
+            ("seconds since 1950-01-01", 3.15e9),
+            ("days since 1970-01-01", 36_500.0),
+            ("hours since 2000-01-01T00:00:00", 876_000.0),
+            ("milliseconds since 1900-01-01", 3.15e12),
+            ("minutes since 1985-07-01", 52_560_000.0),
+        ];
+
+        for (units, century) in cases {
+            let (epoch, unit) = parse_cf_time(units, None).expect("the units parse");
+            let scale = CfScale::new(epoch, unit);
+
+            for fraction in [0.0, 1e-9, 0.5, 0.25, -0.5, 0.001, -1.0, 1.0] {
+                for span in [0.0, 1e-6, 0.01, 0.5, 1.0, -1.0] {
+                    let offset = century * span + fraction;
+                    let hifitime_says = (epoch + offset * unit).to_unix(Unit::Nanosecond) as i64;
+                    let scale_says = scale.nanos(offset).expect("a finite offset is a time");
+
+                    // The bound is the `f64` the old path returned. One step of
+                    // it at 3e18 nanoseconds is about 700 ns, so the two cannot
+                    // agree more closely than that however exact this one is —
+                    // and the residue is the old path's, not this one's, which
+                    // `a_zero_offset_is_exact` pins down. Anything beyond a few
+                    // steps would mean the arithmetic changed.
+                    let step = (hifitime_says.unsigned_abs() as f64 * f64::EPSILON).max(1.0);
+                    let drift = (scale_says - hifitime_says).abs();
+                    assert!(
+                        drift as f64 <= 8.0 * step,
+                        "{units} at offset {offset}: drifted {drift} ns, \
+                         more than the {:.0} ns an f64 can resolve there",
+                        8.0 * step
+                    );
+                }
+            }
+        }
+    }
+
+    /// The new arithmetic is exact where the old was not.
+    ///
+    /// `1950-01-01` is `-631152000000000000` Unix nanoseconds. Reached through
+    /// `Epoch::to_unix(Unit::Nanosecond)` — an `f64` — it came out as
+    /// `-631151999999999872`, 128 ns adrift, because the value needs 60 bits and
+    /// an `f64` mantissa has 53. Integer nanoseconds have no such limit.
+    #[test]
+    fn a_zero_offset_is_exact() {
+        let (epoch, unit) = parse_cf_time("seconds since 1950-01-01", None).unwrap();
+
+        assert_eq!(
+            CfScale::new(epoch, unit).nanos(0.0),
+            Some(-631_152_000_000_000_000),
+            "the epoch decodes to itself, to the nanosecond"
+        );
+        assert_ne!(
+            epoch.to_unix(Unit::Nanosecond) as i64,
+            -631_152_000_000_000_000,
+            "and the path this replaces could not say so"
+        );
+    }
+
+    /// A value that is not a time has no timestamp, and says so.
+    ///
+    /// `hifitime` panics on a non-finite `Duration` rather than refusing it, and
+    /// this runs on a file's `_FillValue` while a schema is being read, so a NaN
+    /// fill would take down a request that only wanted the schema.
+    #[test]
+    fn a_value_that_is_not_a_time_has_no_timestamp() {
+        let (epoch, unit) = parse_cf_time("seconds since 1950-01-01", None).unwrap();
+        let scale = CfScale::new(epoch, unit);
+
+        assert_eq!(scale.nanos(f64::NAN), None);
+        assert_eq!(scale.nanos(f64::INFINITY), None);
+        assert_eq!(scale.nanos(f64::NEG_INFINITY), None);
+        assert!(scale.nanos(0.0).is_some(), "zero is a time");
+    }
+
+    /// The epoch itself decodes to the epoch.
+    #[test]
+    fn a_zero_offset_is_the_epoch() {
+        for (units, expected) in [
+            ("seconds since 1970-01-01", 0i64),
+            ("days since 1970-01-02", 86_400 * 1_000_000_000),
+        ] {
+            let (epoch, unit) = parse_cf_time(units, None).unwrap();
+            assert_eq!(CfScale::new(epoch, unit).nanos(0.0), Some(expected), "{units}");
+        }
+    }
 
     /// Julian Day Number of the calendar date the proleptic Julian calendar
     /// assigns JDN 0 (noon). The `julian` crate uses astronomical year
@@ -523,3 +735,4 @@ mod tests {
         assert!(err.contains("Failed to extract time unit"), "got: {err}");
     }
 }
+

@@ -51,10 +51,8 @@ pub(crate) fn authorize_logical_plan(
     // they enumerate the catalog through `Runtime::visible_tables`, which returns
     // only the tables their roles grant.
     if !identity.is_super_user {
-        if let Some(schema) = metadata_schema_touched(plan) {
-            anyhow::bail!(
-                "permission denied: the '{schema}' schema is restricted to the super-user"
-            );
+        if let Some(surface) = metadata_surface_touched(plan) {
+            anyhow::bail!("permission denied: {surface} is restricted to the super-user");
         }
     }
 
@@ -82,20 +80,36 @@ pub(crate) fn authorize_logical_plan(
 }
 
 /// The name of the first metadata schema (`beacon.system` / `information_schema`)
-/// any table scan in `plan` reads, or `None`.
+/// any table scan in `plan` reads, as a noun phrase for the error, or `None`.
 ///
 /// Matched on the scan's schema so it catches the read however it is reached —
 /// through a subquery, a view, or a rewrite (`SHOW TABLES` becomes a scan of
-/// `information_schema.tables`).
-fn metadata_schema_touched(plan: &LogicalPlan) -> Option<String> {
+/// `information_schema.tables`) — and on the provider for the one metadata
+/// surface that has no schema name, the `file_statistics` table function.
+fn metadata_surface_touched(plan: &LogicalPlan) -> Option<String> {
     let mut found = None;
     let _ = plan.apply_with_subqueries(|node| {
         if let LogicalPlan::TableScan(scan) = node {
             if let Some(schema) = scan.table_name.schema() {
                 if crate::system_schema::is_metadata_schema(schema) {
-                    found = Some(schema.to_string());
+                    found = Some(format!("the '{schema}' schema"));
                     return Ok(TreeNodeRecursion::Stop);
                 }
+            }
+            // `file_statistics(...)` is the same metadata, reached through a
+            // table function. A function has no schema in the plan — its scan is
+            // named after the function itself — so the check above cannot see it
+            // and the provider is matched instead.
+            if source_as_provider(&scan.source).is_ok_and(|provider| {
+                provider
+                    .as_any()
+                    .is::<crate::system_schema::FileStatisticsTable>()
+            }) {
+                found = Some(format!(
+                    "the {} table function",
+                    crate::system_schema::FILE_STATISTICS_FUNCTION
+                ));
+                return Ok(TreeNodeRecursion::Stop);
             }
         }
         Ok(TreeNodeRecursion::Continue)

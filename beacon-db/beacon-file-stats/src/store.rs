@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use arrow::array::{Array, ArrayRef, UInt64Array};
+use arrow::datatypes::DataType;
 use futures::stream::{self, StreamExt};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use tokio::sync::RwLock;
@@ -25,6 +27,31 @@ type Joined = std::result::Result<
     std::result::Result<(usize, Option<ColumnStats>), crate::FileStatsError>,
     tokio::task::JoinError,
 >;
+
+/// One column's recorded statistics for one file.
+///
+/// What [`FileStatsStore::file_column_stats`] returns: a single row of the
+/// segment, kept in the column's own Arrow type rather than rendered, so the
+/// caller decides how to present it. `min` and `max` are one-element arrays.
+#[derive(Debug, Clone)]
+pub struct FileColumnStat {
+    pub column_id: ColumnId,
+    /// The segment this row came from.
+    pub segment: String,
+    pub data_type: DataType,
+    pub min: ArrayRef,
+    pub max: ArrayRef,
+    /// `None` where the format reported no count.
+    pub null_count: Option<u64>,
+    /// `None` for a format that reports no row count, such as netCDF.
+    pub row_count: Option<u64>,
+}
+
+/// Reads one count out of a nullable `UInt64` column.
+fn count_at(counts: &ArrayRef, row: usize) -> Option<u64> {
+    let counts = counts.as_any().downcast_ref::<UInt64Array>()?;
+    (!counts.is_null(row)).then(|| counts.value(row))
+}
 
 /// Statistics for every known file, split across immutable segments.
 pub struct FileStatsStore {
@@ -163,6 +190,79 @@ impl FileStatsStore {
         }
     }
 
+    /// Every column statistic recorded for one file.
+    ///
+    /// The inverse of [`Self::column_stats`], which reads one column across many
+    /// files. Pruning never needs this direction; an operator asking "what does
+    /// Beacon actually hold for this file" does, and answering it from the
+    /// segments is the only honest way to answer it.
+    ///
+    /// Segments are folded in manifest order, so a file that appears in more than
+    /// one is reported from the newest — the same resolution the pruning reader
+    /// applies. A column with no recorded range is absent rather than null: the
+    /// segment holds nothing for it.
+    pub async fn file_column_stats(&self, file_id: FileId) -> Result<Vec<FileColumnStat>> {
+        let covering: Vec<SegmentEntry> = {
+            let manifest = self.manifest.read().await;
+            manifest
+                .segments
+                .iter()
+                .filter(|entry| entry.min_file_id <= file_id && file_id <= entry.max_file_id)
+                .cloned()
+                .collect()
+        };
+
+        // Keyed by column so a newer segment replaces an older one's row.
+        let mut newest: std::collections::BTreeMap<ColumnId, FileColumnStat> =
+            std::collections::BTreeMap::new();
+
+        for entry in covering {
+            let path = self.prefix.clone().join(entry.name.as_str());
+            let reader = SegmentReader::open(self.store.clone(), path).await?;
+
+            // The segment's columns are read concurrently but not spawned: the
+            // reader is borrowed, and one file's columns are a bounded set.
+            let rows: Vec<(ColumnId, Option<ColumnStats>)> =
+                stream::iter(entry.column_ids.iter().copied())
+                    .map(|column_id| {
+                        let reader = &reader;
+                        async move {
+                            Ok::<_, crate::FileStatsError>((
+                                column_id,
+                                reader.column(column_id).await?,
+                            ))
+                        }
+                    })
+                    .buffer_unordered(SEGMENT_READ_CONCURRENCY)
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?;
+
+            for (column_id, stats) in rows {
+                let Some(stats) = stats else { continue };
+                // A segment holds many files; find this one's row, if it has one.
+                let Some(row) = stats.file_ids.iter().position(|id| *id == file_id) else {
+                    continue;
+                };
+                newest.insert(
+                    column_id,
+                    FileColumnStat {
+                        column_id,
+                        segment: entry.name.clone(),
+                        data_type: stats.data_type.clone(),
+                        min: stats.min.slice(row, 1),
+                        max: stats.max.slice(row, 1),
+                        null_count: count_at(&stats.null_count, row),
+                        row_count: count_at(&stats.row_count, row),
+                    },
+                );
+            }
+        }
+
+        Ok(newest.into_values().collect())
+    }
+
     /// A snapshot of the manifest, for diagnostics.
     pub async fn segments(&self) -> Vec<SegmentEntry> {
         self.manifest.read().await.segments.clone()
@@ -241,6 +341,73 @@ mod tests {
 
         let psal = store.column_stats_by_name("PSAL", (0, 2)).await.unwrap();
         assert_eq!(psal[0].file_ids, vec![1, 2]);
+    }
+
+    /// The per-file direction: every column of one file, which is what an
+    /// operator asking "what does Beacon hold for this file" needs. A column the
+    /// file never declared is absent rather than null.
+    #[tokio::test]
+    async fn one_file_reports_only_the_columns_it_declares() {
+        let (store, _dir) = store().await;
+
+        let files: Vec<ObservedFile> = (0..3)
+            .map(|i| ObservedFile::new(format!("argo/{i}.nc"), 10, 1))
+            .collect();
+        let file_ids = store.registry().intern_files(&files).unwrap();
+        let columns = store.registry().intern_columns(&["TEMP", "PSAL"]).unwrap();
+
+        let mut builder = SegmentBuilder::new();
+        builder.push_file(file_ids[0], [(columns[0], stat(0.0, 10.0))]);
+        builder.push_file(
+            file_ids[1],
+            [
+                (columns[0], stat(20.0, 30.0)),
+                (columns[1], stat(34.0, 35.0)),
+            ],
+        );
+        store.commit_segment(builder).await.unwrap().unwrap();
+
+        // The file that declared both.
+        let both = store.file_column_stats(file_ids[1]).await.unwrap();
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[0].min.as_primitive::<Float64Type>().value(0), 20.0);
+        assert_eq!(both[0].max.as_primitive::<Float64Type>().value(0), 30.0);
+        assert_eq!(both[0].null_count, Some(1));
+        assert_eq!(both[0].row_count, Some(100));
+        assert_eq!(both[1].max.as_primitive::<Float64Type>().value(0), 35.0);
+
+        // The file that declared one; PSAL is missing, not null.
+        let one = store.file_column_stats(file_ids[0]).await.unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].column_id, columns[0]);
+
+        // A file the segment covers by id range but holds no row for.
+        assert!(store.file_column_stats(file_ids[2]).await.unwrap().is_empty());
+    }
+
+    /// A file analyzed twice appears in two segments. The newest wins, exactly as
+    /// it does for the pruning reader.
+    #[tokio::test]
+    async fn a_re_analyzed_file_reports_its_newest_range() {
+        let (store, _dir) = store().await;
+        let ids = store
+            .registry()
+            .intern_files(&[ObservedFile::new("a.nc", 1, 1)])
+            .unwrap();
+        let columns = store.registry().intern_columns(&["TEMP"]).unwrap();
+
+        let mut first = SegmentBuilder::new();
+        first.push_file(ids[0], [(columns[0], stat(0.0, 1.0))]);
+        store.commit_segment(first).await.unwrap().unwrap();
+
+        let mut second = SegmentBuilder::new();
+        second.push_file(ids[0], [(columns[0], stat(50.0, 60.0))]);
+        store.commit_segment(second).await.unwrap().unwrap();
+
+        let stats = store.file_column_stats(ids[0]).await.unwrap();
+        assert_eq!(stats.len(), 1, "one row per column, not one per segment");
+        assert_eq!(stats[0].min.as_primitive::<Float64Type>().value(0), 50.0);
+        assert_eq!(stats[0].segment, "segment-00000001.bfs");
     }
 
     #[tokio::test]

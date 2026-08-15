@@ -56,6 +56,33 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         self.create(state, format_options)
     }
+
+    /// Create a [`FileFormat`] that computes file statistics.
+    ///
+    /// A format answers `infer_stats` by reading the file. For parquet that is a
+    /// footer; for a format built on nd arrays it is an open and a read of every
+    /// coordinate array. `ListingTable::scan` infers statistics for every file
+    /// it lists, and it does so during planning, so a format of the second kind
+    /// makes a query over a large collection take minutes to plan and look like
+    /// a hang.
+    ///
+    /// Those formats therefore answer `infer_stats` with
+    /// `Statistics::new_unknown` unless they were built here. The file analyzer
+    /// builds them here, records what it finds in the file-statistics store, and
+    /// the scan prunes from that store instead. The reading happens once, in the
+    /// background, rather than once per query in the planner.
+    ///
+    /// The default delegates, so a format whose statistics are already cheap is
+    /// unaffected and keeps feeding them to the optimizer.
+    fn create_for_analysis(
+        &self,
+        state: &dyn Session,
+        format_options: &HashMap<String, String>,
+        url: &ListingTableUrl,
+        listing: &ListingFactory,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        self.create_with_native_root(state, format_options, url, listing)
+    }
 }
 
 /// Shared, late-filled handle to the [`FileFormatRegistry`], registered as a

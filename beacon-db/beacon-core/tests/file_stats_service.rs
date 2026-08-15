@@ -26,6 +26,8 @@ fn enabled() -> FileStatsConfig {
     FileStatsConfig {
         enable: true,
         interval_secs: 3_600,
+        // Each test drives its own passes; the flag has its own test.
+        on_startup: false,
         concurrency: 2,
         batch_files: 100,
         target_group_files: 100,
@@ -483,6 +485,69 @@ async fn a_pass_discovers_analyzes_and_stores() {
     assert_eq!(rows, 3, "every file contributed a TEMP row");
 }
 
+/// `on_startup` is what a restarted server needs: the timer's first pass is one
+/// interval away and the interval starts again on every boot, so a server that
+/// restarts more often than that never collects anything.
+///
+/// The collection is spawned, not awaited, so the runtime is usable immediately
+/// and the test waits for the queue to drain rather than for `build`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn on_startup_collects_without_waiting_for_the_timer() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/argo/a.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/argo/b.parquet"), 90.0, 100.0);
+
+    let config = FileStatsConfig {
+        on_startup: true,
+        // An hour away, so nothing but the startup collection can do this work.
+        interval_secs: 3_600,
+        ..enabled()
+    };
+    let runtime = builder(root.path(), config).build().await.unwrap();
+    let store = runtime.file_stats().unwrap().store().clone();
+
+    // Poll rather than sleep a fixed time: the pass is a spawned task.
+    let mut analyzed = 0;
+    for _ in 0..100 {
+        analyzed = store
+            .registry()
+            .scan_records()
+            .unwrap()
+            .iter()
+            .filter(|(_, record)| record.state == beacon_file_stats::FileState::Analyzed)
+            .count();
+        if analyzed == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    assert_eq!(
+        analyzed, 2,
+        "both files analyzed without a tick of the timer"
+    );
+    assert_eq!(store.num_segments().await, 1);
+}
+
+/// Without the flag, boot collects nothing: the first pass is one interval away.
+/// This is the default, and it keeps startup free for queries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_the_flag_boot_collects_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/argo/a.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    let store = runtime.file_stats().unwrap().store().clone();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    assert!(
+        store.registry().scan_records().unwrap().is_empty(),
+        "discovery runs inside a pass, and no pass has run"
+    );
+    assert_eq!(store.num_segments().await, 0);
+}
+
 /// A second pass over an unchanged store does nothing. The registry recognises
 /// the files, so nothing re-queues and no segment is written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -598,6 +663,14 @@ async fn statistics_survive_a_restart() {
 
 /// The number of files a plan will actually open.
 fn files_in_plan(explain: &str) -> usize {
+    // An nd scan does not print a file list. It plans one standing entry per
+    // partition, pointing at a queue that holds the files, and states the count
+    // in the entry: `nd-morsel-scan/3-files`. That entry repeats once per
+    // partition, so read the count rather than counting occurrences.
+    if let Some(files) = morsel_scan_files(explain) {
+        return files;
+    }
+
     // Pruning runs before the scan is built, so the file groups the plan prints
     // are the files it will read. Counting the extensions in them is crude, but
     // it is what the plan actually says.
@@ -605,6 +678,16 @@ fn files_in_plan(explain: &str) -> usize {
         .iter()
         .map(|extension| explain.matches(extension).count())
         .sum()
+}
+
+/// The file count an nd scan states in its standing entry, when it has one.
+///
+/// `None` for a plan that lists its files: a parquet scan, or an nd scan that
+/// pruning left with no file at all.
+fn morsel_scan_files(explain: &str) -> Option<usize> {
+    const MARKER: &str = "nd-morsel-scan/";
+    let rest = &explain[explain.find(MARKER)? + MARKER.len()..];
+    rest[..rest.find("-files")?].parse().ok()
 }
 
 /// One metric value, expanded from the abbreviated form `EXPLAIN ANALYZE` uses.
@@ -858,6 +941,133 @@ async fn the_segments_view_shows_the_batching() {
     .await;
     // Two roots, so two segments, each holding one file's columns.
     assert_eq!(rows.matches("segment-").count(), 2, "{rows}");
+}
+
+/// Runs `sql` and returns the error it produced. Panics if it succeeded.
+async fn query_error(runtime: &Runtime, sql: &str) -> String {
+    match runtime
+        .run_query(Query::sql(sql.to_string()), AuthIdentity::system())
+        .await
+    {
+        Ok(_) => panic!("{sql} should have failed"),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// `beacon.system.file_stats` counts a file's columns; this shows their ranges.
+/// A `column_count` of 200 says nothing about whether the bounds are usable, and
+/// the bounds are what pruning runs on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_function_reports_the_recorded_range_of_one_file() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let rows = query(
+        &runtime,
+        "SELECT column, data_type, min, max, row_count \
+         FROM file_statistics('obs/a.parquet') ORDER BY column",
+    )
+    .await;
+
+    assert!(rows.contains("TEMP"), "{rows}");
+    assert!(rows.contains("DEPTH"), "{rows}");
+    // The range the file was written with, rendered in the column's own type.
+    assert!(rows.contains("0.0"), "the recorded minimum:\n{rows}");
+    assert!(rows.contains("5.0"), "the recorded maximum:\n{rows}");
+}
+
+/// A dataset is usually a directory, so the function takes a glob and reports
+/// every file it matches, keeping the path on each row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_function_globs_a_dataset_directory() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/b.parquet"), 90.0, 100.0);
+    write_parquet(&root.path().join("datasets/other/c.parquet"), 0.0, 1.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let rows = query(
+        &runtime,
+        "SELECT path, count(*) AS columns FROM file_statistics('obs/*') \
+         GROUP BY path ORDER BY path",
+    )
+    .await;
+
+    assert!(rows.contains("obs/a.parquet"), "{rows}");
+    assert!(rows.contains("obs/b.parquet"), "{rows}");
+    assert!(
+        !rows.contains("other/c.parquet"),
+        "the glob must not widen:\n{rows}"
+    );
+}
+
+/// A path the registry never saw is a typo far more often than it is a question,
+/// and an empty result would read as "this file has no statistics".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_function_rejects_a_path_it_does_not_know() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let error = query_error(
+        &runtime,
+        "SELECT * FROM file_statistics('obs/nope.parquet')",
+    )
+    .await;
+    assert!(error.contains("nope.parquet"), "{error}");
+    assert!(error.contains("beacon.system.file_stats"), "{error}");
+}
+
+/// With the subsystem off the function says so, rather than returning the empty
+/// result the views correctly return. The views describe a state; a call asks a
+/// question, and "no statistics exist anywhere" is the answer to a different one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_function_says_so_when_the_subsystem_is_off() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), FileStatsConfig::default())
+        .build()
+        .await
+        .unwrap();
+
+    let error = query_error(&runtime, "SELECT * FROM file_statistics('obs/a.parquet')").await;
+    assert!(error.contains("BEACON_FILE_STATS_ENABLE"), "{error}");
+}
+
+/// The function reports the value ranges of files, which is data. It belongs to
+/// the super-user for the same reason `beacon.system` does — and, like that gate,
+/// it cannot wait for grant enforcement to be turned on. A function carries no
+/// schema name, so the name-based gate cannot see it: this pins the provider one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_function_is_super_user_only() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+
+    // Enforcement off, the default posture: an ordinary read would be allowed.
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let denied = runtime
+        .run_query(
+            Query::sql("SELECT * FROM file_statistics('obs/a.parquet')".to_string()),
+            AuthIdentity::empty(),
+        )
+        .await;
+    assert!(
+        denied
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("restricted to the super-user")),
+        "a non-super-user must not read recorded ranges, got: {:?}",
+        denied.as_ref().err().map(|e| e.to_string())
+    );
 }
 
 /// Both views are empty rather than an error when the subsystem never started.

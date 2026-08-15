@@ -298,8 +298,11 @@ impl TimestampBackend {
             variable,
             epoch,
             unit,
+            // A variable that declares no fill still gets one. See
+            // `cf_time::NO_TIME`.
             fill_value: raw_fill_value
-                .map(|f| crate::decoders::cf_time::cf_offset_to_timestamp(f, epoch, unit)),
+                .map(|f| crate::decoders::cf_time::cf_offset_to_timestamp(f, epoch, unit))
+                .or(Some(crate::decoders::cf_time::NO_TIME)),
         }
     }
 }
@@ -337,6 +340,7 @@ impl ArrayBackend<TimestampNanosecond> for TimestampBackend {
             array.view(),
             self.epoch,
             self.unit,
+            self.fill_value,
         ))
     }
 }

@@ -241,12 +241,10 @@ impl TableProvider for LanceTable {
         // repartition, aggregation) fan out over them exactly as they do over a
         // multi-file parquet scan.
         //
-        // This does not cost determinism. UnionExec's child-to-partition mapping is
-        // itself deterministic; the run-to-run row shuffling comes from *merging*
-        // partitions in completion order, which happens in `CoalescePartitionsExec`.
-        // `OrderedCoalesce` rewrites every such node into an `OrderedUnionExec`, and
-        // `execute_stream_ordered` does the same for the final collection, so order
-        // is restored at the points where partitions actually converge.
+        // UnionExec's child-to-partition mapping is itself deterministic. The
+        // run-to-run row shuffling comes from *merging* partitions in completion
+        // order, which happens in `CoalescePartitionsExec` and is a property of
+        // every multi-partition scan, not of this one.
         //
         // Collapsing to a single partition here instead (which is what this used to
         // do) made the scan a serialization point: DataFusion put a

@@ -113,10 +113,27 @@ async fn read_raw_as_f64(
     Ok(out)
 }
 
+/// The timestamp of a CF value that is not a time.
+///
+/// See [`beacon_common::cf_time::NO_TIME_NANOS`]. A store that declares no fill
+/// still reports this one, so a NaN cell reaches a query as null rather than as
+/// the year -292277.
+pub const NO_TIME: TimestampNanosecond =
+    TimestampNanosecond(beacon_common::cf_time::NO_TIME_NANOS);
+
 /// Convert a CF time offset (in `unit`s since `epoch`) to a nanosecond timestamp.
+///
+/// A value that is not a time becomes [`NO_TIME`]. `hifitime` panics on a
+/// non-finite `Duration` rather than returning an error, and this runs on a
+/// store's fill value while a schema is being read — so a NaN fill took down the
+/// worker of any request that only wanted the schema.
+///
+/// One value at a time, so the scale is built and thrown away. A whole array
+/// goes through [`CfTimeBackend::read_subset`], which builds it once.
 pub fn cf_offset_to_timestamp(value: f64, epoch: Epoch, unit: hifitime::Unit) -> TimestampNanosecond {
-    let instant = epoch + (value * unit);
-    TimestampNanosecond(instant.to_unix(hifitime::Unit::Nanosecond) as i64)
+    beacon_common::cf_time::CfScale::new(epoch, unit)
+        .nanos(value)
+        .map_or(NO_TIME, TimestampNanosecond)
 }
 
 // ─── ZarrArrayBackend (direct dtype) ─────────────────────────────────────────
@@ -306,7 +323,13 @@ impl CfTimeBackend {
         unit: hifitime::Unit,
         raw_fill_value: Option<f64>,
     ) -> Self {
-        let fill_value = raw_fill_value.map(|f| cf_offset_to_timestamp(f, epoch, unit));
+        // A store that declares no fill still gets one. Without it a NaN cell
+        // would decode to a timestamp nothing nulls, and reach a query as a date
+        // in the year -292277. The declared fill goes through the same
+        // arithmetic as the data, so a raw fill cell maps exactly onto it.
+        let fill_value = raw_fill_value
+            .map(|f| cf_offset_to_timestamp(f, epoch, unit))
+            .or(Some(NO_TIME));
         Self {
             array,
             kind,
@@ -344,9 +367,14 @@ impl ArrayBackend<TimestampNanosecond> for CfTimeBackend {
 
     async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayD<TimestampNanosecond>> {
         let raw = read_raw_as_f64(&self.array, &to_zarr_subset(&subset), self.kind).await?;
-        let epoch = self.epoch;
-        let unit = self.unit;
-        Ok(raw.mapv(|v| cf_offset_to_timestamp(v, epoch, unit)))
+        // Once for the subset, not once per cell: the epoch and the unit are the
+        // variable's, so every cell resolved the same two constants.
+        let scale = beacon_common::cf_time::CfScale::new(self.epoch, self.unit);
+        // A cell that is not a time takes the fill, so a NaN in a store that
+        // marks its gaps some other way still nulls alongside the gaps it marked
+        // itself.
+        let absent = self.fill_value.unwrap_or(NO_TIME);
+        Ok(raw.mapv(|v| scale.nanos(v).map_or(absent, TimestampNanosecond)))
     }
 }
 

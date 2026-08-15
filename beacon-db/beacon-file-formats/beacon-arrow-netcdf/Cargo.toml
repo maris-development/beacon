@@ -40,7 +40,6 @@ datafusion = { workspace = true }
 moka = { workspace = true }
 chrono = { workspace = true }
 
-
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-common = { path = "../../beacon-common" }

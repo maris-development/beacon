@@ -45,7 +45,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_schema_fields_are_sorted_and_typed() {
-        let ds = dataset(vec![("temp", f64_array(&["x"])), ("count", i32_array(&["x"]))]).await;
+        let ds = dataset(vec![
+            ("temp", f64_array(&["x"])),
+            ("count", i32_array(&["x"])),
+        ])
+        .await;
         let schema = any_dataset_to_arrow_schema(&ds).unwrap();
 
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
