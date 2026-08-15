@@ -544,6 +544,10 @@ impl Runtime {
             BeaconStatement::AnalyzeFiles(statement) => {
                 Ok(crate::statement_plan::analyze_files_plan(statement))
             }
+            BeaconStatement::AlterSystem(statement) => {
+                crate::statement_plan::alter_system_plan(statement)
+            }
+            BeaconStatement::ShowSettings => Ok(crate::statement_plan::show_settings_plan()),
             BeaconStatement::SetExtension(statement) => {
                 Ok(crate::statement_plan::set_extension_plan(statement))
             }

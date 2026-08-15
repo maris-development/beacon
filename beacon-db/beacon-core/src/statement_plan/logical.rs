@@ -945,6 +945,106 @@ fn show_extensions_df_schema() -> &'static DFSchemaRef {
     })
 }
 
+/// Logical node for `ALTER SYSTEM SET <key> = <value>` and
+/// `ALTER SYSTEM RESET <key>`.
+///
+/// `value: None` is the `RESET` form: drop the persisted value and restore what
+/// the runtime booted with.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct AlterSystemNode {
+    /// The setting name, already resolved (aliases applied, startup-only keys
+    /// rejected) — see `statement_plan::settings`.
+    pub(crate) key: String,
+    pub(crate) value: Option<String>,
+}
+
+impl AlterSystemNode {
+    pub(crate) fn new(key: String, value: Option<String>) -> Self {
+        Self { key, value }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for AlterSystemNode {
+    fn name(&self) -> &str {
+        "AlterSystem"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match &self.value {
+            Some(value) => write!(f, "AlterSystem: SET {} = {value}", self.key),
+            None => write!(f, "AlterSystem: RESET {}", self.key),
+        }
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+        })
+    }
+}
+
+/// Logical node for `SHOW SETTINGS`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct ShowSettingsNode;
+
+impl UserDefinedLogicalNodeCore for ShowSettingsNode {
+    fn name(&self) -> &str {
+        "ShowSettings"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        show_settings_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ShowSettings")
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// Arrow schema produced by `SHOW SETTINGS`.
+///
+/// `default` is what the runtime booted with (the environment variable), which is
+/// what a `RESET` restores — so an operator can see both what a setting is now
+/// and what it would go back to.
+pub(crate) fn show_settings_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("name", DataType::Utf8, false),
+                Field::new("value", DataType::Utf8, true),
+                Field::new("default", DataType::Utf8, true),
+                Field::new("description", DataType::Utf8, false),
+            ]))
+        })
+        .clone()
+}
+
+fn show_settings_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(show_settings_arrow_schema().as_ref().clone())
+                .expect("SHOW SETTINGS schema is valid"),
+        )
+    })
+}
+
 /// Logical node for `SET EXTENSION '<kind>' FOR <table> TO '<json>'`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct SetExtensionNode {

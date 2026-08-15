@@ -1,18 +1,107 @@
 ---
-description: Full reference of the BEACON_* environment variables. It covers the server, engine, storage, S3, Flight SQL, crawlers and formats, with their defaults.
+description: Full reference of the BEACON_* environment variables. It covers the server, engine, storage, S3, Flight SQL, crawlers and formats, with their defaults, and the SQL statements that change a setting without a restart.
 ---
 
 # Configuration
 
-You configure Beacon with **environment variables** only. There is no
-configuration file. Beacon reads every option below from the environment at
-startup. An unset variable takes the default from this page.
+You configure Beacon with **environment variables**. There is no configuration
+file. Beacon reads every option below from the environment at startup. An unset
+variable takes the default from this page.
+
+Many engine and format settings also change **at runtime**, through SQL, with no
+restart. See [Change a setting at runtime](#change-a-setting-at-runtime). The
+table for each section marks which ones.
 
 ::: info
 Every setting uses a `BEACON_*` name. The S3 credential variables are the
 exception. They use the standard `AWS_*` names, so they work with your AWS tools.
 See [S3 object storage](#s3-object-storage).
 :::
+
+## Change a setting at runtime
+
+`SET` changes a setting on the running server:
+
+```sql
+SET beacon.netcdf.use_rust_reader = true;
+SET beacon.sql.stream_coalesce.target_rows = 131072;
+SET beacon.default_table = 'observations';
+```
+
+A setting name is its `BEACON_*` variable, lowercased, under the `beacon.`
+namespace: `BEACON_NETCDF_USE_RUST_READER` becomes `beacon.netcdf.use_rust_reader`.
+
+`SHOW SETTINGS` lists every setting you can change, with its value, the value the
+server started with, and what it does. Any authenticated user can read it.
+
+```sql
+SHOW SETTINGS;
+SHOW beacon.default_table;
+SELECT * FROM beacon.system.settings WHERE name LIKE 'beacon.netcdf.%';
+```
+
+### Scope
+
+A `SET` applies to the **whole server**, not to one client. Beacon runs one query
+engine for every connection, so the next query from any user sees the new value.
+Only the super-user may change a setting. This is the scope `SET` has always had
+for the engine options below.
+
+### Persistence
+
+`SET` lasts until the server stops. `ALTER SYSTEM SET` also writes the value into
+the database file, and the server applies it again at the next start:
+
+```sql
+ALTER SYSTEM SET beacon.netcdf.use_rust_reader = 'true';
+```
+
+`RESET` puts a setting back to the value the server started with. `ALTER SYSTEM
+RESET` also removes the stored value:
+
+```sql
+RESET beacon.netcdf.use_rust_reader;
+ALTER SYSTEM RESET beacon.netcdf.use_rust_reader;
+```
+
+Order of precedence, strongest first: `ALTER SYSTEM SET` > environment variable >
+default. `ALTER SYSTEM` needs a file-backed database. An in-memory database
+refuses it.
+
+### Engine options
+
+The `beacon.` namespace also covers the query engine's own options. Both spellings
+work:
+
+```sql
+SET beacon.execution.batch_size = 8192;
+SET datafusion.execution.batch_size = 8192;   -- the same option
+```
+
+`SELECT * FROM information_schema.df_settings` lists both namespaces.
+
+### Settings you cannot change at runtime
+
+A setting that Beacon uses once, at startup, stays an environment variable. This
+covers the port, the host, the worker threads, the data directory, the S3 store,
+the credentials, the Flight SQL server, CORS, the crawler, the file statistics,
+and each reader cache **size**. A `SET` on one of these fails and names the
+variable to edit:
+
+```
+`beacon.port` can only be set when the server starts: set the `BEACON_PORT`
+environment variable and restart
+```
+
+### What a change reaches
+
+A `SET` on a format setting applies to the next `read_netcdf(...)`,
+`read_zarr(...)` or similar call. A **registered** external table keeps the
+settings it was created with, because Beacon builds its reader once. Run
+`REFRESH <table>` to rebuild it with the current settings.
+
+A per-table `CREATE EXTERNAL TABLE ... OPTIONS (...)` value always wins over a
+`SET`, which in turn wins over the environment variable.
 
 ## Server
 
@@ -74,10 +163,10 @@ rejects that `CREATE`. Beacon never writes plaintext.
 | --- | --- | --- |
 | `BEACON_ENABLE_SQL` | `true` | Enable the raw SQL query interface. Set to `false` to disable it (the JSON query API stays available). |
 | `BEACON_VM_MEMORY_SIZE` | `8192` | Working memory (MB) available to the query engine. More is better for larger datasets and memory-heavy operations such as spatial joins and `GROUP BY`. |
-| `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request omits the source. Only applies to the JSON query API, SQL queries must always specify a source. |
-| `BEACON_ENABLE_PUSHDOWN_PROJECTION` | `true` | Push column projection down into file readers so only requested columns are decoded. |
-| `BEACON_ENABLE_ND_PIPELINE` | `false` | Enable the N-dimensional pipeline optimizer for zarr/netcdf reads: sink element-wise projections below the grid broadcast so `lat * 2` and similar run on the coordinate axis instead of the full cross-product. The base nd pipeline always runs; this only enables the node-rewriting optimization. |
-| `BEACON_BATCH_SIZE` | `64000` | Batch size, in rows, for NetCDF reads (local and MPIO). |
+| `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request omits the source. Only applies to the JSON query API, SQL queries must always specify a source. Settable at runtime as `beacon.default_table`. |
+| `BEACON_ENABLE_PUSHDOWN_PROJECTION` | `true` | Push column projection down into file readers so only requested columns are decoded. Settable at runtime as `beacon.enable_pushdown_projection`. |
+| `BEACON_ENABLE_ND_PIPELINE` | `false` | Enable the N-dimensional pipeline optimizer for zarr/netcdf reads: sink element-wise projections below the grid broadcast so `lat * 2` and similar run on the coordinate axis instead of the full cross-product. The base nd pipeline always runs; this only enables the node-rewriting optimization. Settable at runtime as `beacon.enable_nd_pipeline`. |
+| `BEACON_BATCH_SIZE` | `64000` | Batch size, in rows, for NetCDF reads (local and MPIO). Settable at runtime as `beacon.batch_size`. |
 | `BEACON_STATS_CACHE_CAPACITY` | `10000` | Maximum number of per-file statistics entries cached for query pruning. Read once at startup. |
 
 ### SQL result-stream coalescing
@@ -88,10 +177,10 @@ many small batches.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_SQL_STREAM_COALESCE_ENABLED` | `true` | Enable coalescing of the SQL result stream. |
-| `BEACON_SQL_STREAM_COALESCE_TARGET_ROWS` | `65536` | Target rows per coalesced batch. |
-| `BEACON_SQL_STREAM_COALESCE_FLUSH_TIMEOUT_MS` | `25` | Max time (ms) to wait while accumulating rows before flushing a partial batch. |
-| `BEACON_SQL_STREAM_COALESCE_MAX_ROWS` | `262144` | Hard upper bound on rows per coalesced batch. |
+| `BEACON_SQL_STREAM_COALESCE_ENABLED` | `true` | Enable coalescing of the SQL result stream. Settable at runtime as `beacon.sql.stream_coalesce.enabled`. |
+| `BEACON_SQL_STREAM_COALESCE_TARGET_ROWS` | `65536` | Target rows per coalesced batch. Settable at runtime as `beacon.sql.stream_coalesce.target_rows`. |
+| `BEACON_SQL_STREAM_COALESCE_FLUSH_TIMEOUT_MS` | `25` | Max time (ms) to wait while accumulating rows before flushing a partial batch. Settable at runtime as `beacon.sql.stream_coalesce.flush_timeout_ms`. |
+| `BEACON_SQL_STREAM_COALESCE_MAX_ROWS` | `262144` | Hard upper bound on rows per coalesced batch. Settable at runtime as `beacon.sql.stream_coalesce.max_rows`. |
 
 ## Arrow Flight SQL
 
@@ -216,10 +305,10 @@ change them.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_NETCDF_ENABLE_STATISTICS` | `true` | Compute and cache per-file statistics used for query pruning. |
-| `BEACON_NETCDF_USE_READER_CACHE` | `true` | Cache opened NetCDF readers in memory. |
+| `BEACON_NETCDF_ENABLE_STATISTICS` | `true` | Compute and cache per-file statistics used for query pruning. Settable at runtime as `beacon.netcdf.enable_statistics`. |
+| `BEACON_NETCDF_USE_READER_CACHE` | `true` | Cache opened NetCDF readers in memory. Settable at runtime as `beacon.netcdf.use_reader_cache`. |
 | `BEACON_NETCDF_READER_CACHE_SIZE` | `128` | Max NetCDF reader entries to keep cached. |
-| `BEACON_NETCDF_USE_RUST_READER` | `false` | Read NetCDF with the pure-Rust reader instead of the netCDF-C library. |
+| `BEACON_NETCDF_USE_RUST_READER` | `false` | Read NetCDF with the pure-Rust reader instead of the netCDF-C library. Settable at runtime as `beacon.netcdf.use_rust_reader`. |
 
 ### HDF5
 
@@ -229,9 +318,9 @@ reader flag, so you can move one format at a time.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_HDF5_USE_RUST_READER` | `false` | Read HDF5 with the pure-Rust reader instead of the netCDF-C library. |
-| `BEACON_HDF5_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. Needs the pure-Rust reader. |
-| `BEACON_HDF5_USE_READER_CACHE` | `true` | Cache opened HDF5 readers in memory. |
+| `BEACON_HDF5_USE_RUST_READER` | `false` | Read HDF5 with the pure-Rust reader instead of the netCDF-C library. Settable at runtime as `beacon.hdf5.use_rust_reader`. |
+| `BEACON_HDF5_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. Needs the pure-Rust reader. Settable at runtime as `beacon.hdf5.enable_statistics`. |
+| `BEACON_HDF5_USE_READER_CACHE` | `true` | Cache opened HDF5 readers in memory. Settable at runtime as `beacon.hdf5.use_reader_cache`. |
 | `BEACON_HDF5_READER_CACHE_SIZE` | `128` | Max HDF5 reader entries to keep cached. |
 
 The pure-Rust reader also reads two layouts the netCDF data model cannot express: a nested group,
@@ -242,7 +331,7 @@ and a compound dataset. See
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_ZARR_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. |
+| `BEACON_ZARR_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. Settable at runtime as `beacon.zarr.enable_statistics`. |
 
 A store answers from its `actual_range` metadata where it can. Where it cannot, it reads only its
 rank-0 and rank-1 arrays — the coordinates a `WHERE` clause names. A data grid of rank 2 or higher
@@ -256,14 +345,33 @@ which values a store holds, so a store may hold values outside them.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_ATLAS_USE_READER_CACHE` | `true` | Cache opened Atlas store readers in memory, avoiding re-opening the same `atlas.json` across queries. |
+| `BEACON_ATLAS_USE_READER_CACHE` | `true` | Cache opened Atlas store readers in memory, avoiding re-opening the same `atlas.json` across queries. Settable at runtime as `beacon.atlas.use_reader_cache`. |
 | `BEACON_ATLAS_READER_CACHE_SIZE` | `32` | Max Atlas reader entries to keep cached. |
+| `BEACON_ATLAS_USE_PRUNING` | `true` | Drop the datasets a predicate cannot match, from the collection's statistics, before reading them. A pure optimization: off trades throughput for skipping the pruning-index build. Settable at runtime as `beacon.atlas.use_pruning`. |
 
 ### Beacon Binary Format (BBF)
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE` | `false` | Split large batches into smaller slices for better memory use and parallelism on BBF queries. |
+| `BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE` | `false` | Split large batches into smaller slices for better memory use and parallelism on BBF queries. Settable at runtime as `beacon.bbf.split_streams_slice`. |
+
+### Managed Lance tables
+
+These tune the [managed table](/docs/2.0.0-rc2/server/index) engine. An empty
+value leaves the choice to Lance.
+
+The first four apply when Beacon **writes** a table. They shape the files a
+`CREATE TABLE` or `INSERT` produces, and never the files already on disk. Change
+one and rewrite the table to apply it. `BEACON_LANCE_MATERIALIZATION` is a read
+setting and applies to the next query.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_LANCE_COMPRESSION` | _(none)_ | Block compression for string and binary columns: `fsst`, `zstd`, `lz4`, or `none`. Numeric columns are never compressed by this setting. Settable at runtime as `beacon.lance.compression`. |
+| `BEACON_LANCE_NUMERIC_COMPRESSION` | _(Lance default)_ | Block compression for numeric columns: `zstd`, `lz4`, or `none`. `none` also turns off bitpacking and RLE, which usually measures **larger**. Settable at runtime as `beacon.lance.numeric_compression`. |
+| `BEACON_LANCE_VERSION` | `2.2` | Lance file format version for new data: `2.0`, `2.1` or `2.2`. An append keeps the version of the table it appends to. Settable at runtime as `beacon.lance.version`. |
+| `BEACON_LANCE_MINICHUNK` | _(Lance default)_ | Minichunk size, in bytes, for fixed-width columns. A size of 32KB and up needs version `2.2`. Settable at runtime as `beacon.lance.minichunk`. |
+| `BEACON_LANCE_MATERIALIZATION` | _(width rule)_ | Column materialization on a filtered scan: `late` or `early`. Unset keeps Beacon's rule, which reads late above 16 projected columns. Settable at runtime as `beacon.lance.materialization`. |
 
 ## API documentation metadata
 

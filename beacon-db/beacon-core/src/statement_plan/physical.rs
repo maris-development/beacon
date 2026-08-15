@@ -32,8 +32,8 @@ use super::{
     logical::{
         analyze_files_arrow_schema, count_arrow_schema, run_crawler_arrow_schema,
         show_crawlers_arrow_schema,
-        show_indexes_arrow_schema, show_secrets_arrow_schema, AlterTableSpec,
-        Mutation,
+        show_indexes_arrow_schema, show_secrets_arrow_schema, show_settings_arrow_schema,
+        AlterTableSpec, Mutation,
     },
     materialized_view, SessionCell,
 };
@@ -1553,6 +1553,112 @@ impl ExecutionPlan for ShowExtensionsExec {
                 .await
                 .map_err(to_df_err)
         });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
+
+/// Physical node for `ALTER SYSTEM SET <key> = <value>` /
+/// `ALTER SYSTEM RESET <key>`.
+///
+/// Applies the value to the live session *and* writes it into the database file,
+/// so the change takes effect now and survives a restart.
+#[derive(Debug)]
+pub(crate) struct AlterSystemExec {
+    key: String,
+    value: Option<String>,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl AlterSystemExec {
+    pub(crate) fn new(key: String, value: Option<String>, session: SessionCell) -> Self {
+        Self {
+            key,
+            value,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.value {
+            Some(value) => write!(f, "AlterSystemExec: SET {} = {value}", self.key),
+            None => write!(f, "AlterSystemExec: RESET {}", self.key),
+        }
+    }
+}
+
+side_effect_exec!(
+    AlterSystemExec,
+    "AlterSystemExec",
+    |exec: &AlterSystemExec| {
+        let session = upgrade_session(&exec.session)?;
+        let key = exec.key.clone();
+        let value = exec.value.clone();
+        Ok(side_effect_stream(async move {
+            actions::alter_system(&session, &key, value.as_deref())
+                .await
+                .map_err(to_df_err)
+        }))
+    }
+);
+
+/// Physical node for `SHOW SETTINGS` — one row per runtime-settable setting.
+#[derive(Debug)]
+pub(crate) struct ShowSettingsExec {
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl ShowSettingsExec {
+    pub(crate) fn new(session: SessionCell) -> Self {
+        Self {
+            session,
+            cache: Arc::new(plan_properties(show_settings_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for ShowSettingsExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "ShowSettingsExec")
+            }
+            DisplayFormatType::TreeRender => write!(f, "ShowSettingsExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for ShowSettingsExec {
+    fn name(&self) -> &str {
+        "ShowSettingsExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let schema = show_settings_arrow_schema();
+        let stream =
+            futures::stream::once(
+                async move { actions::show_settings(&session).map_err(to_df_err) },
+            );
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }

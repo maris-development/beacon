@@ -68,6 +68,11 @@ pub(crate) async fn lower_df_statement(
     session_ctx: &Arc<SessionContext>,
     statement: datafusion::sql::parser::Statement,
 ) -> anyhow::Result<LogicalPlan> {
+    // `SET`/`RESET`/`SHOW` over the `beacon.*` namespace, resolved here because
+    // `SHOW` validates its name during planning and `RESET` would otherwise
+    // restore DataFusion's compiled default over the operator's environment.
+    let statement = super::settings::rewrite_settings_statement(session_ctx, statement)?;
+
     // DataFusion has no `ALTER TABLE` planning, so build the node from the AST.
     if let datafusion::sql::parser::Statement::Statement(sql_stmt) = &statement {
         if let SqlAstStatement::AlterTable(alter) = sql_stmt.as_ref() {

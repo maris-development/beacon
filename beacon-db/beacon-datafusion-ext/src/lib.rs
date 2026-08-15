@@ -10,6 +10,7 @@ pub mod nd;
 pub mod object_store_registry;
 pub mod remote;
 pub mod secrets;
+pub mod settings;
 pub mod stats_cache;
 pub mod table_ext;
 pub mod type_widening;

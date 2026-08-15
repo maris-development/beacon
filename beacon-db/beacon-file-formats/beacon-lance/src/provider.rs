@@ -29,6 +29,7 @@ use lance::session::Session as LanceSession;
 use crate::definition::LanceTableDefinition;
 use crate::io::WriteKind;
 use crate::sink::LanceDataSink;
+use crate::config::LanceConfig;
 use crate::warehouse::LanceWarehouse;
 
 /// A beacon-managed Lance table provider.
@@ -103,6 +104,7 @@ async fn scan_fragment_group(
     range: std::ops::Range<usize>,
     projection: Option<&Vec<usize>>,
     filters: &[Expr],
+    config: &LanceConfig,
 ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
     let projected_columns = projection.map_or_else(|| schema.fields().len(), |p| p.len());
     let mut scan = dataset.scan();
@@ -153,7 +155,7 @@ async fn scan_fragment_group(
         // time): above `LATE_MATERIALIZATION_MIN_COLUMNS` the downside is a bounded
         // ~10-25% on unselective filters and the upside is several fold, while
         // narrow projections keep Lance's heuristic, where early costs little.
-        match lance_materialization_style() {
+        match config.materialization_style() {
             Some(style) => scan.materialization_style(style),
             None if projected_columns > LATE_MATERIALIZATION_MIN_COLUMNS => {
                 scan.materialization_style(MaterializationStyle::AllLate)
@@ -172,22 +174,6 @@ async fn scan_fragment_group(
 /// Projection width above which a filtered scan switches to late materialization.
 /// See the crossover measurements in `scan_fragment_group`.
 const LATE_MATERIALIZATION_MIN_COLUMNS: usize = 16;
-
-/// Override for Lance's column materialization heuristic.
-///
-/// `BEACON_LANCE_MATERIALIZATION=late|early` forces all columns one way; unset
-/// keeps Lance's per-column heuristic.
-fn lance_materialization_style() -> Option<MaterializationStyle> {
-    match std::env::var("BEACON_LANCE_MATERIALIZATION")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-    {
-        Some("late") => Some(MaterializationStyle::AllLate),
-        Some("early") => Some(MaterializationStyle::AllEarly),
-        _ => None,
-    }
-}
 
 #[async_trait]
 impl TableProvider for LanceTable {
@@ -223,6 +209,10 @@ impl TableProvider for LanceTable {
             return provider.scan(state, projection, filters, limit).await;
         }
 
+        // Read per scan, so `SET beacon.lance.materialization` applies to the next
+        // query rather than to the next restart.
+        let config = LanceConfig::from_session(state);
+
         // Spread fragments over at most `target` groups.
         let groups = target.min(n_frags);
         let per = n_frags.div_ceil(groups);
@@ -231,7 +221,8 @@ impl TableProvider for LanceTable {
         while start < n_frags {
             let end = (start + per).min(n_frags);
             plans.push(
-                scan_fragment_group(&dataset, &self.schema, start..end, projection, filters).await?,
+                scan_fragment_group(&dataset, &self.schema, start..end, projection, filters, &config)
+                    .await?,
             );
             start = end;
         }

@@ -10,7 +10,7 @@ use datafusion::sql::{
 use beacon_auth::{Privilege, PrivilegeTarget};
 
 use super::statement::{
-    AttachStatement, AuthStatement, BeaconStatement, CreateCrawlerStatement, CreateIndexStatement,
+    AlterSystemStatement, AttachStatement, AuthStatement, BeaconStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
     AnalyzeFilesStatement, RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
@@ -109,6 +109,14 @@ impl<'a> BeaconParser<'a> {
 
         if self.is_analyze_files() {
             return self.parse_analyze_files();
+        }
+
+        if self.is_alter_system() {
+            return self.parse_alter_system();
+        }
+
+        if self.is_show_settings() {
+            return self.parse_show_settings();
         }
 
         let df_statement = Box::new(self.df_parser.parse_statement()?);
@@ -311,6 +319,70 @@ impl<'a> BeaconParser<'a> {
         Ok(BeaconStatement::ShowExtensions(ShowExtensionsStatement {
             table,
         }))
+    }
+
+    /// Whether the next two tokens are `ALTER SYSTEM`.
+    ///
+    /// Both words are required, so `ALTER TABLE` still reaches DataFusion.
+    fn is_alter_system(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.keyword == Keyword::ALTER)
+            && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "SYSTEM")
+    }
+
+    /// Parse: ALTER SYSTEM SET <key> = <value> | ALTER SYSTEM RESET <key>
+    fn parse_alter_system(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // ALTER
+        self.df_parser.parser.next_token(); // SYSTEM
+
+        let is_reset = matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.value.to_uppercase() == "RESET"
+        );
+        if is_reset {
+            self.df_parser.parser.next_token(); // RESET
+            let key = self.parse_object_name()?;
+            return Ok(BeaconStatement::AlterSystem(AlterSystemStatement {
+                key,
+                value: None,
+            }));
+        }
+
+        self.expect_keyword(Keyword::SET)?;
+        let key = self.parse_object_name()?;
+        self.expect_token(&Token::Eq)?;
+        // Every value is carried as a string; the config field parses it into its
+        // own type, exactly as it does for a plain `SET`.
+        let value = self.parse_string_value()?;
+        Ok(BeaconStatement::AlterSystem(AlterSystemStatement {
+            key,
+            value: Some(value),
+        }))
+    }
+
+    /// Whether the next two tokens are `SHOW SETTINGS`.
+    fn is_show_settings(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.value.to_uppercase() == "SHOW")
+            && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "SETTINGS")
+    }
+
+    /// Parse: SHOW SETTINGS
+    fn parse_show_settings(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // SHOW
+        self.df_parser.parser.next_token(); // SETTINGS
+        Ok(BeaconStatement::ShowSettings)
+    }
+
+    /// Consume the expected token or error.
+    fn expect_token(&mut self, token: &Token) -> Result<()> {
+        self.df_parser
+            .parser
+            .expect_token(token)
+            .map(|_| ())
+            .map_err(|e| DataFusionError::External(Box::new(e)))
     }
 
     /// Consume the expected keyword or error.

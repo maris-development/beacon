@@ -7,6 +7,7 @@ use beacon_binary_format::{
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::settings::BeaconOptions;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -69,12 +70,17 @@ impl GetExt for BBFFormatFactory {
 impl FileFormatFactory for BBFFormatFactory {
     fn create(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        // Per-table override from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
-        // defaulting to the runtime config.
-        let mut split_streams_slice = self.config.split_streams_slice;
+        // Three layers, narrowest last: the runtime default, the session's
+        // `beacon.bbf.*` namespace (what `SET` writes), then the per-table
+        // `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+        // No namespace means this session was not built by beacon's runtime, so
+        // this factory's own config is the only configuration there is.
+        let mut split_streams_slice = BeaconOptions::try_from_session(state)
+            .map(|beacon| beacon.bbf.split_streams_slice)
+            .unwrap_or(self.config.split_streams_slice);
         if let Some(value) = format_options.get("split_streams_slice") {
             split_streams_slice = parse_bool_option("split_streams_slice", value)?;
         }

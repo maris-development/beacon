@@ -180,6 +180,101 @@ pub(crate) async fn drop_secret(
     }
 }
 
+/// `ALTER SYSTEM SET <key> = <value>` / `ALTER SYSTEM RESET <key>`.
+///
+/// Two effects: the live session config changes, and the database file records
+/// (or forgets) the value so a restart replays it.
+///
+/// A `RESET` restores the value the runtime had before any persisted override —
+/// its environment variable, or the compiled default — and drops that override.
+///
+/// The order is: refuse what cannot be done, apply, then write. A runtime with no
+/// durable store is rejected *before* the session changes, so a failed statement
+/// leaves nothing behind; applying before the write then means an invalid value
+/// is rejected before anything reaches disk.
+pub(crate) async fn alter_system(
+    session: &Arc<SessionContext>,
+    key: &str,
+    value: Option<&str>,
+) -> anyhow::Result<()> {
+    let persistence = crate::settings_persistence::SettingsPersistence::from_session(session);
+    let Some(store) = persistence.store().cloned() else {
+        anyhow::bail!(
+            "cannot persist `{key}`: ALTER SYSTEM needs a file-backed database, not an \
+             in-memory one — use `SET {key}` for a live-only change"
+        );
+    };
+
+    let effective = match value {
+        Some(value) => value.to_string(),
+        None => pre_persisted_value(session, key)?,
+    };
+
+    session
+        .state_ref()
+        .write()
+        .config_mut()
+        .options_mut()
+        .set(key, &effective)
+        .map_err(|error| anyhow::anyhow!("cannot set `{key}`: {error}"))?;
+
+    match value {
+        Some(value) => crate::settings_persistence::persist_setting(&store, key, value).await,
+        None => crate::settings_persistence::remove_persisted_setting(&store, key).await,
+    }
+}
+
+/// The value `key` held *before* any persisted override — the environment's, or
+/// the compiled default.
+///
+/// Not the startup value a plain `RESET` uses: `ALTER SYSTEM RESET` is deleting
+/// the persisted value, so restoring the startup state would put back the very
+/// value it just removed.
+fn pre_persisted_value(session: &Arc<SessionContext>, key: &str) -> anyhow::Result<String> {
+    beacon_datafusion_ext::settings::BootSettings::from_config(session.state().config())
+        .environment(key)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!("cannot reset `{key}`: it had no value when the server started")
+        })
+}
+
+/// `SHOW SETTINGS`: one row per runtime-settable setting, with the value it holds
+/// now and the one the runtime booted with (what a `RESET` restores).
+///
+/// Only the `beacon.*` namespace. The `datafusion.*` half is engine internals and
+/// stays in `information_schema.df_settings`, which is where a DataFusion user
+/// looks for it.
+pub(crate) fn show_settings(
+    session: &Arc<SessionContext>,
+) -> anyhow::Result<arrow::array::RecordBatch> {
+    use arrow::array::{ArrayRef, StringArray};
+
+    let config = session.state();
+    let config = config.config();
+    let boot = beacon_datafusion_ext::settings::BootSettings::from_config(config);
+
+    use datafusion::common::config::ExtensionOptions as _;
+    let mut entries = beacon_datafusion_ext::settings::BeaconOptions::from_config(config).entries();
+    entries.sort_by(|a, b| a.key.cmp(&b.key));
+
+    let names: Vec<&str> = entries.iter().map(|entry| entry.key.as_str()).collect();
+    let values: Vec<Option<&str>> = entries.iter().map(|entry| entry.value.as_deref()).collect();
+    let defaults: Vec<Option<&str>> = entries.iter().map(|entry| boot.get(&entry.key)).collect();
+    let descriptions: Vec<&str> = entries.iter().map(|entry| entry.description).collect();
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(names)),
+        Arc::new(StringArray::from(values)),
+        Arc::new(StringArray::from(defaults)),
+        Arc::new(StringArray::from(descriptions)),
+    ];
+    Ok(arrow::array::RecordBatch::try_new(
+        super::logical::show_settings_arrow_schema(),
+        columns,
+    )?)
+}
+
 /// `SHOW SECRETS`: one row per secret — name, type, scope, and option *keys* (never values).
 pub(crate) async fn show_secrets(
     session: &Arc<SessionContext>,
@@ -529,9 +624,14 @@ pub(crate) async fn create_table(
     // backend (S3 only ever applies to the datasets store).
     let warehouse = lance_warehouse(session)?;
     let namespace = beacon_lance::beacon_namespace();
-    let table =
-        beacon_lance::create_lance_table(warehouse.clone(), &namespace, &table_name, &arrow_schema)
-            .await?;
+    let table = beacon_lance::create_lance_table(
+        warehouse.clone(),
+        &namespace,
+        &table_name,
+        &arrow_schema,
+        &beacon_lance::LanceConfig::from_config(session.state().config()),
+    )
+    .await?;
     let location = table.definition().location.clone();
     let provider: Arc<dyn datafusion::catalog::TableProvider> = Arc::new(table);
 
@@ -635,7 +735,13 @@ pub(crate) async fn replace_table_contents(
             }
             None => {
                 let stream = execute_stream(child, task_ctx.clone())?;
-                beacon_lance::replace_table_contents(&warehouse, &location, stream).await?;
+                beacon_lance::replace_table_contents(
+                    &warehouse,
+                    &location,
+                    stream,
+                    &beacon_lance::LanceConfig::from_config(task_ctx.session_config()),
+                )
+                .await?;
             }
         }
         return Ok(());

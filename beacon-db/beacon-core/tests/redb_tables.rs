@@ -59,7 +59,13 @@ async fn lance_table_lifecycle_over_redb() {
     let warehouse = Arc::new(LanceWarehouse::new(tables.clone()));
     let namespace = beacon_namespace();
 
-    let table = create_lance_table(warehouse.clone(), &namespace, "orders", &sample_schema())
+    let table = create_lance_table(
+        warehouse.clone(),
+        &namespace,
+        "orders",
+        &sample_schema(),
+        &Default::default(),
+    )
         .await
         .expect("create table on redb");
     let location = table.definition().location.clone();
@@ -87,7 +93,7 @@ async fn lance_table_lifecycle_over_redb() {
         .execute_stream()
         .await
         .unwrap();
-    replace_table_contents(&warehouse, &location, keep)
+    replace_table_contents(&warehouse, &location, keep, &Default::default())
         .await
         .expect("replace (delete) on redb");
     assert_eq!(

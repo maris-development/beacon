@@ -309,6 +309,18 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
+        if let Some(alter) = any.downcast_ref::<logical::AlterSystemNode>() {
+            return Ok(Some(Arc::new(physical::AlterSystemExec::new(
+                alter.key.clone(),
+                alter.value.clone(),
+                session,
+            ))));
+        }
+
+        if any.downcast_ref::<logical::ShowSettingsNode>().is_some() {
+            return Ok(Some(Arc::new(physical::ShowSettingsExec::new(session))));
+        }
+
         // Unrecognized node: let the default planner handle it.
         Ok(None)
     }

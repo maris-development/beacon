@@ -11,9 +11,10 @@ use crate::settings::SqlStreamCoalesceSettings;
 /// least [`SqlStreamCoalesceSettings::target_rows`] rows before they reach a
 /// client.
 ///
-/// Published on the session config as an extension by the runtime builder, so
+/// Configured through the `beacon.*` namespace on the session config, so
 /// execution-time code recovers it with [`CoalesceSqlStream::from_session`]
-/// rather than threading a `Runtime` handle through.
+/// rather than threading a `Runtime` handle through — and picks up a
+/// `SET beacon.sql.stream_coalesce.*` on the very next statement.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CoalesceSqlStream {
     settings: SqlStreamCoalesceSettings,
@@ -24,15 +25,10 @@ impl CoalesceSqlStream {
         Self { settings }
     }
 
-    /// Recovers the coalescer published on `session_ctx`, falling back to the
-    /// defaults if the extension is absent (a session beacon did not build).
+    /// Recovers the coalescer configured on `session_ctx`, falling back to the
+    /// defaults if the namespace is absent (a session beacon did not build).
     pub(crate) fn from_session(session_ctx: &SessionContext) -> Self {
-        session_ctx
-            .state()
-            .config()
-            .get_extension::<CoalesceSqlStream>()
-            .map(|coalescer| *coalescer)
-            .unwrap_or_default()
+        Self::new(crate::settings::SqlSettings::from_session(session_ctx).stream_coalesce)
     }
 
     /// Wraps `stream` in the coalescing adapter. Returns `stream` unchanged when
@@ -251,18 +247,24 @@ mod tests {
         assert_eq!(output_batches[1].num_rows(), 2_000);
     }
 
-    /// The coalescer is recovered from the session extension the runtime builder
-    /// publishes, and falls back to the defaults on a session without one.
+    /// The coalescer is recovered from the `beacon.*` namespace the runtime
+    /// builder publishes, and falls back to the defaults on a session without one.
     #[tokio::test]
-    async fn reads_settings_from_the_session_extension() {
+    async fn reads_settings_from_the_session_namespace() {
         let settings = SqlStreamCoalesceSettings {
             enabled: true,
             target_rows: 30_000,
             flush_timeout_ms: 10_000,
             max_rows: 200_000,
         };
-        let config =
-            SessionConfig::new().with_extension(Arc::new(CoalesceSqlStream::new(settings)));
+        let mut options = beacon_datafusion_ext::settings::BeaconOptions::default();
+        crate::settings::SqlSettings {
+            stream_coalesce: settings,
+            ..Default::default()
+        }
+        .apply_to(&mut options);
+        let mut config = SessionConfig::new();
+        config.options_mut().extensions.insert(options);
         let session_ctx = SessionContext::new_with_config(config);
 
         let output_batches = CoalesceSqlStream::from_session(&session_ctx)
@@ -280,7 +282,7 @@ mod tests {
         assert_eq!(
             CoalesceSqlStream::from_session(&SessionContext::new()).settings,
             SqlStreamCoalesceSettings::default(),
-            "a session without the extension should fall back to the defaults"
+            "a session without the namespace should fall back to the defaults"
         );
     }
 }

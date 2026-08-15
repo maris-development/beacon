@@ -35,6 +35,21 @@ use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::logical_expr::Volatility;
 
 use super::exec::{NdBroadcastExec, NdFilterExec, NdProjectionExec};
+use crate::settings::BeaconOptions;
+
+/// Whether the node-rewriting nd optimization is on for this plan.
+///
+/// Both rules are always installed and check here, rather than being installed
+/// conditionally at startup: the optimizer chain is fixed when the session state
+/// is built, so a rule that is absent can never be switched on again, and
+/// `SET beacon.enable_nd_pipeline = true` would need a restart to take effect.
+/// The base nd pipeline runs either way; this only gates the rewrite.
+fn nd_pipeline_enabled(config: &ConfigOptions) -> bool {
+    config
+        .extensions
+        .get::<BeaconOptions>()
+        .is_some_and(|options| options.enable_nd_pipeline)
+}
 
 /// Sinks element-wise `ProjectionExec`s below an [`NdBroadcastExec`] into an
 /// [`NdProjectionExec`], so they evaluate before broadcasting.
@@ -51,8 +66,11 @@ impl PhysicalOptimizerRule for NdProjectionPushdown {
     fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
-        _config: &ConfigOptions,
+        config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        if !nd_pipeline_enabled(config) {
+            return Ok(plan);
+        }
         plan.transform_down(|node| {
             let Some(projection) = node.as_any().downcast_ref::<ProjectionExec>() else {
                 return Ok(Transformed::no(node));
@@ -138,8 +156,11 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
     fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
-        _config: &ConfigOptions,
+        config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        if !nd_pipeline_enabled(config) {
+            return Ok(plan);
+        }
         plan.transform_down(|node| {
             let Some(filter) = node.as_any().downcast_ref::<FilterExec>() else {
                 return Ok(Transformed::no(node));

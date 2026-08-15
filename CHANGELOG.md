@@ -12,6 +12,25 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **A setting changes with `SET`, not only with a restart.** Beacon's configuration was
+  environment-only, so tuning one knob meant a redeploy, and no client could read a value back.
+  The engine and format settings now live in a `beacon.*` namespace the query engine owns:
+  `SET beacon.netcdf.use_rust_reader = true` applies to the next query, `RESET` puts it back to
+  what the server started with, and `SHOW SETTINGS` lists every setting with its value, its
+  startup value and what it does — readable by any authenticated user, which is the piece that
+  made the settings discoverable at all. `ALTER SYSTEM SET` also writes the value into
+  `beacon.db`, so it survives a restart; precedence is persisted > environment > default. A `SET`
+  applies to the whole server and is super-user-only, which is the scope `SET datafusion.*`
+  already had — Beacon runs one engine for every connection, and this does not invent a
+  per-client session. A setting that is read once at startup (the port, the data directory, the
+  credentials, each reader-cache *size*) stays an environment variable and says so by name:
+  ``SET beacon.port`` answers with `BEACON_PORT` and "restart", rather than appearing to work.
+  `beacon.` is also a complete alias for the engine's own `datafusion.` namespace, so
+  `SET beacon.execution.batch_size` and `SET datafusion.execution.batch_size` are one option
+  under two spellings. Format settings keep their three layers, narrowest last: the environment
+  default, the `SET`, then a per-table `OPTIONS (...)`. A `SET` reaches a `read_netcdf(...)`
+  immediately; a registered external table builds its reader once, so `REFRESH` rebuilds it with
+  the current settings. See [Configuration](docs/docs/2.0.0-rc2/server/configuration.md).
 - **Zarr stores supply column ranges for file pruning.** A Zarr store recorded nothing in
   `beacon.system.file_stats`, so every query opened every store. It now reports a range per
   coordinate: an array of rank 0 or rank 1 is read and measured, and an array of rank 2 or higher —
@@ -79,6 +98,12 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **`BEACON_ATLAS_*` and `BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE` now reach the reader.** Both were
+  parsed, validated and documented, and then dropped: the runtime built the Atlas and BBF formats
+  from `Default::default()` instead of the configuration, so setting either to a non-default value
+  did nothing. The `BEACON_LANCE_*` family had the opposite problem — it bypassed the configuration
+  entirely and read the process environment at each write, so it was absent from the reference.
+  Both are wired through the runtime now, and all of them are documented and settable at runtime.
 - **File statistics pruned no netCDF or HDF5 file.** The ranges were recorded and then never used.
   Pruning rewrites the file list of a built scan, and it looked for that list on the plan's root
   node. A netCDF or HDF5 scan is not that node: its arrays reach the plan encoded, so the format

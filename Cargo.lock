@@ -2156,6 +2156,7 @@ dependencies = [
  "beacon-arrow-netcdf",
  "beacon-arrow-zarr",
  "beacon-common",
+ "beacon-lance",
  "envconfig",
  "object_store 0.13.2",
  "thiserror 2.0.20",

@@ -13,6 +13,7 @@ pub mod runtime_builder;
 pub mod schema_persistence;
 pub(crate) mod secret_persistence;
 pub mod settings;
+pub(crate) mod settings_persistence;
 mod statement_plan;
 pub(crate) mod system_schema;
 
