@@ -6,7 +6,6 @@ use std::{
 
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
-use beacon_arrow_atlas::datafusion::AtlasFormatFactory;
 use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
@@ -776,10 +775,6 @@ fn register_file_formats(
         Arc::new(ArrowFormatFactory),
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory::new(builder.zarr.clone())),
-        Arc::new(AtlasFormatFactory::new(
-            Default::default(),
-            Default::default(),
-        )),
         Arc::new(BBFFormatFactory::new(Default::default())),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
@@ -866,14 +861,6 @@ fn build_session_state(
             .with_physical_optimizer_rule(Arc::new(NdFilterPushdown::new()))
             .with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()));
     }
-
-    // Make every partition merge order-preserving so query results are
-    // reproducible run to run. Appended last so it sees the CoalescePartitionsExec
-    // nodes the built-in rules insert (notably under a LIMIT).
-    // See beacon_datafusion_ext::ordered_union::OrderedCoalesce.
-    state_builder = state_builder.with_physical_optimizer_rule(Arc::new(
-        beacon_datafusion_ext::ordered_union::OrderedCoalesce,
-    ));
 
     Ok(state_builder.build())
 }

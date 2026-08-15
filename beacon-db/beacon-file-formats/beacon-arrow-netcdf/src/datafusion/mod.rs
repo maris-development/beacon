@@ -116,6 +116,21 @@ impl NetCDFFormatFactory {
         }
     }
 
+    /// Whether this table wants file statistics computed at all.
+    ///
+    /// Only the file analyzer computes them, through
+    /// [`FileFormatFactoryExt::create_for_analysis`]. This is the switch that
+    /// turns even that off, per table or per runtime.
+    fn statistics_wanted(
+        &self,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<bool> {
+        match format_options.get("enable_statistics") {
+            Some(value) => parse_bool_option("enable_statistics", value),
+            None => Ok(self.config.enable_statistics),
+        }
+    }
+
     /// Build a [`NetcdfFormat`] with the given per-table effective settings,
     /// wiring in the shared reader cache when caching is enabled.
     fn build_format(
@@ -158,7 +173,6 @@ impl FileFormatFactory for NetCDFFormatFactory {
         // defaulting to the runtime config.
         let mut options = self.options.clone();
         let mut use_reader_cache = self.config.use_reader_cache;
-        let mut enable_statistics = self.config.enable_statistics;
         let mut use_rust_reader = self.config.use_rust_reader;
 
         if let Some(value) = format_options.get("read_dimensions") {
@@ -173,9 +187,11 @@ impl FileFormatFactory for NetCDFFormatFactory {
         if let Some(value) = format_options.get("use_reader_cache") {
             use_reader_cache = parse_bool_option("use_reader_cache", value)?;
         }
-        if let Some(value) = format_options.get("enable_statistics") {
-            enable_statistics = parse_bool_option("enable_statistics", value)?;
-        }
+        // Parsed here only so a bad value is an error at `CREATE EXTERNAL
+        // TABLE` rather than at the first analysis pass. The value itself is
+        // read by `create_for_analysis`; a format built for a query computes no
+        // statistics whatever it says.
+        self.statistics_wanted(format_options)?;
         if let Some(value) = format_options.get("use_rust_reader") {
             use_rust_reader = parse_bool_option("use_rust_reader", value)?;
         }
@@ -183,7 +199,8 @@ impl FileFormatFactory for NetCDFFormatFactory {
         Ok(Arc::new(self.build_format(
             options,
             use_reader_cache,
-            enable_statistics,
+            // A query never computes statistics. See `create_for_analysis`.
+            false,
             access_for(use_rust_reader),
         )))
     }
@@ -192,7 +209,8 @@ impl FileFormatFactory for NetCDFFormatFactory {
         Arc::new(self.build_format(
             self.options.clone(),
             self.config.use_reader_cache,
-            self.config.enable_statistics,
+            // A query never computes statistics. See `create_for_analysis`.
+            false,
             access_for(self.config.use_rust_reader),
         ))
     }
@@ -222,6 +240,30 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
     /// [`FileAccess::Oxcdf`] reads through the object store, so it needs no
     /// resolver and no native root. It is returned as it is, which is what lets
     /// a table live in s3, gs or az.
+    /// The same format, with statistics switched on.
+    ///
+    /// `infer_stats` opens the file and reads every coordinate array, so only
+    /// the file analyzer asks for this. See
+    /// [`FileFormatFactoryExt::create_for_analysis`].
+    fn create_for_analysis(
+        &self,
+        state: &dyn Session,
+        format_options: &std::collections::HashMap<String, String>,
+        url: &datafusion::datasource::listing::ListingTableUrl,
+        listing: &ListingFactory,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        let wanted = self.statistics_wanted(format_options)?;
+        let format = self.create_with_native_root(state, format_options, url, listing)?;
+        let netcdf = format
+            .as_any()
+            .downcast_ref::<NetcdfFormat>()
+            .ok_or_else(|| {
+                exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
+            })?
+            .clone();
+        Ok(Arc::new(netcdf.with_enable_statistics(wanted)))
+    }
+
     fn create_with_native_root(
         &self,
         state: &dyn Session,
@@ -433,6 +475,10 @@ impl FileFormat for NetcdfFormat {
             );
             return Ok(Statistics::new_unknown(&table_schema));
         }
+        tracing::trace!(
+            object = %object.location,
+            "generating statistics for NetCDF file"
+        );
 
         // Built the same way the reader builds it, so statistics and scans
         // can never disagree about where a file is or which reader opens it.
@@ -454,6 +500,8 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        beacon_nd_array::arrow::morsel::reject_partition_columns("netCDF", &conf)?;
+
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
         // the file source's schema is the encoded form of the logical table
         // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
@@ -649,13 +697,23 @@ mod reader_backend_tests {
         SessionContext::new_with_state(state)
     }
 
-    /// Register one test file as a table read on `backend`.
+    /// Register one bundled test file as a table read on `backend`.
     async fn register(ctx: &SessionContext, table: &str, backend: ReaderBackend, file: &str) {
-        let url = ListingTableUrl::parse(test_file(file).to_string_lossy()).unwrap();
+        register_path(ctx, table, backend, &test_file(file)).await
+    }
+
+    /// The same, for a file that is not bundled — one a test wrote itself.
+    async fn register_path(
+        ctx: &SessionContext,
+        table: &str,
+        backend: ReaderBackend,
+        path: &std::path::Path,
+    ) {
+        let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
         let listing =
             FastObjectTable::try_new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
                 .await
-                .unwrap_or_else(|e| panic!("register {file} on {backend:?}: {e}"));
+                .unwrap_or_else(|e| panic!("register {} on {backend:?}: {e}", path.display()));
         ctx.register_table(table, Arc::new(listing)).unwrap();
     }
 
@@ -1092,6 +1150,9 @@ mod reader_backend_tests {
     /// needs a repartition rule to read files in parallel. What the Rust reader
     /// adds is that those partitions then run at the same time, because it
     /// holds no global lock.
+    ///
+    /// Sharing one file across partitions is the separate case, and only the
+    /// Rust reader does it. See [`only_the_rust_reader_shares_one_file`].
     #[tokio::test]
     async fn a_multi_file_scan_gets_one_partition_for_each_file() {
         use datafusion::physical_plan::ExecutionPlanProperties;
@@ -1137,32 +1198,543 @@ mod reader_backend_tests {
         }
     }
 
-    /// [`NetCDFSource::repartitioned`] must keep returning `None`, on either
-    /// reader. DataFusion's file-group partitioner splits a file by **byte
-    /// range**, and a byte range of a NetCDF file is not a NetCDF file. The
-    /// opener ignores [`PartitionedFile::range`] and opens the whole dataset, so
-    /// a range split would return every row once for each range. File-level
-    /// parallelism does not go through here (see the test above).
+    /// The split minimum a scan takes from its session
+    /// (`repartition_file_min_size`), and what these tests pass by hand.
+    const MIN_SHARE_SIZE: usize = 10 * 1024 * 1024;
+
+    /// A scan of any size plans one entry per partition, and one queue.
     ///
-    /// [`PartitionedFile::range`]: datafusion::datasource::listing::PartitionedFile::range
+    /// Size decides nothing here. It used to: a file under the minimum was left
+    /// whole, and one over it went into every partition's group with a share.
+    /// Both were guesses made at plan time, and both were measured losing to no
+    /// guess at all. A queue does not guess — whoever is free takes the next
+    /// file, and a partition with nothing left helps divide an open one.
     #[test]
-    fn the_source_never_splits_a_file_by_byte_range() {
+    fn a_scan_plans_one_entry_per_partition_whatever_its_files() {
+        use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
 
-        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
+        const PARTITIONS: usize = 4;
+
+        // One file well under the old minimum, one well over, and a collection.
+        let scans: Vec<(&str, Vec<PartitionedFile>)> = vec![
+            ("one small file", vec![PartitionedFile::new("small.nc", 1024 * 1024)]),
+            ("one large file", vec![PartitionedFile::new("large.nc", 64 * 1024 * 1024)]),
+            (
+                "many files",
+                (0..500)
+                    .map(|i| PartitionedFile::new(format!("f-{i}.nc"), 1024 * 1024))
+                    .collect(),
+            ),
+        ];
+
+        for (what, files) in scans {
             let table_schema =
                 TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-            let source = NetCDFSource::new(access_on(backend), None, table_schema);
-            let config = FileScanConfigBuilder::new(
+            let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
+            let count = files.len();
+            let mut builder = FileScanConfigBuilder::new(
                 ObjectStoreUrl::local_filesystem(),
                 Arc::new(source.clone()) as Arc<dyn FileSource>,
-            )
-            .build();
+            );
+            for file in files {
+                builder = builder.with_file(file);
+            }
+            let config = builder.build();
 
-            assert!(
-                source.repartitioned(8, 1, None, &config).unwrap().is_none(),
-                "{backend:?} must not accept a byte-range repartition"
+            let planned = source
+                .repartitioned(PARTITIONS, MIN_SHARE_SIZE, None, &config)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{what}: a scan is planned morsel-driven"));
+
+            assert_eq!(planned.file_groups.len(), PARTITIONS, "{what}");
+            for group in &planned.file_groups {
+                assert_eq!(
+                    group.len(),
+                    1,
+                    "{what}: one standing entry, not a file list"
+                );
+            }
+
+            let planned_source = planned
+                .file_source()
+                .as_any()
+                .downcast_ref::<NetCDFSource>()
+                .expect("the config carries a NetCDFSource");
+            assert_eq!(
+                planned_source.morsel_files(),
+                Some(count),
+                "{what}: every file is in the queue the openers draw from"
+            );
+        }
+    }
+
+    /// A partitioned table is refused, naming the reader and the column.
+    ///
+    /// A `PARTITIONED BY` column is part of a file's *path*, and `FileStream`
+    /// appends its value to that file's batches — which it can do only because
+    /// it knows which file each batch came from. An nd scan reads a collection
+    /// as one unit, so it does not.
+    ///
+    /// The alternative to refusing is returning the column silently empty, and a
+    /// query that quietly drops a column it was asked for is worse than one that
+    /// says it cannot do this yet.
+    #[tokio::test]
+    async fn a_partitioned_table_is_refused() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let table_schema = TableSchema::new(
+            Arc::new(arrow::datatypes::Schema::empty()),
+            vec![Arc::new(arrow::datatypes::Field::new(
+                "year",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ))],
+        );
+        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new("year=2023/one.nc", 1024))
+        .build();
+
+        let ctx = session();
+        let error = format_on(ReaderBackend::Oxcdf)
+            .create_physical_plan(&ctx.state(), config)
+            .await
+            .expect_err("a partitioned table is refused");
+
+        let message = error.to_string();
+        assert!(message.contains("netCDF"), "it names the reader: {message}");
+        assert!(message.contains("year"), "and the column: {message}");
+        assert!(
+            message.contains("PARTITIONED BY"),
+            "in the words the user wrote: {message}"
+        );
+    }
+
+    /// An ordered scan is left alone: a partition holding an arbitrary subset of
+    /// a file cannot emit its rows in file order.
+    #[test]
+    fn an_ordered_scan_is_not_shared() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("time", arrow::datatypes::DataType::Int64, true),
+        ]));
+        let table_schema = TableSchema::from_file_schema(schema.clone());
+        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new("large.nc", 64 * 1024 * 1024))
+        .build();
+
+        let ordering = LexOrdering::new(vec![PhysicalSortExpr::new_default(
+            datafusion::physical_expr::expressions::col("time", &schema).unwrap(),
+        )])
+        .unwrap();
+
+        assert!(
+            source
+                .repartitioned(4, MIN_SHARE_SIZE, Some(ordering), &config)
+                .unwrap()
+                .is_none(),
+            "an ordered scan must keep its single group"
+        );
+    }
+
+    /// netcdf-c never shares a file, whatever its size: every call it makes
+    /// queues on one process-global mutex, so the partitions would serialise.
+    #[test]
+    fn only_the_rust_reader_shares_one_file() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let table_schema =
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+        let source = NetCDFSource::new(access_on(ReaderBackend::NetcdfC), None, table_schema);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new("large.nc", 64 * 1024 * 1024))
+        .build();
+
+        assert!(
+            source
+                .repartitioned(4, MIN_SHARE_SIZE, None, &config)
+                .unwrap()
+                .is_none(),
+            "netcdf-c must not share a file"
+        );
+    }
+
+    /// A session with `target_partitions` partitions.
+    ///
+    /// Nothing is done to the split minimum here, so a test that wants a share
+    /// has to bring a file large enough to earn one under the session default
+    /// ([`MIN_SHARE_SIZE`]).
+    fn splitting_session(target_partitions: usize, batch_size: usize) -> SessionContext {
+        let config = SessionConfig::new()
+            .with_target_partitions(target_partitions)
+            .with_batch_size(batch_size)
+            .with_extension(
+                beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+            );
+
+        let state = SessionStateBuilder::new()
+            .with_config(config)
+            .with_default_features()
+            .build();
+        SessionContext::new_with_state(state)
+    }
+
+    /// How many columns [`write_large_netcdf`] writes. They are named `V0`..,
+    /// and the tests read `V0`.
+    const LARGE_COLUMNS: usize = 20;
+    /// How many rows it writes in each.
+    const LARGE_ROWS: usize = 100_000;
+
+    /// Write a netCDF-4 file larger than [`MIN_SHARE_SIZE`], and return its path.
+    ///
+    /// Every bundled fixture is hundreds of KB, well under the minimum, so a
+    /// test that needs a real split has to make its own file.
+    ///
+    /// It is written **wide** rather than long, and that is not a free choice.
+    /// `oxcdf` cannot read this writer's output once a single variable grows
+    /// past roughly 200k values: it fails with "chunk at […] was neither cached
+    /// nor fetched" while netcdf-c reads the same bytes. The limit follows one
+    /// variable's chunk count, not the file's size, so 20 columns of 100k values
+    /// clears the minimum with room to spare and still reads back. Measured:
+    /// 20x100k is 16.3 MB and reads; 12x200k is 19.4 MB and does not.
+    ///
+    /// The caller holds the [`TempDir`](tempfile::TempDir) for as long as the
+    /// table is registered.
+    fn write_large_netcdf() -> (tempfile::TempDir, PathBuf) {
+        use arrow::array::{ArrayRef, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        let schema = Arc::new(Schema::new(
+            (0..LARGE_COLUMNS)
+                .map(|column| Field::new(format!("V{column}"), DataType::Float64, false))
+                .collect::<Vec<_>>(),
+        ));
+        let columns: Vec<ArrayRef> = (0..LARGE_COLUMNS)
+            .map(|column| {
+                Arc::new(Float64Array::from_iter_values(
+                    (0..LARGE_ROWS).map(|row| (row + column) as f64 * 0.25),
+                )) as ArrayRef
+            })
+            .collect();
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let path = dir.path().join("large.nc");
+        let mut writer =
+            ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema).expect("a netCDF writer");
+        writer.write_record_batch(batch).expect("write the batch");
+        writer.finish().expect("finish the file");
+
+        (dir, path)
+    }
+
+    /// `count` netCDF files in one directory, each holding `rows` rows of a
+    /// single column, numbered so that no two files hold the same values.
+    ///
+    /// Uneven on purpose: a scan of equal files divides the same way however it
+    /// is divided, and would hide a queue that handed one file out twice.
+    fn write_netcdf_collection(count: usize, rows: usize) -> (tempfile::TempDir, PathBuf) {
+        use arrow::array::{ArrayRef, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let schema = Arc::new(Schema::new(vec![Field::new("V0", DataType::Float64, false)]));
+
+        for file in 0..count {
+            // Each file is a different length and a different range of values.
+            let held = rows + file % 7;
+            let base = (file * 10_000) as f64;
+            let values: ArrayRef = Arc::new(Float64Array::from_iter_values(
+                (0..held).map(|row| base + row as f64),
+            ));
+            let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+
+            let path = dir.path().join(format!("part-{file:04}.nc"));
+            let mut writer = ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema.clone())
+                .expect("a netCDF writer");
+            writer.write_record_batch(batch).expect("write the batch");
+            writer.finish().expect("finish the file");
+        }
+
+        let path = dir.path().to_path_buf();
+        (dir, path)
+    }
+
+    /// A collection scanned on many partitions returns exactly what one
+    /// partition returns.
+    ///
+    /// This is the shape the morsel queue exists for, and the guard on it. The
+    /// partitions take files from one queue, so nothing at plan time says which
+    /// partition reads what — and nothing but the answer says whether a file was
+    /// handed out twice or not at all. `count(*)` catches both. `sum` catches a
+    /// file read from the wrong place, and `min`/`max` catch a partial read.
+    /// None of those raise an error on their own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_collection_scanned_on_many_partitions_returns_the_same_rows() {
+        const FILES: usize = 40;
+        const ROWS: usize = 64;
+        const QUERY: &str =
+            r#"SELECT count(*), count("V0"), min("V0"), max("V0"), sum("V0") FROM many"#;
+
+        let (_dir, dir) = write_netcdf_collection(FILES, ROWS);
+
+        let whole = session();
+        register_path(&whole, "many", ReaderBackend::Oxcdf, &dir).await;
+
+        let split = splitting_session(8, 1024);
+        register_path(&split, "many", ReaderBackend::Oxcdf, &dir).await;
+
+        let plan = split
+            .sql(r#"SELECT "V0" FROM many"#)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        assert_eq!(
+            scan_partitions(&plan),
+            8,
+            "a collection scans on every partition:\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+
+        let summary = async |ctx: &SessionContext| {
+            let batches = ctx.sql(QUERY).await.unwrap().collect().await.unwrap();
+            format!("{:?}", batches[0].columns())
+        };
+
+        let whole_summary = summary(&whole).await;
+        assert_eq!(
+            summary(&split).await,
+            whole_summary,
+            "eight partitions over one queue read the collection exactly once"
+        );
+    }
+
+    /// A collection where only some files carry the column the query selects.
+    ///
+    /// Real collections are not uniform: of one CORA year, 2% of the files hold
+    /// no `TEMP` and 10% no `DEPH`. `SELECT "TEMP"` therefore meets files that
+    /// have none of what it asked for, and those must be skipped, not fail the
+    /// scan.
+    ///
+    /// The failure this guards is not a wrong number, it is a dead query:
+    /// planning such a file as a `COUNT(*)` — its projection resolves empty
+    /// either way — built a batch of no columns against a one-field schema and
+    /// returned "number of columns(0) must match number of fields(1)".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_collection_where_only_some_files_have_the_column_still_reads() {
+        use arrow::array::{ArrayRef, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        const ROWS: usize = 32;
+        const WITH: usize = 3;
+        const WITHOUT: usize = 2;
+
+        let dir = tempfile::tempdir().expect("a temp directory");
+
+        // Files that hold "V0", and files that hold only "OTHER".
+        for (count, column, base) in [(WITH, "V0", 0.0), (WITHOUT, "OTHER", 1000.0)] {
+            let schema = Arc::new(Schema::new(vec![Field::new(column, DataType::Float64, false)]));
+            for file in 0..count {
+                let values: ArrayRef = Arc::new(Float64Array::from_iter_values(
+                    (0..ROWS).map(|row| base + (file * ROWS + row) as f64),
+                ));
+                let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+                let path = dir.path().join(format!("{column}-{file}.nc"));
+                let mut writer =
+                    ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema.clone())
+                        .expect("a netCDF writer");
+                writer.write_record_batch(batch).expect("write the batch");
+                writer.finish().expect("finish the file");
+            }
+        }
+
+        let ctx = splitting_session(4, 1024);
+        register_path(&ctx, "mixed", ReaderBackend::Oxcdf, dir.path()).await;
+
+        // Every file lacking "V0" is skipped; the ones holding it are read whole.
+        let batches = ctx
+            .sql(r#"SELECT count("V0"), min("V0"), max("V0") FROM mixed"#)
+            .await
+            .expect("the query plans")
+            .collect()
+            .await
+            .expect("a file without the column does not fail the scan");
+
+        let summary = format!("{:?}", batches[0].columns());
+        assert!(
+            summary.contains(&format!("{}", WITH * ROWS)),
+            "every row of the {WITH} files that have the column: {summary}"
+        );
+        assert!(
+            summary.contains(&format!("{}", (WITH * ROWS - 1) as f64)),
+            "and its largest value, so nothing was truncated: {summary}"
+        );
+    }
+
+    /// The partition count of the scan at the bottom of `plan`.
+    ///
+    /// The root can carry more partitions than the scan does: DataFusion adds a
+    /// round-robin repartition above a single-partition scan, which hides
+    /// whether the scan itself was split. This looks at the scan, which is the
+    /// thing splitting changes.
+    fn scan_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> usize {
+        use datafusion::physical_plan::ExecutionPlanProperties;
+
+        let mut node = plan.clone();
+        while let Some(child) = node.children().first() {
+            node = Arc::clone(child);
+        }
+        node.output_partitioning().partition_count()
+    }
+
+    /// A file over the split minimum scans in several partitions, and returns
+    /// the same rows it returns in one.
+    ///
+    /// The partition count is the point of the feature. The row check is the
+    /// guard on it: `count(*)` catches a share that overlapped another or a gap
+    /// between two, and `min`/`max` catch a share that read the wrong region.
+    /// None of those raise an error on their own.
+    ///
+    /// This is the only test that reaches the split the way a query does: a real
+    /// file over the real minimum, planned and executed through SQL. The others
+    /// hand the opener its ranges directly, because no bundled fixture is large
+    /// enough for a scan to split one.
+    #[tokio::test]
+    async fn a_large_file_splits_and_returns_the_same_rows() {
+        const QUERY: &str = r#"SELECT count(*), count("V0"), min("V0"), max("V0") FROM one"#;
+
+        let (_dir, file) = write_large_netcdf();
+
+        let whole = session();
+        register_path(&whole, "one", ReaderBackend::Oxcdf, &file).await;
+
+        let split = splitting_session(4, 8192);
+        register_path(&split, "one", ReaderBackend::Oxcdf, &file).await;
+
+        let plan = split
+            .sql(r#"SELECT "V0" FROM one"#)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        assert_eq!(
+            scan_partitions(&plan),
+            4,
+            "a file over the minimum should scan in 4 partitions:\n{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+        );
+
+        let summary = async |ctx: &SessionContext| {
+            let batches = ctx.sql(QUERY).await.unwrap().collect().await.unwrap();
+            format!("{:?}", batches[0].columns())
+        };
+
+        let whole_summary = summary(&whole).await;
+        assert_eq!(summary(&split).await, whole_summary);
+    }
+
+    /// A bare `count(*)` over a shared file counts every row once.
+    ///
+    /// This is the one read that cannot inherit its division from the decode: it
+    /// projects no column, so it drives the read with a column of its own and
+    /// never builds an nd array. It has to take that work from the same queue as
+    /// everything else. A share that read the file whole would count it once per
+    /// partition, and the answer would grow with `target_partitions` — silently,
+    /// because nothing about it is an error.
+    ///
+    /// The whole-file session answers in one partition, so it is the count to
+    /// match.
+    #[tokio::test]
+    async fn a_shared_count_star_counts_every_row_once() {
+        let (_dir, file) = write_large_netcdf();
+
+        let whole = session();
+        register_path(&whole, "one", ReaderBackend::Oxcdf, &file).await;
+
+        let count = async |ctx: &SessionContext| {
+            let batches = ctx
+                .sql("SELECT count(*) FROM one")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("int64 count")
+                .value(0)
+        };
+
+        let expected = count(&whole).await;
+        assert_eq!(
+            expected, LARGE_ROWS as i64,
+            "the fixture holds one row per value of each column"
+        );
+
+        // Several partition counts, because a file read once per partition
+        // returns a multiple of the truth and 2 is easy to mistake for a
+        // coincidence.
+        for target_partitions in [2_usize, 4, 7] {
+            let split = splitting_session(target_partitions, 8192);
+            register_path(&split, "one", ReaderBackend::Oxcdf, &file).await;
+
+            // Guard the guard: the count below proves nothing if the scan under
+            // it was never shared in the first place.
+            let plan = split
+                .sql("SELECT count(*) FROM one")
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            assert_eq!(
+                scan_partitions(&plan),
+                target_partitions,
+                "the count(*) scan must be shared:\n{}",
+                datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+            );
+
+            assert_eq!(
+                count(&split).await,
+                expected,
+                "target_partitions={target_partitions}: the shared file is counted once"
             );
         }
     }
@@ -1241,6 +1813,246 @@ mod reader_backend_tests {
         }
     }
 
+    /// A pruned scan counts what the coordinate itself says it should.
+    ///
+    /// The scan skips chunks whose coordinates cannot meet the predicate, so a
+    /// bound that is too tight loses rows and reports a smaller count. Nothing
+    /// about that raises an error, and comparing the two readers would not catch
+    /// it — they share the pruning. So the expected answer comes from the
+    /// coordinate column itself, read with no predicate in the plan and
+    /// therefore with no pruning.
+    ///
+    /// The fixture's `lat` runs from about 38.8 to 48.8, so the thresholds below
+    /// prune nothing, some, and everything in turn. The middle one is the one
+    /// that matters: a chunk half inside the bound has to be read whole.
+    #[tokio::test]
+    async fn a_pruned_scan_counts_what_the_coordinate_says_it_should() {
+        use arrow::array::{Float32Array, Int64Array};
+
+        let ctx = session();
+        register(&ctx, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        // Every lat the file holds, with no predicate in the plan.
+        let batches = ctx
+            .sql("SELECT lat FROM gridded")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let lats: Vec<f32> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .expect("lat is f32")
+                    .iter()
+                    .flatten()
+                    .collect::<Vec<f32>>()
+            })
+            .collect();
+        assert!(!lats.is_empty(), "the fixture must hold rows");
+
+        let count = async |sql: &str| {
+            let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("int64 count")
+                .value(0) as usize
+        };
+
+        for threshold in [0.0_f32, 44.0, 60.0] {
+            let expected = lats.iter().filter(|lat| **lat > threshold).count();
+            assert_eq!(
+                count(&format!(
+                    "SELECT count(*) FROM gridded WHERE lat > {threshold}"
+                ))
+                .await,
+                expected,
+                "lat > {threshold}: the pruned scan does not match the coordinate"
+            );
+        }
+
+        // The middle threshold has to be a partial prune, or the assertion above
+        // it never exercised a chunk that straddles the bound.
+        let partial = lats.iter().filter(|lat| **lat > 44.0).count();
+        assert!(
+            partial > 0 && partial < lats.len(),
+            "44.0 must cut the fixture in two, it kept {partial} of {}",
+            lats.len()
+        );
+
+        // A disjunction bounds nothing, so it must prune nothing and still
+        // answer. `lat > 60` is inside `lat > 0`, so the two agree. The bounds
+        // used to be intersected as if the `OR` were an `AND`, which pruned
+        // every chunk under 60 — the whole file, since nothing reaches it.
+        assert_eq!(
+            count("SELECT count(*) FROM gridded WHERE lat > 0 OR lat > 60").await,
+            lats.iter().filter(|lat| **lat > 0.0).count(),
+            "a disjunction must not prune on one of its branches"
+        );
+
+        // The same for a negation, which means the opposite of its child.
+        assert_eq!(
+            count("SELECT count(*) FROM gridded WHERE NOT (lat <= 44)").await,
+            partial,
+            "a negation must not prune on the child it negates"
+        );
+    }
+
+    /// The predicate reaches the file source through the nd pipeline.
+    ///
+    /// The scan sits under an `NdSourceExec` and an `NdBroadcastExec`, and a
+    /// node that does not forward filters leaves the source with nothing to
+    /// prune on. That failure is invisible in a result — every row still comes
+    /// back, the scan just reads the whole file — so it is asserted on the
+    /// scan's own output instead.
+    ///
+    /// One encoded batch carries one chunk, so the scan's output rows *are* its
+    /// chunk count.
+    #[tokio::test]
+    async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
+        use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
+
+        let ctx = session();
+        register(&ctx, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        /// The chunk count of the scan at the bottom of an executed plan.
+        struct ScanRows(Option<usize>);
+        impl ExecutionPlanVisitor for ScanRows {
+            type Error = std::convert::Infallible;
+            fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> Result<bool, Self::Error> {
+                if plan.name().contains("DataSourceExec") {
+                    self.0 = plan.metrics().and_then(|metrics| metrics.output_rows());
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+        }
+
+        let chunks_read = async |sql: &str| {
+            let plan = ctx
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
+                .await
+                .unwrap();
+            let mut visitor = ScanRows(None);
+            datafusion::physical_plan::accept(plan.as_ref(), &mut visitor).unwrap();
+            visitor.0.expect("the scan reports its output rows")
+        };
+
+        let whole = chunks_read("SELECT lat FROM gridded").await;
+        assert!(whole > 1, "the fixture must hold several chunks");
+
+        // `lat` runs from about 38.8 to 48.8, so nothing can satisfy this and
+        // every chunk is skipped before it is fetched.
+        assert_eq!(
+            chunks_read("SELECT lat FROM gridded WHERE lat > 1000").await,
+            0,
+            "a predicate no row can meet must leave the scan nothing to read"
+        );
+
+        // A bound the whole file satisfies prunes nothing.
+        assert_eq!(
+            chunks_read("SELECT lat FROM gridded WHERE lat > 0").await,
+            whole,
+            "a predicate every row meets must not skip a chunk"
+        );
+
+        // And one that cuts the file reads some of it.
+        let partial = chunks_read("SELECT lat FROM gridded WHERE lat > 44").await;
+        assert!(
+            partial > 0 && partial < whole,
+            "lat > 44 should read some of the {whole} chunks, it read {partial}"
+        );
+    }
+
+    /// The scan reports what each partition read, and what the predicate saved.
+    ///
+    /// These four counters are the only view of the sharing there is: the scan's
+    /// own `output_rows` counts encoded batches, which says nothing about how a
+    /// file divided between the partitions or how much of it was skipped. They
+    /// went unrecorded once already, so this holds them in place.
+    #[tokio::test]
+    async fn the_scan_reports_what_it_read_and_what_it_skipped() {
+        use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
+
+        let ctx = session();
+        register(&ctx, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        /// The named counter, summed over the scan's partitions.
+        struct Counter(&'static str, usize);
+        impl ExecutionPlanVisitor for Counter {
+            type Error = std::convert::Infallible;
+            fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> Result<bool, Self::Error> {
+                if plan.name().contains("DataSourceExec") {
+                    self.1 = plan
+                        .metrics()
+                        .map(|metrics| {
+                            metrics
+                                .iter()
+                                .filter(|metric| metric.value().name() == self.0)
+                                .map(|metric| metric.value().as_usize())
+                                .sum()
+                        })
+                        .unwrap_or(0);
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+        }
+
+        let counters = async |sql: &str| {
+            let plan = ctx
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
+                .await
+                .unwrap();
+            let read = |name: &'static str| {
+                let mut counter = Counter(name, 0);
+                datafusion::physical_plan::accept(plan.as_ref(), &mut counter).unwrap();
+                counter.1
+            };
+            (
+                read("chunks_read"),
+                read("rows_read"),
+                read("chunks_pruned"),
+                read("rows_pruned"),
+            )
+        };
+
+        // No predicate: everything is read, nothing is skipped, and the rows are
+        // the grid's own — not the one-row-per-chunk the scan emits.
+        let (chunks, rows, pruned, pruned_rows) = counters("SELECT lat FROM gridded").await;
+        assert!(chunks > 1, "the fixture must hold several chunks");
+        assert!(
+            rows > chunks,
+            "rows_read must count broadcast rows ({rows}), not batches ({chunks})"
+        );
+        assert_eq!((pruned, pruned_rows), (0, 0), "nothing to skip");
+
+        // A predicate nothing can meet: every chunk is skipped before it is
+        // read, and the rows it would have produced are accounted for.
+        let (chunks, rows, pruned, pruned_rows) =
+            counters("SELECT lat FROM gridded WHERE lat > 1000").await;
+        assert_eq!((chunks, rows), (0, 0), "nothing is read");
+        assert!(pruned > 0 && pruned_rows > 0, "and the skip is reported");
+    }
+
     /// A projection and a predicate push down the same way on either reader.
     #[tokio::test]
     async fn a_pushed_down_predicate_gives_the_same_answer() {
@@ -1315,844 +2127,3 @@ mod reader_backend_tests {
         }
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use datafusion::datasource::listing::PartitionedFile;
-//     use datafusion::execution::object_store::ObjectStoreUrl;
-//     use futures::StreamExt;
-//     use object_store::path::Path;
-//     use std::path::PathBuf;
-//     use std::sync::Once;
-
-//     static TEST_FIXTURES: Once = Once::new();
-
-//     fn ensure_test_fixtures() {
-//         TEST_FIXTURES.call_once(|| {
-//             let dst_dir: PathBuf =
-//                 beacon_config::DATASETS_DIR_PATH.join("beacon-arrow-netcdf-tests");
-//             std::fs::create_dir_all(&dst_dir).expect("create test dir");
-
-//             for name in ["wod_ctd_1964.nc", "gridded-example.nc"] {
-//                 let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-//                     .join("test_files")
-//                     .join(name);
-//                 let dst = dst_dir.join(name);
-//                 if !dst.exists() {
-//                     std::fs::copy(&src, &dst)
-//                         .unwrap_or_else(|e| panic!("copy {name} into datasets dir: {e}"));
-//                 }
-//             }
-//         });
-//     }
-
-//     fn wod_object_meta() -> ObjectMeta {
-//         ObjectMeta {
-//             location: Path::from("beacon-arrow-netcdf-tests/wod_ctd_1964.nc"),
-//             last_modified: chrono::Utc::now(),
-//             size: 0,
-//             e_tag: None,
-//             version: None,
-//         }
-//     }
-
-//     fn gridded_object_meta() -> ObjectMeta {
-//         ObjectMeta {
-//             location: Path::from("beacon-arrow-netcdf-tests/gridded-example.nc"),
-//             last_modified: chrono::Utc::now(),
-//             size: 0,
-//             e_tag: None,
-//             version: None,
-//         }
-//     }
-
-//     /// The datasets local root the readers translate object paths under. Named
-//     /// `store` at call sites for brevity, but it is a plain filesystem root now
-//     /// that NetCDF opens files natively rather than through `object_store`.
-//     async fn test_store() -> PathBuf {
-//         ensure_test_fixtures();
-//         beacon_config::DATASETS_DIR_PATH.to_path_buf()
-//     }
-
-//     fn test_format(datasets_root: PathBuf) -> NetcdfFormat {
-//         NetcdfFormat::new(datasets_root, NetcdfOptions::default())
-//     }
-
-//     // ── fetch_schema ───────────────────────────────────────────────────
-
-//     #[tokio::test]
-//     async fn fetch_schema_returns_fields_for_ragged_file() {
-//         let store = test_store().await;
-//         let schema = reader::fetch_schema(store, wod_object_meta(), None)
-//             .await
-//             .expect("schema");
-//         assert!(!schema.fields().is_empty());
-//         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-//         assert!(names.contains(&"lat"), "expected lat in {names:?}");
-//         assert!(names.contains(&"lon"), "expected lon in {names:?}");
-//         assert!(names.contains(&"z"), "expected z in {names:?}");
-//         assert!(
-//             names.contains(&"Temperature"),
-//             "expected Temperature in {names:?}"
-//         );
-//     }
-
-//     #[tokio::test]
-//     async fn fetch_schema_returns_fields_for_gridded_file() {
-//         let store = test_store().await;
-//         let schema = reader::fetch_schema(store, gridded_object_meta(), None)
-//             .await
-//             .expect("schema");
-//         assert!(!schema.fields().is_empty());
-//         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-//         assert!(
-//             names.contains(&"analysed_sst"),
-//             "expected analysed_sst in {names:?}"
-//         );
-//     }
-
-//     #[tokio::test]
-//     async fn fetch_schema_with_dimensions_limits_fields() {
-//         let store = test_store().await;
-//         let full = reader::fetch_schema(store.clone(), gridded_object_meta(), None)
-//             .await
-//             .expect("full schema");
-//         let projected =
-//             reader::fetch_schema(store, gridded_object_meta(), Some(vec!["time".to_string()]))
-//                 .await
-//                 .expect("projected schema");
-//         assert!(
-//             projected.fields().len() < full.fields().len(),
-//             "dimension projection should reduce fields: projected {} vs full {}",
-//             projected.fields().len(),
-//             full.fields().len(),
-//         );
-//     }
-
-//     // ── infer_schema ───────────────────────────────────────────────────
-
-//     #[tokio::test]
-//     async fn infer_schema_single_file() {
-//         let store = test_store().await;
-//         let format = test_format(store.clone());
-//         let dummy_store: Arc<dyn ObjectStore> =
-//             Arc::new(object_store::local::LocalFileSystem::new());
-//         let ctx = datafusion::prelude::SessionContext::new();
-
-//         let schema = format
-//             .infer_schema(&ctx.state(), &dummy_store, &[gridded_object_meta()])
-//             .await
-//             .expect("infer schema");
-//         assert!(!schema.fields().is_empty());
-//     }
-
-//     #[tokio::test]
-//     async fn infer_schema_multiple_files_merges() {
-//         let store = test_store().await;
-//         let format = test_format(store.clone());
-//         let dummy_store: Arc<dyn ObjectStore> =
-//             Arc::new(object_store::local::LocalFileSystem::new());
-//         let ctx = datafusion::prelude::SessionContext::new();
-
-//         let schema = format
-//             .infer_schema(
-//                 &ctx.state(),
-//                 &dummy_store,
-//                 &[gridded_object_meta(), gridded_object_meta()],
-//             )
-//             .await
-//             .expect("merged schema");
-//         assert!(!schema.fields().is_empty());
-//     }
-
-//     #[tokio::test]
-//     async fn infer_schema_empty_objects_returns_empty_schema() {
-//         let store = test_store().await;
-//         let format = test_format(store.clone());
-//         let dummy_store: Arc<dyn ObjectStore> =
-//             Arc::new(object_store::local::LocalFileSystem::new());
-//         let ctx = datafusion::prelude::SessionContext::new();
-
-//         // With no objects there is nothing to infer, so the format yields an
-//         // empty schema — consistent with the zarr/tiff N-D formats.
-//         let schema = format
-//             .infer_schema(&ctx.state(), &dummy_store, &[])
-//             .await
-//             .expect("empty object list should infer an empty schema");
-//         assert_eq!(schema.fields().len(), 0);
-//     }
-
-//     // ── file_source ────────────────────────────────────────────────────
-
-//     #[tokio::test]
-//     async fn file_source_returns_netcdf_type() {
-//         let store = test_store().await;
-//         let format = test_format(store);
-//         let source = format.file_source(
-//             datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
-//                 arrow::datatypes::Schema::empty(),
-//             )),
-//         );
-//         assert_eq!(source.file_type(), "netcdf");
-//     }
-
-//     /// `CREATE EXTERNAL TABLE ... OPTIONS (...)` per-table overrides are parsed by
-//     /// the factory: known keys are accepted (defaulting to the runtime config) and
-//     /// a malformed boolean is rejected.
-//     #[tokio::test]
-//     async fn create_parses_per_table_options() {
-//         use datafusion::datasource::file_format::FileFormatFactory;
-//         use std::collections::HashMap;
-
-//         let store = test_store().await;
-//         let factory = NetCDFFormatFactory::new(
-//             store,
-//             std::env::temp_dir(),
-//             NetcdfOptions::default(),
-//             NetcdfConfig::default(),
-//         );
-//         let ctx = datafusion::prelude::SessionContext::new();
-
-//         let mut options = HashMap::new();
-//         options.insert("use_reader_cache".to_string(), "false".to_string());
-//         options.insert("enable_statistics".to_string(), "false".to_string());
-//         options.insert("read_dimensions".to_string(), "time, lat".to_string());
-//         let format = factory.create(&ctx.state(), &options).expect("valid options");
-//         let netcdf = format
-//             .as_any()
-//             .downcast_ref::<NetcdfFormat>()
-//             .expect("netcdf format");
-//         assert_eq!(
-//             netcdf.options.read_dimensions.as_deref(),
-//             Some(["time".to_string(), "lat".to_string()].as_slice())
-//         );
-
-//         // A malformed boolean for a known option is a hard error.
-//         let mut bad = HashMap::new();
-//         bad.insert("use_reader_cache".to_string(), "notabool".to_string());
-//         assert!(factory.create(&ctx.state(), &bad).is_err());
-//     }
-
-//     // ── FileOpener produces batches ────────────────────────────────────
-
-//     #[tokio::test]
-//     async fn opener_streams_batches_for_ragged_file() {
-//         let store = test_store().await;
-//         let table_schema = reader::fetch_schema(store.clone(), wod_object_meta(), None)
-//             .await
-//             .expect("schema");
-
-//         // The opener emits nd-encoded batches, so its source schema is encoded.
-//         let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
-//             beacon_datafusion_ext::nd::encoded_schema(&table_schema),
-//         ));
-//         let opener = source::NetCDFSource::new(store, None, ts);
-//         let file_opener = {
-//             let conf = FileScanConfigBuilder::new(
-//                 ObjectStoreUrl::local_filesystem(),
-//                 Arc::new(opener.clone()) as Arc<dyn FileSource>,
-//             )
-//             .build();
-//             opener
-//                 .create_file_opener(
-//                     Arc::new(object_store::local::LocalFileSystem::new()),
-//                     &conf,
-//                     0,
-//                 )
-//                 .expect("file opener")
-//         };
-
-//         let stream = file_opener
-//             .open(PartitionedFile::from(wod_object_meta()))
-//             .expect("open")
-//             .await
-//             .expect("stream future");
-
-//         let batches: Vec<_> = stream.collect().await;
-//         assert!(!batches.is_empty(), "should produce at least one batch");
-
-//         let first = batches[0].as_ref().expect("first batch ok");
-//         assert!(first.num_columns() > 0);
-//         assert!(first.num_rows() > 0);
-//     }
-
-//     #[tokio::test]
-//     async fn opener_streams_batches_for_gridded_file() {
-//         let store = test_store().await;
-//         let table_schema = reader::fetch_schema(store.clone(), gridded_object_meta(), None)
-//             .await
-//             .expect("schema");
-
-//         let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
-//             beacon_datafusion_ext::nd::encoded_schema(&table_schema),
-//         ));
-//         let opener = source::NetCDFSource::new(store, None, ts);
-//         let file_opener = {
-//             let conf = FileScanConfigBuilder::new(
-//                 ObjectStoreUrl::local_filesystem(),
-//                 Arc::new(opener.clone()) as Arc<dyn FileSource>,
-//             )
-//             .build();
-//             opener
-//                 .create_file_opener(
-//                     Arc::new(object_store::local::LocalFileSystem::new()),
-//                     &conf,
-//                     0,
-//                 )
-//                 .expect("file opener")
-//         };
-
-//         let stream = file_opener
-//             .open(PartitionedFile::from(gridded_object_meta()))
-//             .expect("open")
-//             .await
-//             .expect("stream future");
-
-//         let batches: Vec<_> = stream.collect().await;
-//         assert!(!batches.is_empty(), "should produce at least one batch");
-
-//         let first = batches[0].as_ref().expect("first batch ok");
-//         assert!(first.num_columns() > 0);
-//         assert!(first.num_rows() > 0);
-//     }
-
-//     #[tokio::test]
-//     async fn opener_with_projection_selects_columns() {
-//         let store = test_store().await;
-//         let table_schema = reader::fetch_schema(store.clone(), gridded_object_meta(), None)
-//             .await
-//             .expect("schema");
-
-//         // Project to only the first column.
-//         let projected_schema: SchemaRef = Arc::new(table_schema.project(&[0]).expect("project"));
-
-//         let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
-//             beacon_datafusion_ext::nd::encoded_schema(&table_schema),
-//         ));
-//         let opener = source::NetCDFSource::new(store, None, ts);
-//         let file_opener = {
-//             let conf = FileScanConfigBuilder::new(
-//                 ObjectStoreUrl::local_filesystem(),
-//                 Arc::new(opener.clone()) as Arc<dyn FileSource>,
-//             )
-//             .with_projection_indices(Some(vec![0]))
-//             .unwrap()
-//             .build();
-//             opener
-//                 .create_file_opener(
-//                     Arc::new(object_store::local::LocalFileSystem::new()),
-//                     &conf,
-//                     0,
-//                 )
-//                 .expect("file opener")
-//         };
-
-//         let stream = file_opener
-//             .open(PartitionedFile::from(gridded_object_meta()))
-//             .expect("open")
-//             .await
-//             .expect("stream future");
-
-//         let batches: Vec<_> = stream.collect().await;
-//         assert!(!batches.is_empty());
-
-//         let first = batches[0].as_ref().expect("first batch ok");
-//         assert_eq!(
-//             first.num_columns(),
-//             projected_schema.fields().len(),
-//             "batch should have only the projected columns"
-//         );
-//     }
-
-//     /// When a file is scanned under a merged (super-typed) schema that includes
-//     /// columns it does not have, the `BatchAdapterFactory` must null-fill those
-//     /// columns. We merge the gridded + ragged schemas, read the ragged file, and
-//     /// assert a gridded-only column comes back all-null at the merged width.
-//     #[tokio::test]
-//     async fn opener_null_fills_columns_missing_from_a_file() {
-//         use arrow::array::Array;
-
-//         let store = test_store().await;
-//         let format = test_format(store.clone());
-//         let dummy_store: Arc<dyn ObjectStore> =
-//             Arc::new(object_store::local::LocalFileSystem::new());
-//         let ctx = datafusion::prelude::SessionContext::new();
-
-//         // Merged (super-typed) schema across the ragged + gridded files.
-//         let merged: SchemaRef = format
-//             .infer_schema(
-//                 &ctx.state(),
-//                 &dummy_store,
-//                 &[wod_object_meta(), gridded_object_meta()],
-//             )
-//             .await
-//             .expect("merged schema");
-
-//         // Pick a merged column the ragged (wod) file does not provide.
-//         let wod_schema = reader::fetch_schema(store.clone(), wod_object_meta(), None)
-//             .await
-//             .expect("wod schema");
-//         let missing = merged
-//             .fields()
-//             .iter()
-//             .map(|f| f.name().clone())
-//             .find(|name| wod_schema.index_of(name).is_err())
-//             .expect("merged schema should contain a column the wod file lacks");
-//         let missing_idx = merged.index_of(&missing).unwrap();
-
-//         // No projection pushed → the opener reads under the full merged schema.
-//         let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
-//             beacon_datafusion_ext::nd::encoded_schema(&merged),
-//         ));
-//         let opener = source::NetCDFSource::new(store, None, ts);
-//         let conf = FileScanConfigBuilder::new(
-//             ObjectStoreUrl::local_filesystem(),
-//             Arc::new(opener.clone()) as Arc<dyn FileSource>,
-//         )
-//         .build();
-//         let file_opener = opener
-//             .create_file_opener(
-//                 Arc::new(object_store::local::LocalFileSystem::new()),
-//                 &conf,
-//                 0,
-//             )
-//             .expect("file opener");
-
-//         let stream = file_opener
-//             .open(PartitionedFile::from(wod_object_meta()))
-//             .expect("open")
-//             .await
-//             .expect("stream future");
-//         let batches: Vec<_> = stream.collect().await;
-//         assert!(!batches.is_empty(), "ragged file should produce batches");
-
-//         for batch in &batches {
-//             let batch = batch.as_ref().expect("batch ok");
-//             assert_eq!(
-//                 batch.schema().fields().len(),
-//                 merged.fields().len(),
-//                 "batch must conform to the merged schema width"
-//             );
-//             let col = batch.column(missing_idx);
-//             assert_eq!(
-//                 col.null_count(),
-//                 col.len(),
-//                 "column `{missing}` (absent from the wod file) must be all-null",
-//             );
-//         }
-//     }
-
-//     #[tokio::test]
-//     async fn opener_with_read_dimensions_limits_columns() {
-//         let store = test_store().await;
-//         // Full schema without dimension filter.
-//         let full_schema = reader::fetch_schema(store.clone(), gridded_object_meta(), None)
-//             .await
-//             .expect("full schema");
-
-//         // Schema with dimension filter.
-//         let dim_schema = reader::fetch_schema(
-//             store.clone(),
-//             gridded_object_meta(),
-//             Some(vec!["time".to_string()]),
-//         )
-//         .await
-//         .expect("dim schema");
-
-//         let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
-//             beacon_datafusion_ext::nd::encoded_schema(&dim_schema),
-//         ));
-//         let opener = source::NetCDFSource::new(store, Some(vec!["time".to_string()]), ts);
-//         let file_opener = {
-//             let conf = FileScanConfigBuilder::new(
-//                 ObjectStoreUrl::local_filesystem(),
-//                 Arc::new(opener.clone()) as Arc<dyn FileSource>,
-//             )
-//             .build();
-//             opener
-//                 .create_file_opener(
-//                     Arc::new(object_store::local::LocalFileSystem::new()),
-//                     &conf,
-//                     0,
-//                 )
-//                 .expect("file opener")
-//         };
-
-//         let stream = file_opener
-//             .open(PartitionedFile::from(gridded_object_meta()))
-//             .expect("open")
-//             .await
-//             .expect("stream future");
-
-//         let batches: Vec<_> = stream.collect().await;
-//         assert!(!batches.is_empty());
-
-//         let first = batches[0].as_ref().expect("first batch ok");
-//         assert!(
-//             first.num_columns() < full_schema.fields().len(),
-//             "dimension-filtered batch should have fewer columns ({}) than full ({})",
-//             first.num_columns(),
-//             full_schema.fields().len(),
-//         );
-//     }
-
-//     // ── End-to-end via SessionContext (projection + predicate pushdown) ──
-
-//     /// Register `gridded-example.nc` as a DataFusion table backed by
-//     /// [`NetcdfFormat`] over the `datasets://` object store.
-//     async fn register_example(ctx: &datafusion::prelude::SessionContext, datasets_root: PathBuf) {
-//         use beacon_datafusion_ext::fast_object::FastObjectTable;
-//         use datafusion::datasource::file_format::FileFormat;
-//         use datafusion::datasource::listing::ListingTableUrl;
-
-//         // The `datasets://` store lists the files; the format opens them natively
-//         // under `datasets_root`.
-//         let store = beacon_object_storage::local_datasets_store(datasets_root.clone())
-//             .await
-//             .expect("local datasets store");
-//         let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
-//         ctx.register_object_store(store_url.as_ref(), store);
-
-//         let format: Arc<dyn FileFormat> =
-//             Arc::new(NetcdfFormat::new(datasets_root, NetcdfOptions::default()));
-//         let url =
-//             ListingTableUrl::parse("datasets:///beacon-arrow-netcdf-tests/gridded-example.nc")
-//                 .unwrap();
-//         let table = FastObjectTable::try_new(&ctx.state(), format, vec![url])
-//             .await
-//             .unwrap();
-//         ctx.register_table("gridded_nc", Arc::new(table)).unwrap();
-//     }
-
-//     #[tokio::test]
-//     async fn projection_pushdown_through_datafusion() {
-//         let store = test_store().await;
-//         let ctx = datafusion::prelude::SessionContext::new();
-//         register_example(&ctx, store).await;
-
-//         let df = ctx
-//             .sql("SELECT analysed_sst, lat FROM gridded_nc")
-//             .await
-//             .unwrap();
-//         let names: Vec<String> = df
-//             .schema()
-//             .fields()
-//             .iter()
-//             .map(|f| f.name().clone())
-//             .collect();
-//         assert_eq!(names, vec!["analysed_sst".to_string(), "lat".to_string()]);
-
-//         let batches = df.collect().await.unwrap();
-//         assert_eq!(batches[0].num_columns(), 2);
-//         assert!(batches.iter().map(|b| b.num_rows()).sum::<usize>() > 0);
-//     }
-
-//     #[tokio::test]
-//     async fn predicate_pushdown_prunes_through_datafusion() {
-//         let store = test_store().await;
-//         let ctx = datafusion::prelude::SessionContext::new();
-//         register_example(&ctx, store).await;
-
-//         // Latitude is geographic (≤ 90°), so this excludes every row.
-//         let rows: usize = ctx
-//             .sql("SELECT lat FROM gridded_nc WHERE lat > 100000")
-//             .await
-//             .unwrap()
-//             .collect()
-//             .await
-//             .unwrap()
-//             .iter()
-//             .map(|b| b.num_rows())
-//             .sum();
-//         assert_eq!(rows, 0, "impossible latitude predicate should yield no rows");
-//     }
-
-//     #[tokio::test]
-//     async fn predicate_pushdown_selects_subset_through_datafusion() {
-//         use arrow::array::{Float64Array, Int64Array};
-
-//         let store = test_store().await;
-//         let ctx = datafusion::prelude::SessionContext::new();
-//         register_example(&ctx, store).await;
-
-//         // Filter on the midpoint of the latitude range so the predicate keeps
-//         // some — but not all — rows. Cast to f64 so the test is type-agnostic.
-//         let stats = ctx
-//             .sql(
-//                 "SELECT min(CAST(lat AS DOUBLE)) AS mn, max(CAST(lat AS DOUBLE)) AS mx, \
-//                  count(*) AS n FROM gridded_nc",
-//             )
-//             .await
-//             .unwrap()
-//             .collect()
-//             .await
-//             .unwrap();
-//         let row = &stats[0];
-//         let d = |i: usize| {
-//             row.column(i)
-//                 .as_any()
-//                 .downcast_ref::<Float64Array>()
-//                 .unwrap()
-//                 .value(0)
-//         };
-//         let (mn, mx) = (d(0), d(1));
-//         let total = row
-//             .column(2)
-//             .as_any()
-//             .downcast_ref::<Int64Array>()
-//             .unwrap()
-//             .value(0);
-//         assert!(mx > mn, "lat must span a range");
-//         let mid = mn + (mx - mn) / 2.0;
-
-//         let batches = ctx
-//             .sql(&format!(
-//                 "SELECT CAST(lat AS DOUBLE) AS latd FROM gridded_nc \
-//                  WHERE CAST(lat AS DOUBLE) > {mid}"
-//             ))
-//             .await
-//             .unwrap()
-//             .collect()
-//             .await
-//             .unwrap();
-//         let mut kept = 0i64;
-//         for b in &batches {
-//             let col = b
-//                 .column(0)
-//                 .as_any()
-//                 .downcast_ref::<Float64Array>()
-//                 .unwrap();
-//             for i in 0..col.len() {
-//                 assert!(col.value(i) > mid, "every returned lat must satisfy the predicate");
-//             }
-//             kept += b.num_rows() as i64;
-//         }
-//         assert!(kept > 0, "midpoint predicate should keep some rows");
-//         assert!(kept < total, "midpoint predicate should drop some rows");
-//     }
-
-//     /// `scale_factor`/`add_offset` are actually applied: the decoded
-//     /// `analysed_sst` (packed int16 with scale 0.01, offset 273.15 kelvin) lands
-//     /// in a physical sea-surface-temperature range, which raw packed values
-//     /// never would.
-//     #[tokio::test]
-//     async fn scale_offset_decodes_to_physical_range() {
-//         use arrow::array::Float64Array;
-
-//         let store = test_store().await;
-//         let ctx = datafusion::prelude::SessionContext::new();
-//         register_example(&ctx, store).await;
-
-//         let batches = ctx
-//             .sql("SELECT min(analysed_sst) AS mn, max(analysed_sst) AS mx FROM gridded_nc")
-//             .await
-//             .unwrap()
-//             .collect()
-//             .await
-//             .unwrap();
-
-//         let f = |i: usize| {
-//             batches[0]
-//                 .column(i)
-//                 .as_any()
-//                 .downcast_ref::<Float64Array>()
-//                 .unwrap()
-//                 .value(0)
-//         };
-//         let (mn, mx) = (f(0), f(1));
-//         assert!(
-//             (250.0..350.0).contains(&mn) && (250.0..350.0).contains(&mx),
-//             "decoded SST must be in a physical kelvin range, got [{mn}, {mx}]"
-//         );
-//         assert!(mx > mn, "SST must span a range");
-//     }
-
-//     /// End-to-end: with the nd projection-pushdown rule registered (as
-//     /// beacon-core does), `SELECT lat * 2` plans with an `NdProjectionExec`
-//     /// *below* the `NdBroadcastExec`, and yields the same values as a plain
-//     /// session.
-//     #[tokio::test]
-//     async fn projection_pushdown_fires_end_to_end() {
-//         use arrow::compute::concat_batches;
-//         use datafusion::execution::session_state::SessionStateBuilder;
-//         use datafusion::physical_plan::displayable;
-
-//         let store = test_store().await;
-
-//         let state = SessionStateBuilder::new()
-//             .with_default_features()
-//             .with_physical_optimizer_rule(Arc::new(
-//                 beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
-//             ))
-//             .build();
-//         let ctx = datafusion::prelude::SessionContext::new_with_state(state);
-//         register_example(&ctx, store.clone()).await;
-
-//         let df = ctx
-//             .sql("SELECT lat * 2 AS lat2 FROM gridded_nc")
-//             .await
-//             .unwrap();
-//         let plan = df.clone().create_physical_plan().await.unwrap();
-//         let rendered = displayable(plan.as_ref()).indent(true).to_string();
-
-//         let broadcast = rendered.find("NdBroadcastExec");
-//         let projection = rendered.find("NdProjectionExec");
-//         let source = rendered.find("NdSourceExec");
-//         assert!(
-//             broadcast < projection && projection < source,
-//             "projection must be pushed below the broadcast:\n{rendered}"
-//         );
-
-//         let bare = datafusion::prelude::SessionContext::new();
-//         register_example(&bare, store).await;
-//         let expected = bare
-//             .sql("SELECT lat * 2 AS lat2 FROM gridded_nc")
-//             .await
-//             .unwrap()
-//             .collect()
-//             .await
-//             .unwrap();
-//         let actual = df.collect().await.unwrap();
-
-//         let schema = actual[0].schema();
-//         assert_eq!(
-//             concat_batches(&schema, &actual).unwrap(),
-//             concat_batches(&schema, &expected).unwrap(),
-//         );
-//     }
-
-//     // ── nd pipeline: plan shape + variables & attributes end-to-end ──────
-
-//     /// The physical plan for an nd scan is the nd spine on top of the standard
-//     /// file scan: `NdBroadcastExec` → `NdSourceExec` → `DataSourceExec`, in that
-//     /// nesting order (parent above child in the indented render).
-//     #[tokio::test]
-//     async fn physical_plan_is_nd_spine_over_scan() {
-//         use datafusion::physical_plan::displayable;
-
-//         let store = test_store().await;
-//         let ctx = datafusion::prelude::SessionContext::new();
-//         register_example(&ctx, store).await;
-
-//         let plan = ctx
-//             .sql("SELECT analysed_sst FROM gridded_nc")
-//             .await
-//             .unwrap()
-//             .create_physical_plan()
-//             .await
-//             .unwrap();
-//         let rendered = displayable(plan.as_ref()).indent(true).to_string();
-
-//         let broadcast = rendered.find("NdBroadcastExec");
-//         let source = rendered.find("NdSourceExec");
-//         let scan = rendered.find("DataSourceExec");
-//         assert!(
-//             broadcast.is_some() && source.is_some() && scan.is_some(),
-//             "plan must contain the nd spine over a DataSourceExec:\n{rendered}"
-//         );
-//         assert!(
-//             broadcast < source && source < scan,
-//             "expected NdBroadcastExec → NdSourceExec → DataSourceExec nesting:\n{rendered}"
-//         );
-//     }
-
-//     /// End-to-end through DataFusion: a gridded data variable comes back decoded
-//     /// (scale/offset applied → Float64), and its rank-0 attributes — a variable
-//     /// attribute (`analysed_sst.units`) and a global attribute (`.Conventions`) —
-//     /// ride the `beacon.nd` encoding as constant columns on every row.
-//     #[tokio::test]
-//     async fn end_to_end_reads_variable_with_attributes() {
-//         use arrow::array::StringArray;
-//         use arrow::datatypes::DataType;
-
-//         let store = test_store().await;
-//         let ctx = datafusion::prelude::SessionContext::new();
-//         register_example(&ctx, store).await;
-
-//         let batches = ctx
-//             .sql(
-//                 r#"SELECT analysed_sst,
-//                           "analysed_sst.units" AS units,
-//                           ".Conventions"       AS conventions
-//                    FROM gridded_nc LIMIT 4"#,
-//             )
-//             .await
-//             .unwrap()
-//             .collect()
-//             .await
-//             .unwrap();
-
-//         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-//         assert_eq!(total, 4, "LIMIT 4 should yield exactly 4 rows");
-
-//         let batch = &batches[0];
-//         // The data variable is decoded via scale_factor/add_offset → Float64,
-//         // consistent with the zarr reader.
-//         assert_eq!(
-//             batch.column_by_name("analysed_sst").unwrap().data_type(),
-//             &DataType::Float64
-//         );
-
-//         let units = batch
-//             .column_by_name("units")
-//             .unwrap()
-//             .as_any()
-//             .downcast_ref::<StringArray>()
-//             .unwrap();
-//         let conventions = batch
-//             .column_by_name("conventions")
-//             .unwrap()
-//             .as_any()
-//             .downcast_ref::<StringArray>()
-//             .unwrap();
-//         for i in 0..batch.num_rows() {
-//             assert_eq!(units.value(i), "kelvin", "variable attribute must be constant");
-//             assert_eq!(conventions.value(i), "CF-1.4", "global attribute must be constant");
-//         }
-//     }
-
-//     /// The strongest constant-column check: co-selected with a gridded variable
-//     /// (`lat`, which establishes the broadcast target), a rank-0 attribute is
-//     /// present on *every* grid row and has exactly one distinct value across all
-//     /// of them. Referencing a gridded variable matters — projecting to only the
-//     /// scalar attribute would collapse the grid to a single row.
-//     #[tokio::test]
-//     async fn attribute_is_single_distinct_value_across_grid() {
-//         use arrow::array::Int64Array;
-
-//         let store = test_store().await;
-//         let ctx = datafusion::prelude::SessionContext::new();
-//         register_example(&ctx, store).await;
-
-//         let batches = ctx
-//             .sql(
-//                 r#"SELECT COUNT(DISTINCT "analysed_sst.units") AS distinct_units,
-//                           COUNT("analysed_sst.units")          AS attr_rows,
-//                           COUNT(lat)                           AS grid_rows
-//                    FROM gridded_nc"#,
-//             )
-//             .await
-//             .unwrap()
-//             .collect()
-//             .await
-//             .unwrap();
-
-//         let int = |name: &str| {
-//             batches[0]
-//                 .column_by_name(name)
-//                 .unwrap()
-//                 .as_any()
-//                 .downcast_ref::<Int64Array>()
-//                 .unwrap()
-//                 .value(0)
-//         };
-//         assert_eq!(int("distinct_units"), 1, "attribute must be a single constant");
-//         assert!(int("grid_rows") > 1, "gridded variable must define a multi-row grid");
-//         assert_eq!(
-//             int("attr_rows"),
-//             int("grid_rows"),
-//             "attribute must be broadcast (non-null) onto every grid row"
-//         );
-//     }
-// }

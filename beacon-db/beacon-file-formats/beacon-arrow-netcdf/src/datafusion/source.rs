@@ -1,35 +1,28 @@
 use std::sync::Arc;
 
-use arrow::{
-    datatypes::SchemaRef,
-    record_batch::{RecordBatch, RecordBatchOptions},
-};
+use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
-        batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
-        nd_provider::any_dataset_as_encoded_stream, pushdown_filter::PushdownFilter,
+        metrics::ReadMetrics,
+        morsel::{morsel_scan, MorselSource, OpenFile},
+        file_read::FileRead,
     },
     projection::DatasetProjection,
 };
 use datafusion::{
-    common::pruning::PrunableStatistics,
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     physical_expr::{conjunction, projection::ProjectionExprs, PhysicalExpr},
-    physical_expr_adapter::BatchAdapterFactory,
-    physical_optimizer::pruning::PruningPredicate,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
-        EmptyRecordBatchStream,
     },
 };
-use futures::{stream::BoxStream, FutureExt, StreamExt, TryStreamExt};
+use futures::{stream::BoxStream, FutureExt};
 use object_store::ObjectMeta;
 
 use super::reader::{self, FileAccess, NetcdfInput, NetcdfReaderCache};
@@ -40,8 +33,6 @@ use super::reader::{self, FileAccess, NetcdfInput, NetcdfReaderCache};
 /// pipeline via a [`FileOpener`].
 #[derive(Debug, Clone)]
 pub struct NetCDFSource {
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
-    /// How this scan reaches its files, and which reader opens them.
     access: FileAccess,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
@@ -52,6 +43,12 @@ pub struct NetCDFSource {
     cache: Option<NetcdfReaderCache>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
+    /// The scan's file queue, when it is planned morsel-driven.
+    ///
+    /// `Some` means every partition's group holds one standing entry and the
+    /// files are all in here, so the openers read whatever the queue hands them.
+    /// `None` means the groups are the file list, as DataFusion planned them.
+    morsel: Option<Arc<MorselSource>>,
 }
 
 impl NetCDFSource {
@@ -61,7 +58,6 @@ impl NetCDFSource {
         table_schema: TableSchema,
     ) -> Self {
         Self {
-            schema_adapter_factory: None,
             access,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
@@ -70,6 +66,7 @@ impl NetCDFSource {
             predicate: None,
             cache: None,
             projection: None,
+            morsel: None,
         }
     }
 
@@ -87,6 +84,12 @@ impl NetCDFSource {
         self.projection = projection;
         self
     }
+
+    /// The files this scan's queue holds, when it is planned morsel-driven.
+    #[cfg(test)]
+    pub(crate) fn morsel_files(&self) -> Option<usize> {
+        self.morsel.as_ref().map(|source| source.files())
+    }
 }
 
 impl FileSource for NetCDFSource {
@@ -96,7 +99,6 @@ impl FileSource for NetCDFSource {
         base_config: &FileScanConfig,
         partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
-        let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(NetCDFOpener::new(
@@ -105,11 +107,11 @@ impl FileSource for NetCDFSource {
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
-            file_schema,
             self.cache.clone(),
             self.execution_plan_metrics.clone(),
             partition,
             object_store,
+            self.morsel.clone(),
         )))
     }
 
@@ -128,13 +130,61 @@ impl FileSource for NetCDFSource {
         })
     }
 
+    fn supports_repartitioning(&self) -> bool {
+        tracing::trace!(
+            "NetCDFSource supports_repartitioning: access={:?}",
+            self.access
+        );
+        matches!(self.access, FileAccess::Oxcdf)
+    }
+
+    /// Put the scan's files in one queue, and point every partition at it.
+    ///
+    /// Nothing is assigned here. Each partition's group holds one standing entry
+    /// and the files go into a [`MorselSource`]; a partition takes the next file
+    /// when it is free, and helps divide an open one when no file is left. So
+    /// balance follows completion, and the plan holds one entry per partition
+    /// rather than one per file.
+    ///
+    /// `repartition_file_min_size` is unused. It was the size a file had to
+    /// reach before every partition would open it, back when balance was a guess
+    /// made from file sizes at plan time. A queue does not guess, so there is no
+    /// size at which it is worth declining.
     fn repartitioned(
         &self,
-        _target_partitions: usize,
+        target_partitions: usize,
         _repartition_file_min_size: usize,
-        _output_ordering: Option<datafusion::physical_expr::LexOrdering>,
-        _config: &FileScanConfig,
+        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+        config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
+        tracing::trace!(
+            "NetCDFSource repartitioned: access={:?}, target_partitions={target_partitions}",
+            self.access,
+        );
+        if !self.supports_repartitioning() || output_ordering.is_some() || target_partitions <= 1 {
+            return Ok(None);
+        }
+
+        if let Some((morsel, file_groups)) = morsel_scan(&config.file_groups, target_partitions) {
+            tracing::debug!(
+                "NetCDFSource morsel scan: {} files over {target_partitions} partitions",
+                morsel.files()
+            );
+            let mut config = config.clone();
+            config.file_groups = file_groups;
+            // The openers are built from the config's source, so the queue has
+            // to travel with it.
+            config.file_source = Arc::new(Self {
+                morsel: Some(morsel),
+                ..self.clone()
+            });
+            return Ok(Some(config));
+        }
+
+        // The queue declined. It only does that for a partitioned table, and
+        // `NetcdfFormat::create_physical_plan` refuses those before a scan is
+        // built, so this is unreachable in practice. Keeping the scan as it was
+        // planned is the safe answer either way.
         Ok(None)
     }
 
@@ -144,10 +194,6 @@ impl FileSource for NetCDFSource {
 
     fn file_type(&self) -> &str {
         "netcdf"
-    }
-
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {
@@ -193,22 +239,26 @@ impl FileSource for NetCDFSource {
 }
 
 /// Opens a single NetCDF file and streams its contents as Arrow
-/// [`RecordBatch`]es via [`any_dataset_as_record_batch_stream`].
+/// [`RecordBatch`]es.
 struct NetCDFOpener {
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    pruning_predicate: Option<PruningPredicate>,
-    table_schema: SchemaRef,
     cache: Option<NetcdfReaderCache>,
-    metrics: ExecutionPlanMetricsSet,
+    /// This partition's counters, registered once. See [`ReadMetrics::new`].
+    read_metrics: ReadMetrics,
     partition: usize,
     /// How this opener reaches its files, and which reader opens them.
     access: FileAccess,
     /// The store the scan lists from. The `oxcdf` reader reads through it; the
     /// netcdf-c reader ignores it and opens a resolved native path instead.
     object_store: Arc<dyn object_store::ObjectStore>,
+    /// The scan's file queue, when it is planned morsel-driven. `Some` means the
+    /// entry `FileStream` hands this opener is the scan, not a file.
+    morsel: Option<Arc<MorselSource>>,
+    /// How one file is opened, for the queue to call.
+    files: Arc<dyn OpenFile>,
 }
 
 impl NetCDFOpener {
@@ -219,42 +269,88 @@ impl NetCDFOpener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        table_schema: SchemaRef,
         cache: Option<NetcdfReaderCache>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
         object_store: Arc<dyn object_store::ObjectStore>,
+        morsel: Option<Arc<MorselSource>>,
     ) -> Self {
-        let pruning_predicate = predicate
-            .as_ref()
-            .and_then(|pred| PruningPredicate::try_new(pred.clone(), table_schema.clone()).ok());
+        let read_metrics = ReadMetrics::new(&metrics, partition);
+        let files = Arc::new(NetCDFFiles {
+            access: access.clone(),
+            object_store: object_store.clone(),
+            projected_schema: projected_schema.clone(),
+            read_dimensions: read_dimensions.clone(),
+            batch_size,
+            cache: cache.clone(),
+            predicate: predicate.clone(),
+            metrics: read_metrics.clone(),
+        });
 
         Self {
+            morsel,
+            files,
             projected_schema,
             read_dimensions,
             batch_size,
             predicate,
-            pruning_predicate,
-            table_schema,
             cache,
-            metrics,
+            read_metrics,
             partition,
             access,
             object_store,
         }
     }
 
+    /// Read one file, through its share when it has one.
+    ///
+    /// A shared file is opened and planned by whichever partition arrives first;
+    /// the rest attach to what it built and pull from the same queue. An
+    /// unshared file is planned by the one partition that holds it. Either way
+    /// the reading is the same, so there is one path below the plan.
+    ///
+    /// Every input to the plan has to be identical in every partition of one
+    /// file, or the partitions would not be reading the same file the same way.
+    /// They are: the dataset, `projected_schema`, `batch_size` and `predicate`.
+    /// A scan takes all four from one place, so they are. Keep it that way.
     #[allow(clippy::too_many_arguments)]
-    async fn read_task(
+    async fn read(
         input: NetcdfInput,
         object: ObjectMeta,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
-        predicate: Option<Arc<dyn PhysicalExpr>>,
         cache: Option<NetcdfReaderCache>,
-        metrics: Option<DatasetReadMetrics>,
+        metrics: ReadMetrics,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
+        let planning = metrics.clone();
+        let plan = async move || {
+            let dataset = Self::open_dataset(input, object, cache, read_dimensions).await?;
+            FileRead::plan(
+                dataset,
+                projected_schema,
+                batch_size,
+                predicate,
+                Some(&planning),
+            )
+            .await
+        };
+
+        // This partition's own file. Nothing is shared here: a scan that can be
+        // divided goes through the queue, and one that cannot is refused before
+        // it is planned.
+        let dataset = plan().await?;
+
+        Ok(dataset.stream(Some(metrics)))
+    }
+
+    async fn open_dataset(
+        input: NetcdfInput,
+        object: ObjectMeta,
+        cache: Option<NetcdfReaderCache>,
+        read_dimensions: Option<Vec<String>>,
+    ) -> datafusion::error::Result<beacon_nd_array::dataset::AnyDataset> {
         let dataset = reader::open_dataset(cache.as_ref(), input, object.clone())
             .await
             .map_err(|e| {
@@ -283,167 +379,96 @@ impl NetCDFOpener {
         } else {
             dataset
         };
+        Ok(dataset)
+    }
+}
 
-        let file_schema: SchemaRef =
-            beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to derive Arrow schema from NetCDF dataset: {e}"
-                    ))
-                })?
-                .into();
+/// How one netCDF file becomes a planned [`FileRead`].
+///
+/// This is everything a [`MorselSource`] needs of the format. The queue holds
+/// the files; this says what opening one means.
+struct NetCDFFiles {
+    access: FileAccess,
+    object_store: Arc<dyn object_store::ObjectStore>,
+    projected_schema: SchemaRef,
+    read_dimensions: Option<Vec<String>>,
+    batch_size: usize,
+    cache: Option<NetcdfReaderCache>,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
+    metrics: ReadMetrics,
+}
 
-        // Columns of this file that the query needs, in file order — used both
-        // to prune the read and as the source schema for the batch adapter.
-        let projection: Vec<usize> = file_schema
-            .fields()
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
-            .map(|(i, _)| i)
-            .collect();
+impl std::fmt::Debug for NetCDFFiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetCDFFiles")
+            .field("access", &self.access)
+            .finish_non_exhaustive()
+    }
+}
 
-        if projection.is_empty() {
-            // No output columns are needed (e.g. `COUNT(*)`). Reading zero columns
-            // would yield an empty stream and an incorrect count of 0. Drive the
-            // read with the highest-dimensionality variable so the row count equals
-            // the full broadcast row count (a scalar attribute like `.Conventions`
-            // would give just 1 row), plus any predicate columns so a pushed-down
-            // filter still applies (PushdownFilter matches by name). Emit
-            // zero-column batches carrying the correct row counts.
-            let driver_idx = dataset
-                .fields()
-                .keys()
-                .max_by_key(|name| {
-                    dataset
-                        .get_array(name)
-                        .map(|a| a.shape().iter().product::<usize>())
-                        .unwrap_or(0)
-                })
-                .and_then(|name| file_schema.index_of(name).ok())
-                .unwrap_or(0);
-            let mut driver: Vec<usize> = vec![driver_idx];
-            if let Some(pred) = &predicate {
-                for col in datafusion::physical_expr::utils::collect_columns(pred) {
-                    if let Ok(idx) = file_schema.index_of(col.name()) {
-                        driver.push(idx);
-                    }
-                }
-            }
-            driver.sort_unstable();
-            driver.dedup();
+#[async_trait::async_trait]
+impl OpenFile for NetCDFFiles {
+    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<FileRead>> {
+        let input = self.access.input_for(&self.object_store, &file.object_meta)?;
+        let dataset = NetCDFOpener::open_dataset(
+            input,
+            file.object_meta.clone(),
+            self.cache.clone(),
+            self.read_dimensions.clone(),
+        )
+        .await?;
 
-            let dataset = dataset
-                .project(&DatasetProjection {
-                    dimension_projection: None,
-                    index_projection: Some(driver),
-                })
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to project NetCDF dataset for count: {e}"
-                    ))
-                })?;
-
-            let pushdown_filter = predicate.map(PushdownFilter::new);
-            let count_schema = projected_schema.clone();
-            let stream =
-                any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-                    .map(move |batch| {
-                        let batch = batch.map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Error reading NetCDF as Arrow stream: {e}"
-                            ))
-                        })?;
-                        RecordBatch::try_new_with_options(
-                            count_schema.clone(),
-                            vec![],
-                            &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
-                        )
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Failed to build count batch: {e}"
-                            ))
-                        })
-                    })
-                    .boxed();
-            return Ok(stream);
-        }
-
-        // The opener emits nd-encoded batches, so adaptation happens in the
-        // encoded (struct) domain: reorder and null-fill missing columns onto
-        // the projected encoded schema.
-        let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-            &file_schema.project(&projection)?,
-        ));
-        let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
-
-        let dataset = if projection.len() < file_schema.fields().len() {
-            let proj = DatasetProjection {
-                dimension_projection: None,
-                index_projection: Some(projection),
-            };
-            dataset.project(&proj).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to project NetCDF dataset: {e}"
-                ))
-            })?
-        } else {
-            dataset
-        };
-
-        // Emit nd-encoded batches (decoded/broadcast by the NdSourceExec /
-        // NdBroadcastExec above the scan), adapted onto the projected encoded
-        // schema.
-        let _ = metrics;
-        let stream = any_dataset_as_encoded_stream(dataset, batch_size)
-            .and_then(move |batch| {
-                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to adapt NetCDF batch schema: {e}"
-                    ))
-                });
-                futures::future::ready(mapped)
-            })
-            .boxed();
-
-        Ok(stream)
+        FileRead::plan(
+            dataset,
+            self.projected_schema.clone(),
+            self.batch_size,
+            self.predicate.clone(),
+            Some(&self.metrics),
+        )
+        .await
     }
 }
 
 impl FileOpener for NetCDFOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
-        if let (Some(stats), Some(prune)) = (&file.statistics, &self.pruning_predicate) {
-            let result = prune.prune(&PrunableStatistics::new(
-                vec![Arc::clone(stats)],
-                self.table_schema.clone(),
-            ))?[0];
-            if !result {
-                tracing::debug!(
-                    "Pruning NetCDF file {} based on statistics.",
-                    file.object_meta.location
-                );
-                // File is pruned, return empty stream.
-                let stream = EmptyRecordBatchStream::new(self.table_schema.clone()).boxed();
+        // A morsel-driven scan hands every partition the same standing entry.
+        // It is not a file: the files are in the queue, and this partition reads
+        // whatever it hands out until the scan is done.
+        if let Some(morsel) = &self.morsel {
+            tracing::trace!(
+                "NetCDFOpener morsel scan: {} files, partition={}",
+                morsel.files(),
+                self.partition
+            );
+            let stream = morsel.stream(
+                self.partition,
+                Arc::clone(&self.files),
+                Some(self.read_metrics.clone()),
+            );
+            return Ok(futures::future::ready(Ok(stream)).boxed());
+        }
 
-                return Ok(futures::future::ready(Ok(stream)).boxed());
-            }
-        };
-
-        let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
+        tracing::trace!(
+            "NetCDFOpener open: access={:?}, file={:?}, partition={}",
+            self.access,
+            file.object_meta.location,
+            self.partition
+        );
+        let metrics = self.read_metrics.clone();
         let input = self
             .access
             .input_for(&self.object_store, &file.object_meta)?;
-        let fut = Self::read_task(
+
+        Ok(Self::read(
             input,
             file.object_meta,
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
             self.batch_size,
-            self.predicate.clone(),
             self.cache.clone(),
             metrics,
+            self.predicate.clone(),
         )
-        .boxed();
-        Ok(fut)
+        .boxed())
     }
 }

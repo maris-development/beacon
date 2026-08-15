@@ -67,7 +67,27 @@ impl TableProviderFactory for ListingTableFactoryExt {
         let options = ListingOptions::new(file_format)
             .with_file_extension("") // file extension is not needed for listing table factory since the file format will handle it in `infer_schema` and `infer_partition_schema`
             .with_session_config_options(session_state.config())
-            .with_collect_stat(true)
+            // Statistics come from the file-stats store, not from the listing
+            // table. `build_listing_table` wraps this in a `FastObjectTable`,
+            // which prunes from that store, so collecting them here buys the
+            // scan nothing it does not already have.
+            //
+            // It costs a great deal. `ListingTable::scan` infers statistics for
+            // every file it lists, and a format infers them by opening the file:
+            // for netCDF on the Rust reader that means an open and a read of
+            // every coordinate array, per file, inside `scan` — which is to say
+            // during planning, so `EXPLAIN` pays it too. A table over 16k files
+            // takes minutes to plan and looks like a hang.
+            //
+            // This was harmless while netcdf-c was the default reader, because
+            // `NetcdfFormat::infer_stats` returns unknown for it and the whole
+            // pass was a no-op. Making the Rust reader the default turned that
+            // no-op into the work above.
+            //
+            // `with_session_config_options` above reads
+            // `datafusion.execution.collect_statistics`, so this has to come
+            // after it to win.
+            .with_collect_stat(false)
             .with_table_partition_cols(table_partition_cols)
             .with_file_sort_order(cmd.order_exprs.clone());
 

@@ -29,6 +29,10 @@ use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 /// crate. Both crates read it, so it is not copied into either.
 const WOD_FILE: &str = "wod_ctd_1964.nc";
 /// A NetCDF-4 file with a chunked grid, packed variables and CF time.
+/// The share minimum a scan takes from its session
+/// (`repartition_file_min_size`), which these tests leave at the default.
+const MIN_SHARE_SIZE: u64 = 10 * 1024 * 1024;
+
 const GRIDDED_FILE: &str = "gridded-example.nc";
 /// Plain HDF5: datasets two group levels deep, and no netCDF convention.
 const NESTED_FILE: &str = "nested-groups.h5";
@@ -59,11 +63,38 @@ impl Backend {
 /// Canonical, because `object_store::path::Path` rejects a `..` segment and
 /// this one reaches into a sibling crate.
 fn netcdf_file(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../beacon-arrow-netcdf/test_files")
         .join(name)
         .canonicalize()
-        .unwrap_or_else(|e| panic!("the bundled netCDF fixture {name} exists: {e}"))
+        .unwrap_or_else(|e| panic!("the bundled netCDF fixture {name} exists: {e}"));
+
+    strip_verbatim_prefix(path)
+}
+
+/// Drop the Windows verbatim prefix from a canonical path.
+///
+/// `canonicalize` returns `\\?\C:\...` on Windows, and `ListingTableUrl` cannot
+/// turn one of those back into a file path: it parses, then panics in
+/// `to_file_path`. Every test that registers a table from a canonical path needs
+/// this. On every other platform, and on a UNC path, it does nothing.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path;
+    };
+    // Only the drive form (`C:\...`) is safe to unwrap. `\\?\UNC\server\share`
+    // would lose its leading slashes and stop naming the same place.
+    let mut chars = rest.chars();
+    let is_drive = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && chars.next() == Some('\\');
+
+    if is_drive {
+        PathBuf::from(rest.to_string())
+    } else {
+        path
+    }
 }
 
 /// The absolute path of a bundled plain-HDF5 file.
@@ -99,7 +130,9 @@ fn session() -> SessionContext {
                 .with_target_partitions(1)
                 // `FastObjectTable` merges its schemas through this. A session
                 // that skips `RuntimeBuilder` has to register it itself.
-                .with_extension(beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension()),
+                .with_extension(
+                    beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+                ),
         )
         .with_default_features()
         .build();
@@ -122,6 +155,25 @@ async fn register(ctx: &SessionContext, table: &str, backend: Backend, path: &st
         .await
         .unwrap_or_else(|e| panic!("register {} on {backend:?}: {e}", path.display()));
     ctx.register_table(table, Arc::new(table_provider)).unwrap();
+}
+
+/// A session with `target_partitions` partitions.
+///
+/// Nothing is done to the share minimum here, so it stays the session default
+/// ([`MIN_SHARE_SIZE`]). Asking for partitions is therefore not the same as
+/// getting a share: the file has to be large enough to earn one.
+fn splitting_session(target_partitions: usize) -> SessionContext {
+    let config = SessionConfig::new()
+        .with_target_partitions(target_partitions)
+        .with_extension(
+            beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+        );
+
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_default_features()
+        .build();
+    SessionContext::new_with_state(state)
 }
 
 /// Run `sql` and concatenate the result into one batch.
@@ -178,6 +230,208 @@ async fn both_backends_return_the_same_rows_for_a_gridded_file() {
         rust,
         collect(&ctx, "SELECT analysed_sst, lat, lon, time FROM netcdf_c").await
     );
+}
+
+// ── Splitting one file across partitions ────────────────────────────────────
+
+/// The partition count of the scan at the bottom of `plan`.
+///
+/// The root can carry more partitions than the scan does: DataFusion adds a
+/// round-robin repartition above a single-partition scan, which hides whether
+/// the scan itself was split. This looks at the scan, which is the thing
+/// splitting changes.
+fn scan_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> usize {
+    use datafusion::physical_plan::ExecutionPlanProperties;
+
+    let mut node = plan.clone();
+    while let Some(child) = node.children().first() {
+        node = Arc::clone(child);
+    }
+    node.output_partitioning().partition_count()
+}
+
+/// A table is served by the reader it asked for, and only `oxcdf` can split.
+///
+/// The reader decides, not the format. `Hdf5Source` is the `oxcdf` source and
+/// permits the split; a table on netcdf-c is served by `NetCDFSource`, which
+/// declines because every netcdf-c call queues on one process-global mutex, so
+/// shares of a file would run one at a time and pay for an extra open each.
+///
+/// That routing lives in `Hdf5FormatFactory`, three files from the source that
+/// allows the split. This holds it in place, by reading the scan's file type off
+/// the plan rather than by counting partitions: the bundled fixtures are under
+/// [`MIN_SHARE_SIZE`], so neither reader shares them and a partition count would
+/// say nothing about which source is underneath.
+#[tokio::test]
+async fn each_reader_serves_its_own_source() {
+    for (backend, file_type) in [
+        (Backend::NetcdfC, "file_type=netcdf"),
+        (Backend::Rust, "file_type=hdf5"),
+    ] {
+        let ctx = splitting_session(4);
+        register(&ctx, "t", backend, &netcdf_file(GRIDDED_FILE)).await;
+
+        let plan = ctx
+            .sql("SELECT analysed_sst FROM t")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let rendered = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(false)
+            .to_string();
+
+        assert!(
+            rendered.contains(file_type),
+            "{backend:?} should scan through {file_type}:
+{rendered}"
+        );
+    }
+}
+
+/// A small scan runs on every partition, and returns the same rows it returns
+/// in a single-partition session.
+///
+/// File size decides nothing here any more. It used to: a file under the split
+/// minimum was left on one partition, because a share of it opened the file and
+/// built its chunk list before reading a byte, and on a small file that setup
+/// cost more than the parallelism returned.
+///
+/// The scan is planned morsel-driven now — one standing entry per partition and
+/// one queue behind them — so a partition that finds the queue empty simply
+/// finishes. There is nothing to decline, and no size at which declining helps.
+///
+/// The row check is what matters and it is unchanged: whatever the partitions
+/// divide between them, the answer must equal a single partition's.
+#[tokio::test]
+async fn a_small_scan_runs_on_every_partition_and_returns_the_same_rows() {
+    const QUERY: &str = "SELECT count(*), min(analysed_sst), max(analysed_sst) FROM t";
+    const PARTITIONS: usize = 4;
+
+    let whole = session();
+    register(&whole, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+
+    let asked = splitting_session(PARTITIONS);
+    register(&asked, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+
+    let plan = asked
+        .sql("SELECT analysed_sst FROM t")
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    assert_eq!(
+        scan_partitions(&plan),
+        PARTITIONS,
+        "the scan is planned on every partition:
+{}",
+        datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+    );
+
+    let asked_summary = format!("{:?}", collect(&asked, QUERY).await.columns());
+    let whole_summary = format!("{:?}", collect(&whole, QUERY).await.columns());
+    assert_eq!(
+        asked_summary, whole_summary,
+        "{PARTITIONS} partitions over one queue read the file exactly once"
+    );
+}
+
+/// How many columns [`write_large_netcdf`] writes, and how many rows in each.
+const LARGE_COLUMNS: usize = 20;
+const LARGE_ROWS: usize = 100_000;
+
+/// Write a netCDF-4 file larger than [`MIN_SHARE_SIZE`].
+///
+/// A netCDF-4 file is an HDF5 file, so the Rust reader here reads it as one.
+/// Every bundled fixture is under the minimum, so a test that needs a real
+/// split has to make its own file.
+///
+/// It is written **wide** rather than long, and that is not a free choice.
+/// `oxcdf` cannot read this writer's output once a single variable grows past
+/// roughly 200k values: it fails with "chunk at […] was neither cached nor
+/// fetched" while netcdf-c reads the same bytes. The limit follows one
+/// variable's chunk count, not the file's size, so 20 columns of 100k values
+/// clears 8 MB three times over and still reads back.
+///
+/// The caller holds the [`TempDir`](tempfile::TempDir) for as long as the table
+/// is registered.
+fn write_large_netcdf() -> (tempfile::TempDir, PathBuf) {
+    use arrow::array::{ArrayRef, Float64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+    use beacon_arrow_netcdf::writer::ArrowRecordBatchWriter;
+
+    let schema = Arc::new(Schema::new(
+        (0..LARGE_COLUMNS)
+            .map(|column| Field::new(format!("V{column}"), DataType::Float64, false))
+            .collect::<Vec<_>>(),
+    ));
+    let columns: Vec<ArrayRef> = (0..LARGE_COLUMNS)
+        .map(|column| {
+            Arc::new(Float64Array::from_iter_values(
+                (0..LARGE_ROWS).map(|row| (row + column) as f64 * 0.25),
+            )) as ArrayRef
+        })
+        .collect();
+    let batch = RecordBatch::try_new(schema.clone(), columns).expect("a batch");
+
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("large.nc");
+    let mut writer =
+        ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema).expect("a netCDF writer");
+    writer.write_record_batch(batch).expect("write the batch");
+    writer.finish().expect("finish the file");
+
+    let size = std::fs::metadata(&path).expect("the written file").len();
+    assert!(
+        size > MIN_SHARE_SIZE,
+        "the generated file must clear the share minimum, got {size} bytes"
+    );
+
+    (dir, path)
+}
+
+/// A file over the split minimum scans in several partitions, and returns the
+/// same rows it returns in one.
+///
+/// This is the only HDF5 test that reaches the split the way a query does: a
+/// real file over the real minimum, planned and executed through SQL.
+///
+/// The partition count is the point of the feature. The row check is the guard
+/// on it: `count(*)` catches a share that overlapped another or a gap between
+/// two, and `min`/`max` catch a share that read the wrong region. None of those
+/// raise an error on their own.
+#[tokio::test]
+async fn a_large_file_splits_and_returns_the_same_rows() {
+    const QUERY: &str = r#"SELECT count(*), count("V0"), min("V0"), max("V0") FROM t"#;
+
+    let (_dir, file) = write_large_netcdf();
+
+    let whole = session();
+    register(&whole, "t", Backend::Rust, &file).await;
+
+    let split = splitting_session(4);
+    register(&split, "t", Backend::Rust, &file).await;
+
+    let plan = split
+        .sql(r#"SELECT "V0" FROM t"#)
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    assert_eq!(
+        scan_partitions(&plan),
+        4,
+        "a file over the minimum should scan in 4 partitions:\n{}",
+        datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
+    );
+
+    let split_summary = format!("{:?}", collect(&split, QUERY).await.columns());
+    let whole_summary = format!("{:?}", collect(&whole, QUERY).await.columns());
+    assert_eq!(split_summary, whole_summary);
 }
 
 /// A ragged file, where the row count comes from the instance/observation
@@ -392,6 +646,22 @@ fn format_on(
         .unwrap_or_else(|e| panic!("build the {backend:?} format: {e}"))
 }
 
+/// The analysis form of a format: the one that measures files.
+///
+/// A format built any other way reports unknown statistics, so that a query
+/// never pays to compute them. Only the file analyzer asks for this one.
+fn analysis_format_on(
+    ctx: &SessionContext,
+    backend: Backend,
+    path: &std::path::Path,
+) -> Arc<dyn datafusion::datasource::file_format::FileFormat> {
+    let listing = Arc::new(ListingFactory::dynamic());
+    let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
+    factory(Backend::NetcdfC)
+        .create_for_analysis(&ctx.state(), &backend.options(), &url, &listing)
+        .unwrap_or_else(|e| panic!("build the {backend:?} analysis format: {e}"))
+}
+
 /// How many columns came back with a real minimum.
 fn columns_with_a_range(statistics: &datafusion::common::Statistics) -> usize {
     statistics
@@ -412,7 +682,7 @@ async fn statistics_come_from_the_rust_reader_only() {
     let path = netcdf_file(WOD_FILE);
     let (store, object) = local_object(&path);
 
-    let rust = format_on(&ctx, Backend::Rust, &path);
+    let rust = analysis_format_on(&ctx, Backend::Rust, &path);
     let schema = rust
         .infer_schema(&state, &store, std::slice::from_ref(&object))
         .await
@@ -428,7 +698,7 @@ async fn statistics_come_from_the_rust_reader_only() {
 
     // netcdf-c reports unknown rather than erroring, so a deployment on it keeps
     // working and simply prunes nothing.
-    let netcdf_c = format_on(&ctx, Backend::NetcdfC, &path);
+    let netcdf_c = analysis_format_on(&ctx, Backend::NetcdfC, &path);
     let without_rust_reader = netcdf_c
         .infer_stats(&state, &store, schema.clone(), &object)
         .await
@@ -453,7 +723,7 @@ async fn statistics_cover_a_plain_hdf5_file() {
     let path = hdf5_file(NESTED_FILE);
     let (store, object) = local_object(&path);
 
-    let format = format_on(&ctx, Backend::Rust, &path);
+    let format = analysis_format_on(&ctx, Backend::Rust, &path);
     let schema = format
         .infer_schema(&state, &store, std::slice::from_ref(&object))
         .await
@@ -464,7 +734,9 @@ async fn statistics_cover_a_plain_hdf5_file() {
         .unwrap();
 
     let range = |column: &str| {
-        let index = schema.index_of(column).unwrap_or_else(|e| panic!("{column}: {e}"));
+        let index = schema
+            .index_of(column)
+            .unwrap_or_else(|e| panic!("{column}: {e}"));
         let stats = &statistics.column_statistics[index];
         (stats.min_value.clone(), stats.max_value.clone())
     };
@@ -514,10 +786,130 @@ async fn disabling_statistics_wins_over_the_reader() {
         )
         .unwrap();
 
-    let statistics = off.infer_stats(&state, &store, schema, &object).await.unwrap();
+    let statistics = off
+        .infer_stats(&state, &store, schema, &object)
+        .await
+        .unwrap();
     assert_eq!(
         columns_with_a_range(&statistics),
         0,
         "enable_statistics=false must still mean no statistics"
+    );
+}
+
+/// The predicate reaches the HDF5 scan through the nd spine, and skips chunks.
+///
+/// The scan sits under an `NdSourceExec` and an `NdBroadcastExec`. A node that
+/// does not forward filters leaves the source with nothing to prune on, and that
+/// failure is invisible in a result — every row still comes back, the scan just
+/// reads the whole file. So it is asserted on the scan's own output.
+///
+/// One encoded batch carries one chunk, so the scan's output rows *are* its
+/// chunk count. The fixture's `lat` runs from about 38.8 to 48.8.
+#[tokio::test]
+async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
+    use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
+
+    let ctx = session();
+    register(&ctx, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+
+    struct ScanRows(Option<usize>);
+    impl ExecutionPlanVisitor for ScanRows {
+        type Error = std::convert::Infallible;
+        fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> Result<bool, Self::Error> {
+            if plan.name().contains("DataSourceExec") {
+                self.0 = plan.metrics().and_then(|metrics| metrics.output_rows());
+                return Ok(false);
+            }
+            Ok(true)
+        }
+    }
+
+    let chunks_read = async |sql: &str| {
+        let plan = ctx
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
+            .await
+            .unwrap();
+        let mut visitor = ScanRows(None);
+        datafusion::physical_plan::accept(plan.as_ref(), &mut visitor).unwrap();
+        visitor.0.expect("the scan reports its output rows")
+    };
+
+    let whole = chunks_read("SELECT lat FROM t").await;
+    assert!(whole > 1, "the fixture must hold several chunks");
+
+    assert_eq!(
+        chunks_read("SELECT lat FROM t WHERE lat > 1000").await,
+        0,
+        "a predicate no row can meet must leave the scan nothing to read"
+    );
+    assert_eq!(
+        chunks_read("SELECT lat FROM t WHERE lat > 0").await,
+        whole,
+        "a predicate every row meets must not skip a chunk"
+    );
+
+    let partial = chunks_read("SELECT lat FROM t WHERE lat > 44").await;
+    assert!(
+        partial > 0 && partial < whole,
+        "lat > 44 should read some of the {whole} chunks, it read {partial}"
+    );
+}
+
+/// The count under a pruned scan matches the coordinate itself.
+///
+/// A bound that is too tight loses rows and reports a smaller count, and nothing
+/// about that is an error. The expected answer comes from the coordinate column,
+/// read with no predicate in the plan and therefore with no pruning.
+#[tokio::test]
+async fn a_pruned_scan_counts_what_the_coordinate_says_it_should() {
+    use arrow::array::{Float32Array, Int64Array};
+
+    let ctx = session();
+    register(&ctx, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+
+    let lats: Vec<f32> = {
+        let batch = collect(&ctx, "SELECT lat FROM t").await;
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("lat is f32")
+            .iter()
+            .flatten()
+            .collect()
+    };
+    assert!(!lats.is_empty(), "the fixture must hold rows");
+
+    let count = async |sql: &str| {
+        collect(&ctx, sql)
+            .await
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("int64 count")
+            .value(0) as usize
+    };
+
+    for threshold in [0.0_f32, 44.0, 60.0] {
+        let expected = lats.iter().filter(|lat| **lat > threshold).count();
+        assert_eq!(
+            count(&format!("SELECT count(*) FROM t WHERE lat > {threshold}")).await,
+            expected,
+            "lat > {threshold}: the pruned scan does not match the coordinate"
+        );
+    }
+
+    // A disjunction implies no bound, so it must prune nothing and still answer.
+    assert_eq!(
+        count("SELECT count(*) FROM t WHERE lat > 0 OR lat > 60").await,
+        lats.iter().filter(|lat| **lat > 0.0).count(),
+        "a disjunction must not prune on one of its branches"
     );
 }

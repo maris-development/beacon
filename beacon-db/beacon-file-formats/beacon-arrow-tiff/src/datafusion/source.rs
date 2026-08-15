@@ -1,16 +1,12 @@
 use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
-use beacon_nd_array::{
-    arrow::{
-        batch::{any_dataset_as_record_batch_stream, any_dataset_as_row_size},
-        metrics::DatasetReadMetrics,
-        pushdown_filter::PushdownFilter,
-    },
-    projection::DatasetProjection,
+use beacon_nd_array::arrow::{
+    metrics::ReadMetrics,
+    morsel::{morsel_scan, MorselSource, OpenFile},
+    file_read::FileRead,
 };
 use datafusion::{
-    common::Statistics,
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
@@ -18,16 +14,13 @@ use datafusion::{
         schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    execution::SendableRecordBatchStream,
-    physical_expr::{PhysicalExpr, conjunction, projection::ProjectionExprs},
-    physical_expr_adapter::BatchAdapterFactory,
+    physical_expr::{conjunction, projection::ProjectionExprs, PhysicalExpr},
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
-        metrics::{ExecutionPlanMetricsSet, SplitMetrics},
-        stream::{BatchSplitStream, RecordBatchStreamAdapter},
+        metrics::ExecutionPlanMetricsSet,
     },
 };
-use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
+use futures::{stream::BoxStream, FutureExt};
 use object_store::ObjectMeta;
 
 use super::reader;
@@ -41,6 +34,9 @@ pub struct TiffSource {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
+    /// The scan's file queue, when it is planned morsel-driven. See
+    /// [`morsel_scan`].
+    morsel: Option<Arc<MorselSource>>,
 }
 
 impl TiffSource {
@@ -52,6 +48,7 @@ impl TiffSource {
             batch_size: 128 * 1024,
             predicate: None,
             projection: None,
+            morsel: None,
         }
     }
 
@@ -71,17 +68,16 @@ impl FileSource for TiffSource {
         base_config: &FileScanConfig,
         partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
-        let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(TiffOpener::new(
-            file_schema,
             object_store,
             projected_schema,
             self.batch_size,
             self.predicate.clone(),
             self.execution_plan_metrics.clone(),
             partition,
+            self.morsel.clone(),
         )))
     }
 
@@ -100,14 +96,44 @@ impl FileSource for TiffSource {
         })
     }
 
+    /// Put the scan's rasters in one queue, and point every partition at it.
+    ///
+    /// A GeoTIFF is one raster per object, so nothing here divides a file: the
+    /// partitions take whole rasters, whoever is free taking the next. That is
+    /// worth doing even though the listing already spread them, because the
+    /// listing spread them by a guess at plan time and this does not guess.
+    ///
+    /// An ordered scan keeps its grouping: a partition taking rasters as it
+    /// finishes cannot emit them in listing order.
     fn repartitioned(
         &self,
-        _target_partitions: usize,
+        target_partitions: usize,
         _repartition_file_min_size: usize,
-        _output_ordering: Option<datafusion::physical_expr::LexOrdering>,
-        _config: &FileScanConfig,
+        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+        config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
-        Ok(None)
+        if output_ordering.is_some() || target_partitions <= 1 {
+            return Ok(None);
+        }
+
+        let Some((morsel, file_groups)) = morsel_scan(&config.file_groups, target_partitions)
+        else {
+            return Ok(None);
+        };
+
+        tracing::debug!(
+            "TiffSource morsel scan: {} rasters over {target_partitions} partitions",
+            morsel.files()
+        );
+        let mut config = config.clone();
+        config.file_groups = file_groups;
+        // The openers are built from the config's source, so the queue has to
+        // travel with it.
+        config.file_source = Arc::new(Self {
+            morsel: Some(morsel),
+            ..self.clone()
+        });
+        Ok(Some(config))
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -165,43 +191,106 @@ impl FileSource for TiffSource {
 }
 
 struct TiffOpener {
-    table_schema: SchemaRef,
     object_store: Arc<dyn object_store::ObjectStore>,
     projected_schema: SchemaRef,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     partition: usize,
-    metrics: ExecutionPlanMetricsSet,
+    /// This partition's counters, registered once. See [`ReadMetrics::new`].
+    read_metrics: ReadMetrics,
+    /// The scan's raster queue, when it is planned morsel-driven.
+    morsel: Option<Arc<MorselSource>>,
+    /// How one raster is opened, for the queue to call.
+    rasters: Arc<dyn OpenFile>,
+}
+
+/// How one GeoTIFF becomes a planned [`FileRead`].
+///
+/// This is everything a [`MorselSource`] needs of the format.
+struct TiffRasters {
+    object_store: Arc<dyn object_store::ObjectStore>,
+    projected_schema: SchemaRef,
+    batch_size: usize,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
+    metrics: ReadMetrics,
+}
+
+impl std::fmt::Debug for TiffRasters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TiffRasters").finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenFile for TiffRasters {
+    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<FileRead>> {
+        let object = file.object_meta.clone();
+        let dataset = reader::open_dataset(self.object_store.clone(), object.clone())
+            .await
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to open TIFF dataset {}: {e}",
+                    object.location,
+                ))
+            })?;
+
+        FileRead::plan(
+            dataset,
+            self.projected_schema.clone(),
+            self.batch_size,
+            self.predicate.clone(),
+            Some(&self.metrics),
+        )
+        .await
+    }
 }
 
 impl TiffOpener {
     fn new(
-        table_schema: SchemaRef,
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
+        morsel: Option<Arc<MorselSource>>,
     ) -> Self {
+        // Once per partition, not once per file: every call registers four
+        // counters into the scan's one metrics set, behind a mutex.
+        let read_metrics = ReadMetrics::new(&metrics, partition);
+        let rasters = Arc::new(TiffRasters {
+            object_store: object_store.clone(),
+            projected_schema: projected_schema.clone(),
+            batch_size,
+            predicate: predicate.clone(),
+            metrics: read_metrics.clone(),
+        });
+
         Self {
-            table_schema,
             object_store,
             projected_schema,
             batch_size,
             predicate,
             partition,
-            metrics,
+            read_metrics,
+            morsel,
+            rasters,
         }
     }
 
-    async fn read_task(
+    /// Read one file.
+    ///
+    /// TIFF has no share map: a GeoTIFF is one raster per object and the listing
+    /// spreads objects across the partitions, so each file is one partition's
+    /// alone. The planning below is the same one a shared file gets — see
+    /// [`FileRead::plan`].
+    async fn read(
         object: ObjectMeta,
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        metrics: Option<DatasetReadMetrics>,
+        metrics: ReadMetrics,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(object_store, object.clone())
             .await
@@ -212,93 +301,41 @@ impl TiffOpener {
                 ))
             })?;
 
-        let file_schema: SchemaRef =
-            beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to derive Arrow schema from TIFF dataset: {e}"
-                    ))
-                })?
-                .into();
+        let dataset = FileRead::plan(
+            dataset,
+            projected_schema,
+            batch_size,
+            predicate,
+            Some(&metrics),
+        )
+        .await?;
 
-        // Columns of this file that the query needs, in file order — used both
-        // to prune the read and as the source schema for the batch adapter.
-        let projection: Vec<usize> = file_schema
-            .fields()
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
-            .map(|(i, _)| i)
-            .collect();
-
-        if projection.is_empty() {
-            return Ok(any_dataset_as_row_size(dataset)
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to compute row size for empty projection on TIFF dataset: {e}"
-                    ))
-                })?
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to read TIFF dataset with empty projection: {e}"
-                    ))
-                })
-                .boxed());
-        }
-
-        // Adapt batches (read with `projection`) onto the projected output
-        // schema: reorder, cast, and null-fill columns this file lacks.
-        let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
-        let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
-
-        let dataset = if projection.len() < file_schema.fields().len() {
-            let proj = DatasetProjection {
-                dimension_projection: None,
-                index_projection: Some(projection),
-            };
-            dataset.project(&proj).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to project TIFF dataset: {e}"
-                ))
-            })?
-        } else {
-            dataset
-        };
-
-        let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading TIFF as Arrow stream: {e}"
-                ))
-            })
-            .and_then(move |batch| {
-                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to adapt TIFF batch schema: {e}"
-                    ))
-                });
-                futures::future::ready(mapped)
-            })
-            .boxed();
-
-        Ok(stream)
+        Ok(dataset.stream(Some(metrics)))
     }
 }
 
 impl FileOpener for TiffOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
-        let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
-        let fut = Self::read_task(
+        // A morsel-driven scan hands every partition the same standing entry.
+        // It is not a raster: the rasters are in the queue, and this partition
+        // reads whatever it hands out until the scan is done.
+        if let Some(morsel) = &self.morsel {
+            let stream = morsel.stream(
+                self.partition,
+                Arc::clone(&self.rasters),
+                Some(self.read_metrics.clone()),
+            );
+            return Ok(futures::future::ready(Ok(stream)).boxed());
+        }
+
+        Ok(Self::read(
             file.object_meta,
             self.object_store.clone(),
             self.projected_schema.clone(),
             self.batch_size,
             self.predicate.clone(),
-            metrics,
+            self.read_metrics.clone(),
         )
-        .boxed();
-
-        Ok(fut)
+        .boxed())
     }
 }

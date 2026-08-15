@@ -4,9 +4,14 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
+use datafusion::common::config::ConfigOptions;
 use datafusion::common::plan_err;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterDescription, FilterPushdownPhase, FilterPushdownPropagation,
+};
 use datafusion::physical_plan::metrics::{
     BaselineMetrics, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
 };
@@ -104,6 +109,32 @@ impl ExecutionPlan for NdBroadcastExec {
             broadcasts,
             passthroughs,
         ))
+    }
+
+    /// Pass the filters down the nd pipeline, towards the file source that can
+    /// prune on them.
+    ///
+    /// The broadcast is where the flat schema begins, so this is the node a
+    /// `FilterExec` offers its predicate to. Below it the columns are the
+    /// encoded form of the same columns, named and ordered the same, so the
+    /// predicate travels unchanged.
+    fn gather_filters_for_pushdown(
+        &self,
+        _phase: FilterPushdownPhase,
+        parent_filters: Vec<Arc<dyn PhysicalExpr>>,
+        _config: &ConfigOptions,
+    ) -> Result<FilterDescription> {
+        super::offer_filters_to_child(parent_filters, &self.input)
+    }
+
+    /// The broadcast applies no predicate, so the `FilterExec` above stays.
+    fn handle_child_pushdown_result(
+        &self,
+        _phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &ConfigOptions,
+    ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        Ok(super::filters_stay_above(child_pushdown_result))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {

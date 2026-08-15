@@ -18,6 +18,10 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use datafusion::error::Result;
 use datafusion::execution::TaskContext;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterDescription, FilterPushdownPropagation,
+};
 use datafusion::physical_plan::metrics::{BaselineMetrics, Count};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
@@ -33,6 +37,40 @@ pub use source_exec::NdSourceExec;
 
 /// Stream of nd batches exchanged between nd-aware operators.
 pub type SendableNdBatchStream = BoxStream<'static, Result<NdRecordBatch>>;
+
+/// Offer a parent's filters to the one child, as a hint and nothing more.
+///
+/// An nd operator cannot evaluate a flat predicate on nd batches, so it never
+/// claims one. It does let the predicate travel: a file source underneath reads
+/// the columns a `WHERE` names off it and skips the chunks whose coordinates
+/// cannot satisfy it, which is the difference between reading a grid and reading
+/// the part of it a query asked for.
+///
+/// The filters pass through unchanged. An nd column is the encoded form of the
+/// logical column of the same name, in the same position, so a `Column` means
+/// the same thing on either side of the encoding.
+///
+/// Pair this with [`filters_stay_above`], which is what makes it safe.
+pub(crate) fn offer_filters_to_child(
+    parent_filters: Vec<Arc<dyn PhysicalExpr>>,
+    child: &Arc<dyn ExecutionPlan>,
+) -> Result<FilterDescription> {
+    FilterDescription::from_children(parent_filters, &[child])
+}
+
+/// Tell the parent that none of its filters were applied, whatever the child
+/// said.
+///
+/// The child was given the filters to prune with, not to apply. A source that
+/// claimed one would leave the rows it dropped unaccounted for, because an nd
+/// operator between them cannot re-apply a flat predicate. Reporting everything
+/// unsupported keeps the `FilterExec` above this node, so the predicate is
+/// always evaluated exactly once, on flat rows.
+pub(crate) fn filters_stay_above<T>(
+    child_pushdown_result: ChildPushdownResult,
+) -> FilterPushdownPropagation<T> {
+    FilterPushdownPropagation::all_unsupported(child_pushdown_result)
+}
 
 /// An [`ExecutionPlan`] that can additionally stream nd batches.
 pub trait NdExecutionPlan: ExecutionPlan {

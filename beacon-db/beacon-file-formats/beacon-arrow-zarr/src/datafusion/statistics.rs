@@ -289,9 +289,7 @@ fn attribute_range(
 ///
 /// Anything else — a missing attribute, a wrong length, a non-number, a NaN or
 /// an infinity — is not a bound and yields `None`.
-fn actual_range(
-    attributes: &serde_json::Map<String, serde_json::Value>,
-) -> Option<(f64, f64)> {
+fn actual_range(attributes: &serde_json::Map<String, serde_json::Value>) -> Option<(f64, f64)> {
     let values = attributes.get("actual_range")?.as_array()?;
     let [low, high] = values.as_slice() else {
         return None;
@@ -318,7 +316,10 @@ fn int_range<T: TryFrom<i64>>(low: f64, high: f64, min: f64, max: f64) -> Option
     if low < min || high > max || low < -EXACT_INTEGER || high > EXACT_INTEGER {
         return None;
     }
-    Some((T::try_from(low as i64).ok()?, T::try_from(high as i64).ok()?))
+    Some((
+        T::try_from(low as i64).ok()?,
+        T::try_from(high as i64).ok()?,
+    ))
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -376,15 +377,15 @@ mod tests {
     #[test]
     fn actual_range_decodes_cf_time_the_way_the_reader_does() {
         let units = "seconds since 1970-01-01";
-        let a = attrs(&[
-            ("actual_range", json!([0, 60])),
-            ("units", json!(units)),
-        ]);
+        let a = attrs(&[("actual_range", json!([0, 60])), ("units", json!(units))]);
         let (epoch, unit) = parse_cf_time_units(units, None).unwrap();
         let range = attribute_range(&a, NdArrayDataType::Timestamp).unwrap();
         assert_eq!(
             range.0,
-            ScalarValue::TimestampNanosecond(Some(cf_offset_to_timestamp(0.0, epoch, unit).0), None)
+            ScalarValue::TimestampNanosecond(
+                Some(cf_offset_to_timestamp(0.0, epoch, unit).0),
+                None
+            )
         );
         assert_eq!(
             range.1,
