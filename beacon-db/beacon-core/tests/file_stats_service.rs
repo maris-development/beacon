@@ -663,6 +663,14 @@ async fn statistics_survive_a_restart() {
 
 /// The number of files a plan will actually open.
 fn files_in_plan(explain: &str) -> usize {
+    // An nd scan does not print a file list. It plans one standing entry per
+    // partition, pointing at a queue that holds the files, and states the count
+    // in the entry: `nd-morsel-scan/3-files`. That entry repeats once per
+    // partition, so read the count rather than counting occurrences.
+    if let Some(files) = morsel_scan_files(explain) {
+        return files;
+    }
+
     // Pruning runs before the scan is built, so the file groups the plan prints
     // are the files it will read. Counting the extensions in them is crude, but
     // it is what the plan actually says.
@@ -670,6 +678,16 @@ fn files_in_plan(explain: &str) -> usize {
         .iter()
         .map(|extension| explain.matches(extension).count())
         .sum()
+}
+
+/// The file count an nd scan states in its standing entry, when it has one.
+///
+/// `None` for a plan that lists its files: a parquet scan, or an nd scan that
+/// pruning left with no file at all.
+fn morsel_scan_files(explain: &str) -> Option<usize> {
+    const MARKER: &str = "nd-morsel-scan/";
+    let rest = &explain[explain.find(MARKER)? + MARKER.len()..];
+    rest[..rest.find("-files")?].parse().ok()
 }
 
 /// One metric value, expanded from the abbreviated form `EXPLAIN ANALYZE` uses.
