@@ -53,6 +53,19 @@ mod tests {
     use super::exec::{NdBroadcastExec, NdSourceExec};
     use super::*;
 
+    /// Config with the nd rewrite switched on. Both rules read
+    /// `beacon.enable_nd_pipeline` on every plan (they are always installed, so a
+    /// later `SET` can turn them on), and it is off by default — so a bare
+    /// `ConfigOptions` would make every rule here a no-op.
+    fn nd_pipeline_on() -> datafusion::common::config::ConfigOptions {
+        let mut options = datafusion::common::config::ConfigOptions::default();
+        options.extensions.insert(crate::settings::BeaconOptions {
+            enable_nd_pipeline: true,
+            ..Default::default()
+        });
+        options
+    }
+
     fn dims(spec: &[(&str, usize)]) -> Dimensions {
         Dimensions::try_new(
             spec.iter()
@@ -421,7 +434,7 @@ mod tests {
         let expected = run(original.clone()).await.unwrap();
 
         let optimized = NdProjectionPushdown::new()
-            .optimize(original, &ConfigOptions::default())
+            .optimize(original, &nd_pipeline_on())
             .unwrap();
 
         // Schema is preserved (the rule reports schema_check = true).
@@ -440,6 +453,56 @@ mod tests {
         // Results are unchanged by the rewrite.
         let actual = run(optimized).await.unwrap();
         assert_eq!(actual, expected);
+    }
+
+    /// Both rules are installed unconditionally so a later
+    /// `SET beacon.enable_nd_pipeline = true` can switch them on — which only
+    /// works if a rule left off returns the plan exactly as it found it.
+    #[tokio::test]
+    async fn rules_are_inert_when_the_nd_pipeline_is_off() {
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datafusion::physical_plan::displayable;
+
+        let schema = test_source().schema();
+        let exprs = projection_exprs(&schema);
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            ProjectionExec::try_new(
+                exprs
+                    .iter()
+                    .cloned()
+                    .map(|(expr, alias)| ProjectionExpr { expr, alias }),
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+        let before = displayable(original.as_ref()).indent(true).to_string();
+
+        // A default `ConfigOptions` carries no beacon namespace at all, which is
+        // the other way the flag reads as off.
+        for config in [ConfigOptions::default(), {
+            let mut off = ConfigOptions::default();
+            off.extensions.insert(crate::settings::BeaconOptions::default());
+            off
+        }] {
+            let untouched = NdProjectionPushdown::new()
+                .optimize(original.clone(), &config)
+                .unwrap();
+            assert_eq!(
+                displayable(untouched.as_ref()).indent(true).to_string(),
+                before,
+                "the projection rule rewrote a plan with the nd pipeline off"
+            );
+
+            let untouched = NdFilterPushdown::new()
+                .optimize(original.clone(), &config)
+                .unwrap();
+            assert_eq!(
+                displayable(untouched.as_ref()).indent(true).to_string(),
+                before,
+                "the filter rule rewrote a plan with the nd pipeline off"
+            );
+        }
     }
 
     /// The rule leaves a projection in place when any expression is not
@@ -500,7 +563,7 @@ mod tests {
         );
 
         let optimized = NdProjectionPushdown::new()
-            .optimize(original, &ConfigOptions::default())
+            .optimize(original, &nd_pipeline_on())
             .unwrap();
         let rendered = displayable(optimized.as_ref()).indent(true).to_string();
         assert!(
@@ -747,7 +810,7 @@ mod tests {
         let expected = run(original.clone()).await.unwrap();
 
         let optimized = NdFilterPushdown::new()
-            .optimize(original, &ConfigOptions::default())
+            .optimize(original, &nd_pipeline_on())
             .unwrap();
 
         assert_eq!(optimized.schema(), original_schema);
@@ -837,7 +900,7 @@ mod tests {
         );
 
         let optimized = NdFilterPushdown::new()
-            .optimize(original, &ConfigOptions::default())
+            .optimize(original, &nd_pipeline_on())
             .unwrap();
         let rendered = displayable(optimized.as_ref()).indent(true).to_string();
 

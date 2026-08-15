@@ -15,6 +15,7 @@ pub use beacon_arrow_bbf::datafusion::BbfConfig;
 pub use beacon_arrow_hdf5::Hdf5Config;
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
+pub use beacon_lance::LanceConfig;
 pub use beacon_common::FileStatsConfig;
 pub use beacon_common::CrawlerConfig;
 
@@ -33,6 +34,7 @@ pub struct Config {
     pub zarr: ZarrConfig,
     pub atlas: AtlasConfig,
     pub bbf: BbfConfig,
+    pub lance: LanceConfig,
     pub crawler: CrawlerConfig,
     pub file_stats: FileStatsConfig,
     pub api_docs: ApiDocsConfig,
@@ -472,6 +474,19 @@ struct RawConfig {
     #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
     bbf_split_streams_slice: bool,
 
+    // Managed Lance tables. Empty means "leave it to Lance"; each is also
+    // settable at runtime as `beacon.lance.*`.
+    #[envconfig(from = "BEACON_LANCE_COMPRESSION", default = "")]
+    lance_compression: String,
+    #[envconfig(from = "BEACON_LANCE_NUMERIC_COMPRESSION", default = "")]
+    lance_numeric_compression: String,
+    #[envconfig(from = "BEACON_LANCE_VERSION", default = "")]
+    lance_version: String,
+    #[envconfig(from = "BEACON_LANCE_MINICHUNK", default = "")]
+    lance_minichunk: String,
+    #[envconfig(from = "BEACON_LANCE_MATERIALIZATION", default = "")]
+    lance_materialization: String,
+
     // Base64-encoded 32-byte master key for encrypting persisted secrets
     // (external-database credentials). Optional; validated in `Config::load`.
     #[envconfig(from = "BEACON_SECRETS_KEY")]
@@ -627,6 +642,13 @@ impl From<RawConfig> for Config {
             },
             bbf: BbfConfig {
                 split_streams_slice: raw.bbf_split_streams_slice,
+            },
+            lance: LanceConfig {
+                compression: raw.lance_compression,
+                numeric_compression: raw.lance_numeric_compression,
+                version: raw.lance_version,
+                minichunk: raw.lance_minichunk,
+                materialization: raw.lance_materialization,
             },
             file_stats: FileStatsConfig {
                 enable: raw.file_stats_enable,

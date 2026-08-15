@@ -17,6 +17,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 
+use crate::config::LanceConfig;
 use crate::io::{write_stream, WriteKind};
 use crate::warehouse::LanceWarehouse;
 
@@ -68,13 +69,17 @@ impl DataSink for LanceDataSink {
     async fn write_all(
         &self,
         data: SendableRecordBatchStream,
-        _context: &Arc<TaskContext>,
+        context: &Arc<TaskContext>,
     ) -> DataFusionResult<u64> {
+        // The encoding settings come off the task's session config, so a
+        // `SET beacon.lance.*` shapes the files this write produces.
+        let config = LanceConfig::from_config(context.session_config());
+
         // Serialize writers to this dataset across the (async) write, then stream
         // the input directly into Lance — no full-table buffering.
         let lock = self.warehouse.lock(&self.uri);
         let _guard = lock.lock().await;
-        write_stream(&self.uri, self.warehouse.session(), data, self.kind)
+        write_stream(&self.uri, self.warehouse.session(), data, self.kind, &config)
             .await
             .map_err(|e| DataFusionError::External(e.into()))
     }

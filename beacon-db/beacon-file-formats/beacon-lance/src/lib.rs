@@ -15,6 +15,7 @@
 //! torn reads; a per-dataset write lock serializes writers.
 
 pub mod alter;
+pub mod config;
 pub mod definition;
 pub mod index;
 pub mod io;
@@ -31,6 +32,7 @@ use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt};
 
 pub use alter::{SchemaChange, alter_table};
+pub use config::LanceConfig;
 pub use definition::LanceTableDefinition;
 pub use index::{
     IndexInfo, ScalarIndexKind, create_default_indexes, create_index, drop_index, list_indices,
@@ -48,13 +50,14 @@ pub async fn create_lance_table(
     namespace: &[String],
     name: &str,
     arrow_schema: &ArrowSchema,
+    config: &LanceConfig,
 ) -> anyhow::Result<LanceTable> {
     let uri = warehouse.table_uri(namespace, name);
     tracing::info!(namespace = ?namespace, table = name, uri = %uri, "creating Lance table");
 
     // Store the Lance-writable schema (view types widened) so the provider's
     // schema matches the written dataset.
-    let schema = io::lance_compatible_schema(arrow_schema);
+    let schema = io::lance_compatible_schema(arrow_schema, config);
     {
         let lock = warehouse.lock(&uri);
         let _guard = lock.lock().await;
@@ -65,6 +68,7 @@ pub async fn create_lance_table(
             warehouse.session(),
             io::empty_stream(schema.clone()),
             WriteKind::Create,
+            config,
         )
         .await?;
     }
@@ -108,12 +112,20 @@ pub async fn replace_table_contents(
     warehouse: &LanceWarehouse,
     uri: &str,
     new_rows: SendableRecordBatchStream,
+    config: &LanceConfig,
 ) -> anyhow::Result<()> {
     tracing::info!(uri = %uri, "replacing Lance table contents");
 
     let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
-    io::write_stream(uri, warehouse.session(), new_rows, WriteKind::Overwrite).await?;
+    io::write_stream(
+        uri,
+        warehouse.session(),
+        new_rows,
+        WriteKind::Overwrite,
+        config,
+    )
+    .await?;
     Ok(())
 }
 
@@ -163,7 +175,13 @@ mod tests {
         let warehouse = test_warehouse(&dir);
         let namespace = beacon_namespace();
 
-        let table = create_lance_table(warehouse.clone(), &namespace, "orders", &sample_schema())
+        let table = create_lance_table(
+            warehouse.clone(),
+            &namespace,
+            "orders",
+            &sample_schema(),
+            &LanceConfig::default(),
+        )
             .await
             .expect("table should be created");
         let location = table.definition().location.clone();
@@ -191,7 +209,7 @@ mod tests {
             .execute_stream()
             .await
             .unwrap();
-        replace_table_contents(&warehouse, &location, keep)
+        replace_table_contents(&warehouse, &location, keep, &LanceConfig::default())
             .await
             .expect("replace should succeed");
         assert_eq!(
@@ -215,6 +233,7 @@ mod tests {
             &namespace,
             "discovered",
             &sample_schema(),
+            &LanceConfig::default(),
         )
         .await
         .unwrap();
@@ -265,7 +284,13 @@ mod tests {
         let warehouse = test_warehouse(&dir);
         let namespace = beacon_namespace();
 
-        let table = create_lance_table(warehouse.clone(), &namespace, "orders", &sample_schema())
+        let table = create_lance_table(
+            warehouse.clone(),
+            &namespace,
+            "orders",
+            &sample_schema(),
+            &LanceConfig::default(),
+        )
             .await
             .unwrap();
         let location = table.definition().location.clone();
@@ -349,7 +374,13 @@ mod tests {
         let warehouse = test_warehouse(&dir);
         let namespace = beacon_namespace();
 
-        let table = create_lance_table(warehouse.clone(), &namespace, "orders", &sample_schema())
+        let table = create_lance_table(
+            warehouse.clone(),
+            &namespace,
+            "orders",
+            &sample_schema(),
+            &LanceConfig::default(),
+        )
             .await
             .unwrap();
         let location = table.definition().location.clone();
@@ -397,12 +428,12 @@ mod tests {
         let warehouse = test_warehouse(&dir);
         let namespace = beacon_namespace();
 
-        create_lance_table(warehouse.clone(), &namespace, "dupe", &sample_schema())
+        create_lance_table(warehouse.clone(), &namespace, "dupe", &sample_schema(), &LanceConfig::default())
             .await
             .expect("first create succeeds");
         // A second CREATE at the same location must not silently clobber the
         // dataset (WriteKind::Create errors when a dataset is already present).
-        let err = create_lance_table(warehouse.clone(), &namespace, "dupe", &sample_schema())
+        let err = create_lance_table(warehouse.clone(), &namespace, "dupe", &sample_schema(), &LanceConfig::default())
             .await
             .expect_err("second create must fail");
         assert!(
@@ -424,7 +455,7 @@ mod tests {
             Field::new("blob", DataType::BinaryView, true),
         ]);
 
-        let table = create_lance_table(warehouse.clone(), &beacon_namespace(), "views", &schema)
+        let table = create_lance_table(warehouse.clone(), &beacon_namespace(), "views", &schema, &LanceConfig::default())
             .await
             .unwrap();
         use datafusion::catalog::TableProvider;
@@ -439,7 +470,7 @@ mod tests {
         let warehouse = test_warehouse(&dir);
         let namespace = beacon_namespace();
 
-        let table = create_lance_table(warehouse.clone(), &namespace, "gone", &sample_schema())
+        let table = create_lance_table(warehouse.clone(), &namespace, "gone", &sample_schema(), &LanceConfig::default())
             .await
             .unwrap();
         let location = table.definition().location.clone();
@@ -471,7 +502,13 @@ mod tests {
         let warehouse = test_warehouse(&dir);
         let namespace = beacon_namespace();
 
-        let table = create_lance_table(warehouse.clone(), &namespace, "orders", &sample_schema())
+        let table = create_lance_table(
+            warehouse.clone(),
+            &namespace,
+            "orders",
+            &sample_schema(),
+            &LanceConfig::default(),
+        )
             .await
             .unwrap();
         let location = table.definition().location.clone();

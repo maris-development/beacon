@@ -6,8 +6,8 @@ use std::{
 
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
-use beacon_arrow_atlas::datafusion::AtlasFormatFactory;
-use beacon_arrow_bbf::datafusion::BBFFormatFactory;
+use beacon_arrow_atlas::datafusion::{AtlasConfig, AtlasFormatFactory};
+use beacon_arrow_bbf::datafusion::{BBFFormatFactory, BbfConfig};
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
 use beacon_arrow_hdf5::Hdf5Config;
@@ -20,8 +20,11 @@ use beacon_arrow_zarr::ZarrConfig;
 use beacon_auth::{
     AuthContext, BasicAuthProvider, InMemoryUserStore, RoleProvider, RoleStore, UserDirectory,
 };
+use beacon_lance::LanceConfig;
+
 use beacon_datafusion_ext::{
     consts::{DEFAULT_DB_STORE_URL_OBJECT_URL, TMP_STORE_URL_OBJECT_URL},
+    settings::{BeaconOptions, BootSettings},
     format_ext::{new_file_format_registry_handle, FileFormatFactoryExt, FileFormatRegistry},
     listing_factory::{DefaultStore, ListingFactory, RootStore},
     listing_table_factory_ext::ListingTableFactoryExt,
@@ -97,6 +100,9 @@ pub struct RuntimeBuilder {
     pub netcdf: NetcdfConfig,
     pub hdf5: Hdf5Config,
     pub zarr: ZarrConfig,
+    pub atlas: AtlasConfig,
+    pub bbf: BbfConfig,
+    pub lance: LanceConfig,
 
     pub auth_provider: Option<Arc<dyn beacon_auth::AuthProvider>>,
     pub secrets_encryption_key: Option<[u8; 32]>,
@@ -238,6 +244,24 @@ impl RuntimeBuilder {
     /// Replaces the whole Zarr reader configuration.
     pub fn with_zarr_config(mut self, zarr: ZarrConfig) -> Self {
         self.zarr = zarr;
+        self
+    }
+
+    /// Replaces the whole Atlas reader configuration.
+    pub fn with_atlas_config(mut self, atlas: AtlasConfig) -> Self {
+        self.atlas = atlas;
+        self
+    }
+
+    /// Replaces the whole Beacon Binary Format configuration.
+    pub fn with_bbf_config(mut self, bbf: BbfConfig) -> Self {
+        self.bbf = bbf;
+        self
+    }
+
+    /// Replaces the whole managed-Lance configuration.
+    pub fn with_lance_config(mut self, lance: LanceConfig) -> Self {
+        self.lance = lance;
         self
     }
 
@@ -683,8 +707,62 @@ async fn register_schema_provider(
     .await?;
 
     load_persisted_secrets_into_store(session_ctx).await;
+    apply_persisted_settings(session_ctx).await;
 
     Ok(())
+}
+
+/// Replay the settings an `ALTER SYSTEM SET` persisted into the database file.
+///
+/// Applied *after* the environment built the session config, which is what makes
+/// the precedence **persisted > environment > default**: an operator's runtime
+/// change outlives a restart rather than silently reverting to the deployment's
+/// variables.
+///
+/// A setting that no longer applies (a key a later version removed or renamed) is
+/// logged and skipped. The alternative — failing to open the database — would
+/// leave an operator with a server that cannot start and cannot be fixed through
+/// SQL, since the bad value is the reason SQL is unreachable.
+async fn apply_persisted_settings(session_ctx: &Arc<SessionContext>) {
+    let persistence =
+        crate::settings_persistence::SettingsPersistence::from_session(session_ctx);
+    let Some(store) = persistence.store().cloned() else {
+        return;
+    };
+
+    let settings = match crate::settings_persistence::load_persisted_settings(&store).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::error!("failed to load persisted settings: {error:#}");
+            return;
+        }
+    };
+
+    if settings.is_empty() {
+        return;
+    }
+
+    let state_ref = session_ctx.state_ref();
+    let mut state = state_ref.write();
+    let config = state.config_mut();
+
+    for (key, value) in settings {
+        match config.options_mut().set(&key, &value) {
+            Ok(()) => tracing::info!("applied persisted setting {key} = {value}"),
+            Err(error) => {
+                tracing::error!("skipping persisted setting {key} = {value}: {error}")
+            }
+        }
+    }
+
+    // Re-take the snapshot, so `RESET <key>` restores what this server actually
+    // started with. The first snapshot (in `build_session_config`) records the
+    // environment only; a persisted value is applied over it and is therefore
+    // *also* part of the startup state. Without this, `RESET` on a persisted key
+    // would silently drop to the environment value until the next restart put the
+    // persisted one back.
+    let boot = BootSettings::from_config(config).with_startup(config.options());
+    config.set_extension(Arc::new(boot));
 }
 
 /// Load any secrets persisted (encrypted) in the database file into the in-memory secret store.
@@ -778,9 +856,9 @@ fn register_file_formats(
         Arc::new(ZarrFormatFactory::new(builder.zarr.clone())),
         Arc::new(AtlasFormatFactory::new(
             Default::default(),
-            Default::default(),
+            builder.atlas.clone(),
         )),
-        Arc::new(BBFFormatFactory::new(Default::default())),
+        Arc::new(BBFFormatFactory::new(builder.bbf.clone())),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
             listing_factory.clone(),
@@ -861,11 +939,14 @@ fn build_session_state(
     // `EnforceDistribution` — without which a Final aggregate never merges its
     // partitions and `count(*)` returns one row per file group. Filter runs
     // before projection so the selection is established first.
-    if builder.nd_pipeline {
-        state_builder = state_builder
-            .with_physical_optimizer_rule(Arc::new(NdFilterPushdown::new()))
-            .with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()));
-    }
+    //
+    // Always installed, and each rule reads `beacon.enable_nd_pipeline` on every
+    // plan: the optimizer chain is fixed once the session state is built, so a
+    // rule left out here could never be switched on by a later `SET`. A disabled
+    // rule returns the plan untouched.
+    state_builder = state_builder
+        .with_physical_optimizer_rule(Arc::new(NdFilterPushdown::new()))
+        .with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()));
 
     // Make every partition merge order-preserving so query results are
     // reproducible run to run. Appended last so it sees the CoalescePartitionsExec
@@ -936,13 +1017,19 @@ fn build_session_config(
         // registry erases the `Ext` type — which the external-table builder needs
         // to hand a natively-read format its root store.
         .with_extension(new_file_format_registry_handle())
-        // Recovered by the JSON query compiler (default table, projection pushdown).
-        .with_extension(Arc::new(builder.sql.clone()))
-        // Recovered when a statement's result stream is built, to merge the small
-        // batches a plan emits into client-sized ones.
-        .with_extension(Arc::new(CoalesceSqlStream::new(
-            builder.sql.stream_coalesce,
+        // Where `ALTER SYSTEM SET` writes. Empty for an in-memory database, which
+        // has nowhere durable to keep a setting — as with persistent secrets.
+        .with_extension(Arc::new(crate::settings_persistence::SettingsPersistence::new(
+            builder.db_path.is_some().then(|| db_store.clone()),
         )));
+    // The `beacon.*` config namespace: the query compiler, the stream coalescer
+    // and every format reader recover their settings from here. Unlike the typed
+    // extensions above it is a `ConfigExtension`, which is what lets
+    // `SET beacon.x = y` rewrite it on the live session.
+    config
+        .options_mut()
+        .extensions
+        .insert(build_beacon_options(builder));
     config
         .options_mut()
         .execution
@@ -960,7 +1047,49 @@ fn build_session_config(
     config.options_mut().optimizer.expand_views_at_output = true;
     config.options_mut().sql_parser.map_string_types_to_utf8view = false;
 
+    // Last, so it records the finished startup state of *both* namespaces. This is
+    // what `RESET <key>` restores to: the value the operator's environment
+    // supplied, rather than DataFusion's compiled default.
+    let boot = BootSettings::capture(config.options());
+    config = config.with_extension(Arc::new(boot));
+
     Ok(config)
+}
+
+/// The startup state of the `beacon.*` namespace: every builder-supplied value,
+/// which on the server is every `BEACON_*` environment variable.
+///
+/// One flat namespace rather than a per-subsystem extension each, because
+/// DataFusion keys a `ConfigExtension` by its prefix and `beacon` can only be
+/// claimed once. The per-crate config structs stay the crates' own shape; this
+/// copies into and out of them.
+fn build_beacon_options(builder: &RuntimeBuilder) -> BeaconOptions {
+    let mut options = BeaconOptions::default();
+    builder.sql.apply_to(&mut options);
+    options.enable_nd_pipeline = builder.nd_pipeline;
+
+    options.netcdf.use_reader_cache = builder.netcdf.use_reader_cache;
+    options.netcdf.enable_statistics = builder.netcdf.enable_statistics;
+    options.netcdf.use_rust_reader = builder.netcdf.use_rust_reader;
+
+    options.hdf5.use_reader_cache = builder.hdf5.use_reader_cache;
+    options.hdf5.enable_statistics = builder.hdf5.enable_statistics;
+    options.hdf5.use_rust_reader = builder.hdf5.use_rust_reader;
+
+    options.zarr.enable_statistics = builder.zarr.enable_statistics;
+
+    options.atlas.use_reader_cache = builder.atlas.use_reader_cache;
+    options.atlas.use_pruning = builder.atlas.use_pruning;
+
+    options.bbf.split_streams_slice = builder.bbf.split_streams_slice;
+
+    options.lance.compression = builder.lance.compression.clone();
+    options.lance.numeric_compression = builder.lance.numeric_compression.clone();
+    options.lance.version = builder.lance.version.clone();
+    options.lance.minichunk = builder.lance.minichunk.clone();
+    options.lance.materialization = builder.lance.materialization.clone();
+
+    options
 }
 
 /// Build the [`ListingFactory`] that resolves dataset paths for this runtime,

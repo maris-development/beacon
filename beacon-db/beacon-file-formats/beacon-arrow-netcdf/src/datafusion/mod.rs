@@ -6,6 +6,7 @@ use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_datafusion_ext::settings::BeaconOptions;
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
@@ -116,6 +117,33 @@ impl NetCDFFormatFactory {
         }
     }
 
+    /// The settings this format starts from, for a format built on `session`.
+    ///
+    /// The runtime's `BEACON_NETCDF_*` values seed `beacon.netcdf.*` at startup,
+    /// so reading the namespace here yields the runtime default until an operator
+    /// runs `SET beacon.netcdf.use_rust_reader = true`, and the new value from
+    /// then on. A session beacon did not build carries no namespace, and falls
+    /// back to the config this factory was constructed with.
+    ///
+    /// A per-table `OPTIONS (...)` value still wins over both — see
+    /// [`FileFormatFactory::create`].
+    fn session_config(&self, session: &dyn Session) -> NetcdfConfig {
+        let Some(netcdf) = BeaconOptions::try_from_session(session).map(|beacon| beacon.netcdf)
+        else {
+            // No namespace: this session was not built by beacon's runtime, so
+            // this factory's own config is the only configuration there is.
+            return self.config.clone();
+        };
+        NetcdfConfig {
+            use_reader_cache: netcdf.use_reader_cache,
+            enable_statistics: netcdf.enable_statistics,
+            use_rust_reader: netcdf.use_rust_reader,
+            // Not settable: the cache is built once, at the capacity the runtime
+            // started with.
+            reader_cache_size: self.config.reader_cache_size,
+        }
+    }
+
     /// Build a [`NetcdfFormat`] with the given per-table effective settings,
     /// wiring in the shared reader cache when caching is enabled.
     fn build_format(
@@ -151,15 +179,17 @@ fn access_for(use_rust_reader: bool) -> FileAccess {
 impl FileFormatFactory for NetCDFFormatFactory {
     fn create(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        // Per-table overrides from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
-        // defaulting to the runtime config.
+        // Three layers, narrowest last: the runtime default, the session's
+        // `beacon.netcdf.*` namespace (what `SET` writes), then the per-table
+        // `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+        let session_config = self.session_config(state);
         let mut options = self.options.clone();
-        let mut use_reader_cache = self.config.use_reader_cache;
-        let mut enable_statistics = self.config.enable_statistics;
-        let mut use_rust_reader = self.config.use_rust_reader;
+        let mut use_reader_cache = session_config.use_reader_cache;
+        let mut enable_statistics = session_config.enable_statistics;
+        let mut use_rust_reader = session_config.use_rust_reader;
 
         if let Some(value) = format_options.get("read_dimensions") {
             options.read_dimensions = Some(

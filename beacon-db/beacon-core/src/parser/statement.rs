@@ -27,6 +27,41 @@ pub enum BeaconStatement {
     DropSecret(DropSecretStatement),
     ShowSecrets,
     Summarize(SummarizeStatement),
+    AlterSystem(AlterSystemStatement),
+    ShowSettings,
+}
+
+/// `ALTER SYSTEM SET <key> = <value>` / `ALTER SYSTEM RESET <key>`
+///
+/// The persistent half of `SET`: it applies to the running server *and* is
+/// written into the database file, so a restart replays it. A plain `SET` is
+/// live-only.
+///
+/// Parsed by beacon rather than reaching DataFusion, because sqlparser 0.61 has
+/// no `ALTER SYSTEM` at all.
+#[derive(Debug, Clone)]
+pub struct AlterSystemStatement {
+    /// The setting name as typed. It is resolved (aliases, startup-only
+    /// rejection) when the plan is built, so the parser stays free of any
+    /// knowledge of the settings themselves.
+    pub key: ObjectName,
+    /// The new value, or `None` for `RESET` — which drops the persisted value and
+    /// restores the one the runtime booted with.
+    pub value: Option<String>,
+}
+
+impl Display for AlterSystemStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.value {
+            Some(value) => write!(
+                f,
+                "ALTER SYSTEM SET {} = '{}'",
+                self.key,
+                escape_sql_literal(value)
+            ),
+            None => write!(f, "ALTER SYSTEM RESET {}", self.key),
+        }
+    }
 }
 
 /// SUMMARIZE <table> | SUMMARIZE <query>
@@ -404,6 +439,8 @@ impl Display for BeaconStatement {
             }
             Self::ShowSecrets => write!(f, "SHOW SECRETS"),
             Self::Summarize(s) => write!(f, "SUMMARIZE {}", s.source),
+            Self::AlterSystem(s) => write!(f, "{s}"),
+            Self::ShowSettings => write!(f, "SHOW SETTINGS"),
         }
     }
 }

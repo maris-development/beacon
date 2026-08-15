@@ -10,6 +10,7 @@ use std::{any::Any, sync::Arc};
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::settings::BeaconOptions;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -75,11 +76,12 @@ impl GetExt for ZarrFormatFactory {
 impl FileFormatFactory for ZarrFormatFactory {
     fn create(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        // Per-table overrides from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
-        // defaulting to the runtime config.
+        // Three layers, narrowest last: the runtime default, the session's
+        // `beacon.zarr.*` namespace (what `SET` writes), then the per-table
+        // `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
         let read_dimensions = format_options.get("read_dimensions").map(|value| {
             value
                 .split(',')
@@ -87,7 +89,11 @@ impl FileFormatFactory for ZarrFormatFactory {
                 .filter(|s| !s.is_empty())
                 .collect()
         });
-        let mut enable_statistics = self.config.enable_statistics;
+        // No namespace means this session was not built by beacon's runtime, so
+        // this factory's own config is the only configuration there is.
+        let mut enable_statistics = BeaconOptions::try_from_session(state)
+            .map(|beacon| beacon.zarr.enable_statistics)
+            .unwrap_or(self.config.enable_statistics);
         if let Some(value) = format_options.get("enable_statistics") {
             enable_statistics = parse_bool_option("enable_statistics", value)?;
         }
@@ -463,17 +469,29 @@ mod tests {
         ctx.register_table("gridded", Arc::new(table)).unwrap();
     }
 
-    /// A session with the nd projection-pushdown rule registered — the same
-    /// wiring beacon-core installs, so a `SELECT`-with-computed-column plan gets
-    /// the projection sunk below the broadcast.
+    /// A session with the nd projection-pushdown rule registered *and* enabled —
+    /// the same wiring beacon-core installs, so a `SELECT`-with-computed-column
+    /// plan gets the projection sunk below the broadcast.
+    ///
+    /// The rule is always installed and reads `beacon.enable_nd_pipeline` on each
+    /// plan (so a `SET` can switch it on without a restart), and that flag is off
+    /// by default — hence the namespace here, not just the rule.
     fn ctx_with_pushdown() -> SessionContext {
         use datafusion::execution::session_state::SessionStateBuilder;
         use datafusion::prelude::SessionConfig;
 
         // Single partition so row order is deterministic (the differential tests
         // compare results positionally).
+        let mut config = SessionConfig::new().with_target_partitions(1);
+        config
+            .options_mut()
+            .extensions
+            .insert(beacon_datafusion_ext::settings::BeaconOptions {
+                enable_nd_pipeline: true,
+                ..Default::default()
+            });
         let state = SessionStateBuilder::new()
-            .with_config(SessionConfig::new().with_target_partitions(1))
+            .with_config(config)
             .with_default_features()
             .with_physical_optimizer_rule(Arc::new(
                 beacon_datafusion_ext::nd::NdProjectionPushdown::new(),

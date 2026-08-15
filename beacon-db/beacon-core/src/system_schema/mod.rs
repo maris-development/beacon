@@ -1,7 +1,8 @@
 //! `beacon.system`: runtime introspection exposed as ordinary SQL tables.
 //!
 //! What the runtime knows about itself that is not user data lives here — the
-//! auth directory and the recorded query metrics — so it is reachable through
+//! auth directory, the recorded query metrics, the runtime settings — so it is
+//! reachable through
 //! the one query endpoint rather than through a typed method on
 //! [`Runtime`](crate::runtime::Runtime) and a bespoke HTTP route per item.
 //!
@@ -28,6 +29,7 @@
 
 mod auth;
 mod file_stats;
+mod settings;
 mod table;
 
 pub(crate) use file_stats::{FileStatisticsFunc, FileStatisticsTable};
@@ -105,6 +107,10 @@ impl SystemSchemaProvider {
         tables.insert(
             "file_stats_segments".to_string(),
             Arc::new(file_stats::segments_table(file_stats)),
+        );
+        tables.insert(
+            "settings".to_string(),
+            Arc::new(settings::settings_table(session.clone())),
         );
         Self { tables, session }
     }

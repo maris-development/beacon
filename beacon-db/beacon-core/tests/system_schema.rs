@@ -47,6 +47,7 @@ async fn system_tables_are_listed_in_information_schema() {
             "file_stats_segments",
             "query_metrics",
             "roles",
+            "settings",
             "users"
         ],
         "the system schema should expose exactly these tables"

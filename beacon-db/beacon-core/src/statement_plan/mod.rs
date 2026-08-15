@@ -20,6 +20,7 @@ mod lower;
 pub(crate) mod materialized_view;
 mod physical;
 mod query_planner;
+mod settings;
 mod stream_coalescer;
 
 use std::collections::HashMap;
@@ -33,7 +34,7 @@ use datafusion::{
 };
 
 use crate::parser::statement::{
-    AttachStatement, AuthStatement, CreateCrawlerStatement, CreateIndexStatement,
+    AlterSystemStatement, AttachStatement, AuthStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
     AnalyzeFilesStatement, RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
@@ -104,19 +105,44 @@ pub(crate) fn plan_produces_result_set(plan: &LogicalPlan) -> bool {
     }
 }
 
-/// Whether `plan` contains any [`LogicalPlan::Extension`] node (all of beacon's
-/// extension nodes are super-user-only operations).
+/// Whether `plan` contains any privileged [`LogicalPlan::Extension`] node.
+///
+/// Beacon's extension nodes are super-user-only as a class — they create tables,
+/// write secrets, or list what other users did. [`is_public_node`] carves out the
+/// few that document the engine rather than the instance.
 fn plan_contains_extension(plan: &LogicalPlan) -> anyhow::Result<bool> {
     let mut found = false;
     plan.apply(|node| {
-        if matches!(node, LogicalPlan::Extension(_)) {
-            found = true;
-            Ok(TreeNodeRecursion::Stop)
-        } else {
-            Ok(TreeNodeRecursion::Continue)
+        if let LogicalPlan::Extension(extension) = node {
+            if !is_public_node(extension) {
+                found = true;
+                return Ok(TreeNodeRecursion::Stop);
+            }
         }
+        Ok(TreeNodeRecursion::Continue)
     })?;
     Ok(found)
+}
+
+/// Whether an extension node is readable by any authenticated caller.
+///
+/// The exemption is deliberately one node wide. `SHOW SETTINGS` lists the engine
+/// knobs and their values — the same class of information as `SHOW FUNCTIONS`,
+/// which [`Runtime::show_functions`](crate::runtime::Runtime::show_functions)
+/// already runs as the engine rather than as the caller, so a user can discover
+/// what the engine supports. It exposes no instance state: the node emits only
+/// the `beacon.*` namespace, which holds no credential and no user data, and
+/// every startup-only key (`BEACON_ADMIN_*`, `BEACON_OIDC_*`, `BEACON_S3_*`,
+/// `BEACON_SECRETS_KEY`) is outside that namespace by construction.
+///
+/// *Changing* a setting stays super-user-only: `AlterSystemNode` is not listed
+/// here, and a plain `SET` is a `LogicalPlan::Statement`, which
+/// `SQLOptions::with_allow_statements` already gates above.
+fn is_public_node(extension: &Extension) -> bool {
+    extension
+        .node
+        .as_any()
+        .is::<logical::ShowSettingsNode>()
 }
 
 /// Late-initialized, weak handle to the [`SessionContext`] shared with the
@@ -478,6 +504,26 @@ fn normalize_secret_option_key(key: &str) -> String {
 pub(crate) fn show_crawlers_plan() -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::ShowCrawlersNode),
+    })
+}
+
+/// Build the logical plan for `ALTER SYSTEM SET <key> = <value>` /
+/// `ALTER SYSTEM RESET <key>`.
+///
+/// The key is resolved here, so an alias (`beacon.batch_size`) and a startup-only
+/// key (`beacon.port`) behave exactly as they do for a plain `SET` — the
+/// difference between the two statements is persistence, not what a key means.
+pub(crate) fn alter_system_plan(statement: AlterSystemStatement) -> anyhow::Result<LogicalPlan> {
+    let key = settings::resolve_statement_key(&statement.key)?;
+    Ok(LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::AlterSystemNode::new(key, statement.value)),
+    }))
+}
+
+/// Build the logical plan for `SHOW SETTINGS`.
+pub(crate) fn show_settings_plan() -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::ShowSettingsNode),
     })
 }
 

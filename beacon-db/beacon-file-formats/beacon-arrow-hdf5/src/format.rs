@@ -15,6 +15,7 @@ use beacon_arrow_netcdf::datafusion::{statistics, NetCDFFormatFactory, NetcdfFor
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_datafusion_ext::settings::BeaconOptions;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
@@ -108,23 +109,49 @@ impl Hdf5FormatFactory {
     /// default.
     pub fn uses_rust_reader(
         &self,
+        state: &dyn Session,
         format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<bool> {
         match format_options.get("use_rust_reader") {
             Some(value) => parse_bool_option("use_rust_reader", value),
-            None => Ok(self.config.use_rust_reader),
+            None => Ok(self.session_config(state).use_rust_reader),
         }
     }
 
-    /// Resolve the per-table options against the runtime config.
+    /// The settings this format starts from, for a format built on `state`.
+    ///
+    /// The runtime's `BEACON_HDF5_*` values seed `beacon.hdf5.*` at startup, so
+    /// reading the namespace gives the runtime default until an operator runs a
+    /// `SET`, and the new value afterwards. A session beacon did not build carries
+    /// no namespace and falls back to this factory's own config.
+    fn session_config(&self, state: &dyn Session) -> Hdf5Config {
+        let Some(hdf5) = BeaconOptions::try_from_session(state).map(|beacon| beacon.hdf5) else {
+            // No namespace: this session was not built by beacon's runtime, so
+            // this factory's own config is the only configuration there is.
+            return self.config.clone();
+        };
+        Hdf5Config {
+            use_rust_reader: hdf5.use_rust_reader,
+            use_reader_cache: hdf5.use_reader_cache,
+            enable_statistics: hdf5.enable_statistics,
+            // Not settable: the cache is built once, at the capacity the runtime
+            // started with.
+            reader_cache_size: self.config.reader_cache_size,
+        }
+    }
+
+    /// Resolve the per-table options against the session's settings, which the
+    /// runtime config seeded.
     fn effective_options(
         &self,
+        state: &dyn Session,
         format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<EffectiveOptions> {
+        let config = self.session_config(state);
         let mut options = EffectiveOptions {
-            use_rust_reader: self.config.use_rust_reader,
-            use_reader_cache: self.config.use_reader_cache,
-            enable_statistics: self.config.enable_statistics,
+            use_rust_reader: config.use_rust_reader,
+            use_reader_cache: config.use_reader_cache,
+            enable_statistics: config.enable_statistics,
             read_dimensions: None,
         };
 
@@ -174,7 +201,7 @@ impl FileFormatFactory for Hdf5FormatFactory {
         state: &dyn Session,
         format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        let options = self.effective_options(format_options)?;
+        let options = self.effective_options(state, format_options)?;
         // netcdf-c: hand the whole call to the netCDF factory, exactly as this
         // crate did before a second reader existed.
         if !options.use_rust_reader {
@@ -214,7 +241,7 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
         url: &ListingTableUrl,
         listing: &ListingFactory,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        if self.uses_rust_reader(format_options)? {
+        if self.uses_rust_reader(state, format_options)? {
             return self.create(state, format_options);
         }
         self.inner

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::settings::BeaconOptions;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -121,6 +122,27 @@ impl AtlasFormatFactory {
         }
     }
 
+    /// The settings this format starts from, for a format built on `state`.
+    ///
+    /// The runtime's `BEACON_ATLAS_*` values seed `beacon.atlas.*` at startup, so
+    /// reading the namespace gives the runtime default until an operator runs a
+    /// `SET`, and the new value afterwards. A session beacon did not build carries
+    /// no namespace and falls back to this factory's own config.
+    fn session_config(&self, state: &dyn Session) -> AtlasConfig {
+        let Some(atlas) = BeaconOptions::try_from_session(state).map(|beacon| beacon.atlas) else {
+            // No namespace: this session was not built by beacon's runtime, so
+            // this factory's own config is the only configuration there is.
+            return self.config.clone();
+        };
+        AtlasConfig {
+            use_reader_cache: atlas.use_reader_cache,
+            use_pruning: atlas.use_pruning,
+            // Not settable: the cache is built once, at the capacity the runtime
+            // started with.
+            reader_cache_size: self.config.reader_cache_size,
+        }
+    }
+
     /// Build an [`AtlasFormat`] with the given per-table effective settings,
     /// wiring in the shared reader cache when caching is enabled.
     fn build_format(
@@ -139,14 +161,16 @@ impl AtlasFormatFactory {
 impl FileFormatFactory for AtlasFormatFactory {
     fn create(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        // Per-table overrides from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
-        // defaulting to the runtime config.
+        // Three layers, narrowest last: the runtime default, the session's
+        // `beacon.atlas.*` namespace (what `SET` writes), then the per-table
+        // `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+        let session_config = self.session_config(state);
         let mut options = self.options.clone();
-        let mut use_reader_cache = self.config.use_reader_cache;
-        let mut use_pruning = self.config.use_pruning;
+        let mut use_reader_cache = session_config.use_reader_cache;
+        let mut use_pruning = session_config.use_pruning;
 
         if let Some(value) = format_options.get("read_dimensions") {
             options.read_dimensions = Some(
