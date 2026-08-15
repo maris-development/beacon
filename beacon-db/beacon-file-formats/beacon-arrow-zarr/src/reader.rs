@@ -245,7 +245,7 @@ mod tests {
     async fn predicate_pushdown_prunes_chunks() {
         use beacon_nd_array::arrow::{
             pushdown_filter::PushdownFilter, schema::any_dataset_to_arrow_schema,
-            share::flat_stream,
+            file_read::flat_stream,
         };
         use datafusion::logical_expr::Operator;
         use datafusion::physical_expr::expressions::{binary, col, lit};

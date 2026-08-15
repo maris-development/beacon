@@ -10,9 +10,9 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use beacon_nd_array::arrow::{
-    metrics::SharedReadMetrics,
+    metrics::ReadMetrics,
     morsel::{MorselSource, OpenFile, morsel_scan},
-    share::{FileShares, SharedDataset, share_files},
+    file_read::FileRead,
 };
 use datafusion::{
     config::ConfigOptions,
@@ -67,9 +67,6 @@ pub struct ZarrSource {
     /// Storage to open groups over, replacing the session's object store.
     /// Set by the Icechunk reader; `None` for a listed zarr store.
     storage: Option<ZarrStorage>,
-    /// The shares of this scan. Cloned, not copied, so every partition of a
-    /// group reaches the same one.
-    partitions_shared_map: FileShares,
     /// The scan's group queue, when it is planned morsel-driven. See
     /// [`morsel_scan`].
     morsel: Option<Arc<MorselSource>>,
@@ -86,7 +83,6 @@ impl ZarrSource {
             read_dimensions: None,
             projection: None,
             storage: None,
-            partitions_shared_map: FileShares::default(),
             morsel: None,
         }
     }
@@ -113,13 +109,6 @@ impl ZarrSource {
         self
     }
 
-    /// Whether this scan reads `path` through a share, rather than as one
-    /// partition's own whole group.
-    #[cfg(test)]
-    pub(crate) fn shares_group(&self, path: &object_store::path::Path) -> bool {
-        self.partitions_shared_map.contains_key(path)
-    }
-
     /// The groups this scan's queue holds, when it is planned morsel-driven.
     #[cfg(test)]
     pub(crate) fn morsel_groups(&self) -> Option<usize> {
@@ -140,7 +129,7 @@ impl FileSource for ZarrSource {
             .storage
             .clone()
             .unwrap_or_else(|| ZarrStorage::from_object_store(object_store));
-        let read_metrics = SharedReadMetrics::new(&self.execution_plan_metrics, partition);
+        let read_metrics = ReadMetrics::new(&self.execution_plan_metrics, partition);
 
         Ok(Arc::new(ZarrOpener {
             groups: Arc::new(ZarrGroups {
@@ -159,7 +148,6 @@ impl FileSource for ZarrSource {
             read_dimensions: self.read_dimensions.clone(),
             read_metrics,
             partition,
-            partition_shares: self.partitions_shared_map.clone(),
         }))
     }
 
@@ -192,9 +180,10 @@ impl FileSource for ZarrSource {
     /// that exists whether or not the scan shares, and a partition that arrives
     /// at an empty queue simply reads nothing.
     ///
-    /// Nothing is divided here. The group goes into every partition's group and
-    /// gets a cell in `partitions_shared_map`, and the partitions divide it as
-    /// they read it. Balance follows completion rather than a guess made at plan
+    /// Nothing is divided here. The groups go into a [`MorselSource`] and every
+    /// partition's group holds one standing entry pointing at it; a partition
+    /// takes the next group when it is free, and helps divide an open one when
+    /// none is left. Balance follows completion rather than a guess made at plan
     /// time, which matters most under a predicate: an nd chunk list is
     /// C-ordered, so `WHERE time > …` prunes a prefix of it.
     fn repartitioned(
@@ -224,20 +213,11 @@ impl FileSource for ZarrSource {
             return Ok(Some(config));
         }
 
-        // `None`: every group is shared, whatever its `zarr.json` weighs.
-        Ok(
-            share_files(&config.file_groups, target_partitions, None).map(|scan| {
-                let mut config = config.clone();
-                config.file_groups = scan.file_groups;
-                // The openers are built from the config's source, so the shares
-                // have to travel with it.
-                config.file_source = Arc::new(Self {
-                    partitions_shared_map: scan.shares,
-                    ..self.clone()
-                });
-                config
-            }),
-        )
+        // The queue declined, which it only does for a partitioned table: its
+        // `PARTITIONED BY` values live on each entry and only `FileStream` can
+        // apply them. Such a scan keeps the grouping the listing gave it, which
+        // is what it had before any of this and is correct.
+        Ok(None)
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -312,11 +292,9 @@ struct ZarrOpener {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     batch_size: usize,
     read_dimensions: Option<Vec<String>>,
-    /// This partition's counters, registered once. See [`SharedReadMetrics::new`].
-    read_metrics: SharedReadMetrics,
+    /// This partition's counters, registered once. See [`ReadMetrics::new`].
+    read_metrics: ReadMetrics,
     partition: usize,
-    /// The shares of this scan, so the partitions of a group find each other.
-    partition_shares: FileShares,
     /// The scan's group queue, when it is planned morsel-driven. `Some` means
     /// the entry `FileStream` hands this opener is the scan, not a group.
     morsel: Option<Arc<MorselSource>>,
@@ -324,7 +302,7 @@ struct ZarrOpener {
     groups: Arc<dyn OpenFile>,
 }
 
-/// How one Zarr group becomes a planned [`SharedDataset`].
+/// How one Zarr group becomes a planned [`FileRead`].
 ///
 /// This is everything a [`MorselSource`] needs of the format: the queue holds
 /// the groups, and this says what opening one means.
@@ -334,7 +312,7 @@ struct ZarrGroups {
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    metrics: SharedReadMetrics,
+    metrics: ReadMetrics,
 }
 
 impl std::fmt::Debug for ZarrGroups {
@@ -345,7 +323,7 @@ impl std::fmt::Debug for ZarrGroups {
 
 #[async_trait::async_trait]
 impl OpenFile for ZarrGroups {
-    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<SharedDataset>> {
+    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<FileRead>> {
         let zarr_path = ZarrPath::new_from_object_meta(file.object_meta.clone()).map_err(|e| {
             DataFusionError::Execution(format!(
                 "Failed to create ZarrPath from object metadata: {e}"
@@ -359,7 +337,7 @@ impl OpenFile for ZarrGroups {
         )
         .await?;
 
-        SharedDataset::plan(
+        FileRead::plan(
             dataset,
             self.projected_schema.clone(),
             self.batch_size,
@@ -398,31 +376,26 @@ impl ZarrOpener {
             .map_err(|e| DataFusionError::Execution(e.to_string()))
     }
 
-    /// Read one group, through its share when it has one.
+    /// Read one group whole.
     ///
-    /// A shared group is opened and planned by whichever partition arrives
-    /// first; the rest attach to what it built and pull from the same queue. An
-    /// unshared group is planned by the one partition that holds it.
-    ///
-    /// Every input to the plan has to be identical in every partition of one
-    /// group, or the partitions would not be reading the same group the same
-    /// way. They are: the dataset, `projected_schema`, `batch_size` and
-    /// `predicate`. A scan takes all four from one place, so they are.
+    /// This is the path a scan the queue declined takes — a partitioned table,
+    /// where `FileStream` walks the real group list because only it can apply
+    /// the per-entry `PARTITIONED BY` values. Every other scan goes through
+    /// [`MorselSource`] and never reaches here.
     #[allow(clippy::too_many_arguments)]
     async fn read(
-        share: Option<Arc<beacon_nd_array::arrow::share::FileShare>>,
         storage: ZarrStorage,
         zarr_path: ZarrPath,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
-        metrics: SharedReadMetrics,
+        metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
             let dataset = Self::open_dataset(storage, zarr_path, read_dimensions).await?;
-            SharedDataset::plan(
+            FileRead::plan(
                 dataset,
                 projected_schema,
                 batch_size,
@@ -432,16 +405,10 @@ impl ZarrOpener {
             .await
         };
 
-        // The first partition to arrive opens the group and fills its queue.
-        // What the rest do depends on the share's mode: draw from the same queue,
-        // or leave this one to whoever claimed it and move on.
-        let dataset = match share {
-            Some(share) => match share.open(plan).await? {
-                Some(dataset) => dataset,
-                None => return Ok(Box::pin(futures::stream::empty())),
-            },
-            None => plan().await?,
-        };
+        // This partition's own group. Nothing is shared here: a scan that can be
+        // divided goes through the queue, and one that cannot — a partitioned
+        // table — reads each group whole, as `FileStream` hands it over.
+        let dataset = plan().await?;
 
         Ok(dataset.stream(Some(metrics)))
     }
@@ -467,17 +434,8 @@ impl FileOpener for ZarrOpener {
             ))
         })?;
 
-        // A group in the share map is in every partition's group, so it is read
-        // through its share and no other way. One that is not is this
-        // partition's alone.
-        let share = self
-            .partition_shares
-            .get(&file.object_meta.location)
-            .cloned();
-
         let metrics = self.read_metrics.clone();
         Ok(Self::read(
-            share,
             self.storage.clone(),
             zarr_path,
             self.projected_schema.clone(),

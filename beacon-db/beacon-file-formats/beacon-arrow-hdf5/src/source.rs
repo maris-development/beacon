@@ -14,9 +14,9 @@ use std::sync::Arc;
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
-        metrics::SharedReadMetrics,
+        metrics::ReadMetrics,
         morsel::{morsel_scan, MorselSource, OpenFile},
-        share::{share_files, FileShares, SharedDataset},
+        file_read::FileRead,
     },
     projection::DatasetProjection,
 };
@@ -53,9 +53,6 @@ pub struct Hdf5Source {
     cache: Option<Hdf5ReaderCache>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
-    /// The shares of this scan. Cloned, not copied, so every partition of a file
-    /// reaches the same one.
-    partitions_shared_map: FileShares,
     /// The scan's file queue, when it is planned morsel-driven. See
     /// [`morsel_scan`].
     morsel: Option<Arc<MorselSource>>,
@@ -72,7 +69,6 @@ impl Hdf5Source {
             predicate: None,
             cache: None,
             projection: None,
-            partitions_shared_map: FileShares::default(),
             morsel: None,
         }
     }
@@ -111,7 +107,6 @@ impl FileSource for Hdf5Source {
             self.execution_plan_metrics.clone(),
             partition,
             object_store,
-            self.partitions_shared_map.clone(),
             self.morsel.clone(),
         )))
     }
@@ -145,29 +140,27 @@ impl FileSource for Hdf5Source {
     /// `oxcdf` range-reads through the object store and holds no lock, so the
     /// partitions of one file run at the same time. Nothing is divided by byte
     /// range: they take chunks from one shared queue, so no two of them read the
-    /// same chunk. See [`beacon_nd_array::arrow::share`].
+    /// same chunk. See [`beacon_nd_array::arrow::file_read`].
     fn supports_repartitioning(&self) -> bool {
         true
     }
 
-    /// Give every partition the files that are worth dividing, and one each of
-    /// the files that are not.
+    /// Put the scan's files in one queue, and point every partition at it.
     ///
-    /// A file over the session's `repartition_file_min_size` goes into every
-    /// partition's group and gets a share. Nothing about it is divided here: the
-    /// partitions divide it as they read it, by taking chunks from the one queue
-    /// behind that cell. Balance then follows completion rather than a guess
-    /// made at plan time, which matters most under a predicate: an nd chunk list
-    /// is C-ordered, so `WHERE time > …` prunes a prefix of it, and a deal made
-    /// at plan time would leave the early partitions idle.
+    /// Nothing is assigned here. Each partition's group holds one standing entry
+    /// and the files go into a [`MorselSource`]; a partition takes the next file
+    /// when it is free, and helps divide an open one when no file is left. So
+    /// balance follows completion, and the plan holds one entry per partition
+    /// rather than one per file.
     ///
-    /// A smaller file is left whole and dealt to one partition. Every partition
-    /// opening it to take a chunk or two would cost more than it returns, and
-    /// the listing has already spread these across the scan.
+    /// `repartition_file_min_size` is unused. It was the size a file had to
+    /// reach before every partition would open it, back when balance was a guess
+    /// made from file sizes at plan time. A queue does not guess, so there is no
+    /// size at which it is worth declining.
     fn repartitioned(
         &self,
         target_partitions: usize,
-        repartition_file_min_size: usize,
+        _repartition_file_min_size: usize,
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
@@ -191,22 +184,11 @@ impl FileSource for Hdf5Source {
             return Ok(Some(config));
         }
 
-        Ok(share_files(
-            &config.file_groups,
-            target_partitions,
-            Some(repartition_file_min_size as u64),
-        )
-        .map(|scan| {
-            let mut config = config.clone();
-            config.file_groups = scan.file_groups;
-            // The openers are built from the config's source, so the shares
-            // have to travel with it.
-            config.file_source = Arc::new(Self {
-                partitions_shared_map: scan.shares,
-                ..self.clone()
-            });
-            config
-        }))
+        // The queue declined, which it only does for a partitioned table: its
+        // `PARTITIONED BY` values live on each file and only `FileStream` can
+        // apply them. Such a scan keeps the grouping the listing gave it, which
+        // is what it had before any of this and is correct.
+        Ok(None)
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -273,14 +255,12 @@ struct Hdf5Opener {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     cache: Option<Hdf5ReaderCache>,
-    /// This partition's counters, registered once. See [`SharedReadMetrics::new`].
-    read_metrics: SharedReadMetrics,
+    /// This partition's counters, registered once. See [`ReadMetrics::new`].
+    read_metrics: ReadMetrics,
     partition: usize,
     /// The store the scan lists from. The reader reads its byte ranges through
     /// it, so s3, gs and az work with no local copy.
     object_store: Arc<dyn ObjectStore>,
-    /// The shares of this scan, so the partitions of a file find each other.
-    partition_shares: FileShares,
     /// The scan's file queue, when it is planned morsel-driven. `Some` means the
     /// entry `FileStream` hands this opener is the scan, not a file.
     morsel: Option<Arc<MorselSource>>,
@@ -288,7 +268,7 @@ struct Hdf5Opener {
     files: Arc<dyn OpenFile>,
 }
 
-/// How one HDF5 file becomes a planned [`SharedDataset`].
+/// How one HDF5 file becomes a planned [`FileRead`].
 ///
 /// This is everything a [`MorselSource`] needs of the format.
 struct Hdf5Files {
@@ -298,7 +278,7 @@ struct Hdf5Files {
     batch_size: usize,
     cache: Option<Hdf5ReaderCache>,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    metrics: SharedReadMetrics,
+    metrics: ReadMetrics,
 }
 
 impl std::fmt::Debug for Hdf5Files {
@@ -309,7 +289,7 @@ impl std::fmt::Debug for Hdf5Files {
 
 #[async_trait::async_trait]
 impl OpenFile for Hdf5Files {
-    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<SharedDataset>> {
+    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<FileRead>> {
         let dataset = Hdf5Opener::open_dataset(
             self.object_store.clone(),
             file.object_meta.clone(),
@@ -318,7 +298,7 @@ impl OpenFile for Hdf5Files {
         )
         .await?;
 
-        SharedDataset::plan(
+        FileRead::plan(
             dataset,
             self.projected_schema.clone(),
             self.batch_size,
@@ -340,10 +320,9 @@ impl Hdf5Opener {
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
         object_store: Arc<dyn ObjectStore>,
-        partition_shares: FileShares,
         morsel: Option<Arc<MorselSource>>,
     ) -> Self {
-        let read_metrics = SharedReadMetrics::new(&metrics, partition);
+        let read_metrics = ReadMetrics::new(&metrics, partition);
         let files = Arc::new(Hdf5Files {
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
@@ -365,7 +344,6 @@ impl Hdf5Opener {
             read_metrics,
             partition,
             object_store,
-            partition_shares,
         }
     }
 
@@ -382,20 +360,19 @@ impl Hdf5Opener {
     /// A scan takes all four from one place, so they are. Keep it that way.
     #[allow(clippy::too_many_arguments)]
     async fn read(
-        share: Option<Arc<beacon_nd_array::arrow::share::FileShare>>,
         store: Arc<dyn ObjectStore>,
         object: ObjectMeta,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         cache: Option<Hdf5ReaderCache>,
-        metrics: SharedReadMetrics,
+        metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
             let dataset = Self::open_dataset(store, object, cache, read_dimensions).await?;
-            SharedDataset::plan(
+            FileRead::plan(
                 dataset,
                 projected_schema,
                 batch_size,
@@ -405,16 +382,10 @@ impl Hdf5Opener {
             .await
         };
 
-        // The first partition to arrive opens the file and fills its queue.
-        // What the rest do depends on the share's mode: draw from the same queue,
-        // or leave this one to whoever claimed it and move on.
-        let dataset = match share {
-            Some(share) => match share.open(plan).await? {
-                Some(dataset) => dataset,
-                None => return Ok(Box::pin(futures::stream::empty())),
-            },
-            None => plan().await?,
-        };
+        // This partition's own file. Nothing is shared here: a scan that can be
+        // divided goes through the queue, and one that cannot — a partitioned
+        // table — reads each file whole, as `FileStream` hands it over.
+        let dataset = plan().await?;
 
         Ok(dataset.stream(Some(metrics)))
     }
@@ -475,18 +446,8 @@ impl FileOpener for Hdf5Opener {
         // here: the plan prunes it, off the statistics the file registry already
         // holds. Testing them again per opener would repeat that work on the one
         // file that survived it.
-        //
-        // A file in the share map is in every partition's group, so it is read
-        // through its share and no other way. A file that is not is this
-        // partition's alone.
-        let share = self
-            .partition_shares
-            .get(&file.object_meta.location)
-            .cloned();
-
         let metrics = self.read_metrics.clone();
         Ok(Self::read(
-            share,
             self.object_store.clone(),
             file.object_meta,
             self.projected_schema.clone(),

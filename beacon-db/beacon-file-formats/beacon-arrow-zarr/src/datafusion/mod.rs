@@ -379,6 +379,8 @@ impl FileFormat for ZarrFormat {
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        beacon_nd_array::arrow::morsel::reject_partition_columns("Zarr", &conf)?;
+
         let mut object_metas: Vec<ObjectMeta> = Vec::new();
         for group in &conf.file_groups {
             for file in group.files() {

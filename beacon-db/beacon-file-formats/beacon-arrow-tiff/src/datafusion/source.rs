@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::arrow::{
-    metrics::SharedReadMetrics,
+    metrics::ReadMetrics,
     morsel::{morsel_scan, MorselSource, OpenFile},
-    share::SharedDataset,
+    file_read::FileRead,
 };
 use datafusion::{
     config::ConfigOptions,
@@ -196,15 +196,15 @@ struct TiffOpener {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     partition: usize,
-    /// This partition's counters, registered once. See [`SharedReadMetrics::new`].
-    read_metrics: SharedReadMetrics,
+    /// This partition's counters, registered once. See [`ReadMetrics::new`].
+    read_metrics: ReadMetrics,
     /// The scan's raster queue, when it is planned morsel-driven.
     morsel: Option<Arc<MorselSource>>,
     /// How one raster is opened, for the queue to call.
     rasters: Arc<dyn OpenFile>,
 }
 
-/// How one GeoTIFF becomes a planned [`SharedDataset`].
+/// How one GeoTIFF becomes a planned [`FileRead`].
 ///
 /// This is everything a [`MorselSource`] needs of the format.
 struct TiffRasters {
@@ -212,7 +212,7 @@ struct TiffRasters {
     projected_schema: SchemaRef,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    metrics: SharedReadMetrics,
+    metrics: ReadMetrics,
 }
 
 impl std::fmt::Debug for TiffRasters {
@@ -223,7 +223,7 @@ impl std::fmt::Debug for TiffRasters {
 
 #[async_trait::async_trait]
 impl OpenFile for TiffRasters {
-    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<SharedDataset>> {
+    async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<FileRead>> {
         let object = file.object_meta.clone();
         let dataset = reader::open_dataset(self.object_store.clone(), object.clone())
             .await
@@ -234,7 +234,7 @@ impl OpenFile for TiffRasters {
                 ))
             })?;
 
-        SharedDataset::plan(
+        FileRead::plan(
             dataset,
             self.projected_schema.clone(),
             self.batch_size,
@@ -257,7 +257,7 @@ impl TiffOpener {
     ) -> Self {
         // Once per partition, not once per file: every call registers four
         // counters into the scan's one metrics set, behind a mutex.
-        let read_metrics = SharedReadMetrics::new(&metrics, partition);
+        let read_metrics = ReadMetrics::new(&metrics, partition);
         let rasters = Arc::new(TiffRasters {
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
@@ -283,14 +283,14 @@ impl TiffOpener {
     /// TIFF has no share map: a GeoTIFF is one raster per object and the listing
     /// spreads objects across the partitions, so each file is one partition's
     /// alone. The planning below is the same one a shared file gets — see
-    /// [`SharedDataset::plan`].
+    /// [`FileRead::plan`].
     async fn read(
         object: ObjectMeta,
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        metrics: SharedReadMetrics,
+        metrics: ReadMetrics,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(object_store, object.clone())
             .await
@@ -301,7 +301,7 @@ impl TiffOpener {
                 ))
             })?;
 
-        let dataset = SharedDataset::plan(
+        let dataset = FileRead::plan(
             dataset,
             projected_schema,
             batch_size,

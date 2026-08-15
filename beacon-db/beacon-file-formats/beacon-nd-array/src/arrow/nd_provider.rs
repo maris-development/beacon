@@ -1,7 +1,7 @@
 //! Reading one chunk of a dataset into an un-broadcast [`NdRecordBatch`].
 //!
 //! [`read_nd_chunk`] is what a shared read does with a chunk it pops off the
-//! queue (see [`crate::arrow::share`]). Each variable is sliced on its own axes,
+//! queue (see [`crate::arrow::file_read`]). Each variable is sliced on its own axes,
 //! so a coordinate is read once per chunk rather than once per row of it, and
 //! the broadcast to flat Arrow happens above the scan in
 //! [`beacon_datafusion_ext::nd::exec::NdBroadcastExec`].
@@ -72,14 +72,14 @@ mod tests {
     use beacon_datafusion_ext::nd::decode_nd_record_batch;
 
     use crate::arrow::batch::build_dataset_schema;
-    use crate::arrow::share::{SharedRead, flat_stream};
+    use crate::arrow::file_read::{WorkQueue, flat_stream};
     use crate::dataset::{AnyDataset, Dataset};
     use crate::{NdArray, NdArrayD};
 
     /// Read `dataset` as the scan would: encoded, then broadcast back.
     async fn read_encoded(dataset: Dataset, batch_size: usize) -> Vec<RecordBatch> {
         let encoded: Vec<RecordBatch> =
-            SharedRead::build(AnyDataset::Regular(dataset), batch_size, None, true, None)
+            WorkQueue::build(AnyDataset::Regular(dataset), batch_size, None, true, None)
                 .await
                 .unwrap()
                 .stream(None)

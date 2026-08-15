@@ -583,7 +583,7 @@ mod tests {
     mod ragged_record_batch {
         use super::*;
         use arrow::array::{Array, Float32Array, StringArray};
-        use beacon_nd_array::arrow::share::flat_stream;
+        use beacon_nd_array::arrow::file_read::flat_stream;
         use futures::TryStreamExt;
 
         const WOD_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test_files/wod_ctd_1964.nc");

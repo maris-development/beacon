@@ -28,7 +28,7 @@
 //! gives: balance over many files     gives: balance over few large files
 //! ```
 //!
-//! Level 2 is not new. [`SharedDataset`] already holds a queue of the chunks a
+//! Level 2 is not new. [`FileRead`] already holds a queue of the chunks a
 //! file is worth reading, and already hands them out one at a time. This module
 //! only decides *who* may draw from it, and when.
 //!
@@ -64,24 +64,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use arrow::record_batch::RecordBatch;
 use crossbeam::queue::ArrayQueue;
 use datafusion::datasource::listing::PartitionedFile;
-use datafusion::datasource::physical_plan::FileGroup;
+use datafusion::datasource::physical_plan::{FileGroup, FileScanConfig};
 use datafusion::error::{DataFusionError, Result};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use parking_lot::RwLock;
 
-use crate::arrow::metrics::SharedReadMetrics;
-use crate::arrow::share::SharedDataset;
+use crate::arrow::metrics::ReadMetrics;
+use crate::arrow::file_read::FileRead;
 
 /// How a format opens one of its files.
 ///
 /// The only thing a format supplies. Everything else about dividing a scan is
 /// the same for netCDF, HDF5 and Zarr, because all three read through
-/// [`SharedDataset`].
+/// [`FileRead`].
 #[async_trait::async_trait]
 pub trait OpenFile: Send + Sync + 'static {
     /// Open `file` and plan what the query reads from it.
-    async fn open(&self, file: &PartitionedFile) -> Result<Arc<SharedDataset>>;
+    async fn open(&self, file: &PartitionedFile) -> Result<Arc<FileRead>>;
 }
 
 /// Every file of one scan, and the ones already open.
@@ -98,13 +98,22 @@ pub struct MorselSource {
     /// Pruned whenever it is touched, so it holds about one entry per worker
     /// rather than one per file. Holding every file a scan ever opened would
     /// keep every one of their arrays alive.
-    open: RwLock<Vec<Arc<SharedDataset>>>,
+    open: RwLock<Vec<Arc<FileRead>>>,
     /// Opens in progress.
     ///
     /// A worker that finds `unopened` empty and nothing open is not necessarily
     /// finished: another worker may be part-way through an open whose chunks it
     /// could share. This is how it tells the difference.
     opening: AtomicUsize,
+    /// Woken when an open finishes, so a worker waiting on one sleeps instead of
+    /// spinning.
+    ///
+    /// It used to spin on [`tokio::task::yield_now`], which is a poor way to
+    /// wait on a runtime that is busy: the waiter is rescheduled continuously
+    /// and competes with the very task it is waiting for. Beacon's server runs
+    /// its scans on 8 worker threads by default while planning 24 partitions, so
+    /// "busy" is the normal case rather than the exception.
+    opened: tokio::sync::Notify,
     /// Files this scan started with. For diagnostics.
     files: usize,
 }
@@ -124,6 +133,7 @@ impl MorselSource {
             unopened,
             open: RwLock::new(Vec::new()),
             opening: AtomicUsize::new(0),
+            opened: tokio::sync::Notify::new(),
             files: count,
         })
     }
@@ -156,7 +166,7 @@ impl MorselSource {
         self: &Arc<Self>,
         worker: usize,
         opener: Arc<dyn OpenFile>,
-        metrics: Option<SharedReadMetrics>,
+        metrics: Option<ReadMetrics>,
     ) -> BoxStream<'static, Result<RecordBatch>> {
         let state = Worker {
             source: Arc::clone(self),
@@ -200,7 +210,7 @@ impl MorselSource {
         &self,
         opener: &dyn OpenFile,
         file: &PartitionedFile,
-    ) -> Result<Arc<SharedDataset>> {
+    ) -> Result<Arc<FileRead>> {
         opener.open(file).await.map_err(|error| {
             DataFusionError::Execution(format!(
                 "Failed to open {}: {error}",
@@ -210,14 +220,14 @@ impl MorselSource {
     }
 
     /// Add a newly opened file to the ones workers may draw from.
-    fn register(&self, dataset: Arc<SharedDataset>) {
+    fn register(&self, dataset: Arc<FileRead>) {
         let mut open = self.open.write();
         open.retain(|dataset| dataset.remaining() > 0);
         open.push(dataset);
     }
 
     /// An open file with chunks left, preferring this worker's own.
-    fn borrow_open(&self, worker: usize) -> Option<Arc<SharedDataset>> {
+    fn borrow_open(&self, worker: usize) -> Option<Arc<FileRead>> {
         let mut open = self.open.write();
         open.retain(|dataset| dataset.remaining() > 0);
         if open.is_empty() {
@@ -228,6 +238,36 @@ impl MorselSource {
         // that lands on one simply comes back.
         Some(Arc::clone(&open[worker % open.len()]))
     }
+}
+
+/// Refuse a scan whose table declares partition columns.
+///
+/// A `PARTITIONED BY` column lives in the *path* of a file rather than inside
+/// it, and `FileStream` appends its value to every batch of that file — which it
+/// can do only because it knows which file each batch came from.
+///
+/// An nd scan reads a whole collection behind one plan entry, so `FileStream`
+/// does not know. Supporting this means the morsel loop carrying the values per
+/// morsel and appending them itself. Until it does, the alternatives are to
+/// return those columns silently empty or to say so, and a query that quietly
+/// drops a column it was asked for is the worse of the two.
+///
+/// `format` names the reader in the error, since a user reaches this through
+/// `CREATE EXTERNAL TABLE ... PARTITIONED BY` and needs to know which format
+/// refused.
+pub fn reject_partition_columns(format: &str, config: &FileScanConfig) -> Result<()> {
+    let columns = config.table_partition_cols();
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    let names: Vec<&str> = columns.iter().map(|field| field.name().as_str()).collect();
+    Err(DataFusionError::NotImplemented(format!(
+        "{format} does not support partitioned tables (PARTITIONED BY {}). \
+         A partition column is part of a file's path, and this reader scans a \
+         collection as one unit, so it cannot tell which file a row came from.",
+        names.join(", ")
+    )))
 }
 
 /// Plan a scan morsel-driven: one queue for its files, one entry per partition.
@@ -299,7 +339,7 @@ struct Worker {
     source: Arc<MorselSource>,
     worker: usize,
     opener: Arc<dyn OpenFile>,
-    metrics: Option<SharedReadMetrics>,
+    metrics: Option<ReadMetrics>,
     /// An open failed. The stream reported it and is over.
     failed: bool,
     /// This worker's next file, already opening.
@@ -309,7 +349,7 @@ struct Worker {
     /// this the two never overlap, and every worker sits idle through every open
     /// it makes. `FileStream` opened one file ahead for exactly this reason, and
     /// a scan behind one entry has to do it itself.
-    next: Option<tokio::task::JoinHandle<Result<Arc<SharedDataset>>>>,
+    next: Option<tokio::task::JoinHandle<Result<Arc<FileRead>>>>,
 }
 
 impl Worker {
@@ -341,12 +381,16 @@ impl Worker {
                 source.register(Arc::clone(dataset));
             }
             source.opening.fetch_sub(1, Ordering::AcqRel);
+            // After the register and the decrement, so a woken worker sees both.
+            // Also on failure: a worker waiting for this open must not wait for
+            // one that is never coming.
+            source.opened.notify_waiters();
             opened
         }));
     }
 
     /// The next thing this worker should read, or `None` when the scan is done.
-    async fn take(&mut self) -> Result<Option<Arc<SharedDataset>>> {
+    async fn take(&mut self) -> Result<Option<Arc<FileRead>>> {
         loop {
             // Level 1. Opening a file is preferred over helping with one: it
             // gives this worker something no other worker is on, and it adds a
@@ -366,7 +410,16 @@ impl Worker {
                     .map(Some);
             }
 
-            // Level 2. Nothing left to open, so help with something that is.
+            // Nothing left to open. Register for the next open to finish
+            // *before* looking at what is available, so an open that completes
+            // between the look and the wait still wakes this worker.
+            // `notify_waiters` wakes only those already registered, so checking
+            // first and registering after would lose that wake-up and hang here
+            // for the rest of the scan.
+            let mut opened = std::pin::pin!(self.source.opened.notified());
+            opened.as_mut().enable();
+
+            // Level 2. Help with a file somebody else opened.
             if let Some(dataset) = self.source.borrow_open(self.worker) {
                 return Ok(Some(dataset));
             }
@@ -379,7 +432,7 @@ impl Worker {
             if self.source.opening.load(Ordering::Acquire) == 0 {
                 return Ok(None);
             }
-            tokio::task::yield_now().await;
+            opened.await;
         }
     }
 }
@@ -477,7 +530,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OpenFile for Fake {
-        async fn open(&self, file: &PartitionedFile) -> Result<Arc<SharedDataset>> {
+        async fn open(&self, file: &PartitionedFile) -> Result<Arc<FileRead>> {
             let path = file.object_meta.location.to_string();
             if self.broken.contains(&path) {
                 return Err(DataFusionError::Execution("the disk said no".to_string()));
@@ -486,7 +539,7 @@ mod tests {
                 tokio::time::sleep(delay).await;
             }
             self.opened.lock().push(path);
-            SharedDataset::plan(
+            FileRead::plan(
                 dataset(file.object_meta.size as usize).await,
                 no_columns(),
                 self.batch_size,
@@ -498,6 +551,16 @@ mod tests {
     }
 
     /// Run `workers` workers over `source` and return the rows each one read.
+    /// The longest any test here may take before it is treated as stuck.
+    ///
+    /// A worker waits on [`MorselSource::opened`] when an open is in flight, and
+    /// the way that goes wrong is a missed wake-up: the worker sleeps and the
+    /// scan never finishes. Without this bound the suite hangs instead of
+    /// failing, which reports as a timed-out job rather than a broken test.
+    /// Removing the `notify_waiters` call is exactly that mutation, and it turns
+    /// this into a clean failure naming the worker that never came back.
+    const BEFORE_STUCK: std::time::Duration = std::time::Duration::from_secs(20);
+
     async fn run(source: &Arc<MorselSource>, opener: Arc<dyn OpenFile>, workers: usize) -> Vec<usize> {
         let mut tasks = Vec::new();
         for worker in 0..workers {
@@ -509,8 +572,15 @@ mod tests {
         }
 
         let mut rows = Vec::new();
-        for task in tasks {
-            rows.push(task.await.expect("the worker finishes").expect("it reads"));
+        for (worker, task) in tasks.into_iter().enumerate() {
+            let read = tokio::time::timeout(BEFORE_STUCK, task)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("worker {worker} never finished — a wake-up was missed")
+                })
+                .expect("the worker finishes")
+                .expect("it reads");
+            rows.push(read);
         }
         rows
     }
@@ -753,11 +823,14 @@ mod tests {
         assert_eq!(entry.object_meta.size, 1_000, "the scan's bytes, not a file's");
     }
 
-    /// A partitioned table is left alone.
+    /// A partitioned table is left alone by the planner.
     ///
-    /// `FileStream` appends a file's `PARTITIONED BY` values to its batches, and
-    /// it can do that only because it knows which file a batch came from. Behind
-    /// one entry it does not, so those values would be silently dropped.
+    /// The readers refuse it outright before a scan is built — see
+    /// [`reject_partition_columns`], which each of them calls from
+    /// `create_physical_plan`. This is the second line: `FileStream` appends a
+    /// file's `PARTITIONED BY` values to its batches, and it can do that only
+    /// because it knows which file a batch came from. Behind one entry it does
+    /// not.
     #[test]
     fn a_partitioned_table_is_left_alone() {
         use datafusion::scalar::ScalarValue;

@@ -15,7 +15,7 @@ use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricB
 /// them. Recording a read under those names would report the scan's own rows
 /// plus these, which is a number that means nothing.
 #[derive(Debug, Clone)]
-pub struct SharedReadMetrics {
+pub struct ReadMetrics {
     /// Chunks (regular) or batches (ragged) this partition took off the queue.
     ///
     /// The queue is shared, so these sum across the partitions to the file's
@@ -36,7 +36,7 @@ pub struct SharedReadMetrics {
     pub rows_pruned: Count,
 }
 
-impl SharedReadMetrics {
+impl ReadMetrics {
     /// Register this partition's counters.
     ///
     /// Once per partition, not once per file. Every call here takes four

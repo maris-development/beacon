@@ -646,7 +646,7 @@ mod tests {
         batch_size: usize,
         predicate: Option<PushdownFilter>,
     ) -> Vec<RecordBatch> {
-        crate::arrow::share::flat_stream(dataset, batch_size, predicate)
+        crate::arrow::file_read::flat_stream(dataset, batch_size, predicate)
             .await
             .expect("the read builds")
             .try_collect()
@@ -815,7 +815,7 @@ mod tests {
         // The chunk list is built before anything streams, so a dataset that
         // cannot be laid out fails there rather than on the first batch.
         assert!(
-            crate::arrow::share::flat_stream(AnyDataset::Regular(ds), usize::MAX, None)
+            crate::arrow::file_read::flat_stream(AnyDataset::Regular(ds), usize::MAX, None)
                 .await
                 .is_err()
         );
@@ -825,7 +825,7 @@ mod tests {
     async fn test_empty_dataset_error() {
         let ds = make_dataset(vec![]).await;
         assert!(
-            crate::arrow::share::flat_stream(AnyDataset::Regular(ds), usize::MAX, None)
+            crate::arrow::file_read::flat_stream(AnyDataset::Regular(ds), usize::MAX, None)
                 .await
                 .is_err()
         );

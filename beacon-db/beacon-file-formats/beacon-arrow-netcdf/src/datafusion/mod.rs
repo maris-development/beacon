@@ -500,6 +500,8 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        beacon_nd_array::arrow::morsel::reject_partition_columns("netCDF", &conf)?;
+
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
         // the file source's schema is the encoded form of the logical table
         // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
@@ -1268,53 +1270,50 @@ mod reader_backend_tests {
         }
     }
 
-    /// A partitioned table keeps its file list, and shares as it used to.
+    /// A partitioned table is refused, naming the reader and the column.
     ///
-    /// `FileStream` appends a file's `PARTITIONED BY` values to its batches, and
-    /// it can do that only because it knows which file each batch came from.
-    /// Behind one standing entry it does not, so those values would be dropped
-    /// without a word. Such a scan is left to the older path until the morsel
-    /// loop applies them itself.
-    #[test]
-    fn a_partitioned_table_keeps_its_file_list() {
+    /// A `PARTITIONED BY` column is part of a file's *path*, and `FileStream`
+    /// appends its value to that file's batches — which it can do only because
+    /// it knows which file each batch came from. An nd scan reads a collection
+    /// as one unit, so it does not.
+    ///
+    /// The alternative to refusing is returning the column silently empty, and a
+    /// query that quietly drops a column it was asked for is worse than one that
+    /// says it cannot do this yet.
+    #[tokio::test]
+    async fn a_partitioned_table_is_refused() {
         use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
-        use datafusion::scalar::ScalarValue;
 
-        const PARTITIONS: usize = 4;
-
-        let mut large = PartitionedFile::new("year=2023/large.nc", 64 * 1024 * 1024);
-        large.partition_values = vec![ScalarValue::Utf8(Some("2023".to_string()))];
-
-        let table_schema =
-            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+        let table_schema = TableSchema::new(
+            Arc::new(arrow::datatypes::Schema::empty()),
+            vec![Arc::new(arrow::datatypes::Field::new(
+                "year",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ))],
+        );
         let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
-            Arc::new(source.clone()) as Arc<dyn FileSource>,
+            Arc::new(source) as Arc<dyn FileSource>,
         )
-        .with_file(large)
+        .with_file(PartitionedFile::new("year=2023/one.nc", 1024))
         .build();
 
-        let planned = source
-            .repartitioned(PARTITIONS, MIN_SHARE_SIZE, None, &config)
-            .unwrap()
-            .expect("one large file over four partitions is still shared");
+        let ctx = session();
+        let error = format_on(ReaderBackend::Oxcdf)
+            .create_physical_plan(&ctx.state(), config)
+            .await
+            .expect_err("a partitioned table is refused");
 
-        let planned_source = planned
-            .file_source()
-            .as_any()
-            .downcast_ref::<NetCDFSource>()
-            .expect("the config carries a NetCDFSource");
-        assert_eq!(
-            planned_source.morsel_files(),
-            None,
-            "a partitioned table does not go through the queue"
-        );
+        let message = error.to_string();
+        assert!(message.contains("netCDF"), "it names the reader: {message}");
+        assert!(message.contains("year"), "and the column: {message}");
         assert!(
-            planned_source.shares_file(&object_store::path::Path::from("year=2023/large.nc")),
-            "it shares the file the old way instead"
+            message.contains("PARTITIONED BY"),
+            "in the words the user wrote: {message}"
         );
     }
 
