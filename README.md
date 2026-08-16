@@ -2,13 +2,13 @@
 
 <img src="docs/public/beacon-logo-small.png" alt="" width="120">
 
-<h1>Beacon</h1>
+<h1>Beacon - A Data Lake Query Engine</h1>
 
 <p><b>Query millions of files with one SQL statement</b></p>
 
 <p>
-Beacon is a query engine for scientific data. One server serves your whole community over SQL and JSON.<br>
-It reads NetCDF, Zarr, Parquet and ODV where the files already are.<br>
+Beacon is a data lake query engine for scientific data. One server serves your whole community over SQL and JSON.<br>
+It reads NetCDF, Zarr, Parquet and many other formats where the files already are.<br>
 No download. No conversion. No ETL.
 </p>
 
@@ -30,7 +30,7 @@ No download. No conversion. No ETL.
 
 </div>
 
-Beacon is a server. Point it at an archive of scientific files. Your users then query that archive
+Beacon is a query engine server. Point it at an archive (directory or S3 bucket) of scientific files. Your users then query that archive
 with SQL or with a JSON query. It runs no import job. It makes no second copy. It sends back only the
 rows and columns of the answer.
 
