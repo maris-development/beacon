@@ -12,6 +12,40 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **122 spatial functions with PostGIS names.** `ST_Distance`, `ST_Intersects`, `ST_Buffer`,
+  `ST_Centroid`, `ST_Simplify` and the rest now run in SQL — 117 scalar functions, 3 aggregate
+  functions (`ST_Extent`, `ST_Collect`, `ST_MemUnion`) and 2 window functions
+  (`ST_ClusterKMeans`, `ST_ClusterDBSCAN`). They replace `geodatafusion`, which held a much
+  smaller set. A netCDF, Zarr, CSV or Parquet table holds coordinate columns, not geometry, and
+  `ST_Point(longitude, latitude)` builds a geometry from those, so the whole set reaches every
+  format. A GeoParquet geometry column is a native GeoArrow column that the functions read
+  directly, but a separate scan defect blocks that today: `read_geoparquet` selects the right
+  columns and keeps the old column positions, so a query must read the columns from the first one
+  onwards. Geometry is written last, so every query over it fails, and so does a plain
+  `WHERE temperature > 0`.
+  Each predicate runs a bounding box test before the exact test, and a constant argument gets a
+  cached R-tree. Beacon's own `st_within_point` and `st_geojson_as_wkt` stay beside the set: they
+  need no geometry column, and `beacon-functions/benches/within_point.rs` measures the first one at
+  4 to 12 times the speed of `ST_Within` on a column that repeats its coordinates, which is what
+  one station reporting at many depths produces. Some functions differ from PostGIS. Measurement is
+  planar, so `ST_Distance` over longitude and latitude returns degrees. The coordinate reference
+  system belongs to the column, not to the row. The `&&` operator is the
+  `ST_BBoxIntersects` function, and the one-argument `ST_Union` is `ST_MemUnion`. `SHOW FUNCTIONS`
+  lists only the functions that take numbers or text, such as `ST_Point` and `ST_GeomFromText`: it
+  reads `information_schema.parameters`, and a function that accepts any argument type states no
+  argument types and so gets no row there
+  ([datafusion-spatial#1](https://github.com/robinskil/datafusion-spatial/issues/1)). Every
+  function runs, listed or not. See
+  [the function reference](docs/docs/2.0.0-rc2/sql/function-reference.md#geospatial-functions),
+  which is the full list.
+- **`ST_Transform` reprojects a geometry**, and a standard build ships it. That makes 123 spatial
+  functions. It links [PROJ](https://proj.org), so **a build from source now needs PROJ 9.6.2 or
+  later and pkg-config**, beside the netCDF and HDF5 it already needs (`apt-get install
+  libproj-dev pkg-config`, or `brew install proj pkg-config`). The image installs both, and the
+  runtime image carries `proj-data` for the `proj.db` that resolves an EPSG code. Two options
+  cover a machine without PROJ: `--features spatial-proj-bundled` builds PROJ from source, and
+  `--no-default-features` drops `ST_Transform` and the PROJ dependency with it. The other 122
+  functions need no native library either way.
 - **Zarr stores supply column ranges for file pruning.** A Zarr store recorded nothing in
   `beacon.system.file_stats`, so every query opened every store. It now reports a range per
   coordinate: an array of rank 0 or rank 1 is read and measured, and an array of rank 2 or higher —

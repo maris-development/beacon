@@ -91,7 +91,15 @@ datafusion = "^53"
 datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 
 datafusion-table-providers = { version = "=0.11.0", default-features = false }
-geodatafusion = "0.4.0"
+# PostGIS-named spatial functions on GeoArrow: 117 scalar, 3 aggregate and 2 window. It replaces
+# `geodatafusion`, which held a much smaller set. The crate is not on crates.io yet, so the
+# reference is a git revision. Pin the revision: a git branch moves, and a moving dependency makes
+# a build unrepeatable.
+#
+# `default-features = false` names the DataFusion major explicitly. `df53` matches the DataFusion
+# 53 / Arrow 58 / GeoArrow 0.8 this workspace unifies on. `sql` gives the parser that
+# `SessionContext::sql` needs. `proj` stays off; `beacon-functions` offers it as `proj`.
+datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77", default-features = false, features = ["df53", "sql"] }
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 # Pure-Rust netCDF-4 / classic reader. It parses the HDF5 container itself, so it
 # holds no global lock and reads through `object_store` by byte range. The
@@ -133,7 +141,10 @@ cast = "0.3.0"
 chacha20poly1305 = "0.10"
 csv = "1.3.1"
 envconfig = "0.11.0"
-geo = "0.31"
+# Must stay at the version `datafusion-spatial` uses. Two `geo` versions do not coexist: 0.31 and
+# 0.33 need `i_overlay` 4.0 and 4.5, and cargo picks one version per major. Cargo then fails to
+# resolve. Read the datafusion-spatial README before you move this line.
+geo = "0.33"
 geojson = "0.24.2"
 gsw = "0.2.2"
 hifitime = "4.0.2"
@@ -160,7 +171,9 @@ tracing-panic = "0.1"
 url = "2.5.4"
 uuid = "1.16.0"
 walkdir = "2.5.0"
-wkt = {version = "0.12.0", features = ["geo-types"]}
+# The version `geo` 0.33 and `datafusion-spatial` use. One version keeps the binary small and
+# lets a `wkt::Wkt` pass between beacon code and the spatial functions.
+wkt = {version = "0.14.0", features = ["geo-types"]}
 zarrs = {version = "0.23.12", features = ["async"]}
 zarrs_object_store = "0.6.0"
 zarrs_storage = "0.4.2"

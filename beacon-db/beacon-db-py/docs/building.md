@@ -9,14 +9,15 @@ engine links. A Rust compiler alone is not enough:
 
 - **protoc**. Lance generates protobuf at build time.
 - **HDF5 and netCDF** headers and libraries. The netCDF reader and writer need them.
+- **PROJ, 9.6.2 or later**, and pkg-config. The `ST_Transform` spatial function links it.
 - A Rust toolchain, **1.94 or later**. See `rust-version` in the workspace `Cargo.toml`. The
   `rust-toolchain.toml` file here selects stable for local development.
 
 ```bash
 # macOS
-brew install protobuf hdf5 netcdf
+brew install protobuf hdf5 netcdf proj pkg-config
 # Debian/Ubuntu
-sudo apt-get install -y protobuf-compiler libhdf5-dev libnetcdf-dev
+sudo apt-get install -y protobuf-compiler libhdf5-dev libnetcdf-dev libproj-dev pkg-config
 
 pip install maturin
 maturin develop            # build + install into the current venv (debug)

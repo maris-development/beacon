@@ -382,13 +382,14 @@ links — not just a Rust compiler:
 
 - **protoc** (Lance generates protobuf at build time)
 - **HDF5 + netCDF** headers/libraries (the netCDF reader/writer)
+- **PROJ 9.6.2+** and pkg-config (the `ST_Transform` spatial function links it)
 - a Rust toolchain — **1.94 or later**, enforced by `rust-version` in the workspace `Cargo.toml`
 
 ```bash
 # macOS
-brew install protobuf hdf5 netcdf
+brew install protobuf hdf5 netcdf proj pkg-config
 # Debian/Ubuntu
-sudo apt-get install -y protobuf-compiler libhdf5-dev libnetcdf-dev
+sudo apt-get install -y protobuf-compiler libhdf5-dev libnetcdf-dev libproj-dev pkg-config
 
 pip install maturin
 maturin develop            # build + install into the current venv (debug)

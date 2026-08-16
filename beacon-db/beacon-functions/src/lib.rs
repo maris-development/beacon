@@ -28,7 +28,11 @@ pub fn register_functions(
     runtime_handle: Handle,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 ) {
-    geodatafusion::register(session_context.as_ref());
+    // The PostGIS-named spatial set: 117 scalar, 3 aggregate and 2 window functions. It runs
+    // first, so a Beacon UDF below it wins a name it shares. The two Beacon geo UDFs carry names
+    // that this set does not hold (`st_within_point`, `st_geojson_as_wkt`), so neither replaces
+    // a spatial function today. `geo::tests` guards that.
+    datafusion_spatial::register_all(session_context.as_ref());
     register_util_udfs(session_context.as_ref());
     register_blue_cloud_udfs(session_context.as_ref());
     register_geo_udfs(

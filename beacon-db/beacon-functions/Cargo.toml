@@ -4,6 +4,21 @@ version.workspace = true
 edition = "2021"
 
 rust-version.workspace = true
+
+[features]
+# PROJ is on by default, so a standard build ships `ST_Transform` — the one spatial function that
+# reprojects coordinates. It links PROJ, a C++ library, so the machine needs PROJ 9.6.2 or later
+# and pkg-config. That puts PROJ beside netCDF and HDF5: a native library the build requires.
+#
+# `--no-default-features` drops the function and the native dependency with it. The build then
+# needs no PROJ at all, and every other spatial function stays.
+default = ["proj"]
+proj = ["datafusion-spatial/proj"]
+# Build PROJ from source instead of linking the one on the machine. Use it where the distribution
+# carries a PROJ older than 9.6.2. It needs a C++ toolchain, CMake, sqlite3 and libtiff, and the
+# program then needs `PROJ_DATA` to point at the `share/proj` directory it produces.
+proj-bundled = ["datafusion-spatial/proj-bundled"]
+
 [dependencies]
 datafusion = {workspace = true}
 arrow = {workspace = true}
@@ -42,4 +57,13 @@ beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
 beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
 beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
-geodatafusion = { workspace=true }
+datafusion-spatial = { workspace=true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["rayon", "html_reports"] }
+
+# `st_within_point` against `ST_Within`. It answers one question: does the Beacon function still
+# earn its place beside the PostGIS set? Run `cargo bench -p beacon-functions --bench within_point`.
+[[bench]]
+name = "within_point"
+harness = false
