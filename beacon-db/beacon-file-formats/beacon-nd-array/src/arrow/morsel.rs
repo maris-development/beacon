@@ -690,12 +690,14 @@ mod tests {
     /// Eight workers reach one file; between them they read it exactly once,
     /// however the eight happen to interleave.
     ///
-    /// That the work actually *divides* is asserted by
-    /// [`a_worker_waits_for_a_file_another_is_still_opening`], which slows the
-    /// open so the workers are guaranteed to meet in flight. Asserting it here
-    /// would be a race: with a fast open the first worker can drain the queue
-    /// before the other seven are scheduled, and reading it alone is correct
-    /// behaviour, not a failure.
+    /// No test asserts how much of the file each worker gets. The scheduler
+    /// decides that. The first worker can empty the queue before the other seven
+    /// start. One worker then reads the whole file alone. That result is
+    /// correct.
+    ///
+    /// One property holds on every schedule. A worker does not stop while an
+    /// open is in flight.
+    /// [`a_worker_waits_for_a_file_another_is_still_opening`] asserts it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn one_big_file_is_read_once_by_whichever_workers_reach_it() {
         const ROWS: usize = 1_024;
@@ -711,33 +713,94 @@ mod tests {
         assert_eq!(opener.opened().len(), 1, "and opened once");
     }
 
-    /// A worker waits for a file another one is still opening.
+    /// A worker waits for a file that another worker opens.
     ///
-    /// The queue is empty and nothing is open yet, but the scan is not over: one
-    /// worker is part-way through an open whose chunks the others could take.
-    /// Reading that state as "done" is the exact failure this module exists to
-    /// prevent — workers finishing early while work remains.
+    /// The queue is empty and no file is open. The scan is not over. One worker
+    /// is part way through an open. The other workers can take the chunks of
+    /// that file. A worker that reads this state as "done" stops too early. This
+    /// module exists to prevent that failure.
     ///
-    /// A slow open makes the race happen every run rather than sometimes.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    /// This test sets the open in flight by hand. It then drives one worker step
+    /// by step. A scan of real workers cannot show the wait. It shows only the
+    /// result. The number of workers with rows depends on the speed of the first
+    /// worker. The scheduler controls that speed. A count of those workers is
+    /// therefore not a valid assertion. It reports a busy machine as a bug.
+    ///
+    /// This test asserts the two parts of the wait instead. Part 1: the worker
+    /// stays while the open is in flight. Part 2: the worker takes the chunks
+    /// after the open publishes them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_worker_waits_for_a_file_another_is_still_opening() {
+        const ROWS: usize = 512;
+        const BATCH: usize = 8;
+        /// A worker that stops early stops in less time than this.
+        const A_MOMENT: std::time::Duration = std::time::Duration::from_millis(50);
+
+        let opener = Fake::new(BATCH);
+        // The scan has no files. Nothing is open, and nothing is left to open.
+        // The open in flight is the only reason to stay.
+        let source = MorselSource::new(Vec::new());
+        source.opening.fetch_add(1, Ordering::AcqRel);
+
+        let mut worker = Worker {
+            source: Arc::clone(&source),
+            worker: 0,
+            opener: opener.clone(),
+            metrics: None,
+            failed: false,
+            next: None,
+        };
+        // The test holds this future across both parts. A second call to `take`
+        // cannot show that the wake-up reaches the first waiter.
+        let mut taking = std::pin::pin!(worker.take());
+
+        assert!(
+            tokio::time::timeout(A_MOMENT, taking.as_mut()).await.is_err(),
+            "the worker stays for the open in flight. It does not report the scan as done"
+        );
+
+        // The open finishes. The prefetch task ends in this order: publish the
+        // file, drop the count, wake the waiters.
+        let dataset = opener.open(&file(0, ROWS)).await.expect("the file opens");
+        source.register(dataset);
+        source.opening.fetch_sub(1, Ordering::AcqRel);
+        source.opened.notify_waiters();
+
+        let taken = tokio::time::timeout(BEFORE_STUCK, taking)
+            .await
+            .expect("the worker wakes when the open finishes")
+            .expect("and it takes work, not an error")
+            .expect("the scan is not over: the file has chunks");
+
+        let batches: Vec<RecordBatch> = taken.stream(None).try_collect().await.expect("it reads");
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            ROWS,
+            "and the worker takes every chunk of the file"
+        );
+    }
+
+    /// A slow open reads the file one time, with real workers.
+    ///
+    /// [`a_worker_waits_for_a_file_another_is_still_opening`] drives one worker
+    /// by hand. This test uses the worker loop itself. Eight workers read one
+    /// file. The open is slow, so seven workers reach the empty state before it
+    /// ends. Each worker must wake and stop. A lost wake-up keeps a worker
+    /// asleep. [`BEFORE_STUCK`] then fails the test and names that worker. A
+    /// test without that limit hangs the job instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_slow_open_is_still_read_once() {
         const ROWS: usize = 512;
         const BATCH: usize = 8;
         const WORKERS: usize = 8;
 
-        // One file, so every worker but the opener reaches the empty state while
-        // the open is in flight.
         let opener = Fake::slow(BATCH, 60);
         let source = MorselSource::new(vec![file(0, ROWS)]);
 
-        let rows = run(&source, opener, WORKERS).await;
+        let rows = run(&source, opener.clone(), WORKERS).await;
 
         assert_eq!(rows.iter().sum::<usize>(), ROWS, "the file is read once over");
-        assert!(
-            rows.iter().filter(|read| **read > 0).count() > 1,
-            "the workers that arrived during the open waited and then helped, \
-             rather than finishing empty: {rows:?}"
-        );
+        assert_eq!(opener.opened().len(), 1, "and opened once");
     }
 
     /// The open list holds workers, not files — *while the scan runs*.
