@@ -31,8 +31,10 @@ jobs:
             libclang-dev \
             libhdf5-dev \
             libnetcdf-dev \
+            libproj-dev \
             libsqlite3-dev \
             netcdf-bin \
+            pkg-config \
             protobuf-compiler \
             software-properties-common \
             sqlite3 \

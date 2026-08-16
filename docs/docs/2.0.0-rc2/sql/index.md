@@ -35,7 +35,7 @@ SELECT * FROM read_netcdf(['argo/**/*.nc']) LIMIT 100
 
 - Query: [SELECT](/docs/2.0.0-rc2/sql/select) · [WHERE](/docs/2.0.0-rc2/sql/where) · [GROUP BY](/docs/2.0.0-rc2/sql/group-by) · [JOIN](/docs/2.0.0-rc2/sql/join) · [UNION BY NAME](/docs/2.0.0-rc2/sql/union-by-name)
 - Tables and views: [CREATE TABLE](/docs/2.0.0-rc2/sql/create-table) · [CREATE VIEW](/docs/2.0.0-rc2/sql/create-view) · [CREATE MATERIALIZED VIEW](/docs/2.0.0-rc2/sql/create-materialized-view) · [Managed tables](/docs/2.0.0-rc2/sql/managed-tables) · [Remote tables and `ATTACH`](/docs/2.0.0-rc2/sql/remote-tables)
-- Functions: [Table functions](/docs/2.0.0-rc2/sql/table-functions) · [Utility table functions](/docs/2.0.0-rc2/sql/table-functions-utility) · [Function reference](/docs/2.0.0-rc2/sql/function-reference)
+- Functions: [Table functions](/docs/2.0.0-rc2/sql/table-functions) · [Utility table functions](/docs/2.0.0-rc2/sql/table-functions-utility) · [Function reference](/docs/2.0.0-rc2/sql/function-reference) · [Spatial functions](/docs/2.0.0-rc2/sql/spatial-functions)
 - Secrets and profiles: [`CREATE SECRET`](/docs/2.0.0-rc2/sql/secrets) · [`SUMMARIZE`](/docs/2.0.0-rc2/sql/summarize)
 
 **Friendly SQL.** Beacon also supports these DataFusion extensions: `SELECT * EXCLUDE (col)`,

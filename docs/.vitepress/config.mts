@@ -269,6 +269,7 @@ export default defineConfig({
             { text: 'Table Functions', link: '/docs/2.0.0-rc2/sql/table-functions' },
             { text: 'Introspection', link: '/docs/2.0.0-rc2/sql/table-functions-utility' },
             { text: 'Function Reference', link: '/docs/2.0.0-rc2/sql/function-reference' },
+            { text: 'Spatial Functions', link: '/docs/2.0.0-rc2/sql/spatial-functions' },
           ]
         },
         {

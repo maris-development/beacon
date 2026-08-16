@@ -23,6 +23,14 @@ path = "src/main.rs"
 
 [features]
 jemalloc = ["dep:tikv-jemallocator"]
+# The server ships `ST_Transform`, so a standard build links PROJ. The machine needs PROJ 9.6.2 or
+# later and pkg-config, as it already needs netCDF and HDF5. `cargo build --no-default-features`
+# drops the function and the PROJ dependency with it.
+default = ["spatial-proj"]
+spatial-proj = ["beacon-core/spatial-proj"]
+# The same function, with PROJ built from source. Use it where the distribution carries a PROJ
+# older than 9.6.2. See `beacon-functions` for what that build needs.
+spatial-proj-bundled = ["beacon-core/spatial-proj-bundled"]
 
 [dependencies]
 axum = {workspace = true}
@@ -60,14 +68,16 @@ sysinfo = { workspace = true }
 
 # Local dependencies
 beacon-server-config = { path = "../beacon-server-config" }
-beacon-core = { path = "../../beacon-db/beacon-core" }
+# `default-features = false` so this crate's own `spatial-proj` feature is the one switch that
+# turns PROJ on, and `--no-default-features` here reaches all the way down.
+beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
 beacon-mcp = { path = "../beacon-mcp" }
 
 [dev-dependencies]
 # Tests build runtimes directly via `RuntimeBuilder`, so no test-only feature is
 # needed.
-beacon-core = { path = "../../beacon-db/beacon-core" }
+beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 # The test harness roots each lake in a temp dir; the library itself never does.
 tempfile = { workspace = true }
 # `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.

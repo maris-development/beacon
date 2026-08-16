@@ -1,6 +1,6 @@
 # Function Reference
 
-The SQL runtime of Beacon gives two families of functions:
+The SQL runtime of Beacon gives three families of functions:
 
 1. **DataFusion built-ins**: Beacon takes the full scalar and aggregate function
    library of Apache DataFusion. The tables below hold a selection. For the full
@@ -9,8 +9,11 @@ The SQL runtime of Beacon gives two families of functions:
    and [aggregate](https://datafusion.apache.org/user-guide/sql/aggregate_functions.html)
    references.
 2. **[Beacon-specific functions](#beacon-specific-functions)**: Beacon adds these
-   functions for geospatial filters, type conversion and vocabulary mapping.
-   That section holds the full list.
+   functions for type conversion and vocabulary mapping. Those sections hold the
+   full list.
+3. **[Spatial functions](/docs/2.0.0-rc2/sql/spatial-functions)**: 123 functions
+   with PostGIS names, over a geometry that `ST_Point` builds from coordinate
+   columns. Its own chapter holds the full list.
 
 ## DataFusion built-in functions (inherited)
 
@@ -284,9 +287,62 @@ FROM ocean_profiles
 
 ## Geospatial functions
 
-### `st_within_point(wkt, lon, lat)`
+Beacon holds 123 spatial functions with PostGIS names: 118 scalar functions, 3 aggregate functions
+and 2 window functions. The [spatial functions chapter](/docs/2.0.0-rc2/sql/spatial-functions)
+lists every one of them, with its arguments and its return type.
+
+A name is case insensitive, so `ST_Distance` and `st_distance` are the same function.
+
+| Group | Functions | Examples |
+| ----- | --------- | -------- |
+| [Accessors](/docs/2.0.0-rc2/sql/spatial-functions#accessors) | 16 | `ST_X`, `ST_Y`, `ST_SRID`, `ST_GeometryType` |
+| [Components](/docs/2.0.0-rc2/sql/spatial-functions#components) | 6 | `ST_StartPoint`, `ST_PointN`, `ST_GeometryN` |
+| [Constructors](/docs/2.0.0-rc2/sql/spatial-functions#constructors) | 7 | `ST_Point`, `ST_MakeLine`, `ST_MakeEnvelope` |
+| [Input and output](/docs/2.0.0-rc2/sql/spatial-functions#input-and-output) | 10 | `ST_AsText`, `ST_AsGeoJSON`, `ST_GeomFromText` |
+| [Predicates](/docs/2.0.0-rc2/sql/spatial-functions#predicates) | 15 | `ST_Intersects`, `ST_Within`, `ST_DWithin` |
+| [Measurement](/docs/2.0.0-rc2/sql/spatial-functions#measurement) | 9 | `ST_Area`, `ST_Length`, `ST_Distance` |
+| [Linear reference](/docs/2.0.0-rc2/sql/spatial-functions#linear-reference) | 4 | `ST_ClosestPoint`, `ST_LineLocatePoint` |
+| [Overlay](/docs/2.0.0-rc2/sql/spatial-functions#overlay) | 4 | `ST_Union`, `ST_Intersection`, `ST_Difference` |
+| [Processing](/docs/2.0.0-rc2/sql/spatial-functions#processing) | 18 | `ST_Buffer`, `ST_Centroid`, `ST_Simplify` |
+| [Validity](/docs/2.0.0-rc2/sql/spatial-functions#validity) | 3 | `ST_IsValid`, `ST_MakeValid` |
+| [Affine](/docs/2.0.0-rc2/sql/spatial-functions#affine) | 4 | `ST_Translate`, `ST_Rotate`, `ST_Affine` |
+| [Bounding box](/docs/2.0.0-rc2/sql/spatial-functions#bounding-box) | 8 | `ST_Envelope`, `ST_XMin`, `ST_YMax` |
+| [Tessellation](/docs/2.0.0-rc2/sql/spatial-functions#tessellation) | 4 | `ST_DelaunayTriangles`, `ST_VoronoiPolygons` |
+| [Bearings](/docs/2.0.0-rc2/sql/spatial-functions#bearings) | 2 | `ST_Azimuth`, `ST_Project` |
+| [Edits](/docs/2.0.0-rc2/sql/spatial-functions#edits) | 7 | `ST_Multi`, `ST_SnapToGrid`, `ST_Dump` |
+| [Aggregate functions](/docs/2.0.0-rc2/sql/spatial-functions#aggregate-functions) | 3 | `ST_Extent`, `ST_Collect`, `ST_MemUnion` |
+| [Window functions](/docs/2.0.0-rc2/sql/spatial-functions#window-functions) | 2 | `ST_ClusterKMeans`, `ST_ClusterDBSCAN` |
+| [Reprojection](/docs/2.0.0-rc2/sql/spatial-functions#reprojection) | 1 | `ST_Transform` |
+
+A netCDF, Zarr, CSV or Parquet table holds coordinate columns, not geometry. `ST_Point` builds a
+geometry from them, so every function above reaches every format:
+
+```sql
+SELECT count(*)
+FROM read_parquet(['obs/*.parquet'])
+WHERE ST_Within(
+    ST_Point(longitude, latitude),
+    ST_GeomFromText('POLYGON ((-10 35, 40 35, 40 60, -10 60, -10 35))')
+)
+```
+
+### Beacon geospatial functions
+
+These two functions come from Beacon, not from the PostGIS set. Both take a WKT string and plain
+ordinate columns, so neither needs a geometry column.
+
+#### `st_within_point(wkt, lon, lat)`
 
 Returns `true` if the point `(lon, lat)` lies inside the geometry of the WKT string. It supports every WKT geometry type, such as polygon and multipolygon. For a constant geometry, Beacon adds a bounding rectangle pre-filter and an LRU cache. Repeated calls are then faster.
+
+Use this function on a table that holds longitude and latitude columns, such as netCDF or CSV.
+It parses the WKT once and caches an answer per coordinate pair. `ST_Within` is the PostGIS
+equivalent, and it takes two geometries.
+
+A measurement decides between the two. One station that reports at many depths repeats its
+coordinate pair on every row, and the cache then makes `st_within_point` 4 to 12 times faster. A
+table of distinct coordinates has no repeat to cache, and `ST_Within` is then the faster of the
+two.
 
 | Argument | Type | Description |
 | -------- | ---- | ----------- |
@@ -306,9 +362,10 @@ WHERE st_within_point(
 )
 ```
 
-### `st_geojson_as_wkt(geojson)`
+#### `st_geojson_as_wkt(geojson)`
 
 Converts a GeoJSON geometry string to WKT. Use it to give a GeoJSON polygon to `st_within_point`.
+`ST_GeomFromGeoJSON` is the PostGIS equivalent, and it returns a geometry.
 
 | Argument | Type | Description |
 | -------- | ---- | ----------- |

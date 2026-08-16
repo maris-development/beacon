@@ -13,6 +13,13 @@ static-netcdf = ["beacon-arrow-netcdf/static", "beacon-arrow-hdf5/static"]
 # vendor driver (e.g. msodbcsql18) at runtime. PostgreSQL/MySQL are always on via the crate's
 # defaults.
 sql-odbc = ["beacon-sql-databases/odbc"]
+# The `ST_Transform` spatial function, on by default. It links PROJ, so the machine needs PROJ
+# 9.6.2 or later and pkg-config. `--no-default-features` drops it, and the build then needs no
+# PROJ. The other 122 spatial functions are always on and need no native library.
+default = ["spatial-proj"]
+spatial-proj = ["beacon-functions/proj"]
+# The same function, with PROJ built from source. See `beacon-functions`.
+spatial-proj-bundled = ["beacon-functions/proj-bundled"]
 
 [dependencies]
 futures = { workspace=true}
@@ -24,7 +31,6 @@ utoipa = { workspace=true}
 async-trait = { workspace=true }
 datafusion = { workspace=true }
 datafusion-federation = { workspace=true }
-geodatafusion = { workspace=true }
 arrow = { workspace=true}
 tokio = { workspace = true }
 object_store = { workspace = true }
@@ -56,7 +62,10 @@ beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-hdf5 = { path = "../beacon-file-formats/beacon-arrow-hdf5" }
 beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
 beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
-beacon-functions = { path = "../beacon-functions" }
+# `default-features = false` so this crate's own `spatial-proj` feature is the one switch that
+# turns PROJ on. Without it, the default of `beacon-functions` turns PROJ on again, and
+# `--no-default-features` here would not reach it.
+beacon-functions = { path = "../beacon-functions", default-features = false }
 beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
 beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }

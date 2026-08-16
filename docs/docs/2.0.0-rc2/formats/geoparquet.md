@@ -70,20 +70,50 @@ FROM stations
 
 ### Spatial filters
 
-Use a geometry column with the
-[geospatial functions](/docs/2.0.0-rc2/sql/function-reference#geospatial-functions). This
-example keeps only the rows inside a polygon. It uses
-[`st_within_point`](/docs/2.0.0-rc2/sql/function-reference#st-within-point-wkt-lon-lat):
+Use the [spatial functions](/docs/2.0.0-rc2/sql/spatial-functions). Those
+functions carry PostGIS names. Build the geometry from the two coordinate columns:
 
 ```sql
-SELECT station_id, geometry
+SELECT station_id, temperature
 FROM stations
-WHERE st_within_point(
-    'POLYGON ((-10 35, 40 35, 40 60, -10 60, -10 35))',
-    geometry['x'],
-    geometry['y']
+WHERE ST_Intersects(
+    ST_Point(longitude, latitude),
+    ST_GeomFromText('POLYGON ((-10 35, 40 35, 40 60, -10 60, -10 35))')
 )
 ```
+
+A measurement or an aggregate reads the same expression:
+
+```sql
+SELECT ST_XMin(ST_Extent(ST_Point(longitude, latitude))) AS west,
+       ST_XMax(ST_Extent(ST_Point(longitude, latitude))) AS east,
+       count(*) AS stations
+FROM stations
+WHERE ST_DWithin(ST_Point(longitude, latitude), ST_GeomFromText('POINT(4 52)'), 5.0)
+```
+
+Beacon also holds
+[`st_within_point`](/docs/2.0.0-rc2/sql/function-reference#st-within-point-wkt-lon-lat). It takes
+a WKT string and two ordinate columns.
+
+:::warning
+A query over a GeoParquet file must read the columns from the first one onwards. The scan selects
+the right columns but keeps the old column positions, so any other selection gives wrong
+positions and the query fails. This holds for a plain column too, with no geometry in the query.
+
+| Query | Result |
+| ----- | ------ |
+| `SELECT count(*)` | works |
+| `SELECT lon, lat, temperature` (from the first column) | works |
+| `WHERE lon > 0` (the first column) | works |
+| `SELECT temperature` alone (a later column) | fails |
+| `WHERE lat > 0`, `avg(temperature)`, `ORDER BY lat` | fails |
+| Any use of `geometry`, which the writer puts last | fails |
+
+Until the scan is fixed, build the geometry from the coordinate columns of another format, as the
+examples above do. The same file also reads correctly through `read_parquet`, which gives the
+plain columns without the geometry decoding.
+:::
 
 :::tip
 Beacon also *writes* GeoParquet. It maps the longitude and latitude columns of a query result into a
@@ -92,7 +122,8 @@ geometry column on output. See [output formats](/docs/2.0.0-rc2/api/querying/).
 
 :::warning
 Beacon does not yet use the GeoParquet `bbox` covering to skip row groups on read. A query runs a
-full scan with column projection. Beacon plans support for geometry predicate pushdown.
+full scan with column projection. A GeoParquet file also reports no statistics, so file pruning
+drops no file either. See [issue #378](https://github.com/maris-development/beacon/issues/378).
 :::
 
 ## As an external table
