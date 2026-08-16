@@ -6,7 +6,7 @@ use ::axum::{
     body::Bytes,
     extract::MatchedPath,
     http::{HeaderMap, HeaderName, HeaderValue, Method, Request},
-    response::{Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::get,
     Router,
 };
@@ -80,7 +80,7 @@ pub fn setup_router(
     // Mount the bundled admin web UI when its build directory is present (it is in
     // the Docker image; usually absent for a bare `cargo run`). The bare root then
     // lands on the UI instead of the API docs.
-    let web_ui = web_ui_router(&config.server.web_ui_dir);
+    let web_ui = web_ui_router(&config.server.web_ui_dir, base_path);
 
     // MCP streamable-HTTP endpoint, gated by BEACON_MCP_ENABLED (default on). It
     // rides the same `resolve_identity` middleware as the client API, so MCP tool
@@ -156,16 +156,42 @@ pub fn setup_router(
 ///
 /// Presence is detected by `index.html` rather than the directory itself so a
 /// stray empty `web/` directory does not advertise a broken UI.
-fn web_ui_router(dir: &str) -> Option<Router<Arc<Server>>> {
+fn web_ui_router(dir: &str, base_path: &str) -> Option<Router<Arc<Server>>> {
     let dir = std::path::Path::new(dir);
     let index = dir.join("index.html");
     if !index.is_file() {
         return None;
     }
 
-    tracing::info!("serving admin web UI from {} at /admin", dir.display());
+    // The app root, as the browser must see it. The SPA cannot know `base_path`
+    // at build time, so it asks for its assets with URLs relative to the current
+    // document instead.
+    let app_root: &'static str = format!("{base_path}/admin/").leak();
+    tracing::info!(
+        "serving admin web UI from {} at {}",
+        dir.display(),
+        app_root
+    );
+
     let serve = ServeDir::new(dir).fallback(ServeFile::new(index));
-    Some(Router::new().nest_service("/admin", serve))
+    Some(
+        Router::new()
+            .nest_service("/admin", serve)
+            // Relative asset URLs only resolve inside the app when the document
+            // path ends in a slash. A browser at `{base_path}/admin` resolves
+            // them one directory up, which 404s until the page rewrites its own
+            // base. This redirect keeps that first load clean. The layer sees the
+            // path before the nest strips `/admin`, and it applies only to the
+            // routes above it.
+            .layer(::axum::middleware::from_fn(
+                move |request: ::axum::extract::Request, next: ::axum::middleware::Next| async move {
+                    if request.uri().path() == "/admin" {
+                        return Redirect::to(app_root).into_response();
+                    }
+                    next.run(request).await
+                },
+            )),
+    )
 }
 
 /// Fills in the top-level OpenAPI metadata exposed by the HTTP documentation endpoints.
