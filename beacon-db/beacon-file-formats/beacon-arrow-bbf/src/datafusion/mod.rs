@@ -6,7 +6,7 @@ use beacon_binary_format::{
 };
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_common::super_typing::super_type_schema;
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -95,6 +95,14 @@ impl FileFormatFactory for BBFFormatFactory {
 }
 
 impl FileFormatFactoryExt for BBFFormatFactory {
+    /// BBF opts into the schema cache on its name alone. A file carries its own
+    /// schema, and `split_streams_slice` only decides how many rows a batch
+    /// holds.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        format.as_any().downcast_ref::<BBFFormat>()?;
+        Some(SchemaOptions::new("bbf").finish())
+    }
+
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],

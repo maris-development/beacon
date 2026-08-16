@@ -52,12 +52,12 @@ use std::time::Duration;
 use arrow::datatypes::{DataType, SchemaRef};
 use beacon_arrow_netcdf::datafusion::{NetcdfFormat, ReaderBackend};
 use beacon_common::FileStatsConfig;
-use beacon_datafusion_ext::format_ext::try_file_format_factory_ext;
+use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, try_file_format_factory_ext};
 use beacon_datafusion_ext::listing_factory::try_listing_factory_from_session;
 use beacon_file_stats::segment::ColumnStat;
 use beacon_file_stats::{
     CollectorConfig, FileAnalysis, FileAnalyzer, FileRecord, FileStatsError, FileStatsStore,
-    ObservedFile, StatsCollector,
+    InternedSchema, ObservedFile, StatsCollector,
 };
 use chrono::TimeZone;
 use datafusion::common::{ColumnStatistics, Statistics};
@@ -66,9 +66,9 @@ use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use futures::StreamExt;
-use object_store::{path::Path, ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore, path::Path};
 
-use crate::statement_plan::{upgrade_session, SessionCell};
+use crate::statement_plan::{SessionCell, upgrade_session};
 
 /// A latch that fires once in a pass, however many files ask it.
 ///
@@ -168,7 +168,7 @@ impl FileAnalyzer for FormatFileAnalyzer {
             .object_store(&self.datasets_url)
             .map_err(|e| FileStatsError::Format(format!("datasets store unavailable: {e}")))?;
 
-        let (format_name, format) = resolve_format(&session, &self.datasets_url, &object)?;
+        let (format_name, factory, format) = resolve_format(&session, &self.datasets_url, &object)?;
         self.report_netcdf_c_once(&format_name, format.as_ref());
 
         // The file's *own* schema, not the table's. `column_statistics` is
@@ -186,7 +186,17 @@ impl FileAnalyzer for FormatFileAnalyzer {
             .await
             .map_err(|e| FileStatsError::Format(format!("statistics for {}: {e}", record.path)))?;
 
-        let analysis = to_analysis(&format_name, &schema, &statistics);
+        // Keep the schema this analysis just derived. The read is already paid
+        // for, and without this every query over the file derives it again — 83%
+        // of a netCDF query over a hundred thousand files.
+        let mut analysis = to_analysis(&format_name, &schema, &statistics);
+        analysis.schema = interned_schema(
+            factory.as_ref(),
+            format.as_ref(),
+            &self.datasets_url,
+            record,
+            &schema,
+        );
         tracing::debug!(
             path = record.path.as_str(),
             format = format_name.as_str(),
@@ -253,7 +263,7 @@ fn resolve_format(
     session: &Arc<SessionContext>,
     datasets_url: &ObjectStoreUrl,
     object: &ObjectMeta,
-) -> Result<(String, Arc<dyn FileFormat>), FileStatsError> {
+) -> Result<(String, Arc<dyn FileFormatFactoryExt>, Arc<dyn FileFormat>), FileStatsError> {
     let state = session.state();
     let key = format_key(object).ok_or_else(|| {
         FileStatsError::Format(format!("no file extension on {}", object.location))
@@ -275,7 +285,36 @@ fn resolve_format(
     let format = factory
         .create_for_analysis(&state, &HashMap::new(), &url, &listing)
         .map_err(|e| FileStatsError::Format(format!("cannot open {}: {e}", object.location)))?;
-    Ok((name, format))
+    Ok((name, factory, format))
+}
+
+/// The schema-cache entry for a file the analyzer just read, or `None` when the
+/// format keeps out of the cache.
+///
+/// The key must be the one a *query* would build, or the entry is written and
+/// never found. Both sides use the store URL and the store-relative path, and
+/// both take the fingerprint from the same factory hook.
+///
+/// The stamp comes from the record, which is what the listing reported. That is
+/// also what a query's listing will report while the file is unchanged, so an
+/// entry stays valid exactly as long as its file does.
+fn interned_schema(
+    factory: &dyn FileFormatFactoryExt,
+    format: &dyn FileFormat,
+    datasets_url: &ObjectStoreUrl,
+    record: &FileRecord,
+    schema: &SchemaRef,
+) -> Option<InternedSchema> {
+    let fingerprint = factory.schema_options_fingerprint(format)?;
+    Some(InternedSchema {
+        key: beacon_file_stats::FileKey::new(datasets_url.as_str(), &record.path, fingerprint),
+        stamp: beacon_file_stats::stamp_object(
+            record.size,
+            record.last_modified_millis,
+            record.e_tag.as_deref(),
+        ),
+        schema: schema.clone(),
+    })
 }
 
 /// The registry key for an object: its extension, with Zarr's metadata file
@@ -313,6 +352,8 @@ fn to_analysis(format: &str, schema: &SchemaRef, statistics: &Statistics) -> Fil
         num_rows,
         total_byte_size,
         columns,
+        // Filled by the caller, which knows the format's cache identity.
+        schema: None,
     }
 }
 
@@ -423,6 +464,7 @@ impl FileStatsService {
                 target_group_files: config.target_group_files,
                 min_group_files: config.min_group_files,
                 prefix_depth: config.prefix_depth,
+                write_schemas: config.schema_cache,
             },
         );
         Arc::new(Self {

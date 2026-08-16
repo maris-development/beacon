@@ -89,10 +89,16 @@ pub(crate) async fn build_listing_table(
 ) -> datafusion::error::Result<FastObjectTable> {
     let resolved_schema = match &spec.provided_schema {
         Some(schema) => Arc::clone(schema),
-        None => match spec
-            .options
-            .infer_schema(session, &spec.listing_table_url)
-            .await
+        // One URL, so the cached path returns exactly what
+        // `ListingOptions::infer_schema` returned before it: no merge across
+        // URLs, and none of the widening a `read_*` applies.
+        None => match crate::fast_object::infer_url_schemas(
+            session,
+            &spec.options,
+            std::slice::from_ref(&spec.listing_table_url),
+        )
+        .await
+        .map(|mut schemas| schemas.remove(0))
         {
             Ok(schema) => schema,
             Err(error) => {

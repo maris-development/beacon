@@ -194,6 +194,7 @@ records no ranges.
 | `BEACON_FILE_STATS_PREFIX_DEPTH` | *(derived)* | The folder depth for a group. Leave this variable unset. Beacon derives the depth from your paths and handles roots of different shapes. |
 | `BEACON_FILE_STATS_SCAN_PREFIX` | *(all files)* | Beacon finds files under this prefix of the datasets store only. |
 | `BEACON_FILE_STATS_DISCOVERY_CHUNK` | `10000` | The files that Beacon registers in one transaction. Beacon does not hold a large listing in memory. |
+| `BEACON_FILE_STATS_SCHEMA_CACHE` | `true` | Beacon keeps the schema it reads from each file. A later query then reads the schema instead of the file. A pass derives every schema anyway, so this costs one write. Set it to `false` to take the cache out of the query path and keep the ranges. |
 
 ## CORS
 

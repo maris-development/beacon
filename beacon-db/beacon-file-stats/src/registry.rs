@@ -553,6 +553,14 @@ impl Registry {
         Ok(read.open_table(PENDING)?.len()?)
     }
 
+    /// The database this registry sits in.
+    ///
+    /// Exposed so another tenant of the same file — the schema cache — opens its
+    /// own tables beside these rather than taking a second lock on the file.
+    /// `RedbStore` holds an exclusive lock, so a second opener could not.
+    pub fn database(&self) -> &Arc<Database> {
+        &self.db
+    }
 }
 
 /// Big-endian, so redb's lexicographic byte ordering is numeric ordering. The

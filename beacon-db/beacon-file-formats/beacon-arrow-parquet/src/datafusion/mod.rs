@@ -19,7 +19,7 @@ use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
-use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
 
 #[derive(Debug)]
 pub struct ParquetFormatFactory;
@@ -49,6 +49,17 @@ impl FileFormatFactory for ParquetFormatFactory {
 }
 
 impl FileFormatFactoryExt for ParquetFormatFactory {
+    /// Parquet opts into the schema cache on its name alone.
+    ///
+    /// A Parquet file carries its schema in its footer, and
+    /// [`ParquetFormat::new`] pins the three settings that could re-read it —
+    /// metadata skipping, view types, pruning. Nothing varies per table, so
+    /// nothing but the format itself belongs in the key.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        format.as_any().downcast_ref::<ParquetFormat>()?;
+        Some(SchemaOptions::new("parquet").finish())
+    }
+
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],

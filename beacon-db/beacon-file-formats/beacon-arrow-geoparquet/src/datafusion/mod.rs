@@ -2,7 +2,7 @@ use std::{any::Any, fmt::Debug, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::{file_descriptors::file_open_parallelism, super_typing::super_type_schema};
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -81,6 +81,19 @@ impl GetExt for GeoParquetFormatFactory {
 }
 
 impl FileFormatFactoryExt for GeoParquetFormatFactory {
+    /// GeoParquet opts into the schema cache on the two column names it may
+    /// build a geometry from. Naming a longitude and a latitude column replaces
+    /// them with one geometry column, so it changes the schema.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        let format = format.as_any().downcast_ref::<GeoParquetFormat>()?;
+        Some(
+            SchemaOptions::new("geoparquet")
+                .opt_str(format.options.longitude_column.as_deref())
+                .opt_str(format.options.latitude_column.as_deref())
+                .finish(),
+        )
+    }
+
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
