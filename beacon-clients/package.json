@@ -5,5 +5,9 @@
   "workspaces": [
     "beacon-ts",
     "beacon-web"
-  ]
+  ],
+  "//overrides": "monaco-editor 0.56.0 is the newest release and pins dompurify 3.4.8 exactly, so the only way to a patched sanitizer is to override it. dompurify ships to the browser, and 3.4.13 carries the fixes for GHSA advisories on IN_PLACE hook removal, ALLOWED_ATTR pollution, CUSTOM_ELEMENT_HANDLING and Trusted Types policy survival. Drop this once monaco-editor ships a release that depends on 3.4.13 or later.",
+  "overrides": {
+    "dompurify": "3.4.13"
+  }
 }

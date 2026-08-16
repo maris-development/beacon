@@ -113,12 +113,11 @@ impl OidcAuthProvider {
         let decoding_key = DecodingKey::from_jwk(jwk)
             .map_err(|err| anyhow::anyhow!("invalid signing key: {err}"))?;
 
-        let mut validation = Validation::new(header.alg);
-        validation.set_issuer(&[self.config.issuer.as_str()]);
-        match &self.config.audience {
-            Some(audience) => validation.set_audience(&[audience.as_str()]),
-            None => validation.validate_aud = false,
-        }
+        let validation = validation_for(
+            &self.config.issuer,
+            self.config.audience.as_deref(),
+            header.alg,
+        );
 
         let claims = decode::<Value>(token, &decoding_key, &validation)
             .map_err(|err| anyhow::anyhow!("token validation failed: {err}"))?
@@ -171,6 +170,40 @@ fn roles_from_claim(value: &Value) -> Vec<String> {
         Value::String(s) => s.split_whitespace().map(str::to_string).collect(),
         _ => Vec::new(),
     }
+}
+
+/// Builds the claim validation for a token signed with `alg`.
+///
+/// `set_issuer` and `set_audience` state what a claim must equal. They do not make the
+/// claim required, and that gap is exploitable: a claim sent with the wrong JSON type —
+/// `"aud": 1` instead of `"aud": "beacon"` — fails to parse, and jsonwebtoken treats a
+/// claim that fails to parse as a claim that is absent. The comparison arm never runs,
+/// so the check passes. CVE-2026-25537 is the same bug for `exp` and `nbf`, and
+/// jsonwebtoken 10.3.0 fixed only those two; `iss` and `aud` still fall through. A claim
+/// named in `required_spec_claims` must parse, so naming them here closes it.
+///
+/// `set_required_spec_claims` replaces the set rather than adding to it, so `exp` has to
+/// stay in the list to keep expiry enforced.
+///
+/// This is separate from `verify_token` so a test can reach it without a JWKS fetch.
+fn validation_for(
+    issuer: &str,
+    audience: Option<&str>,
+    alg: jsonwebtoken::Algorithm,
+) -> Validation {
+    let mut validation = Validation::new(alg);
+    validation.set_issuer(&[issuer]);
+    match audience {
+        Some(audience) => {
+            validation.set_audience(&[audience]);
+            validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        }
+        None => {
+            validation.validate_aud = false;
+            validation.set_required_spec_claims(&["exp", "iss"]);
+        }
+    }
+    validation
 }
 
 #[cfg(test)]
@@ -257,6 +290,109 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("token header"), "got: {err}");
+    }
+
+    /// Builds a token signed with HS256, so the whole check runs with no JWKS fetch.
+    fn signed(claims: serde_json::Value, secret: &[u8]) -> String {
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(secret),
+        )
+        .unwrap()
+    }
+
+    fn one_hour_from_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600
+    }
+
+    /// A claim of the wrong JSON type must fail the check, not skip it. See
+    /// `validation_for`: without `iss`/`aud` in `required_spec_claims`, a token signed
+    /// by the right key but issued for another audience is accepted, because the
+    /// unparseable claim reads as absent and the comparison never runs.
+    #[test]
+    fn a_wrongly_typed_iss_or_aud_claim_is_rejected() {
+        let secret = b"test-secret";
+        let decoding = DecodingKey::from_secret(secret);
+        let exp = one_hour_from_now();
+        let validation = validation_for(
+            "https://issuer.example",
+            Some("beacon"),
+            jsonwebtoken::Algorithm::HS256,
+        );
+
+        // The honest token passes, so the assertions below test the claim types and not
+        // a validation that rejects everything.
+        let good = signed(
+            serde_json::json!({ "iss": "https://issuer.example", "aud": "beacon", "exp": exp }),
+            secret,
+        );
+        assert!(decode::<Value>(&good, &decoding, &validation).is_ok());
+
+        // Each of these is signed by the trusted key and would have passed before.
+        for bad in [
+            serde_json::json!({ "iss": "https://issuer.example", "aud": 1, "exp": exp }),
+            serde_json::json!({ "iss": "https://issuer.example", "aud": { "a": 1 }, "exp": exp }),
+            serde_json::json!({ "iss": 1, "aud": "beacon", "exp": exp }),
+            // Omitting the claim entirely must fail too.
+            serde_json::json!({ "iss": "https://issuer.example", "exp": exp }),
+        ] {
+            let token = signed(bad.clone(), secret);
+            assert!(
+                decode::<Value>(&token, &decoding, &validation).is_err(),
+                "a wrongly typed or absent claim must not pass: {bad}"
+            );
+        }
+
+        // An ordinary audience mismatch is still rejected.
+        let wrong_audience = signed(
+            serde_json::json!({ "iss": "https://issuer.example", "aud": "other", "exp": exp }),
+            secret,
+        );
+        assert!(decode::<Value>(&wrong_audience, &decoding, &validation).is_err());
+    }
+
+    /// With no audience configured the `aud` check is off, but `iss` and `exp` still
+    /// have to parse.
+    #[test]
+    fn issuer_and_expiry_are_required_when_no_audience_is_configured() {
+        let secret = b"test-secret";
+        let decoding = DecodingKey::from_secret(secret);
+        let exp = one_hour_from_now();
+        let validation = validation_for(
+            "https://issuer.example",
+            None,
+            jsonwebtoken::Algorithm::HS256,
+        );
+
+        // Any audience is accepted, including none at all.
+        let no_audience = signed(
+            serde_json::json!({ "iss": "https://issuer.example", "exp": exp }),
+            secret,
+        );
+        assert!(decode::<Value>(&no_audience, &decoding, &validation).is_ok());
+        let other_audience = signed(
+            serde_json::json!({ "iss": "https://issuer.example", "aud": "other", "exp": exp }),
+            secret,
+        );
+        assert!(decode::<Value>(&other_audience, &decoding, &validation).is_ok());
+
+        // A wrongly typed issuer, a wrong issuer, and a wrongly typed expiry all fail.
+        for bad in [
+            serde_json::json!({ "iss": 1, "exp": exp }),
+            serde_json::json!({ "iss": "https://attacker.example", "exp": exp }),
+            serde_json::json!({ "iss": "https://issuer.example", "exp": "soon" }),
+        ] {
+            let token = signed(bad.clone(), secret);
+            assert!(
+                decode::<Value>(&token, &decoding, &validation).is_err(),
+                "must not pass: {bad}"
+            );
+        }
     }
 
     #[tokio::test]
