@@ -4,9 +4,12 @@ import { fileURLToPath, URL } from "node:url";
 
 // https://vite.dev/config/
 export default defineConfig(({ command }) => ({
-  // Production builds are served by the Beacon server, which mounts the SPA at
-  // `/admin` (see beacon-server router). The dev server keeps it at the root.
-  base: command === "build" ? "/admin/" : "/",
+  // Production builds are served by the Beacon server at `{base_path}/admin`.
+  // `base_path` is a server setting, so the build cannot write the prefix into
+  // the asset URLs. Relative URLs plus the `<base>` tag that `index.html` writes
+  // at run time resolve to the right prefix instead. The dev server keeps the
+  // SPA at the root, where absolute URLs are correct.
+  base: command === "build" ? "./" : "/",
   plugins: [react()],
   resolve: {
     alias: {

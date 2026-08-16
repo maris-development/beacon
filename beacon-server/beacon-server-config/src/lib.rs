@@ -508,6 +508,12 @@ struct RawConfig {
     file_stats_scan_prefix: String,
     #[envconfig(from = "BEACON_FILE_STATS_DISCOVERY_CHUNK", default = "10000")]
     file_stats_discovery_chunk: usize,
+    /// Keep the schema each analysis derives, so a query reads it rather than
+    /// deriving it again. On by default: the analyzer already computes every
+    /// file's schema and used to drop it. Turn it off to take the cache out of
+    /// a query's path while leaving statistics on.
+    #[envconfig(from = "BEACON_FILE_STATS_SCHEMA_CACHE", default = "true")]
+    file_stats_schema_cache: bool,
 
     // OpenAPI documentation metadata
     #[envconfig(from = "BEACON_API_TITLE", default = "Beacon Rest API")]
@@ -628,6 +634,7 @@ impl From<RawConfig> for Config {
                 prefix_depth: raw.file_stats_prefix_depth,
                 scan_prefix: raw.file_stats_scan_prefix.clone(),
                 discovery_chunk: raw.file_stats_discovery_chunk.max(1),
+                schema_cache: raw.file_stats_schema_cache,
             },
             crawler: CrawlerConfig {
                 enable: raw.crawler_enable,
@@ -848,8 +855,8 @@ fn create_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_master_key, normalize_base_path, normalize_log_level, validate_storage, Config,
-        PathBuf, RawConfig,
+        Config, PathBuf, RawConfig, decode_master_key, normalize_base_path, normalize_log_level,
+        validate_storage,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;

@@ -34,6 +34,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::error::Result;
 use crate::registry::AnalyzedFile;
+use crate::schema_cache::{FileKey, Stamp};
 use crate::segment::{ColumnStat, SegmentBuilder};
 use crate::store::FileStatsStore;
 use crate::types::{FileId, FileRecord, FileState};
@@ -47,6 +48,28 @@ pub struct FileAnalysis {
     /// Per-column statistics, by column name. A column the reader found no
     /// range for may be omitted entirely: absent reads as unknown.
     pub columns: Vec<(String, ColumnStat)>,
+    /// The file's own schema, to intern.
+    ///
+    /// The analyzer derives this to position the statistics — `column_statistics`
+    /// is positional, so it needs the file's schema, not the table's — and used
+    /// to drop it afterwards. Handing it back instead costs one encode and one
+    /// write per batch, and no read that was not happening anyway. It is what
+    /// stops a query from deriving the same schema from the same file forever.
+    ///
+    /// `None` when the format has not opted into the cache. See
+    /// `FileFormatFactoryExt::schema_options_fingerprint`.
+    pub schema: Option<InternedSchema>,
+}
+
+/// One file's schema, and what it describes.
+///
+/// The key says which file and under which format options; the stamp says which
+/// version of it, so a query over changed content reads a miss rather than the
+/// schema of bytes that are gone.
+pub struct InternedSchema {
+    pub key: FileKey,
+    pub stamp: Stamp,
+    pub schema: arrow::datatypes::SchemaRef,
 }
 
 /// Reads one file's statistics.
@@ -94,6 +117,13 @@ pub struct CollectorConfig {
     /// have different shapes: `argo/f.nc` beside `cmems/2024/01/15/f.nc`. Set
     /// it only when a layout is known and the derivation gets it wrong.
     pub prefix_depth: Option<usize>,
+    /// Keep the schema each analysis derives, so a query does not derive it
+    /// again.
+    ///
+    /// On by default. The schema is already computed and already dropped, so
+    /// keeping it costs one encode and one write per batch. Turn it off only to
+    /// take the cache out of a query's path while leaving statistics on.
+    pub write_schemas: bool,
 }
 
 impl Default for CollectorConfig {
@@ -106,6 +136,7 @@ impl Default for CollectorConfig {
             target_group_files: 10_000,
             min_group_files: 500,
             prefix_depth: None,
+            write_schemas: true,
         }
     }
 }
@@ -118,6 +149,9 @@ pub struct CollectReport {
     /// Segments committed, which is the number of non-empty prefix groups.
     pub segments: usize,
     pub groups: usize,
+    /// Schemas interned. Below `analyzed` when a format has not opted into the
+    /// cache, and zero when `write_schemas` is off.
+    pub schemas: usize,
 }
 
 impl CollectReport {
@@ -216,6 +250,7 @@ impl StatsCollector {
             total.failed += pass.failed;
             total.segments += pass.segments;
             total.groups += pass.groups;
+            total.schemas += pass.schemas;
         }
         Ok(total)
     }
@@ -322,6 +357,12 @@ impl StatsCollector {
             report.segments += 1;
         }
 
+        // The schemas these analyses already derived, in one transaction. A
+        // failure here is logged and dropped: the statistics are the pass's
+        // real output, and a query that finds no schema derives one, exactly as
+        // it did before this cache existed.
+        report.schemas += self.intern_schemas(&analyzed);
+
         // Only after the segment is durable, and in one transaction: a redb
         // commit is an fsync, so per-file marking caps the whole collector at a
         // few hundred files a second however fast the analysis is.
@@ -348,6 +389,32 @@ impl StatsCollector {
             "committed a file statistics segment"
         );
         Ok(())
+    }
+
+    /// Keep the schemas this group's analyses derived. Returns how many landed.
+    ///
+    /// One transaction for the batch, beside the one that marks the files
+    /// analyzed. A redb commit is an fsync, so a write per file would cap the
+    /// whole collector however fast the analysis is.
+    fn intern_schemas(&self, analyzed: &[(FileId, FileAnalysis)]) -> usize {
+        if !self.config.write_schemas {
+            return 0;
+        }
+        let entries: Vec<_> = analyzed
+            .iter()
+            .filter_map(|(_, analysis)| analysis.schema.as_ref())
+            .map(|interned| (interned.key, interned.stamp, interned.schema.clone()))
+            .collect();
+        if entries.is_empty() {
+            return 0;
+        }
+        match self.store.schema_cache().put_file_schemas(&entries) {
+            Ok(()) => entries.len(),
+            Err(error) => {
+                tracing::warn!(%error, "could not intern this batch's schemas; queries will infer them");
+                0
+            }
+        }
     }
 
 }

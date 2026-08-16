@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::format_ext::{
+    DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
+};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -187,6 +189,30 @@ impl GetExt for AtlasFormatFactory {
 }
 
 impl FileFormatFactoryExt for AtlasFormatFactory {
+    /// Atlas opts into the schema cache for a store read whole.
+    ///
+    /// TODO(#367): cache a dimension-projected read as well. `read_dimensions`
+    /// decides which arrays are kept, so the same store has one schema per
+    /// dimension set, and the key would have to carry the set in order. It is
+    /// left out of this first pass to keep the key simple, and to keep the four
+    /// nd formats saying the same thing: a read that names dimensions derives
+    /// its schema, exactly as it did before the cache existed.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        let format = format.as_any().downcast_ref::<AtlasFormat>()?;
+        if format.options.read_dimensions.is_some() {
+            return None;
+        }
+        Some(SchemaOptions::new("atlas").finish())
+    }
+
+    /// One schema per store, not per object. See the Zarr factory for the same
+    /// reasoning: `infer_schema` reads the marker at a store's root and derives
+    /// the schema from the collection behind it, so the entry is keyed on the
+    /// marker and depends on everything under it.
+    fn schema_units(&self, objects: &[ObjectMeta]) -> Vec<SchemaUnit> {
+        units_over_stores(objects, &crate::util::top_level_atlas_markers(objects))
+    }
+
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],

@@ -11,10 +11,10 @@ use std::sync::Arc;
 use arrow::array::{Float64Array, Int64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use beacon_common::FileStatsConfig;
+use beacon_core::AuthIdentity;
 use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
-use beacon_core::AuthIdentity;
 use beacon_datafusion_ext::listing_factory::RootStore;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::parquet::arrow::ArrowWriter;
@@ -35,6 +35,7 @@ fn enabled() -> FileStatsConfig {
         prefix_depth: None,
         scan_prefix: String::new(),
         discovery_chunk: 50,
+        schema_cache: true,
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
@@ -60,6 +60,13 @@ impl GetExt for TiffFormatFactory {
 }
 
 impl FileFormatFactoryExt for TiffFormatFactory {
+    /// TIFF opts into the schema cache on its name alone. `TiffOptions` carries
+    /// nothing today, so there is nothing else to tell two reads apart.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        format.as_any().downcast_ref::<TiffFormat>()?;
+        Some(SchemaOptions::new("tiff").finish())
+    }
+
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],

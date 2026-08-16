@@ -73,6 +73,9 @@ lazy_static = "1.5.0"
 base64 = "0.22"
 bloomfilter = { version = "1", features = ["serde"] }
 bincode = "1"
+# Content addressing for the schema cache. Pinned, and already in `Cargo.lock`
+# through other crates, so this adds no new build.
+blake3 = "=1.8.6"
 
 redb = "=4.1.0"
 

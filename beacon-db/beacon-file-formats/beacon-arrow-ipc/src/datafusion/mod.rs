@@ -18,7 +18,7 @@ use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
-use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
 
 pub const DEFAULT_ARROW_EXTENSION: &str = "arrow";
 
@@ -50,6 +50,13 @@ impl GetExt for ArrowFormatFactory {
 }
 
 impl FileFormatFactoryExt for ArrowFormatFactory {
+    /// Arrow IPC opts into the schema cache on its name alone. A file carries
+    /// its own schema, and this format takes no option that could change it.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        format.as_any().downcast_ref::<ArrowFormat>()?;
+        Some(SchemaOptions::new("arrow").finish())
+    }
+
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],

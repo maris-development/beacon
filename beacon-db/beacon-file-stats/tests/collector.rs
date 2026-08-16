@@ -8,11 +8,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field, Schema};
 use beacon_file_stats::segment::ColumnStat;
 use beacon_file_stats::{
-    CollectorConfig, FileAnalysis, FileAnalyzer, FileState, FileStatsStore, ObservedFile, Registry,
-    Result, StatScalar, StatsCollector,
+    CollectorConfig, FileAnalysis, FileAnalyzer, FileKey, FileState, FileStatsStore,
+    InternedSchema, Lookup, ObservedFile, Registry, Result, StatScalar, StatsCollector,
+    stamp_object,
 };
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 
@@ -77,9 +78,26 @@ impl FileAnalyzer for FakeAnalyzer {
                     )
                 })
                 .collect(),
+            // The real analyzer hands back the schema it derived to position
+            // the statistics. This one has no file, so it makes one up — the
+            // point is that the collector interns whatever it is given.
+            schema: Some(InternedSchema {
+                key: FileKey::new(STORE_URL, &record.path, OPTIONS),
+                stamp: stamp_object(record.size, record.last_modified_millis, None),
+                schema: Arc::new(Schema::new(vec![Field::new(
+                    "TEMP",
+                    DataType::Float64,
+                    true,
+                )])),
+            }),
         })
     }
 }
+
+/// The store every fake key is built under, and the format fingerprint they
+/// share. Both only have to match what a lookup asks for.
+const STORE_URL: &str = "test://datasets/";
+const OPTIONS: u64 = 42;
 
 async fn store() -> (Arc<FileStatsStore>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -100,6 +118,7 @@ fn config(prefix_depth: usize) -> CollectorConfig {
         target_group_files: 10_000,
         min_group_files: 500,
         prefix_depth: Some(prefix_depth),
+        write_schemas: true,
     }
 }
 
@@ -296,6 +315,7 @@ async fn run_until_idle_covers_more_files_than_one_batch() {
         target_group_files: 10_000,
         min_group_files: 500,
         prefix_depth: Some(2),
+        write_schemas: true,
     };
     let collector = StatsCollector::new(store.clone(), Arc::new(FakeAnalyzer::new()), small_batches);
 
@@ -337,4 +357,87 @@ async fn a_file_only_reaches_the_columns_it_declares() {
         vec![1]
     );
     assert_eq!(store.registry().num_columns().unwrap(), 3);
+}
+
+/// The pass keeps the schemas it derived, so a query reads them instead of
+/// opening every file again. This is the whole point of interning: the analysis
+/// already computed them and used to throw them away.
+#[tokio::test]
+async fn a_pass_interns_the_schemas_it_derived() {
+    let (store, _dir) = store().await;
+    let files: Vec<ObservedFile> = ["argo/a.nc", "argo/b.nc", "ctd/c.nc"]
+        .iter()
+        .map(|path| ObservedFile::new(*path, 4096, 1_700_000_000_000))
+        .collect();
+    store.registry().intern_files(&files).unwrap();
+
+    let collector = StatsCollector::new(store.clone(), Arc::new(FakeAnalyzer::new()), config(1));
+    let report = collector.run_once().await.unwrap();
+    assert_eq!(report.analyzed, 3);
+    assert_eq!(report.schemas, 3, "every analysis contributed its schema");
+
+    // Every file answers, and the three identical schemas share one blob.
+    let lookups: Vec<Lookup> = files
+        .iter()
+        .map(|file| Lookup {
+            key: FileKey::new(STORE_URL, &file.path, OPTIONS),
+            stamp: stamp_object(file.size, file.last_modified_millis, None),
+        })
+        .collect();
+    let found = store.schema_cache().file_schemas(&lookups);
+    assert!(found.iter().all(Option::is_some), "got {found:?}");
+    assert_eq!(store.schema_cache().num_schemas().unwrap(), 1);
+
+    // And a file whose content moved on reads as a miss rather than as the
+    // schema of bytes that are gone.
+    let changed = Lookup {
+        key: FileKey::new(STORE_URL, "argo/a.nc", OPTIONS),
+        stamp: stamp_object(8192, 1_700_000_000_000, None),
+    };
+    assert!(store.schema_cache().file_schemas(&[changed])[0].is_none());
+}
+
+/// A file whose analysis failed contributes no schema. Recording one would
+/// claim knowledge of a file nothing could read.
+#[tokio::test]
+async fn a_failed_file_interns_nothing() {
+    let (store, _dir) = store().await;
+    store
+        .registry()
+        .intern_files(&[
+            ObservedFile::new("argo/good.nc", 1, 1),
+            ObservedFile::new("argo/bad.nc", 1, 1),
+        ])
+        .unwrap();
+
+    let collector = StatsCollector::new(store.clone(), Arc::new(FakeAnalyzer::new()), config(1));
+    let report = collector.run_once().await.unwrap();
+    assert_eq!((report.analyzed, report.failed), (1, 1));
+    assert_eq!(report.schemas, 1, "only the file that read contributed");
+    assert_eq!(store.schema_cache().num_entries().unwrap(), 1);
+}
+
+/// The switch takes the cache out of the pass entirely, leaving the statistics
+/// it exists beside untouched.
+#[tokio::test]
+async fn the_switch_stops_the_pass_writing_schemas() {
+    let (store, _dir) = store().await;
+    store
+        .registry()
+        .intern_files(&[ObservedFile::new("argo/a.nc", 1, 1)])
+        .unwrap();
+
+    let collector = StatsCollector::new(
+        store.clone(),
+        Arc::new(FakeAnalyzer::new()),
+        CollectorConfig {
+            write_schemas: false,
+            ..config(1)
+        },
+    );
+    let report = collector.run_once().await.unwrap();
+    assert_eq!(report.analyzed, 1, "statistics are collected as ever");
+    assert_eq!(report.segments, 1);
+    assert_eq!(report.schemas, 0);
+    assert_eq!(store.schema_cache().num_entries().unwrap(), 0);
 }

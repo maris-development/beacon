@@ -9,7 +9,9 @@ use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::format_ext::{
+    DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
+};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -123,6 +125,37 @@ impl FileFormatFactory for ZarrFormatFactory {
 }
 
 impl FileFormatFactoryExt for ZarrFormatFactory {
+    /// Zarr opts into the schema cache for a plain listed store, read whole.
+    ///
+    /// A store with `storage` set is an Icechunk one. Its schema comes from a
+    /// repository rather than from the listed objects, so nothing in the listing
+    /// says when that schema changed. It stays out of the cache.
+    ///
+    /// TODO(#367): cache a dimension-projected read as well. `read_dimensions`
+    /// decides which arrays appear, so the same store has one schema per
+    /// dimension set, and the key would have to carry the set in order. It is
+    /// left out of this first pass to keep the key simple: a `read_zarr` that
+    /// names dimensions derives its schema, exactly as it did before the cache
+    /// existed. The default read is cached.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        let format = format.as_any().downcast_ref::<ZarrFormat>()?;
+        if format.has_storage() || format.read_dimensions.is_some() {
+            return None;
+        }
+        Some(SchemaOptions::new("zarr").finish())
+    }
+
+    /// One schema per store, not per object.
+    ///
+    /// A Zarr store is a directory. Its schema comes from the group metadata at
+    /// the root, and `infer_schema` reads exactly those markers and ignores
+    /// every chunk beside them. So the entry is keyed on the marker, and it
+    /// depends on the whole store: an array added under it changes the schema
+    /// while leaving the marker where it was.
+    fn schema_units(&self, objects: &[ObjectMeta]) -> Vec<SchemaUnit> {
+        units_over_stores(objects, &crate::util::top_level_zarr_meta_v3(objects))
+    }
+
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
@@ -223,6 +256,13 @@ impl ZarrFormat {
     pub fn with_storage(mut self, storage: ZarrStorage) -> Self {
         self.storage = Some(storage);
         self
+    }
+
+    /// Whether this format reads through a storage override rather than the
+    /// session's object store. True for Icechunk, where the listing does not
+    /// describe what the reader opens.
+    pub fn has_storage(&self) -> bool {
+        self.storage.is_some()
     }
 
     /// Returns a copy of this format that does or does not measure statistics.

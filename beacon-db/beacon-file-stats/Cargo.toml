@@ -25,6 +25,11 @@ arrow = { workspace = true }
 # this crate serialises `DataType` through serde. beacon-datafusion-ext lost its
 # standalone build to exactly that omission.
 arrow-schema = { workspace = true, features = ["serde"] }
+# The schema cache stores a schema as Arrow IPC: Arrow's own versioned encoding,
+# which round-trips every type Beacon produces. Declared explicitly rather than
+# reached through `arrow`'s feature set, for the reason above.
+arrow-ipc = { workspace = true }
+blake3 = { workspace = true }
 object_store = { workspace = true }
 redb = { workspace = true }
 rkyv = { workspace = true }

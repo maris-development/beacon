@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
 use datafusion::{
@@ -311,6 +311,39 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
 
     fn file_format_name(&self) -> String {
         self.get_ext()
+    }
+
+    /// netCDF opts into the schema cache on its reader backend alone.
+    ///
+    /// The backend is in the key because netcdf-c and `oxcdf` walk different
+    /// metadata, and a file whose schema they read differently must not be
+    /// answered from the other's entry.
+    ///
+    /// Nothing else is. The resolver only says how to reach the bytes, the
+    /// reader cache only says whether an open is reused, and the statistics
+    /// switch only decides whether ranges are computed. None of the three
+    /// changes a field or a type.
+    ///
+    /// TODO(#367): cache a dimension-projected read as well. `read_dimensions`
+    /// decides which variables appear, so the same file has one schema per
+    /// dimension set, and the key would have to carry the set in order. It is
+    /// left out of this first pass to keep the key simple: a `read_netcdf` that
+    /// names dimensions derives its schema, exactly as it did before the cache
+    /// existed. The default read — every table, and every collector pass — is
+    /// what the 9.2s was measured on, and that one is cached.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        let format = format.as_any().downcast_ref::<NetcdfFormat>()?;
+        if format.options.read_dimensions.is_some() {
+            return None;
+        }
+        Some(
+            SchemaOptions::new(NETCDF_EXTENSION)
+                .str(match format.reader_backend() {
+                    ReaderBackend::NetcdfC => "netcdf-c",
+                    ReaderBackend::Oxcdf => "oxcdf",
+                })
+                .finish(),
+        )
     }
 }
 

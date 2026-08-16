@@ -51,6 +51,17 @@ pub struct FileStatsConfig {
     /// Files registered per discovery transaction, so a listing of a large store
     /// does not have to be held whole.
     pub discovery_chunk: usize,
+    /// Keep the schema each analysis derives, so a query reads it instead of
+    /// deriving it again.
+    ///
+    /// On by default. The analyzer already computes each file's schema, to
+    /// position the statistics, and used to drop it; keeping it costs one write
+    /// per batch. Deriving a schema from every file was 83% of a netCDF query
+    /// over a hundred thousand files.
+    ///
+    /// Turn it off to take the cache out of a query's path while leaving
+    /// statistics on. Existing entries are then neither written nor read.
+    pub schema_cache: bool,
 }
 
 impl Default for FileStatsConfig {
@@ -73,6 +84,9 @@ impl Default for FileStatsConfig {
             prefix_depth: None,
             scan_prefix: String::new(),
             discovery_chunk: 10_000,
+            // On, unlike the subsystem around it. The schema is derived and
+            // dropped today, so keeping it adds a write and removes a read.
+            schema_cache: true,
         }
     }
 }
@@ -100,6 +114,10 @@ mod tests {
         assert!(
             config.concurrency <= std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2),
             "a background job must not claim more than the machine has"
+        );
+        assert!(
+            config.schema_cache,
+            "the schema cache rides on a pass that already derives every schema"
         );
         assert!(config.prefix_depth.is_none(), "grouping is derived by default");
     }

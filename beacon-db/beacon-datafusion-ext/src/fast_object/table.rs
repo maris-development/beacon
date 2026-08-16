@@ -76,11 +76,10 @@ impl FastObjectTable {
             .with_target_partitions(state.config_options().execution.target_partitions)
             .with_collect_stat(false); // We rely on the statistics store, not the listing table, to collect stats.
 
-        let mut schemas = Vec::with_capacity(urls.len());
-        for url in &urls {
-            tracing::debug!("Infer schema for table/file url: {}", url);
-            schemas.push(options.infer_schema(state, url).await?);
-        }
+        // One schema per URL, answered from the schema cache wherever it can be.
+        // The merge below is unchanged: the cache decides how a URL's schema is
+        // *arrived at*, never how the URLs combine.
+        let schemas = super::schema::infer_url_schemas(state, &options, &urls).await?;
 
         let schema = widening
             .merge_schemas(&schemas)
