@@ -83,6 +83,9 @@ impl FileAnalyzer for ShapedAnalyzer {
             num_rows: Some(1_000),
             total_byte_size: Some(record.size),
             columns,
+            // This analyzer invents its statistics and reads no file, so it has
+            // no schema to intern. A real one hands back what it derived.
+            schema: None,
         })
     }
 }
@@ -182,6 +185,9 @@ async fn main() -> anyhow::Result<()> {
             // Derived from the paths, which is the default. The shape here is
             // family{n}/2024/{i}.nc, so it should land on one segment per family.
             prefix_depth: None,
+            // Every other knob keeps its default. Spelling the rest out is what
+            // broke this example when the struct grew a field.
+            ..Default::default()
         },
     );
     let start = Instant::now();

@@ -5,5 +5,8 @@
   "workspaces": [
     "beacon-ts",
     "beacon-web"
-  ]
+  ],
+  "overrides": {
+    "dompurify": "3.4.13"
+  }
 }

@@ -66,6 +66,9 @@ impl FileAnalyzer for DemoAnalyzer {
             num_rows: Some(1_000),
             total_byte_size: Some(record.size),
             columns,
+            // This analyzer invents its statistics and reads no file, so it has
+            // no schema to intern. A real one hands back what it derived.
+            schema: None,
         })
     }
 }
@@ -121,6 +124,9 @@ async fn main() -> anyhow::Result<()> {
             target_group_files: 10_000,
             min_group_files: 500,
             prefix_depth: Some(2),
+            // Every other knob keeps its default. Spelling the rest out is what
+            // broke this example when the struct grew a field.
+            ..Default::default()
         },
     );
     let report = collector.run_once().await?;
