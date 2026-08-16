@@ -18,7 +18,7 @@ use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
-use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
 
 pub const DEFAULT_CSV_EXTENSION: &str = "csv";
 
@@ -95,11 +95,35 @@ impl FileFormatFactoryExt for CsvFormatFactory {
     fn file_extensions(&self) -> Vec<String> {
         vec!["csv".to_string(), "tsv".to_string()]
     }
+
+    /// CSV opts into the schema cache on the three settings that decide what a
+    /// file's columns come out as.
+    ///
+    /// The delimiter decides where a column ends. The header flag decides
+    /// whether the first record names the columns or is data. The record limit
+    /// decides how much inference sees, and a column that is integral for the
+    /// first hundred rows and decimal afterwards settles differently at 100 than
+    /// at 1 000.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        let format = format.as_any().downcast_ref::<CsvFormat>()?;
+        Some(
+            SchemaOptions::new("csv")
+                .u64(u64::from(format.delimiter()))
+                .opt_u64(format.has_header().map(u64::from))
+                .u64(format.infer_records() as u64)
+                .finish(),
+        )
+    }
 }
 
 #[derive(Debug)]
 pub struct CsvFormat {
     inner_format: datafusion::datasource::file_format::csv::CsvFormat,
+    /// How many records inference reads. Kept here as well, because the inner
+    /// format takes it and offers no way back, and the schema cache has to
+    /// fingerprint it: a file read to 100 rows and the same file read to 1 000
+    /// can settle on different column types.
+    infer_records: usize,
 }
 
 impl CsvFormat {
@@ -108,7 +132,24 @@ impl CsvFormat {
             inner_format: datafusion::datasource::file_format::csv::CsvFormat::default()
                 .with_delimiter(delimiter)
                 .with_schema_infer_max_rec(infer_records),
+            infer_records,
         }
+    }
+
+    /// The field separator this format reads with.
+    pub fn delimiter(&self) -> u8 {
+        self.inner_format.delimiter()
+    }
+
+    /// How many records inference reads before it settles on a type.
+    pub fn infer_records(&self) -> usize {
+        self.infer_records
+    }
+
+    /// Whether the first record names the columns. `None` leaves it to the
+    /// session default.
+    pub fn has_header(&self) -> Option<bool> {
+        self.inner_format.has_header()
     }
 }
 

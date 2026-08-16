@@ -13,7 +13,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_arrow_netcdf::datafusion::{statistics, NetCDFFormatFactory, NetcdfFormat};
 use beacon_common::super_typing::super_type_schema;
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
@@ -275,6 +275,30 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
 
     fn file_format_name(&self) -> String {
         self.get_ext()
+    }
+
+    /// HDF5 opts into the schema cache on its reader alone.
+    ///
+    /// The reader is in the fingerprint through the format's own type: this
+    /// factory hands back an [`Hdf5Format`] on the Rust reader and a
+    /// [`NetcdfFormat`] on netcdf-c, and the two walk different metadata. A
+    /// `NetcdfFormat` is fingerprinted by the netCDF factory, which owns it.
+    ///
+    /// TODO(#367): cache a dimension-projected read as well. `read_dimensions`
+    /// decides which arrays appear, so the same file has one schema per
+    /// dimension set, and the key would have to carry the set in order. It is
+    /// left out of this first pass to keep the key simple: a `read_hdf5` that
+    /// names dimensions derives its schema, exactly as it did before the cache
+    /// existed. The default read is cached.
+    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
+        let Some(hdf5) = format.as_any().downcast_ref::<Hdf5Format>() else {
+            // netcdf-c reads this one. Ask the factory that built it.
+            return self.inner.schema_options_fingerprint(format);
+        };
+        if hdf5.read_dimensions().is_some() {
+            return None;
+        }
+        Some(SchemaOptions::new("hdf5").str("rust").finish())
     }
 }
 

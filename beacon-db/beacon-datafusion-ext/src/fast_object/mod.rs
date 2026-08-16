@@ -9,6 +9,11 @@
 //! [`ArrowTypeWidening`](crate::type_widening::ArrowTypeWidening) strategy
 //! merges them into the one the table reports.
 //!
+//! Inference goes through [`schema::infer_url_schemas`], which asks the schema
+//! cache about each file before opening it. Deriving a schema from every file on
+//! every query was 83% of a netCDF query over a hundred thousand files, and the
+//! statistics collector already computes those schemas and used to drop them.
+//!
 //! # Pruning happens inside `scan`
 //!
 //! `scan` asks the listing table what it would read — `list_files_for_scan`,
@@ -55,7 +60,9 @@
 //! always reported.
 
 pub mod prune;
+pub mod schema;
 pub mod table;
 
 pub use prune::{Pruned, Pruning, prune_file_groups, prune_plan};
+pub use schema::infer_url_schemas;
 pub use table::FastObjectTable;

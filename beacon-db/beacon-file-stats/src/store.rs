@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 use crate::error::Result;
 use crate::manifest::{Manifest, SegmentEntry};
 use crate::registry::Registry;
+use crate::schema_cache::SchemaCache;
 use crate::segment::{ColumnStats, SegmentBuilder, SegmentReader};
 use crate::types::{ColumnId, FileId};
 
@@ -56,6 +57,7 @@ fn count_at(counts: &ArrayRef, row: usize) -> Option<u64> {
 /// Statistics for every known file, split across immutable segments.
 pub struct FileStatsStore {
     registry: Arc<Registry>,
+    schema_cache: Arc<SchemaCache>,
     store: Arc<dyn ObjectStore>,
     prefix: Path,
     manifest: RwLock<Manifest>,
@@ -69,8 +71,13 @@ impl FileStatsStore {
         prefix: Path,
     ) -> Result<Self> {
         let manifest = Manifest::load(&store, &prefix).await?;
+        // The cache opens its own tables in the registry's database. Both are
+        // tenants of one `beacon.db`, and the store is what a session already
+        // holds, so this is the shortest way for a scan to reach the cache.
+        let schema_cache = Arc::new(SchemaCache::from_database(Arc::clone(registry.database()))?);
         Ok(Self {
             registry,
+            schema_cache,
             store,
             prefix,
             manifest: RwLock::new(manifest),
@@ -79,6 +86,12 @@ impl FileStatsStore {
 
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
+    }
+
+    /// Each file's interned schema, so a plan derives one only for the files
+    /// that changed.
+    pub fn schema_cache(&self) -> &Arc<SchemaCache> {
+        &self.schema_cache
     }
 
     /// Seal a batch: write the segment object, then record it in the manifest.
