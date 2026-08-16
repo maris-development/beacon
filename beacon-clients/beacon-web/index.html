@@ -2,6 +2,27 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      The server serves this UI at `{server.base_path}/admin`, and the build does
+      not know that prefix. Read it from the current URL and write it into a
+      `<base>` tag. The relative asset URLs of the build then point at the app
+      root on every route, with or without a trailing slash.
+
+      Keep this script first in `<head>`. A `<base>` tag applies only to the URLs
+      that come after it.
+    -->
+    <script>
+      (function () {
+        var segments = window.location.pathname.split("/");
+        // The last `admin` segment is the app root. Client routes never use that
+        // name, but `base_path` can contain it.
+        var index = segments.lastIndexOf("admin");
+        var root = index < 0 ? "/" : segments.slice(0, index + 1).join("/") + "/";
+        var base = document.createElement("base");
+        base.setAttribute("href", root);
+        document.head.appendChild(base);
+      })();
+    </script>
     <link rel="icon" type="image/png" href="/beacon-logo-small.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Beacon Admin</title>

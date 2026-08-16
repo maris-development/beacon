@@ -2,6 +2,8 @@
 
 import { BeaconClient } from "@beacon/client";
 
+import { serverBase } from "./base-path";
+
 const STORAGE_KEY = "beacon-web.connection";
 
 /** A stored connection: server URL plus admin basic-auth credentials. */
@@ -22,14 +24,11 @@ export const SAME_ORIGIN = import.meta.env.PROD;
 
 /**
  * The API base URL when the UI is served by Beacon: the current origin plus any
- * deployment base path (the path segment preceding `/admin`). The SDK appends
+ * deployment base path (the path in front of `/admin`). The SDK appends
  * `/api/...` to this, so an empty base path yields just the origin.
  */
 export function sameOriginUrl(): string {
-  const { origin, pathname } = window.location;
-  const idx = pathname.indexOf("/admin");
-  const prefix = idx >= 0 ? pathname.slice(0, idx) : "";
-  return origin + prefix;
+  return serverBase();
 }
 
 /** The server URL to connect to: the serving origin in production, else the dev default. */

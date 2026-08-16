@@ -79,6 +79,13 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **The admin web UI ignored the server URL prefix.** Behind `BEACON_BASE_PATH=/beacon` the page at
+  `/beacon/admin` asked for `/admin/assets/*` and stayed blank. Vite wrote the prefix into every
+  asset URL at build time, and one build cannot know a run time setting. The build now emits URLs
+  relative to the document, and the page resolves its own root from the current URL before the
+  first asset loads. The router basename and the API URL come from that same root, so the UI works
+  under any prefix, including one that contains the word `admin`. The server also sends
+  `{base_path}/admin` to `{base_path}/admin/`, which keeps the first load free of 404s.
 - **File statistics pruned no netCDF or HDF5 file.** The ranges were recorded and then never used.
   Pruning rewrites the file list of a built scan, and it looked for that list on the plan's root
   node. A netCDF or HDF5 scan is not that node: its arrays reach the plan encoded, so the format
