@@ -173,19 +173,6 @@ fn roles_from_claim(value: &Value) -> Vec<String> {
 }
 
 /// Builds the claim validation for a token signed with `alg`.
-///
-/// `set_issuer` and `set_audience` state what a claim must equal. They do not make the
-/// claim required, and that gap is exploitable: a claim sent with the wrong JSON type —
-/// `"aud": 1` instead of `"aud": "beacon"` — fails to parse, and jsonwebtoken treats a
-/// claim that fails to parse as a claim that is absent. The comparison arm never runs,
-/// so the check passes. CVE-2026-25537 is the same bug for `exp` and `nbf`, and
-/// jsonwebtoken 10.3.0 fixed only those two; `iss` and `aud` still fall through. A claim
-/// named in `required_spec_claims` must parse, so naming them here closes it.
-///
-/// `set_required_spec_claims` replaces the set rather than adding to it, so `exp` has to
-/// stay in the list to keep expiry enforced.
-///
-/// This is separate from `verify_token` so a test can reach it without a JWKS fetch.
 fn validation_for(
     issuer: &str,
     audience: Option<&str>,
