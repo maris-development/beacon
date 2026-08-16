@@ -183,13 +183,22 @@ pprof = {version = "0.15", features = ["flamegraph"]}
 prost = "0.14.1"
 radix_trie = "0.3.0"
 regex = "1.11.1"
-# 0.8.18 clears four advisories against 0.8.10. Three of them matter directly here,
-# because `.bbf` archives are input data: RUSTSEC-2026-0233 (use-after-free on a
-# crafted archive), RUSTSEC-2026-0234 and RUSTSEC-2026-0235 (out-of-bounds reads
-# during validation). All three are fixed in 0.8.17. RUSTSEC-2026-0122 is also
-# cleared. `beacon-binary-format` pins the same exact version; the two must move
-# together, because cargo cannot resolve two exact requirements on one crate.
-rkyv = {version = "=0.8.18", features = ["bytes-1", "indexmap-2", "pointer_width_64", "smol_str-0_3"]}
+# HELD BACK ON PURPOSE. This wants to be `=0.8.18`, and it stays at `=0.8.10` only
+# until `beacon-binary-format` can move with it. That crate is a submodule, it pins
+# the same exact version, and cargo cannot resolve two exact requirements on one
+# crate, so the two have to change in one step. Raising this side alone breaks the
+# build for anyone who has not also changed the submodule.
+#
+# The cost of waiting is four open advisories, and three of them are reachable,
+# because a `.bbf` archive is input data that rkyv validates: RUSTSEC-2026-0233 is a
+# use-after-free on a crafted archive, and RUSTSEC-2026-0234 and RUSTSEC-2026-0235
+# are out-of-bounds reads during validation. All three are fixed in 0.8.17.
+# RUSTSEC-2026-0122 is the fourth. Treat a `.bbf` file from outside as untrusted
+# until this reaches 0.8.18.
+#
+# To finish it: commit `rkyv = "=0.8.18"` in the beacon-binary-format repository,
+# push it, bump the submodule pointer here, and raise this line in the same commit.
+rkyv = {version = "=0.8.10", features = ["bytes-1", "indexmap-2", "pointer_width_64", "smol_str-0_3"]}
 rlimit = "0.11.0"
 rmp-serde = "1"
 secrecy = "0.10"
