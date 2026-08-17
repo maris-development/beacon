@@ -112,19 +112,13 @@ tag. Releases before 2.0.0 are recorded in the
 
 - **The GeoParquet scan applied only part of a pushed-down projection.** A `FileSource` that
   accepts a projection has to apply the whole of it. This one accepted a projection and then read
-  only the column names out of it, which dropped everything else. A query over a column other than
-  the first returned a 400, or dropped the connection when the worker panicked, because the
-  expression above the scan still named the column at its old position. Geometry is written last,
+  only the column names out of it, which dropped everything else. Geometry is written last,
   so every query over it failed, and so did a plain `WHERE temperature > 0`. Two quieter faults
   came with it: `SELECT x AS y` found no column named `y` in the file and returned a column of
   NULLs, and a `PARTITIONED BY` value was null-filled instead of taken from the path. The scan now
   splits the projection with DataFusion's own `SplitProjection`: the reader selects the file
   columns, and `ProjectionOpener` applies the rest above it. The reader also stops decoding the
   columns it then threw away — it reads only the projected ones.
-  The same shape is present in `beacon-arrow-{odv,bbf,zarr,tiff,netcdf,hdf5}`, which are untouched
-  here. Only a format whose scan is a bare `DataSourceExec` is reachable — ODV and BBF. Zarr,
-  netCDF, HDF5 and TIFF stack `NdSourceExec` and `NdBroadcastExec` above theirs, and those nodes
-  decline a projection, so the scan under them only ever sees a plain column selection.
 - **A large GeoParquet file returned every row once per partition.** DataFusion divides a file over
   the repartition threshold into byte ranges, one per partition, and the GeoParquet reader ignored
   the range it was given, so each partition read the whole file. The reader now takes the row groups
