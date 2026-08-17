@@ -1,6 +1,5 @@
 import * as React from "react";
 import { useLocation } from "react-router-dom";
-import { rowsFromBatch, type ArrowRecordBatch, type ArrowTable, type Row } from "@beacon/client";
 import {
   AlertCircle,
   Bookmark,
@@ -14,6 +13,7 @@ import {
   Trash2,
 } from "lucide-react";
 
+import { appendChunk, EMPTY_RESULT, type ArrowResult } from "@/lib/arrow-result";
 import { useBeacon } from "@/lib/beacon-context";
 import { errorMessage } from "@/lib/errors";
 import { formatBytes } from "@/lib/format";
@@ -51,9 +51,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 interface RunResult {
-  rows: Row[];
-  /** First record batch (or full table) — carries the schema for timestamp rendering. */
-  table?: ArrowTable | ArrowRecordBatch;
+  /** The rows that have streamed in so far, kept in Arrow's columnar form. */
+  view: ArrowResult;
   queryId: string | null;
   elapsedMs: number;
   /** True when the preview row limit was hit and the query was stopped early. */
@@ -152,26 +151,15 @@ export function WorkbenchPage() {
     abortRef.current = controller;
     try {
       const { queryId, batches } = await beacon.queryBatches(text, controller.signal);
-      const rows: Row[] = [];
-      let schema: ArrowRecordBatch | undefined;
+      let view = EMPTY_RESULT;
       let truncated = false;
       for await (const batch of batches) {
-        if (!schema) schema = batch; // the first batch carries the Arrow schema
-        for (const row of rowsFromBatch<Row>(batch)) {
-          if (rows.length >= PREVIEW_ROW_LIMIT) {
-            truncated = true;
-            break;
-          }
-          rows.push(row);
-        }
-        // New array reference so React re-renders with the rows so far.
-        setResult({
-          rows: rows.slice(),
-          table: schema,
-          queryId,
-          elapsedMs: performance.now() - started,
-          truncated,
-        });
+        // The batch is kept as Arrow columns; nothing is decoded into JS objects
+        // until the grid renders a cell.
+        truncated = batch.numRows > PREVIEW_ROW_LIMIT - view.numRows;
+        view = appendChunk(view, batch, PREVIEW_ROW_LIMIT);
+        // A new result reference makes React render the rows so far.
+        setResult({ view, queryId, elapsedMs: performance.now() - started, truncated });
         if (truncated) {
           controller.abort(); // we have our preview; stop the query
           break;
@@ -180,7 +168,12 @@ export function WorkbenchPage() {
       // No batches arrived (DDL/DML or an empty result): surface a zero-row result.
       setResult(
         (prev) =>
-          prev ?? { rows: [], queryId, elapsedMs: performance.now() - started, truncated: false },
+          prev ?? {
+            view: EMPTY_RESULT,
+            queryId,
+            elapsedMs: performance.now() - started,
+            truncated: false,
+          },
       );
     } catch (err) {
       if (controller.signal.aborted) {
@@ -401,7 +394,7 @@ export function WorkbenchPage() {
           {mode === "results" && result && (
             <>
               <span className="text-muted-foreground">
-                {result.rows.length} rows
+                {result.view.numRows} rows
                 {result.truncated && ` (first ${PREVIEW_ROW_LIMIT} — query stopped)`}
                 {result.cancelled && " (cancelled)"}
               </span>
@@ -448,7 +441,7 @@ export function WorkbenchPage() {
               <Empty>Run Explain to see the query plan.</Empty>
             )
           ) : result ? (
-            <ResultsGrid rows={result.rows} table={result.table} />
+            <ResultsGrid result={result.view} />
           ) : running ? (
             <Empty>
               <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />

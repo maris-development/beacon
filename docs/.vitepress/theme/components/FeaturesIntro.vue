@@ -4,7 +4,7 @@
     <p class="feat-intro-sub">
       Point one node at your archive and it becomes a queryable service for
       everyone who needs it. Ragged profiles, one schema per file, hundreds of
-      thousands of small files: Beacon reads the shape observational data
+      thousands of files. Beacon reads the shape data
       actually has, with no conversion step.
     </p>
   </div>

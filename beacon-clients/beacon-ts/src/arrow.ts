@@ -11,10 +11,37 @@
  * Arrow into their bundle until the first query.
  */
 
-/** Minimal structural view of an apache-arrow `Table`, to avoid a type dependency. */
+/** Minimal structural view of an apache-arrow `Vector` — one decoded column. */
+export interface ArrowVector {
+  readonly length: number;
+  /** The value at `index`, already converted to a JS value (number, string, Date, …). */
+  get(index: number): unknown;
+}
+
+/** One field of an Arrow schema. `String(type)` renders it, e.g. `Timestamp<MICROSECOND>`. */
+export interface ArrowField {
+  readonly name: string;
+  readonly type: unknown;
+}
+
+/** Minimal structural view of an apache-arrow `Schema`. */
+export interface ArrowSchema {
+  readonly fields: readonly ArrowField[];
+}
+
+/**
+ * Minimal structural view of an apache-arrow `Table`, to avoid a type dependency.
+ *
+ * `getChildAt` reads a column without materializing rows — the cheap path for a
+ * consumer that renders or aggregates columnwise. `toArray()` is the row path,
+ * which builds one JS object per row.
+ */
 export interface ArrowTable {
   readonly numRows: number;
   readonly numCols: number;
+  readonly schema: ArrowSchema;
+  /** The column at `index` (in `schema.fields` order), or null when out of range. */
+  getChildAt(index: number): ArrowVector | null;
   toArray(): unknown[];
 }
 
@@ -22,7 +49,9 @@ export interface ArrowTable {
 export interface ArrowRecordBatch {
   readonly numRows: number;
   /** The batch's Arrow schema (carries field names and types). */
-  readonly schema?: unknown;
+  readonly schema: ArrowSchema;
+  /** The column at `index` (in `schema.fields` order), or null when out of range. */
+  getChildAt(index: number): ArrowVector | null;
   toArray(): unknown[];
 }
 
