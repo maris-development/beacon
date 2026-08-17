@@ -292,9 +292,8 @@ mod tests {
     }
 
     /// The merge rule of the session covers several IPC files. It unions the
-    /// columns that agree. Two files that give a column two types are an error, in
-    /// either order. The answer may not depend on the disk answer order. See issue
-    /// #377.
+    /// columns, and it widens a numeric column that two files give two widths. The
+    /// answer may not depend on the disk answer order. See issue #377.
     #[tokio::test]
     async fn infer_schema_merges_across_multiple_files() {
         let store = Arc::new(InMemory::new());
@@ -318,12 +317,14 @@ mod tests {
 
         let ctx = SessionContext::new();
         for pair in [[a.clone(), b.clone()], [b, a.clone()]] {
-            assert!(
-                ArrowFormat::default()
-                    .infer_schema(&ctx.state(), &object_store, &pair)
-                    .await
-                    .is_err(),
-                "an Int64 column beside a Float64 one has no single type"
+            let schema = ArrowFormat::default()
+                .infer_schema(&ctx.state(), &object_store, &pair)
+                .await
+                .expect("two numeric widths merge");
+            assert_eq!(
+                schema.field_with_name("value").unwrap().data_type(),
+                &DataType::Float64,
+                "an Int64 column beside a Float64 one needs a Float64"
             );
         }
 

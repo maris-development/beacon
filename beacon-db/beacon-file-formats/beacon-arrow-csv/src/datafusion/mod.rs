@@ -310,9 +310,8 @@ mod tests {
     }
 
     /// The rule of the session merges the schemas of several CSV files. The
-    /// columns that agree union. Two files that give a column two types are an
-    /// error, in either order. The answer may not depend on the disk answer
-    /// order. See issue #377.
+    /// columns union, and a numeric column that two files give two widths widens.
+    /// The answer may not depend on the disk answer order. See issue #377.
     #[tokio::test]
     async fn infer_schema_merges_columns_across_files() {
         let store = Arc::new(InMemory::new());
@@ -326,12 +325,14 @@ mod tests {
             [ints.clone(), floats.clone()],
             [floats.clone(), ints.clone()],
         ] {
-            assert!(
-                format
-                    .infer_schema(&ctx.state(), &object_store, &pair)
-                    .await
-                    .is_err(),
-                "an Int64 column beside a Float64 one has no single type"
+            let schema = format
+                .infer_schema(&ctx.state(), &object_store, &pair)
+                .await
+                .expect("two numeric widths merge");
+            assert_eq!(
+                schema.field_with_name("value").unwrap().data_type(),
+                &arrow::datatypes::DataType::Float64,
+                "an Int64 column beside a Float64 one needs a Float64"
             );
         }
 

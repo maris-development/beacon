@@ -532,10 +532,23 @@ mod tests {
             );
         }
 
-        // The merge refuses a conflict from either end of the listing.
-        let conflicting = schema(&[("TEMP", DataType::Float32)]);
-        assert!(merge_in_listing_order(&widening(), &[temp.clone(), conflicting.clone()]).is_err());
-        assert!(merge_in_listing_order(&widening(), &[conflicting, temp]).is_err());
+        // A second width widens the column, from either end of the listing.
+        let wider = schema(&[("TEMP", DataType::Float32)]);
+        for listing in [
+            vec![temp.clone(), wider.clone()],
+            vec![wider, temp.clone()],
+        ] {
+            let merged = merge_in_listing_order(&widening(), &listing).unwrap();
+            assert_eq!(
+                merged.field_with_name("TEMP").unwrap().data_type(),
+                &DataType::Float64
+            );
+        }
+
+        // A type from another family is refused, from either end.
+        let text = schema(&[("TEMP", DataType::Utf8)]);
+        assert!(merge_in_listing_order(&widening(), &[temp.clone(), text.clone()]).is_err());
+        assert!(merge_in_listing_order(&widening(), &[text, temp]).is_err());
     }
 
     /// A stamp covers the source and every dependent, so a Zarr chunk that

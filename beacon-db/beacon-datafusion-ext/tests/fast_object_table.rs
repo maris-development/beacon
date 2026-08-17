@@ -557,9 +557,9 @@ async fn a_projection_that_names_nothing_leaves_the_schema_alone() {
     assert_eq!(unknown.schema().fields().len(), 1);
 }
 
-/// The merge rule is the caller's to choose. The session's rule refuses a column
-/// two URLs describe differently; a caller that wants something else names its own
-/// strategy.
+/// The merge rule is the caller's to choose. The rule of the session widens a
+/// numeric column that two URLs give two widths. A caller that wants another
+/// answer names its own strategy.
 ///
 /// Across URLs, note, not within one: a format merges the files behind a single
 /// URL itself. It merges them through the same session rule, so a `read_*` over
@@ -620,15 +620,12 @@ async fn the_caller_can_name_the_merge_rule() {
     ];
     let state = fixture.ctx.state();
 
-    // The session's rule has no answer for a column with two types, and neither
-    // does naming that same rule explicitly.
-    assert!(
+    // The rule of the session widens the column, and the same rule by name gives
+    // the same answer.
+    for table in [
         FastObjectTable::try_new(&state, Arc::new(ParquetFormat::default()), urls.clone())
             .await
-            .is_err(),
-        "the session's rule refuses a column with two types"
-    );
-    assert!(
+            .unwrap(),
         FastObjectTable::try_new_with_widening(
             &state,
             Arc::new(ParquetFormat::default()),
@@ -636,8 +633,14 @@ async fn the_caller_can_name_the_merge_rule() {
             &DefaultArrowTypeWidening,
         )
         .await
-        .is_err()
-    );
+        .unwrap(),
+    ] {
+        assert_eq!(
+            table.schema().field_with_name("v").unwrap().data_type(),
+            &DataType::Int64,
+            "an Int32 column beside an Int64 one needs an Int64"
+        );
+    }
 
     // A caller that names its own rule gets it: this one keeps the first type it
     // saw, so the table reports the Int32 the first URL declared.
