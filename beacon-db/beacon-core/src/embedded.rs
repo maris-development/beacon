@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use beacon_auth::{AuthIdentity, Credential, ANONYMOUS_USERNAME};
+use beacon_common::FileStatsConfig;
 use beacon_datafusion_ext::listing_factory::DefaultStore;
 use datafusion::scalar::ScalarValue;
 use tokio::runtime::Handle;
@@ -194,7 +195,9 @@ impl AuthMode {
 /// Everything an embedder can configure at open time.
 ///
 /// Defaults are chosen for an interactive, single-user embedding: auth off, crawlers available,
-/// dataset paths resolved dynamically by their own scheme (or against the cwd).
+/// dataset paths resolved dynamically by their own scheme (or against the cwd). Dynamic mode
+/// keeps file statistics off. That subsystem needs a datasets store, whatever
+/// [`Self::file_stats`] says.
 #[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
     /// Whether RBAC applies. Defaults to [`AuthMode::Disabled`].
@@ -209,6 +212,14 @@ pub struct OpenOptions {
     /// Crawler subsystem config. Enabled by default; nothing is scheduled until a crawler
     /// exists, so this costs an empty database nothing.
     pub crawlers: CrawlerConfig,
+    /// File statistics config. On by default, as on the server. The same store holds the
+    /// schema cache, which a cold query reads instead of each file.
+    ///
+    /// The subsystem needs a database file and a [`Self::datasets`] store. An in-memory
+    /// database leaves it off. A dynamic-mode database leaves it off.
+    ///
+    /// Set [`FileStatsConfig::enable`] to false to keep a pass off your archive.
+    pub file_stats: FileStatsConfig,
     /// Where bare dataset paths resolve. `None` leaves the runtime in dynamic mode: paths
     /// resolve by their own scheme (`s3://`, `https://`) or against the current directory.
     pub datasets: Option<DefaultStore>,
@@ -273,6 +284,11 @@ impl OpenOptions {
 
     pub fn with_crawlers(mut self, crawlers: CrawlerConfig) -> Self {
         self.crawlers = crawlers;
+        self
+    }
+
+    pub fn with_file_stats(mut self, file_stats: FileStatsConfig) -> Self {
+        self.file_stats = file_stats;
         self
     }
 
@@ -341,7 +357,8 @@ impl Database {
         let mut builder = RuntimeBuilder::new()
             .with_auth_enforcement(auth_enabled)
             .with_read_only(options.read_only)
-            .with_crawler(options.crawlers.clone());
+            .with_crawler(options.crawlers.clone())
+            .with_file_stats(options.file_stats.clone());
 
         if let Some(file) = path.as_path() {
             builder = builder.with_db_path(file.to_path_buf());

@@ -69,11 +69,11 @@ The table above says how to read each format. This one says what you get.
 Reading the columns:
 
 - **On an S3 datasets store** — how the reader behaves when the server's datasets store is a
-  bucket rather than a local directory. **NetCDF and HDF5 need the bucket to allow anonymous
-  reads** by default: netCDF-c opens a file by URL and never sees the credential chain. Both
-  formats also hold a pure-Rust reader that goes through the object store and authenticates
-  normally; turn it on with `BEACON_NETCDF_USE_RUST_READER` or `BEACON_HDF5_USE_RUST_READER`. Every
-  other reader authenticates normally already. This is a property of the server's store, not of the
+  bucket rather than a local directory. NetCDF and HDF5 read through a pure-Rust reader by default.
+  That reader goes through the object store and authenticates normally. A server that sets
+  `BEACON_NETCDF_USE_RUST_READER=false` or `BEACON_HDF5_USE_RUST_READER=false` reads through
+  netCDF-c instead. It **then needs the bucket to allow anonymous reads**: netCDF-c opens a file by
+  URL and never sees the credential chain. Every other reader authenticates normally already. This is a property of the server's store, not of the
   query — paths in SQL are relative either way.
 - **Pushdown** — how much of a query reaches storage instead of running after the read. *Predicate*
   means a `WHERE` clause prunes data. *Projection* means a narrow `SELECT` reads fewer columns.

@@ -418,23 +418,27 @@ struct RawConfig {
 
     /// Read netCDF with the pure-Rust `oxcdf` reader instead of netcdf-c.
     ///
-    /// Off by default: netcdf-c is the path this server has always used. Turn
-    /// it on for parallel reads and for netCDF files in an object store (s3, gs
-    /// or az), which netcdf-c cannot open. Writes always use netcdf-c.
+    /// On by default. It reads in parallel. It opens a netCDF file in an object
+    /// store (s3, gs or az), which netcdf-c cannot. It reports the statistics of
+    /// each file.
+    ///
+    /// Set it to false to read with netcdf-c. Writes always use netcdf-c.
     #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER", default = "true")]
     netcdf_use_rust_reader: bool,
 
     /// Read HDF5 with the pure-Rust reader instead of netcdf-c.
     ///
-    /// Off by default: netcdf-c is the path this server has always used for
-    /// `.h5` and `.hdf5` files, because a NetCDF-4 file is an HDF5 file and
-    /// netcdf-c's HDF5 dispatch opens a plain one too. Turn it on for parallel
-    /// reads, for HDF5 files in an object store (s3, gs or az), for per-file
-    /// statistics, and for the two layouts netcdf-c cannot report: a nested
-    /// group and a compound dataset. Writes always use netcdf-c.
+    /// On by default. It reads in parallel. It opens an HDF5 file in an object
+    /// store (s3, gs or az). It reports the statistics of each file. It also
+    /// reports two layouts that netcdf-c cannot: a nested group and a compound
+    /// dataset.
     ///
-    /// This is separate from `BEACON_NETCDF_USE_RUST_READER`, so a server can
-    /// move one format at a time.
+    /// Set it to false to read with netcdf-c. A NetCDF-4 file is an HDF5 file,
+    /// so the netcdf-c HDF5 dispatch opens a plain HDF5 file too. Writes always
+    /// use netcdf-c.
+    ///
+    /// This flag is separate from `BEACON_NETCDF_USE_RUST_READER`. A server can
+    /// change one format at a time.
     #[envconfig(from = "BEACON_HDF5_USE_RUST_READER", default = "true")]
     hdf5_use_rust_reader: bool,
     #[envconfig(from = "BEACON_HDF5_ENABLE_STATISTICS", default = "true")]
@@ -476,17 +480,29 @@ struct RawConfig {
 
     // File statistics subsystem
     //
-    // Background per-file column ranges, used to skip files a predicate cannot
-    // match. Off by default: it has not run against a real archive yet, and on a
-    // netCDF deployment it does nothing at all unless
-    // `BEACON_NETCDF_USE_RUST_READER` is on, because netcdf-c serialises every
-    // call on a process-global lock.
-    #[envconfig(from = "BEACON_FILE_STATS_ENABLE", default = "false")]
+    // A pass records the column range of each file. A query then skips a file
+    // that its predicate cannot match.
+    //
+    // On by default. netcdf-c reports no range, because it holds one lock for
+    // each call in the process. Both Rust readers are the default now, so a
+    // pass records a real range. The same store holds the schema cache. With
+    // the subsystem off, a query reads the schema of each file again.
+    //
+    // Set it to false for an archive of formats that supply no range. ODV, CSV
+    // and TIFF record zero columns, so a pass costs and returns nothing.
+    #[envconfig(from = "BEACON_FILE_STATS_ENABLE", default = "true")]
     file_stats_enable: bool,
     #[envconfig(from = "BEACON_FILE_STATS_INTERVAL_SECS", default = "900")]
     file_stats_interval_secs: u64,
-    /// Collect at boot rather than one interval later. Off by default, so
-    /// enabling statistics does not turn the next restart into a backfill.
+    /// Collect at boot. Do not wait for the first tick.
+    ///
+    /// Set it for a fresh server, or for one that restarts more often than the
+    /// interval. The first tick is one interval after boot, and the interval
+    /// starts again on each boot. Such a server holds no statistics at all.
+    ///
+    /// Off by default. The pass holds the database file while it reads a batch.
+    /// A caller that drops a runtime and opens the same file again gets a lock
+    /// error. A server that exits does not see this, and can set the flag.
     #[envconfig(from = "BEACON_FILE_STATS_ON_STARTUP", default = "false")]
     file_stats_on_startup: bool,
     /// Files analyzed at once. Empty takes a quarter of the cores, which leaves
@@ -508,10 +524,11 @@ struct RawConfig {
     file_stats_scan_prefix: String,
     #[envconfig(from = "BEACON_FILE_STATS_DISCOVERY_CHUNK", default = "10000")]
     file_stats_discovery_chunk: usize,
-    /// Keep the schema each analysis derives, so a query reads it rather than
-    /// deriving it again. On by default: the analyzer already computes every
-    /// file's schema and used to drop it. Turn it off to take the cache out of
-    /// a query's path while leaving statistics on.
+    /// Keep the schema of each file, so a query reads it instead of the file.
+    /// On by default. A pass computes each schema already, and dropped it
+    /// before. Only a pass writes an entry, so this flag does nothing while
+    /// `BEACON_FILE_STATS_ENABLE` is false. Set it to false to remove the cache
+    /// from the query path, and keep the ranges.
     #[envconfig(from = "BEACON_FILE_STATS_SCHEMA_CACHE", default = "true")]
     file_stats_schema_cache: bool,
 
@@ -1071,15 +1088,21 @@ mod tests {
         );
     }
 
-    /// The startup collection is opt-in: enabling statistics alone must not turn
-    /// the next restart of a large archive into a backfill.
+    /// Statistics default on. The collection at boot does not. It holds the
+    /// database file after a drop, so it stays off until teardown waits for it.
     #[test]
-    fn collecting_at_startup_is_opt_in() {
+    fn statistics_default_on_and_the_startup_collection_stays_opt_in() {
+        assert!(config(&[]).file_stats.enable);
         assert!(!config(&[]).file_stats.on_startup);
         assert!(
             config(&[("BEACON_FILE_STATS_ON_STARTUP", "true")])
                 .file_stats
                 .on_startup
+        );
+        assert!(
+            !config(&[("BEACON_FILE_STATS_ENABLE", "false")])
+                .file_stats
+                .enable
         );
     }
 

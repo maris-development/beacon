@@ -76,6 +76,23 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **File statistics are on by default.** `BEACON_FILE_STATS_ENABLE` now defaults to `true`. The
+  reason for the old default is gone. netcdf-c reported no range, and the pure-Rust readers for
+  netCDF and HDF5 are the default now, so a pass records a real range. The same store holds the
+  schema cache. A server without that store reads the schema of each file again on each cold query,
+  which was 83% of one netCDF query over 100000 files. The timer still runs its first pass one
+  interval after boot. `ANALYZE FILES` fills the store at a time you choose. Set
+  `BEACON_FILE_STATS_ENABLE=false` for an archive of formats that supply no range: ODV, CSV and
+  TIFF record zero columns.
+  `BEACON_FILE_STATS_ON_STARTUP` stays `false`. A pass at startup holds the database file while it
+  reads a batch. A caller that drops a runtime and opens the same file again then gets a lock
+  error. Set the flag to true after a shutdown waits for the pass.
+- **An embedded database configures file statistics**, through `OpenOptions::file_stats`. It
+  configures crawlers the same way. The subsystem needs a database file and a datasets store, so an
+  in-memory database and a dynamic-mode database leave it off, whatever the option says.
+- **The documented defaults for the pure-Rust netCDF and HDF5 readers match the code.**
+  `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` default to `true`; the pages
+  and doc comments still described them as off.
 - **One entry point merges every schema, and it merges in parallel.** Each format merged the
   schemas of the files behind a URL itself. The table above merged the URLs with the rule of the
   session. The applied rule therefore depended on the spelling of a `read_*`. Each format and the
