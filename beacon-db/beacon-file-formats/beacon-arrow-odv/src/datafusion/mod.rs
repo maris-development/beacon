@@ -1,7 +1,7 @@
 use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use beacon_common::super_typing;
+use beacon_datafusion_ext::type_widening::session_widening;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{Column, DFSchema, GetExt, Statistics},
@@ -195,11 +195,16 @@ impl FileFormat for OdvFormat {
             .try_collect()
             .await?;
 
-        let super_schema = super_typing::super_type_schema(&schemas).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
-        })?;
-
-        Ok(Arc::new(super_schema))
+        // The rule of the session decides the result for a column that two
+        // files describe differently.
+        session_widening(state)
+            .merge_schemas(&schemas)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to infer schema: {}",
+                    e
+                ))
+            })
     }
 
     async fn infer_stats(

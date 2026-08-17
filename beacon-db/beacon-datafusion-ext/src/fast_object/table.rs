@@ -1,6 +1,6 @@
 //! [`FastObjectTable`]: the `TableProvider`.
 //!
-//! Wraps a `ListingTable` and prunes inside `scan`. See the
+//! The type wraps a `ListingTable`. It prunes inside `scan`. See the
 //! [module docs](super).
 
 use std::any::Any;
@@ -29,40 +29,39 @@ use datafusion::{
 };
 
 use super::prune::{Pruning, prune_plan};
-use crate::type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy};
+use crate::type_widening::{ArrowTypeWideningStrategy, session_widening};
 
-/// A table over objects: a listing table that prunes before it scans.
+/// A table over objects. It is a listing table that prunes before it scans.
 ///
-/// `Clone` is as cheap as the listing table's own: a configuration and some
-/// `Arc`s, no files touched. `MaterializedView` holds one by value and needs it.
+/// A clone costs what a listing table clone costs. It copies one configuration
+/// and some `Arc` values, and it touches no file. `MaterializedView` holds one
+/// table by value.
 #[derive(Clone, Debug)]
 pub struct FastObjectTable {
     inner: ListingTable,
 }
 
 impl FastObjectTable {
-    /// Build a table over `urls`, inferring and merging their schemas.
+    /// Build a table over `urls`. Read the schema of each URL and merge them.
     ///
-    /// The session decides how a column's diverging types merge. Callers that
-    /// need a particular rule regardless of the session use
+    /// The session decides the result for a column that two files describe
+    /// differently. A caller that needs one rule for every session uses
     /// [`try_new_with_widening`](Self::try_new_with_widening).
     pub async fn try_new(
         state: &SessionState,
         format: Arc<dyn FileFormat>,
         urls: Vec<ListingTableUrl>,
     ) -> Result<Self, DataFusionError> {
-        let widening = state.config().get_extension::<ArrowTypeWidening>().expect(
-            "ArrowTypeWidening extension missing from session config; this is a bug in Beacon",
-        );
+        let widening = session_widening(state);
         Self::try_new_with_widening(state, format, urls, widening.strategy.as_ref()).await
     }
 
     /// The same, with the merge rule named rather than taken from the session.
     ///
-    /// The JSON query API has always merged its schemas by Beacon's super
-    /// typing, which widens a column two files disagree on instead of refusing
-    /// it. SQL `read_*` follows whatever the session registered, which defaults
-    /// to the stricter union. Both reach this, and say which they want.
+    /// A caller names a rule here for two reasons. It needs one rule whatever a
+    /// deployment registered. Or it runs outside a configured session. A `read_*`
+    /// takes the rule of the session through [`try_new`](Self::try_new). Both
+    /// callers reach this method.
     pub async fn try_new_with_widening(
         state: &SessionState,
         format: Arc<dyn FileFormat>,
@@ -70,15 +69,15 @@ impl FastObjectTable {
         widening: &dyn ArrowTypeWideningStrategy,
     ) -> Result<Self, DataFusionError> {
         let options = ListingOptions::new(format)
-            // The format identifies its own files. A suffix here would also
-            // have to match a directory-oriented format's marker.
+            // The format finds its own files. A suffix here must also match the
+            // marker of a directory format.
             .with_file_extension("")
             .with_target_partitions(state.config_options().execution.target_partitions)
             .with_collect_stat(false); // We rely on the statistics store, not the listing table, to collect stats.
 
-        // One schema per URL, answered from the schema cache wherever it can be.
-        // The merge below is unchanged: the cache decides how a URL's schema is
-        // *arrived at*, never how the URLs combine.
+        // One schema per URL. The schema cache answers where it can. The merge
+        // below does not change. The cache decides the source of a schema. It
+        // does not decide how the URLs combine.
         let schemas = super::schema::infer_url_schemas(state, &options, &urls).await?;
 
         let schema = widening
@@ -93,42 +92,41 @@ impl FastObjectTable {
         })
     }
 
-    /// Wrap a listing table the caller has already configured.
+    /// Wrap a listing table that the caller configured.
     ///
-    /// `try_new` covers a `read_*` scan, which knows only a format and some
-    /// URLs. A `CREATE EXTERNAL TABLE` knows more — a declared schema, partition
-    /// columns, a sort order, constraints, column defaults, a statistics cache —
-    /// and builds its own listing table to hold them. This adds pruning to that
-    /// one without taking any of it apart.
+    /// `try_new` covers a `read_*` scan. Such a scan knows one format and some
+    /// URLs. A `CREATE EXTERNAL TABLE` knows more. It states a schema, partition
+    /// columns, a sort order, constraints, column defaults and a statistics
+    /// cache, and it builds its own listing table for them. This method adds a
+    /// prune to that table and keeps every other part of it.
     pub fn from_listing_table(inner: ListingTable) -> Self {
         Self { inner }
     }
 
-    /// The URLs (including any globs) backing this table.
+    /// The URLs behind this table, with every glob.
     ///
-    /// Used by query-time authorization to resolve the dataset paths a `read_*`
-    /// scan reads.
+    /// Query-time authorization reads them. It then resolves the dataset paths of
+    /// a `read_*` scan.
     pub fn table_paths(&self) -> &[ListingTableUrl] {
         self.inner.table_paths()
     }
 
-    /// The listing table underneath. For diagnostics and tests.
+    /// The listing table below. For diagnostics and tests.
     pub fn inner(&self) -> &ListingTable {
         &self.inner
     }
 
-    /// The same table with its schema narrowed to `projection`.
+    /// The same table with a schema that holds only `projection`.
     ///
-    /// The JSON query API names its columns up front, and narrowing the schema
-    /// before planning keeps a wide collection from carrying columns nobody
-    /// asked for. A name that is not in the schema is ignored, and a projection
-    /// that selects nothing leaves the schema alone rather than producing a
-    /// table with no columns.
+    /// The JSON query API names its columns first. A narrow schema then keeps the
+    /// unwanted columns of a wide collection out of the plan. A name outside the
+    /// schema has no effect. A projection that selects nothing leaves the schema
+    /// as it is, because a table with no column reads nothing.
     ///
-    /// Rebuilds from the paths and options, so it suits a table built by
-    /// [`try_new`](Self::try_new). A table wrapped by
-    /// [`from_listing_table`](Self::from_listing_table) would lose the
-    /// constraints and column defaults its caller attached.
+    /// The method rebuilds from the paths and the options. It therefore suits a
+    /// table from [`try_new`](Self::try_new). A table from
+    /// [`from_listing_table`](Self::from_listing_table) loses the constraints and
+    /// the column defaults of its caller.
     pub fn with_pushdown_projection(
         &self,
         projection: Vec<String>,
@@ -192,20 +190,20 @@ impl TableProvider for FastObjectTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        // The listing table plans the scan. Reimplementing it here would mean
-        // reimplementing everything it decides on the way: which filters prune
-        // partition directories, the ordering a `WITH ORDER` table promises,
-        // splitting groups by statistics to keep that ordering, the expression
-        // adapter, and the predicate a format pushes into its own reader.
+        // The listing table plans the scan. A second implementation here must
+        // repeat every decision that it makes. Those decisions cover five points.
+        // Which filters prune partition directories. The order that a
+        // `WITH ORDER` table promises. The split of groups by statistics, which
+        // keeps that order. The expression adapter. The predicate that a format
+        // pushes into its own reader.
         let plan = self.inner.scan(state, projection, filters, limit).await?;
 
-        // Then drop the files the predicate rules out, from the list the format
-        // settled on. It decides that list itself — netCDF and HDF5 stack decode
-        // and broadcast nodes over their scan, and Zarr and Atlas expand a store
-        // directory into the groups their reader opens — so pruning the listing
-        // beforehand would drop a store's analysed root marker, leave its
-        // unanalysed children behind, and the format would read one of those as
-        // a store.
+        // Then drop the files that the predicate excludes, from the list of the
+        // format. The format decides that list. netCDF and HDF5 stack decode and
+        // broadcast nodes over their scan. Zarr and Atlas expand a store
+        // directory into the groups that their reader opens. A prune before the
+        // plan would drop the analysed root marker of a store and keep its
+        // unanalysed children. The format would then read one child as a store.
         let Some(pruning) = self.pruning(state, filters) else {
             return Ok(plan);
         };
@@ -220,10 +218,10 @@ impl TableProvider for FastObjectTable {
         &self,
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
-        // The listing table's answer, unchanged. It reports `Exact` for a filter
-        // that partition directories alone settle, and `Inexact` otherwise.
-        // Pruning here only removes whole files, never rows, so it cannot turn
-        // an exact filter into an inexact one.
+        // The answer of the listing table, unchanged. It reports `Exact` for a
+        // filter that partition directories settle. It reports `Inexact` for every
+        // other filter. A prune here removes whole files, never rows. It therefore
+        // cannot make an exact filter inexact.
         self.inner.supports_filters_pushdown(filters)
     }
 
@@ -231,11 +229,11 @@ impl TableProvider for FastObjectTable {
         self.inner.statistics()
     }
 
-    /// Writing goes straight to the listing table.
+    /// A write goes straight to the listing table.
     ///
-    /// Pruning is a read-side concern: it decides which existing files a scan
-    /// opens, and has nothing to say about where new rows land. The listing
-    /// table already knows how its format writes.
+    /// A prune is a read concern. It decides which files a scan opens. It says
+    /// nothing about the place for new rows. The listing table knows how its
+    /// format writes.
     async fn insert_into(
         &self,
         state: &dyn Session,
@@ -247,13 +245,12 @@ impl TableProvider for FastObjectTable {
 }
 
 impl FastObjectTable {
-    /// The pruning this scan will apply, or `None` when there is none worth
-    /// applying.
+    /// The prune that this scan applies, or `None` when no prune pays off.
     ///
-    /// Compiling a predicate is pure CPU. The check that follows is one index
-    /// lookup per predicate column: a predicate naming no column the registry
-    /// has ever interned cannot drop a file, and setting up pruning for it
-    /// would buy a segment read for nothing.
+    /// A predicate compiles on the CPU alone. The check after it costs one index
+    /// lookup per predicate column. A predicate that names no interned column
+    /// cannot drop a file. A prune for such a predicate buys one segment read and
+    /// gains nothing.
     fn pruning(&self, state: &dyn Session, filters: &[Expr]) -> Option<Pruning> {
         if filters.is_empty() {
             return None;
@@ -272,16 +269,16 @@ impl FastObjectTable {
     }
 }
 
-/// Report what pruning did where people already look.
+/// Report the prune result where people look.
 ///
-/// `DataSourceExec` shares one `ExecutionPlanMetricsSet` with its `FileSource`
-/// through an `Arc`, so registering on the built scan surfaces these under that
-/// node in `EXPLAIN ANALYZE` — with no extra plan node, and so no risk of
-/// blocking a later repartition or limit pushdown.
+/// `DataSourceExec` and its `FileSource` share one `ExecutionPlanMetricsSet`
+/// through an `Arc`. A registration on the built scan therefore shows these
+/// counters under that node in `EXPLAIN ANALYZE`. The report needs no extra plan
+/// node, so it blocks no later repartition and no limit pushdown.
 ///
-/// The scan is found by descending the single-child chain, because an nd format
-/// returns a stack: netCDF and HDF5 hand back decode and broadcast nodes above
-/// their scan.
+/// The code finds the scan through the chain of single children. An nd format
+/// returns a stack. netCDF and HDF5 return decode and broadcast nodes above their
+/// scan.
 fn record_counters(plan: &Arc<dyn ExecutionPlan>, considered: usize, dropped: usize) {
     let mut node: &dyn ExecutionPlan = plan.as_ref();
     loop {
@@ -315,8 +312,8 @@ fn physical_predicate(
     state.create_physical_expr(predicate, &df_schema).ok()
 }
 
-/// The columns a predicate compares on, or `None` when the pruning engine
-/// cannot use its shape at all.
+/// The columns that a predicate compares. `None` means the prune engine cannot
+/// use the shape of the predicate.
 fn predicate_columns(
     state: &dyn Session,
     schema: &SchemaRef,
@@ -331,11 +328,11 @@ fn predicate_columns(
     (!columns.is_empty()).then_some(columns)
 }
 
-/// Whether any predicate column has ever been interned.
+/// Whether the registry holds any predicate column.
 ///
-/// One lookup per column. A predicate over columns the registry has never seen
-/// cannot drop a file, and reading a segment to discover that would be the
-/// entire cost of pruning for none of its benefit.
+/// The check costs one lookup per column. A predicate over unknown columns cannot
+/// drop a file. A segment read to learn that costs the whole price of a prune and
+/// gains nothing.
 fn knows_any(store: &FileStatsStore, columns: &[String]) -> bool {
     columns
         .iter()

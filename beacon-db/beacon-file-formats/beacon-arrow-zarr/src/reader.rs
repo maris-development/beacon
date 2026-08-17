@@ -12,8 +12,8 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::Schema;
-use beacon_common::super_typing::super_type_schema;
+use arrow::datatypes::SchemaRef;
+use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
 use beacon_nd_array::{
     NdArrayD,
     arrow::schema::any_dataset_to_arrow_schema,
@@ -45,16 +45,24 @@ pub fn project_read_dimensions(
     }
 }
 
-/// The super-typed Arrow schema of every leaf group under `group_path`.
+/// The merged Arrow schema of every leaf group under `group_path`.
 ///
-/// Storage independent: it reads the same whether `storage` is an object store
-/// or an Icechunk repository session.
+/// The function is storage independent. It reads an object store and an Icechunk
+/// repository session in the same way.
+///
+/// `widening` decides the result for a column that two leaf groups describe
+/// differently. The caller passes the rule of the session. See
+/// [`session_widening`]. One store then merges by the rule that the stores of a
+/// table and the files of every other format use.
+///
+/// [`session_widening`]: beacon_datafusion_ext::type_widening::session_widening
 pub async fn schema_from_group_path(
     storage: Arc<dyn AsyncReadableListableStorageTraits>,
     group_path: &str,
     read_dimensions: Option<Vec<String>>,
     log_label: Option<&str>,
-) -> anyhow::Result<Schema> {
+    widening: &ArrowTypeWidening,
+) -> anyhow::Result<SchemaRef> {
     let group = Group::async_open(storage, group_path)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Zarr group at '{group_path}': {e}"))?;
@@ -77,7 +85,8 @@ pub async fn schema_from_group_path(
     if schemas.is_empty() {
         anyhow::bail!("No valid Zarr v3 groups found under '{group_path}' to infer schema");
     }
-    super_type_schema(&schemas)
+    widening
+        .merge_schemas(&schemas)
         .map_err(|e| anyhow::anyhow!("Failed to compute super schema for Zarr groups: {e}"))
 }
 
@@ -244,8 +253,8 @@ mod tests {
     #[tokio::test]
     async fn predicate_pushdown_prunes_chunks() {
         use beacon_nd_array::arrow::{
-            pushdown_filter::PushdownFilter, schema::any_dataset_to_arrow_schema,
-            file_read::flat_stream,
+            file_read::flat_stream, pushdown_filter::PushdownFilter,
+            schema::any_dataset_to_arrow_schema,
         };
         use datafusion::logical_expr::Operator;
         use datafusion::physical_expr::expressions::{binary, col, lit};
