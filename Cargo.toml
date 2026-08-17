@@ -67,14 +67,9 @@ deltalake = { version = "=0.32.4", features = ["datafusion"] }
 iceberg = "=0.10.0"
 iceberg-datafusion = "=0.10.0"
 datafusion = "^53"
-# `SplitProjection` and `ProjectionOpener`, the helpers a `FileSource` that reads
-# plain columns needs to apply a pushed-down projection. The `datafusion` facade
-# re-exports only some of `datafusion_datasource`, and not that module, so the
-# crate is named here. Its version tracks `datafusion` above.
+
 datafusion-datasource = "^53"
-# `DFParquetMetadata`, the file-metadata-to-`Statistics` conversion the plain
-# Parquet format already reports through. GeoParquet reads the same footer, so
-# reusing it keeps the two formats reporting the same numbers.
+
 datafusion-datasource-parquet = "^53"
 
 datafusion-federation = { version = "=0.5.3", features = ["sql"] }
@@ -83,9 +78,7 @@ datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 datafusion-table-providers = { version = "=0.11.2", default-features = false }
 
 datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77", default-features = false, features = ["df53", "sql"] }
-# The bounding box of a constant geometry, for GeoParquet row group pruning. The
-# kernels crate holds the array maths and links no query engine, so a file format
-# reads it without the UDF layer. Same repository and revision as the line above.
+
 datafusion-spatial-kernels = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77" }
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 
@@ -124,9 +117,7 @@ cast = "0.3.0"
 chacha20poly1305 = "0.10"
 csv = "1.3.1"
 envconfig = "0.11.0"
-# Must stay at the version `datafusion-spatial` uses. Two `geo` versions do not coexist: 0.31 and
-# 0.33 need `i_overlay` 4.0 and 4.5, and cargo picks one version per major. Cargo then fails to
-# resolve. Read the datafusion-spatial README before you move this line.
+
 geo = "0.33"
 geojson = "0.24.2"
 gsw = "0.2.2"
