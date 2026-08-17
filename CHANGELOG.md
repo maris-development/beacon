@@ -144,9 +144,10 @@ tag. Releases before 2.0.0 are recorded in the
   the number. **A `Boolean` and a number are an error**, and so are a `Timestamp` and an integer.
   **An integer beside a `Float32` widens to `Float64`**, where the old table kept `Float32` for a
   narrow integer: a `Float32` holds no `Int32`, and a lattice cannot keep `Int8` and drop `Int32`.
-  Two time zones are an error rather than a silent shift. A merged column also keeps the field
-  metadata of the first file that states it, and it is nullable unless every file holds it and
-  every file requires it.
+  A time zone follows DataFusion: one file with a zone gives that zone, and two files with two
+  zones give `UTC`. DataFusion keeps the zone of the left operand there, and a merge has no left
+  operand. A merged column also keeps the field metadata of the first file that states it, and it
+  is nullable unless every file holds it and every file requires it.
 - **The GeoParquet scan applied only part of a pushed-down projection.** A `FileSource` that
   accepts a projection has to apply the whole of it. This one accepted a projection and then read
   only the column names out of it, which dropped everything else. Geometry is written last,

@@ -29,16 +29,19 @@
 //! | Family | The order, narrowest first |
 //! | --- | --- |
 //! | number | see the table below |
-//! | timestamp | `Second`, `Millisecond`, `Microsecond`, `Nanosecond`, in one time zone |
+//! | timestamp | `Second`, `Millisecond`, `Microsecond`, `Nanosecond` |
 //! | string | `Utf8`, `Utf8View`, `LargeUtf8` |
 //! | binary | `Binary`, `BinaryView`, `LargeBinary` |
 //! | date | `Date32`, `Date64` |
 //! | time | `Time32(Second)`, `Time32(Millisecond)`, `Time64(Microsecond)`, `Time64(Nanosecond)` |
 //!
-//! **Two time zones give an error.** A zone changes what a value means, so a
-//! tz-naive column beside a UTC column is an error, not a silent shift. One
-//! caveat holds for the finest unit: `Nanosecond` covers the years 1677 to 2262,
-//! and a `Second` value outside that range overflows in the cast.
+//! **A time zone follows DataFusion.** One file with a zone gives that zone, and
+//! the tz-naive column reads as it. Two files with two zones give `UTC`, which is
+//! the zone that both read as. DataFusion keeps the zone of the left operand
+//! there, and a merge has no left operand, because the file order is the disk
+//! answer order. A zone changes what a value means, so both lines are a coercion.
+//! One caveat holds for the finest unit: `Nanosecond` covers the years 1677 to
+//! 2262, and a `Second` value outside that range overflows in the cast.
 //!
 //! Every other pair gives an error. `Boolean` widens with no number.
 //! `Timestamp` widens with no integer. A decimal, a duration, an interval, a
@@ -297,32 +300,47 @@ fn super_type(left: &DataType, right: &DataType) -> Option<DataType> {
     None
 }
 
-/// The timestamp that holds both operands, or `None` when no timestamp holds
-/// both.
+/// The timestamp that holds both operands.
 ///
-/// The result takes the finer unit, which loses no value. It keeps the time zone
-/// of the operands, and two time zones give `None`. A zone changes what a value
-/// means, and this merge makes no guess about that. A tz-naive column beside a
-/// UTC column is therefore an error, not a silent shift.
+/// The result takes the finer unit, which loses no value. The time zone follows
+/// DataFusion:
 ///
-/// One caveat: `Nanosecond` covers the years 1677 to 2262. A second timestamp
-/// outside that range overflows in the cast, not here.
+/// - Two files without a zone give a column without a zone.
+/// - One file with a zone gives that zone. The other column reads as that zone.
+/// - Two files with the same zone keep it.
+/// - Two files with two zones give [`UTC`]. DataFusion keeps the zone of the left
+///   operand here. A merge has no left operand, because the file order is the
+///   disk answer order (issue #377), so this rule takes the zone that both files
+///   read as.
+///
+/// A zone changes what a value means, so the last two lines are a coercion, not a
+/// cast of the values. A tz-naive column that holds local time reads as UTC.
+///
+/// One caveat holds for the unit: `Nanosecond` covers the years 1677 to 2262. A
+/// `Second` value outside that range overflows in the cast, not here.
 fn timestamp_super_type(
     left_unit: &TimeUnit,
     left_zone: &Option<Arc<str>>,
     right_unit: &TimeUnit,
     right_zone: &Option<Arc<str>>,
 ) -> Option<DataType> {
-    if left_zone != right_zone {
-        return None;
-    }
+    let zone = match (left_zone, right_zone) {
+        (None, None) => None,
+        (Some(zone), None) | (None, Some(zone)) => Some(Arc::clone(zone)),
+        (Some(left), Some(right)) if left == right => Some(Arc::clone(left)),
+        (Some(_), Some(_)) => Some(UTC.into()),
+    };
     let finer = if time_unit_rank(left_unit) >= time_unit_rank(right_unit) {
         left_unit
     } else {
         right_unit
     };
-    Some(DataType::Timestamp(finer.clone(), left_zone.clone()))
+    Some(DataType::Timestamp(finer.clone(), zone))
 }
+
+/// The zone that two other zones read as. `"+00:00"` names the same zone, and it
+/// reaches this value through the rule for two zones.
+const UTC: &str = "UTC";
 
 /// The precision of a time unit. A higher rank holds every value of a lower one.
 fn time_unit_rank(unit: &TimeUnit) -> u8 {
@@ -859,6 +877,9 @@ mod tests {
                 DataType::Timestamp(TimeUnit::Second, None),
                 DataType::Timestamp(TimeUnit::Nanosecond, None),
                 DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
+                DataType::Timestamp(TimeUnit::Second, Some("+00:00".into())),
+                DataType::Timestamp(TimeUnit::Millisecond, Some("Europe/Berlin".into())),
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("America/Lima".into())),
                 DataType::Boolean,
                 DataType::Null,
             ])
@@ -935,18 +956,52 @@ mod tests {
         );
     }
 
-    /// Two time zones give an error. A cast between them shifts every value, and
-    /// this merge makes no guess about the shift.
+    /// A time zone follows DataFusion. One zone wins over no zone, and two zones
+    /// give UTC.
     #[test]
-    fn two_time_zones_are_refused() {
-        let naive = DataType::Timestamp(TimeUnit::Second, None);
-        let utc = DataType::Timestamp(TimeUnit::Second, Some("UTC".into()));
-        let berlin = DataType::Timestamp(TimeUnit::Second, Some("Europe/Berlin".into()));
+    fn a_time_zone_coerces_to_utc() {
+        let stamp = |zone: Option<&str>| {
+            DataType::Timestamp(TimeUnit::Second, zone.map(|zone| zone.into()))
+        };
 
-        assert_eq!(super_type(&naive, &utc), None);
-        assert_eq!(super_type(&utc, &berlin), None);
-        // And a timestamp is not a number.
-        assert_eq!(super_type(&naive, &DataType::Int64), None);
+        // One file states a zone, and the tz-naive file reads as that zone.
+        assert_eq!(
+            super_type(&stamp(None), &stamp(Some("Europe/Berlin"))),
+            Some(stamp(Some("Europe/Berlin")))
+        );
+        // Two zones give UTC, in either order.
+        assert_eq!(
+            super_type(&stamp(Some("Europe/Berlin")), &stamp(Some("America/Lima"))),
+            Some(stamp(Some("UTC")))
+        );
+        assert_eq!(
+            super_type(&stamp(Some("America/Lima")), &stamp(Some("Europe/Berlin"))),
+            Some(stamp(Some("UTC")))
+        );
+        // "+00:00" names UTC, and the pair reaches UTC through the same rule.
+        assert_eq!(
+            super_type(&stamp(Some("+00:00")), &stamp(Some("UTC"))),
+            Some(stamp(Some("UTC")))
+        );
+        // One zone, stated twice, stays as it is.
+        assert_eq!(
+            super_type(&stamp(Some("+00:00")), &stamp(Some("+00:00"))),
+            Some(stamp(Some("+00:00")))
+        );
+        // Two files without a zone keep the column tz-naive.
+        assert_eq!(super_type(&stamp(None), &stamp(None)), Some(stamp(None)));
+
+        // A zone and a unit at once.
+        assert_eq!(
+            super_type(
+                &DataType::Timestamp(TimeUnit::Second, Some("Europe/Berlin".into())),
+                &DataType::Timestamp(TimeUnit::Nanosecond, Some("America/Lima".into()))
+            ),
+            Some(DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())))
+        );
+
+        // A timestamp is not a number.
+        assert_eq!(super_type(&stamp(None), &DataType::Int64), None);
     }
 
     /// The other chains: a string, a binary, a date and a time.
