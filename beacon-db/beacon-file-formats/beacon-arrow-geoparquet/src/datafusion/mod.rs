@@ -422,7 +422,14 @@ mod tests {
     /// Build an in-memory GeoParquet file with a native GeoArrow point column
     /// (`geometry`) and an `id` column, returning the encoded bytes.
     fn write_geoparquet_fixture() -> Vec<u8> {
-        let point_type = PointType::new(Dimension::XY, Arc::new(Metadata::default()));
+        write_geoparquet_fixture_with(Metadata::default())
+    }
+
+    /// The same file, with the GeoArrow metadata that the caller states. A
+    /// coordinate reference system lands in that metadata, so two calls give two
+    /// files that describe the same geometry differently.
+    fn write_geoparquet_fixture_with(metadata: Metadata) -> Vec<u8> {
+        let point_type = PointType::new(Dimension::XY, Arc::new(metadata));
         let geometry_field = Arc::new(point_type.to_field("geometry", true));
         let id_field = Arc::new(Field::new("id", DataType::Int32, false));
         let schema = Arc::new(Schema::new(vec![id_field, geometry_field]));
@@ -455,7 +462,10 @@ mod tests {
     }
 
     async fn put_fixture(store: &Arc<InMemory>, path: &Path) -> ObjectMeta {
-        let bytes = write_geoparquet_fixture();
+        put_bytes(store, path, write_geoparquet_fixture()).await
+    }
+
+    async fn put_bytes(store: &Arc<InMemory>, path: &Path, bytes: Vec<u8>) -> ObjectMeta {
         store
             .put(path, bytes::Bytes::from(bytes).into())
             .await
@@ -617,21 +627,163 @@ mod tests {
     /// A field keeps its metadata while every file agrees on it, and loses it
     /// as soon as two files disagree. The GeoArrow extension keys travel in that
     /// metadata, and they are what make a column a geometry.
+    /// Two files with the same geometry merge into one geometry column. The
+    /// column keeps the GeoArrow keys, so the spatial functions still read it.
+    #[tokio::test]
+    async fn two_files_with_the_same_geometry_merge() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let first = put_fixture(&store, &Path::from("a.geoparquet")).await;
+        let second = put_fixture(&store, &Path::from("b.geoparquet")).await;
+
+        let ctx = datafusion::prelude::SessionContext::new();
+        let schema = GeoParquetFormat::new(GeoParquetOptions {
+            longitude_column: None,
+            latitude_column: None,
+        })
+        .infer_schema(&ctx.state(), &object_store, &[first, second])
+        .await
+        .expect("two equal geometry columns merge");
+
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["id", "geometry"], "the union holds each name once");
+        let geometry = schema.field_with_name("geometry").expect("geometry field");
+        assert!(matches!(geometry.data_type(), DataType::Struct(_)));
+        assert_eq!(
+            geometry
+                .metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str),
+            Some("geoarrow.point"),
+            "the merge keeps the GeoArrow keys of the column"
+        );
+    }
+
+    /// Two files that state two coordinate reference systems still merge, and the
+    /// column keeps its GeoArrow keys.
+    ///
+    /// The reader does not carry the system into the field metadata. It reads the
+    /// extension name alone, so the merge sees two equal fields. A query over both
+    /// files therefore reads two systems as one column.
+    #[tokio::test]
+    async fn two_files_with_two_coordinate_systems_still_merge() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let crs = |code: &str| {
+            Metadata::new(
+                geoarrow_schema::Crs::from_authority_code(code.to_string()),
+                None,
+            )
+        };
+        let first = put_bytes(
+            &store,
+            &Path::from("wgs84.geoparquet"),
+            write_geoparquet_fixture_with(crs("EPSG:4326")),
+        )
+        .await;
+        let second = put_bytes(
+            &store,
+            &Path::from("web.geoparquet"),
+            write_geoparquet_fixture_with(crs("EPSG:3857")),
+        )
+        .await;
+
+        let ctx = datafusion::prelude::SessionContext::new();
+        let schema = GeoParquetFormat::new(GeoParquetOptions {
+            longitude_column: None,
+            latitude_column: None,
+        })
+        .infer_schema(&ctx.state(), &object_store, &[first, second])
+        .await
+        .expect("the two fields are equal, so the merge succeeds");
+
+        let geometry = schema.field_with_name("geometry").expect("geometry field");
+        assert!(matches!(geometry.data_type(), DataType::Struct(_)));
+        assert_eq!(
+            geometry
+                .metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str),
+            Some("geoarrow.point")
+        );
+        assert!(
+            !geometry.metadata().contains_key("ARROW:extension:metadata"),
+            "the reader drops the coordinate system, so the merge cannot see it"
+        );
+    }
+
+    /// One file states a geometry for a column, and one file states a number. The
+    /// merge refuses the pair, in either order.
+    #[tokio::test]
+    async fn a_geometry_column_and_a_plain_column_do_not_merge() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let geometry = put_fixture(&store, &Path::from("points.geoparquet")).await;
+
+        // A plain Parquet file that gives `geometry` a number.
+        let plain_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("geometry", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            plain_schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1])) as ArrayRef,
+                Arc::new(arrow::array::Float64Array::from(vec![1.5])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut writer = ArrowWriter::try_new(&mut buf, plain_schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let plain = put_bytes(&store, &Path::from("plain.parquet"), buf).await;
+
+        let ctx = datafusion::prelude::SessionContext::new();
+        let format = GeoParquetFormat::new(GeoParquetOptions {
+            longitude_column: None,
+            latitude_column: None,
+        });
+        for pair in [
+            [geometry.clone(), plain.clone()],
+            [plain, geometry],
+        ] {
+            assert!(
+                format
+                    .infer_schema(&ctx.state(), &object_store, &pair)
+                    .await
+                    .is_err(),
+                "a geometry column and a Float64 column have no single type"
+            );
+        }
+    }
+
     #[test]
     fn field_metadata_survives_only_while_the_files_agree() {
-        let with = |value: &str| {
-            Arc::new(Schema::new(vec![
-                Field::new("geometry", DataType::Float64, true).with_metadata(
-                    std::collections::HashMap::from([(
-                        "ARROW:extension:name".to_string(),
-                        value.to_string(),
-                    )]),
+        // A real GeoArrow point field, as a file states it. The coordinate
+        // reference system lands in `ARROW:extension:metadata`, so two systems
+        // give two metadata sets.
+        let point = |crs: Option<&str>| {
+            let metadata = match crs {
+                Some(code) => Metadata::new(
+                    geoarrow_schema::Crs::from_authority_code(code.to_string()),
+                    None,
                 ),
-            ])) as SchemaRef
+                None => Metadata::default(),
+            };
+            let point_type = PointType::new(Dimension::XY, Arc::new(metadata));
+            Arc::new(Schema::new(vec![point_type.to_field("geometry", true)])) as SchemaRef
         };
+        let geometry_type = point(None)
+            .field_with_name("geometry")
+            .unwrap()
+            .data_type()
+            .clone();
         let plain = Arc::new(Schema::new(vec![Field::new(
             "geometry",
-            DataType::Float64,
+            geometry_type,
             true,
         )])) as SchemaRef;
 
@@ -648,14 +800,15 @@ mod tests {
                 .cloned()
         };
 
-        let agreeing = [with("geoarrow.point"), with("geoarrow.point")];
+        let agreeing = [point(None), point(None)];
         assert_eq!(extension(&agreeing), Some("geoarrow.point".to_string()));
 
-        let disagreeing = [with("geoarrow.point"), with("geoarrow.linestring")];
+        // Two coordinate systems are two metadata sets, so the column goes plain.
+        let disagreeing = [point(Some("EPSG:4326")), point(Some("EPSG:3857"))];
         assert_eq!(extension(&disagreeing), None);
 
-        // A file that states nothing counts as a disagreement too.
-        assert_eq!(extension(&[with("geoarrow.point"), plain]), None);
+        // A file that states nothing is a disagreement too.
+        assert_eq!(extension(&[point(None), plain]), None);
     }
 
     #[tokio::test]

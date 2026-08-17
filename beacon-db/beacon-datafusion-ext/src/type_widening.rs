@@ -1,40 +1,53 @@
 //! The single place that merges the schemas of a table.
 //!
 //! A table over files holds one schema per file. A query plans against one
-//! schema. Each format merged its own schemas before this module. Five formats
-//! read those schemas in disk answer order, so the merged schema changed between
+//! schema. Each format merged its own schemas before this module, and five
+//! formats read them in disk answer order. The merged schema changed between
 //! runs. See issue #377.
 //!
-//! Each format now calls [`session_widening`]. The table does the same. Both then
-//! merge with [`ArrowTypeWidening::merge_schemas`].
+//! Each format now calls [`session_widening`] and merges with
+//! [`ArrowTypeWidening::merge_schemas`]. The table does the same.
 //!
-//! One entry point gives two results:
+//! # The rules
 //!
-//! - **A deployment sets the rule once.** [`RuntimeBuilder::with_type_widening`]
-//!   registers a strategy on the session. Every merge in the process uses it.
-//! - **The merge gets faster in one place.** Read the next section.
+//! [`DefaultArrowTypeWidening`] applies them. Two files, one column name:
+//!
+//! | The files state | The table reports |
+//! | --- | --- |
+//! | the same type | that type |
+//! | two types (`Int32` and `Int64`) | an error that names the column and both types |
+//! | one nullable field, one not | a nullable field |
+//! | the column in one file only | a nullable field, because the scan fills the other file with nulls |
+//! | the same type, two metadata sets | the metadata of the first file |
+//!
+//! A geometry column follows the same rules. GeoArrow states a geometry as a
+//! struct or a list, and it marks the column with field metadata. Two files with
+//! the same geometry type therefore merge, and the column keeps its GeoArrow
+//! keys. Two files with two geometry types give an error. GeoParquet drops the
+//! keys of a column that the files mark differently, so the column goes plain and
+//! the spatial functions refuse it: see `reconcile_field_metadata` in
+//! `beacon_arrow_geoparquet`. Two coordinate reference systems are an open point.
+//! The GeoParquet reader states the extension name and drops the system, so the
+//! merge sees two equal fields and joins them.
+//!
+//! A deployment replaces the rules through
+//! [`RuntimeBuilder::with_type_widening`]. Every merge in the process takes the
+//! new strategy.
 //!
 //! # How the merge does less work
 //!
-//! A strategy answers [`is_order_independent`]. `true` is a promise: the merge is
-//! a semilattice join. Such a join is idempotent, commutative and associative.
-//! The schema order, the group boundaries and the repeat count do not change the
-//! result. They do not change a failure either. [`DefaultArrowTypeWidening`]
-//! keeps that promise.
+//! The rules above are a semilattice join. The join is idempotent, commutative
+//! and associative, so the schema order, the group boundaries and the repeat
+//! count change no result and no failure. A strategy states that property through
+//! [`is_order_independent`].
 //!
-//! The merge then drops work:
+//! The merge then drops work. It drops each repeated schema, because a
+//! collection of 100000 files holds few distinct schemas. It gives each
+//! contiguous chunk of the rest to a thread. The chunks stay in listing order,
+//! because column order follows the listing and `SELECT *` shows it.
 //!
-//! - **It drops each repeated schema.** A collection of 100000 netCDF files from
-//!   one instrument holds few distinct schemas. One pass finds them. The merge
-//!   reads what remains.
-//! - **It splits the rest across threads.** Each thread merges one contiguous
-//!   chunk. The merge then combines the chunk results in the same way.
-//!
-//! The chunks stay contiguous and stay in listing order. Column order follows the
-//! listing, because `SELECT *` shows it.
-//!
-//! A strategy that answers `false` gets one fold over every schema it was given.
-//! The repeats stay.
+//! A strategy that answers `false` gets one fold over every schema, repeats
+//! included.
 //!
 //! [`is_order_independent`]: ArrowTypeWideningStrategy::is_order_independent
 //! [`RuntimeBuilder::with_type_widening`]: ../../beacon_core/runtime_builder/struct.RuntimeBuilder.html#method.with_type_widening
@@ -47,11 +60,8 @@ use std::sync::Arc;
 use arrow_schema::{ArrowError, FieldRef, Schema, SchemaRef};
 use datafusion::catalog::Session;
 
-/// Below this count, one fold costs less than a split.
-///
-/// A merge walks field names, so one schema is little work. A thread must earn
-/// its start cost. A `read_*` over a few files stays below this count. A
-/// collection goes far above it.
+/// Below this count, one fold costs less than a split. A merge walks field
+/// names, so a thread must earn its start cost.
 const SEQUENTIAL_MERGE_LIMIT: usize = 64;
 
 /// The least work for one thread.
@@ -68,21 +78,18 @@ impl ArrowTypeWidening {
 
     /// The strategy for a session that registers none.
     ///
-    /// Every merge in the process reads this extension. Each format merges the
-    /// files behind one URL. `FastObjectTable` merges the URLs behind one table.
-    /// `RuntimeBuilder` registers the extension for a server. A test or an
-    /// embedded use must register it too. [`session_widening`] falls back to this
-    /// value, so a session that forgets gets the default rule and no error.
+    /// `RuntimeBuilder` registers the extension for a server. [`session_widening`]
+    /// falls back to this value, so a test or an embedded use gets the same rule
+    /// and no error.
     pub fn default_extension() -> Arc<Self> {
         Arc::new(Self::new(Arc::new(DefaultArrowTypeWidening)))
     }
 
     /// Merge `schema_refs` into the schema a query plans against.
     ///
-    /// The strategy decides the result for a column that two files describe
-    /// differently. This method decides the cost. An order-independent strategy
-    /// loses its repeats, and threads merge the rest. See the
-    /// [module docs](self).
+    /// The strategy decides the result. This method decides the cost: an
+    /// order-independent strategy loses its repeats, and threads merge the rest.
+    /// See the [module docs](self).
     pub fn merge_schemas(&self, schema_refs: &[SchemaRef]) -> Result<SchemaRef, ArrowError> {
         let strategy = self.strategy.as_ref();
         if !strategy.is_order_independent() {
@@ -94,15 +101,12 @@ impl ArrowTypeWidening {
 
 /// The merge rule of the session, or the default rule when the session has none.
 ///
-/// This function is the entry point. A format calls it in `infer_schema` to merge
-/// the files it got. `FastObjectTable` calls it to merge the URLs behind one
-/// table. Both then get the rule that a deployment registered through
-/// `RuntimeBuilder::with_type_widening`.
-///
-/// A session without the extension gets
-/// [`ArrowTypeWidening::default_extension`]. `RuntimeBuilder` registers the same
-/// rule. The fallback keeps a hand-built session correct, and it keeps that
-/// session equal to a server.
+/// This function is the entry point. A format calls it in `infer_schema`.
+/// `FastObjectTable` calls it for the URLs behind one table. Both then get the
+/// rule that a deployment registered through
+/// `RuntimeBuilder::with_type_widening`. A session without the extension gets
+/// [`ArrowTypeWidening::default_extension`], which is the same rule that
+/// `RuntimeBuilder` registers.
 pub fn session_widening(session: &dyn Session) -> Arc<ArrowTypeWidening> {
     session
         .config()
@@ -114,21 +118,16 @@ pub trait ArrowTypeWideningStrategy: Send + Sync {
     /// Merge these schemas into one, in the order given.
     fn merge_schemas(&self, schema_refs: &[SchemaRef]) -> Result<SchemaRef, ArrowError>;
 
-    /// State whether this merge is a semilattice join.
+    /// State whether this merge is a semilattice join: **idempotent, commutative
+    /// and associative**. The schema order, the group boundaries and the repeat
+    /// count then change no result and no failure.
     ///
-    /// Such a join is **idempotent, commutative and associative**. The schema
-    /// order, the group boundaries and the repeat count do not change the result.
-    /// They do not change a failure either.
-    ///
-    /// `true` is the default. It lets [`ArrowTypeWidening::merge_schemas`] drop a
-    /// repeated schema and give each contiguous chunk to a thread.
-    /// [`DefaultArrowTypeWidening`] qualifies. It unions the fields that agree and
-    /// refuses the rest. The refusal does not depend on the position of the
-    /// conflict.
+    /// `true` is the default, and it lets [`ArrowTypeWidening::merge_schemas`]
+    /// drop a repeated schema and thread each chunk.
+    /// [`DefaultArrowTypeWidening`] qualifies.
     ///
     /// Answer `false` for a rule that reads the order. One example keeps the first
-    /// type of a column. Such a merge gets one fold over every schema, first to
-    /// last.
+    /// type of a column. Such a merge gets one fold over every schema.
     fn is_order_independent(&self) -> bool {
         true
     }
@@ -136,18 +135,13 @@ pub trait ArrowTypeWideningStrategy: Send + Sync {
 
 /// Merge the schemas of a table. Union the fields that agree.
 ///
-/// A table reports one type per column. Two files that give a column two types
-/// are an error, not a promotion. A guess about the type that holds both values
-/// made the merge depend on the file order. See issue #377.
-///
-/// The fields keep first seen order, which is the order `SELECT *` shows. Each
-/// field keeps the metadata of the first file that states it.
+/// The [module docs](self) hold the rule table. The fields keep first seen order,
+/// which is the order `SELECT *` shows.
 ///
 /// A field is nullable unless every schema holds it and every schema requires it.
-/// The scan fills a missing column with nulls. A non-nullable column holds no
-/// nulls, so the query fails with "Non-nullable column X is missing from the
-/// physical schema". Presence and nullability belong to the whole set of schemas.
-/// The order, the group boundaries and the repeats do not change them.
+/// The scan fills a missing column with nulls, and a non-nullable column holds no
+/// nulls. Such a table fails with "Non-nullable column X is missing from the
+/// physical schema".
 pub struct DefaultArrowTypeWidening;
 
 impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
@@ -205,12 +199,9 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
 
 /// The schemas without a repeat, in first seen order.
 ///
-/// An order-independent join is idempotent, so a repeat cannot change its
-/// answer. A collection holds far fewer distinct schemas than files. This
-/// function turns a merge over 100000 files into a merge over a few.
-///
-/// The check uses a fingerprint, not a pairwise compare. One pass reads the
-/// fields. A full compare runs only for two equal fingerprints.
+/// An idempotent join gives the same answer without the repeats, and a collection
+/// holds far fewer distinct schemas than files. The check uses a fingerprint. A
+/// full compare runs only for two equal fingerprints.
 fn distinct_schemas(schemas: &[SchemaRef]) -> Cow<'_, [SchemaRef]> {
     if schemas.len() < 2 {
         return Cow::Borrowed(schemas);
@@ -239,8 +230,8 @@ fn distinct_schemas(schemas: &[SchemaRef]) -> Cow<'_, [SchemaRef]> {
 
 /// A hash over every part that [`Schema`] equality reads.
 ///
-/// One process makes and reads these values. The hash algorithm therefore needs
-/// no stability across releases. The schema cache stores its keys, so
+/// One process makes and reads these values, so the algorithm needs no stability
+/// across releases. The schema cache stores its keys, so
 /// [`SchemaOptions`](crate::format_ext::SchemaOptions) avoids the `std` hasher.
 fn fingerprint(schema: &Schema) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -253,12 +244,10 @@ fn fingerprint(schema: &Schema) -> u64 {
     hasher.finish()
 }
 
-/// Merge with threads. Each thread takes one contiguous chunk. The chunk results
-/// then merge in the same way.
+/// Merge with threads. Each thread takes one contiguous chunk, and the chunk
+/// results then merge in the same way.
 ///
-/// The chunks stay contiguous and combine in order. The columns therefore keep
-/// the order of the listing. Column order is the last result that the order
-/// decides, and the split keeps it.
+/// The chunks combine in order, so the columns keep the order of the listing.
 fn merge_distinct(
     strategy: &dyn ArrowTypeWideningStrategy,
     schemas: &[SchemaRef],

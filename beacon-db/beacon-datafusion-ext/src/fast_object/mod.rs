@@ -2,20 +2,17 @@
 //!
 //! [`FastObjectTable`] wraps one and adds two things to it.
 //!
-//! # The table merges the schemas of its files
+//! # Schemas are merged, not required to agree
 //!
-//! `ListingTable` takes one schema. A `read_*` reads many files, and a file may
-//! hold a column that another file lacks. This table therefore reads the schema
-//! of each URL. The
-//! [`ArrowTypeWidening`](crate::type_widening::ArrowTypeWidening) strategy of the
-//! session then merges those schemas into the schema that the table reports. That
-//! strategy unions the columns that agree. It refuses a column that two files
-//! give two types.
+//! `ListingTable` takes one schema. The files behind a `read_*` need not agree
+//! on a column's width, so each URL's schema is inferred and the session's
+//! [`ArrowTypeWidening`](crate::type_widening::ArrowTypeWidening) strategy
+//! merges them into the one the table reports.
 //!
-//! [`schema::infer_url_schemas`] reads the schemas. It asks the schema cache about
-//! each file before it opens the file. A schema read of every file on every query
-//! cost 83% of a netCDF query over 100000 files. The statistics collector already
-//! computes those schemas, and it dropped them before this cache.
+//! Inference goes through [`schema::infer_url_schemas`], which asks the schema
+//! cache about each file before opening it. Deriving a schema from every file on
+//! every query was 83% of a netCDF query over a hundred thousand files, and the
+//! statistics collector already computes those schemas and used to drop them.
 //!
 //! # Pruning happens inside `scan`
 //!

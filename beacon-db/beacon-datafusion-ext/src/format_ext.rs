@@ -87,39 +87,29 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     /// A fingerprint over every part of `format` that changes the schema of one
     /// object.
     ///
-    /// The fingerprint lets Beacon keep the schema of a file. A schema is not a
-    /// function of the file alone. The `read_dimensions` option of netCDF changes
-    /// which variables appear, so the same bytes hold more than one schema. The
-    /// fingerprint separates them.
+    /// The fingerprint lets the cache keep the schema of a file. A schema is not a
+    /// function of the file alone: `read_dimensions` changes which netCDF
+    /// variables appear, so the same bytes hold more than one schema.
     ///
-    /// `None` is the default. It keeps this format out of the cache, and it is the
-    /// audit gate. An override makes a claim about the format. The claim has two
-    /// parts:
+    /// `None` is the default, and it keeps this format out of the cache. An
+    /// override claims two things:
     ///
-    /// 1. **The format reads one object at a time.** `infer_schema` over `n`
-    ///    objects equals the
+    /// 1. `infer_schema` over `n` objects equals the
     ///    [`ArrowTypeWidening`](crate::type_widening::ArrowTypeWidening) merge of
-    ///    the session over the `n` single-object results, in listing order. Every
-    ///    Beacon format works this way, because each one calls that merge.
-    /// 2. **The fingerprint is complete.** It covers every part that changes the
-    ///    schema of a file. An omission returns a *wrong* schema, not a slow one.
-    ///    Each implementation therefore carries a test that two option sets give
-    ///    two fingerprints.
+    ///    the session over the `n` single-object results, in listing order.
+    /// 2. The fingerprint covers every part that changes the schema of a file. An
+    ///    omission returns a wrong schema, not a slow one, so each implementation
+    ///    carries a test that two option sets give two fingerprints.
     ///
-    /// Leave out every part that changes no schema. Three examples are a reader
-    /// cache, a path resolver and a statistics switch. Such a part costs cache
-    /// hits.
+    /// Leave out a part that changes no schema, such as a reader cache or a
+    /// statistics switch. Such a part costs cache hits.
     ///
     /// `None` also suits an option that this format does not separate yet. The
-    /// four nd formats return `None` for a read that names dimensions. The key
-    /// must hold the whole ordered set, so such a read derives its schema as
-    /// before. The cache holds only the default read, which every table and every
-    /// collector pass takes. An opt out costs speed. A wrong key costs
-    /// correctness.
+    /// four nd formats return `None` for a read that names dimensions.
     ///
-    /// Build the value with [`SchemaOptions`]. Do not use a `Hasher` from `std`.
-    /// Rust does not guarantee the algorithm of the standard hasher across
-    /// releases, so a new toolchain would retire every stored entry.
+    /// Build the value with [`SchemaOptions`]. A `Hasher` from `std` has no stable
+    /// algorithm across Rust releases, so a new toolchain would retire every
+    /// stored entry.
     fn schema_options_fingerprint(&self, _format: &dyn FileFormat) -> Option<u64> {
         None
     }
