@@ -178,17 +178,17 @@ Beacon records the value range of each column in each file. A query then prunes 
 cannot match. See [File statistics](/docs/2.0.0-rc2/internals/file-statistics).
 
 Beacon enables this feature by default. The pure-Rust readers are the default for netCDF and HDF5
-(see [File formats](#file-formats)), so Beacon records real ranges for those formats. A server that
-reads netCDF or HDF5 through the netCDF-C library records no range for them.
+(see [File formats](#file-formats)). Beacon records a real range for those formats. A server that
+reads netCDF or HDF5 through the netCDF-C library records no range.
 
 The first pass runs one interval after startup, not at startup. Run `ANALYZE FILES` to fill the
-store now, or set `BEACON_FILE_STATS_ON_STARTUP=true` to collect at each boot.
+store now. Set `BEACON_FILE_STATS_ON_STARTUP=true` to collect at each boot.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_FILE_STATS_ENABLE` | `true` | Master switch. When `false`, Beacon finds nothing, reads nothing and starts no background task. The schema cache lives in the same store, so `false` also makes Beacon read each file's schema again on every cold query. |
+| `BEACON_FILE_STATS_ENABLE` | `true` | Master switch. When `false`, Beacon finds nothing, reads nothing and starts no background task. The same store holds the schema cache. A server with `false` reads the schema of each file again on each cold query. |
 | `BEACON_FILE_STATS_INTERVAL_SECS` | `900` | The seconds between two passes. The first pass runs one interval after startup, not at startup. A restart starts the interval again, so a server that restarts more often than this never runs a pass. Set `BEACON_FILE_STATS_ON_STARTUP=true` there. |
-| `BEACON_FILE_STATS_ON_STARTUP` | `false` | Collect at each boot, and do not wait for the first tick. Beacon finds the files and reads every one that has no statistics, in the background. The server answers queries while this runs. The timer continues after it. The pass holds the database file while it runs, so a process that closes a database and opens the same file again gets a lock error. Keep this off there. |
+| `BEACON_FILE_STATS_ON_STARTUP` | `false` | Collect at each boot, and do not wait for the first tick. Beacon finds the files and reads every one that has no statistics, in the background. The server answers queries while this runs. The timer continues after it. The pass holds the database file while it runs. A process that closes a database and opens the same file again then gets a lock error. Keep this flag off there. |
 | `BEACON_FILE_STATS_CONCURRENCY` | one quarter of the cores, minimum 2 | The files that Beacon reads at the same time. A pass uses part of the machine, so it does not compete with queries. Increase this value above your core count for data in object storage. |
 | `BEACON_FILE_STATS_BATCH_FILES` | `10000` | The files that Beacon reads in one pass. This value limits the memory of one pass. |
 | `BEACON_FILE_STATS_TARGET_GROUP_FILES` | `10000` | The files that one segment covers. A small value prunes more for a rare column. It also adds segments to read for a common column. |
@@ -222,7 +222,7 @@ change them.
 | `BEACON_NETCDF_ENABLE_STATISTICS` | `true` | Compute and cache per-file statistics used for query pruning. |
 | `BEACON_NETCDF_USE_READER_CACHE` | `true` | Cache opened NetCDF readers in memory. |
 | `BEACON_NETCDF_READER_CACHE_SIZE` | `128` | Max NetCDF reader entries to keep cached. |
-| `BEACON_NETCDF_USE_RUST_READER` | `true` | Read NetCDF with the pure-Rust reader instead of the netCDF-C library. It reads in parallel, it opens files in an object store, and it reports per-file statistics. |
+| `BEACON_NETCDF_USE_RUST_READER` | `true` | Read NetCDF with the pure-Rust reader instead of the netCDF-C library. It reads in parallel. It opens a file in an object store. It reports the statistics of each file. |
 
 ### HDF5
 
@@ -232,7 +232,7 @@ can move one format at a time.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_HDF5_USE_RUST_READER` | `true` | Read HDF5 with the pure-Rust reader instead of the netCDF-C library. It also reports a nested group and a compound dataset, which the netCDF-C library cannot. |
+| `BEACON_HDF5_USE_RUST_READER` | `true` | Read HDF5 with the pure-Rust reader instead of the netCDF-C library. It also reports a nested group and a compound dataset. The netCDF-C library reports neither. |
 | `BEACON_HDF5_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. Needs the pure-Rust reader. |
 | `BEACON_HDF5_USE_READER_CACHE` | `true` | Cache opened HDF5 readers in memory. |
 | `BEACON_HDF5_READER_CACHE_SIZE` | `128` | Max HDF5 reader entries to keep cached. |

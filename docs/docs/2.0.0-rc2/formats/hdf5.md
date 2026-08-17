@@ -13,8 +13,8 @@ Beacon recognizes `.h5` and `.hdf5`. It finds them in the dataset store automati
 ## Two readers
 
 A netCDF-4 file **is** an HDF5 file, and the netCDF-c library also opens plain HDF5. Beacon reads
-HDF5 through the pure-Rust reader by default, and through that library when you turn the Rust
-reader off. HDF5 behaves exactly like
+HDF5 through the pure-Rust reader by default. Beacon reads it through that library when you set the
+Rust reader to false. HDF5 behaves exactly like
 [NetCDF](/docs/2.0.0-rc2/formats/netcdf): the same data model, the same
 [array to table mapping](/docs/2.0.0-rc2/arrays-to-tables), the same
 [CF decoding](/docs/2.0.0-rc2/cf-decoding) and the same attribute columns.

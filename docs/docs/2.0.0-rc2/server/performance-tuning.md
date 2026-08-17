@@ -109,9 +109,9 @@ For a deployment with many NetCDF files:
 `BEACON_NETCDF_ENABLE_STATISTICS` controls the statistics of each file. Beacon uses them to prune a
 query. The default is `true`. Keep it on. Switch it off only to debug the pruning.
 
-Statistics also need the pure-Rust reader below, which is the default. The netCDF-C library holds
-one lock for each call in the process. Beacon computes the statistics through one thread, and the
-work blocks queries. Your core count does not change this.
+Statistics also need the pure-Rust reader below. That reader is the default. The netCDF-C library
+holds one lock for each call in the process. Beacon computes the statistics through one thread, and
+the work blocks queries. Your core count does not change this.
 
 With `BEACON_NETCDF_USE_RUST_READER=false`, Beacon reports no statistics for netCDF. It prunes no
 file. This variable does not change that result. See
@@ -153,8 +153,8 @@ OPTIONS ('use_rust_reader' 'true');
 
 A NetCDF-4 file is an HDF5 file, and the netCDF-C library opens a plain HDF5 file too. Beacon reads
 `.h5` and `.hdf5` through the pure-Rust reader by default. Set `BEACON_HDF5_USE_RUST_READER=false`
-to read through the netCDF-C library instead, which carries the same three costs as netCDF: one lock
-for each call, a local path only, and no statistics. The flag is separate from
+to read through the netCDF-C library instead. That library carries the same three costs as netCDF:
+one lock for each call, a local path only, and no statistics. The flag is separate from
 `BEACON_NETCDF_USE_RUST_READER`, so you move one format at a time.
 
 The reader adds two things the netCDF reader cannot give you, because the netCDF data model does not

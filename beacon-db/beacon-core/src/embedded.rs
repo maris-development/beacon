@@ -196,8 +196,8 @@ impl AuthMode {
 ///
 /// Defaults are chosen for an interactive, single-user embedding: auth off, crawlers available,
 /// dataset paths resolved dynamically by their own scheme (or against the cwd). Dynamic mode
-/// also means file statistics stay off until a datasets store is named, however
-/// [`Self::file_stats`] is set.
+/// keeps file statistics off. That subsystem needs a datasets store, whatever
+/// [`Self::file_stats`] says.
 #[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
     /// Whether RBAC applies. Defaults to [`AuthMode::Disabled`].
@@ -212,11 +212,13 @@ pub struct OpenOptions {
     /// Crawler subsystem config. Enabled by default; nothing is scheduled until a crawler
     /// exists, so this costs an empty database nothing.
     pub crawlers: CrawlerConfig,
-    /// File-statistics subsystem config. Enabled by default, like the server, and it also
-    /// carries the schema cache a cold plan reads instead of every file. It needs both a
-    /// database file and a [`Self::datasets`] store, so an in-memory or dynamic-mode database
-    /// leaves it off whatever this says. Set [`FileStatsConfig::enable`] to false to keep a
-    /// background pass off an archive the embedder does not want read.
+    /// File statistics config. On by default, as on the server. The same store holds the
+    /// schema cache, which a cold query reads instead of each file.
+    ///
+    /// The subsystem needs a database file and a [`Self::datasets`] store. An in-memory
+    /// database leaves it off. A dynamic-mode database leaves it off.
+    ///
+    /// Set [`FileStatsConfig::enable`] to false to keep a pass off your archive.
     pub file_stats: FileStatsConfig,
     /// Where bare dataset paths resolve. `None` leaves the runtime in dynamic mode: paths
     /// resolve by their own scheme (`s3://`, `https://`) or against the current directory.

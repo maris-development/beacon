@@ -15,11 +15,12 @@ does not open one million.
 
 Beacon enables this feature by default. The first pass runs 15 minutes after startup.
 
-:::warning The reader decides the ranges
-A netCDF or HDF5 file supplies ranges only through the pure-Rust reader. Both readers are the
-default, so this holds by itself. A server that sets `BEACON_NETCDF_USE_RUST_READER=false` or
-`BEACON_HDF5_USE_RUST_READER=false` reads each such file and records no range. The
-[Check the result](#check-the-result) section shows how to find this condition.
+:::warning The reader decides the range
+A netCDF or HDF5 file supplies a range only through the pure-Rust reader. Both readers are the
+default, so a standard server records a range. A server that sets
+`BEACON_NETCDF_USE_RUST_READER=false` or `BEACON_HDF5_USE_RUST_READER=false` reads each such file
+and records no range. The [Check the result](#check-the-result) section shows how to find this
+condition.
 :::
 
 ## What Beacon records
@@ -55,10 +56,10 @@ BEACON_HDF5_USE_RUST_READER=true     # the default, HDF5 ranges
 Beacon runs a pass every 15 minutes. Each pass finds new files and reads them.
 [Configuration](/docs/2.0.0-rc2/server/configuration#file-statistics) lists each variable.
 
-The **timer's first pass runs one interval after startup**, not at startup. Beacon starts the
+The **timer runs its first pass one interval after startup**, not at startup. Beacon starts the
 interval again on each boot, and records no due time. A server that restarts more often than the
-interval therefore never reaches a tick. `ANALYZE FILES` covers both conditions at a time you
-choose, and `BEACON_FILE_STATS_ON_STARTUP` covers them at each boot.
+interval therefore never reaches a tick. `ANALYZE FILES` fills the store at a time you choose.
+`BEACON_FILE_STATS_ON_STARTUP` fills it at each boot.
 
 ## Collect at every boot
 
@@ -88,8 +89,8 @@ competes with your queries. `ANALYZE FILES` covers that case, at a time you choo
 
 :::warning The pass holds the database file
 The pass keeps `beacon.db` open while it reads a batch. A process that closes a database and opens
-the same file again reports a lock error until the pass ends. This affects an embedded caller, not a
-server that exits. Leave this flag off there.
+the same file again then reports a lock error. The error continues until the pass ends. This
+condition applies to an embedded caller, not to a server that exits. Leave this flag off there.
 :::
 
 Do not wait for the timer. Start a pass with SQL:

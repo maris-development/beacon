@@ -203,8 +203,8 @@ async fn query_rejects_malformed_body() {
 /// that shape.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stream_that_fails_before_its_first_batch_is_a_400_with_a_message() {
-    // File statistics are on by default, and this test needs the refusal that a
-    // runtime without them gives, so it says so rather than taking the default.
+    // File statistics are on by default. This test needs the refusal from a
+    // runtime without them, so it sets the flag.
     let mut cfg = config(false);
     cfg.file_stats.enable = false;
     let (router, _lake, _cfg) = app(cfg).await;

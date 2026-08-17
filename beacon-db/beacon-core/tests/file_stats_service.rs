@@ -39,8 +39,7 @@ fn enabled() -> FileStatsConfig {
     }
 }
 
-/// File statistics off. The default is on, so a test of the off state has to
-/// say so rather than take the default.
+/// File statistics off. The default is on, so a test of the off state sets it.
 fn disabled() -> FileStatsConfig {
     FileStatsConfig {
         enable: false,
