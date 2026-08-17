@@ -67,6 +67,15 @@ deltalake = { version = "=0.32.4", features = ["datafusion"] }
 iceberg = "=0.10.0"
 iceberg-datafusion = "=0.10.0"
 datafusion = "^53"
+# `SplitProjection` and `ProjectionOpener`, the helpers a `FileSource` that reads
+# plain columns needs to apply a pushed-down projection. The `datafusion` facade
+# re-exports only some of `datafusion_datasource`, and not that module, so the
+# crate is named here. Its version tracks `datafusion` above.
+datafusion-datasource = "^53"
+# `DFParquetMetadata`, the file-metadata-to-`Statistics` conversion the plain
+# Parquet format already reports through. GeoParquet reads the same footer, so
+# reusing it keeps the two formats reporting the same numbers.
+datafusion-datasource-parquet = "^53"
 
 datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 
@@ -74,6 +83,10 @@ datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 datafusion-table-providers = { version = "=0.11.2", default-features = false }
 
 datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77", default-features = false, features = ["df53", "sql"] }
+# The bounding box of a constant geometry, for GeoParquet row group pruning. The
+# kernels crate holds the array maths and links no query engine, so a file format
+# reads it without the UDF layer. Same repository and revision as the line above.
+datafusion-spatial-kernels = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77" }
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 
 oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.3.0", features = ["async", "object-store", "ndarray"] }

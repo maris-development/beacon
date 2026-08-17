@@ -43,14 +43,16 @@ A column without geometry metadata also reads as a geometry. A `VARCHAR` column 
 `VARBINARY` column reads as WKB. So a raw CSV column needs no cast.
 
 A [GeoParquet](/docs/2.0.0-rc2/formats/geoparquet) file holds a geometry column, and Beacon decodes
-it to native GeoArrow on read.
+it to native GeoArrow on read. Every function here reads such a column directly:
 
-:::warning
-A spatial function over a GeoParquet geometry column fails today. The fault is in the scan, not in
-these functions. See
-[issue #378](https://github.com/maris-development/beacon/issues/378) and the note in the
-[GeoParquet chapter](/docs/2.0.0-rc2/formats/geoparquet). Build the geometry with `ST_Point` over
-another format until the scan is fixed.
+```sql
+SELECT ST_AsText(ST_Extent(geometry)) AS extent
+FROM read_geoparquet(['spatial/stations/*.geoparquet'])
+```
+
+:::tip
+A filter over a GeoParquet geometry column also skips row groups. See
+[what the scan skips](/docs/2.0.0-rc2/formats/geoparquet).
 :::
 
 ## Accessors
