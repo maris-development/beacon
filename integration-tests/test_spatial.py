@@ -345,15 +345,6 @@ def test_geometry_functions_are_absent_from_the_catalog(client):
         assert name in names, f"{name} is absent from the function catalog"
 
 
-@pytest.mark.xfail(
-    reason="Issue #378. The GeoParquet scan selects the right columns but keeps the old positions, "
-           "so only a selection that starts at the first column stays correct. The writer puts "
-           "geometry last, so every query over it fails. The defect predates the spatial "
-           "function set and hits plain columns too: `read_geoparquet(...) WHERE <a later "
-           "column> > 0` fails the same way, with no geometry and no spatial function in the "
-           "query, while the same file through `read_parquet` works.",
-    strict=False,
-)
 def test_spatial_functions_over_a_geoparquet_geometry_column(client, datasets_dir):
     """The spatial functions read a GeoParquet geometry column directly."""
     src = (
@@ -373,3 +364,46 @@ def test_spatial_functions_over_a_geoparquet_geometry_column(client, datasets_di
         f"SELECT * FROM {table} WHERE ST_Distance(geometry, ST_GeomFromText('POINT(0 0)')) < 100"
     )
     assert n > 0
+
+    # The scalar, aggregate and window groups each read the geometry column.
+    assert client.scalar(
+        f"SELECT ST_AsText(ST_Extent(geometry)) AS extent FROM {table}"
+    ).startswith("POLYGON")
+    assert client.scalar(
+        f"SELECT ST_GeometryType(ST_Collect(geometry)) AS t FROM {table}"
+    )
+    assert (
+        client.count(f"SELECT ST_ClusterKMeans(geometry, 3) OVER () AS k FROM {table}")
+        == 200
+    )
+
+
+def test_a_geoparquet_column_after_the_first_reads_correctly(client, datasets_dir):
+    """Issue #378: the scan kept a column's old position after a projection.
+
+    The writer appends `geometry` to the columns it was given, so the file holds
+    `lon, lat, temperature, geometry`. This reads every position past the first:
+    a plain column on its own, an alias over it, and a filter on a later column.
+    Each one is a query the old scan answered with a 400, a dropped connection or
+    a column of NULLs.
+    """
+    if not (datasets_dir / "geo" / "points.geoparquet").exists():
+        pytest.skip("the GeoParquet fixture is written by the spatial function test")
+
+    table = "read_geoparquet(['geo/points.geoparquet'])"
+
+    # `temperature` is the third column, and the alias must carry its values.
+    plain = client.sql_rows(f"SELECT temperature FROM {table} ORDER BY temperature")
+    aliased = client.sql_rows(f"SELECT temperature AS t FROM {table} ORDER BY t")
+    assert plain[0] == ["temperature"] and aliased[0] == ["t"]
+    assert plain[1:] == aliased[1:] and len(plain) == 201
+
+    # `lat` is the second column. Filtering on it must agree with the count the
+    # same predicate gives over the plain-Parquet source the file was built from.
+    lat_rows = client.count(f"SELECT * FROM {table} WHERE lat > 0")
+    assert lat_rows == client.count(
+        "SELECT * FROM ("
+        "SELECT latitude AS lat FROM read_parquet(['obs/*.parquet']) "
+        "ORDER BY time LIMIT 200"
+        ") WHERE lat > 0"
+    )

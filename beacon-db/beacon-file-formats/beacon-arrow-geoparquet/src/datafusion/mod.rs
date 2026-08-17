@@ -5,7 +5,7 @@ use beacon_common::{file_descriptors::file_open_parallelism, super_typing::super
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
-    common::{GetExt, Statistics, exec_datafusion_err},
+    common::{ColumnStatistics, GetExt, Statistics, exec_datafusion_err},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
         physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
@@ -15,12 +15,14 @@ use datafusion::{
     physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,
 };
+use datafusion_datasource_parquet::metadata::DFParquetMetadata;
 use futures::{StreamExt, TryStreamExt, stream};
 
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::datafusion::source::GeoParquetSource;
 
+mod bbox;
 pub mod opener;
 mod reader;
 pub mod sink;
@@ -173,17 +175,32 @@ impl FileFormat for GeoParquetFormat {
             exec_datafusion_err!("Failed to compute super type schema for GeoParquet: {}", e)
         })?;
 
-        Ok(Arc::new(super_schema))
+        Ok(Arc::new(restore_field_metadata(super_schema, &schemas)))
     }
 
+    /// Row count, byte size and a range per plain column, from the file footer.
+    ///
+    /// A GeoParquet file is a Parquet file, so the same converter the plain
+    /// Parquet format uses reads it, and the two report the same numbers for the
+    /// same bytes. Only the footer is read; no row group is decoded.
+    ///
+    /// A geometry column gets no range. DataFusion states a column's statistics
+    /// as one minimum and one maximum scalar, and a bounding box is neither. The
+    /// boxes a GeoParquet file does hold are per row group, and the scan reads
+    /// them there, in `GeoParquetSource::try_pushdown_filters`, which is where
+    /// they can drop work rather than only describe it.
     async fn infer_stats(
         &self,
         _state: &dyn Session,
-        _store: &Arc<dyn ObjectStore>,
+        store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
-        _object: &ObjectMeta,
+        object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
-        Ok(Statistics::new_unknown(&table_schema))
+        let statistics = DFParquetMetadata::new(store.as_ref(), object)
+            .fetch_statistics(&table_schema)
+            .await?;
+
+        Ok(drop_nested_column_ranges(statistics, &table_schema))
     }
 
     async fn create_physical_plan(
@@ -280,6 +297,77 @@ impl FileFormat for GeoParquetFormat {
     ) -> Arc<dyn FileSource> {
         Arc::new(GeoParquetSource::new(table_schema))
     }
+}
+
+/// Report a nested column's range as unknown.
+///
+/// A GeoArrow geometry column is a struct, and the Parquet statistics converter
+/// answers one for it: a struct scalar whose every child is null. That is not a
+/// range. It is not absent either, so a consumer that only checks for absence —
+/// `beacon.system.file_stats` does — would store a row of nulls per file and per
+/// geometry column, and read it back as a bound it cannot use.
+///
+/// The rule is by shape rather than by geometry, because it is the shape that
+/// makes the answer meaningless: no nested column has a scalar minimum. A file
+/// keeps its row count, its byte size and the range of every plain column, which
+/// is what prunes.
+fn drop_nested_column_ranges(mut statistics: Statistics, table_schema: &SchemaRef) -> Statistics {
+    for (field, column) in table_schema
+        .fields()
+        .iter()
+        .zip(statistics.column_statistics.iter_mut())
+    {
+        if field.data_type().is_nested() {
+            *column = ColumnStatistics::new_unknown();
+        }
+    }
+    statistics
+}
+
+/// Put each field's own metadata back onto the merged schema.
+///
+/// [`super_type_schema`] rebuilds every field from its name and type alone,
+/// which drops the GeoArrow extension keys that mark a column as a geometry.
+/// Without them the spatial functions see a plain struct of `x` and `y` and
+/// refuse it, so a geometry column would be unreadable by every one of them.
+///
+/// A field keeps its metadata only while every file that holds it states the
+/// same metadata and the merged type is still that field's own type. A column
+/// two files describe differently stays plain, which is what it has become.
+fn restore_field_metadata(
+    merged: arrow::datatypes::Schema,
+    schemas: &[SchemaRef],
+) -> arrow::datatypes::Schema {
+    let fields = merged
+        .fields()
+        .iter()
+        .map(|merged_field| {
+            let mut sources = schemas
+                .iter()
+                .filter_map(|schema| schema.field_with_name(merged_field.name()).ok());
+
+            let Some(first) = sources.next() else {
+                return merged_field.clone();
+            };
+            let cannot_keep = first.metadata().is_empty()
+                || first.data_type() != merged_field.data_type()
+                || sources.any(|other| {
+                    other.metadata() != first.metadata() || other.data_type() != first.data_type()
+                });
+            if cannot_keep {
+                return merged_field.clone();
+            }
+
+            Arc::new(
+                merged_field
+                    .as_ref()
+                    .clone()
+                    .with_metadata(first.metadata().clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    arrow::datatypes::Schema::new_with_metadata(fields, merged.metadata().clone())
 }
 
 fn is_lat_column(name: &str) -> bool {
@@ -383,9 +471,7 @@ mod tests {
         let geometry = schema.field_with_name("geometry").expect("geometry field");
         // Geometry is decoded to its native GeoArrow storage (a struct of x/y
         // child arrays for the Separated coord layout), not left as opaque WKB
-        // binary. Note the GeoArrow extension *metadata* is dropped here because
-        // Beacon's `super_type_schema` rebuilds fields without metadata — the
-        // native struct layout is what survives at the table-schema level.
+        // binary.
         let DataType::Struct(children) = geometry.data_type() else {
             panic!(
                 "geometry should decode to a native GeoArrow struct, got {:?}",
@@ -398,6 +484,16 @@ mod tests {
             "geometry struct should have x/y children, got {child_names:?}"
         );
         assert!(schema.field_with_name("id").is_ok());
+
+        // The GeoArrow extension name survives the schema merge. Without it the
+        // spatial functions read the column as a plain struct and refuse it.
+        assert_eq!(
+            geometry
+                .metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str),
+            Some("geoarrow.point")
+        );
     }
 
     #[tokio::test]
@@ -471,7 +567,13 @@ mod tests {
         let id_idx = file_schema.index_of("id").expect("id column");
         let projected: SchemaRef = Arc::new(file_schema.project(&[id_idx]).expect("project"));
 
-        let opener = opener::GeoParquetOpener::new(object_store, projected, 128 * 1024);
+        let opener = opener::GeoParquetOpener::new(
+            object_store,
+            projected,
+            128 * 1024,
+            None,
+            &Default::default(),
+        );
         let stream = opener
             .open(PartitionedFile::from(object))
             .expect("open")
@@ -497,6 +599,47 @@ mod tests {
             full.column(0).as_primitive::<Int32Type>().values(),
             &[1, 2, 3]
         );
+    }
+
+    /// A field keeps its metadata while every file agrees on it, and loses it
+    /// as soon as two files disagree. The GeoArrow extension keys travel in that
+    /// metadata, and they are what make a column a geometry.
+    #[test]
+    fn field_metadata_survives_only_while_the_files_agree() {
+        let with = |value: &str| {
+            Arc::new(Schema::new(vec![
+                Field::new("geometry", DataType::Float64, true).with_metadata(
+                    std::collections::HashMap::from([(
+                        "ARROW:extension:name".to_string(),
+                        value.to_string(),
+                    )]),
+                ),
+            ])) as SchemaRef
+        };
+        let plain = Arc::new(Schema::new(vec![Field::new(
+            "geometry",
+            DataType::Float64,
+            true,
+        )])) as SchemaRef;
+
+        let extension = |schemas: &[SchemaRef]| {
+            let merged = super_type_schema(schemas).expect("merge");
+            restore_field_metadata(merged, schemas)
+                .field_with_name("geometry")
+                .expect("geometry")
+                .metadata()
+                .get("ARROW:extension:name")
+                .cloned()
+        };
+
+        let agreeing = [with("geoarrow.point"), with("geoarrow.point")];
+        assert_eq!(extension(&agreeing), Some("geoarrow.point".to_string()));
+
+        let disagreeing = [with("geoarrow.point"), with("geoarrow.linestring")];
+        assert_eq!(extension(&disagreeing), None);
+
+        // A file that states nothing counts as a disagreement too.
+        assert_eq!(extension(&[with("geoarrow.point"), plain]), None);
     }
 
     #[tokio::test]
@@ -547,7 +690,13 @@ mod tests {
         assert!(inferred.field_with_name("id").is_ok());
         assert!(inferred.field_with_name("geometry").is_err());
 
-        let opener = opener::GeoParquetOpener::new(object_store, inferred.clone(), 128 * 1024);
+        let opener = opener::GeoParquetOpener::new(
+            object_store,
+            inferred.clone(),
+            128 * 1024,
+            None,
+            &Default::default(),
+        );
         let stream = opener
             .open(PartitionedFile::from(object))
             .expect("open")

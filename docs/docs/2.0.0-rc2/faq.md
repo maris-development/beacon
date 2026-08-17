@@ -127,9 +127,13 @@ collections into [Atlas](/docs/2.0.0-rc2/formats/atlas). See
 
 ### My spatial filter on GeoParquet prunes nothing
 
-This behaviour is correct today. Beacon does not yet use the GeoParquet `bbox` covering to skip row
-groups. An `st_*` filter therefore runs over a full scan with column projection. Beacon plans support
-for geometry predicate pushdown.
+Five predicates state a bounding box, and only those skip row groups: `ST_Intersects`, `ST_Within`,
+`ST_Contains`, `ST_BBoxIntersects`, and `ST_DWithin` with a constant distance. A filter such as
+`ST_Distance(geometry, …) < 100` states no box, so the scan reads every row group.
+
+Rewrite the filter as one of the five. `EXPLAIN ANALYZE` reports `geoparquet_row_groups_pruned`,
+which tells you if the rewrite worked. See
+[what the scan skips](/docs/2.0.0-rc2/formats/geoparquet).
 
 ### My query runs out of memory
 
