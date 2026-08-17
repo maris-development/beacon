@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { EMPTY_RESULT, resultFromTable } from "@/lib/arrow-result";
 import { useBeacon } from "@/lib/beacon-context";
 import { COLUMN_PAGE_SIZE, parseSchema } from "@/lib/schema";
 import { errorMessage } from "@/lib/errors";
@@ -482,12 +483,10 @@ function TablePreview({ table, defaults }: { table: TableRef; defaults: CatalogD
   const beacon = useBeacon();
   const query = useQuery({
     queryKey: ["table-preview", refKey(table)],
-    queryFn: async () => {
-      const result = await beacon.query(
-        `SELECT * FROM ${sqlName(table, defaults)} LIMIT ${PREVIEW_ROWS}`,
-      );
-      return { rows: result.rows, table: result.table };
-    },
+    queryFn: async () =>
+      resultFromTable(
+        await beacon.queryArrow(`SELECT * FROM ${sqlName(table, defaults)} LIMIT ${PREVIEW_ROWS}`),
+      ),
   });
 
   if (query.isLoading)
@@ -503,14 +502,14 @@ function TablePreview({ table, defaults }: { table: TableRef; defaults: CatalogD
       </div>
     );
 
-  const rows = query.data?.rows ?? [];
+  const result = query.data ?? EMPTY_RESULT;
   return (
     <div className="space-y-2">
       <div className="max-h-[60vh] overflow-auto rounded-md border">
-        <ResultsGrid rows={rows} table={query.data?.table} />
+        <ResultsGrid result={result} />
       </div>
-      {rows.length > 0 && (
-        <p className="text-xs text-muted-foreground">First {rows.length} rows.</p>
+      {result.numRows > 0 && (
+        <p className="text-xs text-muted-foreground">First {result.numRows} rows.</p>
       )}
     </div>
   );

@@ -79,6 +79,14 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **The admin UI renders a result from the Arrow columns.** The query workbench reads each record
+  batch as it arrives and shows it. It no longer builds a JS object for each row first, which cost
+  one object per row and one property per column — on a beacon table that carries 100K+ columns,
+  the decode was the wait, not the query. The grid now reads one value as `column.get(row)`, and
+  the preview and dataset pages take the same path. Duplicate column names survive, because the
+  columns come from the Arrow schema and not from the keys of a decoded row. The SDK types state
+  the columnar access the UI uses: `ArrowTable` and `ArrowRecordBatch` declare `schema` and
+  `getChildAt`, with the new `ArrowVector`, `ArrowField` and `ArrowSchema`.
 - **Minimum supported Rust is 1.94**, up from 1.91. `iceberg` and `iceberg-datafusion` 0.10 — the
   only release line built against the DataFusion 53 and Arrow 58 this workspace unifies on —
   declare `rust-version = "1.94"`, so the workspace floor follows. Beacon's own code uses no
