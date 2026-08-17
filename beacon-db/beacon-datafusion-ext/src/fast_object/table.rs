@@ -29,7 +29,7 @@ use datafusion::{
 };
 
 use super::prune::{Pruning, prune_plan};
-use crate::type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy};
+use crate::type_widening::{ArrowTypeWideningStrategy, session_widening};
 
 /// A table over objects: a listing table that prunes before it scans.
 ///
@@ -51,18 +51,16 @@ impl FastObjectTable {
         format: Arc<dyn FileFormat>,
         urls: Vec<ListingTableUrl>,
     ) -> Result<Self, DataFusionError> {
-        let widening = state.config().get_extension::<ArrowTypeWidening>().expect(
-            "ArrowTypeWidening extension missing from session config; this is a bug in Beacon",
-        );
+        let widening = session_widening(state);
         Self::try_new_with_widening(state, format, urls, widening.strategy.as_ref()).await
     }
 
     /// The same, with the merge rule named rather than taken from the session.
     ///
-    /// The JSON query API has always merged its schemas by Beacon's super
-    /// typing, which widens a column two files disagree on instead of refusing
-    /// it. SQL `read_*` follows whatever the session registered, which defaults
-    /// to the stricter union. Both reach this, and say which they want.
+    /// A caller names a rule here for two reasons. It needs one rule whatever a
+    /// deployment registered. Or it runs outside a configured session. A `read_*`
+    /// takes the rule of the session through [`try_new`](Self::try_new). Both
+    /// callers reach this method.
     pub async fn try_new_with_widening(
         state: &SessionState,
         format: Arc<dyn FileFormat>,

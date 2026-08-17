@@ -14,11 +14,11 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
+use beacon_datafusion_ext::type_widening::session_widening;
 
 pub const DEFAULT_CSV_EXTENSION: &str = "csv";
 
@@ -190,16 +190,23 @@ impl FileFormat for CsvFormat {
                         .await
                 }
             })
-            .buffer_unordered(file_open_parallelism()) // tune this
+            // Keep the listing order. The merged schema then does not depend on
+            // the disk answer order. See issue #377. The width stays the
+            // concurrency. `buffered` holds a finished schema until its turn.
+            .buffered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;
 
-        //Supertype the schema
-        let super_schema = super_type_schema(&schemas).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
-        })?;
-
-        Ok(Arc::new(super_schema))
+        // The rule of the session decides the result for a column that two
+        // files describe differently.
+        session_widening(state)
+            .merge_schemas(&schemas)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to infer schema: {}",
+                    e
+                ))
+            })
     }
 
     async fn infer_stats(
@@ -302,29 +309,40 @@ mod tests {
         assert!(datasets.iter().all(|d| d.format == "csv"));
     }
 
-    /// Schemas of multiple CSV files are merged with Beacon's super-typing rather
-    /// than taken from the first file: an Int64 column plus a Float64 column of the
-    /// same name must widen to Float64.
+    /// The rule of the session merges the schemas of several CSV files. The
+    /// columns that agree union. Two files that give a column two types are an
+    /// error, in either order. The answer may not depend on the disk answer
+    /// order. See issue #377.
     #[tokio::test]
-    async fn infer_schema_super_types_columns_across_files() {
+    async fn infer_schema_merges_columns_across_files() {
         let store = Arc::new(InMemory::new());
         let object_store: Arc<dyn ObjectStore> = store.clone();
-        let a = put(&store, &Path::from("ints.csv"), "value\n1\n2\n").await;
-        let b = put(&store, &Path::from("floats.csv"), "value\n1.5\n2.5\n").await;
+        let ints = put(&store, &Path::from("ints.csv"), "value\n1\n2\n").await;
+        let floats = put(&store, &Path::from("floats.csv"), "value\n1.5\n2.5\n").await;
 
         let ctx = SessionContext::new();
         let format = CsvFormat::new(b',', 1000);
-        let schema = format
-            .infer_schema(&ctx.state(), &object_store, &[a, b])
-            .await
-            .expect("both CSV files should be inferable");
+        for pair in [
+            [ints.clone(), floats.clone()],
+            [floats.clone(), ints.clone()],
+        ] {
+            assert!(
+                format
+                    .infer_schema(&ctx.state(), &object_store, &pair)
+                    .await
+                    .is_err(),
+                "an Int64 column beside a Float64 one has no single type"
+            );
+        }
 
-        assert_eq!(schema.fields().len(), 1);
-        assert_eq!(schema.field(0).name(), "value");
-        assert_eq!(
-            schema.field(0).data_type(),
-            &arrow::datatypes::DataType::Float64
-        );
+        // Files that agree union their columns, in listing order.
+        let other = put(&store, &Path::from("other.csv"), "other\n3\n").await;
+        let schema = format
+            .infer_schema(&ctx.state(), &object_store, &[ints, other])
+            .await
+            .expect("agreeing files merge");
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["value", "other"]);
     }
 
     /// A non-default delimiter must reach the wrapped DataFusion format, otherwise

@@ -250,6 +250,14 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set the rule for every schema merge in this runtime.
+    ///
+    /// Each format merges the files behind one URL. `FastObjectTable` merges the
+    /// URLs behind one table. Both use this rule.
+    ///
+    /// The default is
+    /// [`DefaultArrowTypeWidening`](beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening).
+    /// It unions the fields that agree and refuses the rest.
     pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
         self.type_widening = Some(strategy);
         self
@@ -901,10 +909,10 @@ fn build_session_config(
         // subsystem is off rather than silently doing nothing.
         .with_extension(crate::file_stats::new_file_stats_service_handle())
         .with_extension(secrets_store.clone())
-        // How `FastObjectTable` merges the schemas of the files behind one
-        // table. The table requires this extension, so a session that skips
-        // `RuntimeBuilder` must register `ArrowTypeWidening::default_extension`
-        // itself.
+        // The rule for every schema merge in this process. Each format merges
+        // the files behind one URL. `FastObjectTable` merges the URLs behind one
+        // table. A session without `RuntimeBuilder` gets the same rule from
+        // `ArrowTypeWidening::default_extension`.
         .with_extension(Arc::new(ArrowTypeWidening::new(
             builder
                 .type_widening

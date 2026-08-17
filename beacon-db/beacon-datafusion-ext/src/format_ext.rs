@@ -97,10 +97,10 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     /// is the audit gate. Overriding it is a claim about the format, and the
     /// claim has two parts:
     ///
-    /// 1. **Inference is per object.** `infer_schema` over `n` objects equals
-    ///    [`super_type_schema`](beacon_common::super_typing::super_type_schema)
-    ///    over the `n` single-object inferences, in listing order. Every Beacon
-    ///    format works this way today.
+    /// 1. **Inference is per object.** `infer_schema` over `n` objects equals the
+    ///    [`ArrowTypeWidening`](crate::type_widening::ArrowTypeWidening) merge of
+    ///    the session over the `n` single-object results, in listing order. Every
+    ///    Beacon format works this way, because each one calls that merge.
     /// 2. **The fingerprint is complete.** Anything that changes what a file's
     ///    schema comes out as is in it. Leaving something out is the one way
     ///    this returns a *wrong* schema rather than a slow one, so each

@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_datafusion_ext::type_widening::session_widening;
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
@@ -466,13 +466,16 @@ impl FileFormat for NetcdfFormat {
             // Return a default empty schema
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
-        let schema = super_type_schema(&schemas).map_err(|e| {
-            exec_datafusion_err!(
-                "Failed to compute super type schema for NetCDF datasets: {}",
-                e
-            )
-        })?;
-        Ok(schema.into())
+        // The rule of the session decides the result for a column that two
+        // files describe differently.
+        session_widening(state)
+            .merge_schemas(&schemas)
+            .map_err(|e| {
+                exec_datafusion_err!(
+                    "Failed to merge the schemas of the NetCDF datasets: {}",
+                    e
+                )
+            })
     }
 
     async fn infer_stats(

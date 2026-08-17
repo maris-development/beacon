@@ -557,17 +557,44 @@ async fn a_projection_that_names_nothing_leaves_the_schema_alone() {
     assert_eq!(unknown.schema().fields().len(), 1);
 }
 
-/// The merge rule is the caller's to choose. The default refuses a column two
-/// URLs disagree on; super typing widens it, which is what the JSON query API
-/// has always done.
+/// The merge rule is the caller's to choose. The session's rule refuses a column
+/// two URLs describe differently; a caller that wants something else names its own
+/// strategy.
 ///
-/// Across URLs, note, not within one. A format merges the files behind a single
-/// URL itself — Parquet strictly, the nd formats by super typing — and the
-/// strategy here only decides how those per-URL results combine.
+/// Across URLs, note, not within one: a format merges the files behind a single
+/// URL itself. It merges them through the same session rule, so a `read_*` over
+/// files that disagree behaves the same however the URLs are spelled.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_caller_can_name_the_merge_rule() {
-    use beacon_datafusion_ext::type_widening::SuperTypeWidening;
+    use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
     use datafusion::arrow::array::{Int32Array, Int64Array};
+    use datafusion::arrow::datatypes::SchemaRef;
+
+    /// A rule of its own: keep the first type seen for a column instead of
+    /// refusing the second. Order-sensitive by construction, so it says so and
+    /// the merge folds it over every schema in order.
+    struct FirstTypeWins;
+
+    impl ArrowTypeWideningStrategy for FirstTypeWins {
+        fn merge_schemas(
+            &self,
+            schema_refs: &[SchemaRef],
+        ) -> Result<SchemaRef, datafusion::arrow::error::ArrowError> {
+            let mut fields: Vec<datafusion::arrow::datatypes::FieldRef> = Vec::new();
+            for schema in schema_refs {
+                for field in schema.fields() {
+                    if !fields.iter().any(|kept| kept.name() == field.name()) {
+                        fields.push(field.clone());
+                    }
+                }
+            }
+            Ok(Arc::new(Schema::new(fields)))
+        }
+
+        fn is_order_independent(&self) -> bool {
+            false
+        }
+    }
 
     let fixture = fixture().await;
     put_typed(
@@ -593,26 +620,38 @@ async fn the_caller_can_name_the_merge_rule() {
     ];
     let state = fixture.ctx.state();
 
-    // The session's rule is the strict union, which has no answer for this.
+    // The session's rule has no answer for a column with two types, and neither
+    // does naming that same rule explicitly.
     assert!(
         FastObjectTable::try_new(&state, Arc::new(ParquetFormat::default()), urls.clone())
             .await
             .is_err(),
-        "the default refuses a column with two types"
+        "the session's rule refuses a column with two types"
+    );
+    assert!(
+        FastObjectTable::try_new_with_widening(
+            &state,
+            Arc::new(ParquetFormat::default()),
+            urls.clone(),
+            &DefaultArrowTypeWidening,
+        )
+        .await
+        .is_err()
     );
 
-    // Super typing promotes to the type that holds both.
-    let widened = FastObjectTable::try_new_with_widening(
+    // A caller that names its own rule gets it: this one keeps the first type it
+    // saw, so the table reports the Int32 the first URL declared.
+    let first_wins = FastObjectTable::try_new_with_widening(
         &state,
         Arc::new(ParquetFormat::default()),
         urls,
-        &SuperTypeWidening,
+        &FirstTypeWins,
     )
     .await
     .unwrap();
     assert_eq!(
-        widened.schema().field_with_name("v").unwrap().data_type(),
-        &DataType::Int64
+        first_wins.schema().field_with_name("v").unwrap().data_type(),
+        &DataType::Int32
     );
 }
 

@@ -76,6 +76,16 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **One entry point merges every schema, and it merges in parallel.** Each format merged the
+  schemas of the files behind a URL itself. The table above merged the URLs with the rule of the
+  session. The applied rule therefore depended on the spelling of a `read_*`. Each format and the
+  table now read the same `ArrowTypeWidening` from the session and merge with it, so
+  `RuntimeBuilder::with_type_widening` sets the rule for the whole process. The rule itself does not
+  change: `DefaultArrowTypeWidening` unions the columns that agree and refuses the rest. That merge
+  is idempotent, commutative and associative. The entry point therefore drops a schema it has seen
+  and gives each contiguous chunk to a thread. A collection of 100000 files from one instrument
+  holds few distinct schemas, so the merge reads few schemas. Column order still follows the
+  listing, because `SELECT *` shows it.
 - **The admin UI renders a result from the Arrow columns.** The query workbench reads each record
   batch as it arrives and shows it. It no longer builds a JS object for each row first, which cost
   one object per row and one property per column — on a beacon table that carries 100K+ columns,
@@ -118,6 +128,24 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **A schema merge depended on the disk answer order**
+  ([#377](https://github.com/maris-development/beacon/issues/377)). A table over many files merges
+  their schemas into one schema. A query plans against that schema. Beacon's own "super typing"
+  widened a column that two files gave two types, and the result depended on the merge order.
+  `Int32` beside `Float32` gave `Float32` in one order and `Float64` in the other. `Date32` beside
+  `Float64` gave `Float64` or an error. Five formats read their schemas with `buffer_unordered`,
+  which returns them in completion order: Parquet, GeoParquet, CSV, Arrow IPC and BBF. The same
+  query over the same files could therefore return different types, or fail, between two runs.
+  **Super typing is gone.** Every merge now uses the rule the table already used across URLs. Two
+  files that give a column two types are a planning error that names the column and both types.
+  Beacon makes no guess about the type that holds both values. That rule is order independent. The
+  five formats also read their schemas in listing order, so column order is stable.
+  This behaviour change affects a collection whose files disagree on a column. A `read_*` that
+  widened such a column now refuses it. Cast the column, or read the groups separately and combine
+  them with `UNION ALL BY NAME`, which runs its own coercion. A merged column also keeps the field
+  metadata of the first file that states it, where super typing dropped that metadata. A column is
+  nullable unless every file holds it and every file requires it. The scan fills a missing column
+  with nulls, and a non-nullable column holds no nulls.
 - **The GeoParquet scan applied only part of a pushed-down projection.** A `FileSource` that
   accepts a projection has to apply the whole of it. This one accepted a projection and then read
   only the column names out of it, which dropped everything else. Geometry is written last,

@@ -1,7 +1,7 @@
 //! DataFusion integration for atlas stores.
 //!
 //! Mirrors the zarr crate: an [`AtlasFormatFactory`] discovers atlas metadata
-//! markers, [`AtlasFormat`] infers the (super-typed) Arrow schema across a
+//! markers, [`AtlasFormat`] infers the merged Arrow schema across a
 //! store's datasets and plans the scan, and [`AtlasSource`] opens each store
 //! natively over the query's object store and streams every dataset through the
 //! shared `beacon-nd-array` engine.
@@ -10,10 +10,10 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{
     DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
 };
+use beacon_datafusion_ext::type_widening::session_widening;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -288,7 +288,7 @@ impl FileFormat for AtlasFormat {
 
     async fn infer_schema(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
@@ -313,9 +313,10 @@ impl FileFormat for AtlasFormat {
             schemas.push(Arc::new(schema));
         }
 
-        // Union across stores (a single store is the common case — one schema).
-        let schema = super_type_schema(&schemas).map_err(|e| {
-            exec_datafusion_err!("Failed to compute super type schema for atlas datasets: {}", e)
+        // Union the stores with the rule of the session. One store is the common
+        // case, and it gives one schema.
+        let schema = session_widening(state).merge_schemas(&schemas).map_err(|e| {
+            exec_datafusion_err!("Failed to merge the schemas of the atlas stores: {}", e)
         })?;
         tracing::debug!(
             elapsed_ms = infer_start.elapsed().as_millis() as u64,
@@ -323,7 +324,7 @@ impl FileFormat for AtlasFormat {
             fields = schema.fields().len(),
             "atlas infer_schema",
         );
-        Ok(Arc::new(schema))
+        Ok(schema)
     }
 
     async fn infer_stats(

@@ -3,7 +3,6 @@ pub mod crawler_config;
 pub mod file_stats_config;
 pub mod error;
 pub mod file_descriptors;
-pub mod super_typing;
 pub mod table_function;
 
 pub use crawler_config::CrawlerConfig;

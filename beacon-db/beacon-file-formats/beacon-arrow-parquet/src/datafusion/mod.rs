@@ -15,11 +15,11 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
+use beacon_datafusion_ext::type_widening::session_widening;
 
 #[derive(Debug)]
 pub struct ParquetFormatFactory;
@@ -137,16 +137,23 @@ impl FileFormat for ParquetFormat {
                 let store = Arc::clone(store);
                 async move { self.inner.infer_schema(state, &store, &[object]).await }
             })
-            .buffer_unordered(file_open_parallelism()) // tune this
+            // Keep the listing order. The merged schema then does not depend on
+            // the disk answer order. See issue #377. The width stays the
+            // concurrency. `buffered` holds a finished schema until its turn.
+            .buffered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;
 
-        //Supertype the schema
-        let super_schema = super_type_schema(&schemas).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
-        })?;
-
-        Ok(Arc::new(super_schema))
+        // The rule of the session decides the result for a column that two
+        // files describe differently.
+        session_widening(state)
+            .merge_schemas(&schemas)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to infer schema: {}",
+                    e
+                ))
+            })
     }
 
     async fn infer_stats(
@@ -299,10 +306,12 @@ mod tests {
         assert_eq!(datasets[0].format, "parquet");
     }
 
-    /// Multi-file inference must super-type rather than fail on a type mismatch:
-    /// Int64 + Float64 for the same column widens to Float64.
+    /// The rule of the session merges the schemas of several files. It unions the
+    /// columns that agree. Two files that give a column two types are an error, in
+    /// either order. The answer may not depend on the disk answer order. See issue
+    /// #377.
     #[tokio::test]
-    async fn infer_schema_super_types_across_multiple_files() {
+    async fn infer_schema_merges_across_multiple_files() {
         let store = Arc::new(InMemory::new());
         let object_store: Arc<dyn ObjectStore> = store.clone();
         let a = put_parquet(
@@ -321,12 +330,37 @@ mod tests {
         .await;
 
         let ctx = SessionContext::new();
+        for pair in [[a.clone(), b.clone()], [b, a]] {
+            assert!(
+                ParquetFormat::default()
+                    .infer_schema(&ctx.state(), &object_store, &pair)
+                    .await
+                    .is_err(),
+                "an Int64 column beside a Float64 one has no single type"
+            );
+        }
+
+        // Files that agree union into one schema.
+        let c = put_parquet(
+            &store,
+            &Path::from("more_ints.parquet"),
+            Field::new("other", DataType::Int64, true),
+            Arc::new(Int64Array::from(vec![4])),
+        )
+        .await;
+        let ints = put_parquet(
+            &store,
+            &Path::from("ints2.parquet"),
+            Field::new("value", DataType::Int64, true),
+            Arc::new(Int64Array::from(vec![5])),
+        )
+        .await;
         let schema = ParquetFormat::default()
-            .infer_schema(&ctx.state(), &object_store, &[a, b])
+            .infer_schema(&ctx.state(), &object_store, &[ints, c])
             .await
-            .expect("both parquet files should be inferable");
-        assert_eq!(schema.fields().len(), 1);
-        assert_eq!(schema.field(0).data_type(), &DataType::Float64);
+            .expect("agreeing files merge");
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["value", "other"]);
     }
 
     /// `force_view_types(false)` is deliberate: string columns must come back as
