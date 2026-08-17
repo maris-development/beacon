@@ -5,8 +5,8 @@ use beacon_binary_format::{
     object_store::ArrowBBFObjectReader, reader::async_reader::AsyncBBFReader,
 };
 use beacon_common::file_descriptors::file_open_parallelism;
-use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
+use beacon_datafusion_ext::type_widening::session_widening;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -159,7 +159,7 @@ impl FileFormat for BBFFormat {
 
     async fn infer_schema(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
@@ -176,16 +176,23 @@ impl FileFormat for BBFFormat {
                     Ok::<_, datafusion::error::DataFusionError>(Arc::new(reader.arrow_schema()))
                 }
             })
-            .buffer_unordered(file_open_parallelism())
+            // Keep the listing order. The merged schema then does not depend on
+            // the disk answer order. See issue #377. The width stays the
+            // concurrency. `buffered` holds a finished schema until its turn.
+            .buffered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;
 
-        //Supertype the schema
-        let super_schema = super_type_schema(&schemas).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
-        })?;
-
-        Ok(Arc::new(super_schema))
+        // The rule of the session decides the result for a column that two
+        // files describe differently.
+        session_widening(state)
+            .merge_schemas(&schemas)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to infer schema: {}",
+                    e
+                ))
+            })
     }
 
     /// Infer the statistics for the provided object. The cost and accuracy of the

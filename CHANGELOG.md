@@ -93,6 +93,14 @@ tag. Releases before 2.0.0 are recorded in the
 - **The documented defaults for the pure-Rust netCDF and HDF5 readers match the code.**
   `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` default to `true`; the pages
   and doc comments still described them as off.
+- **One entry point merges every schema, and it merges in parallel.** Each format merged the
+  schemas of the files behind a URL itself. The table above merged the URLs with the rule of the
+  session. The applied rule therefore depended on the spelling of a `read_*`. Each format and the
+  table now read the same `ArrowTypeWidening` from the session and merge with it, so
+  `RuntimeBuilder::with_type_widening` sets the rule for the whole process. Because the rule is a
+  lattice join, the entry point drops a schema it has seen and gives each contiguous chunk to a
+  thread. A collection of 100000 files from one instrument holds few distinct schemas, so the merge
+  reads few schemas. Column order still follows the listing, because `SELECT *` shows it.
 - **The admin UI renders a result from the Arrow columns.** The query workbench reads each record
   batch as it arrives and shows it. It no longer builds a JS object for each row first, which cost
   one object per row and one property per column — on a beacon table that carries 100K+ columns,
@@ -135,6 +143,28 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **A schema merge depended on the disk answer order**
+  ([#377](https://github.com/maris-development/beacon/issues/377)). A table over many files merges
+  their schemas into one schema, and a query plans against that schema. Beacon's own "super typing"
+  widened a column that two files gave two types, and the result depended on the merge order.
+  `Int32` beside `Float32` gave `Float32` in one order and `Float64` in the other. `Date32` beside
+  `Float64` gave `Float64` or an error. Five formats read their schemas with `buffer_unordered`,
+  which returns them in completion order: Parquet, GeoParquet, CSV, Arrow IPC and BBF. The same
+  query over the same files could therefore return different types, or fail, between two runs.
+  The rules are now the join of a lattice, so the schema order, the group boundaries and the repeat
+  count change no result and no failure. A column widens inside one family only, and the five
+  formats read their schemas in listing order, so column order is stable too. The families are the
+  numbers, the timestamps (the finer unit, in one time zone), the strings (`Utf8`, `Utf8View`,
+  `LargeUtf8`), the binaries (`Binary`, `BinaryView`, `LargeBinary`), the dates (`Date32`,
+  `Date64`) and the times (`Time32`, `Time64`). `Null` takes the type of the other file.
+  Three results changed. **A number and a string are now an error**, where super typing stringified
+  the number. **A `Boolean` and a number are an error**, and so are a `Timestamp` and an integer.
+  **An integer beside a `Float32` widens to `Float64`**, where the old table kept `Float32` for a
+  narrow integer: a `Float32` holds no `Int32`, and a lattice cannot keep `Int8` and drop `Int32`.
+  A time zone follows DataFusion: one file with a zone gives that zone, and two files with two
+  zones give `UTC`. DataFusion keeps the zone of the left operand there, and a merge has no left
+  operand. A merged column also keeps the field metadata of the first file that states it, and it
+  is nullable unless every file holds it and every file requires it.
 - **The GeoParquet scan applied only part of a pushed-down projection.** A `FileSource` that
   accepts a projection has to apply the whole of it. This one accepted a projection and then read
   only the column names out of it, which dropped everything else. Geometry is written last,

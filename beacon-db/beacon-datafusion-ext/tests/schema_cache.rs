@@ -74,11 +74,11 @@ impl FileFormat for CountingFormat {
         None
     }
 
-    /// One column per object, named by that object's bytes, folded the way every
-    /// Beacon format folds: `super_type_schema` over the per-object schemas.
+    /// One column per object. The bytes of the object give the column name. The
+    /// merge uses the widening rule of the session, as every Beacon format does.
     async fn infer_schema(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
@@ -96,8 +96,8 @@ impl FileFormat for CountingFormat {
         if schemas.is_empty() {
             return Ok(Arc::new(Schema::empty()));
         }
-        beacon_common::super_typing::super_type_schema(&schemas)
-            .map(Arc::new)
+        beacon_datafusion_ext::type_widening::session_widening(state)
+            .merge_schemas(&schemas)
             .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
     }
 

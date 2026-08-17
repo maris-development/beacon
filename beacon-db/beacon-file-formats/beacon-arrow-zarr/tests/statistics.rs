@@ -7,7 +7,7 @@
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use arrow::datatypes::Schema;
+use arrow::datatypes::{Schema, SchemaRef};
 use beacon_arrow_zarr::datafusion::statistics::generate_statistics;
 use beacon_arrow_zarr::datafusion::ZarrFormat;
 use beacon_arrow_zarr::reader::schema_from_group_path;
@@ -272,11 +272,17 @@ fn assert_unknown(stats: &ColumnStatistics, what: &str) {
 }
 
 /// Infer the root group's schema through `store`, then measure it.
-async fn statistics_over(store: Arc<dyn ObjectStore>) -> (Schema, Statistics) {
+async fn statistics_over(store: Arc<dyn ObjectStore>) -> (SchemaRef, Statistics) {
     let storage = ZarrStorage::from_object_store(store);
-    let schema = schema_from_group_path(storage.inner(), "/", None, None)
-        .await
-        .unwrap();
+    let schema = schema_from_group_path(
+        storage.inner(),
+        "/",
+        None,
+        None,
+        &beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+    )
+    .await
+    .unwrap();
     let statistics = generate_statistics(storage.inner(), "/", None, &schema)
         .await
         .unwrap();

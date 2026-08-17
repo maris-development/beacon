@@ -2,8 +2,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
+use beacon_datafusion_ext::type_widening::session_widening;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
@@ -153,13 +153,16 @@ impl FileFormat for TiffFormat {
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
 
-        let schema = super_type_schema(&schemas).map_err(|e| {
-            exec_datafusion_err!(
-                "Failed to compute super type schema for TIFF datasets: {}",
-                e
-            )
-        })?;
-        Ok(schema.into())
+        // The rule of the session decides the result for a column that two
+        // files describe differently.
+        session_widening(state)
+            .merge_schemas(&schemas)
+            .map_err(|e| {
+                exec_datafusion_err!(
+                    "Failed to merge the schemas of the TIFF datasets: {}",
+                    e
+                )
+            })
     }
 
     async fn infer_stats(

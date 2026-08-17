@@ -76,9 +76,15 @@ async fn a_nan_time_does_not_kill_a_schema_read() {
     let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
     let storage = ZarrStorage::from_object_store(store);
 
-    let schema = schema_from_group_path(storage.inner(), "/", None, None)
-        .await
-        .expect("a store with a NaN time still has a schema");
+    let schema = schema_from_group_path(
+        storage.inner(),
+        "/",
+        None,
+        None,
+        &beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+    )
+    .await
+    .expect("a store with a NaN time still has a schema");
 
     let names: Vec<&String> = schema.fields().iter().map(|f| f.name()).collect();
     assert!(names.contains(&&"time".to_string()), "time is in {names:?}");
