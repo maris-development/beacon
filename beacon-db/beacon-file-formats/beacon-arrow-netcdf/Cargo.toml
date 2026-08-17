@@ -37,7 +37,6 @@ tracing = { workspace = true }
 serde = { workspace = true }
 object_store = { workspace = true }
 datafusion = { workspace = true }
-moka = { workspace = true }
 chrono = { workspace = true }
 
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }

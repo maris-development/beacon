@@ -14,9 +14,9 @@ use std::sync::Arc;
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
+        file_read::FileRead,
         metrics::ReadMetrics,
         morsel::{morsel_scan, MorselSource, OpenFile},
-        file_read::FileRead,
     },
     projection::DatasetProjection,
 };
@@ -38,8 +38,6 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt};
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::cache::Hdf5ReaderCache;
-
 /// DataFusion [`FileSource`] for HDF5 (`.h5`/`.hdf5`) files.
 #[derive(Debug, Clone)]
 pub struct Hdf5Source {
@@ -49,8 +47,6 @@ pub struct Hdf5Source {
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    /// Reader cache to consult for this scan. `None` disables caching.
-    cache: Option<Hdf5ReaderCache>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
     /// The scan's file queue, when it is planned morsel-driven. See
@@ -67,17 +63,9 @@ impl Hdf5Source {
             read_dimensions,
             batch_size: usize::MAX,
             predicate: None,
-            cache: None,
             projection: None,
             morsel: None,
         }
-    }
-
-    /// Returns a copy of this source that consults `cache` (when `Some`) for
-    /// opened datasets. The format wires in the runtime's shared cache here.
-    pub fn with_cache(mut self, cache: Option<Hdf5ReaderCache>) -> Self {
-        self.cache = cache;
-        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -103,7 +91,6 @@ impl FileSource for Hdf5Source {
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
-            self.cache.clone(),
             self.execution_plan_metrics.clone(),
             partition,
             object_store,
@@ -254,7 +241,6 @@ struct Hdf5Opener {
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    cache: Option<Hdf5ReaderCache>,
     /// This partition's counters, registered once. See [`ReadMetrics::new`].
     read_metrics: ReadMetrics,
     partition: usize,
@@ -276,7 +262,6 @@ struct Hdf5Files {
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
-    cache: Option<Hdf5ReaderCache>,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
 }
@@ -293,7 +278,6 @@ impl OpenFile for Hdf5Files {
         let dataset = Hdf5Opener::open_dataset(
             self.object_store.clone(),
             file.object_meta.clone(),
-            self.cache.clone(),
             self.read_dimensions.clone(),
         )
         .await?;
@@ -316,7 +300,6 @@ impl Hdf5Opener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        cache: Option<Hdf5ReaderCache>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
         object_store: Arc<dyn ObjectStore>,
@@ -328,7 +311,6 @@ impl Hdf5Opener {
             projected_schema: projected_schema.clone(),
             read_dimensions: read_dimensions.clone(),
             batch_size,
-            cache: cache.clone(),
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
         });
@@ -340,7 +322,6 @@ impl Hdf5Opener {
             read_dimensions,
             batch_size,
             predicate,
-            cache,
             read_metrics,
             partition,
             object_store,
@@ -365,13 +346,12 @@ impl Hdf5Opener {
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
-        cache: Option<Hdf5ReaderCache>,
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
-            let dataset = Self::open_dataset(store, object, cache, read_dimensions).await?;
+            let dataset = Self::open_dataset(store, object, read_dimensions).await?;
             FileRead::plan(
                 dataset,
                 projected_schema,
@@ -394,10 +374,9 @@ impl Hdf5Opener {
     async fn open_dataset(
         store: Arc<dyn ObjectStore>,
         object: ObjectMeta,
-        cache: Option<Hdf5ReaderCache>,
         read_dimensions: Option<Vec<String>>,
     ) -> datafusion::error::Result<beacon_nd_array::dataset::AnyDataset> {
-        let dataset = crate::cache::open_dataset(cache.as_ref(), &store, &object)
+        let dataset = crate::open::open_dataset(&store, &object)
             .await
             .map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -453,7 +432,6 @@ impl FileOpener for Hdf5Opener {
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
             self.batch_size,
-            self.cache.clone(),
             metrics,
             self.predicate.clone(),
         )

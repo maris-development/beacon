@@ -10,15 +10,74 @@ use crate::datafusion::object_meta_resolver::{DefaultNetCDFObjectResolver, NetCD
 /// The two readers produce the same dataset, so this only decides how the bytes
 /// are fetched and decoded. See [`crate::oxcdf_reader`] for the trade-off.
 ///
-/// This is the bare choice, small enough to key a cache by. [`FileAccess`] is
+/// This is the bare choice, small enough to key a schema by. [`FileAccess`] is
 /// the choice plus whatever that reader needs to reach a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ReaderBackend {
-    /// netcdf-c, through its Rust bindings. The default.
+    /// `oxcdf`, pure Rust over `object_store`. The default.
     #[default]
-    NetcdfC,
-    /// `oxcdf`, pure Rust over `object_store`.
     Oxcdf,
+    /// netcdf-c, through its Rust bindings. The fallback.
+    NetcdfC,
+}
+
+impl ReaderBackend {
+    /// The name this backend answers to, in configuration and in a log line.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReaderBackend::Oxcdf => "rust",
+            ReaderBackend::NetcdfC => "netcdf-c",
+        }
+    }
+}
+
+impl std::fmt::Display for ReaderBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Parse a reader backend supplied through configuration.
+///
+/// `key` names the setting in the error, so one message serves the
+/// `BEACON_NETCDF_BACKEND` variable, the `BEACON_HDF5_BACKEND` variable and the
+/// `backend` option of one table. Both formats parse their backend here, so they
+/// accept exactly the same spellings.
+pub fn parse_backend(key: &str, value: &str) -> datafusion::error::Result<ReaderBackend> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "rust" | "oxcdf" => Ok(ReaderBackend::Oxcdf),
+        "netcdf-c" | "netcdf_c" | "netcdfc" | "c" => Ok(ReaderBackend::NetcdfC),
+        other => Err(datafusion::error::DataFusionError::Execution(format!(
+            "invalid reader backend for '{key}': '{other}'. Use 'rust' or 'netcdf-c'"
+        ))),
+    }
+}
+
+/// The backend a table reads on: the `backend` option, else `default`.
+///
+/// `use_rust_reader` is the name this option carried in 2.0.0-rc.1. It still
+/// works, so a table that pinned a reader keeps it, and `backend` wins when a
+/// table names both.
+///
+/// netCDF and HDF5 both resolve their reader here, so a table option means the
+/// same thing whichever format reads it.
+pub fn backend_from_options(
+    format_options: &std::collections::HashMap<String, String>,
+    default: ReaderBackend,
+) -> datafusion::error::Result<ReaderBackend> {
+    if let Some(value) = format_options.get("backend") {
+        return parse_backend("backend", value);
+    }
+    if let Some(value) = format_options.get("use_rust_reader") {
+        return match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Ok(ReaderBackend::Oxcdf),
+            "false" | "0" | "no" | "off" => Ok(ReaderBackend::NetcdfC),
+            other => Err(datafusion::error::DataFusionError::Execution(format!(
+                "invalid boolean for option 'use_rust_reader': '{other}'"
+            ))),
+        };
+    }
+    Ok(default)
 }
 
 /// How a table reaches its files, and which reader opens them.
@@ -134,10 +193,7 @@ impl NetcdfInput {
         }
     }
 
-    /// Open the dataset this input points at, with no caching.
-    ///
-    /// [`open_dataset`] adds the cache. Use this one where a cache entry has no
-    /// value, such as one-off statistics.
+    /// Open the dataset this input points at.
     pub async fn open(self) -> anyhow::Result<AnyDataset> {
         match self {
             NetcdfInput::NetcdfC(path) => crate::reader::open_dataset(path).await,
@@ -146,77 +202,6 @@ impl NetcdfInput {
             }
         }
     }
-}
-
-/// A NetCDF dataset reader cache, sized at construction time.
-///
-/// Cloning shares the underlying [`moka`] cache (the cache is reference-counted
-/// internally), so a single cache instance is shared across the formats,
-/// sources and openers that a runtime hands a clone to. This is per-runtime
-/// state — there is no process-global cache.
-#[derive(Debug, Clone)]
-pub struct NetcdfReaderCache {
-    cache: moka::future::Cache<CacheKey, Arc<AnyDataset>>,
-}
-
-impl NetcdfReaderCache {
-    /// Build a cache holding up to `capacity` opened datasets.
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            cache: moka::future::Cache::builder()
-                .max_capacity(capacity as u64)
-                .build(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CacheKey {
-    pub object: object_store::path::Path,
-    pub last_modified: chrono::DateTime<chrono::Utc>,
-    /// The reader that produced the entry. One runtime can serve tables on
-    /// either reader, and their datasets are not interchangeable, so the key
-    /// keeps them apart.
-    pub backend: ReaderBackend,
-}
-
-/// Open a NetCDF dataset, optionally consulting `cache`.
-///
-/// When `cache` is `Some`, an entry keyed by object path + last-modified is
-/// checked before opening and populated afterwards. When `None`, the dataset is
-/// opened directly with no caching (e.g. schema inference or a table that opted
-/// out of caching).
-///
-/// One file opens once, however many callers ask for it at the same time. A
-/// scan that splits a file gives every partition the same key, and they all
-/// arrive together. A read of the cache followed by a write would let every one
-/// of them miss and open the file, which is the cost the cache exists to avoid.
-/// [`moka::future::Cache::try_get_with`] admits the first caller and parks the
-/// rest on its result. A failed open is not cached, so the next scan retries it.
-pub async fn open_dataset(
-    cache: Option<&NetcdfReaderCache>,
-    input: NetcdfInput,
-    object: ObjectMeta,
-) -> anyhow::Result<AnyDataset> {
-    let Some(cache) = cache else {
-        return input.open().await;
-    };
-
-    let key = CacheKey {
-        object: object.location.clone(),
-        last_modified: object.last_modified,
-        backend: input.backend(),
-    };
-
-    let dataset = cache
-        .cache
-        .try_get_with(key, async move { input.open().await.map(Arc::new) })
-        .await
-        // The error belongs to whichever caller ran the open, so every waiter
-        // gets it by reference. Carry the message across.
-        .map_err(|e: Arc<anyhow::Error>| anyhow::anyhow!("{e:#}"))?;
-
-    Ok((*dataset).clone())
 }
 
 /// Fetch the Arrow schema for a NetCDF object by opening the dataset and
@@ -228,15 +213,15 @@ pub async fn open_dataset(
 /// set is auto-selected (see [`beacon_nd_array::dataset::resolve_read_dimensions`])
 /// so the schema matches
 /// what `SELECT *` can actually return.
+///
+/// A repeated inference of the same file is answered by the schema cache of
+/// [`beacon_datafusion_ext::format_ext`], above this function, so this one
+/// always opens the file.
 pub async fn fetch_schema(
-    cache: Option<&NetcdfReaderCache>,
     input: NetcdfInput,
-    object: ObjectMeta,
     read_dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
-    // Schema inference does not consult the reader cache; the cache benefits
-    // repeated data scans, which flow through `NetCDFSource`.
-    let dataset = open_dataset(cache, input, object).await.map_err(|e| {
+    let dataset = input.open().await.map_err(|e| {
         datafusion::error::DataFusionError::Execution(format!(
             "Failed to open NetCDF dataset for schema inference: {e}"
         ))
@@ -272,190 +257,45 @@ pub async fn fetch_schema(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use futures::stream::BoxStream;
-    use object_store::{
-        path::Path, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload,
-        PutMultipartOptions, PutOptions, PutPayload, PutResult,
-    };
-
     use super::*;
 
-    /// A store that counts the reads reaching it, and forwards everything.
-    ///
-    /// Every read path of [`ObjectStore`] funnels through `get_opts`, so one
-    /// counter there sees the lot.
-    #[derive(Debug)]
-    struct CountingStore {
-        inner: Arc<dyn ObjectStore>,
-        reads: Arc<AtomicUsize>,
+    /// The Rust reader is the default. netcdf-c is reached by naming it.
+    #[test]
+    fn the_default_backend_is_the_rust_reader() {
+        assert_eq!(ReaderBackend::default(), ReaderBackend::Oxcdf);
     }
 
-    impl std::fmt::Display for CountingStore {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "CountingStore({})", self.inner)
+    /// Every spelling a deployment may already hold, and both directions of the
+    /// name a log line prints.
+    #[test]
+    fn a_backend_parses_from_either_name() {
+        for value in ["rust", "RUST", " rust ", "oxcdf"] {
+            assert_eq!(
+                parse_backend("backend", value).unwrap(),
+                ReaderBackend::Oxcdf,
+                "{value}"
+            );
         }
+        for value in ["netcdf-c", "netcdf_c", "netcdfc", "C"] {
+            assert_eq!(
+                parse_backend("backend", value).unwrap(),
+                ReaderBackend::NetcdfC,
+                "{value}"
+            );
+        }
+        assert_eq!(ReaderBackend::Oxcdf.as_str(), "rust");
+        assert_eq!(ReaderBackend::NetcdfC.as_str(), "netcdf-c");
     }
 
-    #[async_trait::async_trait]
-    impl ObjectStore for CountingStore {
-        async fn get_opts(
-            &self,
-            location: &Path,
-            options: GetOptions,
-        ) -> object_store::Result<GetResult> {
-            self.reads.fetch_add(1, Ordering::Relaxed);
-            self.inner.get_opts(location, options).await
-        }
-
-        async fn put_opts(
-            &self,
-            location: &Path,
-            payload: PutPayload,
-            opts: PutOptions,
-        ) -> object_store::Result<PutResult> {
-            self.inner.put_opts(location, payload, opts).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &Path,
-            opts: PutMultipartOptions,
-        ) -> object_store::Result<Box<dyn MultipartUpload>> {
-            self.inner.put_multipart_opts(location, opts).await
-        }
-
-        fn list(
-            &self,
-            prefix: Option<&Path>,
-        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-            self.inner.list(prefix)
-        }
-
-        fn delete_stream(
-            &self,
-            locations: BoxStream<'static, object_store::Result<Path>>,
-        ) -> BoxStream<'static, object_store::Result<Path>> {
-            self.inner.delete_stream(locations)
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            prefix: Option<&Path>,
-        ) -> object_store::Result<ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy_opts(
-            &self,
-            from: &Path,
-            to: &Path,
-            options: CopyOptions,
-        ) -> object_store::Result<()> {
-            self.inner.copy_opts(from, to, options).await
-        }
-    }
-
-    /// The bundled gridded file, as a store that counts its reads.
-    fn counting_input() -> (Arc<AtomicUsize>, NetcdfInput, ObjectMeta) {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test_files")
-            .join("gridded-example.nc");
-        let location = object_store::path::Path::from_absolute_path(&path)
-            .expect("the bundled file has an absolute path");
-        let file_meta = std::fs::metadata(&path).expect("the bundled file exists");
-
-        let reads = Arc::new(AtomicUsize::new(0));
-        let store: Arc<dyn ObjectStore> = Arc::new(CountingStore {
-            inner: Arc::new(object_store::local::LocalFileSystem::new()),
-            reads: reads.clone(),
-        });
-
-        let object = ObjectMeta {
-            location: location.clone(),
-            last_modified: file_meta.modified().map(Into::into).unwrap_or_default(),
-            size: file_meta.len(),
-            e_tag: None,
-            version: None,
-        };
-
-        (
-            reads,
-            NetcdfInput::Oxcdf {
-                store,
-                path: location,
-            },
-            object,
-        )
-    }
-
-    /// One file opens once, however many partitions ask for it at the same time.
-    ///
-    /// A scan that splits a file gives every partition the same cache key, and
-    /// they all arrive on a cold cache together. A read of the cache followed by
-    /// a write would let every one of them miss and open the file, so the cost
-    /// would grow with `target_partitions` — worst on the large files that are
-    /// worth splitting in the first place.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_opens_of_one_file_read_it_once() {
-        const PARTITIONS: usize = 8;
-
-        let (reads, input, object) = counting_input();
-
-        // What a single cold open costs.
-        let cache = NetcdfReaderCache::new(4);
-        open_dataset(Some(&cache), input.clone(), object.clone())
-            .await
-            .expect("the bundled file opens");
-        let one_open = reads.swap(0, Ordering::Relaxed);
-        assert!(one_open > 0, "an open must read the file");
-
-        // The shape a split scan runs in: a cold cache, and every partition
-        // asking at once.
-        let cache = NetcdfReaderCache::new(4);
-        let mut set = tokio::task::JoinSet::new();
-        for _ in 0..PARTITIONS {
-            let cache = cache.clone();
-            let input = input.clone();
-            let object = object.clone();
-            set.spawn(async move {
-                open_dataset(Some(&cache), input, object)
-                    .await
-                    .expect("the bundled file opens");
-            });
-        }
-        while set.join_next().await.is_some() {}
-
-        assert_eq!(
-            reads.load(Ordering::Relaxed),
-            one_open,
-            "{PARTITIONS} concurrent opens must read the file once, not {PARTITIONS} times"
-        );
-    }
-
-    /// A failed open is not cached, so the next caller tries again.
-    ///
-    /// `try_get_with` keeps errors out of the cache. A cached error would turn
-    /// one bad read into a table that stays broken until the entry expires.
-    #[tokio::test]
-    async fn a_failed_open_is_not_cached() {
-        let cache = NetcdfReaderCache::new(4);
-        let store: Arc<dyn ObjectStore> = Arc::new(object_store::local::LocalFileSystem::new());
-        let path = object_store::path::Path::from("no/such/file.nc");
-        let object = ObjectMeta {
-            location: path.clone(),
-            last_modified: chrono::DateTime::from_timestamp(0, 0).unwrap(),
-            size: 0,
-            e_tag: None,
-            version: None,
-        };
-        let input = NetcdfInput::Oxcdf { store, path };
-
-        for attempt in 1..=2 {
-            let result = open_dataset(Some(&cache), input.clone(), object.clone()).await;
-            assert!(result.is_err(), "attempt {attempt} must fail");
-        }
-        assert_eq!(cache.cache.entry_count(), 0, "a failure must not be cached");
+    /// The error names the setting and the value, so an operator can find both.
+    #[test]
+    fn an_unknown_backend_names_the_setting_and_the_values() {
+        let error = parse_backend("BEACON_NETCDF_BACKEND", "hdf5")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("BEACON_NETCDF_BACKEND"), "{error}");
+        assert!(error.contains("hdf5"), "{error}");
+        assert!(error.contains("rust"), "{error}");
+        assert!(error.contains("netcdf-c"), "{error}");
     }
 }

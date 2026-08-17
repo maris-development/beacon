@@ -3,9 +3,9 @@ use std::sync::Arc;
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
+        file_read::FileRead,
         metrics::ReadMetrics,
         morsel::{morsel_scan, MorselSource, OpenFile},
-        file_read::FileRead,
     },
     projection::DatasetProjection,
 };
@@ -25,7 +25,7 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt};
 use object_store::ObjectMeta;
 
-use super::reader::{self, FileAccess, NetcdfInput, NetcdfReaderCache};
+use super::reader::{FileAccess, NetcdfInput};
 
 /// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
 ///
@@ -39,8 +39,6 @@ pub struct NetCDFSource {
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    /// Reader cache to consult for this scan. `None` disables caching.
-    cache: Option<NetcdfReaderCache>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
     /// The scan's file queue, when it is planned morsel-driven.
@@ -64,17 +62,9 @@ impl NetCDFSource {
             read_dimensions,
             batch_size: usize::MAX,
             predicate: None,
-            cache: None,
             projection: None,
             morsel: None,
         }
-    }
-
-    /// Returns a copy of this source that consults `cache` (when `Some`) for
-    /// opened datasets. The format wires in the runtime's shared cache here.
-    pub fn with_cache(mut self, cache: Option<NetcdfReaderCache>) -> Self {
-        self.cache = cache;
-        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -107,7 +97,6 @@ impl FileSource for NetCDFSource {
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
-            self.cache.clone(),
             self.execution_plan_metrics.clone(),
             partition,
             object_store,
@@ -245,7 +234,6 @@ struct NetCDFOpener {
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    cache: Option<NetcdfReaderCache>,
     /// This partition's counters, registered once. See [`ReadMetrics::new`].
     read_metrics: ReadMetrics,
     partition: usize,
@@ -269,7 +257,6 @@ impl NetCDFOpener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        cache: Option<NetcdfReaderCache>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
         object_store: Arc<dyn object_store::ObjectStore>,
@@ -282,7 +269,6 @@ impl NetCDFOpener {
             projected_schema: projected_schema.clone(),
             read_dimensions: read_dimensions.clone(),
             batch_size,
-            cache: cache.clone(),
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
         });
@@ -294,7 +280,6 @@ impl NetCDFOpener {
             read_dimensions,
             batch_size,
             predicate,
-            cache,
             read_metrics,
             partition,
             access,
@@ -320,13 +305,12 @@ impl NetCDFOpener {
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
-        cache: Option<NetcdfReaderCache>,
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
-            let dataset = Self::open_dataset(input, object, cache, read_dimensions).await?;
+            let dataset = Self::open_dataset(input, object, read_dimensions).await?;
             FileRead::plan(
                 dataset,
                 projected_schema,
@@ -348,17 +332,14 @@ impl NetCDFOpener {
     async fn open_dataset(
         input: NetcdfInput,
         object: ObjectMeta,
-        cache: Option<NetcdfReaderCache>,
         read_dimensions: Option<Vec<String>>,
     ) -> datafusion::error::Result<beacon_nd_array::dataset::AnyDataset> {
-        let dataset = reader::open_dataset(cache.as_ref(), input, object.clone())
-            .await
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to open NetCDF dataset {}: {e}",
-                    object.location,
-                ))
-            })?;
+        let dataset = input.open().await.map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to open NetCDF dataset {}: {e}",
+                object.location,
+            ))
+        })?;
 
         // Apply dimension projection before deriving the file schema. When no
         // explicit dimensions were requested, fall back to the dataset's
@@ -393,7 +374,6 @@ struct NetCDFFiles {
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
-    cache: Option<NetcdfReaderCache>,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
 }
@@ -409,11 +389,12 @@ impl std::fmt::Debug for NetCDFFiles {
 #[async_trait::async_trait]
 impl OpenFile for NetCDFFiles {
     async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<FileRead>> {
-        let input = self.access.input_for(&self.object_store, &file.object_meta)?;
+        let input = self
+            .access
+            .input_for(&self.object_store, &file.object_meta)?;
         let dataset = NetCDFOpener::open_dataset(
             input,
             file.object_meta.clone(),
-            self.cache.clone(),
             self.read_dimensions.clone(),
         )
         .await?;
@@ -465,7 +446,6 @@ impl FileOpener for NetCDFOpener {
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
             self.batch_size,
-            self.cache.clone(),
             metrics,
             self.predicate.clone(),
         )

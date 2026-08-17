@@ -76,6 +76,21 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **The pure-Rust reader is the default for netCDF and HDF5.** A `.nc`, `.h5` or `.hdf5` file is now
+  read by Beacon's own reader: it holds no process-global lock, so one query scans many files at
+  once, and it fetches byte ranges through the object store, so a private S3, GCS or Azure bucket
+  works with no local copy and no `AWS_SKIP_SIGNATURE`. It also records per-file column ranges, so
+  [file statistics](docs/docs/2.0.0-rc2/internals/file-statistics.md) prune netCDF and HDF5 scans,
+  and it reads two HDF5 layouts the netCDF data model cannot express: a nested group and a compound
+  dataset. netCDF-C remains available as a fallback, and every write still uses it.
+- **One option names the reader: `BEACON_NETCDF_BACKEND` and `BEACON_HDF5_BACKEND`,** each `rust`
+  (the default) or `netcdf-c`, and `OPTIONS ('backend' 'netcdf-c')` on one table. A backend the
+  server does not know stops startup rather than selecting a reader silently. The 2.0.0-rc.1
+  spellings `BEACON_NETCDF_USE_RUST_READER`, `BEACON_HDF5_USE_RUST_READER` and
+  `OPTIONS ('use_rust_reader' ...)` still work, so a deployment that pinned netCDF-C keeps it; the
+  new name wins when both are set. The HDF5 fallback now pins netCDF-C explicitly instead of
+  inheriting the netCDF backend, so `BEACON_HDF5_BACKEND=netcdf-c` reads through that library
+  whatever netCDF is set to.
 - **The admin UI renders a result from the Arrow columns.** The query workbench reads each record
   batch as it arrives and shows it. It no longer builds a JS object for each row first, which cost
   one object per row and one property per column — on a beacon table that carries 100K+ columns,
@@ -110,6 +125,15 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Removed
 
+- **The netCDF and HDF5 reader caches, with `BEACON_NETCDF_USE_READER_CACHE`,
+  `BEACON_NETCDF_READER_CACHE_SIZE`, `BEACON_HDF5_USE_READER_CACHE`, `BEACON_HDF5_READER_CACHE_SIZE`
+  and the `use_reader_cache` table option.** Both formats held opened datasets in a `moka` cache
+  keyed by path, modification time and reader. The schema cache
+  (`BEACON_FILE_STATS_SCHEMA_CACHE`) already answers the repeated inference that cost the most, so
+  what remained was one open per partition of a split scan — in exchange for two caches, four
+  variables and a cache key threaded through every format, source and opener. One open now reads one
+  file, and the read path is a single line from the format to the reader. Setting a removed variable
+  is ignored, not an error.
 - **The `beacondb` wheel is no longer published.** Its release workflow, the manylinux build
   scripts and the `make wheel` targets are gone, and the version scripts no longer track it. The
   crate stays in the workspace and still builds locally with maturin; it is marked

@@ -9,15 +9,15 @@
 //!
 //! The crate reads a file in one of two ways:
 //!
-//! - [`reader`] calls netcdf-c. It is the default, and it is the only path that
+//! - [`oxcdf_reader`] calls [`oxcdf`], a pure-Rust reader. It is the default. It
+//!   holds no global lock and reads through `object_store`, so scans run in
+//!   parallel and S3, GCS and Azure need no local copy.
+//! - [`reader`] calls netcdf-c. It is the fallback, and it is the only path that
 //!   writes files.
-//! - [`oxcdf_reader`] calls [`oxcdf`], a pure-Rust reader. It holds no global
-//!   lock and reads through `object_store`, so scans run in parallel and S3,
-//!   GCS and Azure need no local copy.
 //!
 //! Both produce the same dataset. The
-//! [`use_rust_reader`](datafusion::NetcdfConfig::use_rust_reader) flag selects
-//! between them.
+//! [`backend`](datafusion::NetcdfConfig::backend) setting selects between
+//! them.
 //!
 //! # Key modules
 //! - [`reader`]: high-level NetCDF -> Arrow reader API (netcdf-c).

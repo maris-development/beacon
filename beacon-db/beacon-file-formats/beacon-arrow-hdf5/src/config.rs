@@ -1,5 +1,7 @@
 //! [`Hdf5Config`]: the runtime settings of the HDF5 format.
 
+use beacon_arrow_netcdf::datafusion::ReaderBackend;
+
 /// Runtime configuration for the HDF5 format.
 ///
 /// Plain data with sensible defaults; the caller populates it (there is no
@@ -8,21 +10,21 @@
 /// can be overridden per table via `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
 #[derive(Debug, Clone)]
 pub struct Hdf5Config {
-    /// Whether reads go through the pure-Rust reader instead of netcdf-c.
+    /// Which reader opens a file.
     ///
-    /// Off by default, so a server that leaves it off behaves exactly as it did
-    /// before this reader existed: an HDF5 file is opened by netcdf-c, through
-    /// [`beacon_arrow_netcdf`]. Turn it on for parallel reads, native object
-    /// store access, per-file statistics, nested groups and compound datasets;
-    /// see [`crate::reader`]. Writes always use netcdf-c.
-    pub use_rust_reader: bool,
-    /// Whether reads consult the shared reader cache by default.
+    /// [`ReaderBackend::Oxcdf`], the pure-Rust reader, by default. It reads
+    /// parallel, reads an object store, records per-file statistics, and covers
+    /// the two layouts netcdf-c cannot report: a nested group and a compound
+    /// dataset. See [`crate::reader`].
     ///
-    /// Only the Rust reader has a cache of its own. Under netcdf-c the netCDF
-    /// format's cache applies instead.
-    pub use_reader_cache: bool,
-    /// Capacity (number of opened datasets) of the shared reader cache.
-    pub reader_cache_size: usize,
+    /// [`ReaderBackend::NetcdfC`] is the fallback. A NetCDF-4 file *is* an HDF5
+    /// file, and netcdf-c's HDF5 dispatch opens a plain one too, so it reads
+    /// every file this format serves. It is the reader this crate used before
+    /// the Rust one existed. Writes always use netcdf-c.
+    ///
+    /// This is separate from the netCDF backend, so a runtime moves one format
+    /// at a time.
+    pub backend: ReaderBackend,
     /// Whether to generate per-file statistics during planning.
     ///
     /// Statistics need the Rust reader. Under netcdf-c the format reports
@@ -34,9 +36,7 @@ pub struct Hdf5Config {
 impl Default for Hdf5Config {
     fn default() -> Self {
         Self {
-            use_rust_reader: false,
-            use_reader_cache: true,
-            reader_cache_size: 128,
+            backend: ReaderBackend::Oxcdf,
             enable_statistics: true,
         }
     }

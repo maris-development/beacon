@@ -29,6 +29,10 @@ pub enum ConfigError {
     #[error("invalid BEACON_LOG_LEVEL: {0}")]
     InvalidLogLevel(String),
 
+    /// `BEACON_NETCDF_BACKEND` or `BEACON_HDF5_BACKEND` names no known reader.
+    #[error("{0}")]
+    InvalidReaderBackend(String),
+
     /// `BEACON_SECRETS_KEY` was set but is not a base64-encoded 32-byte key.
     #[error("invalid BEACON_SECRETS_KEY: {0}")]
     InvalidSecretsKey(String),

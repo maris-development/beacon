@@ -70,7 +70,7 @@ impl Default for FileStatsConfig {
         // `beacon-server-config`.
         Self {
             // Off: this has not run against a real archive yet, and on a netCDF
-            // deployment without `BEACON_NETCDF_USE_RUST_READER` it would work
+            // deployment set to `BEACON_NETCDF_BACKEND=netcdf-c` it would work
             // through every file to store nothing.
             enable: false,
             interval_secs: 900,
@@ -112,13 +112,19 @@ mod tests {
         assert!(!config.enable);
         assert!(config.concurrency >= 2);
         assert!(
-            config.concurrency <= std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2),
+            config.concurrency
+                <= std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(2),
             "a background job must not claim more than the machine has"
         );
         assert!(
             config.schema_cache,
             "the schema cache rides on a pass that already derives every schema"
         );
-        assert!(config.prefix_depth.is_none(), "grouping is derived by default");
+        assert!(
+            config.prefix_depth.is_none(),
+            "grouping is derived by default"
+        );
     }
 }

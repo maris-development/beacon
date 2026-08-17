@@ -11,10 +11,10 @@ use std::sync::Arc;
 use arrow::array::{Float64Array, Int64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use beacon_common::FileStatsConfig;
-use beacon_core::AuthIdentity;
 use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
+use beacon_core::AuthIdentity;
 use beacon_datafusion_ext::listing_factory::RootStore;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::parquet::arrow::ArrowWriter;
@@ -122,14 +122,15 @@ fn copy_hdf5(path: &Path) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hdf5_ranges_need_the_rust_reader() {
     use beacon_arrow_hdf5::Hdf5Config;
+    use beacon_arrow_netcdf::datafusion::ReaderBackend;
 
-    async fn analyze(use_rust_reader: bool) -> u32 {
+    async fn analyze(backend: ReaderBackend) -> u32 {
         let root = tempfile::tempdir().unwrap();
         copy_hdf5(&root.path().join("datasets/obs/nested.h5"));
 
         let runtime = builder(root.path(), enabled())
             .with_hdf5_config(Hdf5Config {
-                use_rust_reader,
+                backend,
                 ..Hdf5Config::default()
             })
             .build()
@@ -156,13 +157,13 @@ async fn hdf5_ranges_need_the_rust_reader() {
         record.column_count
     }
 
-    let with_rust_reader = analyze(true).await;
+    let with_rust_reader = analyze(ReaderBackend::Oxcdf).await;
     assert!(
         with_rust_reader > 0,
         "the Rust reader must record a range for station_id"
     );
 
-    let with_netcdf_c = analyze(false).await;
+    let with_netcdf_c = analyze(ReaderBackend::NetcdfC).await;
     assert_eq!(
         with_netcdf_c, 0,
         "netcdf-c reports unknown, so no column carries a range"
@@ -322,6 +323,7 @@ async fn zarr_records_coordinate_ranges() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_netcdf4_file_under_an_hdf5_extension_records_its_ranges() {
     use beacon_arrow_hdf5::Hdf5Config;
+    use beacon_arrow_netcdf::datafusion::ReaderBackend;
 
     let root = tempfile::tempdir().unwrap();
     write_netcdf4(&root.path().join("datasets/obs/cold.h5"), 0.0, 5.0);
@@ -329,7 +331,7 @@ async fn a_netcdf4_file_under_an_hdf5_extension_records_its_ranges() {
 
     let runtime = builder(root.path(), enabled())
         .with_hdf5_config(Hdf5Config {
-            use_rust_reader: true,
+            backend: ReaderBackend::Oxcdf,
             ..Hdf5Config::default()
         })
         .build()
@@ -383,6 +385,7 @@ async fn a_netcdf4_file_under_an_hdf5_extension_records_its_ranges() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_predicate_drops_hdf5_files_from_the_scan() {
     use beacon_arrow_hdf5::Hdf5Config;
+    use beacon_arrow_netcdf::datafusion::ReaderBackend;
 
     let root = tempfile::tempdir().unwrap();
     write_netcdf4(&root.path().join("datasets/obs/cold.h5"), 0.0, 5.0);
@@ -391,7 +394,7 @@ async fn a_predicate_drops_hdf5_files_from_the_scan() {
 
     let runtime = builder(root.path(), enabled())
         .with_hdf5_config(Hdf5Config {
-            use_rust_reader: true,
+            backend: ReaderBackend::Oxcdf,
             ..Hdf5Config::default()
         })
         .build()
