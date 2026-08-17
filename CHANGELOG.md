@@ -76,6 +76,23 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **File statistics are on by default.** `BEACON_FILE_STATS_ENABLE` now defaults to `true`. The
+  reason it was off is gone: netcdf-c reported no ranges at all, and the pure-Rust readers for
+  netCDF and HDF5 are now the default, so a pass records real ranges. This also turns on the schema
+  cache, which lives in the same store: without it a query derives every file's schema again on
+  every cold plan, which was 83% of a netCDF query over a hundred thousand files. The timer's first
+  pass still runs one interval after boot — `ANALYZE FILES` fills the store at a time you choose.
+  Set `BEACON_FILE_STATS_ENABLE=false` for an archive of formats that supply no ranges: ODV, CSV
+  and TIFF record zero columns.
+  `BEACON_FILE_STATS_ON_STARTUP` stays `false`. A startup pass holds the database file while a
+  batch runs, so a caller that drops a runtime and reopens the same file gets a lock error; it can
+  be turned on once teardown waits for the pass.
+- **An embedded database can configure file statistics**, through `OpenOptions::file_stats`,
+  the way it already configures crawlers. It still needs a database file and a datasets store, so
+  an in-memory or dynamic-mode database leaves the subsystem off whatever the option says.
+- **The documented defaults for the pure-Rust netCDF and HDF5 readers match the code.**
+  `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` default to `true`; the pages
+  and doc comments still described them as off.
 - **The admin UI renders a result from the Arrow columns.** The query workbench reads each record
   batch as it arrives and shows it. It no longer builds a JS object for each row first, which cost
   one object per row and one property per column — on a beacon table that carries 100K+ columns,

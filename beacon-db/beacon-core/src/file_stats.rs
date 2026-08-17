@@ -10,10 +10,14 @@
 //!
 //! Two opens per file. `infer_schema` names the columns, then `infer_stats`
 //! fills them, and for netCDF both read the file. That is the dominant cost of a
-//! backfill, and it is also the cost this whole subsystem removes from the
-//! *query* path: `FileCollection` scans with `collect_stat(true)`, so today
-//! every cold query over a netCDF collection generates these same statistics
-//! inline, cached only in a 10 000-entry map that dies on restart.
+//! backfill, and it buys a query two things it otherwise pays for itself: the
+//! file list a predicate can be pruned against, and the schema cache that
+//! spares a cold plan an open of every file.
+//!
+//! A scan no longer computes statistics inline — `FastObjectTable` and
+//! `ListingTableFactoryExt` both set `with_collect_stat(false)`, because
+//! inferring them per file during `scan` made planning over 16k files take
+//! minutes. So a server with this subsystem off prunes nothing at all.
 //!
 //! # Formats that yield nothing
 //!
@@ -35,8 +39,8 @@
 //! netcdf-c call serialises on a process-global mutex and the read is
 //! synchronous, so computing ranges under it is serial *and* parks a tokio
 //! worker. The format therefore reports unknown unless `use_rust_reader` is set,
-//! which is off by default. A netCDF node that prunes nothing is usually this,
-//! and `column_count = 0` on its records is how it shows.
+//! which is the default. A netCDF node that prunes nothing has usually turned it
+//! off, and `column_count = 0` on its records is how it shows.
 //!
 //! `.h5` and `.hdf5` follow the same rule through their own switch. HDF5 owns
 //! the identity and picks the reader; with `BEACON_HDF5_USE_RUST_READER=true` a

@@ -10,17 +10,25 @@
 pub struct FileStatsConfig {
     /// Master switch. When false nothing is discovered, analyzed or stored, and
     /// no background task is spawned.
+    ///
+    /// It also gates the schema cache, which lives in the same store, so a
+    /// server with this off derives every file's schema on every cold plan.
     pub enable: bool,
     /// Seconds between passes.
     pub interval_secs: u64,
     /// Collect at startup instead of waiting for the first tick.
     ///
     /// The timer's first pass lands one whole interval after boot, so a fresh
-    /// server holds no statistics for 15 minutes by default — and a server that
-    /// restarts more often than the interval never collects at all, because the
-    /// interval starts again on each boot. This runs a pass as soon as the
-    /// runtime is up, in the background, and keeps going until the queue is
-    /// empty. The timer takes over from there.
+    /// server holds no statistics for 15 minutes — and a server that restarts
+    /// more often than the interval never collects at all, because the interval
+    /// starts again on each boot. This runs a pass as soon as the runtime is up,
+    /// in the background, and keeps going until the queue is empty. The timer
+    /// takes over from there.
+    ///
+    /// Off by default, despite that, because the pass outlives the runtime that
+    /// owns it: it holds the service, and so the database file, while a batch
+    /// runs. A process that only ever exits does not notice. A caller that drops
+    /// a runtime and opens the same file again does, and gets a lock error.
     pub on_startup: bool,
     /// Files analyzed at once.
     ///
@@ -59,6 +67,9 @@ pub struct FileStatsConfig {
     /// per batch. Deriving a schema from every file was 83% of a netCDF query
     /// over a hundred thousand files.
     ///
+    /// Only the collector writes these entries, so this does nothing while
+    /// [`Self::enable`] is false.
+    ///
     /// Turn it off to take the cache out of a query's path while leaving
     /// statistics on. Existing entries are then neither written nor read.
     pub schema_cache: bool,
@@ -69,13 +80,23 @@ impl Default for FileStatsConfig {
         // Mirrors the `BEACON_FILE_STATS_*` environment defaults in
         // `beacon-server-config`.
         Self {
-            // Off: this has not run against a real archive yet, and on a netCDF
-            // deployment without `BEACON_NETCDF_USE_RUST_READER` it would work
-            // through every file to store nothing.
-            enable: false,
+            // On. The Rust readers are the default for netCDF and HDF5, so a
+            // pass records real ranges rather than nothing, and the schema
+            // cache rides on the same store: with this off a query derives
+            // every file's schema again on every cold plan.
+            enable: true,
             interval_secs: 900,
-            // Off, so enabling statistics alone does not turn boot into a
-            // backfill on an archive that has never been analyzed.
+            // Off, and it should be on: the timer's first pass is one interval
+            // out and the interval restarts on every boot, so a fresh server
+            // holds nothing for 15 minutes and a server that restarts more
+            // often holds nothing at all.
+            //
+            // What blocks it is teardown. The startup pass is the one task that
+            // runs on every boot, and it holds the service — and so the redb
+            // database — while a batch is in flight. Dropping a runtime
+            // therefore does not release the file's lock, and an immediate
+            // reopen fails. `tables_store_lock_release` catches this. Turn this
+            // on together with a shutdown that waits for the pass.
             on_startup: false,
             concurrency: default_concurrency(),
             batch_files: 10_000,
@@ -107,9 +128,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_is_off_and_leaves_room_for_queries() {
+    fn the_default_is_on_and_leaves_room_for_queries() {
         let config = FileStatsConfig::default();
-        assert!(!config.enable);
+        assert!(config.enable);
+        assert!(
+            !config.on_startup,
+            "a startup pass holds the database open past a drop; see the comment above"
+        );
         assert!(config.concurrency >= 2);
         assert!(
             config.concurrency <= std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2),

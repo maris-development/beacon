@@ -203,7 +203,11 @@ async fn query_rejects_malformed_body() {
 /// that shape.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stream_that_fails_before_its_first_batch_is_a_400_with_a_message() {
-    let (router, _lake, _cfg) = app(config(false)).await;
+    // File statistics are on by default, and this test needs the refusal that a
+    // runtime without them gives, so it says so rather than taking the default.
+    let mut cfg = config(false);
+    cfg.file_stats.enable = false;
+    let (router, _lake, _cfg) = app(cfg).await;
     // The statement is super-user only, so anonymous stops at the privilege gate
     // long before the stream this test is about.
     let admin = basic(ADMIN_USERNAME, ADMIN_PASSWORD);

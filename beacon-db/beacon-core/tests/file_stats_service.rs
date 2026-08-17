@@ -39,6 +39,15 @@ fn enabled() -> FileStatsConfig {
     }
 }
 
+/// File statistics off. The default is on, so a test of the off state has to
+/// say so rather than take the default.
+fn disabled() -> FileStatsConfig {
+    FileStatsConfig {
+        enable: false,
+        ..enabled()
+    }
+}
+
 fn builder(root: &Path, file_stats: FileStatsConfig) -> RuntimeBuilder {
     let datasets = root.join("datasets");
     std::fs::create_dir_all(&datasets).unwrap();
@@ -605,13 +614,10 @@ async fn the_subsystem_stays_out_of_the_way_when_disabled() {
     let root = tempfile::tempdir().unwrap();
     write_parquet(&root.path().join("datasets/argo/a.parquet"), 0.0, 5.0);
 
-    let runtime = builder(root.path(), FileStatsConfig::default())
-        .build()
-        .await
-        .unwrap();
+    let runtime = builder(root.path(), disabled()).build().await.unwrap();
     assert!(
         runtime.file_stats().is_none(),
-        "the default is off, so no service is built"
+        "the switch is off, so no service is built"
     );
 }
 
@@ -850,10 +856,7 @@ async fn nothing_is_pruned_when_the_subsystem_is_off() {
     write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
     write_parquet(&root.path().join("datasets/obs/hot.parquet"), 90.0, 100.0);
 
-    let runtime = builder(root.path(), FileStatsConfig::default())
-        .build()
-        .await
-        .unwrap();
+    let runtime = builder(root.path(), disabled()).build().await.unwrap();
 
     let plan = explain(
         &runtime,
@@ -1034,10 +1037,7 @@ async fn the_function_says_so_when_the_subsystem_is_off() {
     let root = tempfile::tempdir().unwrap();
     write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
 
-    let runtime = builder(root.path(), FileStatsConfig::default())
-        .build()
-        .await
-        .unwrap();
+    let runtime = builder(root.path(), disabled()).build().await.unwrap();
 
     let error = query_error(&runtime, "SELECT * FROM file_statistics('obs/a.parquet')").await;
     assert!(error.contains("BEACON_FILE_STATS_ENABLE"), "{error}");
@@ -1077,10 +1077,7 @@ async fn the_views_are_empty_when_the_subsystem_is_off() {
     let root = tempfile::tempdir().unwrap();
     write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
 
-    let runtime = builder(root.path(), FileStatsConfig::default())
-        .build()
-        .await
-        .unwrap();
+    let runtime = builder(root.path(), disabled()).build().await.unwrap();
 
     let rows = query(&runtime, "SELECT count(*) FROM beacon.system.file_stats").await;
     assert!(rows.contains("| 0 "), "no store means no rows:\n{rows}");
@@ -1165,10 +1162,7 @@ async fn analyze_files_force_re_analyzes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn analyze_files_says_when_the_subsystem_is_off() {
     let root = tempfile::tempdir().unwrap();
-    let runtime = builder(root.path(), FileStatsConfig::default())
-        .build()
-        .await
-        .unwrap();
+    let runtime = builder(root.path(), disabled()).build().await.unwrap();
 
     // The statement plans fine; the refusal comes when the stream is polled, so
     // the error has to be collected rather than awaited.
