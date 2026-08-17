@@ -488,3 +488,151 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod scan_tests {
+    //! End-to-end checks on the columns the BBF scan returns.
+    //!
+    //! `BBFSource` accepts a pushed-down projection, so it has to apply the
+    //! whole of it. The projections here rename a column after the first one —
+    //! the shape [#382](https://github.com/maris-development/beacon/issues/382)
+    //! reported: the scan looked for a file column under the alias, found none,
+    //! and read nothing.
+
+    use std::sync::Arc;
+
+    use arrow::array::{Array, AsArray};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::datasource::listing::{
+        ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+    };
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    use super::BBFFormat;
+
+    /// A session over the two-entry fixture. The temp dir is returned so it
+    /// outlives the queries.
+    async fn table() -> (SessionContext, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        super::test_util::write_bbf_fixture(dir.path(), "scan.bbf").await;
+
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+        let options =
+            ListingOptions::new(Arc::new(BBFFormat::default())).with_file_extension(".bbf");
+        let url = ListingTableUrl::parse(dir.path().to_str().expect("utf-8 path")).expect("url");
+        let schema = options
+            .infer_schema(&ctx.state(), &url)
+            .await
+            .expect("schema");
+        let config = ListingTableConfig::new(url)
+            .with_listing_options(options)
+            .with_schema(schema);
+        ctx.register_table("t", Arc::new(ListingTable::try_new(config).expect("table")))
+            .expect("register");
+        (ctx, dir)
+    }
+
+    async fn query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
+        ctx.sql(sql)
+            .await
+            .unwrap_or_else(|e| panic!("planning {sql}: {e}"))
+            .collect()
+            .await
+            .unwrap_or_else(|e| panic!("running {sql}: {e}"))
+    }
+
+    fn one_batch(batches: Vec<RecordBatch>) -> RecordBatch {
+        let schema = batches.first().expect("at least one batch").schema();
+        arrow::compute::concat_batches(&schema, &batches).expect("concat")
+    }
+
+    /// Every value of `ints`, in the fixture's own order.
+    fn ints(batch: &RecordBatch, column: usize) -> Vec<i32> {
+        batch
+            .column(column)
+            .as_primitive::<arrow::datatypes::Int32Type>()
+            .values()
+            .to_vec()
+    }
+
+    /// An aliased projection is pushed into the scan whole. The scan has to
+    /// rename the column it read, not look for a file column under the alias.
+    ///
+    /// `ints` sits after the entry-key column, so a scan that kept the file's
+    /// own column order would also answer with the wrong values here.
+    #[tokio::test]
+    async fn applies_an_aliased_projection() {
+        let (ctx, _dir) = table().await;
+        let batch = one_batch(query(&ctx, "SELECT ints AS measurement FROM t").await);
+
+        assert_eq!(batch.schema().field(0).name(), "measurement");
+        assert_eq!(batch.column(0).null_count(), 0);
+        assert_eq!(
+            ints(&batch, 0),
+            vec![1, 2, 3, 10, 20],
+            "3 rows from entry_a, then 2 from entry_b"
+        );
+    }
+
+    /// A projection that reorders columns and renames one of them returns both,
+    /// in the order asked for and with their own values.
+    #[tokio::test]
+    async fn applies_a_reordered_projection() {
+        let (ctx, _dir) = table().await;
+        let batch = one_batch(
+            query(
+                &ctx,
+                "SELECT ints AS measurement, __entry_key AS entry FROM t",
+            )
+            .await,
+        );
+
+        assert_eq!(
+            batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect::<Vec<_>>(),
+            vec!["measurement", "entry"]
+        );
+        assert_eq!(ints(&batch, 0), vec![1, 2, 3, 10, 20]);
+
+        let entries = batch.column(1).as_string::<i32>();
+        assert_eq!(
+            (0..5).map(|i| entries.value(i)).collect::<Vec<_>>(),
+            vec!["entry_a", "entry_a", "entry_a", "entry_b", "entry_b"]
+        );
+    }
+
+    /// A computed column is a projection too, and it is pushed down whole.
+    #[tokio::test]
+    async fn applies_a_computed_projection() {
+        let (ctx, _dir) = table().await;
+        let batch = one_batch(query(&ctx, "SELECT ints + 1 AS bumped FROM t").await);
+
+        assert_eq!(batch.schema().field(0).name(), "bumped");
+        assert_eq!(
+            batch
+                .column(0)
+                .as_primitive::<arrow::datatypes::Int64Type>()
+                .values()
+                .to_vec(),
+            vec![2, 3, 4, 11, 21]
+        );
+    }
+
+    /// An alias must change nothing but the column's name. A scan that resolved
+    /// file columns by the *output* name would silently return a different set
+    /// of rows here, which is what #382 reported.
+    #[tokio::test]
+    async fn an_alias_changes_only_the_name() {
+        let (ctx, _dir) = table().await;
+        let plain = one_batch(query(&ctx, "SELECT names FROM t").await);
+        let aliased = one_batch(query(&ctx, "SELECT names AS label FROM t").await);
+
+        assert_eq!(aliased.schema().field(0).name(), "label");
+        assert_eq!(aliased.num_rows(), plain.num_rows());
+        assert_eq!(aliased.column(0), plain.column(0));
+    }
+}
