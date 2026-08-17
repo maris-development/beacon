@@ -14,29 +14,25 @@
 //!
 //! # Why a cached schema may stand in for an inferred one
 //!
-//! Every Beacon format infers one schema per object and folds them with
-//! [`super_type_schema`], which unions fields into an `IndexMap` and widens a
-//! type two files disagree on. That is a left fold, and the schema it produces
-//! captures the whole fold state: the field names in insertion order, each with
-//! its type so far. So a partial merge, folded back in at the position it came
-//! from, gives what one flat merge gives. That is what licenses answering part
-//! of a listing from the cache and inferring the rest.
+//! Every Beacon format reads one schema per object. It then merges them with
+//! [`ArrowTypeWidening`], which unions the fields that agree. The merge refuses a
+//! column that two files give two types. That merge is a semilattice join. It is
+//! idempotent, commutative and associative, so a part merge plus the rest equals
+//! one flat merge. The group boundaries do not matter. This property lets the
+//! cache answer for part of a listing, and lets inference cover the rest.
 //!
-//! # Why the listing order is kept exactly
+//! # Why the module keeps the listing order
 //!
-//! Widening is **not** commutative, and so not associative. `super_type_arrow`
-//! is a hand-written table, and it holds `(Int32, Float32) -> Float32` beside
-//! `(Float32, Int32) -> Float64`. A merge that reordered the listing, or that
-//! dropped a repeated schema, could therefore land on a different type — a
-//! property test caught exactly that.
+//! Not for the types. The merge answer no longer depends on the order. See issue
+//! #377. The order counts for the columns. A user sees field order through
+//! `SELECT *`, and that order follows first sight of a column. This module
+//! therefore keeps the units in listing order, and the merge combines them in
+//! that order.
 //!
-//! So this folds every unit's schema, in listing order, however often a schema
-//! repeats. It is the same fold the format did before, over the same sequence,
-//! and it costs the same. What the cache removes is the file opens, which is
-//! where the 9.2s was.
-//!
-//! Field order is user-visible through `SELECT *`, and it follows the same
-//! sequence, so it does not move either.
+//! The cache removes the file opens, which held the 9.2s. The merge removes the
+//! repeats. A collection of 100000 files from one instrument holds few distinct
+//! schemas, and the merge drops the rest. See
+//! [`ArrowTypeWidening::merge_schemas`].
 //!
 //! # Fail open
 //!
@@ -46,10 +42,9 @@
 
 use std::sync::Arc;
 
-use beacon_common::super_typing::super_type_schema;
 use beacon_file_stats::{FileKey, Lookup, SchemaCache, Stamp, try_file_stats_from_session};
 use datafusion::{
-    arrow::datatypes::{Schema, SchemaRef},
+    arrow::datatypes::SchemaRef,
     catalog::Session,
     common::exec_datafusion_err,
     datasource::{
@@ -62,6 +57,7 @@ use futures::{StreamExt, TryStreamExt, future};
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::format_ext::{FileFormatFactoryExt, SchemaUnit, try_file_format_factory_ext};
+use crate::type_widening::{ArrowTypeWidening, session_widening};
 
 /// One schema per URL, cached where the cache can answer.
 ///
@@ -172,7 +168,7 @@ impl CachedInference {
             .into_iter()
             .map(|schema| schema.expect("every miss was just inferred"))
             .collect();
-        merge_in_listing_order(&resolved)
+        merge_in_listing_order(&session_widening(state), &resolved)
     }
 
     /// What to ask the cache, one entry per unit, in listing order.
@@ -273,22 +269,24 @@ fn stamp_unit(objects: &[ObjectMeta], unit: &SchemaUnit) -> Stamp {
     )
 }
 
-/// Fold every unit's schema, in listing order.
+/// Merge the schema of every unit, in listing order.
 ///
-/// The same sequence the format folded before this cache existed, so the answer
-/// is the same answer. Repeats are folded again rather than skipped: widening is
-/// not commutative, so a repeat that arrives after a wider type can still move
-/// the result, and dropping it does not. See the [module docs](self).
-fn merge_in_listing_order(schemas: &[SchemaRef]) -> Result<SchemaRef, DataFusionError> {
-    super_type_schema(schemas)
-        .map(Arc::new)
+/// The sequence equals the sequence of the format before this cache, so the
+/// answer stays the same. The merge decides what it skips and what it splits. The
+/// order still sets the column order. See the [module docs](self).
+fn merge_in_listing_order(
+    widening: &ArrowTypeWidening,
+    schemas: &[SchemaRef],
+) -> Result<SchemaRef, DataFusionError> {
+    widening
+        .merge_schemas(schemas)
         .map_err(|e| exec_datafusion_err!("Failed to merge the schemas of a table: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::datatypes::{DataType, Field};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
 
     fn schema(fields: &[(&str, DataType)]) -> SchemaRef {
         Arc::new(Schema::new(
@@ -303,14 +301,27 @@ mod tests {
         schema.fields().iter().map(|f| f.name().as_str()).collect()
     }
 
-    /// The merge is the fold the format did before, over the same sequence.
+    /// The rule for a session without an extension. A server registers the same
+    /// rule.
+    fn widening() -> Arc<ArrowTypeWidening> {
+        ArrowTypeWidening::default_extension()
+    }
+
+    /// One flat fold over every schema, in order. It skips and splits nothing.
+    /// The tests below compare the merge against this result.
+    fn flat_merge(listing: &[SchemaRef]) -> SchemaRef {
+        use crate::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
+        DefaultArrowTypeWidening.merge_schemas(listing).unwrap()
+    }
+
+    /// The merge equals the earlier fold of the format, over the same sequence.
     #[test]
-    fn the_merge_unions_and_widens_over_the_listing() {
+    fn the_merge_unions_over_the_listing() {
         let a = schema(&[("TEMP", DataType::Float64), ("DEPTH", DataType::Int32)]);
         let b = schema(&[("PSAL", DataType::Float64)]);
-        let c = schema(&[("DEPTH", DataType::Int64)]);
+        let c = schema(&[("DEPTH", DataType::Int32), ("PRES", DataType::Float64)]);
 
-        // A collection that repeats itself, the way a real one does.
+        // A collection with repeats, as a real collection has.
         let listing = vec![
             Arc::clone(&a),
             Arc::clone(&a),
@@ -320,59 +331,61 @@ mod tests {
             Arc::clone(&b),
         ];
 
-        let merged = merge_in_listing_order(&listing).unwrap();
-        assert_eq!(merged.as_ref(), &super_type_schema(&listing).unwrap());
-        assert_eq!(names(&merged), vec!["TEMP", "DEPTH", "PSAL"]);
-        // And the widening still happened: Int32 beside Int64 is Int64.
-        assert_eq!(
-            merged.field_with_name("DEPTH").unwrap().data_type(),
-            &DataType::Int64
-        );
+        let merged = merge_in_listing_order(&widening(), &listing).unwrap();
+        assert_eq!(merged, flat_merge(&listing));
+        assert_eq!(names(&merged), vec!["TEMP", "DEPTH", "PSAL", "PRES"]);
     }
 
-    /// A repeated schema is folded again, not skipped.
+    /// A repeated schema cannot change the answer. The merge therefore drops it.
     ///
-    /// Skipping looks safe and is not: widening is not commutative, so a type
-    /// that arrives again *after* a wider one can still move the answer. This
-    /// pins the case a property test found.
+    /// This test held the opposite claim before. Widening was a table of pairs. It
+    /// gave `(Int32, Float32) -> Float32` and `(Float32, Int32) -> Float64`. A
+    /// second sight of a schema could then widen a column again. See issue #377.
+    /// The merge now unions what agrees and refuses the rest.
     #[test]
-    fn a_repeat_after_a_wider_type_still_counts() {
-        let narrow = schema(&[("TEMP", DataType::Int32)]);
-        let wide = schema(&[("TEMP", DataType::Float32)]);
+    fn a_repeat_cannot_move_the_answer() {
+        let one = schema(&[("TEMP", DataType::Int32)]);
+        let two = schema(&[("PSAL", DataType::Float64)]);
 
-        // Int32, then Float32, then Int32 again. The last one matters: the table
-        // holds (Int32, Float32) -> Float32 but (Float32, Int32) -> Float64.
-        let merged =
-            merge_in_listing_order(&[Arc::clone(&narrow), Arc::clone(&wide), Arc::clone(&narrow)])
-                .unwrap();
-        assert_eq!(
-            merged.field_with_name("TEMP").unwrap().data_type(),
-            &DataType::Float64,
-            "dropping the repeat would have stopped at Float32"
-        );
+        let once =
+            merge_in_listing_order(&widening(), &[Arc::clone(&one), Arc::clone(&two)]).unwrap();
+        let repeated = merge_in_listing_order(
+            &widening(),
+            &[
+                Arc::clone(&one),
+                two,
+                Arc::clone(&one),
+                schema(&[("TEMP", DataType::Int32)]),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(once, repeated);
+        assert_eq!(names(&once), vec!["TEMP", "PSAL"]);
     }
 
-    /// Field order follows the listing, because `SELECT *` shows it. Reversing
-    /// the listing must reverse the columns, exactly as a flat merge does.
+    /// Field order follows the listing, because `SELECT *` shows it. A reversed
+    /// listing gives reversed columns, as a flat merge does.
     #[test]
     fn field_order_follows_the_listing() {
         let a = schema(&[("A", DataType::Int32)]);
         let b = schema(&[("B", DataType::Int32)]);
 
-        let forward = merge_in_listing_order(&[Arc::clone(&a), Arc::clone(&b)]).unwrap();
-        let backward = merge_in_listing_order(&[b, a]).unwrap();
+        let forward =
+            merge_in_listing_order(&widening(), &[Arc::clone(&a), Arc::clone(&b)]).unwrap();
+        let backward = merge_in_listing_order(&widening(), &[b, a]).unwrap();
         assert_eq!(names(&forward), vec!["A", "B"]);
         assert_eq!(names(&backward), vec!["B", "A"]);
     }
 
-    /// A type pair with no common representation is an error, not a guess. The
-    /// deduped merge must refuse exactly what a flat merge refuses.
+    /// Two files that give a column two types are an error, not a guess. The
+    /// listing order does not change that.
     #[test]
-    fn an_irreconcilable_pair_is_still_an_error() {
+    fn a_column_with_two_types_is_still_an_error() {
         let dates = schema(&[("WHEN", DataType::Date32)]);
         let counts = schema(&[("WHEN", DataType::Int32)]);
-        assert!(merge_in_listing_order(&[dates.clone(), counts.clone()]).is_err());
-        assert!(super_type_schema(&[dates, counts]).is_err());
+        assert!(merge_in_listing_order(&widening(), &[dates.clone(), counts.clone()]).is_err());
+        assert!(merge_in_listing_order(&widening(), &[counts, dates]).is_err());
     }
 
     // ── the properties the design rests on ─────────────────────────────
@@ -396,35 +409,29 @@ mod tests {
         }
     }
 
-    /// Types that always have a common super type, so a merge over any mixture
-    /// of them succeeds and the property under test is the *result*, not the
-    /// error.
-    fn lattice() -> Vec<DataType> {
+    /// One type per column name. A merge over any mixture of these schemas then
+    /// succeeds, and each test below reads the result, not an error.
+    fn column_types() -> Vec<(&'static str, DataType)> {
         vec![
-            DataType::Int32,
-            DataType::Int64,
-            DataType::UInt8,
-            DataType::Float32,
-            DataType::Float64,
-            DataType::Utf8,
+            ("TEMP", DataType::Float64),
+            ("PSAL", DataType::Float32),
+            ("DEPTH", DataType::Int32),
+            ("TIME", DataType::Int64),
+            ("PLATFORM", DataType::Utf8),
         ]
     }
 
-    /// A pool of schemas over a shared column namespace, so the merges have
-    /// something to widen and something to union.
+    /// A pool of schemas over one set of column names. The merges then get fields
+    /// to union and fields to skip.
     fn schema_pool(rng: &mut Rng) -> Vec<SchemaRef> {
-        let columns = ["TEMP", "PSAL", "DEPTH", "TIME", "PLATFORM"];
-        let types = lattice();
+        let columns = column_types();
         (0..6)
             .map(|_| {
                 let width = 1 + rng.next(columns.len());
                 let fields: Vec<Field> = (0..width)
                     .map(|_| {
-                        Field::new(
-                            columns[rng.next(columns.len())],
-                            types[rng.next(types.len())].clone(),
-                            true,
-                        )
+                        let (name, kind) = &columns[rng.next(columns.len())];
+                        Field::new(*name, kind.clone(), true)
                     })
                     // A schema cannot hold one name twice.
                     .fold(Vec::new(), |mut kept: Vec<Field>, field| {
@@ -438,13 +445,12 @@ mod tests {
             .collect()
     }
 
-    /// Over random listings: the merge this module applies is the merge the
-    /// format applied before it, exactly.
+    /// Over random listings, the merge of this module equals the earlier merge of
+    /// the format.
     ///
-    /// The cache is allowed to change where a schema *came from*, never what the
-    /// table reports. This is the guard against a future optimization quietly
-    /// reordering or thinning the sequence — dropping repeated schemas looked
-    /// safe, and this test is what caught it.
+    /// The cache may change the source of a schema. It may not change the report
+    /// of the table. This test guards against a later change that reorders or
+    /// thins the sequence.
     #[test]
     fn the_cached_merge_matches_a_flat_merge_over_random_listings() {
         let mut rng = Rng(0x5EED);
@@ -456,19 +462,18 @@ mod tests {
                 .collect();
 
             assert_eq!(
-                merge_in_listing_order(&listing).unwrap().as_ref(),
-                &super_type_schema(&listing).unwrap(),
+                merge_in_listing_order(&widening(), &listing).unwrap(),
+                flat_merge(&listing),
                 "case {case}: the merge changed the answer for {listing:?}"
             );
         }
     }
 
-    /// A partial merge, combined in listing order, is the same answer as one
-    /// flat merge.
+    /// A part merge, combined in listing order, equals one flat merge.
     ///
-    /// This is what makes a cached schema legitimate at all: an entry holds one
-    /// file's schema, and the plan folds those partial answers together. It is
-    /// only sound while folding is associative in listing order.
+    /// This property makes a cached schema valid. One entry holds the schema of
+    /// one file, and the plan merges those part answers. The property holds only
+    /// while the merge is associative.
     #[test]
     fn a_partial_merge_combined_in_order_matches_a_flat_merge() {
         let mut rng = Rng(0xC0FFEE);
@@ -480,49 +485,70 @@ mod tests {
                 .collect();
 
             let split = 1 + rng.next(listing.len() - 1);
-            let head: SchemaRef = Arc::new(super_type_schema(&listing[..split]).unwrap());
-            let combined: Vec<SchemaRef> = std::iter::once(head)
+            let combined: Vec<SchemaRef> = std::iter::once(flat_merge(&listing[..split]))
                 .chain(listing[split..].iter().cloned())
                 .collect();
 
             assert_eq!(
-                super_type_schema(&combined).unwrap(),
-                super_type_schema(&listing).unwrap(),
+                flat_merge(&combined),
+                flat_merge(&listing),
                 "case {case}: splitting at {split} changed the answer"
             );
         }
     }
 
-    /// Widening is **not** commutative, and so not associative.
+    /// The merge answer does not depend on the schema order or the group
+    /// boundaries.
     ///
-    /// `super_type_arrow` is a hand-written table, and its two halves disagree:
-    /// `(Int32, Float32)` gives `Float32` while `(Float32, Int32)` gives
-    /// `Float64`. This pins that, because everything above depends on it: it is
-    /// the reason the merge keeps the listing order exactly, and the reason a
-    /// repeated schema is folded again rather than skipped.
-    ///
-    /// Change this and the merge above has to be re-examined, not just retuned.
+    /// Everything above rests on this property. It lets a cached part merge stand
+    /// for the files it covers. It lets the merge drop a schema it has seen. It
+    /// lets the merge split the work across threads. The property was false
+    /// before. Widening was a table of pairs that gave
+    /// `(Int32, Float32) -> Float32` and `(Float32, Int32) -> Float64`, so one
+    /// listing could merge two ways. See issue #377.
     #[test]
-    fn widening_depends_on_the_order_of_its_operands() {
-        use beacon_common::super_typing::super_type_arrow;
+    fn the_merge_does_not_depend_on_the_order_of_its_schemas() {
+        let temp = schema(&[("TEMP", DataType::Int32)]);
+        let psal = schema(&[("PSAL", DataType::Float32)]);
+        let both = schema(&[("TEMP", DataType::Int32), ("PSAL", DataType::Float32)]);
 
-        assert_eq!(
-            super_type_arrow(&DataType::Int32, &DataType::Float32),
-            Some(DataType::Float32)
-        );
-        assert_eq!(
-            super_type_arrow(&DataType::Float32, &DataType::Int32),
-            Some(DataType::Float64),
-            "the two halves of the table disagree"
-        );
+        // Every order, every group boundary and every repeat count gives the same
+        // fields with the same types.
+        for listing in [
+            vec![Arc::clone(&temp), Arc::clone(&psal)],
+            vec![Arc::clone(&psal), Arc::clone(&temp)],
+            vec![Arc::clone(&both), Arc::clone(&temp), Arc::clone(&psal)],
+            vec![flat_merge(&[Arc::clone(&temp)]), Arc::clone(&psal)],
+        ] {
+            let merged = merge_in_listing_order(&widening(), &listing).unwrap();
+            assert_eq!(merged.fields().len(), 2);
+            assert_eq!(
+                merged.field_with_name("TEMP").unwrap().data_type(),
+                &DataType::Int32
+            );
+            assert_eq!(
+                merged.field_with_name("PSAL").unwrap().data_type(),
+                &DataType::Float32
+            );
+        }
 
-        // Which makes grouping visible: the same three types widen two ways.
-        let left_first = super_type_arrow(&DataType::Float32, &DataType::Int32)
-            .and_then(|pair| super_type_arrow(&pair, &DataType::Float32));
-        let right_first = super_type_arrow(&DataType::Int32, &DataType::Float32)
-            .and_then(|pair| super_type_arrow(&DataType::Float32, &pair));
-        assert_eq!(left_first, Some(DataType::Float64));
-        assert_eq!(right_first, Some(DataType::Float32));
+        // A second width widens the column, from either end of the listing.
+        let wider = schema(&[("TEMP", DataType::Float32)]);
+        for listing in [
+            vec![temp.clone(), wider.clone()],
+            vec![wider, temp.clone()],
+        ] {
+            let merged = merge_in_listing_order(&widening(), &listing).unwrap();
+            assert_eq!(
+                merged.field_with_name("TEMP").unwrap().data_type(),
+                &DataType::Float64
+            );
+        }
+
+        // A type from another family is refused, from either end.
+        let text = schema(&[("TEMP", DataType::Utf8)]);
+        assert!(merge_in_listing_order(&widening(), &[temp.clone(), text.clone()]).is_err());
+        assert!(merge_in_listing_order(&widening(), &[text, temp]).is_err());
     }
 
     /// A stamp covers the source and every dependent, so a Zarr chunk that

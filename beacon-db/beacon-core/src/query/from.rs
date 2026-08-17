@@ -7,7 +7,6 @@ use std::sync::Arc;
 use beacon_arrow_csv::datafusion::CsvFormat;
 use beacon_arrow_odv::datafusion::OdvFormat;
 use beacon_datafusion_ext::fast_object::FastObjectTable;
-use beacon_datafusion_ext::type_widening::SuperTypeWidening;
 use datafusion::{
     datasource::{file_format::FileFormat, listing::ListingTableUrl, provider_as_source},
     logical_expr::{LogicalPlanBuilder, TableSource},
@@ -124,16 +123,9 @@ impl FromFormat {
         let urls = self.listing_table_urls(session_context)?;
         let file_format = self.file_format(session_context, &urls).await?;
 
-        // Super typing, not the session's rule: this API has always widened a
-        // column two files disagree on rather than refusing the collection.
+        // The merge rule of the session. A SQL `read_*` uses the same rule.
         let table = Arc::new(
-            FastObjectTable::try_new_with_widening(
-                &session_context.state(),
-                file_format,
-                urls,
-                &SuperTypeWidening,
-            )
-            .await?,
+            FastObjectTable::try_new(&session_context.state(), file_format, urls).await?,
         );
 
         Ok(provider_as_source(table))

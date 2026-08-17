@@ -14,11 +14,11 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
+use beacon_datafusion_ext::type_widening::session_widening;
 
 pub const DEFAULT_ARROW_EXTENSION: &str = "arrow";
 
@@ -145,15 +145,23 @@ impl FileFormat for ArrowFormat {
                         .await
                 }
             })
-            .buffer_unordered(file_open_parallelism()) // tune this
+            // Keep the listing order. The merged schema then does not depend on
+            // the disk answer order. See issue #377. The width stays the
+            // concurrency. `buffered` holds a finished schema until its turn.
+            .buffered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;
 
-        let super_schema = super_type_schema(&schemas).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
-        })?;
-
-        Ok(Arc::new(super_schema))
+        // The rule of the session decides the result for a column that two
+        // files describe differently.
+        session_widening(state)
+            .merge_schemas(&schemas)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to infer schema: {}",
+                    e
+                ))
+            })
     }
 
     async fn infer_stats(
@@ -283,11 +291,11 @@ mod tests {
         assert!(datasets.iter().all(|d| d.format == DEFAULT_ARROW_EXTENSION));
     }
 
-    /// Schema inference across several IPC files goes through Beacon's supertyping,
-    /// so an Int64 and a Float64 column of the same name widen to Float64 instead
-    /// of erroring or silently taking the first file's type.
+    /// The merge rule of the session covers several IPC files. It unions the
+    /// columns, and it widens a numeric column that two files give two widths. The
+    /// answer may not depend on the disk answer order. See issue #377.
     #[tokio::test]
-    async fn infer_schema_super_types_across_multiple_files() {
+    async fn infer_schema_merges_across_multiple_files() {
         let store = Arc::new(InMemory::new());
         let object_store: Arc<dyn ObjectStore> = store.clone();
         let a = put_ipc(
@@ -308,13 +316,33 @@ mod tests {
         .await;
 
         let ctx = SessionContext::new();
-        let schema = ArrowFormat::default()
-            .infer_schema(&ctx.state(), &object_store, &[a, b])
-            .await
-            .expect("both IPC files should be readable");
+        for pair in [[a.clone(), b.clone()], [b, a.clone()]] {
+            let schema = ArrowFormat::default()
+                .infer_schema(&ctx.state(), &object_store, &pair)
+                .await
+                .expect("two numeric widths merge");
+            assert_eq!(
+                schema.field_with_name("value").unwrap().data_type(),
+                &DataType::Float64,
+                "an Int64 column beside a Float64 one needs a Float64"
+            );
+        }
 
-        assert_eq!(schema.fields().len(), 1);
-        assert_eq!(schema.field(0).data_type(), &DataType::Float64);
+        // Files that agree union their columns.
+        let other = put_ipc(
+            &store,
+            &Path::from("other.arrow"),
+            Field::new("other", DataType::Int64, true),
+            Arc::new(Int64Array::from(vec![4])),
+            false,
+        )
+        .await;
+        let schema = ArrowFormat::default()
+            .infer_schema(&ctx.state(), &object_store, &[a, other])
+            .await
+            .expect("agreeing files merge");
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["value", "other"]);
     }
 
     /// Files that are not valid Arrow IPC must surface as an error rather than an

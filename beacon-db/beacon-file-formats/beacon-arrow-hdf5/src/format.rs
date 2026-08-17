@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_arrow_netcdf::datafusion::{statistics, NetCDFFormatFactory, NetcdfFormat};
-use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_datafusion_ext::type_widening::session_widening;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
@@ -397,13 +397,16 @@ impl FileFormat for Hdf5Format {
         if schemas.is_empty() {
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
-        let schema = super_type_schema(&schemas).map_err(|e| {
-            exec_datafusion_err!(
-                "Failed to compute super type schema for HDF5 datasets: {}",
-                e
-            )
-        })?;
-        Ok(schema.into())
+        // The rule of the session decides the result for a column that two
+        // files describe differently.
+        session_widening(state)
+            .merge_schemas(&schemas)
+            .map_err(|e| {
+                exec_datafusion_err!(
+                    "Failed to merge the schemas of the HDF5 datasets: {}",
+                    e
+                )
+            })
     }
 
     async fn infer_stats(
