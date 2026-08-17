@@ -66,4 +66,15 @@ describe("getArrowDecoder", () => {
     for await (const batch of batches) seen.push(batch.numRows);
     expect(seen).toEqual([2]);
   });
+
+  it("exposes a streamed batch as Arrow columns, without decoding rows", async () => {
+    const decoder = await getArrowDecoder();
+    const batches = await decoder.readStream(responseByteStream(new Response(ipc())));
+    for await (const batch of batches) {
+      expect(batch.schema.fields.map((f) => f.name)).toEqual(["n"]);
+      const column = batch.getChildAt(0);
+      expect(column?.length).toBe(2);
+      expect([column?.get(0), column?.get(1)]).toEqual([1, 2]);
+    }
+  });
 });

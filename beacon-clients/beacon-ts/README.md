@@ -142,8 +142,28 @@ alternative.
 | `queryArrow()` | default Arrow stream | an `apache-arrow` `Table` |
 | `queryStream()` | default Arrow stream | `AsyncGenerator<RecordBatch>` — streamed, unbuffered |
 | `queryArrowTableStream()` | default Arrow stream | `AsyncGenerator<Table>` — one Table per batch, unbuffered |
+| `queryBatches()` | default Arrow stream | `{ queryId, batches }` — the query id, plus the batches as they arrive |
 | `queryCsv()` | `csv` | `{ rows, queryId }` — string-valued rows |
 | `queryRaw(query, format?)` | any (or default stream) | the raw `fetch` `Response` |
+
+Every batch and table also gives its columns directly, which costs no JS object
+per row. Beacon produces rows while the query still runs, so a consumer can read
+the batches as they arrive and stop at the rows it needs:
+
+```ts
+const controller = new AbortController();
+const { batches } = await beacon.queryBatches("SELECT * FROM ctd", controller.signal);
+let seen = 0;
+for await (const batch of batches) {
+  const temp = batch.getChildAt(batch.schema.fields.findIndex((f) => f.name === "TEMP"));
+  for (let i = 0; i < batch.numRows; i++) console.log(temp?.get(i));
+  seen += batch.numRows;
+  if (seen >= 500) {
+    controller.abort(); // enough rows; stop the query on the server
+    break;
+  }
+}
+```
 
 `getArrowDecoder()` exposes the same decoder the methods above use — a loaded,
 zstd-enabled `apache-arrow` — so you can decode Beacon's Arrow output yourself:
