@@ -18,11 +18,8 @@ tag. Releases before 2.0.0 are recorded in the
   (`ST_ClusterKMeans`, `ST_ClusterDBSCAN`). They replace `geodatafusion`, which held a much
   smaller set. A netCDF, Zarr, CSV or Parquet table holds coordinate columns, not geometry, and
   `ST_Point(longitude, latitude)` builds a geometry from those, so the whole set reaches every
-  format. A GeoParquet geometry column is a native GeoArrow column that the functions read
-  directly, but a separate scan defect blocks that today: `read_geoparquet` selects the right
-  columns and keeps the old column positions, so a query must read the columns from the first one
-  onwards. Geometry is written last, so every query over it fails, and so does a plain
-  `WHERE temperature > 0`.
+  format. A GeoParquet geometry column is a native GeoArrow column, and the functions read it
+  directly.
   Each predicate runs a bounding box test before the exact test, and a constant argument gets a
   cached R-tree. Beacon's own `st_within_point` and `st_geojson_as_wkt` stay beside the set: they
   need no geometry column, and `beacon-functions/benches/within_point.rs` measures the first one at
@@ -79,6 +76,14 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **The admin UI renders a result from the Arrow columns.** The query workbench reads each record
+  batch as it arrives and shows it. It no longer builds a JS object for each row first, which cost
+  one object per row and one property per column — on a beacon table that carries 100K+ columns,
+  the decode was the wait, not the query. The grid now reads one value as `column.get(row)`, and
+  the preview and dataset pages take the same path. Duplicate column names survive, because the
+  columns come from the Arrow schema and not from the keys of a decoded row. The SDK types state
+  the columnar access the UI uses: `ArrowTable` and `ArrowRecordBatch` declare `schema` and
+  `getChildAt`, with the new `ArrowVector`, `ArrowField` and `ArrowSchema`.
 - **Minimum supported Rust is 1.94**, up from 1.91. `iceberg` and `iceberg-datafusion` 0.10 — the
   only release line built against the DataFusion 53 and Arrow 58 this workspace unifies on —
   declare `rust-version = "1.94"`, so the workspace floor follows. Beacon's own code uses no
@@ -113,6 +118,33 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **The GeoParquet scan applied only part of a pushed-down projection.** A `FileSource` that
+  accepts a projection has to apply the whole of it. This one accepted a projection and then read
+  only the column names out of it, which dropped everything else. Geometry is written last,
+  so every query over it failed, and so did a plain `WHERE temperature > 0`. Two quieter faults
+  came with it: `SELECT x AS y` found no column named `y` in the file and returned a column of
+  NULLs, and a `PARTITIONED BY` value was null-filled instead of taken from the path. The scan now
+  splits the projection with DataFusion's own `SplitProjection`: the reader selects the file
+  columns, and `ProjectionOpener` applies the rest above it. The reader also stops decoding the
+  columns it then threw away — it reads only the projected ones.
+- **A large GeoParquet file returned every row once per partition.** DataFusion divides a file over
+  the repartition threshold into byte ranges, one per partition, and the GeoParquet reader ignored
+  the range it was given, so each partition read the whole file. The reader now takes the row groups
+  whose first page starts inside its own range, which is the rule the plain Parquet reader uses.
+- **A GeoParquet geometry column reached the spatial functions as a plain struct.** Merging the
+  file schemas rebuilt every field from its name and type, which dropped the GeoArrow extension
+  keys that mark a column as a geometry. `ST_Extent(geometry)` answered `Extension type name
+  missing`. A field now keeps its own metadata whenever every file states the same metadata for it.
+- **A GeoParquet scan read every row group, and reported no statistics.** A GeoParquet file states
+  a bounding box per row group, in its `covering` metadata or in the coordinate columns of a native
+  encoding, and Beacon read neither. A filter of `ST_Intersects`, `ST_Within`, `ST_Contains`,
+  `ST_BBoxIntersects` or `ST_DWithin` with a constant distance now drops each row group whose box
+  lies outside the query box, before it reads a byte. The box test is not the exact test, so the
+  predicate still runs over every row the scan keeps. `EXPLAIN ANALYZE` reports
+  `geoparquet_row_groups_considered`, `geoparquet_row_groups_pruned` and `geoparquet_files_pruned`.
+  `infer_stats` also reads the file metadata now, through the same converter plain Parquet uses, so
+  `beacon.system.file_stats` holds a row count and a range per plain column and file pruning drops
+  a file before the row group step runs.
 - **The admin web UI ignored the server URL prefix.** Behind `BEACON_BASE_PATH=/beacon` the page at
   `/beacon/admin` asked for `/admin/assets/*` and stayed blank. Vite wrote the prefix into every
   asset URL at build time, and one build cannot know a run time setting. The build now emits URLs

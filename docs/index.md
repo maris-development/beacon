@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "Beacon"
   text: "Query millions of files with one SQL statement"
-  tagline: "Beacon is a query engine for scientific data. One node serves your whole community over SQL, reading NetCDF, Zarr, Parquet and ODV where the files already are. No download. No conversion. No ETL."
+  tagline: "Beacon is a data lake query engine for scientific data. One node serves your whole community over SQL, reading NetCDF, Zarr, Parquet and other formats where the files already are. No download. No conversion. No ETL."
   image:
     src: /hero.png
     alt: Beacon
@@ -25,13 +25,13 @@ hero:
       link: /available-nodes/available-nodes
 
 features:
-  - title: Observational data, not just grids
+  - title: Any data shape, gridded or ragged
     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></svg>'
-    details: Argo floats, CTD casts, gliders and moorings give ragged profiles, one schema per file and hundreds of thousands of small files. Beacon reads that shape directly. You write no Python loop.
+    details: Argo floats, CTD casts, gliders and moorings give ragged profiles, one schema per file and hundreds of thousands of files. Beacon reads that shape directly.
 
-  - title: Atlas collections skip whole files
-    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/></svg>'
-    details: An Atlas collection stores per-file statistics next to the data. A filter on time or depth drops files before Beacon opens any array. Large collections stay fast.
+  - title: Filters skip whole files
+    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>'
+    details: Beacon keeps per-file statistics for your archive. A filter on time, depth or position drops files before Beacon opens any array. Large archives stay fast.
 
   - title: One node, every client
     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>'

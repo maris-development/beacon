@@ -68,12 +68,18 @@ iceberg = "=0.10.0"
 iceberg-datafusion = "=0.10.0"
 datafusion = "^53"
 
+datafusion-datasource = "^53"
+
+datafusion-datasource-parquet = "^53"
+
 datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 
 
 datafusion-table-providers = { version = "=0.11.2", default-features = false }
 
 datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77", default-features = false, features = ["df53", "sql"] }
+
+datafusion-spatial-kernels = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77" }
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 
 oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.3.0", features = ["async", "object-store", "ndarray"] }
@@ -111,9 +117,7 @@ cast = "0.3.0"
 chacha20poly1305 = "0.10"
 csv = "1.3.1"
 envconfig = "0.11.0"
-# Must stay at the version `datafusion-spatial` uses. Two `geo` versions do not coexist: 0.31 and
-# 0.33 need `i_overlay` 4.0 and 4.5, and cargo picks one version per major. Cargo then fails to
-# resolve. Read the datafusion-spatial README before you move this line.
+
 geo = "0.33"
 geojson = "0.24.2"
 gsw = "0.2.2"

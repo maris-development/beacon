@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { EMPTY_RESULT, resultFromTable } from "@/lib/arrow-result";
 import { useBeacon } from "@/lib/beacon-context";
 import { COLUMN_PAGE_SIZE, parseSchema } from "@/lib/schema";
 import { errorMessage } from "@/lib/errors";
@@ -1071,13 +1072,13 @@ function DatasetPreview({ path, format }: { path: string; format?: string }) {
     queryKey: ["dataset-preview", path],
     queryFn: async () => {
       const cols = parseSchema(await beacon.datasetSchema(path)).map((c) => c.name);
-      if (cols.length === 0) return { rows: [] as Record<string, unknown>[], table: undefined };
-      const { rows, table } = await beacon.query({
+      if (cols.length === 0) return EMPTY_RESULT;
+      const table = await beacon.queryArrow({
         select: cols.map((name) => ({ column: name })),
         from: { [fromKey(format)]: { paths: [path] } },
         limit: PREVIEW_ROWS,
       });
-      return { rows, table };
+      return resultFromTable(table);
     },
   });
 
@@ -1094,14 +1095,14 @@ function DatasetPreview({ path, format }: { path: string; format?: string }) {
       </div>
     );
 
-  const rows = query.data?.rows ?? [];
+  const result = query.data ?? EMPTY_RESULT;
   return (
     <div className="space-y-2">
       <div className="max-h-[60vh] overflow-auto rounded-md border">
-        <ResultsGrid rows={rows} table={query.data?.table} />
+        <ResultsGrid result={result} />
       </div>
-      {rows.length > 0 && (
-        <p className="text-xs text-muted-foreground">First {rows.length} rows.</p>
+      {result.numRows > 0 && (
+        <p className="text-xs text-muted-foreground">First {result.numRows} rows.</p>
       )}
     </div>
   );

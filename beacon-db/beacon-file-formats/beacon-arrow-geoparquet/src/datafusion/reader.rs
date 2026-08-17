@@ -10,6 +10,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use datafusion::error::{DataFusionError, Result};
 use geoarrow_schema::CoordType;
+use geoparquet::metadata::GeoParquetMetadata;
 use geoparquet::reader::GeoParquetReaderBuilder;
 use object_store::{ObjectMeta, ObjectStore};
 use parquet::arrow::ParquetRecordBatchStreamBuilder;
@@ -29,8 +30,8 @@ pub(crate) async fn stream_builder(
     object_store: Arc<dyn ObjectStore>,
     object: &ObjectMeta,
 ) -> Result<GeoStreamBuilder> {
-    let reader = ParquetObjectReader::new(object_store, object.location.clone())
-        .with_file_size(object.size);
+    let reader =
+        ParquetObjectReader::new(object_store, object.location.clone()).with_file_size(object.size);
 
     ParquetRecordBatchStreamBuilder::new(reader)
         .await
@@ -43,14 +44,26 @@ pub(crate) async fn stream_builder(
 /// their native GeoArrow type. Files without a `geo` metadata key fall back to
 /// the plain Arrow schema, so a regular Parquet file is still readable.
 pub(crate) fn output_schema(builder: &GeoStreamBuilder) -> Result<SchemaRef> {
+    Ok(geo_schema(builder)?.0)
+}
+
+/// The output schema together with the `geo` metadata it was derived from.
+///
+/// Row group pruning needs that metadata as well as the schema, and parsing it
+/// twice would parse the same JSON twice. A plain Parquet file answers `None`
+/// for the metadata and its own Arrow schema.
+pub(crate) fn geo_schema(
+    builder: &GeoStreamBuilder,
+) -> Result<(SchemaRef, Option<GeoParquetMetadata>)> {
     match builder.geoparquet_metadata() {
         Some(geo_meta) => {
             let geo_meta = geo_meta.map_err(|e| DataFusionError::External(Box::new(e)))?;
-            builder
+            let schema = builder
                 .geoarrow_schema(&geo_meta, true, COORD_TYPE)
-                .map_err(|e| DataFusionError::External(Box::new(e)))
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            Ok((schema, Some(geo_meta)))
         }
-        None => Ok(builder.schema().clone()),
+        None => Ok((builder.schema().clone(), None)),
     }
 }
 
