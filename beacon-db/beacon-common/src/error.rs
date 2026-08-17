@@ -5,20 +5,20 @@
 //! single type and get a descriptive [`Display`](std::fmt::Display) message for
 //! logging.
 //!
-//! Lower-level helpers that sit directly on DataFusion trait paths (e.g.
+//! Some helpers sit on a DataFusion trait path. Two examples are
 //! [`parse_listing_table_url`](crate::listing_url::parse_listing_table_url) and
-//! the [`TableProvider`](datafusion::catalog::TableProvider) implementations)
-//! intentionally keep returning [`datafusion::error::Result`] — converting those
-//! would cascade across every dependent crate and fight the trait signatures.
+//! each [`TableProvider`](datafusion::catalog::TableProvider) implementation.
+//! They keep [`datafusion::error::Result`] on purpose. A change there reaches
+//! every dependent crate, and it fights the trait signatures.
 
-/// Errors produced by `beacon-common`'s utility functions.
+/// The errors of the utility functions in `beacon-common`.
 #[derive(Debug, thiserror::Error)]
 pub enum CommonError {
-    /// Failed to parse a CF-convention time `units` string (bad calendar,
-    /// reference date, or time unit). The message carries the offending input.
+    /// A CF `units` string does not parse. The calendar, the reference date or the
+    /// time unit is wrong. The message holds the input.
     #[error("{0}")]
     CfTime(String),
 }
 
-/// Result alias for fallible `beacon-common` operations.
+/// The result alias for a `beacon-common` operation that can fail.
 pub type Result<T> = std::result::Result<T, CommonError>;

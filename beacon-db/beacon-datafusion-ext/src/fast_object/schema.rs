@@ -1,16 +1,16 @@
-//! Inferring a table's schema, from the cache where it can.
+//! The schema of a table, from the cache where the cache can answer.
 //!
-//! # What this replaces
+//! # What this module replaces
 //!
-//! `ListingOptions::infer_schema` lists a URL and hands the whole listing to the
-//! format, which opens every object. Nothing kept the result, so the second
-//! query over a hundred thousand netCDF files opened the same hundred thousand
-//! files as the first. Measured, that is 9.2s of a 10.4s query.
+//! `ListingOptions::infer_schema` lists a URL and gives the whole listing to the
+//! format. The format then opens every object. Nothing kept the result, so a
+//! second query over 100000 netCDF files opened the same 100000 files. That work
+//! measured 9.2s of a 10.4s query.
 //!
-//! This does the same listing, then asks the schema cache about each object
-//! first, and opens only the ones it has no answer for. A fully analysed
-//! collection costs one lookup per file and one merge. A collection that gained
-//! a thousand files costs a thousand opens, not a hundred thousand.
+//! This module runs the same listing. It then asks the schema cache about each
+//! object, and it opens only the objects without an answer. A fully analysed
+//! collection costs one lookup per file and one merge. A collection with 1000 new
+//! files costs 1000 opens, not 100000.
 //!
 //! # Why a cached schema may stand in for an inferred one
 //!
@@ -36,9 +36,9 @@
 //!
 //! # Fail open
 //!
-//! No cache, no format fingerprint, an unreadable table, a stale entry: each one
-//! falls back to inferring. This may only ever make a query faster. It may never
-//! change its answer.
+//! Four cases send the module back to the format: no cache, no format
+//! fingerprint, an unreadable table and a stale entry. The cache may make a query
+//! faster. It may never change the answer of a query.
 
 use std::sync::Arc;
 
@@ -59,12 +59,12 @@ use object_store::{ObjectMeta, ObjectStore};
 use crate::format_ext::{FileFormatFactoryExt, SchemaUnit, try_file_format_factory_ext};
 use crate::type_widening::{ArrowTypeWidening, session_widening};
 
-/// One schema per URL, cached where the cache can answer.
+/// One schema per URL. The cache answers where it can.
 ///
-/// The caller merges them. `FastObjectTable` applies the session's widening
-/// rule, and an external table has one URL and takes it as it is — so the split
-/// stays here rather than being folded into one schema, and neither caller's
-/// merge changes.
+/// The caller merges the schemas. `FastObjectTable` applies the widening rule of
+/// the session. An external table has one URL and takes that schema as it is.
+/// This function therefore returns one schema per URL. The merge of each caller
+/// stays as it is.
 pub async fn infer_url_schemas(
     state: &dyn Session,
     options: &ListingOptions,
@@ -81,8 +81,9 @@ pub async fn infer_url_schemas(
     Ok(schemas)
 }
 
-/// What `ListingOptions::infer_schema` does, per URL. The path every format
-/// that has not opted in still takes, and the one every failure falls back to.
+/// What `ListingOptions::infer_schema` does, per URL.
+///
+/// A format outside the cache takes this path. Every failure falls back to it.
 async fn infer_uncached(
     state: &dyn Session,
     options: &ListingOptions,
@@ -96,24 +97,26 @@ async fn infer_uncached(
     Ok(schemas)
 }
 
-/// The cache, and the format identity its entries are keyed under.
+/// The cache, and the format identity of its entries.
 struct CachedInference {
     cache: Arc<SchemaCache>,
     factory: Arc<dyn FileFormatFactoryExt>,
-    /// The format's options fingerprint. Two option sets that read a file
+    /// The option fingerprint of the format. Two option sets that read a file
     /// differently never share a key.
     fingerprint: u64,
 }
 
 impl CachedInference {
-    /// `None` when this session or this format cannot use the cache: no
-    /// file-statistics store, no factory behind the format, or a format that
-    /// has not opted in. Each is a reason to infer, not a reason to fail.
+    /// `None` when this session or this format cannot use the cache. Three cases
+    /// give `None`: no file statistics store, no factory for the format, and a
+    /// format outside the cache. Each case is a reason to read the files. None of
+    /// them is a reason to fail.
     fn for_session(state: &dyn Session, format: &Arc<dyn FileFormat>) -> Option<Self> {
         let store = try_file_stats_from_session(state)?;
-        // The factory answers to the format's own extension, which is how it was
-        // registered. It is the only route back to the `Ext` trait: DataFusion
-        // hands out `Arc<dyn FileFormatFactory>` and there is no upcast.
+        // The factory answers to the extension of the format, because the
+        // registration used that extension. This lookup is the only route back to
+        // the `Ext` trait. DataFusion returns `Arc<dyn FileFormatFactory>`, and
+        // Rust has no upcast from it.
         let factory = try_file_format_factory_ext(state, &format.get_ext())?;
         let fingerprint = factory.schema_options_fingerprint(format.as_ref())?;
         Some(Self {
@@ -123,7 +126,7 @@ impl CachedInference {
         })
     }
 
-    /// One URL's schema: list it, answer what the cache can, infer the rest.
+    /// The schema of one URL. List the URL. Read the cache. Then open the rest.
     async fn url_schema(
         &self,
         state: &dyn Session,
@@ -135,8 +138,8 @@ impl CachedInference {
 
         let units = self.factory.schema_units(&objects);
         if units.is_empty() {
-            // Nothing to key on. Let the format say what that means: netCDF and
-            // Atlas answer with an empty schema, Zarr with an error.
+            // The listing holds no key. The format states the result. netCDF and
+            // Atlas answer with an empty schema. Zarr answers with an error.
             return options.format.infer_schema(state, &store, &objects).await;
         }
 
@@ -171,7 +174,7 @@ impl CachedInference {
         merge_in_listing_order(&session_widening(state), &resolved)
     }
 
-    /// What to ask the cache, one entry per unit, in listing order.
+    /// The cache request. It holds one entry per unit, in listing order.
     fn lookups(
         &self,
         url: &ListingTableUrl,
@@ -192,11 +195,11 @@ impl CachedInference {
             .collect()
     }
 
-    /// The schemas of the units the cache had no answer for.
+    /// The schemas of the units without a cache answer.
     ///
-    /// Driven at the session's `meta_fetch_concurrency`, which is the width the
-    /// formats use for this themselves. A serial loop here would be slower than
-    /// no cache at all on a cold collection.
+    /// The width is the `meta_fetch_concurrency` of the session. The formats use
+    /// the same width. A serial loop here would make a cold collection slower than
+    /// no cache.
     async fn infer_missing(
         &self,
         state: &dyn Session,
@@ -231,10 +234,10 @@ impl CachedInference {
     }
 }
 
-/// Everything at `url`, the way `ListingOptions::infer_schema` gathers it.
+/// Every object at `url`, as `ListingOptions::infer_schema` collects them.
 ///
-/// Empty objects are dropped: they cannot affect a schema, and a format asked to
-/// read one may well throw.
+/// The function drops an empty object. Such an object changes no schema, and a
+/// format can fail on it.
 async fn list_objects(
     state: &dyn Session,
     options: &ListingOptions,
@@ -248,12 +251,12 @@ async fn list_objects(
         .await
 }
 
-/// What one cached entry describes: its source object, then everything else it
-/// depends on, in listing order.
+/// The content of one cache entry. It holds the source object first. It then
+/// holds every other object of the unit, in listing order.
 ///
-/// A plain file depends on itself alone. A Zarr or Atlas store depends on its
-/// whole directory, so an array added under an unchanged marker still retires
-/// the entry.
+/// A plain file depends on itself. A Zarr store and an Atlas store depend on the
+/// whole directory. A new array under an unchanged marker therefore retires the
+/// entry.
 fn stamp_unit(objects: &[ObjectMeta], unit: &SchemaUnit) -> Stamp {
     beacon_file_stats::stamp_objects(
         std::iter::once(unit.source)
@@ -388,15 +391,15 @@ mod tests {
         assert!(merge_in_listing_order(&widening(), &[counts, dates]).is_err());
     }
 
-    // ── the properties the design rests on ─────────────────────────────
+    // ── the properties of the design ───────────────────────────────────
     //
-    // Randomised rather than enumerated, because the interesting cases are
-    // combinations. Deterministic all the same: the generator is a fixed
-    // sequence, so a failure here reproduces exactly.
+    // These tests use random cases, because the interesting cases are
+    // combinations. The cases stay deterministic. The generator gives a fixed
+    // sequence, so a failure repeats exactly.
 
-    /// A tiny linear congruential generator. Nothing here needs randomness in
-    /// the cryptographic sense, and a fixed sequence is what makes a failing
-    /// case reproducible without a seed to hunt for.
+    /// A small linear congruential generator. These tests need no cryptographic
+    /// random values. A fixed sequence makes a failed case repeat, and it needs no
+    /// seed from a log.
     struct Rng(u64);
 
     impl Rng {
