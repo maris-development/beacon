@@ -20,9 +20,9 @@
 //!
 //! # Which reader runs
 //!
-//! netcdf-c stays the default. Set the `use_rust_reader` flag on
-//! [`Hdf5Config`](crate::Hdf5Config), or the `use_rust_reader` option of one
-//! table, to select this path.
+//! This reader is the default. netcdf-c is the fallback: clear the
+//! `use_rust_reader` flag on [`Hdf5Config`](crate::Hdf5Config), or the
+//! `use_rust_reader` option of one table, to read through it instead.
 //!
 //! # What this reader adds over the netCDF one
 //!

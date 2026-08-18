@@ -11,10 +11,22 @@ async fn seeded(tag: &str) -> TestRuntime {
 }
 
 /// The same fixtures on a runtime that reads HDF5 with the pure-Rust reader.
+///
+/// That is the default, so this is `seeded` with the reader named. It stays
+/// named, because each test that uses it is about what this reader does.
 async fn seeded_with_rust_hdf5(tag: &str) -> TestRuntime {
+    seeded_with_hdf5_backend(tag, true).await
+}
+
+/// The same fixtures on a runtime that reads HDF5 with netcdf-c, the fallback.
+async fn seeded_with_netcdf_c_hdf5(tag: &str) -> TestRuntime {
+    seeded_with_hdf5_backend(tag, false).await
+}
+
+async fn seeded_with_hdf5_backend(tag: &str, use_rust_reader: bool) -> TestRuntime {
     let rt = runtime_with(tag, |b| {
         b.with_hdf5_config(Hdf5Config {
-            use_rust_reader: true,
+            use_rust_reader,
             ..Hdf5Config::default()
         })
     })
@@ -27,8 +39,7 @@ fn seed(rt: TestRuntime) -> TestRuntime {
     write_file(&rt.datasets_dir().join("r/two.csv"), "v,name\n3,c\n");
     std::fs::copy(parquet_fixture(), rt.datasets_dir().join("pq.parquet"))
         .expect("copy parquet fixture");
-    std::fs::copy(netcdf_fixture(), rt.datasets_dir().join("wod.nc"))
-        .expect("copy netcdf fixture");
+    std::fs::copy(netcdf_fixture(), rt.datasets_dir().join("wod.nc")).expect("copy netcdf fixture");
     // A NetCDF-4 file *is* HDF5, so the same bytes serve `read_hdf5`.
     std::fs::copy(netcdf_fixture(), rt.datasets_dir().join("wod.h5"))
         .expect("copy netcdf fixture as hdf5");
@@ -72,7 +83,10 @@ async fn read_csv_scans_filters_and_projects() {
     );
     // Projection + predicate over the ad-hoc scan.
     assert_eq!(
-        scalar_i64(&rt.sql("SELECT v FROM read_csv('r/one.csv') WHERE name = 'b'").await),
+        scalar_i64(
+            &rt.sql("SELECT v FROM read_csv('r/one.csv') WHERE name = 'b'")
+                .await
+        ),
         2,
         "the WHERE should select row (2, 'b')"
     );
@@ -93,10 +107,15 @@ async fn read_csv_glob_merges_matching_files() {
 async fn read_parquet_scans_the_fixture() {
     let rt = seeded("read-parquet").await;
 
-    let count = scalar_i64(&rt.sql("SELECT count(*) FROM read_parquet('pq.parquet')").await);
+    let count = scalar_i64(
+        &rt.sql("SELECT count(*) FROM read_parquet('pq.parquet')")
+            .await,
+    );
     assert!(count > 0, "the parquet fixture should contain rows");
 
-    let one = rt.sql("SELECT * FROM read_parquet('pq.parquet') LIMIT 1").await;
+    let one = rt
+        .sql("SELECT * FROM read_parquet('pq.parquet') LIMIT 1")
+        .await;
     assert_eq!(total_rows(&one), 1);
     assert!(
         one[0].num_columns() > 0,
@@ -123,7 +142,7 @@ async fn read_netcdf_scans_the_fixture() {
 async fn read_hdf5_counts_the_same_rows_on_either_reader() {
     const COUNT: &str = "SELECT count(*) FROM read_hdf5('wod.h5')";
 
-    let netcdf_c = seeded("read-hdf5-netcdf-c").await;
+    let netcdf_c = seeded_with_netcdf_c_hdf5("read-hdf5-netcdf-c").await;
     let rows = scalar_i64(&netcdf_c.sql(COUNT).await);
     assert!(rows > 0, "the WOD CTD fixture should yield rows");
 
@@ -139,9 +158,13 @@ async fn read_hdf5_reaches_a_nested_group_on_the_rust_reader() {
     const SQL: &str = r#"SELECT "observations/qc/flag" FROM read_hdf5('nested.h5')"#;
 
     let rust = seeded_with_rust_hdf5("read-hdf5-nested-rust").await;
-    assert_eq!(total_rows(&rust.sql(SQL).await), 12, "3 stations x 4 samples");
+    assert_eq!(
+        total_rows(&rust.sql(SQL).await),
+        12,
+        "3 stations x 4 samples"
+    );
 
-    let netcdf_c = seeded("read-hdf5-nested-netcdf-c").await;
+    let netcdf_c = seeded_with_netcdf_c_hdf5("read-hdf5-nested-netcdf-c").await;
     assert!(
         netcdf_c.try_sql(SQL).await.is_err(),
         "netcdf-c reports only the root group, so the column is not there"
@@ -187,7 +210,9 @@ async fn read_hdf5_schema_lists_the_nested_columns() {
         .flat_map(|batch| {
             use arrow::array::Array;
             let column = arrow::array::as_string_array(batch.column(0));
-            (0..column.len()).map(|i| column.value(i).to_string()).collect::<Vec<_>>()
+            (0..column.len())
+                .map(|i| column.value(i).to_string())
+                .collect::<Vec<_>>()
         })
         .collect();
     assert!(names.contains(&"station_id".to_string()), "{names:?}");

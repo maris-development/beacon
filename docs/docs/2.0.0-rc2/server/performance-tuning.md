@@ -84,27 +84,7 @@ format such as Zarr. Your access pattern decides the gain. A scan returns batche
 `BEACON_BATCH_SIZE` rows. The default is `64000`.
 :::
 
-### Reader cache (no repeated file open)
-
-#### `BEACON_NETCDF_USE_READER_CACHE` and `BEACON_NETCDF_READER_CACHE_SIZE`
-
-With the reader cache on, Beacon uses an open NetCDF reader again. The cache key is the path and the
-last modification time. This helps when several queries read the same files.
-
-Recommendations:
-
-- Keep `BEACON_NETCDF_USE_READER_CACHE=true`, the default, for a workload with repeated access.
-- Increase `BEACON_NETCDF_READER_CACHE_SIZE` if your active set of NetCDF files is larger than the
-  default of 128.
-- Switch the reader cache off if your files change very often. This also keeps the number of open
-  file handles low.
-
-### Suggested start values
-
-For a deployment with many NetCDF files:
-
-- `BEACON_NETCDF_USE_READER_CACHE=true`
-- `BEACON_NETCDF_READER_CACHE_SIZE=16384`. Match the cache size to your active set of files.
+### Statistics of each file
 
 `BEACON_NETCDF_ENABLE_STATISTICS` controls the statistics of each file. Beacon uses them to prune a
 query. The default is `true`. Keep it on. Switch it off only to debug the pruning.
@@ -144,7 +124,7 @@ You can also set the reader for one table:
 ```sql
 CREATE EXTERNAL TABLE my_table STORED AS NC
 LOCATION 's3://bucket/data/'
-OPTIONS ('use_rust_reader' 'true');
+OPTIONS ('use_rust_reader' 'false');
 ```
 
 ## HDF5 pure-Rust reader
@@ -157,8 +137,8 @@ to read through the netCDF-C library instead. That library carries the same thre
 one lock for each call, a local path only, and no statistics. The flag is separate from
 `BEACON_NETCDF_USE_RUST_READER`, so you move one format at a time.
 
-The reader adds two things the netCDF reader cannot give you, because the netCDF data model does not
-hold them:
+The pure-Rust reader adds two things the netCDF reader cannot give you, because the netCDF data
+model does not hold them:
 
 - **A nested group.** Beacon walks every group. A dataset outside the root group takes its path as
   its column name, such as `observations/qc/flag`.
@@ -175,13 +155,13 @@ Set the reader for one table:
 ```sql
 CREATE EXTERNAL TABLE my_table STORED AS HDF5
 LOCATION 's3://bucket/data/'
-OPTIONS ('use_rust_reader' 'true');
+OPTIONS ('use_rust_reader' 'false');
 ```
 
-Measure before you switch a local archive. On a warm local file the netCDF-C library is competitive,
-because it reads the file directly and Beacon reads byte ranges through the object store. The
-pure-Rust reader wins where the lock and the local copy cost the most: many files in one query, and
-files in S3, GCS or Azure.
+Measure before you move a local archive to the netCDF-C library. On a warm local file that library
+is competitive, because it reads the file directly and Beacon reads byte ranges through the object
+store. The pure-Rust reader wins where the lock and the local copy cost the most: many files in one
+query, and files in S3, GCS or Azure.
 
 ## Zarr predicate pushdown
 

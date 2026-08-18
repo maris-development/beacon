@@ -1,5 +1,5 @@
 ---
-description: Query HDF5 files with read_hdf5. Beacon offers two readers, the netCDF-c library by default and a pure-Rust reader that adds nested groups, compound datasets and object storage.
+description: Query HDF5 files with read_hdf5. Beacon reads HDF5 with a pure-Rust reader that adds nested groups, compound datasets and object storage. The netCDF-c library is the fallback.
 ---
 
 # HDF5
@@ -20,7 +20,7 @@ Rust reader to false. HDF5 behaves exactly like
 [CF decoding](/docs/2.0.0-rc2/cf-decoding) and the same attribute columns.
 
 The **pure-Rust HDF5 reader** is the default. It reads the same files and gives the same answer for
-a netCDF-4 file, and it adds four things over netCDF-c:
+a netCDF-4 file, and it adds five things over netCDF-c:
 
 | | netCDF-c | Pure-Rust reader (default) |
 | --- | --- | --- |
@@ -38,7 +38,7 @@ format at a time. Set it for one table instead of the whole server:
 CREATE EXTERNAL TABLE experiments
 STORED AS HDF5
 LOCATION 'experiments/'
-OPTIONS ('use_rust_reader' 'true');
+OPTIONS ('use_rust_reader' 'false');
 ```
 
 ## How a dataset becomes a column
@@ -136,18 +136,17 @@ LOCATION 'experiments/';
 
 ## On object storage
 
-Under the default reader, **HDF5 supports anonymous access only**, for the same reason as NetCDF:
-the netCDF-c library opens a file by URL and does not go through the credential chain. For a public
-bucket, set `AWS_SKIP_SIGNATURE=true`.
+On the netCDF-c reader, **HDF5 supports anonymous access only**, for the same reason as NetCDF:
+that library opens a file by URL and does not go through the credential chain. For a public bucket,
+set `AWS_SKIP_SIGNATURE=true`.
 
-The pure-Rust reader has no such limit. It reads byte ranges through the object store, so a private
-S3, GCS or Azure bucket works and no local copy is made:
+The default pure-Rust reader has no such limit. It reads byte ranges through the object store, so a
+private S3, GCS or Azure bucket works and no local copy is made. A bucket needs no option at all:
 
 ```sql
 CREATE EXTERNAL TABLE experiments
 STORED AS HDF5
-LOCATION 's3://bucket/experiments/'
-OPTIONS ('use_rust_reader' 'true');
+LOCATION 's3://bucket/experiments/';
 ```
 
 See [Object Storage](/docs/2.0.0-rc2/data-sources/object-storage).
@@ -158,11 +157,11 @@ See [Object Storage](/docs/2.0.0-rc2/data-sources/object-storage).
 extension. Every HDF5 reader opens it. A write always uses netCDF-c, whatever the read flag says.
 
 ::: warning What does not map
-Under the default reader, the netCDF data model bounds what Beacon sees. A compound datatype, a
-variable-length or opaque type, a reference, and a group outside the root are not read.
+The pure-Rust reader covers nested groups and compound datasets. It does not read a variable-length
+or opaque type, a reference, or a region reference.
 
-The pure-Rust reader covers nested groups and compound datasets. It still does not read a
-variable-length or opaque type, a reference, or a region reference.
+On the netCDF-c reader the netCDF data model bounds what Beacon sees. A compound datatype, a
+variable-length or opaque type, a reference, and a group outside the root are not read.
 
 One more limit is worth knowing. Beacon drops an attribute narrower than 8 bytes on a file written
 with the earliest HDF5 library version — h5py's default — because the reader takes the object
@@ -172,8 +171,8 @@ header padding as part of the value. The datasets are unaffected. This is
 
 ## See also
 
-- [NetCDF](/docs/2.0.0-rc2/formats/netcdf): the default reader, with the full detail
+- [NetCDF](/docs/2.0.0-rc2/formats/netcdf): the same readers, with the full detail
 - [Arrays to tables](/docs/2.0.0-rc2/arrays-to-tables): the row count and the grid rule
 - [CF decoding](/docs/2.0.0-rc2/cf-decoding): units, packing and fill values
 - [Performance tuning](/docs/2.0.0-rc2/server/performance-tuning#hdf5-pure-rust-reader): when to
-  turn the reader on
+  change the reader

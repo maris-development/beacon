@@ -101,6 +101,16 @@ tag. Releases before 2.0.0 are recorded in the
   lattice join, the entry point drops a schema it has seen and gives each contiguous chunk to a
   thread. A collection of 100000 files from one instrument holds few distinct schemas, so the merge
   reads few schemas. Column order still follows the listing, because `SELECT *` shows it.
+- **The pure-Rust reader is the default of the library too.** `NetcdfConfig::default()` and
+  `Hdf5Config::default()` select it, so an embedded caller and a `RuntimeBuilder` read a `.nc`,
+  `.h5` or `.hdf5` file the way the server does. The variables keep their names:
+  `BEACON_NETCDF_USE_RUST_READER=false`, `BEACON_HDF5_USE_RUST_READER=false` and
+  `OPTIONS ('use_rust_reader' 'false')` still select netCDF-C, and every write still uses it.
+- **An HDF5 table on netCDF-C read through the Rust reader.** The HDF5 format has no netCDF-C
+  reader of its own: it hands the file to the netCDF format, which picks its own reader. That
+  reader is the Rust one by default, so `BEACON_HDF5_USE_RUST_READER=false` reached it anyway
+  unless netCDF was also set to `false`. The HDF5 fallback now names netCDF-C on the format it
+  delegates to, so each variable decides its own format.
 - **The admin UI renders a result from the Arrow columns.** The query workbench reads each record
   batch as it arrives and shows it. It no longer builds a JS object for each row first, which cost
   one object per row and one property per column — on a beacon table that carries 100K+ columns,
@@ -135,6 +145,20 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Removed
 
+- **The netCDF and HDF5 reader caches, with `BEACON_NETCDF_USE_READER_CACHE`,
+  `BEACON_NETCDF_READER_CACHE_SIZE`, `BEACON_HDF5_USE_READER_CACHE`, `BEACON_HDF5_READER_CACHE_SIZE`
+  and the `use_reader_cache` table option.** Both formats held opened datasets in a `moka` cache
+  keyed by path, modification time and reader. The schema cache
+  (`BEACON_FILE_STATS_SCHEMA_CACHE`) answers the repeated inference that cost the most, so what
+  remained was the second open a file takes inside one query — in exchange for two caches, four
+  variables and a cache key threaded through every format, source and opener. One open now reads one
+  file, and the read path is a single line from the format to the reader. Setting a removed variable
+  is ignored, not an error.
+
+  Measured on 100000 netCDF files: a query that reads a few files costs the same, an analyzed
+  archive scans 11% slower, and an archive with no statistics store scans 17% slower.
+  `ANALYZE FILES` is 6% faster, because a pass paid to fill a cache it never read from. The cache
+  size the tuning page recommended, 16384, was slower than the default 128 on every measurement.
 - **The `beacondb` wheel is no longer published.** Its release workflow, the manylinux build
   scripts and the `make wheel` targets are gone, and the version scripts no longer track it. The
   crate stays in the workspace and still builds locally with maturin; it is marked

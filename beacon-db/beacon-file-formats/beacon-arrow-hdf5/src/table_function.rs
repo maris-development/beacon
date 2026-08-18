@@ -12,8 +12,8 @@ use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_arrow_netcdf::datafusion::ReadNetCDFFunc;
-use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::{TableFunctionImpl, TableProvider},
@@ -25,9 +25,9 @@ use datafusion::{
 
 /// The `read_hdf5` table function.
 pub struct ReadHdf5Func {
-    /// The netCDF reader, for the default netcdf-c path. A NetCDF-4 file *is*
-    /// HDF5, and netcdf-c's HDF5 dispatch opens plain HDF5 too, so there is
-    /// nothing to re-implement there.
+    /// The netCDF reader, for the netcdf-c fallback. A NetCDF-4 file *is* HDF5,
+    /// and netcdf-c's HDF5 dispatch opens plain HDF5 too, so there is nothing to
+    /// re-implement there.
     inner: ReadNetCDFFunc,
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
@@ -100,12 +100,20 @@ impl TableFunctionImpl for ReadHdf5Func {
             .and_then(|f| f.as_any().downcast_ref::<crate::Hdf5FormatFactory>());
 
         // Not registered, or registered on netcdf-c: this is the delegating
-        // path this function has always taken.
-        let Some(hdf5_factory) = hdf5_factory else {
-            return self.inner.call(args);
+        // path this function has always taken. `read_netcdf` is told which
+        // reader to use, because the netCDF format picks its own reader and it
+        // may be the Rust one.
+        let netcdf_c = || {
+            self.inner.call_with_options(
+                args,
+                HashMap::from([("use_rust_reader".to_string(), "false".to_string())]),
+            )
         };
-        if !hdf5_factory.config().use_rust_reader {
-            return self.inner.call(args);
+        let Some(hdf5_factory) = hdf5_factory else {
+            return netcdf_c();
+        };
+        if !hdf5_factory.uses_rust_reader(&HashMap::new())? {
+            return netcdf_c();
         }
 
         let listing_factory = state
@@ -128,10 +136,10 @@ impl TableFunctionImpl for ReadHdf5Func {
         }
 
         // Build the file format from the factory registered on the session, so
-        // the table function shares the runtime's configured format + reader
-        // cache. Per-call settings (read dimensions) are passed as table
-        // options. No native root: this reader reads through the object store,
-        // so an s3, gs or az path works.
+        // the table function shares the runtime's configured format. Per-call
+        // settings (read dimensions) are passed as table options. No native
+        // root: this reader reads through the object store, so an s3, gs or az
+        // path works.
         let mut format_options: HashMap<String, String> = HashMap::new();
         if !dimensions.is_empty() {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));

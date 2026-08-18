@@ -76,10 +76,18 @@ impl BeaconTableFunctionImpl for ReadNetCDFFunc {
     }
 }
 
-impl TableFunctionImpl for ReadNetCDFFunc {
-    fn call(
+impl ReadNetCDFFunc {
+    /// [`TableFunctionImpl::call`], with `extra_options` added to the table
+    /// options the format is built from.
+    ///
+    /// `read_hdf5` calls this on its netcdf-c fallback, to pin the reader. The
+    /// netCDF format has a backend of its own, and it may be the Rust one, so a
+    /// caller that has already resolved a reader has to name it rather than
+    /// inherit whatever netCDF is set to.
+    pub fn call_with_options(
         &self,
         args: &[datafusion::prelude::Expr],
+        extra_options: HashMap<String, String>,
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
@@ -132,10 +140,10 @@ impl TableFunctionImpl for ReadNetCDFFunc {
 
         tracing::debug!("read_netcdf listing urls: {:?}", listing_urls);
 
-        // Build the file format from the factory registered on the session, so the
-        // table function shares the runtime's configured format + reader cache.
+        // Build the file format from the factory registered on the session, so
+        // the table function shares the runtime's configured format and reader.
         // Per-call settings (read dimensions) are passed as table options.
-        let mut format_options: HashMap<String, String> = HashMap::new();
+        let mut format_options: HashMap<String, String> = extra_options;
         if !dimensions.is_empty() {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));
         }
@@ -201,5 +209,14 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         })?;
 
         Ok(Arc::new(fast_object_table))
+    }
+}
+
+impl TableFunctionImpl for ReadNetCDFFunc {
+    fn call(
+        &self,
+        args: &[datafusion::prelude::Expr],
+    ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        self.call_with_options(args, HashMap::new())
     }
 }

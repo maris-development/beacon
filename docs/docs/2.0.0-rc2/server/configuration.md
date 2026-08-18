@@ -220,8 +220,6 @@ change them.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_NETCDF_ENABLE_STATISTICS` | `true` | Compute and cache per-file statistics used for query pruning. |
-| `BEACON_NETCDF_USE_READER_CACHE` | `true` | Cache opened NetCDF readers in memory. |
-| `BEACON_NETCDF_READER_CACHE_SIZE` | `128` | Max NetCDF reader entries to keep cached. |
 | `BEACON_NETCDF_USE_RUST_READER` | `true` | Read NetCDF with the pure-Rust reader instead of the netCDF-C library. It reads in parallel. It opens a file in an object store. It reports the statistics of each file. |
 
 ### HDF5
@@ -234,8 +232,6 @@ can move one format at a time.
 | --- | --- | --- |
 | `BEACON_HDF5_USE_RUST_READER` | `true` | Read HDF5 with the pure-Rust reader instead of the netCDF-C library. It also reports a nested group and a compound dataset. The netCDF-C library reports neither. |
 | `BEACON_HDF5_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. Needs the pure-Rust reader. |
-| `BEACON_HDF5_USE_READER_CACHE` | `true` | Cache opened HDF5 readers in memory. |
-| `BEACON_HDF5_READER_CACHE_SIZE` | `128` | Max HDF5 reader entries to keep cached. |
 
 The pure-Rust reader also reads two layouts the netCDF data model cannot express: a nested group,
 and a compound dataset. See
