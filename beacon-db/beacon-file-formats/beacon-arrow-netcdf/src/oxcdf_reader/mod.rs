@@ -19,9 +19,10 @@
 //!
 //! # Which reader runs
 //!
-//! netcdf-c stays the default. Set the `use_rust_reader` flag on
+//! This path is the default. netcdf-c is the fallback: clear the
+//! `use_rust_reader` flag on
 //! [`NetcdfConfig`](crate::datafusion::NetcdfConfig), or the `use_rust_reader`
-//! option of one table, to select this path.
+//! option of one table, to read through it instead.
 //!
 //! # Limits
 //!

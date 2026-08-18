@@ -4,9 +4,7 @@ use crate::datafusion::TiffFormat;
 use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use datafusion::{
-    catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
-};
+use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
 

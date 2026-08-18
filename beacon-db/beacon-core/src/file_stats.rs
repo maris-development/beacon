@@ -43,12 +43,13 @@
 //! The flag is on by default. A netCDF node that prunes no file usually has the
 //! flag off. `column_count = 0` on its records shows this.
 //!
-//! `.h5` and `.hdf5` follow the same rule through their own switch. HDF5 owns
-//! the identity and picks the reader; with `BEACON_HDF5_USE_RUST_READER=true` a
-//! file is read by `beacon-arrow-hdf5`, which computes ranges for every rank-0
+//! `.h5` and `.hdf5` follow the same rule through their own variable. HDF5 owns
+//! the identity and picks the reader; on the default `BEACON_HDF5_USE_RUST_READER=true`
+//! a file is read by `beacon-arrow-hdf5`, which computes ranges for every rank-0
 //! and rank-1 array, in plain HDF5 and NetCDF-4 alike, whatever the extension
-//! says. With it off the read goes to netcdf-c and the ranges are unknown. Each
-//! pass says so once, through [`FormatFileAnalyzer::report_netcdf_c_once`].
+//! says. With it off the read goes to netcdf-c and the ranges are unknown.
+//! Each pass says so once, through
+//! [`FormatFileAnalyzer::report_netcdf_c_once`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,7 +58,7 @@ use std::time::Duration;
 use arrow::datatypes::{DataType, SchemaRef};
 use beacon_arrow_netcdf::datafusion::{NetcdfFormat, ReaderBackend};
 use beacon_common::FileStatsConfig;
-use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, try_file_format_factory_ext};
+use beacon_datafusion_ext::format_ext::{try_file_format_factory_ext, FileFormatFactoryExt};
 use beacon_datafusion_ext::listing_factory::try_listing_factory_from_session;
 use beacon_file_stats::segment::ColumnStat;
 use beacon_file_stats::{
@@ -71,9 +72,9 @@ use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use futures::StreamExt;
-use object_store::{ObjectMeta, ObjectStore, path::Path};
+use object_store::{path::Path, ObjectMeta, ObjectStore};
 
-use crate::statement_plan::{SessionCell, upgrade_session};
+use crate::statement_plan::{upgrade_session, SessionCell};
 
 /// A latch that fires once in a pass, however many files ask it.
 ///
@@ -222,7 +223,7 @@ impl FileAnalyzer for FormatFileAnalyzer {
 /// The environment switch that turns on the Rust reader for `format`.
 ///
 /// The HDF5 identity delegates its reads to the netCDF format, so an `.h5` file
-/// on netcdf-c *is* that format. Name the switch that owns the file at hand
+/// on netcdf-c *is* that format. Name the variable that owns the file at hand
 /// anyway: the HDF5 one covers every HDF5 layout, including the plain ones the
 /// netCDF data model cannot express.
 fn rust_reader_switch(format: &str) -> &'static str {

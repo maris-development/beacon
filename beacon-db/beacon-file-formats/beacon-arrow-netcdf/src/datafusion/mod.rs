@@ -41,7 +41,7 @@ pub mod source;
 pub mod statistics;
 pub mod table_function;
 
-pub use reader::{FileAccess, NetcdfInput, NetcdfReaderCache, ReaderBackend};
+pub use reader::{FileAccess, NetcdfInput, ReaderBackend};
 pub use table_function::ReadNetCDFFunc;
 
 /// Runtime configuration for the NetCDF format.
@@ -52,28 +52,24 @@ pub use table_function::ReadNetCDFFunc;
 /// can be overridden per table via `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
 #[derive(Debug, Clone)]
 pub struct NetcdfConfig {
-    /// Whether reads consult the shared reader cache by default.
-    pub use_reader_cache: bool,
-    /// Capacity (number of opened datasets) of the shared reader cache.
-    pub reader_cache_size: usize,
     /// Whether to generate per-file statistics during planning.
     pub enable_statistics: bool,
     /// Whether reads go through the pure-Rust [`oxcdf`] reader instead of
     /// netcdf-c.
     ///
-    /// Off by default, so the netcdf-c path stays the one a runtime uses until
-    /// an operator opts in. Turn it on to get parallel reads and native object
-    /// store access; see [`crate::oxcdf_reader`]. Writes always use netcdf-c.
+    /// On by default: the Rust reader reads byte ranges through the object
+    /// store, so a scan runs in parallel and a file in s3, gs or az needs no
+    /// local copy. See [`crate::oxcdf_reader`]. Turn it off for netcdf-c, the
+    /// fallback, for a file the Rust reader cannot yet read. Writes always use
+    /// netcdf-c.
     pub use_rust_reader: bool,
 }
 
 impl Default for NetcdfConfig {
     fn default() -> Self {
         Self {
-            use_reader_cache: true,
-            reader_cache_size: 128,
             enable_statistics: true,
-            use_rust_reader: false,
+            use_rust_reader: true,
         }
     }
 }
@@ -95,8 +91,6 @@ pub struct NetCDFFormatFactory {
     pub output_dir: PathBuf,
     pub options: NetcdfOptions,
     pub config: NetcdfConfig,
-    /// Shared reader cache for this runtime, sized from `config`.
-    cache: NetcdfReaderCache,
 }
 
 impl NetCDFFormatFactory {
@@ -106,13 +100,11 @@ impl NetCDFFormatFactory {
         options: NetcdfOptions,
         config: NetcdfConfig,
     ) -> Self {
-        let cache = NetcdfReaderCache::new(config.reader_cache_size);
         Self {
             listing_factory,
             output_dir,
             options,
             config,
-            cache,
         }
     }
 
@@ -131,21 +123,30 @@ impl NetCDFFormatFactory {
         }
     }
 
-    /// Build a [`NetcdfFormat`] with the given per-table effective settings,
-    /// wiring in the shared reader cache when caching is enabled.
+    /// Build a [`NetcdfFormat`] with the given per-table effective settings.
     fn build_format(
         &self,
         options: NetcdfOptions,
-        use_reader_cache: bool,
         enable_statistics: bool,
         access: FileAccess,
     ) -> NetcdfFormat {
-        let cache = use_reader_cache.then(|| self.cache.clone());
         NetcdfFormat::new(self.listing_factory.clone(), options)
-            .with_cache(cache)
             .with_enable_statistics(enable_statistics)
             .with_access(access)
             .with_output_dir(self.output_dir.clone())
+    }
+
+    /// Whether a table built with `format_options` reads through the Rust
+    /// reader. The per-table `use_rust_reader` option wins over the runtime
+    /// default.
+    fn uses_rust_reader(
+        &self,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<bool> {
+        match format_options.get("use_rust_reader") {
+            Some(value) => parse_bool_option("use_rust_reader", value),
+            None => Ok(self.config.use_rust_reader),
+        }
     }
 }
 
@@ -172,8 +173,6 @@ impl FileFormatFactory for NetCDFFormatFactory {
         // Per-table overrides from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
         // defaulting to the runtime config.
         let mut options = self.options.clone();
-        let mut use_reader_cache = self.config.use_reader_cache;
-        let mut use_rust_reader = self.config.use_rust_reader;
 
         if let Some(value) = format_options.get("read_dimensions") {
             options.read_dimensions = Some(
@@ -184,21 +183,15 @@ impl FileFormatFactory for NetCDFFormatFactory {
                     .collect(),
             );
         }
-        if let Some(value) = format_options.get("use_reader_cache") {
-            use_reader_cache = parse_bool_option("use_reader_cache", value)?;
-        }
         // Parsed here only so a bad value is an error at `CREATE EXTERNAL
         // TABLE` rather than at the first analysis pass. The value itself is
         // read by `create_for_analysis`; a format built for a query computes no
         // statistics whatever it says.
         self.statistics_wanted(format_options)?;
-        if let Some(value) = format_options.get("use_rust_reader") {
-            use_rust_reader = parse_bool_option("use_rust_reader", value)?;
-        }
+        let use_rust_reader = self.uses_rust_reader(format_options)?;
 
         Ok(Arc::new(self.build_format(
             options,
-            use_reader_cache,
             // A query never computes statistics. See `create_for_analysis`.
             false,
             access_for(use_rust_reader),
@@ -208,7 +201,6 @@ impl FileFormatFactory for NetCDFFormatFactory {
     fn default(&self) -> Arc<dyn FileFormat> {
         Arc::new(self.build_format(
             self.options.clone(),
-            self.config.use_reader_cache,
             // A query never computes statistics. See `create_for_analysis`.
             false,
             access_for(self.config.use_rust_reader),
@@ -317,11 +309,11 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
     ///
     /// The backend is in the key because netcdf-c and `oxcdf` walk different
     /// metadata, and a file whose schema they read differently must not be
-    /// answered from the other's entry.
+    /// answered from the other's entry. netcdf-c stays reachable as a fallback,
+    /// so one runtime still serves tables on both.
     ///
-    /// Nothing else is. The resolver only says how to reach the bytes, the
-    /// reader cache only says whether an open is reused, and the statistics
-    /// switch only decides whether ranges are computed. None of the three
+    /// Nothing else is. The resolver only says how to reach the bytes, and the
+    /// statistics switch only decides whether ranges are computed. Neither
     /// changes a field or a type.
     ///
     /// TODO(#367): cache a dimension-projected read as well. `read_dimensions`
@@ -351,8 +343,6 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
 pub struct NetcdfFormat {
     pub listing_factory: Arc<ListingFactory>,
     pub options: NetcdfOptions,
-    /// Reader cache to consult, or `None` to bypass caching for this format.
-    cache: Option<NetcdfReaderCache>,
     /// Whether to generate per-file statistics during planning.
     enable_statistics: bool,
     /// Local directory the netcdf-c writer emits output files into.
@@ -366,7 +356,6 @@ impl NetcdfFormat {
         Self {
             listing_factory,
             options,
-            cache: None,
             enable_statistics: false,
             output_dir: std::env::temp_dir(),
             access: FileAccess::default(),
@@ -382,12 +371,6 @@ impl NetcdfFormat {
     /// The reader this format opens files with.
     pub fn reader_backend(&self) -> ReaderBackend {
         self.access.backend()
-    }
-
-    /// Wire in a reader cache (`Some`) or disable caching (`None`).
-    pub fn with_cache(mut self, cache: Option<NetcdfReaderCache>) -> Self {
-        self.cache = cache;
-        self
     }
 
     /// Set whether per-file statistics are generated during planning.
@@ -433,13 +416,11 @@ impl FileFormat for NetcdfFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         use futures::{StreamExt, TryStreamExt};
 
-        let cache = self.cache.as_ref();
-
         // Resolving an input can fail, and doing it up front keeps the stream
         // below infallible in its setup.
         let mut inputs = Vec::with_capacity(objects.len());
         for object in objects {
-            inputs.push((self.access.input_for(store, object)?, object.clone()));
+            inputs.push(self.access.input_for(store, object)?);
         }
 
         // Bounded, because each open holds a file descriptor until its schema is
@@ -456,9 +437,7 @@ impl FileFormat for NetcdfFormat {
             .meta_fetch_concurrency
             .max(1);
         let schemas: Vec<SchemaRef> = futures::stream::iter(inputs)
-            .map(|(input, object)| {
-                reader::fetch_schema(cache, input, object, self.options.read_dimensions.clone())
-            })
+            .map(|input| reader::fetch_schema(input, self.options.read_dimensions.clone()))
             .buffered(width)
             .try_collect()
             .await?;
@@ -507,7 +486,7 @@ impl FileFormat for NetcdfFormat {
         if !matches!(self.access, FileAccess::Oxcdf) {
             tracing::debug!(
                 object = %object.location,
-                "netCDF statistics need the Rust reader; set use_rust_reader to enable them"
+                "netCDF statistics need the Rust reader; set the backend to rust to enable them"
             );
             return Ok(Statistics::new_unknown(&table_schema));
         }
@@ -557,7 +536,6 @@ impl FileFormat for NetcdfFormat {
             self.options.read_dimensions.clone(),
             table_schema,
         )
-        .with_cache(self.cache.clone())
         .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -633,14 +611,11 @@ impl FileFormat for NetcdfFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(
-            NetCDFSource::new(
-                self.access.clone(),
-                self.options.read_dimensions.clone(),
-                table_schema,
-            )
-            .with_cache(self.cache.clone()),
-        )
+        Arc::new(NetCDFSource::new(
+            self.access.clone(),
+            self.options.read_dimensions.clone(),
+            table_schema,
+        ))
     }
 }
 
@@ -1040,35 +1015,35 @@ mod reader_backend_tests {
 
     // ── The flag ───────────────────────────────────────────────────────
 
-    /// netcdf-c stays the reader until an operator opts in.
+    /// The Rust reader reads a table that sets no option.
     #[test]
-    fn the_default_config_keeps_netcdf_c() {
-        assert!(!NetcdfConfig::default().use_rust_reader);
-        assert_eq!(ReaderBackend::default(), ReaderBackend::NetcdfC);
+    fn the_default_config_takes_the_rust_reader() {
+        assert!(NetcdfConfig::default().use_rust_reader);
+        assert_eq!(ReaderBackend::default(), ReaderBackend::Oxcdf);
     }
 
     #[tokio::test]
-    async fn a_table_option_selects_the_rust_reader() {
+    async fn a_table_option_selects_the_fallback() {
         let factory = factory();
         let ctx = session();
         let state = ctx.state();
 
         assert_eq!(
             backend_of(&factory, &state, &HashMap::new()).unwrap(),
-            ReaderBackend::NetcdfC,
+            ReaderBackend::Oxcdf,
             "no option means the runtime default"
         );
 
-        let options = HashMap::from([("use_rust_reader".to_string(), "true".to_string())]);
-        assert_eq!(
-            backend_of(&factory, &state, &options).unwrap(),
-            ReaderBackend::Oxcdf
-        );
-
-        let options = HashMap::from([("use_rust_reader".to_string(), "off".to_string())]);
+        let options = HashMap::from([("use_rust_reader".to_string(), "false".to_string())]);
         assert_eq!(
             backend_of(&factory, &state, &options).unwrap(),
             ReaderBackend::NetcdfC
+        );
+
+        let options = HashMap::from([("use_rust_reader".to_string(), "on".to_string())]);
+        assert_eq!(
+            backend_of(&factory, &state, &options).unwrap(),
+            ReaderBackend::Oxcdf
         );
 
         let options = HashMap::from([("use_rust_reader".to_string(), "maybe".to_string())]);
@@ -1086,7 +1061,7 @@ mod reader_backend_tests {
             std::env::temp_dir(),
             NetcdfOptions::default(),
             NetcdfConfig {
-                use_rust_reader: true,
+                use_rust_reader: false,
                 ..NetcdfConfig::default()
             },
         );
@@ -1094,14 +1069,14 @@ mod reader_backend_tests {
 
         assert_eq!(
             backend_of(&factory, &ctx.state(), &HashMap::new()).unwrap(),
-            ReaderBackend::Oxcdf
+            ReaderBackend::NetcdfC
         );
 
-        // And one table can still opt back out.
-        let options = HashMap::from([("use_rust_reader".to_string(), "false".to_string())]);
+        // And one table can still ask for the other reader.
+        let options = HashMap::from([("use_rust_reader".to_string(), "true".to_string())]);
         assert_eq!(
             backend_of(&factory, &ctx.state(), &options).unwrap(),
-            ReaderBackend::NetcdfC
+            ReaderBackend::Oxcdf
         );
     }
 
@@ -1113,7 +1088,7 @@ mod reader_backend_tests {
             std::env::temp_dir(),
             NetcdfOptions::default(),
             NetcdfConfig {
-                use_rust_reader: true,
+                use_rust_reader: false,
                 ..NetcdfConfig::default()
             },
         );
@@ -1124,7 +1099,7 @@ mod reader_backend_tests {
                 .downcast_ref::<NetcdfFormat>()
                 .unwrap()
                 .reader_backend(),
-            ReaderBackend::Oxcdf
+            ReaderBackend::NetcdfC
         );
     }
 
@@ -1255,8 +1230,14 @@ mod reader_backend_tests {
 
         // One file well under the old minimum, one well over, and a collection.
         let scans: Vec<(&str, Vec<PartitionedFile>)> = vec![
-            ("one small file", vec![PartitionedFile::new("small.nc", 1024 * 1024)]),
-            ("one large file", vec![PartitionedFile::new("large.nc", 64 * 1024 * 1024)]),
+            (
+                "one small file",
+                vec![PartitionedFile::new("small.nc", 1024 * 1024)],
+            ),
+            (
+                "one large file",
+                vec![PartitionedFile::new("large.nc", 64 * 1024 * 1024)],
+            ),
             (
                 "many files",
                 (0..500)
@@ -1502,7 +1483,11 @@ mod reader_backend_tests {
         use crate::writer::ArrowRecordBatchWriter;
 
         let dir = tempfile::tempdir().expect("a temp directory");
-        let schema = Arc::new(Schema::new(vec![Field::new("V0", DataType::Float64, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "V0",
+            DataType::Float64,
+            false,
+        )]));
 
         for file in 0..count {
             // Each file is a different length and a different range of values.
@@ -1603,7 +1588,11 @@ mod reader_backend_tests {
 
         // Files that hold "V0", and files that hold only "OTHER".
         for (count, column, base) in [(WITH, "V0", 0.0), (WITHOUT, "OTHER", 1000.0)] {
-            let schema = Arc::new(Schema::new(vec![Field::new(column, DataType::Float64, false)]));
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                column,
+                DataType::Float64,
+                false,
+            )]));
             for file in 0..count {
                 let values: ArrayRef = Arc::new(Float64Array::from_iter_values(
                     (0..ROWS).map(|row| base + (file * ROWS + row) as f64),

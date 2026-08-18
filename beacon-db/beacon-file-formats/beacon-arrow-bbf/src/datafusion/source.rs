@@ -1,8 +1,6 @@
 use std::{any::Any, collections::HashMap, sync::Arc};
 
-use arrow::datatypes::SchemaRef;
 use datafusion::{
-    common::Statistics,
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileOpener, FileScanConfig, FileSource},
@@ -25,7 +23,7 @@ use crate::datafusion::{metrics::BBFGlobalMetrics, opener::BBFOpener, stream_sha
 #[derive(Clone, Debug)]
 pub struct BBFSource {
     /// Optional schema adapter factory.
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
+    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>, //ToDo: Remove this once we have removed the deprecated schema adapter factory.
     /// The table schema (file schema + partition columns).
     table_schema: TableSchema,
     /// Execution plan metrics.
@@ -199,6 +197,7 @@ impl FileSource for BBFSource {
 mod tests {
     use super::*;
     use crate::datafusion::BBFFormat;
+    use arrow::datatypes::SchemaRef;
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion::datasource::file_format::FileFormat;
     use datafusion::physical_expr::expressions::{col, lit};
@@ -307,13 +306,12 @@ mod tests {
     #[test]
     fn try_pushdown_filters_keeps_predicate_but_does_not_claim_it() {
         let schema = schema();
-        let filter: Arc<dyn PhysicalExpr> = Arc::new(
-            datafusion::physical_expr::expressions::BinaryExpr::new(
+        let filter: Arc<dyn PhysicalExpr> =
+            Arc::new(datafusion::physical_expr::expressions::BinaryExpr::new(
                 col("a", &schema).unwrap(),
                 datafusion::logical_expr::Operator::Gt,
                 lit(1i32),
-            ),
-        );
+            ));
         let result = source()
             .try_pushdown_filters(vec![filter.clone()], &ConfigOptions::default())
             .expect("filter pushdown should succeed");
@@ -332,20 +330,18 @@ mod tests {
     #[test]
     fn try_pushdown_filters_conjoins_successive_predicates() {
         let schema = schema();
-        let f1: Arc<dyn PhysicalExpr> = Arc::new(
-            datafusion::physical_expr::expressions::BinaryExpr::new(
+        let f1: Arc<dyn PhysicalExpr> =
+            Arc::new(datafusion::physical_expr::expressions::BinaryExpr::new(
                 col("a", &schema).unwrap(),
                 datafusion::logical_expr::Operator::Gt,
                 lit(1i32),
-            ),
-        );
-        let f2: Arc<dyn PhysicalExpr> = Arc::new(
-            datafusion::physical_expr::expressions::BinaryExpr::new(
+            ));
+        let f2: Arc<dyn PhysicalExpr> =
+            Arc::new(datafusion::physical_expr::expressions::BinaryExpr::new(
                 col("b", &schema).unwrap(),
                 datafusion::logical_expr::Operator::Lt,
                 lit(9i32),
-            ),
-        );
+            ));
 
         let first = source()
             .try_pushdown_filters(vec![f1], &ConfigOptions::default())

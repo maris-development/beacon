@@ -411,11 +411,6 @@ struct RawConfig {
     #[envconfig(from = "BEACON_NETCDF_ENABLE_STATISTICS", default = "true")]
     netcdf_enable_statistics: bool,
 
-    #[envconfig(from = "BEACON_NETCDF_USE_READER_CACHE", default = "true")]
-    netcdf_use_reader_cache: bool,
-    #[envconfig(from = "BEACON_NETCDF_READER_CACHE_SIZE", default = "128")]
-    netcdf_reader_cache_size: usize,
-
     /// Read netCDF with the pure-Rust `oxcdf` reader instead of netcdf-c.
     ///
     /// On by default. It reads in parallel. It opens a netCDF file in an object
@@ -441,12 +436,9 @@ struct RawConfig {
     /// change one format at a time.
     #[envconfig(from = "BEACON_HDF5_USE_RUST_READER", default = "true")]
     hdf5_use_rust_reader: bool,
+
     #[envconfig(from = "BEACON_HDF5_ENABLE_STATISTICS", default = "true")]
     hdf5_enable_statistics: bool,
-    #[envconfig(from = "BEACON_HDF5_USE_READER_CACHE", default = "true")]
-    hdf5_use_reader_cache: bool,
-    #[envconfig(from = "BEACON_HDF5_READER_CACHE_SIZE", default = "128")]
-    hdf5_reader_cache_size: usize,
 
     /// Compute per-file statistics for Zarr stores.
     ///
@@ -620,15 +612,11 @@ impl From<RawConfig> for Config {
                 max_age: raw.max_age,
             },
             netcdf: NetcdfConfig {
-                use_reader_cache: raw.netcdf_use_reader_cache,
-                reader_cache_size: raw.netcdf_reader_cache_size,
                 enable_statistics: raw.netcdf_enable_statistics,
                 use_rust_reader: raw.netcdf_use_rust_reader,
             },
             hdf5: Hdf5Config {
                 use_rust_reader: raw.hdf5_use_rust_reader,
-                use_reader_cache: raw.hdf5_use_reader_cache,
-                reader_cache_size: raw.hdf5_reader_cache_size,
                 enable_statistics: raw.hdf5_enable_statistics,
             },
             zarr: ZarrConfig {
@@ -872,8 +860,8 @@ fn create_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, PathBuf, RawConfig, decode_master_key, normalize_base_path, normalize_log_level,
-        validate_storage,
+        decode_master_key, normalize_base_path, normalize_log_level, validate_storage, Config,
+        PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1188,5 +1176,27 @@ mod tests {
         let b64 = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4]);
         let err = decode_master_key(&b64).unwrap_err();
         assert!(err.contains("expected 32 bytes, got 4"), "got: {err}");
+    }
+
+    // ── Reader flags ───────────────────────────────────────────────────
+
+    /// A server that sets neither flag reads both formats in Rust.
+    #[test]
+    fn both_formats_default_to_the_rust_reader() {
+        let config = config(&[]);
+        assert!(config.netcdf.use_rust_reader);
+        assert!(config.hdf5.use_rust_reader);
+    }
+
+    /// Each flag moves one format, so a server can fall back for one alone.
+    #[test]
+    fn each_flag_moves_one_format() {
+        let netcdf_c = config(&[("BEACON_NETCDF_USE_RUST_READER", "false")]);
+        assert!(!netcdf_c.netcdf.use_rust_reader);
+        assert!(netcdf_c.hdf5.use_rust_reader);
+
+        let hdf5_c = config(&[("BEACON_HDF5_USE_RUST_READER", "false")]);
+        assert!(hdf5_c.netcdf.use_rust_reader);
+        assert!(!hdf5_c.hdf5.use_rust_reader);
     }
 }

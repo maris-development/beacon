@@ -207,12 +207,6 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn with_netcdf_reader_cache(mut self, cache_size: usize) -> Self {
-        self.netcdf.use_reader_cache = true;
-        self.netcdf.reader_cache_size = cache_size;
-        self
-    }
-
     pub fn with_netcdf_statistics(mut self) -> Self {
         self.netcdf.enable_statistics = true;
         self
@@ -792,7 +786,7 @@ fn register_file_formats(
             builder.netcdf.clone(),
         )),
         // HDF5 (its own crate — a NetCDF-4 file is HDF5). It reads through the netCDF reader
-        // unless `builder.hdf5.use_rust_reader` is on, and it writes through it either way. In
+        // when `builder.hdf5.use_rust_reader` is off, and it writes through it either way. In
         // the `formats` vec so beacon's format registry keys it by `.h5`/`.hdf5` and dataset
         // discovery picks those files up. Registered under `hdf5` in DataFusion's native registry
         // by the loop below.

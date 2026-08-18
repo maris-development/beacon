@@ -19,7 +19,6 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 indexmap = { workspace = true }
-moka = { workspace = true }
 ndarray = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }

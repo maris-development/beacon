@@ -84,7 +84,7 @@ impl FileFormatFactoryExt for ArrowFormatFactory {
     }
 
     fn file_extensions(&self) -> Vec<String> {
-        vec!["arrow".to_string(), "feather".to_string()]
+        vec![DEFAULT_ARROW_EXTENSION.to_string(), "feather".to_string()]
     }
 }
 
@@ -145,9 +145,6 @@ impl FileFormat for ArrowFormat {
                         .await
                 }
             })
-            // Keep the listing order. The merged schema then does not depend on
-            // the disk answer order. See issue #377. The width stays the
-            // concurrency. `buffered` holds a finished schema until its turn.
             .buffered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;

@@ -137,9 +137,6 @@ impl FileFormat for ParquetFormat {
                 let store = Arc::clone(store);
                 async move { self.inner.infer_schema(state, &store, &[object]).await }
             })
-            // Keep the listing order. The merged schema then does not depend on
-            // the disk answer order. See issue #377. The width stays the
-            // concurrency. `buffered` holds a finished schema until its turn.
             .buffered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;
@@ -195,7 +192,10 @@ impl FileFormat for ParquetFormat {
             .await
     }
 
-    fn file_source(&self, table_schema: datafusion::datasource::table_schema::TableSchema) -> Arc<dyn FileSource> {
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
         self.inner.file_source(table_schema)
     }
 }
@@ -220,8 +220,10 @@ fn cast_ts_seconds_to_ms(
                     let expr = cast(Expr::Column(Column::new_unqualified(&name)), target);
                     session.create_physical_expr(expr, &df_schema)?
                 }
-                _ => session
-                    .create_physical_expr(Expr::Column(Column::new_unqualified(&name)), &df_schema)?,
+                _ => session.create_physical_expr(
+                    Expr::Column(Column::new_unqualified(&name)),
+                    &df_schema,
+                )?,
             };
             Ok((expr, name))
         })
@@ -465,8 +467,9 @@ mod tests {
             Field::new("a", DataType::Int32, false),
             Field::new("b", DataType::Utf8, true),
         ]));
-        let projected = cast_ts_seconds_to_ms(Arc::new(EmptyExec::new(schema.clone())), &ctx.state())
-            .expect("projection should build");
+        let projected =
+            cast_ts_seconds_to_ms(Arc::new(EmptyExec::new(schema.clone())), &ctx.state())
+                .expect("projection should build");
         assert_eq!(projected.schema().fields(), schema.fields());
     }
 }
