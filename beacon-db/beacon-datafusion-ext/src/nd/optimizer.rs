@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use arrow::datatypes::SchemaRef;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::error::Result;
@@ -30,7 +31,7 @@ use datafusion::physical_expr::expressions::{
 use datafusion::physical_expr::{ScalarFunctionExpr, conjunction, split_conjunction};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::filter::{FilterExec, FilterExecBuilder};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::logical_expr::Volatility;
 
@@ -123,8 +124,23 @@ impl PhysicalOptimizerRule for NdProjectionPushdown {
 ///
 /// where `a`, `b` are element-wise ([`is_pushable_expr`]) and `c` is not (e.g. a
 /// volatile function or a subquery). If every conjunct is pushable, the residual
-/// `FilterExec` is dropped entirely. The rewrite is schema-preserving: a filter
-/// never changes columns.
+/// `FilterExec` is dropped entirely.
+///
+/// A `FilterExec` also holds a projection. DataFusion adds one when the select
+/// list is narrower than the predicate. `count(*)` gets an empty projection. A
+/// filter projection is a plain column list, so it sinks too. It becomes an
+/// [`NdProjectionExec`] between the nd filter and the broadcast:
+///
+/// ```text
+/// FilterExec[a, projection=[lat]]        NdBroadcastExec
+///   NdBroadcastExec               ->       NdProjectionExec[lat]
+///     nd-child                               NdFilterExec[a]
+///                                              nd-child
+/// ```
+///
+/// A residual conjunct reads the columns that the projection drops. So the
+/// projection stays with the residual filter above the broadcast. Both forms keep
+/// the schema of the original filter.
 #[derive(Debug, Default)]
 pub struct NdFilterPushdown;
 
@@ -144,15 +160,15 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
             let Some(filter) = node.as_any().downcast_ref::<FilterExec>() else {
                 return Ok(Transformed::no(node));
             };
-            // A `FilterExec` carrying an embedded projection also changes the
-            // schema; leave those in place so the rewrite stays a pure row
-            // selection.
-            if filter.projection().is_some() {
-                return Ok(Transformed::no(node));
-            }
             let Some(broadcast) = filter.input().as_any().downcast_ref::<NdBroadcastExec>() else {
                 return Ok(Transformed::no(node));
             };
+            // A `fetch` caps the rows that the filter returns. The nd filter
+            // records a grid selection and holds no cap. A rewrite that drops
+            // the `FilterExec` drops the cap too. So keep such a filter here.
+            if filter.fetch().is_some() {
+                return Ok(Transformed::no(node));
+            }
 
             // Split the predicate and route each conjunct: element-wise ones sink
             // into the nd filter, the rest stay in a residual filter above.
@@ -169,12 +185,33 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
                 return Ok(Transformed::no(node));
             }
 
-            let nd_filter = Arc::new(NdFilterExec::try_new(broadcast.input().clone(), push)?);
-            let new_broadcast = Arc::new(NdBroadcastExec::try_new(nd_filter)?);
+            let nd_filter: Arc<dyn ExecutionPlan> =
+                Arc::new(NdFilterExec::try_new(broadcast.input().clone(), push)?);
+
             let rewritten: Arc<dyn ExecutionPlan> = if keep.is_empty() {
-                new_broadcast
+                // The full predicate sinks, so the projection sinks too. It is
+                // a plain column list. The nd projection keeps the grid
+                // selection of the nd filter below it.
+                let below = match filter.projection().as_deref() {
+                    Some(indices) => Arc::new(NdProjectionExec::try_new_with_schema(
+                        nd_filter,
+                        projected_columns(&filter.input().schema(), indices),
+                        Some(filter.schema()),
+                    )?) as Arc<dyn ExecutionPlan>,
+                    None => nd_filter,
+                };
+                Arc::new(NdBroadcastExec::try_new(below)?)
             } else {
-                Arc::new(FilterExec::try_new(conjunction(keep), new_broadcast)?)
+                // A residual conjunct reads the columns that the projection
+                // drops. So the projection stays with the residual filter. Build
+                // the new filter from the original one. This keeps the
+                // projection, the batch size and the selectivity.
+                Arc::new(
+                    FilterExecBuilder::from(filter)
+                        .with_predicate(conjunction(keep))
+                        .with_input(Arc::new(NdBroadcastExec::try_new(nd_filter)?))
+                        .build()?,
+                )
             };
             Ok(Transformed::yes(rewritten))
         })
@@ -188,6 +225,29 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// Converts the `indices` of a filter projection into `(column, alias)` pairs.
+/// `schema` is the input schema of the filter. [`NdProjectionExec`] takes this
+/// form.
+///
+/// A filter projection is always a plain column list. So each output is a
+/// [`Column`] that names the field it selects. `FilterExec` validates the indices
+/// against the same schema.
+fn projected_columns(
+    schema: &SchemaRef,
+    indices: &[usize],
+) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
+    indices
+        .iter()
+        .map(|&index| {
+            let name = schema.field(index).name();
+            (
+                Arc::new(Column::new(name, index)) as Arc<dyn PhysicalExpr>,
+                name.clone(),
+            )
+        })
+        .collect()
 }
 
 /// Whether an expression can be evaluated before broadcast and give the same
