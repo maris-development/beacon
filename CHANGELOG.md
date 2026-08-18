@@ -149,11 +149,16 @@ tag. Releases before 2.0.0 are recorded in the
   `BEACON_NETCDF_READER_CACHE_SIZE`, `BEACON_HDF5_USE_READER_CACHE`, `BEACON_HDF5_READER_CACHE_SIZE`
   and the `use_reader_cache` table option.** Both formats held opened datasets in a `moka` cache
   keyed by path, modification time and reader. The schema cache
-  (`BEACON_FILE_STATS_SCHEMA_CACHE`) already answers the repeated inference that cost the most, so
-  what remained was one open per partition of a split scan — in exchange for two caches, four
+  (`BEACON_FILE_STATS_SCHEMA_CACHE`) answers the repeated inference that cost the most, so what
+  remained was the second open a file takes inside one query — in exchange for two caches, four
   variables and a cache key threaded through every format, source and opener. One open now reads one
   file, and the read path is a single line from the format to the reader. Setting a removed variable
   is ignored, not an error.
+
+  Measured on 100000 netCDF files: a query that reads a few files costs the same, an analyzed
+  archive scans 11% slower, and an archive with no statistics store scans 17% slower.
+  `ANALYZE FILES` is 6% faster, because a pass paid to fill a cache it never read from. The cache
+  size the tuning page recommended, 16384, was slower than the default 128 on every measurement.
 - **The `beacondb` wheel is no longer published.** Its release workflow, the manylinux build
   scripts and the `make wheel` targets are gone, and the version scripts no longer track it. The
   crate stays in the workspace and still builds locally with maturin; it is marked
