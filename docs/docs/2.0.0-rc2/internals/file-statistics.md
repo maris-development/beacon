@@ -17,8 +17,8 @@ Beacon does not enable this feature by default.
 
 :::warning netCDF and HDF5 need the Rust reader
 Set `BEACON_FILE_STATS_ENABLE=true`. netCDF and HDF5 also need the pure-Rust reader, which is the
-default for both. A server set to `BEACON_NETCDF_BACKEND=netcdf-c` or `BEACON_HDF5_BACKEND=netcdf-c`
-reads each such file and records no ranges. The [Check the result](#check-the-result) section shows
+default for both. A server set to `BEACON_NETCDF_USE_RUST_READER=false` or
+`BEACON_HDF5_USE_RUST_READER=false` reads each such file and records no ranges. The [Check the result](#check-the-result) section shows
 how to find this condition.
 :::
 
@@ -48,8 +48,8 @@ No row in them can match the query.
 ```bash
 BEACON_FILE_STATS_ENABLE=true
 BEACON_FILE_STATS_ON_STARTUP=true    # collect at each boot, see below
-BEACON_NETCDF_BACKEND=rust           # the default; netCDF ranges need it
-BEACON_HDF5_BACKEND=rust             # the default; HDF5 ranges need it
+BEACON_NETCDF_USE_RUST_READER=true   # the default; netCDF ranges need it
+BEACON_HDF5_USE_RUST_READER=true     # the default; HDF5 ranges need it
 ```
 
 Beacon then starts a pass every 15 minutes. Each pass finds new files and reads them.
@@ -131,8 +131,8 @@ GROUP BY format;
 ```
 
 ```
-netcdf  | 840000 | 840000    <- BEACON_NETCDF_BACKEND is netcdf-c
-hdf5    |   4000 |   4000    <- BEACON_HDF5_BACKEND is netcdf-c
+netcdf  | 840000 | 840000    <- BEACON_NETCDF_USE_RUST_READER is false
+hdf5    |   4000 |   4000    <- BEACON_HDF5_USE_RUST_READER is false
 odv     |  12000 |  12000    <- ODV supplies no ranges
 parquet |  50000 |      0    <- correct
 ```
@@ -224,8 +224,8 @@ condition.
 | Format | Ranges | Cost |
 | --- | --- | --- |
 | Parquet, GeoParquet | Yes | None. Beacon reads the file footer. |
-| netCDF | Yes, with `BEACON_NETCDF_BACKEND=rust`, the default | Beacon opens the file and reads the coordinate variables. |
-| HDF5 | Yes, with `BEACON_HDF5_BACKEND=rust`, the default | Beacon opens the file and reads the one-dimensional datasets. |
+| netCDF | Yes, with `BEACON_NETCDF_USE_RUST_READER=true`, the default | Beacon opens the file and reads the coordinate variables. |
+| HDF5 | Yes, with `BEACON_HDF5_USE_RUST_READER=true`, the default | Beacon opens the file and reads the one-dimensional datasets. |
 | Zarr | Yes | Beacon reads the store metadata, and the coordinate arrays it does not describe. |
 | CSV, Arrow IPC | No | |
 | ODV, TIFF | No | |
@@ -251,10 +251,11 @@ one thread. Your core count does not change this. The work also blocks queries.
 Beacon therefore computes netCDF ranges with its own Rust reader. That reader reads through the
 object store and uses each core.
 
-On `BEACON_NETCDF_BACKEND=netcdf-c`, netCDF files record `column_count = 0`. Beacon prunes no file.
+With `BEACON_NETCDF_USE_RUST_READER=false`, netCDF files record `column_count = 0`. Beacon prunes no
+file.
 
-The rule applies to `.h5` and `.hdf5` files. Keep `BEACON_HDF5_BACKEND=rust`, the default, for HDF5
-ranges.
+The rule applies to `.h5` and `.hdf5` files. Keep `BEACON_HDF5_USE_RUST_READER=true`, the default,
+for HDF5 ranges.
 
 Beacon writes the reason one time for each pass, at log level `info`. The line names the
 variable to set.
@@ -275,9 +276,9 @@ the ranges of that file.
 Beacon never prunes it. An incomplete first pass is safe. It makes queries faster on the files that
 Beacon read. It changes nothing else.
 
-Move `BEACON_NETCDF_BACKEND` (or `BEACON_HDF5_BACKEND`) to `rust` after a pass, and each such file
-has a record with no ranges. The files did not change. Only the reader changed. Beacon does not read
-them again. Use `FORCE` for this condition:
+Set `BEACON_NETCDF_USE_RUST_READER=true` (or `BEACON_HDF5_USE_RUST_READER=true`) after a pass, and
+each such file has a record with no ranges. The files did not change. Only the reader changed.
+Beacon does not read them again. Use `FORCE` for this condition:
 
 ```sql
 ANALYZE FILES FORCE;

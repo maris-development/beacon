@@ -14,7 +14,7 @@ Beacon recognizes `.h5` and `.hdf5`. It finds them in the dataset store automati
 
 Beacon reads HDF5 with a **pure-Rust reader** by default. A netCDF-4 file **is** an HDF5 file, and
 the netCDF-c library also opens plain HDF5, so that library is the fallback: set
-`BEACON_HDF5_BACKEND=netcdf-c` to read through it. On that backend HDF5 behaves exactly like
+`BEACON_HDF5_USE_RUST_READER=false` to read through it. On that reader HDF5 behaves exactly like
 [NetCDF](/docs/2.0.0-rc2/formats/netcdf): the same data model, the same
 [array to table mapping](/docs/2.0.0-rc2/arrays-to-tables), the same
 [CF decoding](/docs/2.0.0-rc2/cf-decoding) and the same attribute columns.
@@ -31,18 +31,15 @@ adds five things:
 | Concurrent scans | In parallel | One file at a time |
 | Writes | netCDF-c | netCDF-c |
 
-The setting is separate from `BEACON_NETCDF_BACKEND`, so you move one format at a time. Set it for
-one table instead of the whole server:
+The flag is separate from `BEACON_NETCDF_USE_RUST_READER`, so you move one format at a time. Set it
+for one table instead of the whole server:
 
 ```sql
 CREATE EXTERNAL TABLE experiments
 STORED AS HDF5
 LOCATION 'experiments/'
-OPTIONS ('backend' 'netcdf-c');
+OPTIONS ('use_rust_reader' 'false');
 ```
-
-`OPTIONS ('use_rust_reader' 'true')` is the 2.0.0-rc.1 spelling. A table that holds it keeps the
-reader it asked for.
 
 ## How a dataset becomes a column
 
@@ -158,14 +155,14 @@ See [Object Storage](/docs/2.0.0-rc2/data-sources/object-storage).
 ## As a query output
 
 `COPY TO ... STORED AS HDF5` uses the netCDF-4 writer. The result is a netCDF-4 file with an HDF5
-extension. Every HDF5 reader opens it. A write always uses netCDF-c, whatever the read backend says.
+extension. Every HDF5 reader opens it. A write always uses netCDF-c, whatever the read flag says.
 
 ::: warning What does not map
 The pure-Rust reader covers nested groups and compound datasets. It does not read a variable-length
 or opaque type, a reference, or a region reference.
 
-On `netcdf-c` the netCDF data model bounds what Beacon sees. A compound datatype, a variable-length
-or opaque type, a reference, and a group outside the root are not read.
+On the netCDF-c reader the netCDF data model bounds what Beacon sees. A compound datatype, a
+variable-length or opaque type, a reference, and a group outside the root are not read.
 
 One more limit is worth knowing. Beacon drops an attribute narrower than 8 bytes on a file written
 with the earliest HDF5 library version — h5py's default — because the reader takes the object
@@ -178,5 +175,5 @@ header padding as part of the value. The datasets are unaffected. This is
 - [NetCDF](/docs/2.0.0-rc2/formats/netcdf): the same readers, with the full detail
 - [Arrays to tables](/docs/2.0.0-rc2/arrays-to-tables): the row count and the grid rule
 - [CF decoding](/docs/2.0.0-rc2/cf-decoding): units, packing and fill values
-- [Performance tuning](/docs/2.0.0-rc2/server/performance-tuning#the-hdf5-reader-backend): when to
+- [Performance tuning](/docs/2.0.0-rc2/server/performance-tuning#hdf5-pure-rust-reader): when to
   change the reader

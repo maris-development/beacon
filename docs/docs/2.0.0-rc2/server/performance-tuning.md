@@ -93,19 +93,20 @@ Statistics need the pure-Rust reader below, which is the default. The netCDF-C l
 lock for each call in the process. Beacon computes the statistics through one thread, and the work
 blocks queries. Your core count does not change this.
 
-On `BEACON_NETCDF_BACKEND=netcdf-c`, Beacon reports no statistics for netCDF. It prunes no file.
+With `BEACON_NETCDF_USE_RUST_READER=false`, Beacon reports no statistics for netCDF. It prunes no
+file.
 This variable does not change that result. See
 [File statistics](/docs/2.0.0-rc2/internals/file-statistics).
 
-### The reader backend (parallel reads and object storage)
+### Pure-Rust reader (parallel reads and object storage)
 
-#### `BEACON_NETCDF_BACKEND`
+#### `BEACON_NETCDF_USE_RUST_READER`
 
 Beacon reads NetCDF with the pure-Rust reader by default. That reader holds no lock, so Beacon reads
 many files at the same time. It also reads byte ranges through the object store, so a file in S3,
 GCS or Azure needs no local copy.
 
-Set `BEACON_NETCDF_BACKEND=netcdf-c` to read through the netCDF-C library instead. That library is
+Set `BEACON_NETCDF_USE_RUST_READER=false` to read through the netCDF-C library instead. That library is
 not thread safe. Its Rust bindings hold one lock for each call. The lock covers the input, the
 decompression and the type conversion. A query that reads many files therefore reads one file at a
 time. The library also opens only a local path or an `http`/`https` URL, and it records no
@@ -113,10 +114,10 @@ statistics.
 
 Recommendations:
 
-- Keep the default `rust` for a query that scans many NetCDF files.
-- Keep the default `rust` for NetCDF files in an object store. The netCDF-C library cannot open
+- Keep the default `true` for a query that scans many NetCDF files.
+- Keep the default `true` for NetCDF files in an object store. The netCDF-C library cannot open
   those.
-- Set `netcdf-c` for a file the pure-Rust reader cannot read, or to match the behaviour of the
+- Set it to `false` for a file the pure-Rust reader cannot read, or to match the behaviour of the
   netCDF-C library exactly.
 
 Both readers give the same schema and the same values. Writes always use the netCDF-C library.
@@ -126,19 +127,20 @@ You can also set the reader for one table:
 ```sql
 CREATE EXTERNAL TABLE my_table STORED AS NC
 LOCATION 's3://bucket/data/'
-OPTIONS ('backend' 'netcdf-c');
+OPTIONS ('use_rust_reader' 'false');
 ```
 
-## The HDF5 reader backend
+## HDF5 pure-Rust reader
 
-### `BEACON_HDF5_BACKEND`
+### `BEACON_HDF5_USE_RUST_READER`
 
-Beacon reads `.h5` and `.hdf5` with the pure-Rust reader by default. The setting is separate from
-`BEACON_NETCDF_BACKEND`, so you move one format at a time.
+Beacon reads `.h5` and `.hdf5` with the pure-Rust reader by default. The flag is separate from
+`BEACON_NETCDF_USE_RUST_READER`, so you move one format at a time.
 
 A NetCDF-4 file is an HDF5 file, and the netCDF-C library opens a plain HDF5 file too, so
-`BEACON_HDF5_BACKEND=netcdf-c` reads every file this format serves. It carries the same three costs
-as netCDF: one lock for each call, a local path only, and no statistics.
+`BEACON_HDF5_USE_RUST_READER=false` reads every file this format serves through that library. It
+carries the same three costs as netCDF: one lock for each call, a local path only, and no
+statistics.
 
 The pure-Rust reader adds two things the netCDF reader cannot give you, because the netCDF data
 model does not hold them:
@@ -158,10 +160,10 @@ Set the reader for one table:
 ```sql
 CREATE EXTERNAL TABLE my_table STORED AS HDF5
 LOCATION 's3://bucket/data/'
-OPTIONS ('backend' 'netcdf-c');
+OPTIONS ('use_rust_reader' 'false');
 ```
 
-Measure before you move a local archive to `netcdf-c`. On a warm local file that library is
+Measure before you move a local archive to the netCDF-C library. On a warm local file that library is
 competitive, because it reads the file directly and Beacon reads byte ranges through the object
 store. The pure-Rust reader wins where the lock and the local copy cost the most: many files in one
 query, and files in S3, GCS or Azure.

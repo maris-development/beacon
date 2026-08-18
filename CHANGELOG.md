@@ -83,14 +83,12 @@ tag. Releases before 2.0.0 are recorded in the
   [file statistics](docs/docs/2.0.0-rc2/internals/file-statistics.md) prune netCDF and HDF5 scans,
   and it reads two HDF5 layouts the netCDF data model cannot express: a nested group and a compound
   dataset. netCDF-C remains available as a fallback, and every write still uses it.
-- **One option names the reader: `BEACON_NETCDF_BACKEND` and `BEACON_HDF5_BACKEND`,** each `rust`
-  (the default) or `netcdf-c`, and `OPTIONS ('backend' 'netcdf-c')` on one table. A backend the
-  server does not know stops startup rather than selecting a reader silently. The 2.0.0-rc.1
-  spellings `BEACON_NETCDF_USE_RUST_READER`, `BEACON_HDF5_USE_RUST_READER` and
-  `OPTIONS ('use_rust_reader' ...)` still work, so a deployment that pinned netCDF-C keeps it; the
-  new name wins when both are set. The HDF5 fallback now pins netCDF-C explicitly instead of
-  inheriting the netCDF backend, so `BEACON_HDF5_BACKEND=netcdf-c` reads through that library
-  whatever netCDF is set to.
+- **The reader variables keep their names, and only their defaults change.**
+  `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` now default to `true`, and
+  `OPTIONS ('use_rust_reader' 'false')` still moves one table to netCDF-C. A server that pinned
+  netCDF-C keeps it, and no variable is renamed. The HDF5 fallback now pins netCDF-C explicitly
+  instead of inheriting the netCDF setting, so `BEACON_HDF5_USE_RUST_READER=false` reads through
+  that library whatever netCDF is set to.
 - **The admin UI renders a result from the Arrow columns.** The query workbench reads each record
   batch as it arrives and shows it. It no longer builds a JS object for each row first, which cost
   one object per row and one property per column — on a beacon table that carries 100K+ columns,

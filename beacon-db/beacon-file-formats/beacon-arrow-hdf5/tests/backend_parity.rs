@@ -14,9 +14,7 @@ use std::sync::Arc;
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use beacon_arrow_hdf5::{Hdf5Config, Hdf5FormatFactory};
-use beacon_arrow_netcdf::datafusion::{
-    options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig, ReaderBackend,
-};
+use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
@@ -51,10 +49,10 @@ enum Backend {
 impl Backend {
     fn options(self) -> HashMap<String, String> {
         HashMap::from([(
-            "backend".to_string(),
+            "use_rust_reader".to_string(),
             match self {
-                Backend::NetcdfC => "netcdf-c".to_string(),
-                Backend::Rust => "rust".to_string(),
+                Backend::NetcdfC => "false".to_string(),
+                Backend::Rust => "true".to_string(),
             },
         )])
     }
@@ -118,10 +116,7 @@ fn factory(default_reader: Backend) -> Hdf5FormatFactory {
     Hdf5FormatFactory::new(
         inner,
         Hdf5Config {
-            backend: match default_reader {
-                Backend::NetcdfC => ReaderBackend::NetcdfC,
-                Backend::Rust => ReaderBackend::Oxcdf,
-            },
+            use_rust_reader: default_reader == Backend::Rust,
             ..Hdf5Config::default()
         },
     )
@@ -783,7 +778,7 @@ async fn disabling_statistics_wins_over_the_reader() {
         .create_with_native_root(
             &ctx.state(),
             &HashMap::from([
-                ("backend".to_string(), "rust".to_string()),
+                ("use_rust_reader".to_string(), "true".to_string()),
                 ("enable_statistics".to_string(), "false".to_string()),
             ]),
             &url,

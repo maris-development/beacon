@@ -1,7 +1,5 @@
 //! [`Hdf5Config`]: the runtime settings of the HDF5 format.
 
-use beacon_arrow_netcdf::datafusion::ReaderBackend;
-
 /// Runtime configuration for the HDF5 format.
 ///
 /// Plain data with sensible defaults; the caller populates it (there is no
@@ -10,21 +8,20 @@ use beacon_arrow_netcdf::datafusion::ReaderBackend;
 /// can be overridden per table via `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
 #[derive(Debug, Clone)]
 pub struct Hdf5Config {
-    /// Which reader opens a file.
+    /// Whether reads go through the pure-Rust reader instead of netcdf-c.
     ///
-    /// [`ReaderBackend::Oxcdf`], the pure-Rust reader, by default. It reads
-    /// parallel, reads an object store, records per-file statistics, and covers
-    /// the two layouts netcdf-c cannot report: a nested group and a compound
-    /// dataset. See [`crate::reader`].
+    /// On by default. The Rust reader reads in parallel, reads an object store,
+    /// records per-file statistics, and covers the two layouts netcdf-c cannot
+    /// report: a nested group and a compound dataset. See [`crate::reader`].
     ///
-    /// [`ReaderBackend::NetcdfC`] is the fallback. A NetCDF-4 file *is* an HDF5
+    /// Turn it off for netcdf-c, the fallback. A NetCDF-4 file *is* an HDF5
     /// file, and netcdf-c's HDF5 dispatch opens a plain one too, so it reads
     /// every file this format serves. It is the reader this crate used before
     /// the Rust one existed. Writes always use netcdf-c.
     ///
-    /// This is separate from the netCDF backend, so a runtime moves one format
+    /// This is separate from the netCDF setting, so a runtime moves one format
     /// at a time.
-    pub backend: ReaderBackend,
+    pub use_rust_reader: bool,
     /// Whether to generate per-file statistics during planning.
     ///
     /// Statistics need the Rust reader. Under netcdf-c the format reports
@@ -36,7 +33,7 @@ pub struct Hdf5Config {
 impl Default for Hdf5Config {
     fn default() -> Self {
         Self {
-            backend: ReaderBackend::Oxcdf,
+            use_rust_reader: true,
             enable_statistics: true,
         }
     }

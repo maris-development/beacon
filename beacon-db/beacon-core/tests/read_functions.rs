@@ -4,7 +4,6 @@
 mod common;
 
 use beacon_arrow_hdf5::Hdf5Config;
-use beacon_arrow_netcdf::datafusion::ReaderBackend;
 use common::{runtime, runtime_with, scalar_i64, total_rows, write_file, TestRuntime};
 
 async fn seeded(tag: &str) -> TestRuntime {
@@ -16,18 +15,18 @@ async fn seeded(tag: &str) -> TestRuntime {
 /// That is the default, so this is `seeded` with the reader named. It stays
 /// named, because each test that uses it is about what this reader does.
 async fn seeded_with_rust_hdf5(tag: &str) -> TestRuntime {
-    seeded_with_hdf5_backend(tag, ReaderBackend::Oxcdf).await
+    seeded_with_hdf5_backend(tag, true).await
 }
 
 /// The same fixtures on a runtime that reads HDF5 with netcdf-c, the fallback.
 async fn seeded_with_netcdf_c_hdf5(tag: &str) -> TestRuntime {
-    seeded_with_hdf5_backend(tag, ReaderBackend::NetcdfC).await
+    seeded_with_hdf5_backend(tag, false).await
 }
 
-async fn seeded_with_hdf5_backend(tag: &str, backend: ReaderBackend) -> TestRuntime {
+async fn seeded_with_hdf5_backend(tag: &str, use_rust_reader: bool) -> TestRuntime {
     let rt = runtime_with(tag, |b| {
         b.with_hdf5_config(Hdf5Config {
-            backend,
+            use_rust_reader,
             ..Hdf5Config::default()
         })
     })

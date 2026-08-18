@@ -104,10 +104,10 @@ The remote server runs its own scan. It then streams the result back. See
   [Zarr](/docs/2.0.0-rc2/formats/zarr),
   [Atlas](/docs/2.0.0-rc2/formats/atlas) and Cloud-Optimized GeoTIFF support
   range requests. Beacon fetches only the chunks that a query needs.
-- **NetCDF and HDF5 need an anonymous bucket on the netCDF-c backend.** netCDF-c opens a file by
-  URL and does not use the credential chain. Keep the default `BEACON_NETCDF_BACKEND=rust` and
-  `BEACON_HDF5_BACKEND=rust`, or set `AWS_SKIP_SIGNATURE=true`. The pure-Rust reader fetches byte
-  ranges through the object store, so a private bucket works and no local copy is made. See
+- **NetCDF and HDF5 need an anonymous bucket on the netCDF-c reader.** netCDF-c opens a file by URL
+  and does not use the credential chain. Keep the default `BEACON_NETCDF_USE_RUST_READER=true` and
+  `BEACON_HDF5_USE_RUST_READER=true`, or set `AWS_SKIP_SIGNATURE=true`. The pure-Rust reader fetches
+  byte ranges through the object store, so a private bucket works and no local copy is made. See
   [NetCDF](/docs/2.0.0-rc2/formats/netcdf) and [HDF5](/docs/2.0.0-rc2/formats/hdf5).
 - **A large bucket is slow to list.** Register a [crawler](/docs/2.0.0-rc2/server/crawlers). It
   builds the file list before a query needs it.

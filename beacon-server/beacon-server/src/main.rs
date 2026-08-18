@@ -45,11 +45,6 @@ async fn async_main(config: Arc<beacon_server_config::Config>) -> anyhow::Result
     install_panic_hook();
 
     tracing::info!("Beacon v{}", BEACON_VERSION);
-    // Configuration is read before this subscriber exists, so a setting that
-    // needs a word from us says it here instead.
-    for notice in &config.deprecations {
-        tracing::warn!("{notice}");
-    }
     // This line only prints when DEBUG is on, so it confirms the level took effect.
     tracing::debug!(filter = %log_filter, "debug logging is on");
     // The server owns the datasets store and hosts the runtime that queries it.

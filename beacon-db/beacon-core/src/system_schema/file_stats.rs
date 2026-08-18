@@ -21,7 +21,7 @@
 //! ```
 //!
 //! ```text
-//! netcdf  | 840000 | 840000    <- the backend is netcdf-c
+//! netcdf  | 840000 | 840000    <- use_rust_reader is off
 //! odv     |  12000 |  12000    <- ODV computes no ranges
 //! parquet |  50000 |      0    <- working
 //! ```

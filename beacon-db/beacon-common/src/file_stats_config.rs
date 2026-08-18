@@ -70,7 +70,7 @@ impl Default for FileStatsConfig {
         // `beacon-server-config`.
         Self {
             // Off: this has not run against a real archive yet, and on a netCDF
-            // deployment set to `BEACON_NETCDF_BACKEND=netcdf-c` it would work
+            // deployment without `BEACON_NETCDF_USE_RUST_READER` it would work
             // through every file to store nothing.
             enable: false,
             interval_secs: 900,

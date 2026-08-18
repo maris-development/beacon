@@ -68,9 +68,9 @@ LIMIT 1
 Limitations:
 
 - Beacon does not support user-defined types.
-- Object storage authenticates on the default `BEACON_NETCDF_BACKEND=rust`. On `netcdf-c` a bucket
-  supports anonymous access only, because that library opens a file by URL and never sees the
-  credential chain.
+- Object storage authenticates on the default `BEACON_NETCDF_USE_RUST_READER=true`. On the netCDF-C
+  library a bucket supports anonymous access only, because that library opens a file by URL and
+  never sees the credential chain.
 
 :::tip
 For a large NetCDF collection, convert the files into one

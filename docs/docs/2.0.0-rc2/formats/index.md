@@ -71,7 +71,7 @@ Reading the columns:
 - **On an S3 datasets store** — how the reader behaves when the server's datasets store is a
   bucket rather than a local directory. Every reader authenticates normally, netCDF and HDF5
   included: both read through the object store on their default pure-Rust reader. A server set to
-  `BEACON_NETCDF_BACKEND=netcdf-c` or `BEACON_HDF5_BACKEND=netcdf-c` **needs the bucket to allow
+  `BEACON_NETCDF_USE_RUST_READER=false` or `BEACON_HDF5_USE_RUST_READER=false` **needs the bucket to allow
   anonymous reads**, because netCDF-c opens a file by URL and never sees the credential chain. This
   is a property of the server's store, not of the query — paths in SQL are relative either way.
 - **Pushdown** — how much of a query reaches storage instead of running after the read. *Predicate*

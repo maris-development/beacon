@@ -12,6 +12,10 @@ use crate::datafusion::object_meta_resolver::{DefaultNetCDFObjectResolver, NetCD
 ///
 /// This is the bare choice, small enough to key a schema by. [`FileAccess`] is
 /// the choice plus whatever that reader needs to reach a file.
+///
+/// `oxcdf` is the default. `BEACON_NETCDF_USE_RUST_READER=false` and
+/// `BEACON_HDF5_USE_RUST_READER=false` select netcdf-c, and so does
+/// `OPTIONS ('use_rust_reader' 'false')` on one table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ReaderBackend {
     /// `oxcdf`, pure Rust over `object_store`. The default.
@@ -19,65 +23,6 @@ pub enum ReaderBackend {
     Oxcdf,
     /// netcdf-c, through its Rust bindings. The fallback.
     NetcdfC,
-}
-
-impl ReaderBackend {
-    /// The name this backend answers to, in configuration and in a log line.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ReaderBackend::Oxcdf => "rust",
-            ReaderBackend::NetcdfC => "netcdf-c",
-        }
-    }
-}
-
-impl std::fmt::Display for ReaderBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Parse a reader backend supplied through configuration.
-///
-/// `key` names the setting in the error, so one message serves the
-/// `BEACON_NETCDF_BACKEND` variable, the `BEACON_HDF5_BACKEND` variable and the
-/// `backend` option of one table. Both formats parse their backend here, so they
-/// accept exactly the same spellings.
-pub fn parse_backend(key: &str, value: &str) -> datafusion::error::Result<ReaderBackend> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "rust" | "oxcdf" => Ok(ReaderBackend::Oxcdf),
-        "netcdf-c" | "netcdf_c" | "netcdfc" | "c" => Ok(ReaderBackend::NetcdfC),
-        other => Err(datafusion::error::DataFusionError::Execution(format!(
-            "invalid reader backend for '{key}': '{other}'. Use 'rust' or 'netcdf-c'"
-        ))),
-    }
-}
-
-/// The backend a table reads on: the `backend` option, else `default`.
-///
-/// `use_rust_reader` is the name this option carried in 2.0.0-rc.1. It still
-/// works, so a table that pinned a reader keeps it, and `backend` wins when a
-/// table names both.
-///
-/// netCDF and HDF5 both resolve their reader here, so a table option means the
-/// same thing whichever format reads it.
-pub fn backend_from_options(
-    format_options: &std::collections::HashMap<String, String>,
-    default: ReaderBackend,
-) -> datafusion::error::Result<ReaderBackend> {
-    if let Some(value) = format_options.get("backend") {
-        return parse_backend("backend", value);
-    }
-    if let Some(value) = format_options.get("use_rust_reader") {
-        return match value.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" | "on" => Ok(ReaderBackend::Oxcdf),
-            "false" | "0" | "no" | "off" => Ok(ReaderBackend::NetcdfC),
-            other => Err(datafusion::error::DataFusionError::Execution(format!(
-                "invalid boolean for option 'use_rust_reader': '{other}'"
-            ))),
-        };
-    }
-    Ok(default)
 }
 
 /// How a table reaches its files, and which reader opens them.
@@ -259,43 +204,9 @@ pub async fn fetch_schema(
 mod tests {
     use super::*;
 
-    /// The Rust reader is the default. netcdf-c is reached by naming it.
+    /// The Rust reader is the default. netcdf-c is reached by asking for it.
     #[test]
     fn the_default_backend_is_the_rust_reader() {
         assert_eq!(ReaderBackend::default(), ReaderBackend::Oxcdf);
-    }
-
-    /// Every spelling a deployment may already hold, and both directions of the
-    /// name a log line prints.
-    #[test]
-    fn a_backend_parses_from_either_name() {
-        for value in ["rust", "RUST", " rust ", "oxcdf"] {
-            assert_eq!(
-                parse_backend("backend", value).unwrap(),
-                ReaderBackend::Oxcdf,
-                "{value}"
-            );
-        }
-        for value in ["netcdf-c", "netcdf_c", "netcdfc", "C"] {
-            assert_eq!(
-                parse_backend("backend", value).unwrap(),
-                ReaderBackend::NetcdfC,
-                "{value}"
-            );
-        }
-        assert_eq!(ReaderBackend::Oxcdf.as_str(), "rust");
-        assert_eq!(ReaderBackend::NetcdfC.as_str(), "netcdf-c");
-    }
-
-    /// The error names the setting and the value, so an operator can find both.
-    #[test]
-    fn an_unknown_backend_names_the_setting_and_the_values() {
-        let error = parse_backend("BEACON_NETCDF_BACKEND", "hdf5")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("BEACON_NETCDF_BACKEND"), "{error}");
-        assert!(error.contains("hdf5"), "{error}");
-        assert!(error.contains("rust"), "{error}");
-        assert!(error.contains("netcdf-c"), "{error}");
     }
 }

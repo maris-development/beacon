@@ -41,7 +41,7 @@ pub mod source;
 pub mod statistics;
 pub mod table_function;
 
-pub use reader::{backend_from_options, parse_backend, FileAccess, NetcdfInput, ReaderBackend};
+pub use reader::{FileAccess, NetcdfInput, ReaderBackend};
 pub use table_function::ReadNetCDFFunc;
 
 /// Runtime configuration for the NetCDF format.
@@ -54,21 +54,22 @@ pub use table_function::ReadNetCDFFunc;
 pub struct NetcdfConfig {
     /// Whether to generate per-file statistics during planning.
     pub enable_statistics: bool,
-    /// Which reader opens a file.
+    /// Whether reads go through the pure-Rust [`oxcdf`] reader instead of
+    /// netcdf-c.
     ///
-    /// [`ReaderBackend::Oxcdf`], the pure-Rust reader, by default: it reads byte
-    /// ranges through the object store, so a scan runs in parallel and a file in
-    /// s3, gs or az needs no local copy. See [`crate::oxcdf_reader`].
-    /// [`ReaderBackend::NetcdfC`] is the fallback, for a file the Rust reader
-    /// cannot yet read. Writes always use netcdf-c.
-    pub backend: ReaderBackend,
+    /// On by default: the Rust reader reads byte ranges through the object
+    /// store, so a scan runs in parallel and a file in s3, gs or az needs no
+    /// local copy. See [`crate::oxcdf_reader`]. Turn it off for netcdf-c, the
+    /// fallback, for a file the Rust reader cannot yet read. Writes always use
+    /// netcdf-c.
+    pub use_rust_reader: bool,
 }
 
 impl Default for NetcdfConfig {
     fn default() -> Self {
         Self {
             enable_statistics: true,
-            backend: ReaderBackend::Oxcdf,
+            use_rust_reader: true,
         }
     }
 }
@@ -135,24 +136,31 @@ impl NetCDFFormatFactory {
             .with_output_dir(self.output_dir.clone())
     }
 
-    /// The backend a table reads on. See [`backend_from_options`].
-    fn backend_for(
+    /// Whether a table built with `format_options` reads through the Rust
+    /// reader. The per-table `use_rust_reader` option wins over the runtime
+    /// default.
+    fn uses_rust_reader(
         &self,
         format_options: &std::collections::HashMap<String, String>,
-    ) -> datafusion::error::Result<ReaderBackend> {
-        backend_from_options(format_options, self.config.backend)
+    ) -> datafusion::error::Result<bool> {
+        match format_options.get("use_rust_reader") {
+            Some(value) => parse_bool_option("use_rust_reader", value),
+            None => Ok(self.config.use_rust_reader),
+        }
     }
 }
 
-/// The access a backend selects, for a format built without a location.
+/// The access a `use_rust_reader` setting selects, for a format built without a
+/// location.
 ///
 /// `oxcdf` is complete as it stands: it reads through the scan's object store.
 /// netcdf-c needs a resolver it cannot have yet, so it gets the unresolvable
 /// default; `create_with_native_root` is where it gets a real one.
-fn access_for(backend: ReaderBackend) -> FileAccess {
-    match backend {
-        ReaderBackend::Oxcdf => FileAccess::Oxcdf,
-        ReaderBackend::NetcdfC => FileAccess::default(),
+fn access_for(use_rust_reader: bool) -> FileAccess {
+    if use_rust_reader {
+        FileAccess::Oxcdf
+    } else {
+        FileAccess::default()
     }
 }
 
@@ -180,13 +188,13 @@ impl FileFormatFactory for NetCDFFormatFactory {
         // read by `create_for_analysis`; a format built for a query computes no
         // statistics whatever it says.
         self.statistics_wanted(format_options)?;
-        let backend = self.backend_for(format_options)?;
+        let use_rust_reader = self.uses_rust_reader(format_options)?;
 
         Ok(Arc::new(self.build_format(
             options,
             // A query never computes statistics. See `create_for_analysis`.
             false,
-            access_for(backend),
+            access_for(use_rust_reader),
         )))
     }
 
@@ -195,7 +203,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
             self.options.clone(),
             // A query never computes statistics. See `create_for_analysis`.
             false,
-            access_for(self.config.backend),
+            access_for(self.config.use_rust_reader),
         ))
     }
 
@@ -322,7 +330,10 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         }
         Some(
             SchemaOptions::new(NETCDF_EXTENSION)
-                .str(format.reader_backend().as_str())
+                .str(match format.reader_backend() {
+                    ReaderBackend::NetcdfC => "netcdf-c",
+                    ReaderBackend::Oxcdf => "oxcdf",
+                })
                 .finish(),
         )
     }
@@ -999,12 +1010,12 @@ mod reader_backend_tests {
         );
     }
 
-    // ── The backend ────────────────────────────────────────────────────
+    // ── The flag ───────────────────────────────────────────────────────
 
-    /// The Rust reader reads a table that names no backend.
+    /// The Rust reader reads a table that sets no option.
     #[test]
     fn the_default_config_takes_the_rust_reader() {
-        assert_eq!(NetcdfConfig::default().backend, ReaderBackend::Oxcdf);
+        assert!(NetcdfConfig::default().use_rust_reader);
         assert_eq!(ReaderBackend::default(), ReaderBackend::Oxcdf);
     }
 
@@ -1020,33 +1031,6 @@ mod reader_backend_tests {
             "no option means the runtime default"
         );
 
-        let options = HashMap::from([("backend".to_string(), "netcdf-c".to_string())]);
-        assert_eq!(
-            backend_of(&factory, &state, &options).unwrap(),
-            ReaderBackend::NetcdfC
-        );
-
-        let options = HashMap::from([("backend".to_string(), "rust".to_string())]);
-        assert_eq!(
-            backend_of(&factory, &state, &options).unwrap(),
-            ReaderBackend::Oxcdf
-        );
-
-        let options = HashMap::from([("backend".to_string(), "maybe".to_string())]);
-        assert!(
-            backend_of(&factory, &state, &options).is_err(),
-            "an unknown backend is a hard error"
-        );
-    }
-
-    /// `use_rust_reader` is the name this option carried in 2.0.0-rc.1. A table
-    /// that holds it keeps the reader it asked for, and `backend` wins over it.
-    #[tokio::test]
-    async fn the_old_option_name_still_selects_a_reader() {
-        let factory = factory();
-        let ctx = session();
-        let state = ctx.state();
-
         let options = HashMap::from([("use_rust_reader".to_string(), "false".to_string())]);
         assert_eq!(
             backend_of(&factory, &state, &options).unwrap(),
@@ -1057,16 +1041,6 @@ mod reader_backend_tests {
         assert_eq!(
             backend_of(&factory, &state, &options).unwrap(),
             ReaderBackend::Oxcdf
-        );
-
-        let options = HashMap::from([
-            ("use_rust_reader".to_string(), "false".to_string()),
-            ("backend".to_string(), "rust".to_string()),
-        ]);
-        assert_eq!(
-            backend_of(&factory, &state, &options).unwrap(),
-            ReaderBackend::Oxcdf,
-            "backend wins over the old name"
         );
 
         let options = HashMap::from([("use_rust_reader".to_string(), "maybe".to_string())]);
@@ -1084,7 +1058,7 @@ mod reader_backend_tests {
             std::env::temp_dir(),
             NetcdfOptions::default(),
             NetcdfConfig {
-                backend: ReaderBackend::NetcdfC,
+                use_rust_reader: false,
                 ..NetcdfConfig::default()
             },
         );
@@ -1096,7 +1070,7 @@ mod reader_backend_tests {
         );
 
         // And one table can still ask for the other reader.
-        let options = HashMap::from([("backend".to_string(), "rust".to_string())]);
+        let options = HashMap::from([("use_rust_reader".to_string(), "true".to_string())]);
         assert_eq!(
             backend_of(&factory, &ctx.state(), &options).unwrap(),
             ReaderBackend::Oxcdf
@@ -1111,7 +1085,7 @@ mod reader_backend_tests {
             std::env::temp_dir(),
             NetcdfOptions::default(),
             NetcdfConfig {
-                backend: ReaderBackend::NetcdfC,
+                use_rust_reader: false,
                 ..NetcdfConfig::default()
             },
         );

@@ -12,7 +12,7 @@ use error::Result;
 // composes them here and fills them from the environment.
 pub use beacon_arrow_bbf::datafusion::BbfConfig;
 pub use beacon_arrow_hdf5::Hdf5Config;
-pub use beacon_arrow_netcdf::datafusion::{NetcdfConfig, ReaderBackend};
+pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::CrawlerConfig;
 pub use beacon_common::FileStatsConfig;
@@ -38,10 +38,6 @@ pub struct Config {
     pub data: DataDirsConfig,
     pub s3: S3Config,
     pub secrets: SecretsConfig,
-    /// Settings that are honored but no longer the documented spelling, one
-    /// message each. The server logs them once logging is up: configuration
-    /// loads first, so nothing written during the load would be seen.
-    pub deprecations: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -415,44 +411,31 @@ struct RawConfig {
     #[envconfig(from = "BEACON_NETCDF_ENABLE_STATISTICS", default = "true")]
     netcdf_enable_statistics: bool,
 
-    /// Which reader opens a netCDF file: `rust` or `netcdf-c`.
+    /// Read netCDF with the pure-Rust `oxcdf` reader instead of netcdf-c.
     ///
-    /// `rust` by default. The pure-Rust `oxcdf` reader holds no process-global
-    /// lock, so scans run in parallel, and it reads byte ranges through the
-    /// object store, so a file in s3, gs or az needs no local copy. netcdf-c
-    /// cannot open one at all.
+    /// On by default. The Rust reader holds no process-global lock, so scans run
+    /// in parallel, and it reads byte ranges through the object store, so a file
+    /// in s3, gs or az needs no local copy. netcdf-c cannot open one at all.
     ///
-    /// `netcdf-c` is the fallback, for a file the Rust reader cannot yet read.
-    /// Writes always use netcdf-c.
-    #[envconfig(from = "BEACON_NETCDF_BACKEND", default = "rust")]
-    netcdf_backend: String,
+    /// Turn it off for netcdf-c, the fallback, for a file the Rust reader cannot
+    /// yet read. Writes always use netcdf-c.
+    #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER", default = "true")]
+    netcdf_use_rust_reader: bool,
 
-    /// The 2.0.0-rc.1 name of `BEACON_NETCDF_BACKEND`.
+    /// Read HDF5 with the pure-Rust reader instead of netcdf-c.
     ///
-    /// Unset unless a deployment still holds it. `true` means `rust` and `false`
-    /// means `netcdf-c`; `BEACON_NETCDF_BACKEND` wins when both are set.
-    #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER")]
-    netcdf_use_rust_reader: Option<bool>,
-
-    /// Which reader opens an HDF5 file: `rust` or `netcdf-c`.
+    /// On by default. The Rust reader adds parallel reads, object store access,
+    /// per-file statistics, and the two layouts netcdf-c cannot report: a nested
+    /// group and a compound dataset.
     ///
-    /// `rust` by default. The pure-Rust reader adds parallel reads, object store
-    /// access, per-file statistics, and the two layouts netcdf-c cannot report:
-    /// a nested group and a compound dataset.
+    /// Turn it off for netcdf-c, the fallback. A NetCDF-4 file is an HDF5 file
+    /// and netcdf-c's HDF5 dispatch opens a plain one too, so it reads every
+    /// file this format serves. Writes always use netcdf-c.
     ///
-    /// `netcdf-c` is the fallback. A NetCDF-4 file is an HDF5 file and
-    /// netcdf-c's HDF5 dispatch opens a plain one too, so it reads every file
-    /// this format serves. Writes always use netcdf-c.
-    ///
-    /// This is separate from `BEACON_NETCDF_BACKEND`, so a server can move one
-    /// format at a time.
-    #[envconfig(from = "BEACON_HDF5_BACKEND", default = "rust")]
-    hdf5_backend: String,
-
-    /// The 2.0.0-rc.1 name of `BEACON_HDF5_BACKEND`. See
-    /// `netcdf_use_rust_reader`.
-    #[envconfig(from = "BEACON_HDF5_USE_RUST_READER")]
-    hdf5_use_rust_reader: Option<bool>,
+    /// This is separate from `BEACON_NETCDF_USE_RUST_READER`, so a server can
+    /// move one format at a time.
+    #[envconfig(from = "BEACON_HDF5_USE_RUST_READER", default = "true")]
+    hdf5_use_rust_reader: bool,
 
     #[envconfig(from = "BEACON_HDF5_ENABLE_STATISTICS", default = "true")]
     hdf5_enable_statistics: bool,
@@ -552,76 +535,9 @@ struct RawConfig {
     api_license_identifier: Option<String>,
 }
 
-/// The reader a `BEACON_*_BACKEND` variable names, and the deprecation notice
-/// its 2.0.0-rc.1 spelling earns.
-///
-/// `key` is the variable that holds `value`. `legacy` is the
-/// `BEACON_*_USE_RUST_READER` boolean of the same format: it decides only when
-/// the backend variable is absent, so a deployment that pinned netcdf-c keeps
-/// netcdf-c rather than moving to the new default without asking.
-///
-/// The notice is returned rather than logged. Configuration loads before the
-/// tracing subscriber exists, so a warning written here would go nowhere; the
-/// server logs [`Config::deprecations`] once logging is up.
-fn reader_backend(
-    key: &str,
-    value: &str,
-    legacy: Option<bool>,
-) -> std::result::Result<(ReaderBackend, Option<String>), String> {
-    // envconfig fills `value` from the `default = "rust"` when the variable is
-    // unset, so an explicit `rust` and an absent variable look the same here.
-    // The old name therefore wins over the default and loses to any other
-    // value, which is what "the backend variable wins when both are set" means.
-    if let Some(use_rust_reader) = legacy.filter(|_| value.trim().eq_ignore_ascii_case("rust")) {
-        let old_key = format!("{}_USE_RUST_READER", key.trim_end_matches("_BACKEND"));
-        let backend = if use_rust_reader {
-            ReaderBackend::Oxcdf
-        } else {
-            ReaderBackend::NetcdfC
-        };
-        let notice = format!(
-            "{old_key} is deprecated: {use_rust_reader} means {key}={backend}. \
-             Set {key} instead."
-        );
-        return Ok((backend, Some(notice)));
-    }
-    beacon_arrow_netcdf::datafusion::parse_backend(key, value)
-        .map(|backend| (backend, None))
-        .map_err(|e| e.to_string())
-}
-
-/// [`reader_backend`], falling back to the default reader on a bad value.
-///
-/// The fallback is unreachable through [`Config::load`], which parses both
-/// variables strictly and refuses to start on an error. It exists because
-/// `From<RawConfig>` cannot fail.
-fn reader_backend_or_default(
-    key: &str,
-    value: &str,
-    legacy: Option<bool>,
-) -> (ReaderBackend, Option<String>) {
-    reader_backend(key, value, legacy).unwrap_or_else(|e| {
-        (
-            ReaderBackend::default(),
-            Some(format!("{e}; falling back to the default reader")),
-        )
-    })
-}
-
 impl From<RawConfig> for Config {
     fn from(raw: RawConfig) -> Self {
-        let (netcdf_backend, netcdf_notice) = reader_backend_or_default(
-            "BEACON_NETCDF_BACKEND",
-            &raw.netcdf_backend,
-            raw.netcdf_use_rust_reader,
-        );
-        let (hdf5_backend, hdf5_notice) = reader_backend_or_default(
-            "BEACON_HDF5_BACKEND",
-            &raw.hdf5_backend,
-            raw.hdf5_use_rust_reader,
-        );
         Self {
-            deprecations: [netcdf_notice, hdf5_notice].into_iter().flatten().collect(),
             admin: AdminConfig {
                 username: raw.admin_username,
                 password: raw.admin_password,
@@ -684,10 +600,10 @@ impl From<RawConfig> for Config {
             },
             netcdf: NetcdfConfig {
                 enable_statistics: raw.netcdf_enable_statistics,
-                backend: netcdf_backend,
+                use_rust_reader: raw.netcdf_use_rust_reader,
             },
             hdf5: Hdf5Config {
-                backend: hdf5_backend,
+                use_rust_reader: raw.hdf5_use_rust_reader,
                 enable_statistics: raw.hdf5_enable_statistics,
             },
             zarr: ZarrConfig {
@@ -828,23 +744,6 @@ impl Config {
     /// report the problem cleanly and exit.
     pub fn load() -> Result<Config> {
         let raw = RawConfig::init_from_env().map_err(|e| ConfigError::EnvLoad(e.to_string()))?;
-        // Both readers are named, not numbered, so a typo has to stop the server
-        // rather than quietly pick one. `From<RawConfig>` cannot fail, so the
-        // check happens here, before it runs. The reader it resolves is
-        // discarded: `From` resolves it again, and carries the deprecation
-        // notice with it.
-        reader_backend(
-            "BEACON_NETCDF_BACKEND",
-            &raw.netcdf_backend,
-            raw.netcdf_use_rust_reader,
-        )
-        .map_err(ConfigError::InvalidReaderBackend)?;
-        reader_backend(
-            "BEACON_HDF5_BACKEND",
-            &raw.hdf5_backend,
-            raw.hdf5_use_rust_reader,
-        )
-        .map_err(ConfigError::InvalidReaderBackend)?;
         // Capture the secrets key before `raw` is consumed; decode/validate below.
         let secrets_key_b64 = raw.secrets_key.clone();
         let mut config: Config = raw.into();
@@ -948,8 +847,8 @@ fn create_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_master_key, normalize_base_path, normalize_log_level, reader_backend,
-        validate_storage, Config, PathBuf, RawConfig, ReaderBackend,
+        decode_master_key, normalize_base_path, normalize_log_level, validate_storage, Config,
+        PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1260,77 +1159,25 @@ mod tests {
         assert!(err.contains("expected 32 bytes, got 4"), "got: {err}");
     }
 
-    // ── Reader backends ────────────────────────────────────────────────
+    // ── Reader flags ───────────────────────────────────────────────────
 
-    /// A server that names no reader reads both formats in Rust.
+    /// A server that sets neither flag reads both formats in Rust.
     #[test]
     fn both_formats_default_to_the_rust_reader() {
         let config = config(&[]);
-        assert_eq!(config.netcdf.backend, ReaderBackend::Oxcdf);
-        assert_eq!(config.hdf5.backend, ReaderBackend::Oxcdf);
+        assert!(config.netcdf.use_rust_reader);
+        assert!(config.hdf5.use_rust_reader);
     }
 
-    /// Each variable moves one format, so a server can fall back for one alone.
+    /// Each flag moves one format, so a server can fall back for one alone.
     #[test]
-    fn each_backend_variable_moves_one_format() {
-        let netcdf_c = config(&[("BEACON_NETCDF_BACKEND", "netcdf-c")]);
-        assert_eq!(netcdf_c.netcdf.backend, ReaderBackend::NetcdfC);
-        assert_eq!(netcdf_c.hdf5.backend, ReaderBackend::Oxcdf);
+    fn each_flag_moves_one_format() {
+        let netcdf_c = config(&[("BEACON_NETCDF_USE_RUST_READER", "false")]);
+        assert!(!netcdf_c.netcdf.use_rust_reader);
+        assert!(netcdf_c.hdf5.use_rust_reader);
 
-        let hdf5_c = config(&[("BEACON_HDF5_BACKEND", "netcdf-c")]);
-        assert_eq!(hdf5_c.netcdf.backend, ReaderBackend::Oxcdf);
-        assert_eq!(hdf5_c.hdf5.backend, ReaderBackend::NetcdfC);
-    }
-
-    /// A deployment that pinned netcdf-c through the 2.0.0-rc.1 variable keeps
-    /// netcdf-c. It must not move to the new default without being asked.
-    #[test]
-    fn the_old_variable_still_pins_netcdf_c() {
-        let config = config(&[
-            ("BEACON_NETCDF_USE_RUST_READER", "false"),
-            ("BEACON_HDF5_USE_RUST_READER", "false"),
-        ]);
-        assert_eq!(config.netcdf.backend, ReaderBackend::NetcdfC);
-        assert_eq!(config.hdf5.backend, ReaderBackend::NetcdfC);
-    }
-
-    /// The new variable wins when both name a reader.
-    #[test]
-    fn the_backend_variable_wins_over_the_old_one() {
-        let config = config(&[
-            ("BEACON_NETCDF_BACKEND", "netcdf-c"),
-            ("BEACON_NETCDF_USE_RUST_READER", "true"),
-        ]);
-        assert_eq!(config.netcdf.backend, ReaderBackend::NetcdfC);
-    }
-
-    /// The old variable earns a notice that names both spellings, and the
-    /// server logs it. The notice is carried on the config, because
-    /// configuration loads before the tracing subscriber exists.
-    #[test]
-    fn the_old_variable_reports_itself_once() {
-        let legacy = config(&[("BEACON_HDF5_USE_RUST_READER", "false")]);
-        assert_eq!(legacy.deprecations.len(), 1, "{:?}", legacy.deprecations);
-        let notice = &legacy.deprecations[0];
-        assert!(notice.contains("BEACON_HDF5_USE_RUST_READER"), "{notice}");
-        assert!(notice.contains("BEACON_HDF5_BACKEND=netcdf-c"), "{notice}");
-
-        // Nothing to say when only the current spelling is set.
-        let current = config(&[("BEACON_HDF5_BACKEND", "netcdf-c")]);
-        assert!(
-            current.deprecations.is_empty(),
-            "{:?}",
-            current.deprecations
-        );
-    }
-
-    /// An unknown reader is an error, naming the variable and the value.
-    /// `Config::load` refuses to start on it.
-    #[test]
-    fn an_unknown_backend_is_rejected() {
-        let error = reader_backend("BEACON_NETCDF_BACKEND", "netcdf4", None).unwrap_err();
-        assert!(error.contains("BEACON_NETCDF_BACKEND"), "{error}");
-        assert!(error.contains("netcdf4"), "{error}");
-        assert!(error.contains("rust"), "{error}");
+        let hdf5_c = config(&[("BEACON_HDF5_USE_RUST_READER", "false")]);
+        assert!(hdf5_c.netcdf.use_rust_reader);
+        assert!(!hdf5_c.hdf5.use_rust_reader);
     }
 }

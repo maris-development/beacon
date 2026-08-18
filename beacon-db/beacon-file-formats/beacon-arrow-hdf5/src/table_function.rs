@@ -101,12 +101,12 @@ impl TableFunctionImpl for ReadHdf5Func {
 
         // Not registered, or registered on netcdf-c: this is the delegating
         // path this function has always taken. `read_netcdf` is told which
-        // reader to use, because the netCDF format has a backend of its own and
-        // it may be the Rust one.
+        // reader to use, because the netCDF format picks its own reader and it
+        // may be the Rust one.
         let netcdf_c = || {
             self.inner.call_with_options(
                 args,
-                HashMap::from([("backend".to_string(), "netcdf-c".to_string())]),
+                HashMap::from([("use_rust_reader".to_string(), "false".to_string())]),
             )
         };
         let Some(hdf5_factory) = hdf5_factory else {

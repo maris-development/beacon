@@ -2,7 +2,8 @@
 //!
 //! This crate owns the HDF5 *identity*: the `.h5`/`.hdf5` extensions,
 //! `STORED AS {H5,HDF5}` and the `read_hdf5` table function. It offers two
-//! readers behind that identity, and [`Hdf5Config::backend`] picks between them.
+//! readers behind that identity, and [`Hdf5Config::use_rust_reader`] picks
+//! between them.
 //!
 //! # The pure-Rust reader, the default
 //!
@@ -14,12 +15,11 @@
 //! # netcdf-c, the fallback
 //!
 //! A NetCDF-4 file *is* an HDF5 file, and the netCDF-c library's HDF5 dispatch
-//! also opens *plain* HDF5 files (their datasets read as variables/arrays). Set
-//! the backend to `netcdf-c` and this crate re-implements no reader at all: it
-//! delegates to [`beacon_arrow_netcdf`], the way it did before the Rust reader
-//! existed.
+//! also opens *plain* HDF5 files (their datasets read as variables/arrays). Turn
+//! the flag off and this crate re-implements no reader at all: it delegates to
+//! [`beacon_arrow_netcdf`], the way it did before the Rust reader existed.
 //!
-//! Writes always use netcdf-c, whatever the backend says. The Rust reader reads.
+//! Writes always use netcdf-c, whatever the flag says. The Rust reader reads.
 //!
 //! # The public surface
 //!
@@ -27,7 +27,7 @@
 //! - [`Hdf5FormatFactory`] — a `FileFormat` factory recognizing `.h5`/`.hdf5`
 //!   and answering to `STORED AS {h5,hdf5}`.
 //! - [`Hdf5Format`] — the `FileFormat` the factory builds on the Rust reader.
-//! - [`Hdf5Config`] — the runtime settings, including the reader backend.
+//! - [`Hdf5Config`] — the runtime settings, including the reader flag.
 
 mod config;
 mod format;

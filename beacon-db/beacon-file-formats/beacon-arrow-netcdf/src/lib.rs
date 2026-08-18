@@ -16,8 +16,8 @@
 //!   writes files.
 //!
 //! Both produce the same dataset. The
-//! [`backend`](datafusion::NetcdfConfig::backend) setting selects between
-//! them.
+//! [`use_rust_reader`](datafusion::NetcdfConfig::use_rust_reader) flag selects
+//! between them.
 //!
 //! # Key modules
 //! - [`reader`]: high-level NetCDF -> Arrow reader API (netcdf-c).

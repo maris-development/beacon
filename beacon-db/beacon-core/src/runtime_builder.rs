@@ -220,8 +220,8 @@ impl RuntimeBuilder {
 
     /// Replaces the whole HDF5 reader configuration.
     ///
-    /// HDF5 has its own reader backend, separate from netCDF's. A NetCDF-4 file
-    /// is HDF5, so one runtime can read `.nc` through netcdf-c and `.h5` through
+    /// HDF5 has its own reader flag, separate from netCDF's. A NetCDF-4 file is
+    /// HDF5, so one runtime can read `.nc` through netcdf-c and `.h5` through
     /// the Rust reader, or the other way round.
     pub fn with_hdf5_config(mut self, hdf5: Hdf5Config) -> Self {
         self.hdf5 = hdf5;
@@ -778,7 +778,7 @@ fn register_file_formats(
             builder.netcdf.clone(),
         )),
         // HDF5 (its own crate — a NetCDF-4 file is HDF5). It reads through the netCDF reader
-        // when `builder.hdf5.backend` is netcdf-c, and it writes through it either way. In
+        // when `builder.hdf5.use_rust_reader` is off, and it writes through it either way. In
         // the `formats` vec so beacon's format registry keys it by `.h5`/`.hdf5` and dataset
         // discovery picks those files up. Registered under `hdf5` in DataFusion's native registry
         // by the loop below.
