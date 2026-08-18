@@ -10,7 +10,6 @@ use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
-    execution::object_store::ObjectStoreUrl,
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
 };

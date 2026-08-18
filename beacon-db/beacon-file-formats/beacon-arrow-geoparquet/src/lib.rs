@@ -9,5 +9,4 @@
 //!   geometry columns described in the file's `geo` metadata to their native
 //!   GeoArrow representation.
 
-/// DataFusion integration for reading and writing GeoParquet.
 pub mod datafusion;

@@ -6,7 +6,6 @@ use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl,
-    execution::object_store::ObjectStoreUrl,
     prelude::{Expr, SessionContext},
 };
 

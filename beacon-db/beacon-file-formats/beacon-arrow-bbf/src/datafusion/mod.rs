@@ -26,15 +26,13 @@ pub mod opener;
 pub mod source;
 pub mod stream_share;
 
+pub const BBF_FORMAT_NAME: &str = "bbf";
+
 /// Runtime configuration for the BBF format.
-///
-/// Plain data with sensible defaults; the caller populates it (no environment
-/// parsing here). `split_streams_slice` is a default that a table can override
-/// via `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
 #[derive(Clone, Debug, Default)]
 pub struct BbfConfig {
     /// Whether to split each record batch into `batch_size`-row slices to bound
-    /// peak memory for wide tables.
+    /// peak memory for wide tables. Defaults to `false` for backward compatibility.
     pub split_streams_slice: bool,
 }
 
@@ -62,7 +60,7 @@ impl BBFFormatFactory {
 
 impl GetExt for BBFFormatFactory {
     fn get_ext(&self) -> String {
-        "bbf".to_string()
+        BBF_FORMAT_NAME.to_string()
     }
 }
 
@@ -112,7 +110,7 @@ impl FileFormatFactoryExt for BBFFormatFactory {
             .filter(|obj| {
                 obj.location
                     .extension()
-                    .map(|ext| ext == "bbf")
+                    .map(|ext| ext == BBF_FORMAT_NAME)
                     .unwrap_or(false)
             })
             .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
@@ -141,7 +139,7 @@ impl FileFormat for BBFFormat {
 
     /// Returns the extension for this FileFormat, e.g. "file.csv" -> csv
     fn get_ext(&self) -> String {
-        "bbf".to_string()
+        BBF_FORMAT_NAME.to_string()
     }
 
     /// Returns the extension for this FileFormat when compressed, e.g. "file.csv.gz" -> csv
@@ -149,7 +147,7 @@ impl FileFormat for BBFFormat {
         &self,
         _file_compression_type: &FileCompressionType,
     ) -> datafusion::error::Result<String> {
-        Ok("bbf".to_string())
+        Ok(self.get_ext())
     }
 
     /// Returns whether this instance uses compression if applicable
@@ -176,15 +174,12 @@ impl FileFormat for BBFFormat {
                     Ok::<_, datafusion::error::DataFusionError>(Arc::new(reader.arrow_schema()))
                 }
             })
-            // Keep the listing order. The merged schema then does not depend on
-            // the disk answer order. See issue #377. The width stays the
-            // concurrency. `buffered` holds a finished schema until its turn.
+            // Keep the listing order.
             .buffered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;
 
-        // The rule of the session decides the result for a column that two
-        // files describe differently.
+        // Merge & widen types across all files, using the session's type widening rules.
         session_widening(state)
             .merge_schemas(&schemas)
             .map_err(|e| {
@@ -195,19 +190,13 @@ impl FileFormat for BBFFormat {
             })
     }
 
-    /// Infer the statistics for the provided object. The cost and accuracy of the
-    /// estimated statistics might vary greatly between file formats.
-    ///
-    /// `table_schema` is the (combined) schema of the overall table
-    /// and may be a superset of the schema contained in this file.
-    ///
-    /// TODO: should the file source return statistics for only columns referred to in the table schema?
+    /// BBF Maintains its own internal statistics, so we don't need to compute them here. Return unknown stats to avoid unnecessary work.
     async fn infer_stats(
         &self,
-        state: &dyn Session,
-        store: &Arc<dyn ObjectStore>,
+        _state: &dyn Session,
+        _store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
-        object: &ObjectMeta,
+        _object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
         return Ok(Statistics::new_unknown(&table_schema));
     }
@@ -224,7 +213,7 @@ impl FileFormat for BBFFormat {
             conf.table_partition_cols().clone(),
         );
         // Preserve a projection that the scan pushed down into the incoming
-        // source — rebuilding the source below would otherwise drop it.
+        // source. Rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = BBFSource::new(table_schema)
             .with_split_streams_slice(self.split_streams_slice)
