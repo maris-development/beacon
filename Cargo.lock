@@ -1420,8 +1420,10 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "datafusion 53.1.0",
+ "datafusion-datasource 53.1.0",
  "futures",
  "object_store 0.13.2",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1487,8 +1489,10 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "datafusion 53.1.0",
+ "datafusion-datasource 53.1.0",
  "futures",
  "object_store 0.13.2",
+ "tempfile",
  "tokio",
  "tracing",
 ]

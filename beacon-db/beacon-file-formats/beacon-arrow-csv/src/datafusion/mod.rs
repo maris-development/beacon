@@ -7,7 +7,9 @@ use datafusion::{
     common::{GetExt, Statistics},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
-        physical_plan::{FileScanConfig, FileSinkConfig, FileSource},
+        physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
+        source::DataSourceExec,
+        table_schema::TableSchema,
     },
     physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,
@@ -214,12 +216,37 @@ impl FileFormat for CsvFormat {
             .await
     }
 
+    /// Build the scan, with a source that adapts each file to the merged schema.
+    ///
+    /// The inner format builds a source that hands the merged schema to the
+    /// record parser of every file. That parser counts fields, so a file that
+    /// holds fewer columns than the collection fails. This method builds
+    /// [`BeaconCsvSource`] instead, which reads each file with its own columns.
     async fn create_physical_plan(
         &self,
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        self.inner_format.create_physical_plan(state, conf).await
+        let options = self.resolved_options(state);
+        let compression = options.compression.into();
+
+        let table_schema = TableSchema::new(
+            Arc::clone(conf.file_schema()),
+            conf.table_partition_cols().clone(),
+        );
+        // The listing table built the source, so it already carries any
+        // projection the optimizer pushed down. Keep it and restate the options.
+        let source: Arc<dyn FileSource> =
+            match conf.file_source.as_any().downcast_ref::<BeaconCsvSource>() {
+                Some(source) => Arc::new(source.clone().with_csv_options(options)),
+                None => Arc::new(BeaconCsvSource::new(table_schema, options)),
+            };
+
+        let config = FileScanConfigBuilder::from(conf)
+            .with_file_compression_type(compression)
+            .with_source(source)
+            .build();
+        Ok(DataSourceExec::from_data_source(config))
     }
 
     async fn create_writer_physical_plan(
@@ -238,9 +265,38 @@ impl FileFormat for CsvFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        self.inner_format.file_source(table_schema)
+        let mut options = self.inner_format.options().clone();
+        if options.has_header.is_none() {
+            options.has_header = Some(true);
+        }
+        Arc::new(BeaconCsvSource::new(table_schema, options))
     }
 }
+
+impl CsvFormat {
+    /// The read options, with the two the session decides resolved.
+    ///
+    /// `has_header` and `newlines_in_values` fall back to the session when a
+    /// statement leaves them out. The source reads files, not configuration, so
+    /// it needs the settled answer.
+    fn resolved_options(&self, state: &dyn Session) -> datafusion::common::config::CsvOptions {
+        let mut options = self.inner_format.options().clone();
+        options.has_header = Some(
+            options
+                .has_header
+                .unwrap_or_else(|| state.config_options().catalog.has_header),
+        );
+        options.newlines_in_values = Some(
+            options
+                .newlines_in_values
+                .unwrap_or_else(|| state.config_options().catalog.newlines_in_values),
+        );
+        options
+    }
+}
+
+pub mod source;
+pub use source::BeaconCsvSource;
 
 pub mod table_function;
 pub use table_function::ReadCsvFunc;

@@ -7,12 +7,15 @@ use datafusion::{
     common::{GetExt, Statistics},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
-        physical_plan::{FileScanConfig, FileSinkConfig, FileSource},
+        physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
+        source::DataSourceExec,
+        table_schema::TableSchema,
     },
     physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,
 };
-use object_store::{ObjectMeta, ObjectStore};
+use object_store::path::Path;
+use object_store::{GetOptions, GetRange, ObjectMeta, ObjectStore};
 
 use futures::{StreamExt, TryStreamExt, stream};
 
@@ -173,12 +176,50 @@ impl FileFormat for ArrowFormat {
             .await
     }
 
+    /// Build the scan, with a source that adapts each file to the merged schema.
+    ///
+    /// The inner format builds a source that reads a file with the file's own
+    /// schema. That source cannot produce the merged schema of a collection
+    /// whose files disagree, so this method builds [`BeaconArrowSource`]
+    /// instead. Every other decision stays with the inner format, including
+    /// which container the collection holds: that is read from the first file,
+    /// because a reader for one container cannot read the other.
     async fn create_physical_plan(
         &self,
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        self.inner_format.create_physical_plan(state, conf).await
+        let store = state.runtime_env().object_store(&conf.object_store_url)?;
+        let first = conf
+            .file_groups
+            .iter()
+            .flat_map(|group| group.files())
+            .next()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Internal(
+                    "no files found in the file groups of an Arrow IPC scan".to_string(),
+                )
+            })?
+            .object_meta
+            .location
+            .clone();
+        let container = read_container(&store, &first).await?;
+
+        let table_schema = TableSchema::new(
+            Arc::clone(conf.file_schema()),
+            conf.table_partition_cols().clone(),
+        );
+        // The optimizer may have pushed a projection into the source the inner
+        // format built. Carry it over, or the scan reads every column.
+        let pushed_down = conf.file_source.projection().cloned();
+        let source = Arc::new(
+            BeaconArrowSource::new(container, table_schema).with_projection(pushed_down.as_ref()),
+        );
+
+        let config = FileScanConfigBuilder::from(conf)
+            .with_source(source)
+            .build();
+        Ok(DataSourceExec::from_data_source(config))
     }
 
     async fn create_writer_physical_plan(
@@ -193,13 +234,45 @@ impl FileFormat for ArrowFormat {
             .await
     }
 
+    /// The source a listing table builds before it knows the files.
+    ///
+    /// The container named here is a placeholder.
+    /// [`create_physical_plan`](Self::create_physical_plan) reads the first file
+    /// and rebuilds the source for the container that file holds.
     fn file_source(
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        self.inner_format.file_source(table_schema)
+        Arc::new(BeaconArrowSource::new(IpcContainer::File, table_schema))
     }
 }
+
+/// The first six bytes of an IPC *file* container.
+const ARROW_FILE_MAGIC: &[u8; 6] = b"ARROW1";
+
+/// Which container `location` holds.
+///
+/// The file container opens with a magic string. Everything else is read as the
+/// stream container, which opens with a schema message.
+async fn read_container(
+    store: &Arc<dyn ObjectStore>,
+    location: &Path,
+) -> datafusion::error::Result<IpcContainer> {
+    let options = GetOptions {
+        range: Some(GetRange::Bounded(0..ARROW_FILE_MAGIC.len() as u64)),
+        ..Default::default()
+    };
+    let bytes = store.get_opts(location, options).await?.bytes().await?;
+    if bytes.len() >= ARROW_FILE_MAGIC.len() && &bytes[..ARROW_FILE_MAGIC.len()] == ARROW_FILE_MAGIC
+    {
+        Ok(IpcContainer::File)
+    } else {
+        Ok(IpcContainer::Stream)
+    }
+}
+
+pub mod source;
+pub use source::{BeaconArrowSource, IpcContainer};
 
 pub mod table_function;
 pub use table_function::ReadArrowFunc;
