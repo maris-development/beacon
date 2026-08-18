@@ -1,5 +1,5 @@
 ---
-description: Query HDF5 files with read_hdf5. Beacon offers two readers, the netCDF-c library by default and a pure-Rust reader that adds nested groups, compound datasets and object storage.
+description: Query HDF5 files with read_hdf5. Beacon reads HDF5 with a pure-Rust reader that adds nested groups, compound datasets and object storage. The netCDF-c library is the fallback.
 ---
 
 # HDF5
@@ -20,15 +20,15 @@ Rust reader to false. HDF5 behaves exactly like
 [CF decoding](/docs/2.0.0-rc2/cf-decoding) and the same attribute columns.
 
 The **pure-Rust HDF5 reader** is the default. It reads the same files and gives the same answer for
-a netCDF-4 file, and it adds four things over netCDF-c:
+a netCDF-4 file, and it adds five things over netCDF-c:
 
 | | netCDF-c | Pure-Rust reader (default) |
 | --- | --- | --- |
-| Nested groups | Every group | Root group only |
-| Compound datasets | One column for each member | Not read |
-| Object storage | Full credential chain, no local copy | Anonymous access only |
-| [File statistics](/docs/2.0.0-rc2/internals/file-statistics) | Per-file column ranges | None |
-| Concurrent scans | In parallel | One file at a time |
+| Nested groups | Root group only | Every group |
+| Compound datasets | Not read | One column for each member |
+| Object storage | Anonymous access only | Full credential chain, no local copy |
+| [File statistics](/docs/2.0.0-rc2/internals/file-statistics) | None | Per-file column ranges |
+| Concurrent scans | One file at a time | In parallel |
 | Writes | netCDF-c | netCDF-c |
 
 The flag is on by default, and it is separate from `BEACON_NETCDF_USE_RUST_READER`, so you move one
@@ -136,13 +136,12 @@ LOCATION 'experiments/';
 
 ## On object storage
 
-Under the default reader, **HDF5 supports anonymous access only**, for the same reason as NetCDF:
-the netCDF-c library opens a file by URL and does not go through the credential chain. For a public
-bucket, set `AWS_SKIP_SIGNATURE=true`.
+On the netCDF-c reader, **HDF5 supports anonymous access only**, for the same reason as NetCDF:
+that library opens a file by URL and does not go through the credential chain. For a public bucket,
+set `AWS_SKIP_SIGNATURE=true`.
 
-The pure-Rust reader has no such limit. It reads byte ranges through the object store, so a private
-S3, GCS or Azure bucket works and no local copy is made. It is the default, so a bucket needs no
-option at all:
+The default pure-Rust reader has no such limit. It reads byte ranges through the object store, so a
+private S3, GCS or Azure bucket works and no local copy is made. A bucket needs no option at all:
 
 ```sql
 CREATE EXTERNAL TABLE experiments

@@ -158,8 +158,8 @@ LOCATION 's3://bucket/data/'
 OPTIONS ('use_rust_reader' 'false');
 ```
 
-Measure before you move a local archive to the netCDF-C library. On a warm local file that library is
-competitive, because it reads the file directly and Beacon reads byte ranges through the object
+Measure before you move a local archive to the netCDF-C library. On a warm local file that library
+is competitive, because it reads the file directly and Beacon reads byte ranges through the object
 store. The pure-Rust reader wins where the lock and the local copy cost the most: many files in one
 query, and files in S3, GCS or Azure.
 
