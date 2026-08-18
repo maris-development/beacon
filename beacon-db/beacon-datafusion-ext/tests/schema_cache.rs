@@ -299,13 +299,19 @@ impl Fixture {
     }
 
     async fn table(&self, urls: &[&str]) -> FastObjectTable {
+        self.try_table(urls).await.unwrap()
+    }
+
+    /// The same, for a case that is meant to fail.
+    async fn try_table(
+        &self,
+        urls: &[&str],
+    ) -> Result<FastObjectTable, datafusion::error::DataFusionError> {
         let urls = urls
             .iter()
             .map(|url| ListingTableUrl::parse(url).unwrap())
             .collect();
-        FastObjectTable::try_new(&self.ctx.state(), self.factory.format(), urls)
-            .await
-            .unwrap()
+        FastObjectTable::try_new(&self.ctx.state(), self.factory.format(), urls).await
     }
 
     fn opens(&self) -> usize {
@@ -485,12 +491,26 @@ async fn a_session_without_a_store_still_infers() {
     assert_eq!(opens.load(Ordering::SeqCst), 1);
 }
 
-/// An empty listing is the format's own business. The cache has nothing to key
-/// on, so it hands the question straight over.
+/// An empty listing names the path, and the cache still opens nothing.
+///
+/// The cache has nothing to key on, so it hands the question to the format and
+/// opens no file. That half is unchanged, and it is what this test guards.
+///
+/// What reaches the caller changed: a path that matches no object is a caller
+/// mistake, so every reader now reports it the same way instead of each format
+/// answering in its own words. This format returned an empty schema, which read
+/// exactly like a table that is genuinely empty.
 #[tokio::test]
-async fn an_empty_listing_is_left_to_the_format() {
+async fn an_empty_listing_names_the_path() {
     let fixture = Fixture::new().await;
-    let table = fixture.table(&["test://schemas/empty/"]).await;
-    assert!(table.schema().fields().is_empty());
+    let error = fixture
+        .try_table(&["test://schemas/empty/"])
+        .await
+        .expect_err("a path that matches no object must fail")
+        .to_string();
+    assert!(
+        error.contains("no file matched") && error.contains("empty/"),
+        "the message must name the path, got: {error}"
+    );
     assert_eq!(fixture.opens(), 0, "there was nothing to open");
 }

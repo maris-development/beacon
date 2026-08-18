@@ -78,7 +78,8 @@ class BeaconHTTPClient:
             raise QueryError(resp.status_code, resp.text)
         content = resp.content
         if not content:
-            # An empty result set streams as a zero-length body (no schema message).
+            # Only an older build answers an empty result with a zero-length body; a current
+            # one streams the schema with zero rows. Kept for a `BEACON_IMAGE` that predates it.
             return [[]]
         try:
             table = pa.ipc.open_stream(pa.BufferReader(pa.py_buffer(content))).read_all()
