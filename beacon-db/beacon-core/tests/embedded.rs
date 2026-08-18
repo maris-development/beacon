@@ -352,15 +352,14 @@ async fn second_open_of_a_locked_file_fails_with_a_useful_message() {
 
 /// An embedder reads HDF5 with the pure-Rust reader, as the server does.
 ///
-/// `Database::open` sets `use_rust_reader` for netCDF and for HDF5. Both format crates
-/// default the flag to off, and the server turns it on
-/// (`BEACON_NETCDF_USE_RUST_READER` / `BEACON_HDF5_USE_RUST_READER`, both `true`), so
-/// without that the same query returns two different tables on the two hosts.
+/// `Hdf5Config` and `NetcdfConfig` both default `use_rust_reader` to true (#400), and
+/// `Database::open` overrides neither. This pins that default from the embedded host, so
+/// a change to it cannot silently make one query return two different tables on the two
+/// hosts.
 ///
 /// The probe is the reader difference itself: `nested-groups.h5` keeps its datasets two
 /// group levels deep, and netcdf-c reports only the root group. Under netcdf-c the two
-/// nested columns do not exist and this query fails to plan. It pins the HDF5 flag
-/// behaviourally; the netCDF flag is set in the same expression.
+/// nested columns do not exist and this query fails to plan.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_embedded_default_reads_hdf5_with_the_rust_reader() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -32,8 +32,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use beacon_arrow_hdf5::Hdf5Config;
-use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 use beacon_auth::{AuthIdentity, Credential, ANONYMOUS_USERNAME};
 use beacon_common::FileStatsConfig;
 use beacon_datafusion_ext::listing_factory::DefaultStore;
@@ -360,21 +358,7 @@ impl Database {
             .with_auth_enforcement(auth_enabled)
             .with_read_only(options.read_only)
             .with_crawler(options.crawlers.clone())
-            .with_file_stats(options.file_stats.clone())
-            // Read netCDF and HDF5 with the pure-Rust reader, as the server does
-            // (`BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` both
-            // default to true). The two format crates default the flag to off, so
-            // without these two lines an embedder reads through netcdf-c while the
-            // server reads through oxcdf, and one query returns two tables. Writes use
-            // netcdf-c on both hosts either way.
-            .with_netcdf_config(NetcdfConfig {
-                use_rust_reader: true,
-                ..NetcdfConfig::default()
-            })
-            .with_hdf5_config(Hdf5Config {
-                use_rust_reader: true,
-                ..Hdf5Config::default()
-            });
+            .with_file_stats(options.file_stats.clone());
 
         if let Some(file) = path.as_path() {
             builder = builder.with_db_path(file.to_path_buf());
