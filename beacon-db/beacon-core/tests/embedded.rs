@@ -349,3 +349,40 @@ async fn second_open_of_a_locked_file_fails_with_a_useful_message() {
         "the error should name the locked file, got: {message}"
     );
 }
+
+/// An embedder reads HDF5 with the pure-Rust reader, as the server does.
+///
+/// `Hdf5Config` and `NetcdfConfig` both default `use_rust_reader` to true (#400), and
+/// `Database::open` overrides neither. This pins that default from the embedded host, so
+/// a change to it cannot silently make one query return two different tables on the two
+/// hosts.
+///
+/// The probe is the reader difference itself: `nested-groups.h5` keeps its datasets two
+/// group levels deep, and netcdf-c reports only the root group. Under netcdf-c the two
+/// nested columns do not exist and this query fails to plan.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_embedded_default_reads_hdf5_with_the_rust_reader() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("beacon-db")
+        .join("beacon-file-formats/beacon-arrow-hdf5/test_files/nested-groups.h5");
+
+    let db = open_memory(AuthMode::Disabled).await;
+    let batches = sql(
+        &db,
+        &format!(
+            r#"SELECT station_id, "observations/temperature", "observations/qc/flag"
+               FROM read_hdf5('{}')"#,
+            fixture.display()
+        ),
+        AuthIdentity::local(),
+    )
+    .await;
+
+    assert_eq!(total_rows(&batches), 12, "3 stations x 4 samples");
+    assert_eq!(
+        batches[0].num_columns(),
+        3,
+        "netcdf-c reports only the root group, so a nested column would be absent"
+    );
+}

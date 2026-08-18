@@ -129,6 +129,81 @@ async fn query_sql_select_streams_arrow_with_a_query_id() {
     assert!(!res.body.is_empty(), "the Arrow IPC stream should be non-empty");
 }
 
+/// A result with no rows still carries its schema.
+///
+/// The IPC writer prepends the schema to the first batch it writes, so a stream that
+/// yields no batch used to emit the end-of-stream marker alone: eight bytes that no
+/// Arrow reader accepts, and the column types of the answer lost. Every query whose
+/// predicate matched nothing reached a client that way, and the embedded engine
+/// returned the schema for the same query, so the two interfaces disagreed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_result_still_carries_its_schema() {
+    let (router, harness, _cfg) = app(config(false)).await;
+    seed(
+        harness.server.runtime(),
+        "CREATE TABLE e (a BIGINT, s VARCHAR)",
+    )
+    .await;
+    seed(harness.server.runtime(), "INSERT INTO e VALUES (1, 'x')").await;
+
+    // Each of these returns zero rows, by a different route through the planner.
+    for sql in [
+        "SELECT 1 AS a WHERE 1 = 0",
+        "SELECT a, s FROM e WHERE a < 0",
+        "SELECT a FROM e LIMIT 0",
+        "SELECT a, count(*) AS n FROM e WHERE a < 0 GROUP BY a",
+    ] {
+        let res = send(
+            &router,
+            post_json("/api/query", json!({ "sql": sql }), None),
+        )
+        .await;
+        assert_eq!(res.status, StatusCode::OK, "{sql}");
+
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(&res.body), None)
+                .unwrap_or_else(|e| {
+                    panic!("an empty result must be a readable Arrow stream: {sql}: {e}")
+                });
+        let schema = reader.schema();
+        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        assert_eq!(rows, 0, "{sql} returns no row");
+        assert!(
+            !schema.fields().is_empty(),
+            "{sql} must report its columns, got an empty schema"
+        );
+    }
+
+    // The column types are the real payload: assert them, not just their presence.
+    let res = send(
+        &router,
+        post_json(
+            "/api/query",
+            json!({ "sql": "SELECT a, s FROM e WHERE a < 0" }),
+            None,
+        ),
+    )
+    .await;
+    let reader =
+        arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(&res.body), None).unwrap();
+    let fields: Vec<(String, String)> = reader
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| (f.name().clone(), f.data_type().to_string()))
+        .collect();
+    assert_eq!(
+        fields,
+        vec![
+            ("a".to_string(), "Int64".to_string()),
+            ("s".to_string(), "Utf8".to_string()),
+        ],
+        "an empty result reports the same types a non-empty one would"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn query_json_body_runs() {
     let (router, harness, _cfg) = app(config(false)).await;

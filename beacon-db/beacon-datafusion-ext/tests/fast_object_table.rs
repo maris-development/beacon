@@ -704,3 +704,87 @@ async fn a_wrapped_listing_table_keeps_what_it_declared() {
         .unwrap();
     assert_eq!(rows(plan, &fixture.ctx).await, 1);
 }
+
+/// A path that matches no object names the path, not the merge rule.
+///
+/// A caller who mistypes a path is the most common failure here, and the message
+/// used to come from whatever the format did with zero schemas. Parquet, CSV,
+/// Arrow IPC, ODV and BBF merged an empty list, so `DefaultArrowTypeWidening`
+/// reported "No schemas provided for merging" — the merge rule's own state, which
+/// names neither the path nor the cause. netCDF, HDF5, GeoParquet and TIFF
+/// answered with an empty schema instead, so a mistyped path returned zero rows
+/// and zero columns and no error at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_that_matches_nothing_names_the_path() {
+    let fixture = fixture().await;
+    put_parquet(&fixture.objects, "obs/a.parquet", &[1.0]).await;
+
+    for url in [
+        "test://stats/nothing/",             // a prefix that holds no object
+        "test://stats/no/such/file.parquet", // a file that is not there
+    ] {
+        let urls = vec![ListingTableUrl::parse(url).unwrap()];
+        let error = FastObjectTable::try_new(
+            &fixture.ctx.state(),
+            Arc::new(ParquetFormat::default()),
+            urls,
+        )
+        .await
+        .expect_err("a path that matches no object must fail")
+        .to_string();
+
+        assert!(
+            error.contains("no file matched"),
+            "the message must say what happened, got: {error}"
+        );
+        assert!(
+            error.contains(url.trim_end_matches('/')) || error.contains(url),
+            "the message must name the path, got: {error}"
+        );
+        assert!(
+            !error.contains("No schemas provided for merging"),
+            "the merge rule's own state must not reach the caller, got: {error}"
+        );
+    }
+}
+
+/// A glob stays in the message.
+///
+/// `ListingTableUrl` parses a glob off the path and holds it beside the prefix, so
+/// the prefix alone would show `obs/` for `obs/*.tsv` and read as the directory
+/// being wrong. The mistyped part is the glob.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_glob_that_matches_nothing_keeps_the_glob_in_the_message() {
+    let fixture = fixture().await;
+    put_parquet(&fixture.objects, "obs/a.parquet", &[1.0]).await;
+
+    let urls = vec![ListingTableUrl::parse("test://stats/obs/*.tsv").unwrap()];
+    let error = FastObjectTable::try_new(
+        &fixture.ctx.state(),
+        Arc::new(ParquetFormat::default()),
+        urls,
+    )
+    .await
+    .expect_err("a glob that matches no object must fail")
+    .to_string();
+
+    assert!(
+        error.contains("obs/*.tsv"),
+        "the glob is the part the caller mistyped, got: {error}"
+    );
+}
+
+/// A path that does hold objects keeps working, so the check above costs a
+/// successful query nothing and changes no answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_that_matches_objects_is_unaffected() {
+    let fixture = fixture().await;
+    put_parquet(&fixture.objects, "obs/a.parquet", &[1.0, 2.0]).await;
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &[], None)
+        .await
+        .unwrap();
+    assert_eq!(rows(plan, &fixture.ctx).await, 2);
+}

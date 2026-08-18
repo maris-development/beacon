@@ -128,6 +128,25 @@ pub(crate) async fn query(
                 }
                 first => first,
             };
+
+            // An empty result is still a typed result: zero rows *and* a schema.
+            //
+            // The IPC writer prepends the schema to the first batch it writes, so a
+            // stream that yields no batch emits the end-of-stream marker alone. That
+            // is eight bytes the caller cannot read: `pyarrow` refuses it with "Tried
+            // reading schema message, was null or length 0", and the column types of
+            // the answer are simply lost. Every query whose predicate matches nothing
+            // reached a client that way.
+            //
+            // Sending one zero-row batch makes the writer emit the schema. A reader
+            // then gets an empty table with the right columns, which is what the
+            // embedded engine already returns for the same query.
+            let first = first.or_else(|| {
+                Some(Ok(arrow::record_batch::RecordBatch::new_empty(
+                    schema.clone(),
+                )))
+            });
+
             let batches = futures::stream::iter(first).chain(arrow_output_stream);
 
             // Stream Arrow IPC directly so large result sets do not need to be buffered in memory.
