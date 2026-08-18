@@ -4,15 +4,11 @@ use std::sync::{Arc, Weak};
 use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use datafusion::{
-    catalog::TableFunctionImpl, datasource::file_format::FileFormatFactory,
-    execution::object_store::ObjectStoreUrl, prelude::SessionContext,
-};
+use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
-/// Format identity the BBF factory is registered under (its `get_ext`).
-const BBF_FORMAT: &str = "bbf";
+use crate::datafusion::BBF_FORMAT_NAME;
 
 pub struct ReadBBFFunc {
     // Session Reference
@@ -88,13 +84,16 @@ impl TableFunctionImpl for ReadBBFFunc {
         // table function shares the runtime's configured format.
         let format_options: HashMap<String, String> = HashMap::new();
 
-        let factory = state.get_file_format_factory(BBF_FORMAT).ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "read_bbf: the BBF file format is not registered on the session".to_string(),
-            )
-        })?;
+        let factory = state
+            .get_file_format_factory(BBF_FORMAT_NAME)
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "read_bbf: the BBF file format is not registered on the session".to_string(),
+                )
+            })?;
         let file_format = factory.create(&state, &format_options)?;
 
+        // Create a FastObjectTable for the given listing URLs and file format. This is done in a blocking context to avoid blocking the async runtime.
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async {
                 FastObjectTable::try_new(&session_ctx.state(), file_format, listing_urls).await

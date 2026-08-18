@@ -164,9 +164,6 @@ impl FileFormat for GeoParquetFormat {
                 let store = Arc::clone(store);
                 async move { reader::fetch_schema(store, object).await }
             })
-            // Keep the listing order. The merged schema then does not depend on
-            // the disk answer order. See issue #377. The width stays the
-            // concurrency. `buffered` holds a finished schema until its turn.
             .buffered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;
@@ -186,8 +183,6 @@ impl FileFormat for GeoParquetFormat {
         Ok(Arc::new(reconcile_field_metadata(&super_schema, &schemas)))
     }
 
-    /// Row count, byte size and a range per plain column, from the file footer.
-    ///
     /// A GeoParquet file is a Parquet file, so the same converter the plain
     /// Parquet format uses reads it, and the two report the same numbers for the
     /// same bytes. Only the footer is read; no row group is decoded.
@@ -308,17 +303,6 @@ impl FileFormat for GeoParquetFormat {
 }
 
 /// Report a nested column's range as unknown.
-///
-/// A GeoArrow geometry column is a struct, and the Parquet statistics converter
-/// answers one for it: a struct scalar whose every child is null. That is not a
-/// range. It is not absent either, so a consumer that only checks for absence —
-/// `beacon.system.file_stats` does — would store a row of nulls per file and per
-/// geometry column, and read it back as a bound it cannot use.
-///
-/// The rule is by shape rather than by geometry, because it is the shape that
-/// makes the answer meaningless: no nested column has a scalar minimum. A file
-/// keeps its row count, its byte size and the range of every plain column, which
-/// is what prunes.
 fn drop_nested_column_ranges(mut statistics: Statistics, table_schema: &SchemaRef) -> Statistics {
     for (field, column) in table_schema
         .fields()
@@ -337,16 +321,6 @@ fn drop_nested_column_ranges(mut statistics: Statistics, table_schema: &SchemaRe
 /// The GeoArrow extension keys mark a column as a geometry. They live in field
 /// metadata. Without them a spatial function sees a plain struct of `x` and `y`
 /// and refuses it. A geometry column then reads in no spatial function.
-///
-/// Two merge rules break the keys. A rule that rebuilds a field from its name and
-/// type drops them. A rule that keeps the first field carries the keys of the
-/// first file onto a column that the other files describe differently. This
-/// function corrects both cases.
-///
-/// A field keeps its metadata while three conditions hold. Every file that holds
-/// the field states the same metadata. The merged type equals the type of the
-/// field. The metadata is not empty. The field loses its metadata in every other
-/// case, so a column that two files describe differently stays plain.
 fn reconcile_field_metadata(
     merged: &arrow::datatypes::Schema,
     schemas: &[SchemaRef],
@@ -646,7 +620,11 @@ mod tests {
         .expect("two equal geometry columns merge");
 
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(names, vec!["id", "geometry"], "the union holds each name once");
+        assert_eq!(
+            names,
+            vec!["id", "geometry"],
+            "the union holds each name once"
+        );
         let geometry = schema.field_with_name("geometry").expect("geometry field");
         assert!(matches!(geometry.data_type(), DataType::Struct(_)));
         assert_eq!(
@@ -746,10 +724,7 @@ mod tests {
             longitude_column: None,
             latitude_column: None,
         });
-        for pair in [
-            [geometry.clone(), plain.clone()],
-            [plain, geometry],
-        ] {
+        for pair in [[geometry.clone(), plain.clone()], [plain, geometry]] {
             assert!(
                 format
                     .infer_schema(&ctx.state(), &object_store, &pair)

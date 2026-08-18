@@ -7,7 +7,6 @@ use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
-    execution::object_store::ObjectStoreUrl,
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
 };
@@ -90,7 +89,9 @@ impl TableFunctionImpl for ReadCsvFunc {
             None => b',',
             // A NULL delimiter (or an absent value) means "use the default".
             Some(Expr::Literal(
-                ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) | ScalarValue::Utf8View(None),
+                ScalarValue::Utf8(None)
+                | ScalarValue::LargeUtf8(None)
+                | ScalarValue::Utf8View(None),
                 _,
             )) => b',',
             // Accept every string-scalar flavour, and resolve escapes like `\t`.
@@ -118,7 +119,7 @@ impl TableFunctionImpl for ReadCsvFunc {
 
         let mut listing_urls = vec![];
         for path in &glob_paths {
-            tracing::debug!("read_csv processing path: {}", path);
+            tracing::trace!("read_csv processing path: {}", path);
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 

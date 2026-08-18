@@ -55,14 +55,9 @@ impl BboxMetrics {
 pub struct GeoParquetOpener {
     object_store: Arc<dyn ObjectStore>,
     /// The file columns the scan reads, in file order.
-    ///
-    /// This is the table's file schema narrowed to the pushed-down projection.
-    /// The remainder of that projection — aliases, computed expressions,
-    /// partition columns, output order — is applied above this opener by
-    /// `ProjectionOpener`, which derives the same schema.
     read_schema: SchemaRef,
     batch_size: usize,
-    /// The box a pushed-down spatial predicate states, when it states one.
+    /// The box a pushed-down spatial predicate. If present, the opener drops row groups whose own box misses it.
     query_box: Option<QueryBox>,
     bbox_metrics: BboxMetrics,
 }

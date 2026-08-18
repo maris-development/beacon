@@ -21,6 +21,8 @@ use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::type_widening::session_widening;
 
 pub const DEFAULT_CSV_EXTENSION: &str = "csv";
+pub const DEFAULT_TSV_EXTENSION: &str = "tsv";
+pub const DEFAULT_INFER_RECORDS: usize = 1000;
 
 #[derive(Debug, Default)]
 pub struct CsvFormatFactory;
@@ -30,9 +32,6 @@ impl GetExt for CsvFormatFactory {
         DEFAULT_CSV_EXTENSION.to_string()
     }
 }
-
-/// The default number of records the CSV reader samples to infer a schema.
-const DEFAULT_INFER_RECORDS: usize = 1000;
 
 impl FileFormatFactory for CsvFormatFactory {
     fn create(
@@ -80,7 +79,7 @@ impl FileFormatFactoryExt for CsvFormatFactory {
             .filter(|obj| {
                 obj.location
                     .extension()
-                    .map(|ext| ext == "csv" || ext == "tsv")
+                    .map(|ext| ext == DEFAULT_CSV_EXTENSION || ext == DEFAULT_TSV_EXTENSION)
                     .unwrap_or(false)
             })
             .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
@@ -93,17 +92,17 @@ impl FileFormatFactoryExt for CsvFormatFactory {
     }
 
     fn file_extensions(&self) -> Vec<String> {
-        vec!["csv".to_string(), "tsv".to_string()]
+        vec![
+            DEFAULT_CSV_EXTENSION.to_string(),
+            DEFAULT_TSV_EXTENSION.to_string(),
+        ]
     }
 
     /// CSV opts into the schema cache on the three settings that decide what a
     /// file's columns come out as.
     ///
     /// The delimiter decides where a column ends. The header flag decides
-    /// whether the first record names the columns or is data. The record limit
-    /// decides how much inference sees, and a column that is integral for the
-    /// first hundred rows and decimal afterwards settles differently at 100 than
-    /// at 1 000.
+    /// whether the first record names the columns or is data.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
         let format = format.as_any().downcast_ref::<CsvFormat>()?;
         Some(
@@ -119,10 +118,7 @@ impl FileFormatFactoryExt for CsvFormatFactory {
 #[derive(Debug)]
 pub struct CsvFormat {
     inner_format: datafusion::datasource::file_format::csv::CsvFormat,
-    /// How many records inference reads. Kept here as well, because the inner
-    /// format takes it and offers no way back, and the schema cache has to
-    /// fingerprint it: a file read to 100 rows and the same file read to 1 000
-    /// can settle on different column types.
+    /// How many records inference reads.
     infer_records: usize,
 }
 
@@ -190,9 +186,6 @@ impl FileFormat for CsvFormat {
                         .await
                 }
             })
-            // Keep the listing order. The merged schema then does not depend on
-            // the disk answer order. See issue #377. The width stays the
-            // concurrency. `buffered` holds a finished schema until its turn.
             .buffered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;

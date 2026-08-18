@@ -1,11 +1,6 @@
 //! [`Hdf5Config`]: the runtime settings of the HDF5 format.
 
 /// Runtime configuration for the HDF5 format.
-///
-/// Plain data with sensible defaults; the caller populates it (there is no
-/// environment parsing here, so the crate stays reusable and the host decides
-/// where the values come from). These are the *defaults* for a runtime — each
-/// can be overridden per table via `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
 #[derive(Debug, Clone)]
 pub struct Hdf5Config {
     /// Whether reads go through the pure-Rust reader instead of netcdf-c.
@@ -18,9 +13,6 @@ pub struct Hdf5Config {
     /// file, and netcdf-c's HDF5 dispatch opens a plain one too, so it reads
     /// every file this format serves. It is the reader this crate used before
     /// the Rust one existed. Writes always use netcdf-c.
-    ///
-    /// This is separate from the netCDF setting, so a runtime moves one format
-    /// at a time.
     pub use_rust_reader: bool,
     /// Whether to generate per-file statistics during planning.
     ///
