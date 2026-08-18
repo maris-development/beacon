@@ -82,6 +82,7 @@ impl IcechunkTable {
             ROOT_GROUP,
             read_dimensions.clone(),
             Some("read_icechunk"),
+            &beacon_datafusion_ext::type_widening::session_widening(session),
         )
         .await
         .with_context(|| {
@@ -96,7 +97,7 @@ impl IcechunkTable {
             version,
             repository,
             object_store_url,
-            schema: Arc::new(schema),
+            schema,
             read_dimensions,
         })
     }

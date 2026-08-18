@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::{ListingFactory, RootStore};
-use beacon_datafusion_ext::type_widening::SuperTypeWidening;
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::datafusion::{options::NetcdfOptions, FileAccess, NetcdfFormat, ReaderBackend};
@@ -65,10 +64,9 @@ async fn ctx_for(
     ))
     .expect("listing url");
 
-    let table =
-        FastObjectTable::try_new_with_widening(&state, format, vec![url], &SuperTypeWidening)
-            .await
-            .expect("object table");
+    let table = FastObjectTable::try_new(&state, format, vec![url])
+        .await
+        .expect("object table");
     ctx.register_table("nc", Arc::new(table)).unwrap();
     ctx
 }

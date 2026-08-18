@@ -84,41 +84,32 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
         self.create_with_native_root(state, format_options, url, listing)
     }
 
-    /// A fingerprint of everything about `format` that changes the schema it
-    /// infers from one object.
+    /// A fingerprint over every part of `format` that changes the schema of one
+    /// object.
     ///
-    /// This is what lets Beacon keep a file's schema instead of deriving it
-    /// again on every query. A schema is not a function of the file alone:
-    /// netCDF's `read_dimensions` changes which variables appear, so the same
-    /// bytes have more than one schema, and the fingerprint is what tells them
-    /// apart.
+    /// The fingerprint lets the cache keep the schema of a file. A schema is not a
+    /// function of the file alone: `read_dimensions` changes which netCDF
+    /// variables appear, so the same bytes hold more than one schema.
     ///
-    /// `None` — the default — keeps this format out of the cache entirely. That
-    /// is the audit gate. Overriding it is a claim about the format, and the
-    /// claim has two parts:
+    /// `None` is the default, and it keeps this format out of the cache. An
+    /// override claims two things:
     ///
-    /// 1. **Inference is per object.** `infer_schema` over `n` objects equals
-    ///    [`super_type_schema`](beacon_common::super_typing::super_type_schema)
-    ///    over the `n` single-object inferences, in listing order. Every Beacon
-    ///    format works this way today.
-    /// 2. **The fingerprint is complete.** Anything that changes what a file's
-    ///    schema comes out as is in it. Leaving something out is the one way
-    ///    this returns a *wrong* schema rather than a slow one, so each
-    ///    implementation carries a test that two option sets differ.
+    /// 1. `infer_schema` over `n` objects equals the
+    ///    [`ArrowTypeWidening`](crate::type_widening::ArrowTypeWidening) merge of
+    ///    the session over the `n` single-object results, in listing order.
+    /// 2. The fingerprint covers every part that changes the schema of a file. An
+    ///    omission returns a wrong schema, not a slow one, so each implementation
+    ///    carries a test that two option sets give two fingerprints.
     ///
-    /// Leave out what does not change a schema: a reader cache, a path
-    /// resolver, a statistics switch. Including them only costs hits.
+    /// Leave out a part that changes no schema, such as a reader cache or a
+    /// statistics switch. Such a part costs cache hits.
     ///
-    /// `None` is also the right answer for an option this format would rather
-    /// not distinguish yet. The four nd formats return it when a read names
-    /// dimensions: the key would have to carry the whole ordered set, so for now
-    /// such a read derives its schema as it always did, and only the default
-    /// read — the one every table and every collector pass takes — is cached.
-    /// Opting out costs speed. Getting the key wrong costs correctness.
+    /// `None` also suits an option that this format does not separate yet. The
+    /// four nd formats return `None` for a read that names dimensions.
     ///
-    /// Build the value with [`SchemaOptions`], not with a `Hasher` from `std`.
-    /// The standard hasher's algorithm is not guaranteed across Rust releases,
-    /// so a toolchain bump would quietly retire every stored entry.
+    /// Build the value with [`SchemaOptions`]. A `Hasher` from `std` has no stable
+    /// algorithm across Rust releases, so a new toolchain would retire every
+    /// stored entry.
     fn schema_options_fingerprint(&self, _format: &dyn FileFormat) -> Option<u64> {
         None
     }

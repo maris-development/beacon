@@ -27,8 +27,7 @@ fn main() -> anyhow::Result<()> {
     // `BEACON_BASE_PATH`) surface as a clean error here. The config is owned and
     // passed explicitly into the runtime and the transports — it is not stored in
     // a process-global.
-    let config =
-        Arc::new(beacon_server_config::Config::load().context("failed to load configuration")?);
+    let config = Arc::new(beacon_server_config::Config::load().context("failed to load configuration")?);
 
     let rt = Builder::new_multi_thread()
         .worker_threads(config.server.worker_threads)
@@ -170,11 +169,7 @@ fn setup_tracing(config: &beacon_server_config::Config) -> String {
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(file_writer)
-                .with_ansi(false),
-        )
+        .with(tracing_subscriber::fmt::layer().with_writer(file_writer).with_ansi(false))
         .init();
 
     // The non-blocking writer must outlive the subscriber, so keep the guard for the

@@ -1,17 +1,17 @@
 //! DataFusion integration for zarr stores.
 //!
 //! Mirrors the netcdf/tiff/atlas crates: a [`ZarrFormatFactory`] discovers
-//! zarr stores, [`ZarrFormat`] infers the (super-typed) Arrow schema and plans
+//! zarr stores, [`ZarrFormat`] infers the merged Arrow schema and plans
 //! the scan, and [`ZarrSource`] streams each leaf group through the shared
 //! `beacon-nd-array` engine with predicate pushdown.
 
 use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{
     DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
 };
+use beacon_datafusion_ext::type_widening::session_widening;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -319,7 +319,7 @@ impl FileFormat for ZarrFormat {
 
     async fn infer_schema(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
@@ -335,6 +335,9 @@ impl FileFormat for ZarrFormat {
             ));
         }
         let storage = self.storage(store.clone());
+        // One rule for both merges. The first merge covers the leaf groups in
+        // one store. The second merge covers the stores of this table.
+        let widening = session_widening(state);
         let mut schemas = Vec::new();
         for object in verified_objects {
             let zarr_path = ZarrPath::new_from_object_meta(object.clone()).map_err(|e| {
@@ -348,10 +351,11 @@ impl FileFormat for ZarrFormat {
                 &zarr_path.as_zarr_path(),
                 self.read_dimensions.clone(),
                 Some("read_zarr"),
+                &widening,
             )
             .await
             .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-            schemas.push(Arc::new(schema));
+            schemas.push(schema);
         }
 
         if schemas.is_empty() {
@@ -360,12 +364,13 @@ impl FileFormat for ZarrFormat {
             ));
         }
 
-        let super_schema = super_type_schema(&schemas).map_err(|e| {
+        // The rule of the session decides the result for a column that two
+        // stores describe differently.
+        widening.merge_schemas(&schemas).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(
                 "Failed to compute super schema for Zarr groups: {e}"
             ))
-        })?;
-        Ok(Arc::new(super_schema))
+        })
     }
 
     async fn infer_stats(

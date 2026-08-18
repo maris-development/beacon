@@ -8,12 +8,17 @@
 //!
 //! # What it costs
 //!
-//! Two opens per file. `infer_schema` names the columns, then `infer_stats`
-//! fills them, and for netCDF both read the file. That is the dominant cost of a
-//! backfill, and it is also the cost this whole subsystem removes from the
-//! *query* path: `FileCollection` scans with `collect_stat(true)`, so today
-//! every cold query over a netCDF collection generates these same statistics
-//! inline, cached only in a 10 000-entry map that dies on restart.
+//! Two opens for each file. `infer_schema` names the columns. `infer_stats`
+//! fills them. For netCDF both calls read the file. This is the largest cost of
+//! a backfill.
+//!
+//! A query gets two returns for that cost. It prunes its file list against the
+//! ranges. It reads the schema cache instead of each file.
+//!
+//! A scan does not compute the statistics itself. `FastObjectTable` and
+//! `ListingTableFactoryExt` both set `with_collect_stat(false)`. A scan that
+//! computed them for each file made a plan over 16k files take minutes. A
+//! server with this subsystem off therefore prunes no file.
 //!
 //! # Formats that yield nothing
 //!
@@ -31,12 +36,12 @@
 //! `zarr.json` has a group behind it; the rest fail, which is why a zarr
 //! collection shows a large `failed` count on an otherwise healthy pass.
 //!
-//! **netCDF and HDF5 join that list on the netcdf-c fallback.** Every netcdf-c
-//! call serialises on a process-global mutex and the read is synchronous, so
-//! computing ranges under it is serial *and* parks a tokio worker. The format
-//! therefore reports unknown whenever `BEACON_NETCDF_USE_RUST_READER=false`. A netCDF
-//! node that prunes nothing is usually this, and `column_count = 0` on its
-//! records is how it shows.
+//! **netCDF and HDF5 join that list unless the Rust reader is on.** Every
+//! netcdf-c call serialises on a process-global mutex and the read is
+//! synchronous, so computing ranges under it is serial *and* parks a tokio
+//! worker. The format therefore reports unknown when `use_rust_reader` is off.
+//! The flag is on by default. A netCDF node that prunes no file usually has the
+//! flag off. `column_count = 0` on its records shows this.
 //!
 //! `.h5` and `.hdf5` follow the same rule through their own variable. HDF5 owns
 //! the identity and picks the reader; on the default `BEACON_HDF5_USE_RUST_READER=true`

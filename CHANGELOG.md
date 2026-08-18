@@ -76,19 +76,41 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
-- **The pure-Rust reader is the default for netCDF and HDF5.** A `.nc`, `.h5` or `.hdf5` file is now
-  read by Beacon's own reader: it holds no process-global lock, so one query scans many files at
-  once, and it fetches byte ranges through the object store, so a private S3, GCS or Azure bucket
-  works with no local copy and no `AWS_SKIP_SIGNATURE`. It also records per-file column ranges, so
-  [file statistics](docs/docs/2.0.0-rc2/internals/file-statistics.md) prune netCDF and HDF5 scans,
-  and it reads two HDF5 layouts the netCDF data model cannot express: a nested group and a compound
-  dataset. netCDF-C remains available as a fallback, and every write still uses it.
-- **The reader variables keep their names, and only their defaults change.**
-  `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` now default to `true`, and
-  `OPTIONS ('use_rust_reader' 'false')` still moves one table to netCDF-C. A server that pinned
-  netCDF-C keeps it, and no variable is renamed. The HDF5 fallback now pins netCDF-C explicitly
-  instead of inheriting the netCDF setting, so `BEACON_HDF5_USE_RUST_READER=false` reads through
-  that library whatever netCDF is set to.
+- **File statistics are on by default.** `BEACON_FILE_STATS_ENABLE` now defaults to `true`. The
+  reason for the old default is gone. netcdf-c reported no range, and the pure-Rust readers for
+  netCDF and HDF5 are the default now, so a pass records a real range. The same store holds the
+  schema cache. A server without that store reads the schema of each file again on each cold query,
+  which was 83% of one netCDF query over 100000 files. The timer still runs its first pass one
+  interval after boot. `ANALYZE FILES` fills the store at a time you choose. Set
+  `BEACON_FILE_STATS_ENABLE=false` for an archive of formats that supply no range: ODV, CSV and
+  TIFF record zero columns.
+  `BEACON_FILE_STATS_ON_STARTUP` stays `false`. A pass at startup holds the database file while it
+  reads a batch. A caller that drops a runtime and opens the same file again then gets a lock
+  error. Set the flag to true after a shutdown waits for the pass.
+- **An embedded database configures file statistics**, through `OpenOptions::file_stats`. It
+  configures crawlers the same way. The subsystem needs a database file and a datasets store, so an
+  in-memory database and a dynamic-mode database leave it off, whatever the option says.
+- **The documented defaults for the pure-Rust netCDF and HDF5 readers match the code.**
+  `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` default to `true`; the pages
+  and doc comments still described them as off.
+- **One entry point merges every schema, and it merges in parallel.** Each format merged the
+  schemas of the files behind a URL itself. The table above merged the URLs with the rule of the
+  session. The applied rule therefore depended on the spelling of a `read_*`. Each format and the
+  table now read the same `ArrowTypeWidening` from the session and merge with it, so
+  `RuntimeBuilder::with_type_widening` sets the rule for the whole process. Because the rule is a
+  lattice join, the entry point drops a schema it has seen and gives each contiguous chunk to a
+  thread. A collection of 100000 files from one instrument holds few distinct schemas, so the merge
+  reads few schemas. Column order still follows the listing, because `SELECT *` shows it.
+- **The pure-Rust reader is the default of the library too.** `NetcdfConfig::default()` and
+  `Hdf5Config::default()` select it, so an embedded caller and a `RuntimeBuilder` read a `.nc`,
+  `.h5` or `.hdf5` file the way the server does. The variables keep their names:
+  `BEACON_NETCDF_USE_RUST_READER=false`, `BEACON_HDF5_USE_RUST_READER=false` and
+  `OPTIONS ('use_rust_reader' 'false')` still select netCDF-C, and every write still uses it.
+- **An HDF5 table on netCDF-C read through the Rust reader.** The HDF5 format has no netCDF-C
+  reader of its own: it hands the file to the netCDF format, which picks its own reader. That
+  reader is the Rust one by default, so `BEACON_HDF5_USE_RUST_READER=false` reached it anyway
+  unless netCDF was also set to `false`. The HDF5 fallback now names netCDF-C on the format it
+  delegates to, so each variable decides its own format.
 - **The admin UI renders a result from the Arrow columns.** The query workbench reads each record
   batch as it arrives and shows it. It no longer builds a JS object for each row first, which cost
   one object per row and one property per column — on a beacon table that carries 100K+ columns,
@@ -140,6 +162,28 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **A schema merge depended on the disk answer order**
+  ([#377](https://github.com/maris-development/beacon/issues/377)). A table over many files merges
+  their schemas into one schema, and a query plans against that schema. Beacon's own "super typing"
+  widened a column that two files gave two types, and the result depended on the merge order.
+  `Int32` beside `Float32` gave `Float32` in one order and `Float64` in the other. `Date32` beside
+  `Float64` gave `Float64` or an error. Five formats read their schemas with `buffer_unordered`,
+  which returns them in completion order: Parquet, GeoParquet, CSV, Arrow IPC and BBF. The same
+  query over the same files could therefore return different types, or fail, between two runs.
+  The rules are now the join of a lattice, so the schema order, the group boundaries and the repeat
+  count change no result and no failure. A column widens inside one family only, and the five
+  formats read their schemas in listing order, so column order is stable too. The families are the
+  numbers, the timestamps (the finer unit, in one time zone), the strings (`Utf8`, `Utf8View`,
+  `LargeUtf8`), the binaries (`Binary`, `BinaryView`, `LargeBinary`), the dates (`Date32`,
+  `Date64`) and the times (`Time32`, `Time64`). `Null` takes the type of the other file.
+  Three results changed. **A number and a string are now an error**, where super typing stringified
+  the number. **A `Boolean` and a number are an error**, and so are a `Timestamp` and an integer.
+  **An integer beside a `Float32` widens to `Float64`**, where the old table kept `Float32` for a
+  narrow integer: a `Float32` holds no `Int32`, and a lattice cannot keep `Int8` and drop `Int32`.
+  A time zone follows DataFusion: one file with a zone gives that zone, and two files with two
+  zones give `UTC`. DataFusion keeps the zone of the left operand there, and a merge has no left
+  operand. A merged column also keeps the field metadata of the first file that states it, and it
+  is nullable unless every file holds it and every file requires it.
 - **The GeoParquet scan applied only part of a pushed-down projection.** A `FileSource` that
   accepts a projection has to apply the whole of it. This one accepted a projection and then read
   only the column names out of it, which dropped everything else. Geometry is written last,

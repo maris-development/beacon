@@ -12,17 +12,17 @@ Beacon recognizes `.h5` and `.hdf5`. It finds them in the dataset store automati
 
 ## Two readers
 
-Beacon reads HDF5 with a **pure-Rust reader** by default. A netCDF-4 file **is** an HDF5 file, and
-the netCDF-c library also opens plain HDF5, so that library is the fallback: set
-`BEACON_HDF5_USE_RUST_READER=false` to read through it. On that reader HDF5 behaves exactly like
+A netCDF-4 file **is** an HDF5 file, and the netCDF-c library also opens plain HDF5. Beacon reads
+HDF5 through the pure-Rust reader by default. Beacon reads it through that library when you set the
+Rust reader to false. HDF5 behaves exactly like
 [NetCDF](/docs/2.0.0-rc2/formats/netcdf): the same data model, the same
 [array to table mapping](/docs/2.0.0-rc2/arrays-to-tables), the same
 [CF decoding](/docs/2.0.0-rc2/cf-decoding) and the same attribute columns.
 
-Both readers read the same files and give the same answer for a netCDF-4 file. The pure-Rust one
-adds five things:
+The **pure-Rust HDF5 reader** is the default. It reads the same files and gives the same answer for
+a netCDF-4 file, and it adds four things over netCDF-c:
 
-| | Pure-Rust reader (default) | netCDF-c |
+| | netCDF-c | Pure-Rust reader (default) |
 | --- | --- | --- |
 | Nested groups | Every group | Root group only |
 | Compound datasets | One column for each member | Not read |
@@ -31,8 +31,8 @@ adds five things:
 | Concurrent scans | In parallel | One file at a time |
 | Writes | netCDF-c | netCDF-c |
 
-The flag is separate from `BEACON_NETCDF_USE_RUST_READER`, so you move one format at a time. Set it
-for one table instead of the whole server:
+The flag is on by default, and it is separate from `BEACON_NETCDF_USE_RUST_READER`, so you move one
+format at a time. Set it for one table instead of the whole server:
 
 ```sql
 CREATE EXTERNAL TABLE experiments

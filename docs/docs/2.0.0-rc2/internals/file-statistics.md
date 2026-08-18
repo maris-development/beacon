@@ -13,13 +13,14 @@ a query against these ranges. It then prunes the files that cannot hold a row th
 A server with one million netCDF files answers a narrow query. It opens fifty thousand files. It
 does not open one million.
 
-Beacon does not enable this feature by default.
+Beacon enables this feature by default. The first pass runs 15 minutes after startup.
 
-:::warning netCDF and HDF5 need the Rust reader
-Set `BEACON_FILE_STATS_ENABLE=true`. netCDF and HDF5 also need the pure-Rust reader, which is the
-default for both. A server set to `BEACON_NETCDF_USE_RUST_READER=false` or
-`BEACON_HDF5_USE_RUST_READER=false` reads each such file and records no ranges. The [Check the result](#check-the-result) section shows
-how to find this condition.
+:::warning The reader decides the range
+A netCDF or HDF5 file supplies a range only through the pure-Rust reader. Both readers are the
+default, so a standard server records a range. A server that sets
+`BEACON_NETCDF_USE_RUST_READER=false` or `BEACON_HDF5_USE_RUST_READER=false` reads each such file
+and records no range. The [Check the result](#check-the-result) section shows how to find this
+condition.
 :::
 
 ## What Beacon records
@@ -43,27 +44,22 @@ DataSourceExec: file_groups={1 group: [[obs/hot.parquet]]}
 Three files go in. One file comes out. The other two files record a maximum temperature below 80.
 No row in them can match the query.
 
-## Enable the feature
+## The defaults
 
 ```bash
-BEACON_FILE_STATS_ENABLE=true
-BEACON_FILE_STATS_ON_STARTUP=true    # collect at each boot, see below
-BEACON_NETCDF_USE_RUST_READER=true   # the default; netCDF ranges need it
-BEACON_HDF5_USE_RUST_READER=true     # the default; HDF5 ranges need it
+BEACON_FILE_STATS_ENABLE=true        # the default
+BEACON_FILE_STATS_ON_STARTUP=false   # the default, see below
+BEACON_NETCDF_USE_RUST_READER=true   # the default, netCDF ranges
+BEACON_HDF5_USE_RUST_READER=true     # the default, HDF5 ranges
 ```
 
-Beacon then starts a pass every 15 minutes. Each pass finds new files and reads them.
+Beacon runs a pass every 15 minutes. Each pass finds new files and reads them.
 [Configuration](/docs/2.0.0-rc2/server/configuration#file-statistics) lists each variable.
 
-The **first pass runs one interval after startup**, not at startup. A new server does nothing for
-15 minutes. It finds no file, and `beacon.system.file_stats` holds no row. This is correct. Beacon
-keeps startup free for your queries.
-
-:::warning A restart resets the timer
-Beacon starts the interval again on each boot, and records no due time. A server that restarts more
-often than the interval never runs a pass. A build-and-run loop has this shape. Set
-`BEACON_FILE_STATS_ON_STARTUP=true` there, which is what the next section covers.
-:::
+The **timer runs its first pass one interval after startup**, not at startup. Beacon starts the
+interval again on each boot, and records no due time. A server that restarts more often than the
+interval therefore never reaches a tick. `ANALYZE FILES` fills the store at a time you choose.
+`BEACON_FILE_STATS_ON_STARTUP` fills it at each boot.
 
 ## Collect at every boot
 
@@ -71,7 +67,7 @@ often than the interval never runs a pass. A build-and-run loop has this shape. 
 BEACON_FILE_STATS_ON_STARTUP=true
 ```
 
-Beacon then collects as soon as the runtime is up. It finds the files, reads every one that has no
+Beacon collects as soon as the runtime is up. It finds the files, reads every one that has no
 statistics, and stops when the queue is empty. The timer continues afterwards.
 
 The collection runs in the background. It does not hold up startup, and the server answers queries
@@ -85,10 +81,16 @@ INFO startup file statistics collection finished discovered=2 analyzed=2 failed=
 The work is not repeated. The registry survives a restart, so the next boot reads only the files
 that are new or changed. The first boot over a large archive is the expensive one.
 
-:::tip Which one do you need
-Set this flag for a server that restarts often, or for a fresh instance that must be useful at once.
+:::tip When to set this
+Set it for a server that restarts often, and for a fresh instance that must be useful at once.
 Leave it off for a long-lived server over a large archive, where an unattended backfill at boot
 competes with your queries. `ANALYZE FILES` covers that case, at a time you choose.
+:::
+
+:::warning The pass holds the database file
+The pass keeps `beacon.db` open while it reads a batch. A process that closes a database and opens
+the same file again then reports a lock error. The error continues until the pass ends. This
+condition applies to an embedded caller, not to a server that exits. Leave this flag off there.
 :::
 
 Do not wait for the timer. Start a pass with SQL:
@@ -131,8 +133,8 @@ GROUP BY format;
 ```
 
 ```
-netcdf  | 840000 | 840000    <- BEACON_NETCDF_USE_RUST_READER is false
-hdf5    |   4000 |   4000    <- BEACON_HDF5_USE_RUST_READER is false
+netcdf  | 840000 | 840000    <- this server set BEACON_NETCDF_USE_RUST_READER=false
+hdf5    |   4000 |   4000    <- this server set BEACON_HDF5_USE_RUST_READER=false
 odv     |  12000 |  12000    <- ODV supplies no ranges
 parquet |  50000 |      0    <- correct
 ```
@@ -224,8 +226,8 @@ condition.
 | Format | Ranges | Cost |
 | --- | --- | --- |
 | Parquet, GeoParquet | Yes | None. Beacon reads the file footer. |
-| netCDF | Yes, with `BEACON_NETCDF_USE_RUST_READER=true`, the default | Beacon opens the file and reads the coordinate variables. |
-| HDF5 | Yes, with `BEACON_HDF5_USE_RUST_READER=true`, the default | Beacon opens the file and reads the one-dimensional datasets. |
+| netCDF | Yes, through the Rust reader (the default) | Beacon opens the file and reads the coordinate variables. |
+| HDF5 | Yes, through the Rust reader (the default) | Beacon opens the file and reads the one-dimensional datasets. |
 | Zarr | Yes | Beacon reads the store metadata, and the coordinate arrays it does not describe. |
 | CSV, Arrow IPC | No | |
 | ODV, TIFF | No | |
@@ -249,13 +251,12 @@ The netCDF-C library holds one lock for each call in the process. Beacon compute
 one thread. Your core count does not change this. The work also blocks queries.
 
 Beacon therefore computes netCDF ranges with its own Rust reader. That reader reads through the
-object store and uses each core.
+object store and uses each core. It is the default.
 
-With `BEACON_NETCDF_USE_RUST_READER=false`, netCDF files record `column_count = 0`. Beacon prunes no
-file.
+With `BEACON_NETCDF_USE_RUST_READER=false`, netCDF files record `column_count = 0`. Beacon prunes
+no file.
 
-The rule applies to `.h5` and `.hdf5` files. Keep `BEACON_HDF5_USE_RUST_READER=true`, the default,
-for HDF5 ranges.
+The rule applies to `.h5` and `.hdf5` files, through `BEACON_HDF5_USE_RUST_READER`.
 
 Beacon writes the reason one time for each pass, at log level `info`. The line names the
 variable to set.

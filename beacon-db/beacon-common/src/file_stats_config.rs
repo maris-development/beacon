@@ -10,17 +10,24 @@
 pub struct FileStatsConfig {
     /// Master switch. When false nothing is discovered, analyzed or stored, and
     /// no background task is spawned.
+    ///
+    /// The same store holds the schema cache. A server with this flag off reads
+    /// the schema of each file again on each cold query.
     pub enable: bool,
     /// Seconds between passes.
     pub interval_secs: u64,
     /// Collect at startup instead of waiting for the first tick.
     ///
     /// The timer's first pass lands one whole interval after boot, so a fresh
-    /// server holds no statistics for 15 minutes by default — and a server that
-    /// restarts more often than the interval never collects at all, because the
-    /// interval starts again on each boot. This runs a pass as soon as the
-    /// runtime is up, in the background, and keeps going until the queue is
-    /// empty. The timer takes over from there.
+    /// server holds no statistics for 15 minutes — and a server that restarts
+    /// more often than the interval never collects at all, because the interval
+    /// starts again on each boot. This runs a pass as soon as the runtime is up,
+    /// in the background, and keeps going until the queue is empty. The timer
+    /// takes over from there.
+    ///
+    /// Off by default. The pass holds the service, and thus the database file,
+    /// while it reads a batch. A process that exits does not see this. A caller
+    /// that drops a runtime and opens the same file again gets a lock error.
     pub on_startup: bool,
     /// Files analyzed at once.
     ///
@@ -59,6 +66,9 @@ pub struct FileStatsConfig {
     /// per batch. Deriving a schema from every file was 83% of a netCDF query
     /// over a hundred thousand files.
     ///
+    /// Only a pass writes an entry. This flag does nothing while
+    /// [`Self::enable`] is false.
+    ///
     /// Turn it off to take the cache out of a query's path while leaving
     /// statistics on. Existing entries are then neither written nor read.
     pub schema_cache: bool,
@@ -69,13 +79,22 @@ impl Default for FileStatsConfig {
         // Mirrors the `BEACON_FILE_STATS_*` environment defaults in
         // `beacon-server-config`.
         Self {
-            // Off: this has not run against a real archive yet, and on a netCDF
-            // deployment without `BEACON_NETCDF_USE_RUST_READER` it would work
-            // through every file to store nothing.
-            enable: false,
+            // On. The Rust readers are the default for netCDF and HDF5, so a
+            // pass records a real range. The same store holds the schema
+            // cache, so a server with this flag off reads the schema of each
+            // file again on each cold query.
+            enable: true,
             interval_secs: 900,
-            // Off, so enabling statistics alone does not turn boot into a
-            // backfill on an archive that has never been analyzed.
+            // Off. A fresh server therefore holds no statistics for 15
+            // minutes.
+            //
+            // Teardown blocks a change to on. A pass holds the service, and
+            // thus the redb database, while it reads a batch. A drop of the
+            // runtime does not release the file lock. An immediate reopen
+            // fails. `tables_store_lock_release` shows this.
+            //
+            // Set this flag to true together with a shutdown that waits for
+            // the pass.
             on_startup: false,
             concurrency: default_concurrency(),
             batch_files: 10_000,
@@ -107,9 +126,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_is_off_and_leaves_room_for_queries() {
+    fn the_default_is_on_and_leaves_room_for_queries() {
         let config = FileStatsConfig::default();
-        assert!(!config.enable);
+        assert!(config.enable);
+        assert!(
+            !config.on_startup,
+            "a pass at startup holds the database file after a drop"
+        );
         assert!(config.concurrency >= 2);
         assert!(
             config.concurrency
