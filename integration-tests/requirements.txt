@@ -1,3 +1,17 @@
-pytest>=8.0
-requests>=2.31
-pyarrow>=15.0
+# The HTTP suite.
+pytest==8.3.5
+requests==2.34.2
+pyarrow==21.0.0
+
+# The reference writers for formats/, one per format. Each file skips itself when its writer is
+# absent, so these are only needed for the formats you want to run. Pinned exactly: a writer
+# upgrade changes the bytes of a file, and a new failure after one is a signal worth keeping.
+netCDF4==1.7.4
+zarr==3.3.0
+h5py==3.14.0
+geopandas==1.1.4
+rasterio==1.5.1
+deltalake==1.6.2
+pyiceberg==0.11.1
+sqlalchemy==2.0.52   # pyiceberg's SQL catalog, which the Iceberg tests write through
+icechunk==2.1.2

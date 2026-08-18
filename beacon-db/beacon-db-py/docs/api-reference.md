@@ -91,7 +91,7 @@ method. A new function appears without a client update. Each reader returns a la
 | Method | Description |
 | --- | --- |
 | `read(function, *args, **kwargs)` | The general form. Call any table function by name. |
-| `read_parquet`, `read_geoparquet`, `read_csv`, `read_json`, `read_arrow`, `read_netcdf`, `read_hdf5`, `read_zarr`, `read_delta`, `read_odv_ascii`, `read_tiff`, `read_bbf`, `read_atlas` | One reader for each format. Each takes a path or a glob. It also takes the options of that format as keywords. Every reader takes `columns=[...]` to project during the read. |
+| `read_parquet`, `read_geoparquet`, `read_csv`, `read_arrow`, `read_netcdf`, `read_hdf5`, `read_zarr`, `read_delta`, `read_iceberg`, `read_odv_ascii`, `read_tiff`, `read_bbf` | One reader for each format. Each takes a path or a glob. It also takes the options of that format as keywords. Every reader takes `columns=[...]` to project during the read. |
 | `list_datasets(*args)` | A relation over the datasets that Beacon knows. |
 | `table_functions()` | The names of every available reader. |
 

@@ -33,7 +33,21 @@ SQL_KEYWORDS = sorted(
 
 # Table functions — only meaningful in a table position (after FROM / JOIN).
 TABLE_FUNCTIONS = sorted(
-    ["read_netcdf", "read_parquet", "read_csv", "read_json", "read_odv"]
+    [
+        "read_arrow",
+        "read_bbf",
+        "read_csv",
+        "read_delta",
+        "read_geoparquet",
+        "read_hdf5",
+        "read_iceberg",
+        "read_icechunk",
+        "read_netcdf",
+        "read_odv_ascii",
+        "read_parquet",
+        "read_tiff",
+        "read_zarr",
+    ]
 )
 
 # Backslash meta-commands (mirrors repl.meta dispatch), offered when a line
