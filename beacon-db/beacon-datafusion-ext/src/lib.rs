@@ -8,6 +8,7 @@ pub mod listing_url_resolver;
 pub mod nd;
 pub mod object_store_registry;
 pub mod remote;
+pub mod scan_adapt;
 pub mod secrets;
 pub mod stats_cache;
 pub mod table_ext;
