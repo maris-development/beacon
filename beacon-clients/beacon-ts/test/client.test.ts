@@ -1,7 +1,13 @@
 import { Table, tableFromArrays, tableToIPC } from "apache-arrow";
 import { describe, expect, it, vi } from "vitest";
 
-import { ApiError, BeaconClient, basicAuthHeader, rowsFromTable } from "../src/index.js";
+import {
+  ADMIN_API_PREFIX,
+  ApiError,
+  BeaconClient,
+  basicAuthHeader,
+  rowsFromTable,
+} from "../src/index.js";
 
 /** Builds a fetch stub that records calls and returns a fresh `response` each time. */
 function stubFetch(makeResponse: () => Response) {
@@ -174,5 +180,28 @@ describe("BeaconClient metadata paths", () => {
     const client = new BeaconClient({ url: "http://beacon.test", basePath: "/beacon", fetch: fn });
     await client.tables();
     expect(calls[0]!.url).toBe("http://beacon.test/beacon/api/tables");
+  });
+
+  it("calls the admin alias when apiPrefix is set", async () => {
+    const { fn, calls } = stubFetch(() => jsonResponse([]));
+    const client = new BeaconClient({
+      url: "http://beacon.test",
+      apiPrefix: ADMIN_API_PREFIX,
+      fetch: fn,
+    });
+    await client.tables();
+    expect(calls[0]!.url).toBe("http://beacon.test/admin/api/tables");
+  });
+
+  it("puts apiPrefix after basePath", async () => {
+    const { fn, calls } = stubFetch(() => jsonResponse([]));
+    const client = new BeaconClient({
+      url: "http://beacon.test",
+      basePath: "/beacon",
+      apiPrefix: ADMIN_API_PREFIX,
+      fetch: fn,
+    });
+    await client.tables();
+    expect(calls[0]!.url).toBe("http://beacon.test/beacon/admin/api/tables");
   });
 });

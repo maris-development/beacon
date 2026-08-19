@@ -17,6 +17,11 @@
 //! This test pins the wire contract by asserting each client-called path is
 //! present in the router's own OpenAPI document. Add a client call → add it
 //! here; intentionally retire an endpoint → remove both, deliberately.
+//!
+//! The admin UI addresses every one of them through the `/admin` alias (so a
+//! deployment can gate `/api/*` in front of Beacon and keep the panel working),
+//! which the same list checks against the router itself — the alias is not in
+//! the OpenAPI document.
 
 mod common;
 
@@ -129,6 +134,207 @@ async fn every_client_called_endpoint_is_routed() {
         "the shipped clients call endpoints the router does not serve — these 404 in the \
          admin UI:\n  {}",
         missing.join("\n  ")
+    );
+}
+
+/// Every endpoint the clients call is served a second time below `/admin`, so
+/// the admin UI can reach the whole API without touching `/api/*`. The alias is
+/// absent from the OpenAPI document on purpose (it would list every operation
+/// twice), so this asks the router instead.
+///
+/// `TRACE` is the probe. No handler registers it, so a routed path answers `405`
+/// and an unrouted one falls through to `404`. That separates routing from
+/// behaviour without running a handler — several of these endpoints write.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_client_called_endpoint_is_routed_under_the_admin_alias() {
+    let (router, _lake) = app().await;
+    let auth = basic(ADMIN_USERNAME, ADMIN_PASSWORD);
+
+    let mut wrong = Vec::new();
+    for (_, path) in CLIENT_ENDPOINTS {
+        // The probe never reaches a handler, so any value fills a path parameter.
+        let uri = format!(
+            "/admin{}",
+            path.replace("{query_id}", "x").replace("{name}", "x")
+        );
+        let (status, _) = send(
+            &router,
+            Request::builder()
+                .method("TRACE")
+                .uri(&uri)
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        if status != StatusCode::METHOD_NOT_ALLOWED {
+            wrong.push(format!("{uri} answered {status}, expected 405"));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "the admin UI calls these through the `/admin` alias — a 404 means the alias          does not route them, a 401 means the admin gate rejects the super-user:
+  {}",
+        wrong.join("
+  ")
+    );
+}
+
+/// The GETs the admin UI loads on page render must answer through the alias, not
+/// merely route: this is the path the shipped panel actually uses. `/api/health`
+/// is aliased by hand (it is a plain route), so it is in the list.
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_alias_get_endpoints_answer_successfully() {
+    let (router, _lake) = app().await;
+    let auth = basic(ADMIN_USERNAME, ADMIN_PASSWORD);
+
+    let cases = [
+        "/admin/api/health",
+        "/admin/api/info",
+        "/admin/api/tables",
+        "/admin/api/tables-with-schema",
+        "/admin/api/list-datasets",
+        "/admin/api/functions",
+        "/admin/api/admin/check",
+        "/admin/api/admin/auth/users",
+        "/admin/api/admin/crawlers",
+    ];
+
+    for uri in cases {
+        let (status, body) = send(
+            &router,
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "GET {uri} should succeed, got {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+}
+
+/// The whole alias sits behind the admin gate, the mirrored client routes
+/// included. `/api/info` answers any caller; `/admin/api/info` answers the
+/// super-user only. Anything less would publish an ungated copy of the client
+/// API on a second path.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_admin_alias_gates_the_client_routes_it_mirrors() {
+    let (router, _lake) = app().await;
+
+    for uri in ["/api/info", "/api/tables"] {
+        let (status, _) = send(
+            &router,
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "GET {uri} is open to any caller");
+
+        let (status, _) = send(
+            &router,
+            Request::builder()
+                .method("GET")
+                .uri(&format!("/admin{uri}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "GET /admin{uri} must demand credentials"
+        );
+    }
+
+    // Wrong credentials are refused rather than treated as anonymous.
+    let (status, _) = send(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri("/admin/api/info")
+            .header(
+                header::AUTHORIZATION,
+                basic(ADMIN_USERNAME, "wrong-password"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "bad credentials are refused"
+    );
+}
+
+/// An alias path that no endpoint claims answers `404`, like the canonical path
+/// does. The web UI mounts at the same prefix and catches everything below it with
+/// its own shell, so the alias carries a catch-all of its own to stop a mistyped
+/// endpoint from returning that HTML page with a `200`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unclaimed_alias_path_is_a_404() {
+    let (router, _lake) = app().await;
+    let auth = basic(ADMIN_USERNAME, ADMIN_PASSWORD);
+
+    for uri in [
+        "/admin/api/nope",
+        "/admin/api/admin/nope",
+        "/admin/api/query/nope",
+    ] {
+        let (status, _) = send(
+            &router,
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "GET {uri}");
+    }
+
+    // The catch-all must not shadow the endpoints beside it.
+    let (status, _) = send(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri("/admin/api/tables")
+            .header(header::AUTHORIZATION, &auth)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "an exact route beats the catch-all");
+}
+
+/// The alias is not published: `/openapi.json` documents each operation once, on
+/// its own path. A second copy would double every tag in Swagger UI and repeat
+/// each operation id, which breaks code generators.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_admin_alias_stays_out_of_the_openapi_document() {
+    let (router, _lake) = app().await;
+    let spec = openapi(&router).await;
+    let paths = spec
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("the OpenAPI document should have a `paths` object");
+
+    let published: Vec<&String> = paths.keys().filter(|p| p.starts_with("/admin/")).collect();
+    assert!(
+        published.is_empty(),
+        "the `/admin` alias should not be documented, found: {published:?}"
     );
 }
 

@@ -20,6 +20,34 @@ This documentation shows every endpoint as a relative path, for example `GET /ap
 request to the base URL of your Beacon server. The default is `http://localhost:5001`. Behind a
 reverse proxy, use the URL of that proxy.
 
+## Admin path alias
+
+Beacon serves each endpoint on two paths. The second path has the prefix `/admin`:
+
+| Endpoint | Alias |
+| -------- | ----- |
+| `POST /api/query` | `POST /admin/api/query` |
+| `GET /api/tables` | `GET /admin/api/tables` |
+| `GET /api/admin/crawlers` | `GET /admin/api/admin/crawlers` |
+| `GET /api/health` | `GET /admin/api/health` |
+
+The two paths run the same handler.
+
+Each path below `/admin` needs the admin Basic auth credentials. This also applies
+to the endpoints that answer any caller on `/api/*`. `GET /api/info` is open.
+`GET /admin/api/info` is not.
+
+Use the alias when a proxy in front of Beacon protects `/api/*`. Your proxy keeps
+control of `/api/*`. The [admin web UI](/docs/2.0.0-rc3/connect/web-admin-ui) calls
+the alias only, so the UI stays in service.
+
+```bash
+curl -u beacon-admin:beacon-password http://localhost:5001/admin/api/tables
+```
+
+The OpenAPI specification lists each endpoint one time. It shows the path without
+the prefix.
+
 ## Health check
 
 ```http

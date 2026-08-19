@@ -19,8 +19,8 @@ export function routerBasename(): string {
 
 /**
  * The URL of the Beacon server that serves this UI: the origin plus the prefix
- * in front of `/admin`. The SDK adds `/api/...` to it, so a server at the root
- * gives back only the origin.
+ * in front of `/admin`. The SDK adds `/admin/api/...` to it (the admin-gated
+ * alias of the API), so a server at the root gives back only the origin.
  */
 export function serverBase(): string {
   const { origin, pathname } = new URL(document.baseURI);

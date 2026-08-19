@@ -2,16 +2,16 @@
 
 use std::{str::FromStr, sync::Arc, time::Duration};
 
+use crate::server::Server;
 use ::axum::{
     body::Bytes,
     extract::MatchedPath,
     http::{HeaderMap, HeaderName, HeaderValue, Method, Request},
     response::{IntoResponse, Redirect, Response},
-    routing::get,
+    routing::{any, get},
     Router,
 };
 use anyhow::Context;
-use crate::server::Server;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
@@ -23,6 +23,9 @@ use utoipa_swagger_ui::{SwaggerUi, Url};
 use crate::axum::{admin::setup_admin_router, client::setup_client_router};
 
 const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Path prefix carrying an admin-gated alias of the whole HTTP API.
+const ADMIN_ALIAS_PREFIX: &str = "/admin";
 
 /// Builds the complete HTTP router, OpenAPI docs, CORS policy, and tracing layers.
 ///
@@ -36,6 +39,19 @@ pub fn setup_router(
     let (client_router, mut api_docs_client) = setup_client_router();
     let (admin_router, api_docs_admin) = setup_admin_router();
 
+    // The alias of both surfaces (see `ADMIN_ALIAS_PREFIX`). It copies the two
+    // routers before any middleware goes on them, so the admin gate added below
+    // covers all of it — the mirrored client routes as well. `/api/health` is a
+    // plain route rather than a documented one, so it is added here by hand.
+    let alias_router = Router::new().nest(
+        ADMIN_ALIAS_PREFIX,
+        client_router
+            .clone()
+            .merge(admin_router.clone())
+            .route("/api/health", get(health))
+            .route("/api/{*rest}", any(::axum::http::StatusCode::NOT_FOUND)),
+    );
+
     // Resolve the caller's identity for every client route; gate admin routes on a super-user.
     // Both middlewares carry the runtime as their own state (independent of the router state set
     // below), so they are attached per-sub-router before the two are merged.
@@ -43,20 +59,8 @@ pub fn setup_router(
         beacon_runtime.clone(),
         crate::axum::auth::resolve_identity,
     ));
-    // `basic_auth` gates admin routes on the super-user; `resolve_identity` puts
-    // that identity in the request extensions. Admin handlers need it too, now
-    // that they read the catalog by running SQL as the caller rather than through
-    // privileged accessors. Layers apply bottom-up, so `resolve_identity` is
-    // listed second to run after the gate.
-    let admin_router = admin_router
-        .layer(::axum::middleware::from_fn_with_state(
-            beacon_runtime.clone(),
-            crate::axum::auth::resolve_identity,
-        ))
-        .layer(::axum::middleware::from_fn_with_state(
-            beacon_runtime.clone(),
-            crate::axum::auth::basic_auth,
-        ));
+    let admin_router = with_admin_auth(admin_router, &beacon_runtime);
+    let alias_router = with_admin_auth(alias_router, &beacon_runtime);
 
     api_docs_client.merge(api_docs_admin);
     api_docs_client = set_api_docs_info(api_docs_client, &config.api_docs);
@@ -87,9 +91,14 @@ pub fn setup_router(
     // calls execute under the caller's identity (or the anonymous principal when
     // enabled) and per-user RBAC applies at query time.
     let mcp_enabled = std::env::var("BEACON_MCP_ENABLED")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "off"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "off"
+            )
+        })
         .unwrap_or(true);
-    let mut router = client_router.merge(admin_router);
+    let mut router = client_router.merge(admin_router).merge(alias_router);
     if mcp_enabled {
         let mcp_router = ::axum::Router::new()
             .route_service(
@@ -108,10 +117,7 @@ pub fn setup_router(
             "/scalar",
             get(move || async move { Redirect::to(scalar_redirect) }),
         )
-        .route(
-            "/api/health",
-            get(|| async { Response::new("Ok".to_string()) }),
-        )
+        .route("/api/health", get(health))
         .route(
             "/",
             get(move || async move { Redirect::to(swagger_redirect) }),
@@ -142,6 +148,33 @@ pub fn setup_router(
             .nest(base_path, setup_tracing_router(router))
             .merge(swagger_ui))
     }
+}
+
+/// Liveness probe: `200 OK` once the server answers.
+///
+/// Undocumented on purpose — it is a plain route, not part of the OpenAPI
+/// surface. Served on `/api/health` and on its `ADMIN_ALIAS_PREFIX` alias.
+async fn health() -> Response<String> {
+    Response::new("Ok".to_string())
+}
+
+/// Puts the admin gate on `router`.
+///
+/// `basic_auth` rejects every caller that is not the super-user. `resolve_identity`
+/// then puts that identity in the request extensions: admin handlers need it too,
+/// now that they read the catalog by running SQL as the caller rather than through
+/// privileged accessors. Layers apply bottom-up, so the gate listed last runs
+/// first.
+fn with_admin_auth(router: Router<Arc<Server>>, runtime: &Arc<Server>) -> Router<Arc<Server>> {
+    router
+        .layer(::axum::middleware::from_fn_with_state(
+            runtime.clone(),
+            crate::axum::auth::resolve_identity,
+        ))
+        .layer(::axum::middleware::from_fn_with_state(
+            runtime.clone(),
+            crate::axum::auth::basic_auth,
+        ))
 }
 
 /// Builds a router that serves the admin web UI (a Vite single-page app) at

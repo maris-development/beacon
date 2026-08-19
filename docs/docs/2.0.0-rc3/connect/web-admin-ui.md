@@ -28,8 +28,22 @@ BEACON_ADMIN_USERNAME=beacon-admin
 BEACON_ADMIN_PASSWORD=beacon-password
 ```
 
-The UI checks the credentials with `GET /api/admin/check`. It stores them in the
-`localStorage` of the browser. It then sends them on every request.
+The UI checks the credentials with `GET /admin/api/admin/check`. It stores them in
+the `localStorage` of the browser. It then sends them on every request.
+
+## Every call sits below `/admin`
+
+The UI calls the [admin path alias](/docs/2.0.0-rc3/api/#admin-path-alias) of the
+API. `/admin/api/query` runs the same handler as `/api/query`. Each request of the
+UI therefore uses the same prefix that serves the UI.
+
+Put your own security in front of `/api/*` with this. The UI keeps its function,
+because it sends no request to `/api/*`. Give your proxy these rules:
+
+- Keep your own rules on `/api/*`.
+- Send `/admin` and each path below it to Beacon.
+
+The alias needs the admin credentials, which the UI holds after the login.
 
 :::warning
 This login runs in the browser, over the HTTP Basic admin auth of Beacon. It

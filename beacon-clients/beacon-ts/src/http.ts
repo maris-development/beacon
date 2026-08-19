@@ -5,6 +5,16 @@ import { ApiError, ConnectionError, TimeoutError } from "./errors.js";
 /** A fetch-compatible function. Defaults to the global `fetch`. */
 export type FetchLike = typeof fetch;
 
+/**
+ * Prefix of Beacon's admin-gated alias of the API, for {@link ClientOptions.apiPrefix}.
+ *
+ * Beacon serves every endpoint twice: on its own path (`/api/query`) and below
+ * `/admin` (`/admin/api/query`). Both run the same handler. Use the alias when a
+ * gateway in front of Beacon holds `/api/*`; it needs super-user credentials, so
+ * set `username` and `password` with it.
+ */
+export const ADMIN_API_PREFIX = "/admin";
+
 export interface ClientOptions {
   /** Base URL of the Beacon server, e.g. `http://localhost:5001`. */
   url: string;
@@ -19,6 +29,12 @@ export interface ClientOptions {
    * Prepended to every API path. Defaults to "".
    */
   basePath?: string;
+  /**
+   * Prefix of the API surface to call, between `basePath` and the endpoint path.
+   * Defaults to "" — the endpoints on their own paths. Set
+   * {@link ADMIN_API_PREFIX} to call the admin-gated alias instead.
+   */
+  apiPrefix?: string;
   /** Per-request timeout in milliseconds. Defaults to 60000. Set to 0 to disable. */
   timeoutMs?: number;
   /** Custom fetch implementation (e.g. for testing or a proxy). */
@@ -60,7 +76,8 @@ export class Http {
   constructor(options: ClientOptions) {
     const base = options.url.replace(/\/+$/, "");
     const prefix = (options.basePath ?? "").replace(/\/+$/, "");
-    this.baseUrl = `${base}${prefix}`;
+    const apiPrefix = (options.apiPrefix ?? "").replace(/\/+$/, "");
+    this.baseUrl = `${base}${prefix}${apiPrefix}`;
     const fetchImpl = options.fetch ?? globalThis.fetch;
     if (typeof fetchImpl !== "function") {
       throw new Error(
