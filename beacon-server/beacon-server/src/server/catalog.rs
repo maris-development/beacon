@@ -214,6 +214,24 @@ pub(crate) async fn list_datasets(
         .collect())
 }
 
+/// One directory level of the datasets store, via the runtime's browse.
+///
+/// Unlike [`list_datasets`] this does not go through SQL: there is no pattern to
+/// plan and no rows to page, just a delimiter listing the runtime answers
+/// directly.
+pub(crate) async fn browse_datasets(
+    server: &Arc<Server>,
+    prefix: &str,
+    identity: AuthIdentity,
+) -> anyhow::Result<crate::api::BrowseDatasetsResponse> {
+    let result = server.runtime().browse_datasets(prefix, &identity).await?;
+    Ok(crate::api::BrowseDatasetsResponse {
+        prefix: result.prefix,
+        folders: result.folders,
+        datasets: result.datasets.into_iter().map(Into::into).collect(),
+    })
+}
+
 /// The `read_*` table function that reads a dataset file with the given
 /// extension, or `None` when the extension is not one beacon reads by path.
 fn read_function_for_extension(ext: &str) -> Option<&'static str> {

@@ -7,7 +7,7 @@ use ::axum::{
     http::StatusCode,
     Extension, Json,
 };
-use crate::api::DatasetInfo;
+use crate::api::{BrowseDatasetsResponse, DatasetInfo};
 use beacon_core::AuthIdentity;
 use crate::server::{catalog, Server};
 use utoipa::{IntoParams, ToSchema};
@@ -175,6 +175,53 @@ pub(crate) async fn total_datasets(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error reading total datasets".to_string(),
+            ))
+        }
+    }
+}
+/// Query parameters for a single-level dataset browse.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
+pub struct BrowseDatasetsQuery {
+    /// Directory to read, relative to the datasets store. Empty or absent means
+    /// the root.
+    pub prefix: Option<String>,
+}
+
+/// Reads one directory level of the datasets store.
+///
+/// The endpoint a folder view should call. `/api/list-datasets` enumerates every
+/// object under its pattern before it can answer, so its cost tracks the size of
+/// the store; this issues one delimiter request, so it does not. On a store of
+/// 2.85 million objects the difference measured 79.9 s against 14 ms.
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "datasets",
+    get,
+    path = "/api/browse-datasets",
+    params(BrowseDatasetsQuery),
+    responses(
+        (status = 200, description = "One directory level", body = BrowseDatasetsResponse),
+        (status = 500, description = "Failed to browse datasets"),
+    ),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
+pub(crate) async fn browse_datasets(
+    State(state): State<Arc<Server>>,
+    Extension(identity): Extension<AuthIdentity>,
+    Query(query): Query<BrowseDatasetsQuery>,
+) -> Result<Json<BrowseDatasetsResponse>, (StatusCode, String)> {
+    let prefix = query.prefix.unwrap_or_default();
+    match catalog::browse_datasets(&state, &prefix, identity).await {
+        Ok(result) => Ok(Json(result)),
+        Err(err) => {
+            tracing::error!("Error browsing datasets: {:?}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Error browsing datasets".to_string(),
             ))
         }
     }

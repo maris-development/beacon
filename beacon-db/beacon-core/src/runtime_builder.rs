@@ -363,7 +363,7 @@ impl RuntimeBuilder {
         // `beacon.system` — the auth directory and query metrics as SQL tables.
         register_system_schema(&session_ctx, session_cell.clone(), auth_context.clone())?;
 
-        init_crawler_manager(&self, &session_ctx, session_cell.clone(), file_formats).await?;
+        init_crawler_manager(&self, &session_ctx, session_cell.clone(), file_formats.clone()).await?;
 
         let file_stats = init_file_stats(&self, &session_ctx, session_cell, redb_store).await?;
 
@@ -382,6 +382,7 @@ impl RuntimeBuilder {
             auth_enforce: self.auth_enforce,
             read_only: self.read_only,
             file_stats,
+            file_formats,
 
             tmp_dir,
         })
