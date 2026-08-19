@@ -1,6 +1,6 @@
 /** Connection + admin-credential storage for the login-gated admin UI. */
 
-import { BeaconClient } from "@beacon/client";
+import { ADMIN_API_PREFIX, BeaconClient } from "@beacon/client";
 
 import { serverBase } from "./base-path";
 
@@ -25,7 +25,7 @@ export const SAME_ORIGIN = import.meta.env.PROD;
 /**
  * The API base URL when the UI is served by Beacon: the current origin plus any
  * deployment base path (the path in front of `/admin`). The SDK appends
- * `/api/...` to this, so an empty base path yields just the origin.
+ * `/admin/api/...` to this, so an empty base path yields just the origin.
  */
 export function sameOriginUrl(): string {
   return serverBase();
@@ -65,18 +65,27 @@ export function clearConnection(): void {
   localStorage.removeItem(STORAGE_KEY);
 }
 
-/** Builds a `BeaconClient` from a connection (credentials elevate every request). */
+/**
+ * Builds a `BeaconClient` from a connection (credentials elevate every request).
+ *
+ * The client calls Beacon's admin-gated alias of the API, so every request the UI
+ * makes sits below `/admin` — the same prefix that serves this application. A
+ * deployment can then put its own security in front of `/api/*` and this panel
+ * keeps working. The alias demands super-user credentials, which a session here
+ * always carries.
+ */
 export function makeClient(conn: Connection): BeaconClient {
   return new BeaconClient({
     url: conn.url.replace(/\/+$/, ""),
+    apiPrefix: ADMIN_API_PREFIX,
     username: conn.username,
     password: conn.password,
   });
 }
 
 /**
- * Verifies admin credentials against `GET /api/admin/check`. Throws the SDK's
- * `ApiError` (401 on bad credentials) or a `ConnectionError` if unreachable.
+ * Verifies admin credentials against `GET /admin/api/admin/check`. Throws the
+ * SDK's `ApiError` (401 on bad credentials) or a `ConnectionError` if unreachable.
  */
 export async function verifyAdmin(client: BeaconClient): Promise<void> {
   await client.admin.check();

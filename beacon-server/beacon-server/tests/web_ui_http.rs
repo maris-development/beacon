@@ -138,6 +138,40 @@ async fn the_api_stays_reachable_beside_the_web_ui() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// The API alias and the SPA share the `/admin` prefix. The alias paths are exact
+/// routes and the SPA is a catch-all below them, so `/admin/api/...` has to reach
+/// the API. A `401` proves it: the app shell answers `200` to anything it catches.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_api_alias_wins_over_the_spa_catch_all() {
+    let web = web_build();
+
+    for (base_path, alias, spa_route) in [
+        ("", "/admin/api/info", "/admin/tables"),
+        ("/beacon", "/beacon/admin/api/info", "/beacon/admin/tables"),
+    ] {
+        let (_harness, router) = app(base_path, &web).await;
+
+        let (status, _, body) = get(&router, alias).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "base path {base_path:?}: {alias} should reach the gated API"
+        );
+        assert_ne!(body, INDEX_HTML, "base path {base_path:?}");
+
+        // An unclaimed alias path is the API's 404, not the app shell. The gate
+        // in front of the alias answers first, which is already not the shell.
+        let (status, _, body) = get(&router, &format!("{alias}-nope")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "base path {base_path:?}");
+        assert_ne!(body, INDEX_HTML, "base path {base_path:?}");
+
+        // A client-side route beside it still falls back to the app shell.
+        let (status, _, body) = get(&router, spa_route).await;
+        assert_eq!(status, StatusCode::OK, "base path {base_path:?}");
+        assert_eq!(body, INDEX_HTML, "base path {base_path:?}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn no_web_ui_directory_leaves_the_admin_path_unmounted() {
     let empty = tempfile::tempdir().expect("create temp dir");

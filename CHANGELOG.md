@@ -73,6 +73,15 @@ tag. Releases before 2.0.0 are recorded in the
   creation, no `INSERT`. Virtual chunk references — chunks that stay inside a netCDF or HDF5 file
   outside the repository, as VirtualiZarr produces — are **not** followed, because that read needs
   the credentials of a different store than the one the caller was granted.
+- **Every endpoint answers on a second path below `/admin`.** `POST /admin/api/query` runs the same
+  handler as `POST /api/query`, and `/admin/api/admin/crawlers` the same as `/api/admin/crawlers`.
+  The whole alias sits behind the admin Basic auth gate, the client endpoints included: `/api/info`
+  answers any caller, `/admin/api/info` only the super-user. The
+  [admin web UI](docs/docs/2.0.0-rc3/connect/web-admin-ui.md) now calls the alias, so a deployment
+  that puts its own security in front of `/api/*` keeps a working admin panel. `@beacon/client`
+  reaches the alias with the new `apiPrefix: ADMIN_API_PREFIX` client option. The alias stays out of
+  `/openapi.json`: publishing it would list every operation twice and repeat each operation id. See
+  [the REST API reference](docs/docs/2.0.0-rc3/api/index.md#admin-path-alias).
 
 ### Changed
 

@@ -102,6 +102,31 @@ The client sends the credentials on every request. The server checks them with
 `GET /api/admin/check`. The [REST API reference](/docs/2.0.0-rc3/api/) lists every
 admin endpoint.
 
+## Call the admin path alias
+
+Beacon serves each endpoint a second time below `/admin`. Set `apiPrefix` to send
+each call through that prefix:
+
+```ts
+import { ADMIN_API_PREFIX, BeaconClient } from "@beacon/client";
+
+const beacon = new BeaconClient({
+  url: "http://localhost:5001",
+  apiPrefix: ADMIN_API_PREFIX,
+  username: "beacon-admin",
+  password: "beacon-password",
+});
+
+await beacon.tables(); // GET /admin/api/tables
+```
+
+Use this when a proxy in front of Beacon protects `/api/*`. The alias needs the
+admin credentials for each endpoint. Read the
+[admin path alias](/docs/2.0.0-rc3/api/#admin-path-alias) for the rules.
+
+`basePath` and `apiPrefix` are separate. `basePath` gives the prefix that the
+server runs under (`BEACON_BASE_PATH`). `apiPrefix` comes after it.
+
 ## Use in a browser
 
 The SDK works with a bundler. It runs in the browser without a change. The
