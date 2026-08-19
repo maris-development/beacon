@@ -356,7 +356,11 @@ struct RawConfig {
     // Former name of `BEACON_S3_DATASETS`, kept so existing deployments keep working.
     // `Config::load` warns when it is the one that turned the S3 store on. Remove it
     // one major version after 2.0.
-    #[envconfig(from = "BEACON_S3_DATASETS", default = "false")]
+    //
+    // This read the *new* name until 2.0.0-rc.4, which made the whole back-compat
+    // path dead: a 1.x deployment carrying only `BEACON_S3_DATA_LAKE=true` fell
+    // silently back to the local `datasets/` directory and reported an empty store.
+    #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
     s3_data_lake_deprecated: bool,
     #[envconfig(from = "BEACON_S3_BUCKET")]
     s3_bucket: Option<String>,
