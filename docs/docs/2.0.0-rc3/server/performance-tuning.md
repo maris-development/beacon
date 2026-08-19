@@ -62,7 +62,7 @@ This flag controls the SQL parser and the SQL execution.
 
 ### Object store listings
 
-#### `BEACON_S3_DATA_LAKE`, `BEACON_S3_BUCKET`, `BEACON_S3_ENABLE_VIRTUAL_HOSTING`
+#### `BEACON_S3_DATASETS`, `BEACON_S3_BUCKET`, `BEACON_S3_ENABLE_VIRTUAL_HOSTING`
 
 These settings decide if the datasets store lives on an S3-compatible bucket. They also set the
 address form. Every listing and every read on object storage costs network latency.

@@ -6,6 +6,12 @@ description: Common Beacon errors and what causes them. Missing columns, zero ro
 
 Each entry below names a symptom, its usual cause and the fix.
 
+::: tip Find the log first
+Many entries below tell you to read the log. Beacon writes to stdout and to a dated file in
+`/beacon/logs/`. Use `docker logs -f beacon`, or mount the directory to keep the files. See
+[Log files](/docs/2.0.0-rc3/server/configuration#log-files).
+:::
+
 ## Reading files
 
 ### A variable is missing from `SELECT *`
