@@ -5,7 +5,7 @@
 // (config.mts imports this for the no-JS <meta refresh>, and the theme imports
 // it for the client-side redirects).
 //
-// This is the newest *stable* version, not the newest folder: 2.0.0-rc2 is a
+// This is the newest *stable* version, not the newest folder: 2.0.0-rc3 is a
 // pre-release, so `/docs/latest` and the 404 fallback deliberately resolve to
 // 1.8.0. Bump to 2.0.0 when the RC goes GA.
 export const LATEST_VERSION = '1.8.0'

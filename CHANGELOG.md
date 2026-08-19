@@ -33,7 +33,7 @@ tag. Releases before 2.0.0 are recorded in the
   argument types and so gets no row there
   ([datafusion-spatial#1](https://github.com/robinskil/datafusion-spatial/issues/1)). Every
   function runs, listed or not. See
-  [the function reference](docs/docs/2.0.0-rc2/sql/function-reference.md#geospatial-functions),
+  [the function reference](docs/docs/2.0.0-rc3/sql/function-reference.md#geospatial-functions),
   which is the full list.
 - **`ST_Transform` reprojects a geometry**, and a standard build ships it. That makes 123 spatial
   functions. It links [PROJ](https://proj.org), so **a build from source now needs PROJ 9.6.2 or
@@ -62,7 +62,7 @@ tag. Releases before 2.0.0 are recorded in the
   column another writer commits shows on the next query without a restart. A `WHERE` clause is
   pushed into the Iceberg scan, which drops data files from the manifests' statistics. Reads only:
   no `INSERT`, `MERGE` or snapshot expiry, and no REST or Glue catalog yet. See
-  [Apache Iceberg](docs/docs/2.0.0-rc2/formats/iceberg.md).
+  [Apache Iceberg](docs/docs/2.0.0-rc3/formats/iceberg.md).
 - **Icechunk repositories read through the Zarr reader.** An Icechunk repository is a Zarr v3 store
   with commits, branches and snapshots. `read_icechunk('sst/repo')` and `CREATE EXTERNAL TABLE …
   STORED AS ICECHUNK` read one version of it: the tip of a branch by default, or a fixed `tag` /

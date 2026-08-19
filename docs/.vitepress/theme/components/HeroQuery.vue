@@ -57,7 +57,7 @@ const tokens = {
     { t: ' ', c: '' },
     { t: 'Client', c: 'fn' },
     { t: '(', c: '' },
-    // PUBLIC NODE URL — see docs/2.0.0-rc2/quickstart.md for the other copies.
+    // PUBLIC NODE URL — see docs/2.0.0-rc3/quickstart.md for the other copies.
     { t: `"${PUBLIC_NODE}"`, c: 's' },
     { t: ')\ndf ', c: '' },
     { t: '=', c: 'o' },

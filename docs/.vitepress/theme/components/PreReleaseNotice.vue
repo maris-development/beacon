@@ -6,7 +6,7 @@ import { LATEST_VERSION, LATEST_ENTRY } from '../version.js'
 // Versions whose docs are published but not released. Keep in sync with the
 // version dropdown label in config.mts. `route.path` carries the site base, so
 // match on the version segment rather than a full path.
-const PRE_RELEASE = ['2.0.0-rc2']
+const PRE_RELEASE = ['2.0.0-rc3']
 
 const route = useRoute()
 

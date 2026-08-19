@@ -3,7 +3,7 @@ import { withBase } from 'vitepress'
 import Icon from './Icon.vue'
 
 // Two steps of one path, not two products: deploy a node, or query one that
-// already runs. Both land on 2.0.0-rc2 — that is the release this page
+// already runs. Both land on 2.0.0-rc3 — that is the release this page
 // describes, and the 1.8.0 tree still uses the old two-product naming.
 const paths = [
   {
@@ -14,7 +14,7 @@ const paths = [
     blurb: 'Point Beacon at a directory or a bucket. It finds the files itself.',
     cmd: 'docker pull ghcr.io/maris-development/beacon:latest',
     cta: 'Deploy a server',
-    link: withBase('/docs/2.0.0-rc2/getting-started'),
+    link: withBase('/docs/2.0.0-rc3/getting-started'),
   },
   {
     key: 'try',
@@ -24,7 +24,7 @@ const paths = [
     blurb: 'Point the Python client at the public Beacon and read real data back.',
     cmd: 'pip install beacon-api',
     cta: 'Run the first query',
-    link: withBase('/docs/2.0.0-rc2/quickstart#query-the-public-node'),
+    link: withBase('/docs/2.0.0-rc3/quickstart#query-the-public-node'),
   },
 ]
 </script>

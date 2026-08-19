@@ -21,14 +21,14 @@ con.sql("SELECT * FROM read_parquet('obs/*.parquet')").df()
 - **In-process, no setup.** You run no server. The engine links into your Python process.
 - **Reads your formats in place.** NetCDF, Zarr, Parquet, GeoParquet, CSV, HDF5, ODV, GeoTIFF, Delta
   and more. There is no import step. It uses the same
-  [readers](/docs/2.0.0-rc2/beacondb/python/querying#reading-files) and the same
-  [SQL](/docs/2.0.0-rc2/beacondb/sql/) as Beacon Data Lake.
+  [readers](/docs/2.0.0-rc3/beacondb/python/querying#reading-files) and the same
+  [SQL](/docs/2.0.0-rc3/beacondb/sql/) as Beacon Data Lake.
 - **One portable file.** One `beacon.db` holds everything that Beacon *owns*: its catalog and its
   managed data. It references everything else. Copy the file and the managed lake goes with it.
 - **Arrow-native results.** Results cross into Python over the Arrow PyCapsule protocol. Any Arrow
   consumer reads them without an extra dependency. Use `.df()`, `.pl()` or `.arrow()` for pandas,
   polars or pyarrow.
-- **Federates outward.** [`ATTACH`](/docs/2.0.0-rc2/beacondb/python/remote-catalogs) a remote Beacon
+- **Federates outward.** [`ATTACH`](/docs/2.0.0-rc3/beacondb/python/remote-catalogs) a remote Beacon
   Data Lake and query it. You can then join remote tables against local files.
 
 ## Install
@@ -75,7 +75,7 @@ RUN pip install beacondb
 ```
 
 Must you stay on Alpine? Then see
-[build from source](/docs/2.0.0-rc2/beacondb/python/building#building-on-alpine-musl) for the `apk`
+[build from source](/docs/2.0.0-rc3/beacondb/python/building#building-on-alpine-musl) for the `apk`
 prerequisites. Beacon plans to publish musllinux wheels again. This gap is temporary.
 :::
 
@@ -84,10 +84,10 @@ You can force a source build on a platform that *does* have a wheel. Use
 
 ## Next steps
 
-- [Getting started](/docs/2.0.0-rc2/beacondb/python/getting-started): connect, first query, auth modes.
-- [Querying](/docs/2.0.0-rc2/beacondb/python/querying): lazy relations, readers, file sinks, streams.
-- [Bring data in](/docs/2.0.0-rc2/beacondb/python/data-in): `register()` and `append()`.
-- [Remote catalogs](/docs/2.0.0-rc2/beacondb/python/remote-catalogs): `ATTACH` a remote Beacon.
-- [Secrets](/docs/2.0.0-rc2/beacondb/python/secrets): credentials for S3, GCS, Azure and a remote Beacon.
-- [SQLAlchemy](/docs/2.0.0-rc2/beacondb/python/sqlalchemy): the `beacondb://` dialect.
-- [API reference](/docs/2.0.0-rc2/beacondb/python/api-reference) · [Building from source](/docs/2.0.0-rc2/beacondb/python/building)
+- [Getting started](/docs/2.0.0-rc3/beacondb/python/getting-started): connect, first query, auth modes.
+- [Querying](/docs/2.0.0-rc3/beacondb/python/querying): lazy relations, readers, file sinks, streams.
+- [Bring data in](/docs/2.0.0-rc3/beacondb/python/data-in): `register()` and `append()`.
+- [Remote catalogs](/docs/2.0.0-rc3/beacondb/python/remote-catalogs): `ATTACH` a remote Beacon.
+- [Secrets](/docs/2.0.0-rc3/beacondb/python/secrets): credentials for S3, GCS, Azure and a remote Beacon.
+- [SQLAlchemy](/docs/2.0.0-rc3/beacondb/python/sqlalchemy): the `beacondb://` dialect.
+- [API reference](/docs/2.0.0-rc3/beacondb/python/api-reference) · [Building from source](/docs/2.0.0-rc3/beacondb/python/building)

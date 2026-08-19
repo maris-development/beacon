@@ -43,18 +43,18 @@ engines cannot open those formats.
 | Prepare extracts for other tools | Export the results to Parquet, CSV, NetCDF or Arrow. |
 
 Do you need to serve datasets to many people over the network, with access control and a web UI?
-Then use the same engine as [Beacon Data Lake](/docs/2.0.0-rc2/getting-started).
+Then use the same engine as [Beacon Data Lake](/docs/2.0.0-rc3/getting-started).
 
 ## How this chapter is organized
 
-1. **[How It Works](/docs/2.0.0-rc2/beacondb/how-it-works)**: the engine, the query pipeline and the
+1. **[How It Works](/docs/2.0.0-rc3/beacondb/how-it-works)**: the engine, the query pipeline and the
    storage model.
-2. **[Data Sources](/docs/2.0.0-rc2/beacondb/data-sources/)**: external files, object storage, other
+2. **[Data Sources](/docs/2.0.0-rc3/beacondb/data-sources/)**: external files, object storage, other
    databases and the internal format of BeaconDB.
-3. **[SQL Reference](/docs/2.0.0-rc2/beacondb/sql/)**: statements, functions and syntax.
-4. **[Python Binding](/docs/2.0.0-rc2/beacondb/python/)**: the client API, from `connect()` to
+3. **[SQL Reference](/docs/2.0.0-rc3/beacondb/sql/)**: statements, functions and syntax.
+4. **[Python Binding](/docs/2.0.0-rc3/beacondb/python/)**: the client API, from `connect()` to
    dataframes.
-5. **[Guides](/docs/2.0.0-rc2/beacondb/guides/)**: step-by-step instructions for common tasks.
+5. **[Guides](/docs/2.0.0-rc3/beacondb/guides/)**: step-by-step instructions for common tasks.
 
 ## Language bindings
 
@@ -63,11 +63,11 @@ stay the same.
 
 | Binding | Status | Docs |
 |---|---|---|
-| **Python** (`pip install beacondb`) | Available | [Python binding](/docs/2.0.0-rc2/beacondb/python/) |
+| **Python** (`pip install beacondb`) | Available | [Python binding](/docs/2.0.0-rc3/beacondb/python/) |
 | **Rust** | Planned | |
 | **C ABI** (for .NET, Go, Node, Java) | Planned | |
 
 The Python binding is the reference front-end today. It gives a PEP 249 connection, a lazy relation
 API, Arrow-native results, `ATTACH`, secrets, streams and file sinks.
 
-**[Get started with the Python binding](/docs/2.0.0-rc2/beacondb/python/getting-started)**
+**[Get started with the Python binding](/docs/2.0.0-rc3/beacondb/python/getting-started)**

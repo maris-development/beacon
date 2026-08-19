@@ -48,23 +48,23 @@ SQL. Beacon sends back only the rows and columns of the answer.
 give ragged profiles. They give hundreds of thousands of small files. The schema changes from file
 to file. `xarray.open_mfdataset` fails on that change. A manual loop is slow. Beacon joins the files
 by column name. It reads the collection as one table. See
-[Coming from xarray](/docs/2.0.0-rc2/coming-from-xarray).
+[Coming from xarray](/docs/2.0.0-rc3/coming-from-xarray).
 
 **Beacon needs no conversion step.** It reads NetCDF, Zarr, Parquet, GeoParquet, CSV, ODV, HDF5,
 Arrow, GeoTIFF, Delta and BBF in place. You run no import job. You keep no second copy.
 
 **Beacon gives one set of names.** Register a glob once as a table or a view. Users then query a
 name. You can move the storage later. No saved query breaks. See
-[Server Setup](/docs/2.0.0-rc2/server/).
+[Server Setup](/docs/2.0.0-rc3/server/).
 
 **Beacon controls access per table and per path.** A grant is `ON TABLE <name>` or
 `ON PATH '<glob>'`. A deny always beats a grant. Three public collections and one private collection
 need a few statements. They do not need a second bucket. See
-[Access Control](/docs/2.0.0-rc2/security/access-control).
+[Access Control](/docs/2.0.0-rc3/security/access-control).
 
 **Beacon queries other servers.** `ATTACH` a second Beacon server. Then join its tables against your
 own in one statement. Neither server moves its data. Each server keeps its own access rules. See
-[ATTACH](/docs/2.0.0-rc2/data-sources/attach).
+[ATTACH](/docs/2.0.0-rc3/data-sources/attach).
 
 ## Why it fits data in a cloud bucket
 
@@ -87,7 +87,7 @@ The first leg costs nothing. Only the answer leaves the cloud. An answer is much
 files that hold it. Three effects combine:
 
 1. **Beacon drops whole files.** A filter on time or depth removes a file before Beacon reads its
-   data. Beacon uses the statistics in an [Atlas](/docs/2.0.0-rc2/formats/atlas) collection, or the
+   data. Beacon uses the statistics in an [Atlas](/docs/2.0.0-rc3/formats/atlas) collection, or the
    row group statistics in a Parquet file.
 2. **Beacon reads only the columns you name.** `SELECT time, temp` reads two columns from a columnar
    file. It does not read the other 198.
@@ -112,7 +112,7 @@ You save money only when all four conditions are true:
   A small archive costs more this way. A large archive costs less.
 - **The format supports pushdown.** Parquet, Atlas, Delta and Zarr drop data early. A CSV file
   cannot. Beacon reads a CSV file from start to end. See the
-  [capability matrix](/docs/2.0.0-rc2/formats/#capability-matrix).
+  [capability matrix](/docs/2.0.0-rc3/formats/#capability-matrix).
 
 Range reads add `GET` requests. Request charges are much lower than egress charges. They do not
 change the result.
@@ -144,7 +144,7 @@ the need for the portal.
 
 A path in a query is relative to the datasets root. You set that root when the server starts. You can
 restructure the bucket, rename it, or move to another provider. No user sees a change. See
-[Object Storage](/docs/2.0.0-rc2/data-sources/object-storage).
+[Object Storage](/docs/2.0.0-rc3/data-sources/object-storage).
 
 ## Beacon and DuckDB
 
@@ -242,13 +242,13 @@ Beacon is the wrong tool in four cases:
 Beacon uses Rust, [Apache Arrow](https://arrow.apache.org/) and
 [DataFusion](https://datafusion.apache.org/). It parses a query into a plan. It pushes filters and
 column choices as deep as the format permits. It streams the result back as Arrow, Parquet, NetCDF,
-CSV or ODV. See [How it works](/docs/2.0.0-rc2/how-it-works).
+CSV or ODV. See [How it works](/docs/2.0.0-rc3/how-it-works).
 
 ## Next
 
 | | |
 |---|---|
-| **Try it. No setup** | [Query the public server](/docs/2.0.0-rc2/quickstart#query-the-public-node) |
-| **Deploy a server** | [Quick Start](/docs/2.0.0-rc2/quickstart#deploy-a-server) · [Getting Started](/docs/2.0.0-rc2/getting-started) |
-| **See the full model** | [Introduction](/docs/2.0.0-rc2/introduction) |
-| **Move from Python** | [Coming from xarray](/docs/2.0.0-rc2/coming-from-xarray) |
+| **Try it. No setup** | [Query the public server](/docs/2.0.0-rc3/quickstart#query-the-public-node) |
+| **Deploy a server** | [Quick Start](/docs/2.0.0-rc3/quickstart#deploy-a-server) · [Getting Started](/docs/2.0.0-rc3/getting-started) |
+| **See the full model** | [Introduction](/docs/2.0.0-rc3/introduction) |
+| **Move from Python** | [Coming from xarray](/docs/2.0.0-rc3/coming-from-xarray) |
