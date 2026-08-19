@@ -19,12 +19,16 @@
 //! # Page size
 //!
 //! [`ObjectStore::list`] sends no `max-keys`, so a server applies its own
-//! default of 1000. [`DEFAULT_MAX_KEYS`] is 5000, not the 65535 SeaweedFS will
-//! parse. Larger pages measured *worse*, and they broke: at 65535 with 8 to 16
-//! shards in flight, SeaweedFS failed whole responses with a body error and the
-//! walk silently returned 2 288 498 of 2 853 217 objects. A moderate page keeps
-//! the response small enough to survive concurrency, and it already removes 80%
-//! of the round trips.
+//! default of 1000. [`DEFAULT_MAX_KEYS`] is 5000, well under the 65535 SeaweedFS
+//! will parse.
+//!
+//! 65535 is not a server limit, and asking for it is not an error. It is a
+//! timeout risk. `ClientOptions` gives a request 30 seconds by default, and one
+//! page of 65535 keys from a filer whose metadata is not yet in page cache took
+//! 6.5 s on its own; with 16 shards in flight, some requests crossed 30 s and
+//! failed. Warm, the same walk completed with no errors at all. A moderate page
+//! stays inside the budget whatever the cache is doing, and it already removes
+//! 80% of the round trips. Raise `AWS_TIMEOUT` before raising this.
 //!
 //! # Shards
 //!

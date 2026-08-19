@@ -206,9 +206,17 @@ impl ListingFactory {
         let mut objects = Vec::new();
         let mut entry_stream = listing_url.list_all_files(session, &store, "").await?;
         while let Some(entry) = entry_stream.next().await {
-            if let Ok(entry) = entry {
-                objects.push(entry);
-            }
+            // Propagate. Discarding the error here turned a transient object-store
+            // failure part-way through a walk into a short dataset list that looked
+            // complete: a timeout on object 2 000 000 of 2 850 000 reported success
+            // and lost the rest without a word.
+            let entry = entry.map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "list_datasets: listing `{glob_path}` failed after {} objects: {e}",
+                    objects.len()
+                ))
+            })?;
+            objects.push(entry);
         }
 
         // Ask each file format which objects it owns and how to interpret them.
