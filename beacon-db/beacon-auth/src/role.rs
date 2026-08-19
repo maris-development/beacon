@@ -316,6 +316,46 @@ impl RoleProvider {
         })
     }
 
+    /// Whether any path under the directory `prefix` could satisfy `privilege`.
+    ///
+    /// [`Self::is_allowed`] answers for one concrete path. A folder is not a
+    /// grantable target — it is worth showing only when something inside it is
+    /// reachable — so a browse asks this instead.
+    ///
+    /// Deny still wins, but only a deny that covers the whole directory: a rule
+    /// hiding one file inside a folder must not hide the folder, or the rest of
+    /// it becomes unreachable. Per-file denies are applied by `is_allowed` when
+    /// the caller descends.
+    ///
+    /// An empty `prefix` is the store root, which every path is under.
+    pub fn prefix_is_reachable(
+        &self,
+        roles: &[String],
+        privilege: Privilege,
+        prefix: &str,
+    ) -> bool {
+        let registry = self.roles.read();
+        let matched: Vec<&Role> = roles
+            .iter()
+            .filter_map(|name| registry.get(name))
+            .collect();
+
+        let denied = matched.iter().any(|role| {
+            role.denies.iter().any(|rule| {
+                rule_privilege_matches(rule, privilege) && rule_covers_subtree(rule, prefix)
+            })
+        });
+        if denied {
+            return false;
+        }
+
+        matched.iter().any(|role| {
+            role.grants.iter().any(|rule| {
+                rule_privilege_matches(rule, privilege) && rule_reaches_into(rule, prefix)
+            })
+        })
+    }
+
     /// Evaluates whether the given roles are allowed to perform `privilege` on `target`.
     ///
     /// Deny rules win over grant rules; absent any matching grant, access is denied.
@@ -381,6 +421,104 @@ pub fn decode_target(
 
 /// Segment-aware glob match: `*` does not cross `/`, so `example/*` does not match
 /// `example_2/file.parquet` nor `example/sub/file.parquet`.
+fn rule_privilege_matches(rule: &PrivilegeRule, privilege: Privilege) -> bool {
+    rule.privilege == privilege || rule.privilege == Privilege::All
+}
+
+/// Whether `rule` could match some path under the directory `prefix`.
+///
+/// `ALL` and an untargeted rule reach everywhere. A table rule reaches nothing.
+/// A path pattern reaches in when walking it segment by segment against `prefix`
+/// neither diverges nor runs out early.
+fn rule_reaches_into(rule: &PrivilegeRule, prefix: &str) -> bool {
+    match &rule.target {
+        None | Some(PrivilegeTarget::All) => true,
+        Some(PrivilegeTarget::Table(_)) => false,
+        Some(PrivilegeTarget::Path(pattern)) => pattern_reaches_into(pattern, prefix),
+    }
+}
+
+/// Whether `rule` covers *every* path under `prefix`, which is what it takes to
+/// justify hiding the directory outright.
+fn rule_covers_subtree(rule: &PrivilegeRule, prefix: &str) -> bool {
+    match &rule.target {
+        None | Some(PrivilegeTarget::All) => true,
+        Some(PrivilegeTarget::Table(_)) => false,
+        Some(PrivilegeTarget::Path(pattern)) => pattern_covers_subtree(pattern, prefix),
+    }
+}
+
+fn segments(path: &str) -> Vec<&str> {
+    path.split('/').filter(|s| !s.is_empty()).collect()
+}
+
+/// Segment-wise walk of a glob against a directory.
+///
+/// `**` swallows the rest, so it always reaches in. A literal or single-segment
+/// glob has to match the directory segment beside it. Running out of pattern
+/// before running out of directory means the pattern describes something
+/// shallower than `prefix`, so nothing under `prefix` can match it.
+fn pattern_reaches_into(pattern: &str, prefix: &str) -> bool {
+    let pat = segments(pattern);
+    let dir = segments(prefix);
+
+    for (i, want) in dir.iter().enumerate() {
+        match pat.get(i) {
+            // Pattern ran out: it is shallower than the directory.
+            None => return false,
+            Some(p) if *p == "**" => return true,
+            Some(p) => {
+                if !segment_matches(p, want) {
+                    return false;
+                }
+            }
+        }
+    }
+    // The directory is a proper ancestor of (or equal to) the pattern, so the
+    // pattern describes something inside it.
+    true
+}
+
+/// Whether every path under `prefix` matches `pattern`.
+///
+/// Only a `**` tail can do that, and only once its literal head has matched the
+/// directory exactly. `secret/**` covers `secret` and `secret/a`; `secret/*.nc`
+/// covers neither, because a sibling `.csv` under it would not match.
+fn pattern_covers_subtree(pattern: &str, prefix: &str) -> bool {
+    let pat = segments(pattern);
+    let dir = segments(prefix);
+
+    let Some(star_at) = pat.iter().position(|p| *p == "**") else {
+        return false;
+    };
+    // Anything after `**` constrains the tail, so the cover is not total.
+    if star_at + 1 != pat.len() {
+        return false;
+    }
+    // The head must be an ancestor-or-self of the directory.
+    if star_at > dir.len() {
+        return false;
+    }
+    pat[..star_at]
+        .iter()
+        .zip(dir.iter())
+        .all(|(p, d)| segment_matches(p, d))
+}
+
+/// One path segment against one pattern segment. Separators never match, so a
+/// segment glob cannot span directories.
+fn segment_matches(pattern: &str, segment: &str) -> bool {
+    let options = MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+    match Pattern::new(pattern) {
+        Ok(compiled) => compiled.matches_with(segment, options),
+        Err(_) => pattern == segment,
+    }
+}
+
 fn path_matches(pattern: &str, path: &str) -> bool {
     let options = MatchOptions {
         case_sensitive: true,
@@ -396,6 +534,95 @@ fn path_matches(pattern: &str, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- prefix reachability -------------------------------------------
+
+    fn rule(pattern: &str) -> PrivilegeRule {
+        PrivilegeRule {
+            privilege: Privilege::Select,
+            target: Some(PrivilegeTarget::Path(pattern.to_string())),
+        }
+    }
+
+    async fn provider_with(grants: &[&str], denies: &[&str]) -> RoleProvider {
+        let provider = RoleProvider::new();
+        provider.create_role("reader").await.unwrap();
+        for g in grants {
+            provider.grant("reader", rule(g)).await.unwrap();
+        }
+        for d in denies {
+            provider.deny("reader", rule(d)).await.unwrap();
+        }
+        provider
+    }
+
+    fn reachable(p: &RoleProvider, prefix: &str) -> bool {
+        p.prefix_is_reachable(&["reader".to_string()], Privilege::Select, prefix)
+    }
+
+    /// A grant deep inside a tree keeps every directory on the way to it visible,
+    /// or the caller cannot navigate to what they were granted.
+    #[tokio::test]
+    async fn ancestors_of_a_grant_stay_reachable() {
+        let p = provider_with(&["argo/floats/**"], &[]).await;
+        assert!(reachable(&p, ""), "the root leads to the grant");
+        assert!(reachable(&p, "argo"));
+        assert!(reachable(&p, "argo/floats"));
+        assert!(reachable(&p, "argo/floats/2024"));
+    }
+
+    /// A sibling the grant cannot reach stays hidden.
+    #[tokio::test]
+    async fn unrelated_directories_are_not_reachable() {
+        let p = provider_with(&["argo/floats/**"], &[]).await;
+        assert!(!reachable(&p, "secret"));
+        assert!(!reachable(&p, "argo/gliders"));
+    }
+
+    /// A pattern shallower than the directory describes something above it, so
+    /// nothing inside the directory can match.
+    #[tokio::test]
+    async fn a_shallower_pattern_does_not_reach_in() {
+        let p = provider_with(&["argo/*.nc"], &[]).await;
+        assert!(reachable(&p, "argo"), "the file lives directly here");
+        assert!(!reachable(&p, "argo/floats"), "*.nc cannot cross a separator");
+    }
+
+    /// A single-segment glob still has to match segment by segment.
+    #[tokio::test]
+    async fn segment_globs_match_one_level() {
+        let p = provider_with(&["*/floats/**"], &[]).await;
+        assert!(reachable(&p, "argo/floats"));
+        assert!(!reachable(&p, "argo/gliders"));
+    }
+
+    /// A deny over the whole subtree hides the directory.
+    #[tokio::test]
+    async fn a_subtree_deny_hides_the_directory() {
+        let p = provider_with(&["**"], &["secret/**"]).await;
+        assert!(reachable(&p, "public"));
+        assert!(!reachable(&p, "secret"));
+        assert!(!reachable(&p, "secret/inner"));
+    }
+
+    /// A deny over *part* of a directory must not hide the directory, or the rest
+    /// of it becomes unreachable. The per-file check still refuses the file.
+    #[tokio::test]
+    async fn a_partial_deny_leaves_the_directory_visible() {
+        let p = provider_with(&["data/**"], &["data/*.csv"]).await;
+        assert!(reachable(&p, "data"));
+        let roles = ["reader".to_string()];
+        assert!(!p.is_allowed(&roles, Privilege::Select, &path("data/x.csv")));
+        assert!(p.is_allowed(&roles, Privilege::Select, &path("data/x.parquet")));
+    }
+
+    /// No grant at all means nothing is reachable: default-deny, as elsewhere.
+    #[tokio::test]
+    async fn without_a_grant_nothing_is_reachable() {
+        let p = provider_with(&[], &[]).await;
+        assert!(!reachable(&p, ""));
+        assert!(!reachable(&p, "argo"));
+    }
 
     fn path(p: &str) -> ConcreteTarget {
         ConcreteTarget::Path(p.to_string())

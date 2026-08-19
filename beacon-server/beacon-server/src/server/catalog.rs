@@ -193,10 +193,15 @@ pub(crate) async fn list_datasets(
         // so pass a limit only when the caller asked for one.
         limit.map(|l| l.to_string()).unwrap_or_else(|| "NULL".to_string()),
     );
-    let rows = query_rows(server, sql, identity).await?;
+    let rows = query_rows(server, sql, identity.clone()).await?;
 
+    // The same narrowing `browse_datasets` applies. Both listings have to move
+    // together: one filtered and one not would disagree about what exists, and
+    // the unfiltered one would be the way around it.
+    let runtime = server.runtime();
     Ok(rows
         .iter()
+        .filter(|row| runtime.may_read_path(str_field(row, "file_name"), &identity))
         .map(|row| DatasetInfo {
             file_path: str_field(row, "file_name").to_string(),
             format: str_field(row, "file_format").to_string(),

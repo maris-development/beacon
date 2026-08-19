@@ -326,15 +326,15 @@ impl Runtime {
     ///
     /// `prefix` is relative to the datasets store; empty means the root.
     ///
-    /// Authorization matches `list_datasets`: the caller must be authenticated,
-    /// and no per-path grant filtering is applied. `GRANT ... ON PATH` governs
-    /// *reading* a dataset, which still goes through the query path. Narrowing
-    /// both listings to granted paths is a separate change, and it has to move
-    /// them together or the two disagree about what exists.
+    /// With grant enforcement on, the result is narrowed to what `identity` could
+    /// actually read: a dataset survives when `Select` is allowed on its path, and
+    /// a folder survives when some grant could match a path inside it. A listing
+    /// therefore describes the same store the caller could go on to read, rather
+    /// than the whole tree.
     pub async fn browse_datasets(
         &self,
         prefix: &str,
-        _identity: &beacon_auth::AuthIdentity,
+        identity: &beacon_auth::AuthIdentity,
     ) -> anyhow::Result<beacon_datafusion_ext::listing_factory::BrowseResult> {
         use beacon_datafusion_ext::listing_factory::ListingFactory;
 
@@ -344,10 +344,64 @@ impl Runtime {
             .get_extension::<ListingFactory>()
             .ok_or_else(|| anyhow::anyhow!("the listing factory is not registered on the session"))?;
 
-        factory
+        let mut result = factory
             .browse_datasets(&state, &self.file_formats, prefix)
             .await
-            .map_err(|e| anyhow::anyhow!("browse of `{prefix}` failed: {e}"))
+            .map_err(|e| anyhow::anyhow!("browse of `{prefix}` failed: {e}"))?;
+
+        if self.listing_is_filtered(identity) {
+            let base = result.prefix.trim_end_matches('/').to_string();
+            let join = |name: &str| {
+                if base.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{base}/{name}")
+                }
+            };
+            result
+                .datasets
+                .retain(|d| self.may_read_path(&d.file_path, identity));
+            result
+                .folders
+                .retain(|name| self.prefix_is_reachable(&join(name), identity));
+        }
+
+        Ok(result)
+    }
+
+    /// Whether a listing shown to `identity` has to be narrowed to their grants.
+    ///
+    /// Mirrors the read path: off without enforcement, and never applied to the
+    /// super-user. A deployment that has not opted into grants sees what it saw
+    /// before.
+    pub fn listing_is_filtered(&self, identity: &beacon_auth::AuthIdentity) -> bool {
+        self.auth_enforce && !identity.is_super_user
+    }
+
+    /// Whether `identity` may read the dataset at `path`.
+    ///
+    /// The same question, and the same evaluator, the read path asks — so a
+    /// listing cannot name a file the caller would then be refused.
+    pub fn may_read_path(&self, path: &str, identity: &beacon_auth::AuthIdentity) -> bool {
+        use beacon_auth::{ConcreteTarget, Privilege};
+        if !self.listing_is_filtered(identity) {
+            return true;
+        }
+        self.auth.is_allowed(
+            &identity.roles,
+            Privilege::Select,
+            &ConcreteTarget::Path(path.to_string()),
+        )
+    }
+
+    /// Whether any path under the directory `prefix` could be read by `identity`.
+    pub fn prefix_is_reachable(&self, prefix: &str, identity: &beacon_auth::AuthIdentity) -> bool {
+        use beacon_auth::Privilege;
+        if !self.listing_is_filtered(identity) {
+            return true;
+        }
+        self.auth
+            .prefix_is_reachable(&identity.roles, Privilege::Select, prefix)
     }
 
     /// The catalog and schema an unqualified table name resolves against.
