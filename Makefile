@@ -8,6 +8,9 @@
 #   make run     # build the SPA, then serve API + UI on http://localhost:5001/admin
 #   make dev-api # run just the API (terminal 1)   } UI dev with hot-reload
 #   make dev-ui  # run the Vite dev server (terminal 2)
+#
+# A standard build links PROJ, a native C++ library. Use the *-no-proj targets on a
+# machine without it. See the PROJ note above `run-no-proj`.
 
 # Admin credentials the server starts with (also what you log in with).
 BEACON_ADMIN_USERNAME ?= beacon-admin
@@ -18,11 +21,11 @@ WEB_DIR ?= beacon-clients/beacon-web/dist
 export BEACON_ADMIN_USERNAME
 export BEACON_ADMIN_PASSWORD
 
-.PHONY: help ui-deps ui run serve dev-api dev-ui clean-ui
+.PHONY: help ui-deps ui run run-release run-no-proj run-release-no-proj serve dev-api dev-api-no-proj dev-ui clean-ui
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 ui-deps: ## Install JS workspace dependencies
 	cd beacon-clients && npm install
@@ -42,11 +45,27 @@ run: ui ## Build the SPA, then serve API + UI on http://localhost:5001/admin
 run-release: ui ## Build the SPA, then serve API + UI on http://localhost:5001/admin
 	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run --release -p beacon-server
 
+# `spatial-proj` is the only default feature of beacon-server, so `--no-default-features`
+# drops PROJ and nothing else. The server then loses `ST_Transform`, the one function that
+# reprojects coordinates. Every other spatial function stays. Use this where the machine
+# carries no PROJ 9.6.2 or later, or no pkg-config to find it. The alternative is
+# `--features spatial-proj-bundled`, which builds PROJ from source and needs a C++
+# toolchain, CMake, sqlite3 and libtiff.
+run-no-proj: ui ## Same as `run`, but without PROJ (drops ST_Transform)
+	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run -p beacon-server --no-default-features
+
+run-release-no-proj: ui ## Same as `run-release`, but without PROJ (drops ST_Transform)
+	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run --release -p beacon-server --no-default-features
+
 serve: ## Serve API + UI without rebuilding the SPA (expects $(WEB_DIR) to exist)
 	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run -p beacon-server
 
 dev-api: ## Run only the API (no bundled UI); pair with `make dev-ui`
 	cargo run -p beacon-server
+
+# See the PROJ note above `run-no-proj`.
+dev-api-no-proj: ## Same as `dev-api`, but without PROJ (drops ST_Transform)
+	cargo run -p beacon-server --no-default-features
 
 dev-ui: ## Run the Vite dev server with hot-reload on http://localhost:5173
 	cd beacon-clients/beacon-web && npm run dev

@@ -2017,6 +2017,7 @@ dependencies = [
  "futures",
  "indexmap 2.14.0",
  "ndarray 0.17.2",
+ "num-traits",
  "object_store 0.13.2",
  "parking_lot",
  "rand 0.8.7",

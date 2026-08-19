@@ -3,7 +3,14 @@ use std::{collections::HashMap, sync::Arc};
 use indexmap::IndexMap;
 use tokio::sync::OnceCell;
 
-use crate::{NdArray, NdArrayD, array::subset::ArraySubset, dataset::Dataset};
+use num_traits::ToPrimitive;
+
+use crate::{
+    NdArray, NdArrayD,
+    array::subset::ArraySubset,
+    dataset::Dataset,
+    datatypes::{NdArrayDataType, NdArrayType},
+};
 
 /// A view over a [`Dataset`] that follows the CF contiguous ragged-array
 /// convention.
@@ -55,6 +62,34 @@ impl RaggedArray {
             RaggedArray::Attribute(a) => a,
         }
     }
+}
+
+/// Read a row-size variable of a known integer type as a list of counts.
+///
+/// `to_usize` rejects a negative or oversized value and returns an error. A
+/// plain `as` cast wraps such a value into a huge count instead, which then
+/// builds offsets that run past the end of the observation dimension.
+async fn read_row_sizes<T>(arr: &Arc<dyn NdArrayD>, rs_var: &str) -> anyhow::Result<Vec<usize>>
+where
+    T: NdArrayType + ToPrimitive + std::fmt::Display,
+{
+    let typed = arr.as_any().downcast_ref::<NdArray<T>>().ok_or_else(|| {
+        anyhow::anyhow!(
+            "row-size variable {rs_var} reports {:?}, but does not hold that type",
+            arr.datatype()
+        )
+    })?;
+
+    typed
+        .clone_into_raw_vec()
+        .await
+        .into_iter()
+        .map(|sz| {
+            sz.to_usize().ok_or_else(|| {
+                anyhow::anyhow!("row-size variable {rs_var} holds an invalid row size: {sz}")
+            })
+        })
+        .collect()
 }
 
 impl RaggedDataset {
@@ -225,16 +260,30 @@ impl RaggedDataset {
         let mut offsets: HashMap<String, Vec<usize>> = HashMap::new();
 
         for (obs_dim, arr) in &self.row_size_arrays {
-            let typed = arr.as_any().downcast_ref::<NdArray<i32>>().ok_or_else(|| {
-                let rs_var = &self.row_size_vars[obs_dim];
-                anyhow::anyhow!("{rs_var} is not an i32 array")
-            })?;
-            let row_sizes = typed.clone_into_raw_vec().await;
+            let rs_var = &self.row_size_vars[obs_dim];
+
+            // CF fixes no width on a row-size variable, so a writer picks whatever
+            // integer holds its largest cast. WOD ships `short`, other producers
+            // ship `int` or `int64`. Read every signed and unsigned width through
+            // the same path.
+            let row_sizes: Vec<usize> = match arr.datatype() {
+                NdArrayDataType::I8 => read_row_sizes::<i8>(arr, rs_var).await?,
+                NdArrayDataType::I16 => read_row_sizes::<i16>(arr, rs_var).await?,
+                NdArrayDataType::I32 => read_row_sizes::<i32>(arr, rs_var).await?,
+                NdArrayDataType::I64 => read_row_sizes::<i64>(arr, rs_var).await?,
+                NdArrayDataType::U8 => read_row_sizes::<u8>(arr, rs_var).await?,
+                NdArrayDataType::U16 => read_row_sizes::<u16>(arr, rs_var).await?,
+                NdArrayDataType::U32 => read_row_sizes::<u32>(arr, rs_var).await?,
+                NdArrayDataType::U64 => read_row_sizes::<u64>(arr, rs_var).await?,
+                other => anyhow::bail!(
+                    "row-size variable {rs_var} holds {other:?}; it must hold an integer type"
+                ),
+            };
 
             let mut cum = Vec::with_capacity(self.n_instances + 1);
             cum.push(0usize);
-            for &sz in &row_sizes {
-                cum.push(cum.last().unwrap() + sz as usize);
+            for sz in row_sizes {
+                cum.push(cum.last().unwrap() + sz);
             }
             offsets.insert(obs_dim.clone(), cum);
         }

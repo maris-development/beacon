@@ -310,16 +310,24 @@ mod tests {
     ///   - `temperature.units`: var attr     ["°C"]
     ///   - `Conventions`: global attr        ["CF-1.6"]
     async fn make_ragged_dataset() -> Dataset {
-        let station_id = NdArray::<f64>::try_new_from_vec_in_mem(
-            vec![100.0, 200.0, 300.0],
+        let z_row_size = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![2, 1, 3],
             vec![3],
             vec!["casts".into()],
             None,
         )
         .unwrap();
 
-        let z_row_size = NdArray::<i32>::try_new_from_vec_in_mem(
-            vec![2, 1, 3],
+        make_ragged_dataset_with_row_size(Arc::new(z_row_size)).await
+    }
+
+    /// The same layout, with the caller supplying the row-size variable.
+    ///
+    /// CF fixes no width on that variable, so a writer picks any integer that
+    /// holds its largest cast. The tests below build it from each one.
+    async fn make_ragged_dataset_with_row_size(z_row_size: Arc<dyn NdArrayD>) -> Dataset {
+        let station_id = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![100.0, 200.0, 300.0],
             vec![3],
             vec!["casts".into()],
             None,
@@ -379,7 +387,7 @@ mod tests {
             vec![
                 ("Conventions", Arc::new(conventions)),
                 ("station_id", Arc::new(station_id)),
-                ("z_row_size", Arc::new(z_row_size)),
+                ("z_row_size", z_row_size),
                 ("z_row_size.sample_dimension", Arc::new(sample_dim)),
                 ("depth", Arc::new(depth)),
                 ("depth.units", Arc::new(depth_units)),
@@ -488,6 +496,80 @@ mod tests {
         let offsets = ragged.offsets.get().unwrap();
         // row sizes [2, 1, 3] → cumulative offsets [0, 2, 3, 6]
         assert_eq!(offsets.get("z_obs").unwrap(), &[0, 2, 3, 6]);
+    }
+
+    /// Every integer width must produce the same offsets. WOD writes
+    /// `Latitude_row_size` as `short`, so a reader that accepts only `int`
+    /// rejects the whole file.
+    macro_rules! test_row_size_type {
+        ($name:ident, $ty:ty) => {
+            #[tokio::test]
+            async fn $name() {
+                let row_size = NdArray::<$ty>::try_new_from_vec_in_mem(
+                    vec![2 as $ty, 1, 3],
+                    vec![3],
+                    vec!["casts".into()],
+                    None,
+                )
+                .unwrap();
+                let ds = make_ragged_dataset_with_row_size(Arc::new(row_size)).await;
+                let ragged = RaggedDataset::try_new(&ds).await.unwrap();
+
+                let _ = ragged.get_cast(0).await.unwrap();
+                assert_eq!(
+                    ragged.offsets.get().unwrap().get("z_obs").unwrap(),
+                    &[0, 2, 3, 6]
+                );
+            }
+        };
+    }
+
+    test_row_size_type!(test_row_size_i8, i8);
+    test_row_size_type!(test_row_size_i16, i16);
+    test_row_size_type!(test_row_size_i32, i32);
+    test_row_size_type!(test_row_size_i64, i64);
+    test_row_size_type!(test_row_size_u8, u8);
+    test_row_size_type!(test_row_size_u16, u16);
+    test_row_size_type!(test_row_size_u32, u32);
+    test_row_size_type!(test_row_size_u64, u64);
+
+    #[tokio::test]
+    async fn test_row_size_rejects_a_negative_count() {
+        // `as usize` would wrap -1 into a huge count and index past the obs axis.
+        let row_size = NdArray::<i16>::try_new_from_vec_in_mem(
+            vec![2, -1, 3],
+            vec![3],
+            vec!["casts".into()],
+            None,
+        )
+        .unwrap();
+        let ds = make_ragged_dataset_with_row_size(Arc::new(row_size)).await;
+        let ragged = RaggedDataset::try_new(&ds).await.unwrap();
+
+        let err = ragged.get_cast(0).await.unwrap_err();
+        assert!(
+            err.to_string().contains("invalid row size"),
+            "expected an invalid-row-size error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_row_size_rejects_a_non_integer_type() {
+        let row_size = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![2.0, 1.0, 3.0],
+            vec![3],
+            vec!["casts".into()],
+            None,
+        )
+        .unwrap();
+        let ds = make_ragged_dataset_with_row_size(Arc::new(row_size)).await;
+        let ragged = RaggedDataset::try_new(&ds).await.unwrap();
+
+        let err = ragged.get_cast(0).await.unwrap_err();
+        assert!(
+            err.to_string().contains("must hold an integer type"),
+            "expected an integer-type error, got: {err}"
+        );
     }
 
     #[tokio::test]
