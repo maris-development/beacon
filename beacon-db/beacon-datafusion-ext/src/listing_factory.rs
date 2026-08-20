@@ -233,116 +233,148 @@ impl ListingFactory {
         Ok(datasets)
     }
 
-    /// Resolve `glob_path` to the store it lives in and the URL that matches it.
+    /// Resolve `glob_path` into the listing it names.
     ///
-    /// The half of a listing that needs a session. Split out so the other half —
-    /// the walk — can be built later, more than once, and without one. A plan
-    /// resolves here and streams at execute time; see [`stream_datasets`].
-    pub fn resolve_listing(
+    /// The only half of a listing that needs a session. [`ObjectListing`] holds
+    /// what the walk needs and can be read as many times as a caller wants, so a
+    /// plan resolves once here and reads at execute time.
+    pub fn listing(
         &self,
         session: &dyn Session,
         glob_path: &str,
-    ) -> datafusion::error::Result<(Arc<dyn object_store::ObjectStore>, ListingTableUrl)> {
+    ) -> datafusion::error::Result<ObjectListing> {
         use datafusion::error::DataFusionError;
 
-        let listing_url = self.parse_listing_table_url(session, glob_path)?;
-        let store_url = listing_url.object_store();
+        let url = self.parse_listing_table_url(session, glob_path)?;
+        let store_url = url.object_store();
         let store = session
             .runtime_env()
             .object_store(store_url.clone())
             .map_err(|e| {
                 DataFusionError::Execution(format!(
-                    "resolve_listing: failed to get object store for {store_url}: {e}"
+                    "listing: failed to get object store for {store_url}: {e}"
                 ))
             })?;
-        Ok((store, listing_url))
+        Ok(ObjectListing { store, url })
+    }
+}
+
+/// A resolved listing: a store, and the URL selecting objects within it.
+///
+/// Holds no session, so it is `'static` and readable more than once. Path
+/// resolution happened when [`ListingFactory::listing`] built it, which is what
+/// lets every reader below inherit the same rules — the configured default
+/// store, a schemed path, a local directory, and the glob.
+#[derive(Debug, Clone)]
+pub struct ObjectListing {
+    store: Arc<dyn object_store::ObjectStore>,
+    url: ListingTableUrl,
+}
+
+impl ObjectListing {
+    /// The store the objects live in.
+    pub fn store(&self) -> &Arc<dyn object_store::ObjectStore> {
+        &self.store
     }
 
-    /// One directory level under `prefix`: its immediate sub-folders and the
-    /// datasets sitting directly in it.
+    /// The directory this listing addresses, relative to the store root. For a
+    /// glob that is the literal head, the part before the first wildcard.
+    pub fn prefix(&self) -> &object_store::path::Path {
+        self.url.prefix()
+    }
+
+    /// Every object the URL matches, as pages arrive.
     ///
-    /// This is the browse counterpart to [`Self::list_datasets`]. That one globs,
-    /// so it enumerates the whole subtree; a folder view never needs the subtree.
-    /// The difference is not a constant factor. Against a SeaweedFS bucket of
-    /// 2 853 217 objects the recursive walk took 79.9 s and this took 14 ms,
-    /// because it is a single delimiter request instead of hundreds of paged ones.
+    /// Yields each object as its page arrives and holds none of them, where
+    /// [`ListingFactory::list_datasets`] drains the whole walk into a `Vec`
+    /// first — about a gigabyte for a listing of 2 853 217 objects.
     ///
-    /// Sub-folders are returned as names relative to `prefix`, not full paths, so
-    /// a caller descends by joining rather than by parsing.
+    /// Objects, not datasets: walking a store and deciding what a file *is* are
+    /// different jobs, and only the second needs to know about formats. A caller
+    /// that wants datasets classifies the stream itself.
     ///
-    /// A directory-shaped dataset (Zarr, Atlas) keeps its marker *inside* its
-    /// directory, so at this level it reads as a folder. Descending into it shows
-    /// the marker. Classifying it here would cost one request per sub-folder,
-    /// which is the recursive cost this method exists to avoid.
-    pub async fn browse_datasets(
-        &self,
-        session: &dyn Session,
-        file_formats: &[Arc<dyn FileFormatFactoryExt>],
-        prefix: &str,
-    ) -> datafusion::error::Result<BrowseResult> {
+    /// Stopping the stream stops the walk.
+    pub fn stream(&self) -> futures::stream::BoxStream<'static, datafusion::error::Result<ObjectMeta>> {
         use datafusion::error::DataFusionError;
 
-        // Resolve through the same path rules as a glob listing, minus the glob:
-        // a browse addresses a directory, never a pattern.
-        let listing_url = self.parse_listing_table_url(session, prefix)?;
-        let store_url = listing_url.object_store();
-        let store = session
-            .runtime_env()
-            .object_store(store_url.clone())
-            .map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "browse_datasets: failed to get object store for {store_url}: {e}"
-                ))
-            })?;
+        let store = Arc::clone(&self.store);
+        let url = self.url.clone();
+        let prefix = url.prefix().clone();
+        async_stream::try_stream! {
+            let mut objects = store.list(Some(&prefix));
+            while let Some(object) = objects.next().await {
+                let object = object.map_err(|e| {
+                    DataFusionError::Execution(format!(
+                        "listing `{prefix}` failed part-way: {e}"
+                    ))
+                })?;
+                // The prefix is only the literal head of the glob, so the rest of
+                // the pattern is applied here, as a listing table does.
+                if url.contains(&object.location, false) {
+                    yield object;
+                }
+            }
+        }
+        .boxed()
+    }
 
-        let base = listing_url.prefix().clone();
-        let listed = store
+    /// One directory level: the sub-folder names, and the objects directly in it.
+    ///
+    /// A single delimiter request rather than a walk. The difference is not a
+    /// constant factor: against a SeaweedFS bucket of 2 853 217 objects the
+    /// recursive walk took 79.9 s and this took 14 ms.
+    ///
+    /// Folder names are relative to [`Self::prefix`], so a caller descends by
+    /// joining rather than by parsing. A directory-shaped dataset (Zarr) keeps
+    /// its marker *inside* its directory, so at this level it is a folder;
+    /// descending shows the marker. Naming it here would cost one request per
+    /// sub-folder, which is the recursive cost this avoids.
+    pub async fn level(&self) -> datafusion::error::Result<ObjectLevel> {
+        use datafusion::error::DataFusionError;
+
+        let base = self.prefix().clone();
+        let listed = self
+            .store
             .list_with_delimiter(Some(&base))
             .await
             .map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "browse_datasets: listing `{prefix}` failed: {e}"
-                ))
+                DataFusionError::Execution(format!("listing level `{base}` failed: {e}"))
             })?;
 
         let base_str = base.as_ref().to_string();
-        let relative = |full: &str| -> String {
-            full.strip_prefix(&base_str)
-                .map(|r| r.trim_start_matches('/').to_string())
-                .unwrap_or_else(|| full.to_string())
-        };
-
         let mut folders: Vec<String> = listed
             .common_prefixes
             .iter()
-            .map(|p| relative(p.as_ref()))
+            .map(|p| {
+                let full = p.as_ref();
+                full.strip_prefix(&base_str)
+                    .map(|r| r.trim_start_matches('/').to_string())
+                    .unwrap_or_else(|| full.to_string())
+            })
             .filter(|name| !name.is_empty())
             .collect();
         folders.sort();
 
-        // Classify only what is at this level. Every format sees the same slice,
-        // exactly as `list_datasets` arranges it.
-        let objects = listed.objects;
-        let mut datasets = vec![];
-        for file_format in file_formats.iter() {
-            datasets.extend(file_format.discover_datasets(&objects)?);
-        }
-        enrich_with_object_metadata(&mut datasets, &objects);
-        datasets.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+        let mut objects = listed.objects;
+        objects.sort_by(|a, b| a.location.cmp(&b.location));
 
-        Ok(BrowseResult { prefix: base_str, folders, datasets })
+        Ok(ObjectLevel {
+            prefix: base_str,
+            folders,
+            objects,
+        })
     }
 }
 
-/// One directory level of the datasets store.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BrowseResult {
-    /// The directory this describes, relative to the datasets store root.
+/// One directory level of a store.
+#[derive(Debug, Clone)]
+pub struct ObjectLevel {
+    /// The directory this describes, relative to the store root.
     pub prefix: String,
     /// Immediate sub-folder names, relative to `prefix`, sorted.
     pub folders: Vec<String>,
-    /// Datasets sitting directly in `prefix`, sorted by path.
-    pub datasets: Vec<DatasetMetadata>,
+    /// Objects sitting directly in `prefix`, sorted by path.
+    pub objects: Vec<ObjectMeta>,
 }
 
 /// Fill each dataset's `size` + `last_modified` from the object listing.

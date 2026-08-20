@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema};
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
-use beacon_datafusion_ext::listing_factory::{BrowseResult, ListingFactory, stream_objects};
+use beacon_datafusion_ext::listing_factory::{ListingFactory, ObjectLevel};
 use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::{Session, TableProvider},
@@ -173,7 +173,10 @@ fn effective_limit(declared: Option<usize>, pushed: Option<usize>) -> Option<usi
 }
 
 /// One directory level, as rows. Directories first, so it reads like one.
-fn level_rows(level: BrowseResult) -> Vec<Row> {
+///
+/// Folder names arrive relative to the level, and a row carries a full path, so
+/// they are joined back on here.
+fn level_rows(formats: &[Arc<dyn FileFormatFactoryExt>], level: ObjectLevel) -> Vec<Row> {
     let base = level.prefix.trim_end_matches('/').to_string();
     let join = |name: &str| {
         if base.is_empty() {
@@ -184,9 +187,9 @@ fn level_rows(level: BrowseResult) -> Vec<Row> {
     };
     level
         .folders
-        .into_iter()
-        .map(|name| Row::directory(join(&name)))
-        .chain(level.datasets.into_iter().map(Row::from))
+        .iter()
+        .map(|name| Row::directory(join(name)))
+        .chain(level.objects.iter().filter_map(|object| classify(formats, object)))
         .collect()
 }
 
@@ -233,11 +236,14 @@ impl TableProvider for DatasetsTable {
             Listing::Glob { pattern } => {
                 // Resolve now, against this session. The walk is rebuilt per
                 // execute from the resolved parts, so the plan can run again.
-                let (store, url) = factory.resolve_listing(state, pattern)?;
+                // Resolved once, against this session. The handle holds no
+                // session, so the walk is rebuilt per execute from it.
+                let listing = factory.listing(state, pattern)?;
                 let formats = self.file_formats.clone();
                 Arc::new(move || {
                     let formats = formats.clone();
-                    Ok(stream_objects(Arc::clone(&store), url.clone())
+                    Ok(listing
+                        .stream()
                         .filter_map(move |object| {
                             let formats = formats.clone();
                             async move {
@@ -255,10 +261,8 @@ impl TableProvider for DatasetsTable {
             // One level is a single request. `scan` is async, so it is answered
             // here and the rows are what the plan replays.
             Listing::Level { prefix } => {
-                let level = factory
-                    .browse_datasets(state, &self.file_formats, prefix)
-                    .await?;
-                let rows = Arc::new(level_rows(level));
+                let level = factory.listing(state, prefix)?.level().await?;
+                let rows = Arc::new(level_rows(&self.file_formats, level));
                 Arc::new(move || {
                     let rows = Arc::clone(&rows);
                     Ok(futures::stream::iter((0..rows.len()).map(move |i| Ok(rows[i].clone())))

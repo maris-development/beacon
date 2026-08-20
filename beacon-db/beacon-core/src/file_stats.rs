@@ -72,7 +72,7 @@ use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use futures::StreamExt;
-use object_store::{path::Path, ObjectMeta, ObjectStore};
+use object_store::{path::Path, ObjectMeta};
 
 use crate::statement_plan::{upgrade_session, SessionCell};
 
@@ -673,16 +673,23 @@ impl FileStatsService {
 
     /// The same, restricted to a prefix. `None` uses the configured scan prefix.
     async fn discover_under(&self, prefix: Option<&str>) -> anyhow::Result<usize> {
-        let session = self.session()?;
-        let store = session
-            .state()
-            .runtime_env()
-            .object_store(&self.datasets_url)
-            .map_err(|e| anyhow::anyhow!("datasets store unavailable: {e}"))?;
+        use beacon_datafusion_ext::listing_factory::ListingFactory;
 
+        let session = self.session()?;
+        let state = session.state();
         let scan_prefix = prefix.unwrap_or(self.config.scan_prefix.as_str());
-        let prefix = (!scan_prefix.is_empty()).then(|| Path::from(scan_prefix));
-        let mut listing = store.list(prefix.as_ref());
+
+        // Through the listing factory rather than the store directly, so the
+        // scan prefix resolves by the same rules a query would use: the
+        // configured datasets store, and a glob if one is given.
+        let factory = state
+            .config()
+            .get_extension::<ListingFactory>()
+            .ok_or_else(|| anyhow::anyhow!("the listing factory is not registered"))?;
+        let mut listing = factory
+            .listing(&state, scan_prefix)
+            .map_err(|e| anyhow::anyhow!("cannot resolve the scan prefix `{scan_prefix}`: {e}"))?
+            .stream();
 
         let mut batch: Vec<ObservedFile> = Vec::with_capacity(self.config.discovery_chunk);
         let mut total = 0usize;
