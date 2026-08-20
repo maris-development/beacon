@@ -95,8 +95,7 @@ pub fn register_table_functions(
     functions.push(Arc::new(list_datasets::ListDatasetsFunc::new(
         file_formats.clone(),
     )));
-    // The browse counterpart. Same rows, one directory level instead of a glob,
-    // so its cost does not grow with the store below the prefix.
+    // The same provider, stopped at one directory level.
     functions.push(Arc::new(list_datasets::BrowseDatasetsFunc::new(
         file_formats,
     )));

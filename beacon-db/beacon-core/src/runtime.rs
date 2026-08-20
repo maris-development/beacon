@@ -48,12 +48,6 @@ pub struct Runtime {
     /// owns its timer: dropping the runtime aborts it.
     pub(crate) file_stats: Option<Arc<crate::file_stats::FileStatsService>>,
 
-    /// The registered file-format factories, which decide what a listed object
-    /// *is*. `list_datasets` reaches them through the table function it was
-    /// built with; `browse_datasets` has no table function, so the runtime holds
-    /// them directly.
-    pub(crate) file_formats: Vec<Arc<dyn beacon_datafusion_ext::format_ext::FileFormatFactoryExt>>,
-
     /// tmp directory for storing temporary files (e.g. for query output)
     pub(crate) tmp_dir: PathBuf,
 }
@@ -312,57 +306,6 @@ impl Runtime {
             .await
             .map_err(|e| anyhow::anyhow!("table '{table}' could not be resolved: {e}"))?;
         Ok(provider.schema())
-    }
-
-    /// One directory level of the datasets store: its sub-folders, and the
-    /// datasets sitting directly in it.
-    ///
-    /// The browse counterpart to the `list_datasets` table function. That one
-    /// globs, so it walks the whole subtree and pays for every object under the
-    /// prefix before it can answer. A folder view never needs the subtree, and
-    /// the gap is not a constant factor: against a SeaweedFS bucket of 2 853 217
-    /// objects the recursive walk took 79.9 s and one delimiter request took
-    /// 14 ms.
-    ///
-    /// `prefix` is relative to the datasets store; empty means the root.
-    ///
-    /// With grant enforcement on, the result is narrowed to what `identity` could
-    /// actually read: a dataset survives when `Select` is allowed on its path, and
-    /// a folder survives when some grant could match a path inside it. A listing
-    /// therefore describes the same store the caller could go on to read, rather
-    /// than the whole tree.
-    pub async fn browse_folders(
-        &self,
-        prefix: &str,
-        identity: &beacon_auth::AuthIdentity,
-    ) -> anyhow::Result<Vec<String>> {
-        use beacon_datafusion_ext::listing_factory::ListingFactory;
-
-        let state = self.session_ctx.state();
-        let factory = state
-            .config()
-            .get_extension::<ListingFactory>()
-            .ok_or_else(|| anyhow::anyhow!("the listing factory is not registered on the session"))?;
-
-        let mut result = factory
-            .browse_datasets(&state, &self.file_formats, prefix)
-            .await
-            .map_err(|e| anyhow::anyhow!("browse of `{prefix}` failed: {e}"))?;
-
-        let visible = self.path_visibility(identity);
-        if visible.is_restricted() {
-            let base = result.prefix.trim_end_matches('/').to_string();
-            let join = |name: &str| {
-                if base.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{base}/{name}")
-                }
-            };
-            result.folders.retain(|name| visible.allows_prefix(&join(name)));
-        }
-
-        Ok(result.folders)
     }
 
     /// What `identity` may be shown of the datasets store.

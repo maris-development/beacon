@@ -193,16 +193,10 @@ pub(crate) async fn list_datasets(
         // so pass a limit only when the caller asked for one.
         limit.map(|l| l.to_string()).unwrap_or_else(|| "NULL".to_string()),
     );
-    let rows = query_rows(server, sql, identity.clone()).await?;
+    let rows = query_rows(server, sql, identity).await?;
 
-    // The same narrowing `browse_datasets` applies. Both listings have to move
-    // together: one filtered and one not would disagree about what exists, and
-    // the unfiltered one would be the way around it.
-    let runtime = server.runtime();
-    let visible = runtime.path_visibility(&identity);
     Ok(rows
         .iter()
-        .filter(|row| visible.allows_path(str_field(row, "file_name")))
         .map(|row| DatasetInfo {
             file_path: str_field(row, "file_name").to_string(),
             format: str_field(row, "file_format").to_string(),
@@ -220,26 +214,38 @@ pub(crate) async fn list_datasets(
         .collect())
 }
 
-/// One directory level of the datasets store, via the runtime's browse.
+/// One directory level of the datasets store.
 ///
-/// Unlike [`list_datasets`] this does not go through SQL: there is no pattern to
-/// plan and no rows to page, just a delimiter listing the runtime answers
-/// directly.
+/// Goes through the same SQL surface as [`list_datasets`], because it is the
+/// same provider: `browse_datasets` stops at one level and reports the
+/// sub-directories as rows. Splitting those rows out here is all this adds.
 pub(crate) async fn browse_datasets(
     server: &Arc<Server>,
     prefix: &str,
     identity: AuthIdentity,
 ) -> anyhow::Result<crate::api::BrowseDatasetsResponse> {
-    // The datasets go through SQL, so the engine plans and executes this listing
-    // exactly as it does every other one.
     let sql = format!("SELECT * FROM browse_datasets({})", quote_literal(prefix));
-    let rows = query_rows(server, sql, identity.clone()).await?;
+    let rows = query_rows(server, sql, identity).await?;
 
-    let runtime = server.runtime();
-    let visible = runtime.path_visibility(&identity);
+    let is_dir = |row: &Value| {
+        row.get("is_directory")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+
+    let folders = rows
+        .iter()
+        .filter(|row| is_dir(row))
+        // Rows carry the full path; a folder view wants the name below `prefix`.
+        .map(|row| {
+            let full = str_field(row, "file_name");
+            full.rsplit('/').next().unwrap_or(full).to_string()
+        })
+        .collect();
+
     let datasets = rows
         .iter()
-        .filter(|row| visible.allows_path(str_field(row, "file_name")))
+        .filter(|row| !is_dir(row))
         .map(|row| DatasetInfo {
             file_path: str_field(row, "file_name").to_string(),
             format: str_field(row, "file_format").to_string(),
@@ -255,11 +261,6 @@ pub(crate) async fn browse_datasets(
                 .map(str::to_string),
         })
         .collect();
-
-    // Folders are not rows, so they still come from the runtime. The same
-    // delimiter listing answers both; only the datasets half is expressible as a
-    // table.
-    let folders = runtime.browse_folders(prefix, &identity).await?;
 
     Ok(crate::api::BrowseDatasetsResponse {
         prefix: prefix.trim_end_matches('/').to_string(),

@@ -170,7 +170,7 @@ async fn listing_composes_with_sql() {
 async fn browsed(rt: &TestRuntime, args: &str) -> Vec<String> {
     let mut names = column_strings(
         &rt.sql(&format!(
-            "SELECT file_name FROM browse_datasets({args}) ORDER BY file_name"
+            "SELECT file_name FROM browse_datasets({args}) WHERE NOT is_directory ORDER BY file_name"
         ))
         .await,
         0,
@@ -225,4 +225,31 @@ async fn planning_a_listing_does_not_run_it() {
     let rt = seeded_runtime("browse_plan_only").await;
     let batches = rt.sql("EXPLAIN SELECT file_name FROM list_datasets()").await;
     assert!(total_rows(&batches) > 0, "EXPLAIN should produce a plan");
+}
+
+/// Sub-directories come back as rows, flagged, so one query describes a level.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_reports_sub_directories_as_rows() {
+    let rt = seeded_runtime("browse_dirs").await;
+    let dirs = column_strings(
+        &rt.sql(
+            "SELECT file_name FROM browse_datasets('') \
+             WHERE is_directory ORDER BY file_name",
+        )
+        .await,
+        0,
+    );
+    assert_eq!(dirs, vec!["sub"]);
+}
+
+/// A recursive listing describes files, so the flag is never set there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recursive_listing_reports_no_directories() {
+    let rt = seeded_runtime("list_no_dirs").await;
+    let dirs = column_strings(
+        &rt.sql("SELECT file_name FROM list_datasets() WHERE is_directory")
+            .await,
+        0,
+    );
+    assert!(dirs.is_empty(), "got {dirs:?}");
 }
