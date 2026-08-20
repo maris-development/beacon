@@ -356,10 +356,6 @@ struct RawConfig {
     // Former name of `BEACON_S3_DATASETS`, kept so existing deployments keep working.
     // `Config::load` warns when it is the one that turned the S3 store on. Remove it
     // one major version after 2.0.
-    //
-    // This read the *new* name until 2.0.0-rc.4, which made the whole back-compat
-    // path dead: a 1.x deployment carrying only `BEACON_S3_DATA_LAKE=true` fell
-    // silently back to the local `datasets/` directory and reported an empty store.
     #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
     s3_data_lake_deprecated: bool,
     #[envconfig(from = "BEACON_S3_BUCKET")]
@@ -763,7 +759,16 @@ impl Config {
         let raw = RawConfig::init_from_env().map_err(|e| ConfigError::EnvLoad(e.to_string()))?;
         // Capture the secrets key before `raw` is consumed; decode/validate below.
         let secrets_key_b64 = raw.secrets_key.clone();
+        // Same, for the one case the deprecation warning below has to distinguish:
+        // the S3 store turned on by the old variable alone.
+        let s3_via_deprecated_name = raw.s3_data_lake_deprecated && !raw.s3_datasets;
         let mut config: Config = raw.into();
+        if s3_via_deprecated_name {
+            tracing::warn!(
+                "BEACON_S3_DATA_LAKE is deprecated; set BEACON_S3_DATASETS=true instead. \
+                 The old name is removed one major version after 2.0."
+            );
+        }
         if let Some(b64) = secrets_key_b64 {
             config.secrets.master_key =
                 Some(decode_master_key(&b64).map_err(ConfigError::InvalidSecretsKey)?);
@@ -919,6 +924,37 @@ mod tests {
         // Path-style addressing and plain HTTP are the defaults (local MinIO).
         assert!(!s3.enable_virtual_hosting);
         assert!(s3.allow_http);
+    }
+
+    /// `BEACON_S3_DATA_LAKE` is the pre-2.0 name of `BEACON_S3_DATASETS`. A
+    /// deployment that still sets it must keep its S3 datasets store, so the two
+    /// names stay independent inputs to the same flag.
+    #[test]
+    fn the_deprecated_s3_variable_still_turns_the_store_on() {
+        let old = config(&[
+            ("BEACON_S3_DATA_LAKE", "true"),
+            ("BEACON_S3_BUCKET", "my-bucket"),
+        ])
+        .s3;
+        assert!(old.datasets_on_s3);
+        assert_eq!(old.bucket.as_deref(), Some("my-bucket"));
+
+        // The old name off and the new one on is the ordinary 2.0 deployment.
+        assert!(
+            config(&[
+                ("BEACON_S3_DATASETS", "true"),
+                ("BEACON_S3_BUCKET", "my-bucket"),
+            ])
+            .s3
+            .datasets_on_s3
+        );
+
+        // Neither name set leaves the datasets store local.
+        assert!(
+            !config(&[("BEACON_S3_BUCKET", "my-bucket")])
+                .s3
+                .datasets_on_s3
+        );
     }
 
     /// The native-reader base URL must address the same bucket the object store

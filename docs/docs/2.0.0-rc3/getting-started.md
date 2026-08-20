@@ -94,6 +94,7 @@ docker run -d \
     -e BEACON_ADMIN_PASSWORD=securepassword \
     -v ./datasets:/beacon/data/datasets \
     -v ./tables:/beacon/data/tables \
+    -v ./logs:/beacon/logs \
     ghcr.io/maris-development/beacon:latest
 ```
 
@@ -112,6 +113,7 @@ services:
         volumes:
             - ./datasets:/beacon/data/datasets
             - ./tables:/beacon/data/tables
+            - ./logs:/beacon/logs
 ```
 
 :::
@@ -120,6 +122,12 @@ For Compose, run `docker compose up -d`. Beacon now runs. Open the
 [admin UI](/docs/2.0.0-rc3/connect/web-admin-ui) at `http://localhost:5001/admin` to explore and
 query. Open `http://localhost:5001/swagger` for the API docs. You can query any file in `./datasets`
 at once.
+
+::: tip Log files
+The `./logs` volume writes the log files to your machine. Beacon starts one file each day, for
+example `beacon.log.2026-08-19`. Without the volume the files stay in the container. See
+[Log files](/docs/2.0.0-rc3/server/configuration#log-files).
+:::
 
 ::: tip Two ways to connect
 Beacon exposes two endpoints. The **HTTP API** on port `5001` serves SQL and JSON queries, the admin
@@ -155,8 +163,9 @@ docker run -d \
     -e AWS_ACCESS_KEY_ID=your-access-key \
     -e AWS_SECRET_ACCESS_KEY=your-secret-key \
     -e BEACON_S3_BUCKET=your-bucket-name \
-    -e BEACON_S3_DATA_LAKE=true \
+    -e BEACON_S3_DATASETS=true \
     -v ./tables:/beacon/data/tables \
+    -v ./logs:/beacon/logs \
     ghcr.io/maris-development/beacon:latest
 ```
 
@@ -176,9 +185,10 @@ services:
             - AWS_ACCESS_KEY_ID=your-access-key
             - AWS_SECRET_ACCESS_KEY=your-secret-key
             - BEACON_S3_BUCKET=your-bucket-name
-            - BEACON_S3_DATA_LAKE=true
+            - BEACON_S3_DATASETS=true
         volumes:
             - ./tables:/beacon/data/tables
+            - ./logs:/beacon/logs
 ```
 
 :::

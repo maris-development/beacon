@@ -129,9 +129,58 @@ Beacon creates and uses these paths under `BEACON_DATA_DIR`:
 With Docker, mount the subdirectories that you want to keep. Two examples are
 `-v ./datasets:/beacon/data/datasets` and `-v ./tables:/beacon/data/tables`.
 
+## Log files
+
+Beacon writes each log line to two places at the same time:
+
+- **stdout**, which Docker collects. Read it with `docker logs -f beacon`.
+- a **rolling log file** in the `logs/` directory.
+
+The file name carries the date, for example `logs/beacon.log.2026-08-19`. Beacon starts a new file
+each day. Beacon never deletes an old file. Remove old files yourself.
+
+::: warning The log directory is fixed
+`BEACON_DATA_DIR` does not move the log files. The path is always `logs/`, below the working
+directory. In the Docker image the working directory is `/beacon`, so the files are in
+`/beacon/logs/`.
+:::
+
+`BEACON_LOG_LEVEL` and `RUST_LOG` control how much Beacon writes. See [Server](#server). The file
+and stdout always get the same lines. The file holds no ANSI colour codes.
+
+### Write the log files to your machine
+
+Mount a host directory on `/beacon/logs`:
+
+::: code-group
+
+```bash [docker run]
+docker run -d \
+    --name beacon \
+    -p 5001:5001 \
+    -v ./logs:/beacon/logs \
+    ghcr.io/maris-development/beacon:latest
+```
+
+```yaml [docker-compose.yml]
+services:
+    beacon:
+        image: ghcr.io/maris-development/beacon:latest
+        container_name: beacon
+        ports:
+            - "5001:5001"
+        volumes:
+            - ./logs:/beacon/logs
+```
+
+:::
+
+The dated files then appear in `./logs` on your machine. The files stay there after you remove the
+container. On Linux, give the directory write permission for the container user first.
+
 ## S3 object storage
 
-Set `BEACON_S3_DATA_LAKE=true` to put the **datasets** store on an S3-compatible
+Set `BEACON_S3_DATASETS=true` to put the **datasets** store on an S3-compatible
 bucket. Beacon then does not use the local `datasets/` directory. Beacon finds and
 queries every file in the bucket. This works like a local datasets directory.
 `tables/beacon.db` and `tmp/` stay on local disk. `BEACON_DATA_DIR` therefore
@@ -139,10 +188,11 @@ still applies.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_S3_DATA_LAKE` | `false` | Use an S3-compatible bucket as the datasets store. When `false`, the local filesystem is used. |
-| `BEACON_S3_BUCKET` | _(none)_ | Bucket name. **Required** when `BEACON_S3_DATA_LAKE=true`; Beacon exits at startup if it is missing. Never inferred from the endpoint. |
+| `BEACON_S3_DATASETS` | `false` | Use an S3-compatible bucket as the datasets store. When `false`, the local filesystem is used. |
+| `BEACON_S3_BUCKET` | _(none)_ | Bucket name. **Required** when `BEACON_S3_DATASETS=true`; Beacon exits at startup if it is missing. Never inferred from the endpoint. |
 | `BEACON_S3_ENABLE_VIRTUAL_HOSTING` | `false` | Use virtual-hosted-style addressing (bucket in the host) instead of path-style (`{endpoint}/{bucket}/{key}`). |
 | `BEACON_S3_ALLOW_HTTP` | `true` | Allow plain `http://` endpoints (useful for local MinIO; disable for production). |
+| `BEACON_S3_DATA_LAKE` | `false` | Deprecated name of `BEACON_S3_DATASETS`. It still works. Beacon logs a warning at startup. |
 
 ### S3 credentials and endpoint (`AWS_*`)
 
