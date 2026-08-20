@@ -11,10 +11,12 @@
 //! first.
 
 pub mod browse_datasets;
+pub mod exec;
 pub mod list_datasets;
 pub mod provider;
 
 pub use browse_datasets::BrowseDatasetsFunc;
+pub use exec::DatasetsExec;
 pub use list_datasets::{list_datasets, ListDatasetsFunc};
 pub use provider::{list_datasets_schema, DatasetsTable, Listing};
 

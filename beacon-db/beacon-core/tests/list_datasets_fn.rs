@@ -253,3 +253,59 @@ async fn a_recursive_listing_reports_no_directories() {
     );
     assert!(dirs.is_empty(), "got {dirs:?}");
 }
+
+// ---- the streaming plan ----------------------------------------------------
+
+/// The listing is its own plan node, not a materialised table. `EXPLAIN` names
+/// it, and names what it will list.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listing_plans_as_its_own_node() {
+    let rt = seeded_runtime("plan_node").await;
+    let plan = column_strings(
+        &rt.sql("EXPLAIN SELECT file_name FROM list_datasets('**/*.csv')").await,
+        1,
+    )
+    .join("\n");
+    assert!(plan.contains("DatasetsExec"), "plan was:\n{plan}");
+    assert!(plan.contains("glob=**/*.csv"), "plan was:\n{plan}");
+}
+
+/// A browse names the level it reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browse_plans_as_a_level() {
+    let rt = seeded_runtime("plan_level").await;
+    let plan = column_strings(
+        &rt.sql("EXPLAIN SELECT file_name FROM browse_datasets('sub')").await,
+        1,
+    )
+    .join("\n");
+    assert!(plan.contains("level=sub"), "plan was:\n{plan}");
+}
+
+/// A `LIMIT` reaches the node, which is what lets it stop the walk rather than
+/// list everything and discard the tail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_limit_reaches_the_listing_node() {
+    let rt = seeded_runtime("plan_limit").await;
+    let plan = column_strings(
+        &rt.sql("EXPLAIN SELECT file_name FROM list_datasets() LIMIT 2").await,
+        1,
+    )
+    .join("\n");
+    assert!(plan.contains("limit=2"), "plan was:\n{plan}");
+
+    // And it returns that many.
+    let rows = rt.sql("SELECT file_name FROM list_datasets() LIMIT 2").await;
+    assert_eq!(total_rows(&rows), 2);
+}
+
+/// Rows survive the trip through the stream unchanged: the same four datasets,
+/// with their sizes and timestamps still attached.
+#[tokio::test(flavor = "multi_thread")]
+async fn streamed_rows_keep_their_object_metadata() {
+    let rt = seeded_runtime("stream_meta").await;
+    let sized = rt
+        .sql("SELECT file_name FROM list_datasets() WHERE size > 0 AND last_modified IS NOT NULL")
+        .await;
+    assert_eq!(total_rows(&sized), 4, "every dataset carries its object metadata");
+}

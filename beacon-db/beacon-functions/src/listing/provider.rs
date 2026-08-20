@@ -1,30 +1,31 @@
 //! [`DatasetsTable`]: the table both listing functions return.
 //!
-//! # Laziness
+//! # Nothing happens until it is scanned
 //!
-//! Deliberately inert until scanned. The listing used to run inside
-//! `TableFunctionImpl::call`, a *synchronous* trait method, so it reached the
-//! store through `block_in_place` + `block_on` and held a worker thread for the
-//! whole walk — during logical planning, before anything decided to read it.
-//! [`TableProvider::scan`] is async, so the walk belongs there.
+//! The listing used to run inside `TableFunctionImpl::call`, a *synchronous*
+//! trait method, so it reached the store through `block_in_place` + `block_on`
+//! and held a worker thread for the whole walk — during logical planning, before
+//! anything decided to read it. [`TableProvider::scan`] is async, so the walk
+//! belongs there, and even there it only builds the plan: the walk itself starts
+//! when the plan is executed. See [`super::exec`].
 
 use std::sync::Arc;
 
-use arrow::{
-    array::{BooleanArray, StringArray, UInt64Array},
-    datatypes::{DataType, Field, Schema},
-    record_batch::RecordBatch,
-};
+use arrow::datatypes::{DataType, Field, Schema};
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
-use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_datafusion_ext::listing_factory::{BrowseResult, ListingFactory, stream_datasets};
 use datafusion::{
     arrow::datatypes::SchemaRef,
-    catalog::{MemTable, Session, TableProvider},
+    catalog::{Session, TableProvider},
     datasource::TableType,
     error::DataFusionError,
-    physical_plan::ExecutionPlan,
+    physical_expr::PhysicalExpr,
+    physical_plan::{ExecutionPlan, expressions::Column, projection::ProjectionExec},
     prelude::Expr,
 };
+use futures::stream::StreamExt;
+
+use super::exec::{DatasetsExec, RowStreamFactory};
 
 /// The full [`DatasetMetadata`] shape, so a caller gets everything discovery
 /// computed rather than just the name and format.
@@ -37,22 +38,22 @@ pub fn list_datasets_schema() -> Arc<Schema> {
         // Null when the size or timestamp could not be resolved.
         Field::new("size", DataType::UInt64, true),
         Field::new("last_modified", DataType::Utf8, true),
-        // True for a sub-directory, which only a depth-limited listing reports.
-        // A recursive listing describes files, so this is always false there.
+        // True for a sub-directory, which only a one-level listing reports. A
+        // recursive listing describes files, so this is always false there.
         Field::new("is_directory", DataType::Boolean, false),
     ]))
 }
 
 /// One row of a listing: a dataset, or a sub-directory of one.
 #[derive(Debug, Clone)]
-struct Row {
-    file_name: String,
-    file_format: String,
-    can_inspect: bool,
-    can_partial_explore: bool,
-    size: Option<u64>,
-    last_modified: Option<String>,
-    is_directory: bool,
+pub(super) struct Row {
+    pub(super) file_name: String,
+    pub(super) file_format: String,
+    pub(super) can_inspect: bool,
+    pub(super) can_partial_explore: bool,
+    pub(super) size: Option<u64>,
+    pub(super) last_modified: Option<String>,
+    pub(super) is_directory: bool,
 }
 
 impl From<DatasetMetadata> for Row {
@@ -70,7 +71,7 @@ impl From<DatasetMetadata> for Row {
 }
 
 impl Row {
-    fn directory(path: String) -> Self {
+    pub(super) fn directory(path: String) -> Self {
         Self {
             file_name: path,
             file_format: String::new(),
@@ -81,6 +82,15 @@ impl Row {
             is_directory: true,
         }
     }
+}
+
+/// What a [`DatasetsTable`] enumerates.
+#[derive(Debug, Clone)]
+pub enum Listing {
+    /// Every dataset the glob matches, anywhere below it.
+    Glob { pattern: String },
+    /// One directory level: what is directly inside `prefix`.
+    Level { prefix: String },
 }
 
 /// The datasets of the store, as a table.
@@ -101,22 +111,6 @@ impl Row {
 /// The difference is not a constant factor. One level is a single delimiter
 /// request; a recursive walk of a 2 853 217-object bucket took 79.9 s where the
 /// delimiter took 14 ms.
-///
-/// # Laziness
-///
-/// Deliberately inert until scanned. The listing used to run inside
-/// `TableFunctionImpl::call`, a *synchronous* trait method, so it reached the
-/// store through `block_in_place` + `block_on` and held a worker thread for the
-/// whole walk — during logical planning, before anything decided to read it.
-/// [`TableProvider::scan`] is async, so the walk belongs there.
-#[derive(Debug, Clone)]
-pub enum Listing {
-    /// Every dataset the glob matches, anywhere below it.
-    Glob { pattern: String },
-    /// One directory level: what is directly inside `prefix`.
-    Level { prefix: String },
-}
-
 #[derive(Debug)]
 pub struct DatasetsTable {
     listing: Listing,
@@ -148,82 +142,40 @@ impl DatasetsTable {
         &self.listing
     }
 
-    /// Run the listing and page it.
-    async fn rows(&self, state: &dyn Session) -> datafusion::error::Result<Vec<Row>> {
-        let factory = state
-            .config()
-            .get_extension::<ListingFactory>()
-            .ok_or_else(|| {
-                DataFusionError::Execution(
-                    "the listing factory is not registered on the session".to_string(),
-                )
-            })?;
-
-        let rows: Vec<Row> = if let Listing::Level { prefix } = &self.listing {
-            let level = factory
-                .browse_datasets(state, &self.file_formats, prefix)
-                .await?;
-            let base = level.prefix.trim_end_matches('/').to_string();
-            let join = |name: &str| {
-                if base.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{base}/{name}")
-                }
-            };
-            // Directories first, so a browse reads like a directory listing.
-            level
-                .folders
-                .into_iter()
-                .map(|name| Row::directory(join(&name)))
-                .chain(level.datasets.into_iter().map(Row::from))
-                .collect()
-        } else {
-            let Listing::Glob { pattern } = &self.listing else {
-                unreachable!("the level case is handled above")
-            };
-            factory
-                .list_datasets(state, &self.file_formats, pattern)
-                .await?
-                .into_iter()
-                .map(Row::from)
-                .collect()
-        };
-
-        // `saturating_sub`: an offset past the end is an empty page, not a panic.
-        let start = self.offset;
-        let end = self.limit.map(|l| start + l).unwrap_or(rows.len());
-        Ok(rows
-            .into_iter()
-            .skip(start)
-            .take(end.saturating_sub(start))
-            .collect())
+    /// How this listing prints in `EXPLAIN`.
+    fn label(&self) -> String {
+        match &self.listing {
+            Listing::Glob { pattern } => format!("glob={pattern}"),
+            Listing::Level { prefix } if prefix.is_empty() => "level=<root>".to_string(),
+            Listing::Level { prefix } => format!("level={prefix}"),
+        }
     }
 }
 
-/// Pack listing rows into the one batch the table returns.
-fn rows_batch(schema: SchemaRef, rows: &[Row]) -> datafusion::error::Result<RecordBatch> {
-    let file_names: StringArray = rows.iter().map(|r| Some(r.file_name.as_str())).collect();
-    let formats: StringArray = rows.iter().map(|r| Some(r.file_format.as_str())).collect();
-    let can_inspect = BooleanArray::from(rows.iter().map(|r| r.can_inspect).collect::<Vec<_>>());
-    let can_partial_explore =
-        BooleanArray::from(rows.iter().map(|r| r.can_partial_explore).collect::<Vec<_>>());
-    let sizes = UInt64Array::from(rows.iter().map(|r| r.size).collect::<Vec<_>>());
-    let last_modified: StringArray = rows.iter().map(|r| r.last_modified.clone()).collect();
-    let is_directory = BooleanArray::from(rows.iter().map(|r| r.is_directory).collect::<Vec<_>>());
+/// The tighter of the function's own limit and the planner push-down.
+fn effective_limit(declared: Option<usize>, pushed: Option<usize>) -> Option<usize> {
+    match (declared, pushed) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
 
-    Ok(RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(file_names),
-            Arc::new(formats),
-            Arc::new(can_inspect),
-            Arc::new(can_partial_explore),
-            Arc::new(sizes),
-            Arc::new(last_modified),
-            Arc::new(is_directory),
-        ],
-    )?)
+/// One directory level, as rows. Directories first, so it reads like one.
+fn level_rows(level: BrowseResult) -> Vec<Row> {
+    let base = level.prefix.trim_end_matches('/').to_string();
+    let join = |name: &str| {
+        if base.is_empty() {
+            name.to_string()
+        } else {
+            format!("{base}/{name}")
+        }
+    };
+    level
+        .folders
+        .into_iter()
+        .map(|name| Row::directory(join(&name)))
+        .chain(level.datasets.into_iter().map(Row::from))
+        .collect()
 }
 
 #[async_trait::async_trait]
@@ -240,28 +192,84 @@ impl TableProvider for DatasetsTable {
         TableType::Base
     }
 
-    /// Where the listing happens.
+    /// Builds the plan. The walk itself runs when the plan is executed.
     ///
-    /// `limit` is the planner push-down. It bounds the rows returned, but not
-    /// yet the walk behind them: a recursive listing classifies objects into
-    /// datasets in one pass and the two do not correspond one to one, so
-    /// stopping the walk early needs the classifier to work in chunks. The rows
-    /// are correct either way; the walk is the part still to shorten.
+    /// `limit` is the planner push-down, and here it bounds the walk as well as
+    /// the rows: a glob listing is a lazy stream, so the node stopping stops the
+    /// pages behind it. `LIMIT 50` over a bucket of millions reads one page.
     async fn scan(
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        _filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let mut rows = self.rows(state).await?;
-        if let Some(limit) = limit {
-            rows.truncate(limit);
+        let schema = self.schema();
+        let factory = state
+            .config()
+            .get_extension::<ListingFactory>()
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "the listing factory is not registered on the session".to_string(),
+                )
+            })?;
+
+        // The two listings differ only here.
+        let rows: RowStreamFactory = match &self.listing {
+            // A glob streams. The store is resolved now, against this session;
+            // the stream owns it, so the walk can start at execute time.
+            Listing::Glob { pattern } => {
+                // Resolve now, against this session. The walk is rebuilt per
+                // execute from the resolved parts, so the plan can run again.
+                let (store, url) = factory.resolve_listing(state, pattern)?;
+                let formats = self.file_formats.clone();
+                Arc::new(move || {
+                    Ok(
+                        stream_datasets(Arc::clone(&store), url.clone(), formats.clone())
+                            .map(|d| d.map(Row::from))
+                            .boxed(),
+                    )
+                })
+            }
+            // One level is a single request. `scan` is async, so it is answered
+            // here and the rows are what the plan replays.
+            Listing::Level { prefix } => {
+                let level = factory
+                    .browse_datasets(state, &self.file_formats, prefix)
+                    .await?;
+                let rows = Arc::new(level_rows(level));
+                Arc::new(move || {
+                    let rows = Arc::clone(&rows);
+                    Ok(futures::stream::iter((0..rows.len()).map(move |i| Ok(rows[i].clone())))
+                        .boxed())
+                })
+            }
+        };
+
+        let plan = Arc::new(DatasetsExec::new(
+            Arc::clone(&schema),
+            rows,
+            self.offset,
+            effective_limit(self.limit, limit),
+            self.label(),
+        ));
+
+        // The node produces the full row shape, so a projection sits above it.
+        match projection {
+            Some(projection) => {
+                let exprs: Vec<(Arc<dyn PhysicalExpr>, String)> = projection
+                    .iter()
+                    .map(|index| {
+                        let field = schema.field(*index);
+                        (
+                            Arc::new(Column::new(field.name(), *index)) as Arc<dyn PhysicalExpr>,
+                            field.name().to_string(),
+                        )
+                    })
+                    .collect();
+                Ok(Arc::new(ProjectionExec::try_new(exprs, plan)?))
+            }
+            None => Ok(plan),
         }
-        let batch = rows_batch(self.schema(), &rows)?;
-        MemTable::try_new(self.schema(), vec![vec![batch]])?
-            .scan(state, projection, filters, limit)
-            .await
     }
 }
-

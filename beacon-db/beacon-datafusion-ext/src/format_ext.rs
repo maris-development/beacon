@@ -18,6 +18,29 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>>;
+
+    /// Whether this format claims `object`, judged from that object alone.
+    ///
+    /// Every format decides per object: the file formats read an extension, and
+    /// Zarr reads the directory holding its marker. So the default asks
+    /// [`Self::discover_datasets`] about a listing of one, and a format needs to
+    /// override this only if it ever wants to see its objects together.
+    ///
+    /// This is what lets a listing classify as it streams, instead of holding
+    /// every object first. The size and timestamp come from `object` here, where
+    /// `discover_datasets` leaves them for a later pass over the whole listing.
+    fn classify_object(&self, object: &ObjectMeta) -> Option<DatasetMetadata> {
+        let mut found = self
+            .discover_datasets(std::slice::from_ref(object))
+            .ok()?
+            .into_iter()
+            .next()?;
+        if found.file_path == object.location.as_ref() {
+            found.size = Some(object.size);
+            found.last_modified = Some(object.last_modified);
+        }
+        Some(found)
+    }
     fn file_format_name(&self) -> String;
     fn list_with_file_extension(&self) -> bool {
         true
