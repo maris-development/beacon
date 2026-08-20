@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::StreamExt;
+use object_store::ObjectMeta;
 
 use datafusion::{
     catalog::Session, datasource::listing::ListingTableUrl, execution::object_store::ObjectStoreUrl,
@@ -560,28 +561,25 @@ mod tests {
     }
 }
 
-/// The datasets under `listing_url`, as they are found.
+/// The objects under `listing_url`, as the store returns them.
 ///
-/// The streaming form of [`ListingFactory::list_datasets`]. That one collects
-/// every object before it classifies any of them, so nothing is produced until
-/// the whole walk is done, and a listing of 2 853 217 objects holds about a
-/// gigabyte of `ObjectMeta` while it works. This classifies each object as it
-/// arrives and holds none of them.
+/// The streaming counterpart to what [`ListingFactory::list_datasets`] does
+/// internally. That one drains the walk into a `Vec` before anything looks at
+/// it, so nothing is produced until it finishes and a listing of 2 853 217
+/// objects holds about a gigabyte while it works. This yields each object as its
+/// page arrives and holds none of them.
 ///
-/// It is only possible because every format decides per object; see
-/// [`FileFormatFactoryExt::classify_object`].
+/// Objects, not datasets: walking a store and deciding what a file *is* are
+/// different jobs, and only the second one needs to know about formats. A caller
+/// that wants datasets classifies the stream itself.
 ///
-/// Takes resolved parts rather than a session, so the stream is `'static` and a
-/// caller can build it as many times as it needs to. A caller that stops reading
-/// stops the walk.
-///
-/// An object no format claims is skipped. A listing error ends the stream rather
-/// than truncating it silently.
-pub fn stream_datasets(
+/// Takes a resolved store and URL rather than a session, so the stream is
+/// `'static` and can be built as many times as a caller needs. Stopping the
+/// stream stops the walk.
+pub fn stream_objects(
     store: Arc<dyn object_store::ObjectStore>,
     listing_url: ListingTableUrl,
-    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-) -> futures::stream::BoxStream<'static, datafusion::error::Result<DatasetMetadata>> {
+) -> futures::stream::BoxStream<'static, datafusion::error::Result<ObjectMeta>> {
     use datafusion::error::DataFusionError;
 
     let prefix = listing_url.prefix().clone();
@@ -590,19 +588,13 @@ pub fn stream_datasets(
         while let Some(object) = objects.next().await {
             let object = object.map_err(|e| {
                 DataFusionError::Execution(format!(
-                    "stream_datasets: listing `{prefix}` failed part-way: {e}"
+                    "stream_objects: listing `{prefix}` failed part-way: {e}"
                 ))
             })?;
             // The prefix is only the literal head of the glob, so the rest of the
             // pattern is applied here, exactly as a listing table does.
-            if !listing_url.contains(&object.location, false) {
-                continue;
-            }
-            for format in &file_formats {
-                if let Some(dataset) = format.classify_object(&object) {
-                    yield dataset;
-                    break;
-                }
+            if listing_url.contains(&object.location, false) {
+                yield object;
             }
         }
     }

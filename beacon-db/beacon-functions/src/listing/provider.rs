@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema};
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
-use beacon_datafusion_ext::listing_factory::{BrowseResult, ListingFactory, stream_datasets};
+use beacon_datafusion_ext::listing_factory::{BrowseResult, ListingFactory, stream_objects};
 use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::{Session, TableProvider},
@@ -24,6 +24,7 @@ use datafusion::{
     prelude::Expr,
 };
 use futures::stream::StreamExt;
+use object_store::ObjectMeta;
 
 use super::exec::{DatasetsExec, RowStreamFactory};
 
@@ -152,6 +153,17 @@ impl DatasetsTable {
     }
 }
 
+/// The first format that claims `object`, as a row.
+///
+/// Order is registration order, and the first claim wins: a format that reads an
+/// extension another also reads would otherwise produce two rows for one file.
+fn classify(formats: &[Arc<dyn FileFormatFactoryExt>], object: &ObjectMeta) -> Option<Row> {
+    formats
+        .iter()
+        .find_map(|format| format.classify_object(object))
+        .map(Row::from)
+}
+
 /// The tighter of the function's own limit and the planner push-down.
 fn effective_limit(declared: Option<usize>, pushed: Option<usize>) -> Option<usize> {
     match (declared, pushed) {
@@ -224,11 +236,20 @@ impl TableProvider for DatasetsTable {
                 let (store, url) = factory.resolve_listing(state, pattern)?;
                 let formats = self.file_formats.clone();
                 Arc::new(move || {
-                    Ok(
-                        stream_datasets(Arc::clone(&store), url.clone(), formats.clone())
-                            .map(|d| d.map(Row::from))
-                            .boxed(),
-                    )
+                    let formats = formats.clone();
+                    Ok(stream_objects(Arc::clone(&store), url.clone())
+                        .filter_map(move |object| {
+                            let formats = formats.clone();
+                            async move {
+                                match object {
+                                    // An object no format claims is not a dataset,
+                                    // and not an error either.
+                                    Ok(object) => classify(&formats, &object).map(Ok),
+                                    Err(e) => Some(Err(e)),
+                                }
+                            }
+                        })
+                        .boxed())
                 })
             }
             // One level is a single request. `scan` is async, so it is answered
