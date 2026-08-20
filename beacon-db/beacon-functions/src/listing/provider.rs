@@ -1,3 +1,13 @@
+//! [`DatasetsTable`]: the table both listing functions return.
+//!
+//! # Laziness
+//!
+//! Deliberately inert until scanned. The listing used to run inside
+//! `TableFunctionImpl::call`, a *synchronous* trait method, so it reached the
+//! store through `block_in_place` + `block_on` and held a worker thread for the
+//! whole walk — during logical planning, before anything decided to read it.
+//! [`TableProvider::scan`] is async, so the walk belongs there.
+
 use std::sync::Arc;
 
 use arrow::{
@@ -9,95 +19,12 @@ use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     arrow::datatypes::SchemaRef,
-    catalog::{MemTable, Session, TableFunctionImpl, TableProvider},
+    catalog::{MemTable, Session, TableProvider},
     datasource::TableType,
     error::DataFusionError,
     physical_plan::ExecutionPlan,
-    prelude::{Expr, SessionContext},
-    scalar::ScalarValue,
+    prelude::Expr,
 };
-
-use crate::file_formats::BeaconTableFunctionImpl;
-
-/// Discover the datasets matching `pattern` (default `**/*`) under the datasets
-/// object store at `datasets_url`, asking each registered file format which
-/// objects it owns.
-pub async fn list_datasets(
-    session_ctx: &SessionContext,
-    file_formats: &[Arc<dyn FileFormatFactoryExt>],
-    offset: Option<usize>,
-    limit: Option<usize>,
-    search_pattern: Option<String>,
-) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-    let state = session_ctx.state();
-    let listing_factory = state
-        .config()
-        .get_extension::<ListingFactory>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(
-                "list_datasets: the listing factory is not registered on the session".to_string(),
-            )
-        })?;
-
-    // Discovery + object-metadata enrichment lives on the listing factory; this
-    // function only adds pagination on top.
-    let datasets = listing_factory
-        .list_datasets(
-            &state,
-            file_formats,
-            &search_pattern.unwrap_or_else(|| "**/*".to_string()),
-        )
-        .await?;
-
-    // Keep current pagination semantics to avoid behavior regressions.
-    // `saturating_sub`: an offset past the end must yield an empty page, not an
-    // underflow panic (`end` is clamped to `datasets.len()`, so it can be < start).
-    let start = offset.unwrap_or(0);
-    let end = limit.map(|l| start + l).unwrap_or(datasets.len());
-    let datasets = datasets
-        .into_iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect();
-
-    Ok(datasets)
-}
-
-pub struct ListDatasetsFunc {
-    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-}
-
-impl ListDatasetsFunc {
-    pub fn new(file_formats: Vec<Arc<dyn FileFormatFactoryExt>>) -> Self {
-        Self { file_formats }
-    }
-}
-
-impl std::fmt::Debug for ListDatasetsFunc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ListDatasetsFunc")
-    }
-}
-
-impl BeaconTableFunctionImpl for ListDatasetsFunc {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn name(&self) -> String {
-        "list_datasets".to_string()
-    }
-
-    fn description(&self) -> Option<String> {
-        Some(
-            "Lists the datasets stored in beacon, descending the whole tree. \
-             Optional arguments: list_datasets(pattern, offset, limit) — a glob \
-             (default '**/*'), a row offset, and a row limit. Use browse_datasets \
-             to read a single directory level instead."
-                .to_string(),
-        )
-    }
-}
 
 /// The full [`DatasetMetadata`] shape, so a caller gets everything discovery
 /// computed rather than just the name and format.
@@ -114,28 +41,6 @@ pub fn list_datasets_schema() -> Arc<Schema> {
         // A recursive listing describes files, so this is always false there.
         Field::new("is_directory", DataType::Boolean, false),
     ]))
-}
-
-/// A `Utf8` literal argument, or `None` when absent.
-fn string_arg(args: &[Expr], index: usize) -> Option<String> {
-    match args.get(index) {
-        Some(Expr::Literal(ScalarValue::Utf8(value), _)) => value.clone(),
-        _ => None,
-    }
-}
-
-/// A non-negative integer literal argument, or `None` when absent.
-fn usize_arg(args: &[Expr], index: usize) -> Option<usize> {
-    match args.get(index) {
-        Some(Expr::Literal(scalar, _)) => match scalar {
-            ScalarValue::Int64(Some(v)) if *v >= 0 => Some(*v as usize),
-            ScalarValue::UInt64(Some(v)) => Some(*v as usize),
-            ScalarValue::Int32(Some(v)) if *v >= 0 => Some(*v as usize),
-            ScalarValue::UInt32(Some(v)) => Some(*v as usize),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 /// One row of a listing: a dataset, or a sub-directory of one.
@@ -360,80 +265,3 @@ impl TableProvider for DatasetsTable {
     }
 }
 
-impl TableFunctionImpl for ListDatasetsFunc {
-    /// `list_datasets([pattern[, offset[, limit]]])`: every dataset the glob
-    /// matches, anywhere below it.
-    ///
-    /// All three are optional and positional; omitting them lists everything,
-    /// which is the historical behaviour. No I/O happens here: the arguments are
-    /// read and handed to a [`DatasetsTable`], which lists when it is scanned.
-    fn call(&self, args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
-        let pattern = string_arg(args, 0).unwrap_or_else(|| "**/*".to_string());
-        let offset = usize_arg(args, 1).unwrap_or(0);
-        let limit = usize_arg(args, 2);
-
-        Ok(Arc::new(DatasetsTable::new(
-            Listing::Glob { pattern },
-            offset,
-            limit,
-            self.file_formats.clone(),
-        )))
-    }
-}
-
-/// `browse_datasets([prefix[, offset[, limit]]])`: one directory level.
-///
-/// The same provider as `list_datasets`, stopped at one level. A folder view
-/// wants this: its cost is one delimiter request, so it does not grow with the
-/// size of the store below the prefix.
-pub struct BrowseDatasetsFunc {
-    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-}
-
-impl BrowseDatasetsFunc {
-    pub fn new(file_formats: Vec<Arc<dyn FileFormatFactoryExt>>) -> Self {
-        Self { file_formats }
-    }
-}
-
-impl std::fmt::Debug for BrowseDatasetsFunc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "BrowseDatasetsFunc")
-    }
-}
-
-impl BeaconTableFunctionImpl for BrowseDatasetsFunc {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn name(&self) -> String {
-        "browse_datasets".to_string()
-    }
-
-    fn description(&self) -> Option<String> {
-        Some(
-            "Lists one directory level of the datasets store. Optional arguments: \
-             browse_datasets(prefix, offset, limit) — a directory (default the root), \
-             a row offset, and a row limit. Sub-directories come back as rows with \
-             `is_directory` set. Unlike list_datasets it does not descend, so its \
-             cost does not grow with the size of the store below the prefix."
-                .to_string(),
-        )
-    }
-}
-
-impl TableFunctionImpl for BrowseDatasetsFunc {
-    fn call(&self, args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
-        let prefix = string_arg(args, 0).unwrap_or_default();
-        let offset = usize_arg(args, 1).unwrap_or(0);
-        let limit = usize_arg(args, 2);
-
-        Ok(Arc::new(DatasetsTable::new(
-            Listing::Level { prefix },
-            offset,
-            limit,
-            self.file_formats.clone(),
-        )))
-    }
-}
