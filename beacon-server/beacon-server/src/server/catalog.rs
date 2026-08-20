@@ -199,9 +199,10 @@ pub(crate) async fn list_datasets(
     // together: one filtered and one not would disagree about what exists, and
     // the unfiltered one would be the way around it.
     let runtime = server.runtime();
+    let visible = runtime.path_visibility(&identity);
     Ok(rows
         .iter()
-        .filter(|row| runtime.may_read_path(str_field(row, "file_name"), &identity))
+        .filter(|row| visible.allows_path(str_field(row, "file_name")))
         .map(|row| DatasetInfo {
             file_path: str_field(row, "file_name").to_string(),
             format: str_field(row, "file_format").to_string(),

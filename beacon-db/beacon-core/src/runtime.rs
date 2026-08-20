@@ -349,7 +349,8 @@ impl Runtime {
             .await
             .map_err(|e| anyhow::anyhow!("browse of `{prefix}` failed: {e}"))?;
 
-        if self.listing_is_filtered(identity) {
+        let visible = self.path_visibility(identity);
+        if visible.is_restricted() {
             let base = result.prefix.trim_end_matches('/').to_string();
             let join = |name: &str| {
                 if base.is_empty() {
@@ -358,50 +359,23 @@ impl Runtime {
                     format!("{base}/{name}")
                 }
             };
-            result
-                .datasets
-                .retain(|d| self.may_read_path(&d.file_path, identity));
-            result
-                .folders
-                .retain(|name| self.prefix_is_reachable(&join(name), identity));
+            result.datasets.retain(|d| visible.allows_path(&d.file_path));
+            result.folders.retain(|name| visible.allows_prefix(&join(name)));
         }
 
         Ok(result)
     }
 
-    /// Whether a listing shown to `identity` has to be narrowed to their grants.
+    /// What `identity` may be shown of the datasets store.
     ///
-    /// Mirrors the read path: off without enforcement, and never applied to the
-    /// super-user. A deployment that has not opted into grants sees what it saw
-    /// before.
-    pub fn listing_is_filtered(&self, identity: &beacon_auth::AuthIdentity) -> bool {
-        self.auth_enforce && !identity.is_super_user
-    }
-
-    /// Whether `identity` may read the dataset at `path`.
-    ///
-    /// The same question, and the same evaluator, the read path asks — so a
-    /// listing cannot name a file the caller would then be refused.
-    pub fn may_read_path(&self, path: &str, identity: &beacon_auth::AuthIdentity) -> bool {
-        use beacon_auth::{ConcreteTarget, Privilege};
-        if !self.listing_is_filtered(identity) {
-            return true;
-        }
-        self.auth.is_allowed(
-            &identity.roles,
-            Privilege::Select,
-            &ConcreteTarget::Path(path.to_string()),
-        )
-    }
-
-    /// Whether any path under the directory `prefix` could be read by `identity`.
-    pub fn prefix_is_reachable(&self, prefix: &str, identity: &beacon_auth::AuthIdentity) -> bool {
-        use beacon_auth::Privilege;
-        if !self.listing_is_filtered(identity) {
-            return true;
-        }
-        self.auth
-            .prefix_is_reachable(&identity.roles, Privilege::Select, prefix)
+    /// The one place the rule lives. A listing filters rows with it, and the
+    /// read path asks the same evaluator per scan, so the two cannot drift.
+    /// Unrestricted without grant enforcement, and for the super-user.
+    pub fn path_visibility<'a>(
+        &'a self,
+        identity: &'a beacon_auth::AuthIdentity,
+    ) -> beacon_auth::PathVisibility<'a> {
+        beacon_auth::PathVisibility::for_identity(&self.auth, identity, self.auth_enforce)
     }
 
     /// The catalog and schema an unqualified table name resolves against.
