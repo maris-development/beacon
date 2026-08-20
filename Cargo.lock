@@ -1876,6 +1876,7 @@ version = "2.0.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
+ "async-trait",
  "beacon-arrow-bbf",
  "beacon-arrow-csv",
  "beacon-arrow-geoparquet",

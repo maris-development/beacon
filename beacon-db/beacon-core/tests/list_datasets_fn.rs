@@ -163,3 +163,66 @@ async fn listing_composes_with_sql() {
     );
     assert_eq!(csv_count, 3, "the three CSVs should be countable through SQL");
 }
+
+// ---- browse_datasets -------------------------------------------------------
+
+/// Sorted file names from a `browse_datasets` invocation.
+async fn browsed(rt: &TestRuntime, args: &str) -> Vec<String> {
+    let mut names = column_strings(
+        &rt.sql(&format!(
+            "SELECT file_name FROM browse_datasets({args}) ORDER BY file_name"
+        ))
+        .await,
+        0,
+    );
+    names.sort();
+    names
+}
+
+/// The browse reads one level. The root holds `a.csv` and `p.parquet`; the CSVs
+/// under `sub/` belong to the levels below and must not appear.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_reads_one_directory_level() {
+    let rt = seeded_runtime("browse_one_level").await;
+    assert_eq!(browsed(&rt, "''").await, vec!["a.csv", "p.parquet"]);
+}
+
+/// Descending shows that level and no deeper one.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_descends_by_prefix() {
+    let rt = seeded_runtime("browse_descend").await;
+    assert_eq!(browsed(&rt, "'sub'").await, vec!["sub/b.csv"]);
+    assert_eq!(browsed(&rt, "'sub/deep'").await, vec!["sub/deep/c.csv"]);
+}
+
+/// The whole point: a browse is not a recursive listing. `list_datasets` sees
+/// every CSV under the root, a browse of the root sees one.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_is_not_a_recursive_listing() {
+    let rt = seeded_runtime("browse_vs_list").await;
+    let recursive = names(&rt, "'**/*.csv'").await;
+    assert_eq!(recursive.len(), 3, "got {recursive:?}");
+
+    let one_level: Vec<String> = browsed(&rt, "''")
+        .await
+        .into_iter()
+        .filter(|n| n.ends_with(".csv"))
+        .collect();
+    assert_eq!(one_level, vec!["a.csv"]);
+}
+
+/// An empty directory returns no rows rather than failing.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_of_an_unknown_prefix_is_empty() {
+    let rt = seeded_runtime("browse_unknown").await;
+    assert!(browsed(&rt, "'nope'").await.is_empty());
+}
+
+/// The listing is inert until it is scanned, so building the plan must not
+/// touch the store. `EXPLAIN` plans without executing.
+#[tokio::test(flavor = "multi_thread")]
+async fn planning_a_listing_does_not_run_it() {
+    let rt = seeded_runtime("browse_plan_only").await;
+    let batches = rt.sql("EXPLAIN SELECT file_name FROM list_datasets()").await;
+    assert!(total_rows(&batches) > 0, "EXPLAIN should produce a plan");
+}

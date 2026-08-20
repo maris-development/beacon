@@ -20,6 +20,7 @@ proj = ["datafusion-spatial/proj"]
 proj-bundled = ["datafusion-spatial/proj-bundled"]
 
 [dependencies]
+async-trait = { workspace = true }
 datafusion = {workspace = true}
 arrow = {workspace = true}
 geo = {workspace = true}

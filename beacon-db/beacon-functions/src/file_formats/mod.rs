@@ -93,8 +93,11 @@ pub fn register_table_functions(
     let mut functions = readers;
     functions.extend(schema_funcs);
     functions.push(Arc::new(list_datasets::ListDatasetsFunc::new(
-        runtime_handle,
-        Arc::downgrade(&session_ctx),
+        file_formats.clone(),
+    )));
+    // The browse counterpart. Same rows, one directory level instead of a glob,
+    // so its cost does not grow with the store below the prefix.
+    functions.push(Arc::new(list_datasets::BrowseDatasetsFunc::new(
         file_formats,
     )));
     functions

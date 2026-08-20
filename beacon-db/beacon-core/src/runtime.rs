@@ -331,11 +331,11 @@ impl Runtime {
     /// a folder survives when some grant could match a path inside it. A listing
     /// therefore describes the same store the caller could go on to read, rather
     /// than the whole tree.
-    pub async fn browse_datasets(
+    pub async fn browse_folders(
         &self,
         prefix: &str,
         identity: &beacon_auth::AuthIdentity,
-    ) -> anyhow::Result<beacon_datafusion_ext::listing_factory::BrowseResult> {
+    ) -> anyhow::Result<Vec<String>> {
         use beacon_datafusion_ext::listing_factory::ListingFactory;
 
         let state = self.session_ctx.state();
@@ -359,11 +359,10 @@ impl Runtime {
                     format!("{base}/{name}")
                 }
             };
-            result.datasets.retain(|d| visible.allows_path(&d.file_path));
             result.folders.retain(|name| visible.allows_prefix(&join(name)));
         }
 
-        Ok(result)
+        Ok(result.folders)
     }
 
     /// What `identity` may be shown of the datasets store.

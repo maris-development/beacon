@@ -230,11 +230,41 @@ pub(crate) async fn browse_datasets(
     prefix: &str,
     identity: AuthIdentity,
 ) -> anyhow::Result<crate::api::BrowseDatasetsResponse> {
-    let result = server.runtime().browse_datasets(prefix, &identity).await?;
+    // The datasets go through SQL, so the engine plans and executes this listing
+    // exactly as it does every other one.
+    let sql = format!("SELECT * FROM browse_datasets({})", quote_literal(prefix));
+    let rows = query_rows(server, sql, identity.clone()).await?;
+
+    let runtime = server.runtime();
+    let visible = runtime.path_visibility(&identity);
+    let datasets = rows
+        .iter()
+        .filter(|row| visible.allows_path(str_field(row, "file_name")))
+        .map(|row| DatasetInfo {
+            file_path: str_field(row, "file_name").to_string(),
+            format: str_field(row, "file_format").to_string(),
+            can_inspect: row.get("can_inspect").and_then(Value::as_bool).unwrap_or(false),
+            can_partial_explore: row
+                .get("can_partial_explore")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            size: row.get("size").and_then(Value::as_u64),
+            last_modified: row
+                .get("last_modified")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+        .collect();
+
+    // Folders are not rows, so they still come from the runtime. The same
+    // delimiter listing answers both; only the datasets half is expressible as a
+    // table.
+    let folders = runtime.browse_folders(prefix, &identity).await?;
+
     Ok(crate::api::BrowseDatasetsResponse {
-        prefix: result.prefix,
-        folders: result.folders,
-        datasets: result.datasets.into_iter().map(Into::into).collect(),
+        prefix: prefix.trim_end_matches('/').to_string(),
+        folders,
+        datasets,
     })
 }
 
