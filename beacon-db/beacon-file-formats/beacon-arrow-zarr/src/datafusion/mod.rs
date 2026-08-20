@@ -29,8 +29,7 @@ use crate::{
     config::ZarrConfig,
     reader::schema_from_group_path,
     util::{
-        ZarrPath, ZarrStorage, is_zarr_store_root, is_zarr_v3_metadata, leaf_group_keys,
-        top_level_zarr_meta_v3,
+        ZarrPath, ZarrStorage, is_zarr_store_root, leaf_group_keys,
     },
 };
 
@@ -330,13 +329,17 @@ impl FileFormat for ZarrFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         // The listing may include non-metadata objects — chunk data files such as
         // `<array>/c/0/0/0` — when the table is created without a `zarr.json`
-        // extension filter (e.g. via `read_zarr`). Select the top-level group
-        // metadata files and ignore the rest rather than erroring on the first
-        // chunk we encounter.
-        let verified_objects = top_level_zarr_meta_v3(objects);
+        // extension filter (e.g. via `read_zarr`). Select the store roots and
+        // ignore the rest rather than erroring on the first chunk we encounter.
+        let verified_objects: Vec<ObjectMeta> = objects
+            .iter()
+            .filter(|obj| is_zarr_store_root(obj))
+            .cloned()
+            .collect();
         if verified_objects.is_empty() {
             return Err(datafusion::error::DataFusionError::Execution(
-                "No Zarr v3 metadata (zarr.json) found in the provided path(s)".to_string(),
+                "No Zarr v3 store found in the provided path(s). A store is a                  `*.zarr` directory holding `zarr.json`, for example                  `gridded-example.zarr/zarr.json`."
+                    .to_string(),
             ));
         }
         let storage = self.storage(store.clone());
@@ -441,7 +444,11 @@ impl FileFormat for ZarrFormat {
             .runtime_env()
             .object_store(conf.object_store_url.clone())?;
 
-        let top_level_metas = top_level_zarr_meta_v3(&object_metas);
+        let top_level_metas: Vec<ObjectMeta> = object_metas
+            .iter()
+            .filter(|obj| is_zarr_store_root(obj))
+            .cloned()
+            .collect();
         let mut file_groups: Vec<FileGroup> = vec![];
         for meta in top_level_metas {
             let file = self

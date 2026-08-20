@@ -1,10 +1,7 @@
 //! Zarr path handling and group-discovery helpers shared by the DataFusion
 //! integration.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use object_store::{ObjectStore, ObjectStoreExt};
 use zarrs::group::Group;
@@ -121,8 +118,8 @@ pub fn path_parent(p: &object_store::path::Path) -> Option<object_store::path::P
 ///
 /// A bare `zarr.json` — no parent directory — counts too: a repository-backed
 /// store such as Icechunk exposes its root group there. Listing-based discovery
-/// is unaffected, because [`top_level_zarr_meta_v3`] keys groups by their parent
-/// directory and a root-level metadata file has none.
+/// is unaffected, because [`is_zarr_store_root`] names a store by the directory
+/// holding the marker and a root-level metadata file has none.
 pub fn is_zarr_v3_metadata(meta: &object_store::ObjectMeta) -> bool {
     let loc = meta.location.to_string().to_lowercase();
     loc == "zarr.json" || loc.ends_with("/zarr.json")
@@ -176,8 +173,9 @@ pub async fn leaf_group_keys(
 ///
 /// This is decided per object, with no reference to any other. That is what lets
 /// discovery classify a listing as it streams, instead of holding every object
-/// to compare ancestors — see [`top_level_zarr_meta_v3`], which still does that
-/// for a listing the caller has already scoped to one store.
+/// to compare ancestors. It is the only rule: an explicit `read_zarr` path
+/// resolves its store the same way, so a path is either a store everywhere or
+/// nowhere.
 ///
 /// A bare `zarr.json` at the store root has no directory to name it, so it is
 /// not a discovered dataset. Icechunk reaches its root group directly and does
@@ -189,46 +187,6 @@ pub fn is_zarr_store_root(meta: &object_store::ObjectMeta) -> bool {
     path_parent(&meta.location)
         .and_then(|parent| parent.filename().map(|name| name.to_lowercase()))
         .is_some_and(|name| name.ends_with(".zarr"))
-}
-
-/// Return only the ObjectMeta entries corresponding to **top-level Zarr groups**.
-pub fn top_level_zarr_meta_v3(metas: &[object_store::ObjectMeta]) -> Vec<object_store::ObjectMeta> {
-    let mut dir_to_meta: HashMap<object_store::path::Path, &object_store::ObjectMeta> =
-        HashMap::new();
-
-    for meta in metas {
-        if is_zarr_v3_metadata(meta)
-            && let Some(parent) = path_parent(&meta.location)
-        {
-            dir_to_meta.insert(parent, meta);
-        }
-    }
-
-    let mut candidates: Vec<object_store::path::Path> = dir_to_meta.keys().cloned().collect();
-    candidates.sort();
-    candidates.dedup();
-
-    let all_dirs: HashSet<object_store::path::Path> = candidates.iter().cloned().collect();
-
-    let mut top_level_dirs: Vec<object_store::path::Path> = Vec::new();
-    'outer: for dir in &candidates {
-        let mut current = path_parent(dir);
-        while let Some(ancestor) = current {
-            if ancestor == *dir {
-                break;
-            }
-            if all_dirs.contains(&ancestor) {
-                continue 'outer;
-            }
-            current = path_parent(&ancestor);
-        }
-        top_level_dirs.push(dir.clone());
-    }
-
-    top_level_dirs
-        .into_iter()
-        .filter_map(|d| dir_to_meta.get(&d).cloned().cloned())
-        .collect()
 }
 
 /// Recursively collect the leaf Zarr groups under `top_level_group`.
@@ -291,61 +249,6 @@ mod tests {
         }
     }
 
-    fn extract_paths(metas: &[ObjectMeta]) -> Vec<String> {
-        metas.iter().map(|m| m.location.to_string()).collect()
-    }
-
-    #[test]
-    fn test_single_top_level() {
-        let metas = vec![meta("a/zarr.json")];
-        let result = top_level_zarr_meta_v3(&metas);
-        assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
-    }
-
-    #[test]
-    fn test_nested_group_dropped() {
-        let metas = vec![meta("a/zarr.json"), meta("a/b/zarr.json")];
-        let result = top_level_zarr_meta_v3(&metas);
-        assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
-    }
-
-    #[test]
-    fn test_multiple_top_level() {
-        let metas = vec![meta("a/zarr.json"), meta("b/zarr.json")];
-        let result = top_level_zarr_meta_v3(&metas);
-        let mut paths = extract_paths(&result);
-        paths.sort();
-        assert_eq!(paths, vec!["a/zarr.json", "b/zarr.json"]);
-    }
-
-    #[test]
-    fn test_ignore_non_zarr_json() {
-        let metas = vec![
-            meta("a/zarr.json"),
-            meta("b/not_zarr.json"),
-            meta("c/zarr.txt"),
-        ];
-        let result = top_level_zarr_meta_v3(&metas);
-        assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
-    }
-
-    #[test]
-    fn deeply_nested_children_are_all_dropped() {
-        // Only the shallowest ancestor group survives.
-        let metas = vec![
-            meta("root/zarr.json"),
-            meta("root/a/zarr.json"),
-            meta("root/a/b/zarr.json"),
-            meta("other/zarr.json"),
-        ];
-        let mut result = extract_paths(&top_level_zarr_meta_v3(&metas));
-        result.sort();
-        assert_eq!(result, vec!["other/zarr.json", "root/zarr.json"]);
-    }
-
-    // ---- store-root detection ------------------------------------------
-
-    /// The marker directly inside a `.zarr` directory is the store.
     #[test]
     fn a_marker_in_a_zarr_directory_is_a_store() {
         assert!(is_zarr_store_root(&meta("gridded-example.zarr/zarr.json")));
