@@ -28,7 +28,10 @@ use zarrs::group::Group;
 use crate::{
     config::ZarrConfig,
     reader::schema_from_group_path,
-    util::{ZarrPath, ZarrStorage, is_zarr_v3_metadata, leaf_group_keys, top_level_zarr_meta_v3},
+    util::{
+        ZarrPath, ZarrStorage, is_zarr_store_root, is_zarr_v3_metadata, leaf_group_keys,
+        top_level_zarr_meta_v3,
+    },
 };
 
 pub mod source;
@@ -153,22 +156,24 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
     /// depends on the whole store: an array added under it changes the schema
     /// while leaving the marker where it was.
     fn schema_units(&self, objects: &[ObjectMeta]) -> Vec<SchemaUnit> {
-        units_over_stores(objects, &crate::util::top_level_zarr_meta_v3(objects))
+        let roots: Vec<_> = objects
+            .iter()
+            .filter(|obj| crate::util::is_zarr_store_root(obj))
+            .cloned()
+            .collect();
+        units_over_stores(objects, &roots)
     }
 
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-        let datasets: Vec<ObjectMeta> = objects
+        // A store is a `*.zarr` directory holding `zarr.json`. Decided per
+        // object, so this classifies a listing without holding it.
+        let zarr_paths: Vec<ZarrPath> = objects
             .iter()
-            .filter(|obj| is_zarr_v3_metadata(obj))
+            .filter(|obj| is_zarr_store_root(obj))
             .cloned()
-            .collect();
-
-        let top_level_datasets = top_level_zarr_meta_v3(&datasets);
-        let zarr_paths: Vec<ZarrPath> = top_level_datasets
-            .into_iter()
             .filter_map(|path| match ZarrPath::new_from_object_meta(path) {
                 Ok(zarr_path) => Some(zarr_path),
                 Err(e) => {

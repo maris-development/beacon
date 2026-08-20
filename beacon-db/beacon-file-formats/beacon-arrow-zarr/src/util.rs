@@ -160,6 +160,37 @@ pub async fn leaf_group_keys(
     )
 }
 
+/// Whether `meta` is the root marker of a Zarr store, judged from its own path.
+///
+/// A store is a `*.zarr` directory holding `zarr.json` directly beside its
+/// arrays:
+///
+/// ```text
+/// gridded-example.zarr/zarr.json              the store
+/// gridded-example.zarr/lat/zarr.json          an array inside it
+/// ```
+///
+/// Zarr v3 gives every group *and every array* a `zarr.json`, so a marker alone
+/// says nothing about which one it is. The directory it sits in does: only the
+/// store carries the `.zarr` suffix.
+///
+/// This is decided per object, with no reference to any other. That is what lets
+/// discovery classify a listing as it streams, instead of holding every object
+/// to compare ancestors — see [`top_level_zarr_meta_v3`], which still does that
+/// for a listing the caller has already scoped to one store.
+///
+/// A bare `zarr.json` at the store root has no directory to name it, so it is
+/// not a discovered dataset. Icechunk reaches its root group directly and does
+/// not come through discovery.
+pub fn is_zarr_store_root(meta: &object_store::ObjectMeta) -> bool {
+    if !is_zarr_v3_metadata(meta) {
+        return false;
+    }
+    path_parent(&meta.location)
+        .and_then(|parent| parent.filename().map(|name| name.to_lowercase()))
+        .is_some_and(|name| name.ends_with(".zarr"))
+}
+
 /// Return only the ObjectMeta entries corresponding to **top-level Zarr groups**.
 pub fn top_level_zarr_meta_v3(metas: &[object_store::ObjectMeta]) -> Vec<object_store::ObjectMeta> {
     let mut dir_to_meta: HashMap<object_store::path::Path, &object_store::ObjectMeta> =
@@ -310,6 +341,46 @@ mod tests {
         let mut result = extract_paths(&top_level_zarr_meta_v3(&metas));
         result.sort();
         assert_eq!(result, vec!["other/zarr.json", "root/zarr.json"]);
+    }
+
+    // ---- store-root detection ------------------------------------------
+
+    /// The marker directly inside a `.zarr` directory is the store.
+    #[test]
+    fn a_marker_in_a_zarr_directory_is_a_store() {
+        assert!(is_zarr_store_root(&meta("gridded-example.zarr/zarr.json")));
+        assert!(is_zarr_store_root(&meta("deep/nested/path/cube.zarr/zarr.json")));
+        // The suffix is matched case-insensitively, as the marker name is.
+        assert!(is_zarr_store_root(&meta("CUBE.ZARR/zarr.json")));
+    }
+
+    /// Every array in a v3 store also has a `zarr.json`. The directory between
+    /// it and the store is what tells them apart.
+    #[test]
+    fn a_marker_below_the_store_directory_is_an_array() {
+        assert!(!is_zarr_store_root(&meta("gridded-example.zarr/lat/zarr.json")));
+        assert!(!is_zarr_store_root(&meta("gridded-example.zarr/a/b/zarr.json")));
+    }
+
+    /// A directory without the suffix is not a store, however the marker looks.
+    #[test]
+    fn a_marker_outside_a_zarr_directory_is_not_a_store() {
+        assert!(!is_zarr_store_root(&meta("a/zarr.json")));
+        assert!(!is_zarr_store_root(&meta("root/zarr.json")));
+    }
+
+    /// A root-level marker has no directory to name it. Icechunk reaches its
+    /// root group directly rather than through discovery.
+    #[test]
+    fn a_bare_marker_is_not_a_discovered_store() {
+        assert!(!is_zarr_store_root(&meta("zarr.json")));
+    }
+
+    /// Non-markers are rejected before the directory is even considered.
+    #[test]
+    fn a_non_marker_is_never_a_store() {
+        assert!(!is_zarr_store_root(&meta("cube.zarr/not_zarr.json")));
+        assert!(!is_zarr_store_root(&meta("cube.zarr/data.nc")));
     }
 
     #[test]
