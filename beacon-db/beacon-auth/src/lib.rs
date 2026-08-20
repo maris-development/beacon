@@ -17,7 +17,6 @@ mod oidc;
 mod password;
 mod provider;
 mod role;
-mod visibility;
 
 pub use basic::{BasicAuthProvider, InMemoryUserStore};
 pub use composite::CompositeAuthProvider;
@@ -26,7 +25,6 @@ pub use credential::Credential;
 pub use oidc::{OidcAuthProvider, OidcConfig};
 pub use password::{hash_password, verify_password};
 pub use provider::{AuthProvider, Authenticated, StoredUser, UserDirectory, UserRecord};
-pub use visibility::PathVisibility;
 pub use role::{
     decode_target, encode_target, rule_kind, ConcreteTarget, Privilege, PrivilegeRule,
     PrivilegeTarget, Role, RoleProvider, RoleStore,

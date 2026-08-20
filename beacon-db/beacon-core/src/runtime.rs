@@ -308,18 +308,6 @@ impl Runtime {
         Ok(provider.schema())
     }
 
-    /// What `identity` may be shown of the datasets store.
-    ///
-    /// The one place the rule lives. A listing filters rows with it, and the
-    /// read path asks the same evaluator per scan, so the two cannot drift.
-    /// Unrestricted without grant enforcement, and for the super-user.
-    pub fn path_visibility<'a>(
-        &'a self,
-        identity: &'a beacon_auth::AuthIdentity,
-    ) -> beacon_auth::PathVisibility<'a> {
-        beacon_auth::PathVisibility::for_identity(&self.auth, identity, self.auth_enforce)
-    }
-
     /// The catalog and schema an unqualified table name resolves against.
     pub fn default_catalog_and_schema(&self) -> (String, String) {
         let options = self.session_ctx.copied_config().options().catalog.clone();

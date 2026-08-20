@@ -225,17 +225,6 @@ impl AuthContext {
         self.role_provider.is_allowed(roles, privilege, target)
     }
 
-    /// Whether any path under the directory `prefix` could satisfy `privilege`.
-    /// See [`RoleProvider::prefix_is_reachable`].
-    pub fn prefix_is_reachable(
-        &self,
-        roles: &[String],
-        privilege: Privilege,
-        prefix: &str,
-    ) -> bool {
-        self.role_provider.prefix_is_reachable(roles, privilege, prefix)
-    }
-
     // --- Role management (delegated to the role provider) ---
     //
     // Roles are strictly read-only: only `SELECT` may be granted or denied. Write/management access
