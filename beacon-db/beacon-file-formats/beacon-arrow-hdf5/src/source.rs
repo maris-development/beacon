@@ -12,12 +12,16 @@
 use std::sync::Arc;
 
 use crate::ReadOptions;
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use arrow::{
+    datatypes::{FieldRef, SchemaRef},
+    record_batch::RecordBatch,
+};
 use beacon_nd_array::{
     arrow::{
         file_read::FileRead,
         metrics::ReadMetrics,
         morsel::{morsel_scan, MorselSource, OpenFile},
+        partition::FilePartitions,
     },
     projection::DatasetProjection,
 };
@@ -105,6 +109,7 @@ impl FileSource for Hdf5Source {
             partition,
             object_store,
             self.morsel.clone(),
+            base_config.table_partition_cols().clone(),
         )))
     }
 
@@ -181,10 +186,8 @@ impl FileSource for Hdf5Source {
             return Ok(Some(config));
         }
 
-        // The queue declined, which it only does for a partitioned table: its
-        // `PARTITIONED BY` values live on each file and only `FileStream` can
-        // apply them. Such a scan keeps the grouping the listing gave it, which
-        // is what it had before any of this and is correct.
+        // The queue declined: one partition, or no files. Keeping the scan as it
+        // was planned is the answer to both.
         Ok(None)
     }
 
@@ -263,6 +266,9 @@ struct Hdf5Opener {
     morsel: Option<Arc<MorselSource>>,
     /// How one file is opened, for the queue to call.
     files: Arc<dyn OpenFile>,
+    /// The table's `PARTITIONED BY` columns, nd-encoded as the scan carries
+    /// them. A file's values for them travel on its `PartitionedFile`.
+    partition_fields: Vec<FieldRef>,
 }
 
 /// How one HDF5 file becomes a planned [`FileRead`].
@@ -276,6 +282,8 @@ struct Hdf5Files {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
+    /// The table's `PARTITIONED BY` columns. Each file brings its own values.
+    partition_fields: Vec<FieldRef>,
 }
 
 impl std::fmt::Debug for Hdf5Files {
@@ -300,6 +308,7 @@ impl OpenFile for Hdf5Files {
             self.projected_schema.clone(),
             self.batch_size,
             self.predicate.clone(),
+            FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
             Some(&self.metrics),
         )
         .await
@@ -318,6 +327,7 @@ impl Hdf5Opener {
         partition: usize,
         object_store: Arc<dyn ObjectStore>,
         morsel: Option<Arc<MorselSource>>,
+        partition_fields: Vec<FieldRef>,
     ) -> Self {
         let read_metrics = ReadMetrics::new(&metrics, partition);
         let files = Arc::new(Hdf5Files {
@@ -328,6 +338,7 @@ impl Hdf5Opener {
             batch_size,
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
+            partition_fields: partition_fields.clone(),
         });
 
         Self {
@@ -341,6 +352,7 @@ impl Hdf5Opener {
             read_metrics,
             partition,
             object_store,
+            partition_fields,
         }
     }
 
@@ -365,6 +377,7 @@ impl Hdf5Opener {
         batch_size: usize,
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        partitions: FilePartitions,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
@@ -374,14 +387,16 @@ impl Hdf5Opener {
                 projected_schema,
                 batch_size,
                 predicate,
+                partitions,
                 Some(&planning),
             )
             .await
         };
 
         // This partition's own file. Nothing is shared here: a scan that can be
-        // divided goes through the queue, and one that cannot — a partitioned
-        // table — reads each file whole, as `FileStream` hands it over.
+        // divided goes through the queue, and one that cannot — a single
+        // partition, or no files — reads each file whole, as `FileStream` hands
+        // it over.
         let dataset = plan().await?;
 
         Ok(dataset.stream(Some(metrics)))
@@ -444,6 +459,8 @@ impl FileOpener for Hdf5Opener {
         // holds. Testing them again per opener would repeat that work on the one
         // file that survived it.
         let metrics = self.read_metrics.clone();
+        let partitions =
+            FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone());
         Ok(Self::read(
             self.object_store.clone(),
             file.object_meta,
@@ -453,6 +470,7 @@ impl FileOpener for Hdf5Opener {
             self.batch_size,
             metrics,
             self.predicate.clone(),
+            partitions,
         )
         .boxed())
     }

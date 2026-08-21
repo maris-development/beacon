@@ -12,6 +12,7 @@ use arrow::record_batch::RecordBatch;
 use beacon_nd_array::arrow::{
     metrics::ReadMetrics,
     morsel::{MorselSource, OpenFile, morsel_scan},
+    partition::FilePartitions,
     file_read::FileRead,
 };
 use datafusion::{
@@ -213,10 +214,9 @@ impl FileSource for ZarrSource {
             return Ok(Some(config));
         }
 
-        // The queue declined, which it only does for a partitioned table: its
-        // `PARTITIONED BY` values live on each entry and only `FileStream` can
-        // apply them. Such a scan keeps the grouping the listing gave it, which
-        // is what it had before any of this and is correct.
+        // The queue declined: one partition, or no groups. Keeping the scan as
+        // it was planned is the answer to both. A partitioned Zarr table never
+        // reaches here — `ZarrFormat::create_physical_plan` refuses it.
         Ok(None)
     }
 
@@ -337,11 +337,14 @@ impl OpenFile for ZarrGroups {
         )
         .await?;
 
+        // Zarr refuses a partitioned table before a scan is built — see
+        // `reject_partition_columns` — so a group never carries values.
         FileRead::plan(
             dataset,
             self.projected_schema.clone(),
             self.batch_size,
             self.predicate.clone(),
+            FilePartitions::none(),
             Some(&self.metrics),
         )
         .await
@@ -378,10 +381,9 @@ impl ZarrOpener {
 
     /// Read one group whole.
     ///
-    /// This is the path a scan the queue declined takes — a partitioned table,
-    /// where `FileStream` walks the real group list because only it can apply
-    /// the per-entry `PARTITIONED BY` values. Every other scan goes through
-    /// [`MorselSource`] and never reaches here.
+    /// This is the path a scan the queue declined takes — one partition, or no
+    /// groups — where `FileStream` walks the real group list. Every other scan
+    /// goes through [`MorselSource`] and never reaches here.
     #[allow(clippy::too_many_arguments)]
     async fn read(
         storage: ZarrStorage,
@@ -400,14 +402,16 @@ impl ZarrOpener {
                 projected_schema,
                 batch_size,
                 predicate,
+                FilePartitions::none(),
                 Some(&planning),
             )
             .await
         };
 
         // This partition's own group. Nothing is shared here: a scan that can be
-        // divided goes through the queue, and one that cannot — a partitioned
-        // table — reads each group whole, as `FileStream` hands it over.
+        // divided goes through the queue, and one that cannot — a single
+        // partition, or no groups — reads each group whole, as `FileStream`
+        // hands it over.
         let dataset = plan().await?;
 
         Ok(dataset.stream(Some(metrics)))

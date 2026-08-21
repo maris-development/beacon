@@ -485,17 +485,24 @@ impl FileFormat for Hdf5Format {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        beacon_nd_array::arrow::morsel::reject_partition_columns("HDF5", &conf)?;
-
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
         // the file source's schema is the encoded form of the logical table
         // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
         // back to the logical schema above the scan.
+        //
+        // The `PARTITIONED BY` columns are encoded with it. Their values come
+        // from a file's path rather than its contents, and the reader appends
+        // them per file, but they reach the plan the same way every other column
+        // does — so that one decoder reads the whole batch.
         let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
             conf.file_schema(),
         ));
-        let table_schema =
-            TableSchema::new(encoded_file_schema, conf.table_partition_cols().clone());
+        let table_schema = TableSchema::new(
+            encoded_file_schema,
+            beacon_nd_array::arrow::partition::encoded_partition_cols(
+                conf.table_partition_cols(),
+            ),
+        );
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();

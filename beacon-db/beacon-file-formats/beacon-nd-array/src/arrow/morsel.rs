@@ -247,10 +247,16 @@ impl MorselSource {
 /// can do only because it knows which file each batch came from.
 ///
 /// An nd scan reads a whole collection behind one plan entry, so `FileStream`
-/// does not know. Supporting this means the morsel loop carrying the values per
-/// morsel and appending them itself. Until it does, the alternatives are to
-/// return those columns silently empty or to say so, and a query that quietly
-/// drops a column it was asked for is the worse of the two.
+/// does not know. The file readers do it themselves instead: a morsel carries
+/// its file's values and
+/// [`FilePartitions`](crate::arrow::partition::FilePartitions) appends them to
+/// its batches. That works because a morsel is a file.
+///
+/// A Zarr table is not made of files. Its entries are groups inside a store,
+/// and a group is not a path a partition value can be read off, so Zarr still
+/// refuses such a table. The alternatives are to return those columns silently
+/// empty or to say so, and a query that quietly drops a column it was asked for
+/// is the worse of the two.
 ///
 /// `format` names the reader in the error, since a user reaches this through
 /// `CREATE EXTERNAL TABLE ... PARTITIONED BY` and needs to know which format
@@ -291,14 +297,17 @@ pub fn reject_partition_columns(format: &str, config: &FileScanConfig) -> Result
 /// whatever the queue hands out. Its path says so, and its size is the scan's,
 /// so `EXPLAIN` still shows how much a partition is pointed at.
 ///
+/// A partitioned table divides the same way. A file's `PARTITIONED BY` values
+/// travel on its [`PartitionedFile`], the queue hands that whole entry to
+/// whoever opens it, and the reader appends the values to the batches it reads
+/// from it — see
+/// [`FilePartitions`](crate::arrow::partition::FilePartitions). So the standing
+/// entry below carries no values of its own, and needs none.
+///
 /// Returns `None` when the scan should keep the grouping it was planned with:
 ///
 /// - one partition, where there is nobody to divide the work with;
-/// - no files;
-/// - a partitioned table. `FileStream` appends a file's `PARTITIONED BY` values
-///   to its batches, and it can only do that because it knows which file each
-///   batch came from. Behind one entry it does not. A morsel loop would have to
-///   apply them itself, per morsel, and until it does such a scan is left alone.
+/// - no files.
 pub fn morsel_scan(
     file_groups: &[FileGroup],
     target_partitions: usize,
@@ -313,12 +322,6 @@ pub fn morsel_scan(
         .cloned()
         .collect();
     if files.is_empty() {
-        return None;
-    }
-    if files
-        .iter()
-        .any(|file| !file.partition_values.is_empty())
-    {
         return None;
     }
 
@@ -544,6 +547,7 @@ mod tests {
                 no_columns(),
                 self.batch_size,
                 None,
+                crate::arrow::partition::FilePartitions::none(),
                 None,
             )
             .await
@@ -886,25 +890,43 @@ mod tests {
         assert_eq!(entry.object_meta.size, 1_000, "the scan's bytes, not a file's");
     }
 
-    /// A partitioned table is left alone by the planner.
+    /// A partitioned table divides like any other, values and all.
     ///
-    /// The readers refuse it outright before a scan is built — see
-    /// [`reject_partition_columns`], which each of them calls from
-    /// `create_physical_plan`. This is the second line: `FileStream` appends a
-    /// file's `PARTITIONED BY` values to its batches, and it can do that only
-    /// because it knows which file a batch came from. Behind one entry it does
-    /// not.
+    /// The values travel on the [`PartitionedFile`] the queue holds, so whoever
+    /// opens that file has them and appends them to what it reads. Only the
+    /// standing entry is valueless, and nothing reads it as a file.
     #[test]
-    fn a_partitioned_table_is_left_alone() {
+    fn a_partitioned_table_divides_and_keeps_its_values() {
         use datafusion::scalar::ScalarValue;
 
-        let mut partitioned = file(0, 32);
-        partitioned.partition_values = vec![ScalarValue::Utf8(Some("2023".to_string()))];
-        let group = FileGroup::new(vec![partitioned, file(1, 32)]);
+        let year = |value: &str| vec![ScalarValue::Utf8(Some(value.to_string()))];
+        let mut first = file(0, 32);
+        first.partition_values = year("2023");
+        let mut second = file(1, 32);
+        second.partition_values = year("2024");
+        let group = FileGroup::new(vec![first, second]);
 
+        let (source, groups) =
+            morsel_scan(&[group], 8).expect("a partitioned table plans morsel-driven");
+
+        assert_eq!(groups.len(), 8, "one entry per partition, as for any scan");
+        assert_eq!(source.files(), 2, "and both files are in the queue");
+
+        let mut taken: Vec<Vec<ScalarValue>> = Vec::new();
+        while let Some(file) = source.unopened.pop() {
+            taken.push(file.partition_values.clone());
+        }
+        taken.sort_by_key(|values| format!("{values:?}"));
+        assert_eq!(
+            taken,
+            vec![year("2023"), year("2024")],
+            "each file keeps the values of its own path"
+        );
+
+        let entry = groups[0].iter().next().expect("an entry");
         assert!(
-            morsel_scan(&[group], 8).is_none(),
-            "a scan carrying partition values keeps its own grouping"
+            entry.partition_values.is_empty(),
+            "the standing entry stands for the scan, not for a file, so it holds no values"
         );
     }
 
