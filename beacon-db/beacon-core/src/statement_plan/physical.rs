@@ -864,7 +864,9 @@ impl ExecutionPlan for InsertExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let session = upgrade_session(&self.session)?;
-        let table = self.table.table().to_string();
+        // The planner's reference, not its table name: rebuilding one from a
+        // string lowercases it, and the catalog holds the name as written.
+        let table = self.table.clone();
         let op = self.op;
         let child = self.child.clone();
         Ok(forward_stream(count_arrow_schema(), async move {

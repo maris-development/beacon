@@ -14,6 +14,7 @@ pub mod schema_persistence;
 pub(crate) mod secret_persistence;
 pub mod settings;
 mod statement_plan;
+mod table_name;
 pub(crate) mod system_schema;
 
 // Re-export the auth types the transports (HTTP, Flight SQL) need, so they depend
