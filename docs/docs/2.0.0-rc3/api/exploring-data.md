@@ -267,7 +267,7 @@ Content-Type: application/json
 ```
 
 Create an external table. This endpoint matches
-[`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-table):
+[`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table):
 
 ```http
 POST /api/admin/external-tables

@@ -21,7 +21,7 @@ survive a restart. You run `SELECT`, `JOIN` and `DROP` on them, like any other t
 :::tip When to use a crawler
 Use a crawler when you have **many** datasets under a prefix. Such datasets often use a partition by
 date or by region. The crawler registers them and keeps them current. You write no DDL by hand. For
-one table, a plain [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-table) is simpler.
+one table, a plain [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table) is simpler.
 :::
 
 You can send the crawler DDL through any SQL interface of Beacon:
@@ -213,5 +213,5 @@ folder. Register it with
 ## See also
 
 - [External Tables](/docs/2.0.0-rc3/data-sources/external-tables): the tables that a crawler produces
-- [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-table): the manual form, with `PARTITIONED BY`
+- [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table): the manual form, with `PARTITIONED BY`
 - [Configuration](/docs/2.0.0-rc3/server/configuration): every Beacon setting
