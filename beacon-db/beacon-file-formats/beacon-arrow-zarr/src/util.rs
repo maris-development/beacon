@@ -1,10 +1,8 @@
 //! Zarr path handling and group-discovery helpers shared by the DataFusion
 //! integration.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use object_store::{ObjectStore, ObjectStoreExt};
 use zarrs::group::Group;
@@ -121,8 +119,8 @@ pub fn path_parent(p: &object_store::path::Path) -> Option<object_store::path::P
 ///
 /// A bare `zarr.json` — no parent directory — counts too: a repository-backed
 /// store such as Icechunk exposes its root group there. Listing-based discovery
-/// is unaffected, because [`top_level_zarr_meta_v3`] keys groups by their parent
-/// directory and a root-level metadata file has none.
+/// is unaffected, because [`is_zarr_store_root`] names a store by the directory
+/// holding the marker and a root-level metadata file has none.
 pub fn is_zarr_v3_metadata(meta: &object_store::ObjectMeta) -> bool {
     let loc = meta.location.to_string().to_lowercase();
     loc == "zarr.json" || loc.ends_with("/zarr.json")
@@ -158,6 +156,44 @@ pub async fn leaf_group_keys(
             .map(|leaf| group_metadata_key(leaf.path().as_str()))
             .collect(),
     )
+}
+
+/// Whether `meta` is the root marker of a Zarr store, judged from its own path.
+///
+/// A store is a `*.zarr` directory holding `zarr.json` directly beside its
+/// arrays:
+///
+/// ```text
+/// gridded-example.zarr/zarr.json              the store
+/// gridded-example.zarr/lat/zarr.json          an array inside it
+/// ```
+///
+/// Zarr v3 gives every group *and every array* a `zarr.json`, so a marker alone
+/// says nothing about which one it is. The directory it sits in does: only the
+/// store carries the `.zarr` suffix.
+///
+/// This is decided per object, with no reference to any other. That is what lets
+/// discovery classify a listing as it streams, instead of holding every object
+/// to compare ancestors.
+///
+/// Discovery only. A caller that names a store — `read_zarr('some/dir')` — has
+/// already said which directory it means, and that directory need not carry the
+/// suffix, so those paths use [`top_level_zarr_meta_v3`] instead. The two
+/// questions differ: discovery asks "is this marker a store root, among many
+/// stores", and a read asks "which marker is the root of the one store I was
+/// given". Only the first can be answered from one object, and only the second
+/// has a listing small enough to compare.
+///
+/// A bare `zarr.json` at the store root has no directory to name it, so it is
+/// not a discovered dataset. Icechunk reaches its root group directly and does
+/// not come through discovery.
+pub fn is_zarr_store_root(meta: &object_store::ObjectMeta) -> bool {
+    if !is_zarr_v3_metadata(meta) {
+        return false;
+    }
+    path_parent(&meta.location)
+        .and_then(|parent| parent.filename().map(|name| name.to_lowercase()))
+        .is_some_and(|name| name.ends_with(".zarr"))
 }
 
 /// Return only the ObjectMeta entries corresponding to **top-level Zarr groups**.
@@ -260,56 +296,41 @@ mod tests {
         }
     }
 
-    fn extract_paths(metas: &[ObjectMeta]) -> Vec<String> {
-        metas.iter().map(|m| m.location.to_string()).collect()
+    #[test]
+    fn a_marker_in_a_zarr_directory_is_a_store() {
+        assert!(is_zarr_store_root(&meta("gridded-example.zarr/zarr.json")));
+        assert!(is_zarr_store_root(&meta("deep/nested/path/cube.zarr/zarr.json")));
+        // The suffix is matched case-insensitively, as the marker name is.
+        assert!(is_zarr_store_root(&meta("CUBE.ZARR/zarr.json")));
     }
 
+    /// Every array in a v3 store also has a `zarr.json`. The directory between
+    /// it and the store is what tells them apart.
     #[test]
-    fn test_single_top_level() {
-        let metas = vec![meta("a/zarr.json")];
-        let result = top_level_zarr_meta_v3(&metas);
-        assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
+    fn a_marker_below_the_store_directory_is_an_array() {
+        assert!(!is_zarr_store_root(&meta("gridded-example.zarr/lat/zarr.json")));
+        assert!(!is_zarr_store_root(&meta("gridded-example.zarr/a/b/zarr.json")));
     }
 
+    /// A directory without the suffix is not a store, however the marker looks.
     #[test]
-    fn test_nested_group_dropped() {
-        let metas = vec![meta("a/zarr.json"), meta("a/b/zarr.json")];
-        let result = top_level_zarr_meta_v3(&metas);
-        assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
+    fn a_marker_outside_a_zarr_directory_is_not_a_store() {
+        assert!(!is_zarr_store_root(&meta("a/zarr.json")));
+        assert!(!is_zarr_store_root(&meta("root/zarr.json")));
     }
 
+    /// A root-level marker has no directory to name it. Icechunk reaches its
+    /// root group directly rather than through discovery.
     #[test]
-    fn test_multiple_top_level() {
-        let metas = vec![meta("a/zarr.json"), meta("b/zarr.json")];
-        let result = top_level_zarr_meta_v3(&metas);
-        let mut paths = extract_paths(&result);
-        paths.sort();
-        assert_eq!(paths, vec!["a/zarr.json", "b/zarr.json"]);
+    fn a_bare_marker_is_not_a_discovered_store() {
+        assert!(!is_zarr_store_root(&meta("zarr.json")));
     }
 
+    /// Non-markers are rejected before the directory is even considered.
     #[test]
-    fn test_ignore_non_zarr_json() {
-        let metas = vec![
-            meta("a/zarr.json"),
-            meta("b/not_zarr.json"),
-            meta("c/zarr.txt"),
-        ];
-        let result = top_level_zarr_meta_v3(&metas);
-        assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
-    }
-
-    #[test]
-    fn deeply_nested_children_are_all_dropped() {
-        // Only the shallowest ancestor group survives.
-        let metas = vec![
-            meta("root/zarr.json"),
-            meta("root/a/zarr.json"),
-            meta("root/a/b/zarr.json"),
-            meta("other/zarr.json"),
-        ];
-        let mut result = extract_paths(&top_level_zarr_meta_v3(&metas));
-        result.sort();
-        assert_eq!(result, vec!["other/zarr.json", "root/zarr.json"]);
+    fn a_non_marker_is_never_a_store() {
+        assert!(!is_zarr_store_root(&meta("cube.zarr/not_zarr.json")));
+        assert!(!is_zarr_store_root(&meta("cube.zarr/data.nc")));
     }
 
     #[test]

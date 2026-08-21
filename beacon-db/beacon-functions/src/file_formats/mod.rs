@@ -10,7 +10,6 @@ use datafusion::prelude::SessionContext;
 pub use beacon_common::table_function::{parse_glob_paths_arg, BeaconTableFunctionImpl};
 
 // Cross-format table functions that don't belong to a single format crate.
-pub mod list_datasets;
 pub mod schema_function;
 
 use schema_function::SchemaTableFunc;
@@ -92,9 +91,11 @@ pub fn register_table_functions(
 
     let mut functions = readers;
     functions.extend(schema_funcs);
-    functions.push(Arc::new(list_datasets::ListDatasetsFunc::new(
-        runtime_handle,
-        Arc::downgrade(&session_ctx),
+    // Listing the datasets store: two functions over one provider.
+    functions.push(Arc::new(crate::listing::ListDatasetsFunc::new(
+        file_formats.clone(),
+    )));
+    functions.push(Arc::new(crate::listing::BrowseDatasetsFunc::new(
         file_formats,
     )));
     functions

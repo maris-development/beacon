@@ -5,6 +5,7 @@ edition = "2024"
 
 rust-version.workspace = true
 [dependencies]
+async-stream = { workspace = true }
 beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
 # Fingerprints a format's options for the schema cache. A fixed algorithm, so a
 # stored entry keeps its meaning across releases.
