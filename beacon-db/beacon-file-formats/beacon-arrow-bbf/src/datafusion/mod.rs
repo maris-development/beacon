@@ -7,7 +7,7 @@ use beacon_binary_format::{
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::format_options::format_option;
-use beacon_datafusion_ext::type_widening::session_widening;
+use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -180,9 +180,10 @@ impl FileFormat for BBFFormat {
             .try_collect::<Vec<_>>()
             .await?;
 
-        // Merge & widen types across all files, using the session's type widening rules.
+        // Merge & widen types across all files, using the session's type widening
+        // rules. Each schema names its file, so a refused column names both files.
         session_widening(state)
-            .merge_schemas(&schemas)
+            .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
                     "Failed to infer schema: {}",

@@ -75,9 +75,9 @@ impl FastObjectTable {
             .with_target_partitions(state.config_options().execution.target_partitions)
             .with_collect_stat(false); // We rely on the statistics store, not the listing table, to collect stats.
 
-        // One schema per URL. The schema cache answers where it can. The merge
-        // below does not change. The cache decides the source of a schema. It
-        // does not decide how the URLs combine.
+        // One schema per URL, each named after its URL. The schema cache answers
+        // where it can. The merge below does not change. The cache decides the
+        // source of a schema. It does not decide how the URLs combine.
         let schemas = super::schema::infer_url_schemas(state, &options, &urls).await?;
 
         let schema = widening

@@ -16,7 +16,7 @@
 //! | --- | --- |
 //! | the same type | that type |
 //! | two types of one family | the member that holds both, from the tables below |
-//! | two families (a number and a string) | an error that names the column and both types |
+//! | two families (a number and a string) | an error that names the column, both types and both files |
 //! | `Null` and any type | that type, because a null column holds no value |
 //! | one nullable field, one not | a nullable field |
 //! | the column in one file only | a nullable field, because the scan fills the other file with nulls |
@@ -83,6 +83,23 @@
 //! [`RuntimeBuilder::with_type_widening`]. Every merge in the process takes the
 //! new strategy.
 //!
+//! # The source of a conflict
+//!
+//! A merge that refuses a column names the source of each type. A table over
+//! 10000 files is otherwise a search:
+//!
+//! ```text
+//! Incompatible types for field 'depth': Utf8 in 'argo/a.nc' vs Float64 in 'argo/b.nc'
+//! ```
+//!
+//! Each caller passes one [`LabeledSchema`] per source. [`label_by_object`] builds
+//! them from a listing. A caller that holds no name passes
+//! [`LabeledSchema::unlabeled`], and the error reports the two types alone.
+//!
+//! A widened column takes the name of the source that states its current type. A
+//! join that equals neither operand leaves that side without a name: `Int64`
+//! beside `UInt64` gives `Float64`, and no file states `Float64`.
+//!
 //! # How the merge does less work
 //!
 //! The rules above are a semilattice join. The numeric order is a lattice, and a
@@ -99,6 +116,12 @@
 //! A strategy that answers `false` gets one fold over every schema, repeats
 //! included.
 //!
+//! Both steps hide the source of a field. A repeat loses its own name, and a
+//! chunk result names no source at all. A merge that fails therefore folds the
+//! distinct schemas once more, in one thread, to name both sources. The fold
+//! stops at the same pair, because the join is associative. A merge that succeeds
+//! pays nothing for it.
+//!
 //! [`is_order_independent`]: ArrowTypeWideningStrategy::is_order_independent
 //! [`RuntimeBuilder::with_type_widening`]: ../../beacon_core/runtime_builder/struct.RuntimeBuilder.html#method.with_type_widening
 
@@ -109,6 +132,7 @@ use std::sync::{Arc, LazyLock};
 
 use arrow_schema::{ArrowError, DataType, FieldRef, Schema, SchemaRef, TimeUnit};
 use datafusion::catalog::Session;
+use object_store::ObjectMeta;
 
 /// Below this count, one fold costs less than a split. A merge walks field
 /// names, so a thread must earn its start cost.
@@ -116,6 +140,59 @@ const SEQUENTIAL_MERGE_LIMIT: usize = 64;
 
 /// The least work for one thread.
 const MIN_SCHEMAS_PER_THREAD: usize = 32;
+
+/// A schema and the name of the source it was read from.
+///
+/// A merge that refuses a column reports the name of both sources. The name is
+/// the object path of a file, the URL of a table, or the group path of a Zarr
+/// leaf. See the [module docs](self).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabeledSchema {
+    /// The schema of one source.
+    pub schema: SchemaRef,
+    /// What an error calls that source. `None` for a caller that holds no name,
+    /// and the error then reports the two types alone.
+    pub label: Option<Arc<str>>,
+}
+
+impl LabeledSchema {
+    /// A schema with the name of its source.
+    pub fn new(schema: SchemaRef, label: impl Into<Arc<str>>) -> Self {
+        Self {
+            schema,
+            label: Some(label.into()),
+        }
+    }
+
+    /// A schema without a name.
+    pub fn unlabeled(schema: SchemaRef) -> Self {
+        Self {
+            schema,
+            label: None,
+        }
+    }
+}
+
+impl From<SchemaRef> for LabeledSchema {
+    fn from(schema: SchemaRef) -> Self {
+        Self::unlabeled(schema)
+    }
+}
+
+/// Name each schema after the object it was read from.
+///
+/// A format reads one schema per object, in listing order, so the two lists line
+/// up. A schema past the end of `objects` gets no name.
+pub fn label_by_object(objects: &[ObjectMeta], schemas: &[SchemaRef]) -> Vec<LabeledSchema> {
+    schemas
+        .iter()
+        .enumerate()
+        .map(|(index, schema)| match objects.get(index) {
+            Some(object) => LabeledSchema::new(Arc::clone(schema), object.location.as_ref()),
+            None => LabeledSchema::unlabeled(Arc::clone(schema)),
+        })
+        .collect()
+}
 
 pub struct ArrowTypeWidening {
     pub strategy: Arc<dyn ArrowTypeWideningStrategy>,
@@ -135,17 +212,25 @@ impl ArrowTypeWidening {
         Arc::new(Self::new(Arc::new(DefaultArrowTypeWidening)))
     }
 
-    /// Merge `schema_refs` into the schema a query plans against.
+    /// Merge `schemas` into the schema a query plans against.
     ///
     /// The strategy decides the result. This method decides the cost: an
     /// order-independent strategy loses its repeats, and threads merge the rest.
-    /// See the [module docs](self).
-    pub fn merge_schemas(&self, schema_refs: &[SchemaRef]) -> Result<SchemaRef, ArrowError> {
+    /// Each schema names its source, and a failed merge reports both names. See
+    /// the [module docs](self).
+    pub fn merge_schemas(&self, schemas: &[LabeledSchema]) -> Result<SchemaRef, ArrowError> {
         let strategy = self.strategy.as_ref();
         if !strategy.is_order_independent() {
-            return strategy.merge_schemas(schema_refs);
+            return strategy.merge_schemas(schemas);
         }
-        merge_distinct(strategy, &distinct_schemas(schema_refs))
+        let distinct = distinct_schemas(schemas);
+        match merge_distinct(strategy, &distinct) {
+            Ok(schema) => Ok(schema),
+            // The dropped repeats and the chunk results hide the source of a
+            // field. Fold the named schemas once to name both sources. The fold
+            // stops at the same pair, because the join is associative.
+            Err(error) => Err(strategy.merge_schemas(&distinct).err().unwrap_or(error)),
+        }
     }
 }
 
@@ -166,7 +251,10 @@ pub fn session_widening(session: &dyn Session) -> Arc<ArrowTypeWidening> {
 
 pub trait ArrowTypeWideningStrategy: Send + Sync {
     /// Merge these schemas into one, in the order given.
-    fn merge_schemas(&self, schema_refs: &[SchemaRef]) -> Result<SchemaRef, ArrowError>;
+    ///
+    /// Each schema names its source. Report both names for a column that two
+    /// sources describe with two types. See [`LabeledSchema`].
+    fn merge_schemas(&self, schemas: &[LabeledSchema]) -> Result<SchemaRef, ArrowError>;
 
     /// State whether this merge is a semilattice join: **idempotent, commutative
     /// and associative**. The schema order, the group boundaries and the repeat
@@ -195,23 +283,28 @@ pub trait ArrowTypeWideningStrategy: Send + Sync {
 pub struct DefaultArrowTypeWidening;
 
 impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
-    fn merge_schemas(&self, schema_refs: &[SchemaRef]) -> Result<SchemaRef, ArrowError> {
-        if schema_refs.is_empty() {
+    fn merge_schemas(&self, schemas: &[LabeledSchema]) -> Result<SchemaRef, ArrowError> {
+        if schemas.is_empty() {
             return Err(ArrowError::SchemaError(
                 "No schemas provided for merging".to_string(),
             ));
         }
 
         let mut merged_fields: Vec<FieldRef> = Vec::new();
+        // The source that gave each merged field its type, at the same index.
+        let mut sources: Vec<Option<Arc<str>>> = Vec::new();
         // The position of each field in `merged_fields`, and its schema count.
         let mut field_map: HashMap<String, (usize, usize)> = HashMap::new();
 
-        for schema_ref in schema_refs {
-            for field in schema_ref.fields() {
+        for labeled in schemas {
+            for field in labeled.schema.fields() {
                 let field_name = field.name().clone();
                 if let Some((at, held_by)) = field_map.get_mut(&field_name) {
                     *held_by += 1;
-                    let existing_field = &merged_fields[*at];
+                    let at = *at;
+                    // An `Arc` clone. It ends the borrow of `merged_fields`, so
+                    // the write below needs no second lookup.
+                    let existing_field = Arc::clone(&merged_fields[at]);
                     // Two types for one column. A numeric pair widens. Every
                     // other pair is an error.
                     let widened = if existing_field.data_type() == field.data_type() {
@@ -220,17 +313,22 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
                         match super_type(existing_field.data_type(), field.data_type()) {
                             Some(data_type) => Some(data_type),
                             None => {
-                                return Err(ArrowError::SchemaError(format!(
-                                    "Incompatible types for field '{}': {:?} vs {:?}",
-                                    field_name,
+                                return Err(ArrowError::SchemaError(incompatible_types(
+                                    &field_name,
                                     existing_field.data_type(),
-                                    field.data_type()
+                                    sources[at].as_deref(),
+                                    field.data_type(),
+                                    labeled.label.as_deref(),
                                 )));
                             }
                         }
                     };
                     // One file that permits nulls makes the column nullable.
                     let nullable = field.is_nullable() && !existing_field.is_nullable();
+                    if let Some(data_type) = &widened {
+                        sources[at] =
+                            source_of(data_type, &existing_field, &sources[at], field, labeled);
+                    }
                     if widened.is_some() || nullable {
                         let mut merged = existing_field.as_ref().clone();
                         if let Some(data_type) = widened {
@@ -239,12 +337,13 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
                         if nullable {
                             merged = merged.with_nullable(true);
                         }
-                        merged_fields[*at] = Arc::new(merged);
+                        merged_fields[at] = Arc::new(merged);
                     }
                 } else {
                     // If the field does not exist, add it to the map and merged fields
                     field_map.insert(field_name.clone(), (merged_fields.len(), 1));
                     merged_fields.push(field.clone());
+                    sources.push(labeled.label.clone());
                 }
             }
         }
@@ -253,12 +352,57 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
         // lack must therefore be nullable.
         for field in merged_fields.iter_mut() {
             let (_, held_by) = field_map[field.name()];
-            if held_by < schema_refs.len() && !field.is_nullable() {
+            if held_by < schemas.len() && !field.is_nullable() {
                 *field = Arc::new(field.as_ref().clone().with_nullable(true));
             }
         }
 
         Ok(Arc::new(arrow_schema::Schema::new(merged_fields)))
+    }
+}
+
+/// The text for a column that two sources describe with two types.
+///
+/// Each type takes the name of the source that states it. A side without a name
+/// reports its type alone. See the [module docs](self).
+fn incompatible_types(
+    field_name: &str,
+    left: &DataType,
+    left_source: Option<&str>,
+    right: &DataType,
+    right_source: Option<&str>,
+) -> String {
+    fn describe(data_type: &DataType, source: Option<&str>) -> String {
+        match source {
+            Some(source) => format!("{data_type:?} in '{source}'"),
+            None => format!("{data_type:?}"),
+        }
+    }
+    format!(
+        "Incompatible types for field '{field_name}': {} vs {}",
+        describe(left, left_source),
+        describe(right, right_source)
+    )
+}
+
+/// The source that states `widened`, which is the type the column now holds.
+///
+/// One operand equals the result, so that source states it. A join that equals
+/// neither operand has no such source: `Int64` beside `UInt64` gives `Float64`,
+/// and no file states `Float64`.
+fn source_of(
+    widened: &DataType,
+    existing_field: &FieldRef,
+    existing_source: &Option<Arc<str>>,
+    field: &FieldRef,
+    labeled: &LabeledSchema,
+) -> Option<Arc<str>> {
+    if widened == existing_field.data_type() {
+        existing_source.clone()
+    } else if widened == field.data_type() {
+        labeled.label.clone()
+    } else {
+        None
     }
 }
 
@@ -540,23 +684,25 @@ impl Numeric {
 /// An idempotent join gives the same answer without the repeats, and a collection
 /// holds far fewer distinct schemas than files. The check uses a fingerprint. A
 /// full compare runs only for two equal fingerprints.
-fn distinct_schemas(schemas: &[SchemaRef]) -> Cow<'_, [SchemaRef]> {
+fn distinct_schemas(schemas: &[LabeledSchema]) -> Cow<'_, [LabeledSchema]> {
     if schemas.len() < 2 {
         return Cow::Borrowed(schemas);
     }
 
-    let mut kept: Vec<SchemaRef> = Vec::new();
+    let mut kept: Vec<LabeledSchema> = Vec::new();
     let mut seen: HashMap<u64, Vec<usize>> = HashMap::new();
-    for schema in schemas {
-        let candidates = seen.entry(fingerprint(schema)).or_default();
-        if candidates
-            .iter()
-            .any(|index| Arc::ptr_eq(&kept[*index], schema) || kept[*index] == *schema)
-        {
+    for labeled in schemas {
+        let candidates = seen.entry(fingerprint(&labeled.schema)).or_default();
+        // The first of a repeat stays, with its own name. A later copy names the
+        // same types, so the name it drops adds nothing to an error.
+        if candidates.iter().any(|index| {
+            Arc::ptr_eq(&kept[*index].schema, &labeled.schema)
+                || kept[*index].schema == labeled.schema
+        }) {
             continue;
         }
         candidates.push(kept.len());
-        kept.push(Arc::clone(schema));
+        kept.push(labeled.clone());
     }
 
     if kept.len() == schemas.len() {
@@ -588,7 +734,7 @@ fn fingerprint(schema: &Schema) -> u64 {
 /// The chunks combine in order, so the columns keep the order of the listing.
 fn merge_distinct(
     strategy: &dyn ArrowTypeWideningStrategy,
-    schemas: &[SchemaRef],
+    schemas: &[LabeledSchema],
 ) -> Result<SchemaRef, ArrowError> {
     let threads = std::thread::available_parallelism()
         .map(|threads| threads.get())
@@ -619,7 +765,10 @@ fn merge_distinct(
     // first conflict, as one fold does.
     let mut partial = Vec::with_capacity(results.len());
     for result in results {
-        partial.push(result?);
+        // A chunk result holds the fields of every schema in that chunk, so it
+        // names no single source. `ArrowTypeWidening::merge_schemas` folds the
+        // named schemas again when such a merge fails.
+        partial.push(LabeledSchema::unlabeled(result?));
     }
     // `per_thread` is 32 or more. This call therefore gets at most one part in 32
     // of the input, and the recursion stops.
@@ -632,7 +781,17 @@ mod tests {
 
     use super::*;
 
-    fn schema(fields: &[(&str, DataType)]) -> SchemaRef {
+    /// A schema without a source name. Most tests read the types alone.
+    fn schema(fields: &[(&str, DataType)]) -> LabeledSchema {
+        LabeledSchema::unlabeled(schema_ref(fields))
+    }
+
+    /// A schema with the name of the file it came from.
+    fn from_file(label: &str, fields: &[(&str, DataType)]) -> LabeledSchema {
+        LabeledSchema::new(schema_ref(fields), label)
+    }
+
+    fn schema_ref(fields: &[(&str, DataType)]) -> SchemaRef {
         Arc::new(Schema::new(
             fields
                 .iter()
@@ -704,6 +863,124 @@ mod tests {
                 }
                 other => panic!("expected SchemaError, got {other:?}"),
             }
+        }
+    }
+
+    // ── naming the source of a conflict ────────────────────────────────
+
+    /// The error names the file of each type. A table over 10000 files is
+    /// otherwise a search. See issue #424.
+    #[test]
+    fn a_refused_column_names_both_files() {
+        let widening = ArrowTypeWidening::default_extension();
+        let text = from_file("argo/a.nc", &[("depth", DataType::Utf8)]);
+        let number = from_file("argo/b.nc", &[("depth", DataType::Float64)]);
+
+        let message = message_of(widening.merge_schemas(&[text, number]).unwrap_err());
+        assert_eq!(
+            message,
+            "Incompatible types for field 'depth': Utf8 in 'argo/a.nc' vs \
+             Float64 in 'argo/b.nc'"
+        );
+    }
+
+    /// A caller without a name gets the types alone, as before issue #424.
+    #[test]
+    fn a_schema_without_a_name_reports_its_type_alone() {
+        let widening = ArrowTypeWidening::default_extension();
+        let text = schema(&[("depth", DataType::Utf8)]);
+        let number = from_file("argo/b.nc", &[("depth", DataType::Float64)]);
+
+        assert_eq!(
+            message_of(widening.merge_schemas(&[text, number]).unwrap_err()),
+            "Incompatible types for field 'depth': Utf8 vs Float64 in 'argo/b.nc'"
+        );
+    }
+
+    /// A widened column names the file that states the type it now holds, not the
+    /// file that first held the column.
+    #[test]
+    fn a_widened_column_names_the_file_of_its_current_type() {
+        let widening = ArrowTypeWidening::default_extension();
+        let narrow = from_file("a.nc", &[("depth", DataType::Int32)]);
+        let wide = from_file("b.nc", &[("depth", DataType::Int64)]);
+        let text = from_file("c.nc", &[("depth", DataType::Utf8)]);
+
+        assert_eq!(
+            message_of(widening.merge_schemas(&[narrow, wide, text]).unwrap_err()),
+            "Incompatible types for field 'depth': Int64 in 'b.nc' vs Utf8 in 'c.nc'"
+        );
+    }
+
+    /// A join that equals neither operand has no file behind it. `Int64` beside
+    /// `UInt64` gives `Float64`, and no file states `Float64`.
+    #[test]
+    fn a_join_of_two_files_names_neither() {
+        let widening = ArrowTypeWidening::default_extension();
+        let signed = from_file("a.nc", &[("depth", DataType::Int64)]);
+        let unsigned = from_file("b.nc", &[("depth", DataType::UInt64)]);
+        let text = from_file("c.nc", &[("depth", DataType::Utf8)]);
+
+        assert_eq!(
+            message_of(
+                widening
+                    .merge_schemas(&[signed, unsigned, text])
+                    .unwrap_err()
+            ),
+            "Incompatible types for field 'depth': Float64 vs Utf8 in 'c.nc'"
+        );
+    }
+
+    /// A repeated schema keeps the name of its first file. The merge drops the
+    /// later copies, which state the same types.
+    #[test]
+    fn a_repeated_schema_keeps_the_name_of_its_first_file() {
+        let widening = ArrowTypeWidening::default_extension();
+        let first = from_file("a.nc", &[("depth", DataType::Utf8)]);
+        let copy = from_file("z.nc", &[("depth", DataType::Utf8)]);
+        let number = from_file("b.nc", &[("depth", DataType::Float64)]);
+
+        assert_eq!(
+            message_of(widening.merge_schemas(&[first, copy, number]).unwrap_err()),
+            "Incompatible types for field 'depth': Utf8 in 'a.nc' vs Float64 in 'b.nc'"
+        );
+    }
+
+    /// A merge that splits over threads still names both files. A chunk result
+    /// names no file, so the failed merge folds the named schemas once more.
+    #[test]
+    fn a_split_merge_names_both_files() {
+        // Enough distinct schemas to reach the threads, and a conflict in the
+        // last chunk.
+        let mut schemas: Vec<LabeledSchema> = (0..300)
+            .map(|index| {
+                from_file(
+                    &format!("argo/{index}.nc"),
+                    &[
+                        ("depth", DataType::Utf8),
+                        (&format!("own_{index}"), DataType::Int32),
+                    ],
+                )
+            })
+            .collect();
+        schemas.push(from_file("argo/bad.nc", &[("depth", DataType::Float64)]));
+
+        let message = message_of(
+            ArrowTypeWidening::default_extension()
+                .merge_schemas(&schemas)
+                .unwrap_err(),
+        );
+        assert_eq!(
+            message,
+            "Incompatible types for field 'depth': Utf8 in 'argo/0.nc' vs \
+             Float64 in 'argo/bad.nc'"
+        );
+    }
+
+    fn message_of(error: ArrowError) -> String {
+        match error {
+            ArrowError::SchemaError(message) => message,
+            other => panic!("expected SchemaError, got {other:?}"),
         }
     }
 
@@ -1074,7 +1351,7 @@ mod tests {
     #[test]
     fn a_field_keeps_its_metadata() {
         let geometry = || {
-            Arc::new(Schema::new(vec![
+            LabeledSchema::unlabeled(Arc::new(Schema::new(vec![
                 Field::new("geometry", DataType::Float64, false).with_metadata(
                     [(
                         "ARROW:extension:name".to_string(),
@@ -1082,7 +1359,7 @@ mod tests {
                     )]
                     .into(),
                 ),
-            ])) as SchemaRef
+            ])))
         };
 
         let merged = ArrowTypeWidening::default_extension()
@@ -1105,11 +1382,11 @@ mod tests {
     #[test]
     fn a_column_some_files_lack_comes_out_nullable() {
         let required = |name: &str| {
-            Arc::new(Schema::new(vec![Field::new(
+            LabeledSchema::unlabeled(Arc::new(Schema::new(vec![Field::new(
                 name,
                 DataType::Float64,
                 false,
-            )])) as SchemaRef
+            )])))
         };
 
         let merged = ArrowTypeWidening::default_extension()
@@ -1121,14 +1398,14 @@ mod tests {
         // A column that every file holds keeps the declared nullability. One file
         // that permits nulls makes the column nullable. No such file leaves the
         // column required.
-        let both_required = Arc::new(Schema::new(vec![
+        let both_required = LabeledSchema::unlabeled(Arc::new(Schema::new(vec![
             Field::new("TEMP", DataType::Float64, false),
             Field::new("DEPTH", DataType::Int64, false),
-        ])) as SchemaRef;
-        let depth_optional = Arc::new(Schema::new(vec![
+        ])));
+        let depth_optional = LabeledSchema::unlabeled(Arc::new(Schema::new(vec![
             Field::new("TEMP", DataType::Float64, false),
             Field::new("DEPTH", DataType::Int64, true),
-        ])) as SchemaRef;
+        ])));
 
         for order in [
             vec![both_required.clone(), depth_optional.clone()],
@@ -1158,17 +1435,11 @@ mod tests {
         // fingerprint must catch it, because the pointers differ.
         let a_again = schema(&[("a", DataType::Int32)]);
 
-        let listing = [
-            Arc::clone(&a),
-            Arc::clone(&a),
-            Arc::clone(&b),
-            a_again,
-            Arc::clone(&b),
-        ];
+        let listing = [a.clone(), a.clone(), b.clone(), a_again, b.clone()];
         let distinct = distinct_schemas(&listing);
         assert_eq!(distinct.len(), 2);
-        assert_eq!(names(&distinct[0]), vec!["a"]);
-        assert_eq!(names(&distinct[1]), vec!["b"]);
+        assert_eq!(names(&distinct[0].schema), vec!["a"]);
+        assert_eq!(names(&distinct[1].schema), vec!["b"]);
 
         // The input holds no repeat, so the function returns it unchanged.
         let no_repeats = [a, b];
@@ -1180,14 +1451,18 @@ mod tests {
     /// drop one schema and report the other.
     #[test]
     fn schemas_that_differ_in_more_than_types_stay_distinct() {
-        let nullable = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
-        let required = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
+        let nullable = schema(&[("a", DataType::Int32)]);
+        let required = LabeledSchema::unlabeled(Arc::new(Schema::new(vec![Field::new(
+            "a",
+            DataType::Int32,
+            false,
+        )])));
         assert_eq!(distinct_schemas(&[nullable.clone(), required]).len(), 2);
 
-        let with_metadata: SchemaRef = Arc::new(
+        let with_metadata = LabeledSchema::unlabeled(Arc::new(
             Schema::new(vec![Field::new("a", DataType::Int32, true)])
                 .with_metadata([("k".to_string(), "v".to_string())].into()),
-        );
+        ));
         assert_eq!(distinct_schemas(&[nullable, with_metadata]).len(), 2);
     }
 
@@ -1204,7 +1479,7 @@ mod tests {
             DataType::UInt8,
             DataType::Float32,
         ];
-        let schemas: Vec<SchemaRef> = (0..300)
+        let schemas: Vec<LabeledSchema> = (0..300)
             .map(|index| {
                 schema(&[
                     ("shared", widths[index % widths.len()].clone()),
@@ -1233,8 +1508,13 @@ mod tests {
     /// first chunk, gives back the order dependence of issue #377.
     #[test]
     fn a_split_merge_reports_a_conflict_wherever_it_falls() {
-        let schemas: Vec<SchemaRef> = (0..300)
-            .map(|index| schema(&[("shared", DataType::Int32), (&format!("own_{index}"), DataType::Utf8)]))
+        let schemas: Vec<LabeledSchema> = (0..300)
+            .map(|index| {
+                schema(&[
+                    ("shared", DataType::Int32),
+                    (&format!("own_{index}"), DataType::Utf8),
+                ])
+            })
             .collect();
         let widening = ArrowTypeWidening::default_extension();
         assert!(widening.merge_schemas(&schemas).is_ok());
@@ -1250,7 +1530,7 @@ mod tests {
         }
 
         // A second copy of every schema does not change a clean merge.
-        let doubled: Vec<SchemaRef> = schemas.iter().chain(schemas.iter()).cloned().collect();
+        let doubled: Vec<LabeledSchema> = schemas.iter().chain(schemas.iter()).cloned().collect();
         assert_eq!(
             widening.merge_schemas(&doubled).unwrap(),
             widening.merge_schemas(&schemas).unwrap()
@@ -1269,10 +1549,10 @@ mod tests {
         }
 
         impl ArrowTypeWideningStrategy for CountingStrategy {
-            fn merge_schemas(&self, schema_refs: &[SchemaRef]) -> Result<SchemaRef, ArrowError> {
+            fn merge_schemas(&self, schemas: &[LabeledSchema]) -> Result<SchemaRef, ArrowError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                self.seen.fetch_add(schema_refs.len(), Ordering::SeqCst);
-                DefaultArrowTypeWidening.merge_schemas(schema_refs)
+                self.seen.fetch_add(schemas.len(), Ordering::SeqCst);
+                DefaultArrowTypeWidening.merge_schemas(schemas)
             }
 
             fn is_order_independent(&self) -> bool {
@@ -1286,7 +1566,7 @@ mod tests {
         });
         let widening = ArrowTypeWidening::new(strategy.clone());
         let one = schema(&[("a", DataType::Int32)]);
-        let repeated: Vec<SchemaRef> = (0..200).map(|_| Arc::clone(&one)).collect();
+        let repeated: Vec<LabeledSchema> = (0..200).map(|_| one.clone()).collect();
 
         widening.merge_schemas(&repeated).unwrap();
         assert_eq!(strategy.calls.load(Ordering::SeqCst), 1, "one fold");
