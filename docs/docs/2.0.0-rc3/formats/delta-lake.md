@@ -84,14 +84,17 @@ Beacon resolves the path against its dataset storage root. In the default Docker
 is `/beacon/data/datasets`. On object storage the root is the S3 prefix. Beacon reads the schema
 from the transaction log. You declare no columns.
 
-### `OPTIONS`, time travel
+### `OPTIONS`
 
 Pin the table to an older snapshot. Use **one** of these options:
 
-| Option | Description |
-| ----------- | --------------------------------------------------------------------------- |
-| `version` | A Delta version number, for example `'12'`. |
-| `timestamp` | An RFC-3339 timestamp. Beacon takes the last version at or before it, for example `'2026-01-01T00:00:00Z'`. |
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `version` | Whole number | The latest committed version | A Delta version number, for example `'12'`. |
+| `timestamp` | RFC-3339 timestamp | The latest committed version | Beacon takes the last version at or before it, for example `'2026-01-01T00:00:00Z'`. |
+
+`version` wins if you set both. See
+[`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key.
 
 ```sql
 -- Register the table as it looked at version 12

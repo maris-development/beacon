@@ -70,15 +70,17 @@ STORED AS ICECHUNK
 LOCATION 'sst/repo';
 ```
 
+### `OPTIONS`
+
 `OPTIONS` selects the version and the arrays. Set one of `branch`, `tag` and `snapshot`. Do not set
 two. Beacon reads the tip of `main` if you set none.
 
-| Option | Function |
-| --- | --- |
-| `branch` | Read the tip of this branch. The tip moves after each commit. |
-| `tag` | Read this tag. The tag does not move. |
-| `snapshot` | Read this snapshot. The snapshot does not move. |
-| `read_dimensions` | A list of dimension names. Beacon reads an array only if the list holds all dimensions of the array. |
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `branch` | Branch name | `main` | Read the tip of this branch. The tip moves after each commit. |
+| `tag` | Tag name | None | Read this tag. The tag does not move. |
+| `snapshot` | Snapshot id | None | Read this snapshot. The snapshot does not move. |
+| `read_dimensions` | List of dimension names | The default grid of the repository | The dimensions the table reads. Beacon returns an array only if the list holds every dimension of that array. |
 
 ```sql
 CREATE EXTERNAL TABLE sst_v1
@@ -86,6 +88,8 @@ STORED AS ICECHUNK
 LOCATION 'sst/repo'
 OPTIONS ('tag' 'v1', 'read_dimensions' 'time,lat,lon');
 ```
+
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key.
 
 A table on a branch reads new data for each query. Beacon reads the branch tip again for each scan.
 A table on a tag or on a snapshot reads the same rows each time.

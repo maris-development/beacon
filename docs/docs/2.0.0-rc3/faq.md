@@ -12,7 +12,7 @@ follow your task.
 ### Do I have to run a server to try Beacon?
 
 No. Query a public node first. Install the Python client, point it at the node and run SQL. See
-[Query a public node](/docs/2.0.0-rc3/quickstart#query-a-public-node).
+[Query the public node](/docs/2.0.0-rc3/quickstart#query-the-public-node).
 
 Run your own server when the data is yours, or when you need access control, a web UI or crawlers.
 

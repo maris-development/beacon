@@ -89,3 +89,24 @@ LOCATION 'argo/**/*.nc'
 
 See [Create External Tables](/docs/2.0.0-rc3/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc3/data-sources/) for the
 full read model.
+
+### `OPTIONS`
+
+`STORED AS NC` reads three keys:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `read_dimensions` | List of dimension names | The default grid of each file | The dimensions the table reads. Beacon returns a variable only if the list holds every dimension of that variable. |
+| `use_rust_reader` | Boolean | `true` (`BEACON_NETCDF_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library needs anonymous access to a bucket. |
+| `enable_statistics` | Boolean | `true` (`BEACON_NETCDF_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_NETCDF_ENABLE_STATISTICS` to turn the column ranges off. |
+
+```sql
+-- One grid, and the netCDF-C reader for this table alone
+CREATE EXTERNAL TABLE argo
+STORED AS NC
+LOCATION 'argo/**/*.nc'
+OPTIONS ('read_dimensions' 'time,latitude,longitude', 'use_rust_reader' 'false')
+```
+
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key. See
+[Arrays to tables](/docs/2.0.0-rc3/arrays-to-tables#the-dimensions-argument) for the grid rule.

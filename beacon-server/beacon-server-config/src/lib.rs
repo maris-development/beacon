@@ -460,7 +460,7 @@ struct RawConfig {
     /// nothing is assumed. `optodas` reads an ASN OptoDAS acquisition file: it
     /// names the axes of the payload, builds the `time` and `distance`
     /// coordinates the file describes, and decodes the payload to the unit the
-    /// file records. A table sets its own with `OPTIONS ('convention' = ...)`.
+    /// file records. A table sets its own with `OPTIONS ('convention' 'optodas')`.
     #[envconfig(from = "BEACON_HDF5_CONVENTION", default = "none")]
     hdf5_convention: String,
 

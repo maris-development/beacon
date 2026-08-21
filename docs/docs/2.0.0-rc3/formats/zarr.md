@@ -102,3 +102,22 @@ LOCATION 'sst/*/zarr.json'
 
 See [Create External Tables](/docs/2.0.0-rc3/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc3/data-sources/) for the
 full read model.
+
+### `OPTIONS`
+
+`STORED AS ZARR` reads two keys:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `read_dimensions` | List of dimension names | The default grid of each store | The dimensions the table reads. Beacon returns an array only if the list holds every dimension of that array. |
+| `enable_statistics` | Boolean | `true` (`BEACON_ZARR_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per store, not per table. Set `BEACON_ZARR_ENABLE_STATISTICS` to turn the column ranges off. |
+
+```sql
+CREATE EXTERNAL TABLE sst_zarr
+STORED AS ZARR
+LOCATION 'sst/*/zarr.json'
+OPTIONS ('read_dimensions' 'time,lat,lon')
+```
+
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key. See
+[Arrays to tables](/docs/2.0.0-rc3/arrays-to-tables#the-dimensions-argument) for the grid rule.
