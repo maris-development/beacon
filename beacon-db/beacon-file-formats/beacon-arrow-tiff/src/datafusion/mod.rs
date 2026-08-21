@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
-use beacon_datafusion_ext::type_widening::session_widening;
+use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
@@ -154,9 +154,10 @@ impl FileFormat for TiffFormat {
         }
 
         // The rule of the session decides the result for a column that two
-        // files describe differently.
+        // files describe differently. Each schema names its file, so a refused
+        // column names both files.
         session_widening(state)
-            .merge_schemas(&schemas)
+            .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 exec_datafusion_err!(
                     "Failed to merge the schemas of the TIFF datasets: {}",

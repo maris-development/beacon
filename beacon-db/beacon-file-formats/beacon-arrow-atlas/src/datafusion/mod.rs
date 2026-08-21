@@ -13,7 +13,7 @@ use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{
     DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
 };
-use beacon_datafusion_ext::type_widening::session_widening;
+use beacon_datafusion_ext::type_widening::{LabeledSchema, session_widening};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -310,7 +310,11 @@ impl FileFormat for AtlasFormat {
             let merged = atlas.merged_schema();
             let schema =
                 crate::compat::atlas_merged_schema_to_arrow(&merged, read_dimensions.as_deref());
-            schemas.push(Arc::new(schema));
+            // The marker names the store, so a refused column names both stores.
+            schemas.push(LabeledSchema::new(
+                Arc::new(schema),
+                marker.location.as_ref(),
+            ));
         }
 
         // Union the stores with the rule of the session. One store is the common
