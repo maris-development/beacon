@@ -15,6 +15,11 @@ The table definition and the data survive a restart.
 A managed table needs write access. `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE INDEX`
 and `DROP INDEX` need admin credentials. Anonymous access stays read-only.
 
+::: tip Names keep their case
+A table name means exactly what you write. `MyTable` and `mytable` are two different tables.
+See [Identifiers and case](/docs/2.0.0-rc3/sql/identifiers).
+:::
+
 ## Storage engine
 
 **[Lance](https://lancedb.github.io/lance/)** holds a managed table. Lance is a columnar format with

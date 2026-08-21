@@ -254,6 +254,7 @@ export default defineConfig({
           collapsed: true,
           items: [
             { text: 'Overview', link: '/docs/2.0.0-rc3/sql/' },
+            { text: 'Identifiers & Case', link: '/docs/2.0.0-rc3/sql/identifiers' },
             { text: 'SELECT', link: '/docs/2.0.0-rc3/sql/select' },
             { text: 'WHERE', link: '/docs/2.0.0-rc3/sql/where' },
             { text: 'GROUP BY', link: '/docs/2.0.0-rc3/sql/group-by' },
