@@ -66,4 +66,4 @@ LOCATION 'path/to/files'
 OPTIONS ('split_streams_slice' 'true')
 ```
 
-See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key.
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key.

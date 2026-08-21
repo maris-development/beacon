@@ -105,7 +105,7 @@ Pin the table to one snapshot:
 | --- | --- | --- | --- |
 | `snapshot_id` | Whole number | The current snapshot | An Iceberg snapshot id, for example `'3821550127947089060'`. |
 
-See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key.
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key.
 
 ```sql
 -- Read the table at one snapshot
@@ -168,7 +168,7 @@ GET /api/tables
 GET /api/table-schema?table_name=ocean_profiles
 ```
 
-The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-table#querying-and-inspecting)
+The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table#querying-and-inspecting)
 reference gives the SQL forms, `SHOW TABLES` and `DESCRIBE`.
 
 ## Remove an Iceberg table

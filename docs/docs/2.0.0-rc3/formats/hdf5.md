@@ -230,7 +230,7 @@ LOCATION 'acquisition/*.hdf5'
 OPTIONS ('convention' 'optodas', 'unify_phony_dimensions' 'false')
 ```
 
-See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key.
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key.
 
 ## On object storage
 

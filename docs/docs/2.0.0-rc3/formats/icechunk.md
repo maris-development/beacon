@@ -89,7 +89,7 @@ LOCATION 'sst/repo'
 OPTIONS ('tag' 'v1', 'read_dimensions' 'time,lat,lon');
 ```
 
-See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key.
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key.
 
 A table on a branch reads new data for each query. Beacon reads the branch tip again for each scan.
 A table on a tag or on a snapshot reads the same rows each time.

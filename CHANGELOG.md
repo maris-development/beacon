@@ -187,7 +187,7 @@ tag. Releases before 2.0.0 are recorded in the
 - **`CREATE EXTERNAL TABLE` did not document `OPTIONS`**
   ([#421](https://github.com/maris-development/beacon/issues/421)). The syntax block omitted the
   clause, and no page listed the keys of a format, so a reader had to open the Rust source. The
-  [create table page](docs/docs/2.0.0-rc3/sql/create-table.md#options) now holds the clause, the
+  [create external table page](docs/docs/2.0.0-rc3/sql/create-external-table.md#options) now holds the clause, the
   rules that apply to every key, and an index of the keys of each `STORED AS` value. Each format
   page holds a table of its own keys, with a type, a default and a description. The page for a
   format that reads no key says so. Two examples also spelled an option `OPTIONS ('convention' =

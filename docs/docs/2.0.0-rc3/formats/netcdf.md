@@ -108,5 +108,5 @@ LOCATION 'argo/**/*.nc'
 OPTIONS ('read_dimensions' 'time,latitude,longitude', 'use_rust_reader' 'false')
 ```
 
-See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key. See
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key. See
 [Arrays to tables](/docs/2.0.0-rc3/arrays-to-tables#the-dimensions-argument) for the grid rule.

@@ -23,9 +23,10 @@ also handles partitioned layouts. You write no DDL for each dataset.
 :::
 
 This page is a **setup guide** with an example for each format. The
-[`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-table) reference gives the full
+[`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table) reference gives the full
 statement grammar and every clause: `OR REPLACE`, `IF NOT EXISTS`, `PARTITIONED BY`, `OPTIONS` and
-`DROP TABLE`. [Keys of each format](/docs/2.0.0-rc3/sql/create-table#keys-of-each-format) lists the
+`DROP TABLE`.
+[Keys of each format](/docs/2.0.0-rc3/sql/create-external-table#keys-of-each-format) lists the
 `OPTIONS` keys that each `STORED AS` value reads.
 
 You can send the DDL through any SQL interface of Beacon:
@@ -216,7 +217,7 @@ The table is read only. See [Icechunk](/docs/2.0.0-rc3/formats/icechunk) for the
 Your files can use Hive-style partition directories such as `year=2024/month=01/...`. Declare the
 partition columns. Beacon can then prune them at query time. The directory names hold the values.
 The columns become normal queryable columns. See
-[`PARTITIONED BY`](/docs/2.0.0-rc3/sql/create-table#partitioned-by) for the syntax.
+[`PARTITIONED BY`](/docs/2.0.0-rc3/sql/create-external-table#partitioned-by) for the syntax.
 
 ## Remote tables
 
@@ -235,7 +236,7 @@ A view holds a persistent SQL query over any external table or table function. S
 ## Remove a table
 
 `DROP TABLE` removes an external table from the catalog. Beacon does **not** delete the files. See
-[`DROP TABLE`](/docs/2.0.0-rc3/sql/create-table#drop-table).
+[`DROP TABLE`](/docs/2.0.0-rc3/sql/create-external-table#drop-table).
 
 ## List and inspect tables
 
@@ -251,5 +252,5 @@ Inspect the columns and data types of a table:
 GET /api/table-schema?table_name=ocean_profiles
 ```
 
-The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-table#querying-and-inspecting)
+The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table#querying-and-inspecting)
 reference gives the SQL equivalents, `SHOW TABLES` and `DESCRIBE`.

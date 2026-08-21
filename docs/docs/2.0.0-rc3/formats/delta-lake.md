@@ -94,7 +94,7 @@ Pin the table to an older snapshot. Use **one** of these options:
 | `timestamp` | RFC-3339 timestamp | The latest committed version | Beacon takes the last version at or before it, for example `'2026-01-01T00:00:00Z'`. |
 
 `version` wins if you set both. See
-[`OPTIONS`](/docs/2.0.0-rc3/sql/create-table#options) for the rules that hold for every key.
+[`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key.
 
 ```sql
 -- Register the table as it looked at version 12
@@ -151,7 +151,7 @@ GET /api/tables
 GET /api/table-schema?table_name=ocean_profiles
 ```
 
-The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-table#querying-and-inspecting)
+The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table#querying-and-inspecting)
 reference gives the SQL equivalents, `SHOW TABLES` and `DESCRIBE`.
 
 ## Remove a Delta table
