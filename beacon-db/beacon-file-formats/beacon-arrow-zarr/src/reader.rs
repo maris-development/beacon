@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
+use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema};
 use beacon_nd_array::{
     NdArrayD,
     arrow::schema::any_dataset_to_arrow_schema,
@@ -72,6 +72,8 @@ pub async fn schema_from_group_path(
 
     let mut schemas = Vec::new();
     for leaf in leaves {
+        // The group path names the leaf, so a refused column names both leaves.
+        let leaf_path = leaf.path().as_str().to_string();
         let dataset = dataset_from_group(&leaf, None)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?;
@@ -79,7 +81,7 @@ pub async fn schema_from_group_path(
         let dataset = project_read_dimensions(dataset, read_dimensions.clone(), log_label)?;
         let schema = any_dataset_to_arrow_schema(&dataset)
             .map_err(|e| anyhow::anyhow!("Failed to derive Zarr Arrow schema: {e}"))?;
-        schemas.push(Arc::new(schema));
+        schemas.push(LabeledSchema::new(Arc::new(schema), leaf_path));
     }
 
     if schemas.is_empty() {

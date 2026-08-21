@@ -97,7 +97,9 @@ impl FileFormat for CountingFormat {
             return Ok(Arc::new(Schema::empty()));
         }
         beacon_datafusion_ext::type_widening::session_widening(state)
-            .merge_schemas(&schemas)
+            .merge_schemas(&beacon_datafusion_ext::type_widening::label_by_object(
+                objects, &schemas,
+            ))
             .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
     }
 
