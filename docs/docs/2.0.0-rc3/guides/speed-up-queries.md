@@ -49,7 +49,7 @@ interpret runs after the read. It therefore prunes nothing.
 
 - **Partition** the files Hive-style, for example `year=2024/month=01/`. Declare the partition
   columns with `PARTITIONED BY`. Beacon then skips whole directories. See
-  [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-table).
+  [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table).
 - **Do not use very many small files.** The cost of each file dominates. A merge into fewer files
   helps more than any change to a query.
 - **Use a cloud-optimized format** for data on object storage. See

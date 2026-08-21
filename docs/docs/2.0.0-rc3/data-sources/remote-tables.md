@@ -128,7 +128,7 @@ GET /api/tables
 GET /api/table-schema?table_name=remote_profiles
 ```
 
-The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-table#querying-and-inspecting)
+The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table#querying-and-inspecting)
 reference gives the SQL equivalents, `SHOW TABLES` and `DESCRIBE`.
 
 ## Remove a remote table

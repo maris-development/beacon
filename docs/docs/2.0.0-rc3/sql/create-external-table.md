@@ -10,6 +10,8 @@ An external table is a SQL table over files in the storage of Beacon. After you 
 query it with `SELECT` and `JOIN`. A `VIEW` can also reference it. Beacon reads the files on demand.
 It does not copy them. A table definition survives a restart.
 
+For a table that Beacon owns and writes, see [`CREATE TABLE`](/docs/2.0.0-rc3/sql/managed-tables).
+
 ## Syntax
 
 ```sql

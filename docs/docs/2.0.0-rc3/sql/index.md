@@ -34,7 +34,7 @@ SELECT * FROM read_netcdf(['argo/**/*.nc']) LIMIT 100
 ## Reference
 
 - Query: [SELECT](/docs/2.0.0-rc3/sql/select) · [WHERE](/docs/2.0.0-rc3/sql/where) · [GROUP BY](/docs/2.0.0-rc3/sql/group-by) · [JOIN](/docs/2.0.0-rc3/sql/join) · [UNION BY NAME](/docs/2.0.0-rc3/sql/union-by-name)
-- Tables and views: [CREATE TABLE](/docs/2.0.0-rc3/sql/create-table) · [CREATE VIEW](/docs/2.0.0-rc3/sql/create-view) · [CREATE MATERIALIZED VIEW](/docs/2.0.0-rc3/sql/create-materialized-view) · [Managed tables](/docs/2.0.0-rc3/sql/managed-tables) · [Remote tables and `ATTACH`](/docs/2.0.0-rc3/sql/remote-tables)
+- Tables and views: [CREATE TABLE](/docs/2.0.0-rc3/sql/managed-tables) · [CREATE EXTERNAL TABLE](/docs/2.0.0-rc3/sql/create-external-table) · [CREATE VIEW](/docs/2.0.0-rc3/sql/create-view) · [CREATE MATERIALIZED VIEW](/docs/2.0.0-rc3/sql/create-materialized-view) · [Remote tables and `ATTACH`](/docs/2.0.0-rc3/sql/remote-tables)
 - Functions: [Table functions](/docs/2.0.0-rc3/sql/table-functions) · [Utility table functions](/docs/2.0.0-rc3/sql/table-functions-utility) · [Function reference](/docs/2.0.0-rc3/sql/function-reference) · [Spatial functions](/docs/2.0.0-rc3/sql/spatial-functions)
 - Secrets and profiles: [`CREATE SECRET`](/docs/2.0.0-rc3/sql/secrets) · [`SUMMARIZE`](/docs/2.0.0-rc3/sql/summarize)
 
