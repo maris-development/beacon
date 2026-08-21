@@ -38,6 +38,13 @@ const GRIDDED_FILE: &str = "gridded-example.nc";
 const NESTED_FILE: &str = "nested-groups.h5";
 /// Plain HDF5: one compound dataset.
 const COMPOUND_FILE: &str = "compound.h5";
+/// Plain HDF5 in the ASN OptoDAS layout: the same shape as [`INSTRUMENT_FILE`],
+/// plus the metadata that layout records about itself.
+const OPTODAS_FILE: &str = "optodas.h5";
+/// Plain HDF5 shaped like an instrument file: a payload of two axes in the root
+/// group, a description of each channel in a second group, and metadata that
+/// outnumbers both. See `test_files/generate.py`.
+const INSTRUMENT_FILE: &str = "instrument.h5";
 
 /// Which reader a table reads through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,6 +495,415 @@ async fn a_nested_group_reads_end_to_end() {
     assert_eq!(batch.num_columns(), 3);
 }
 
+/// A dataset of one group carries the rows of a dataset of another.
+///
+/// [`oxcdf`] names the axes of one group apart from those of another, so the
+/// two would not broadcast on the names it gives. Beacon renames every invented
+/// dimension by its length, so `station_id` of the root group repeats once for
+/// each sample of `observations/temperature`, which is two groups away.
+#[tokio::test]
+async fn a_root_dataset_aligns_with_a_nested_one() {
+    let ctx = session();
+    register(&ctx, "nested", Backend::Rust, &hdf5_file(NESTED_FILE)).await;
+
+    let batch = collect(
+        &ctx,
+        r#"SELECT station_id, "observations/temperature", "observations/qc/flag"
+           FROM nested ORDER BY station_id, "observations/temperature""#,
+    )
+    .await;
+
+    let station = arrow::array::as_primitive_array::<arrow::datatypes::Int32Type>(batch.column(0));
+    let temperature =
+        arrow::array::as_primitive_array::<arrow::datatypes::Float32Type>(batch.column(1));
+    let flag = arrow::array::as_primitive_array::<arrow::datatypes::Int8Type>(batch.column(2));
+
+    // The fixture holds stations 11, 22 and 33, and counts up over the samples.
+    let stations: Vec<i32> = (0..batch.num_rows())
+        .map(|row| station.value(row))
+        .collect();
+    assert_eq!(
+        stations,
+        vec![11, 11, 11, 11, 22, 22, 22, 22, 33, 33, 33, 33],
+        "each station holds its own four samples"
+    );
+    let temperatures: Vec<f32> = (0..batch.num_rows())
+        .map(|row| temperature.value(row))
+        .collect();
+    assert_eq!(
+        temperatures,
+        (0..12).map(|v| v as f32).collect::<Vec<f32>>(),
+        "the samples of one station are the four the file gives it"
+    );
+    // The nested group of the nested group lines up the same way.
+    let flags: Vec<i8> = (0..batch.num_rows()).map(|row| flag.value(row)).collect();
+    assert_eq!(flags, (0..12).map(|v| v as i8).collect::<Vec<i8>>());
+}
+
+/// An instrument file reads on the grid of its payload.
+///
+/// The file names no dimension, so every grid is a candidate. The metadata of
+/// `instrument` holds six variables on one axis and the payload holds one, so a
+/// grid chosen by variable count picks the metadata and drops the payload. The
+/// payload is what the file is for, and it is 24 cells against 3.
+#[tokio::test]
+async fn an_instrument_file_defaults_to_the_grid_of_its_payload() {
+    let ctx = session();
+    register(
+        &ctx,
+        "instrument",
+        Backend::Rust,
+        &hdf5_file(INSTRUMENT_FILE),
+    )
+    .await;
+
+    let batch = collect(&ctx, "SELECT count(*) AS rows FROM instrument").await;
+    let rows = arrow::array::as_primitive_array::<arrow::datatypes::Int64Type>(batch.column(0));
+    assert_eq!(rows.value(0), 24, "6 samples x 4 channels");
+}
+
+/// The description of each channel lines up with the payload, two groups away.
+///
+/// `header/channels` counts 0, 4, 8, 12 and `sweep/coeffs` counts 0.1 to 0.4.
+/// Both are 4 long, in two groups neither of which holds the payload, and both
+/// follow the payload's second axis.
+#[tokio::test]
+async fn a_channel_description_lines_up_with_the_payload() {
+    let ctx = session();
+    register(
+        &ctx,
+        "instrument",
+        Backend::Rust,
+        &hdf5_file(INSTRUMENT_FILE),
+    )
+    .await;
+
+    let batch = collect(
+        &ctx,
+        r#"SELECT "data", "header/channels", "header/distances", "sweep/coeffs", "header/dt"
+           FROM instrument ORDER BY "data" LIMIT 8"#,
+    )
+    .await;
+
+    let value = arrow::array::as_primitive_array::<arrow::datatypes::Int16Type>(batch.column(0));
+    let channels = arrow::array::as_primitive_array::<arrow::datatypes::Int32Type>(batch.column(1));
+    let distances =
+        arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(batch.column(2));
+    let coefficients =
+        arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(batch.column(3));
+    let dt = arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(batch.column(4));
+
+    // The payload counts up over its 4 channels, so the channel columns repeat
+    // once for each sample.
+    let read = |array: &arrow::array::Int32Array| -> Vec<i32> {
+        (0..batch.num_rows()).map(|row| array.value(row)).collect()
+    };
+    assert_eq!(
+        (0..8).map(|row| value.value(row)).collect::<Vec<i16>>(),
+        (0..8).collect::<Vec<i16>>()
+    );
+    assert_eq!(read(channels), vec![0, 4, 8, 12, 0, 4, 8, 12]);
+    assert_eq!(
+        (0..8).map(|row| distances.value(row)).collect::<Vec<f64>>(),
+        vec![0.0, 1.5, 3.0, 4.5, 0.0, 1.5, 3.0, 4.5]
+    );
+    // `sweep/coeffs` counts something else entirely, and is 4 long. Beacon
+    // unifies an invented axis by length alone, so it follows the channels.
+    // This is the trade-off that unification takes; the test states it.
+    assert_eq!(
+        (0..4)
+            .map(|row| coefficients.value(row))
+            .collect::<Vec<f64>>(),
+        vec![0.1, 0.2, 0.3, 0.4]
+    );
+    // A scalar reaches every row.
+    assert_eq!(dt.value(0), 0.008);
+    assert_eq!(dt.value(7), 0.008);
+}
+
+/// A variable off the default grid is not in the table, and an explicit
+/// dimension list is how to reach it.
+#[tokio::test]
+async fn the_metadata_grid_needs_an_explicit_dimension_list() {
+    let ctx = session();
+    register(
+        &ctx,
+        "instrument",
+        Backend::Rust,
+        &hdf5_file(INSTRUMENT_FILE),
+    )
+    .await;
+
+    let columns: Vec<String> = ctx
+        .table("instrument")
+        .await
+        .unwrap()
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    assert!(columns.contains(&"data".to_string()), "{columns:?}");
+    assert!(
+        columns.contains(&"header/channels".to_string()),
+        "{columns:?}"
+    );
+    // 3 long, and the payload grid holds no axis of that length.
+    assert!(
+        !columns.contains(&"instrument/gains".to_string()),
+        "{columns:?}"
+    );
+
+    // The same file on the metadata grid.
+    let ctx = session();
+    let listing = Arc::new(ListingFactory::dynamic());
+    let path = hdf5_file(INSTRUMENT_FILE);
+    let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
+    let format = factory(Backend::Rust)
+        .create_with_native_root(
+            &ctx.state(),
+            &HashMap::from([
+                ("use_rust_reader".to_string(), "true".to_string()),
+                ("read_dimensions".to_string(), "phony_len_3".to_string()),
+            ]),
+            &url,
+            &listing,
+        )
+        .unwrap();
+    let table = FastObjectTable::try_new(&ctx.state(), format, vec![url])
+        .await
+        .unwrap();
+    ctx.register_table("metadata", Arc::new(table)).unwrap();
+
+    let batch = collect(&ctx, r#"SELECT "instrument/gains" FROM metadata"#).await;
+    assert_eq!(batch.num_rows(), 3);
+}
+
+/// Both backends invent the same dimension names for a plain HDF5 file.
+///
+/// netcdf-c reads the root group alone, so the payload is all the two share.
+/// The names have to agree there, or a table would change its dimensions when
+/// the reader changes.
+#[tokio::test]
+async fn both_backends_name_the_axes_of_a_plain_file_the_same() {
+    let ctx = session();
+    register(
+        &ctx,
+        "netcdf_c",
+        Backend::NetcdfC,
+        &hdf5_file(INSTRUMENT_FILE),
+    )
+    .await;
+    register(&ctx, "rust", Backend::Rust, &hdf5_file(INSTRUMENT_FILE)).await;
+
+    let netcdf_c = collect(&ctx, r#"SELECT "data" FROM netcdf_c ORDER BY "data""#).await;
+    let rust = collect(&ctx, r#"SELECT "data" FROM rust ORDER BY "data""#).await;
+    assert_eq!(netcdf_c.num_rows(), 24);
+    assert_eq!(
+        netcdf_c, rust,
+        "the payload reads the same on both backends"
+    );
+
+    // The dimension names themselves, which no query shows.
+    let arrays = beacon_arrow_netcdf::reader::read_arrays(hdf5_file(INSTRUMENT_FILE))
+        .expect("netcdf-c opens a plain HDF5 file");
+    assert_eq!(
+        arrays["data"].dimensions(),
+        vec!["phony_len_6".to_string(), "phony_len_4".to_string()],
+    );
+}
+
+// ─── The OptoDAS convention ─────────────────────────────────────────────────
+
+/// Register `path` as a table that reads with the OptoDAS convention.
+async fn register_optodas(ctx: &SessionContext, table: &str, path: &std::path::Path) {
+    let listing = Arc::new(ListingFactory::dynamic());
+    let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
+    let format = factory(Backend::Rust)
+        .create_with_native_root(
+            &ctx.state(),
+            &HashMap::from([
+                ("use_rust_reader".to_string(), "true".to_string()),
+                ("convention".to_string(), "optodas".to_string()),
+            ]),
+            &url,
+            &listing,
+        )
+        .unwrap();
+    let table_provider = FastObjectTable::try_new(&ctx.state(), format, vec![url])
+        .await
+        .unwrap();
+    ctx.register_table(table, Arc::new(table_provider)).unwrap();
+}
+
+/// The convention is opt-in, and the default reads the container alone.
+///
+/// This is the test that keeps the layer honest: the same file, read twice,
+/// with and without the option.
+#[tokio::test]
+async fn the_convention_is_off_unless_a_table_asks_for_it() {
+    let ctx = session();
+    register(&ctx, "plain", Backend::Rust, &hdf5_file(OPTODAS_FILE)).await;
+    register_optodas(&ctx, "das", &hdf5_file(OPTODAS_FILE)).await;
+
+    let plain: Vec<String> = ctx
+        .table("plain")
+        .await
+        .unwrap()
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    // No convention: no coordinate is invented, and the payload is what the
+    // file stores.
+    assert!(!plain.contains(&"time".to_string()), "{plain:?}");
+    assert!(!plain.contains(&"distance".to_string()), "{plain:?}");
+    let counts = collect(&ctx, r#"SELECT "data" FROM plain ORDER BY "data" LIMIT 4"#).await;
+    let raw = arrow::array::as_primitive_array::<arrow::datatypes::Int16Type>(counts.column(0));
+    assert_eq!(
+        (0..4).map(|row| raw.value(row)).collect::<Vec<i16>>(),
+        vec![0, 1, 2, 3],
+        "the payload stays the counts the file holds"
+    );
+
+    let das: Vec<String> = ctx
+        .table("das")
+        .await
+        .unwrap()
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    assert!(das.contains(&"time".to_string()), "{das:?}");
+    assert!(das.contains(&"distance".to_string()), "{das:?}");
+}
+
+/// The convention names the axes, so the payload and the coordinates land on
+/// one grid and one query reads them together.
+#[tokio::test]
+async fn the_convention_gives_the_payload_its_coordinates() {
+    let ctx = session();
+    register_optodas(&ctx, "das", &hdf5_file(OPTODAS_FILE)).await;
+
+    let batch = collect(
+        &ctx,
+        r#"SELECT time, distance, "data" FROM das ORDER BY time, distance LIMIT 8"#,
+    )
+    .await;
+    assert_eq!(batch.num_rows(), 8);
+
+    let time = arrow::array::as_primitive_array::<arrow::datatypes::TimestampNanosecondType>(
+        batch.column(0),
+    );
+    let distance =
+        arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(batch.column(1));
+    let payload =
+        arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(batch.column(2));
+
+    // 2026-03-28T12:00:00Z, 125 Hz: the first four rows are one sample.
+    let start = 1_774_699_200_000_000_000i64;
+    assert_eq!(
+        (0..8).map(|row| time.value(row)).collect::<Vec<i64>>(),
+        vec![start; 4]
+            .into_iter()
+            .chain(vec![start + 8_000_000; 4])
+            .collect::<Vec<i64>>()
+    );
+    // 4 raw channels apart, 1.25 m each, repeating once per sample.
+    assert_eq!(
+        (0..8).map(|row| distance.value(row)).collect::<Vec<f64>>(),
+        vec![0.0, 5.0, 10.0, 15.0, 0.0, 5.0, 10.0, 15.0]
+    );
+    // The counts run 0, 1, 2 … and the scale is 0.5.
+    assert_eq!(
+        (0..8).map(|row| payload.value(row)).collect::<Vec<f64>>(),
+        (0..8).map(|count| count as f64 * 0.5).collect::<Vec<f64>>()
+    );
+}
+
+/// A predicate on a coordinate reaches the scan, which is why the coordinates
+/// are arrays of the dataset rather than an expression above it.
+///
+/// The rows are counted here rather than asked for with `count(*)`. A `count(*)`
+/// under a predicate pushes a projection of the predicate column alone, and the
+/// grid then follows that column rather than the table. That is a defect of the
+/// nd read path, it predates every convention, and it is filed separately.
+#[tokio::test]
+async fn a_coordinate_filters_the_rows() {
+    let ctx = session();
+    register_optodas(&ctx, "das", &hdf5_file(OPTODAS_FILE)).await;
+
+    let batch = collect(
+        &ctx,
+        r#"SELECT time, distance, "data" FROM das WHERE distance > 7.0 ORDER BY time, distance"#,
+    )
+    .await;
+    // Two of the four positions, over every one of the six samples.
+    assert_eq!(batch.num_rows(), 12);
+
+    let distance =
+        arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(batch.column(1));
+    assert!(
+        (0..batch.num_rows()).all(|row| distance.value(row) > 7.0),
+        "every row the scan keeps satisfies the predicate"
+    );
+    assert_eq!(distance.value(0), 10.0);
+    assert_eq!(distance.value(1), 15.0);
+}
+
+/// A file the convention does not recognise reads plainly rather than failing.
+///
+/// An archive holds files of every kind, and one scan reads them all.
+#[tokio::test]
+async fn a_file_of_another_layout_still_reads() {
+    let ctx = session();
+    register_optodas(&ctx, "mixed", &hdf5_file(INSTRUMENT_FILE)).await;
+
+    let batch = collect(&ctx, "SELECT count(*) AS rows FROM mixed").await;
+    let rows = arrow::array::as_primitive_array::<arrow::datatypes::Int64Type>(batch.column(0));
+    assert_eq!(
+        rows.value(0),
+        24,
+        "the file reads as it does with no convention"
+    );
+}
+
+/// A file that names its dimensions keeps every one of them.
+///
+/// The unification and the grid rule both turn on what a reader invented. A
+/// NetCDF-4 file names every axis, so it invents nothing, and neither rule
+/// touches the file. This holds the line.
+#[tokio::test]
+async fn a_netcdf_file_keeps_the_dimension_names_it_carries() {
+    for file in [GRIDDED_FILE, WOD_FILE] {
+        let path = netcdf_file(file);
+        let store: Arc<dyn object_store::ObjectStore> = Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(path.parent().unwrap()).unwrap(),
+        );
+        let dataset = beacon_arrow_hdf5::reader::open_dataset(
+            store,
+            object_store::path::Path::from(file),
+            beacon_arrow_hdf5::ReadOptions::default(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("open {file}: {e}"));
+
+        assert!(
+            dataset.dataset().invented_dimensions.is_empty(),
+            "{file} names every dimension, so the reader invents none"
+        );
+        let invented: Vec<&String> = dataset
+            .dataset()
+            .dimensions
+            .keys()
+            .filter(|name| name.starts_with("phony_"))
+            .collect();
+        assert!(invented.is_empty(), "{file} carries {invented:?}");
+    }
+}
+
 /// A compound dataset becomes one column per member. netcdf-c reports neither
 /// the dataset nor an error for it.
 #[tokio::test]
@@ -521,9 +937,13 @@ async fn an_object_reads_with_no_local_copy() {
     let bytes = std::fs::read(hdf5_file(NESTED_FILE)).unwrap();
     store.put(&path, bytes.into()).await.unwrap();
 
-    let dataset = beacon_arrow_hdf5::reader::open_dataset(store, path)
-        .await
-        .expect("an in-memory object opens with no local file");
+    let dataset = beacon_arrow_hdf5::reader::open_dataset(
+        store,
+        path,
+        beacon_arrow_hdf5::ReadOptions::default(),
+    )
+    .await
+    .expect("an in-memory object opens with no local file");
     assert!(dataset.get_array("observations/temperature").is_some());
     assert!(dataset.get_array("observations/qc/flag").is_some());
 }

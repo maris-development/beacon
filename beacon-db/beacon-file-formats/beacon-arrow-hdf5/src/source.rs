@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use crate::ReadOptions;
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
@@ -45,6 +46,9 @@ pub struct Hdf5Source {
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     read_dimensions: Option<Vec<String>>,
+    /// How this table reads one file: the naming of the invented dimensions,
+    /// and the layout convention. See [`crate::ReadOptions`].
+    read_options: ReadOptions,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// Projection pushed down by the scan, applied on top of the table schema.
@@ -55,12 +59,17 @@ pub struct Hdf5Source {
 }
 
 impl Hdf5Source {
-    pub fn new(read_dimensions: Option<Vec<String>>, table_schema: TableSchema) -> Self {
+    pub fn new(
+        read_dimensions: Option<Vec<String>>,
+        read_options: ReadOptions,
+        table_schema: TableSchema,
+    ) -> Self {
         Self {
             schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             read_dimensions,
+            read_options,
             batch_size: usize::MAX,
             predicate: None,
             projection: None,
@@ -89,6 +98,7 @@ impl FileSource for Hdf5Source {
         Ok(Arc::new(Hdf5Opener::new(
             projected_schema,
             self.read_dimensions.clone(),
+            self.read_options,
             self.batch_size,
             self.predicate.clone(),
             self.execution_plan_metrics.clone(),
@@ -239,6 +249,7 @@ impl FileSource for Hdf5Source {
 struct Hdf5Opener {
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
+    read_options: ReadOptions,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// This partition's counters, registered once. See [`ReadMetrics::new`].
@@ -261,6 +272,7 @@ struct Hdf5Files {
     object_store: Arc<dyn ObjectStore>,
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
+    read_options: ReadOptions,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
@@ -279,6 +291,7 @@ impl OpenFile for Hdf5Files {
             self.object_store.clone(),
             file.object_meta.clone(),
             self.read_dimensions.clone(),
+            self.read_options,
         )
         .await?;
 
@@ -298,6 +311,7 @@ impl Hdf5Opener {
     fn new(
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
+        read_options: ReadOptions,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ExecutionPlanMetricsSet,
@@ -310,6 +324,7 @@ impl Hdf5Opener {
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
             read_dimensions: read_dimensions.clone(),
+            read_options,
             batch_size,
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
@@ -320,6 +335,7 @@ impl Hdf5Opener {
             files,
             projected_schema,
             read_dimensions,
+            read_options,
             batch_size,
             predicate,
             read_metrics,
@@ -345,13 +361,14 @@ impl Hdf5Opener {
         object: ObjectMeta,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
+        read_options: ReadOptions,
         batch_size: usize,
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
-            let dataset = Self::open_dataset(store, object, read_dimensions).await?;
+            let dataset = Self::open_dataset(store, object, read_dimensions, read_options).await?;
             FileRead::plan(
                 dataset,
                 projected_schema,
@@ -375,8 +392,9 @@ impl Hdf5Opener {
         store: Arc<dyn ObjectStore>,
         object: ObjectMeta,
         read_dimensions: Option<Vec<String>>,
+        read_options: ReadOptions,
     ) -> datafusion::error::Result<beacon_nd_array::dataset::AnyDataset> {
-        let dataset = crate::open::open_dataset(&store, &object)
+        let dataset = crate::open::open_dataset(&store, &object, read_options)
             .await
             .map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -431,6 +449,7 @@ impl FileOpener for Hdf5Opener {
             file.object_meta,
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
+            self.read_options,
             self.batch_size,
             metrics,
             self.predicate.clone(),

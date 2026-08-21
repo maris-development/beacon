@@ -13,6 +13,7 @@ use crate::{
         strings::StringVariableDecoder,
         DefaultVariableDecoder,
     },
+    dimensions::PhonyDimensions,
     NcChar,
 };
 
@@ -218,10 +219,15 @@ pub fn attribute_to_nd_array(
 /// - NetCDF string variables.
 /// - Char arrays with trailing string-length dimensions.
 /// - `_FillValue` for supported numeric and string types.
+///
+/// `phony` renames the dimensions netcdf-c invented for a file that names none,
+/// so this reader reports what the [`oxcdf`](crate::oxcdf) one reports. Pass
+/// [`PhonyDimensions::none`] to keep the names netcdf-c gave.
 pub fn variable_to_nd_array(
     nc_file: Arc<netcdf::File>,
     variable_name: &str,
     attributes: HashMap<String, AttributeValue>,
+    phony: &PhonyDimensions,
 ) -> anyhow::Result<Arc<dyn NdArrayD>> {
     let var = nc_file
         .variable(variable_name)
@@ -231,11 +237,12 @@ pub fn variable_to_nd_array(
         .iter()
         .map(|dim| dim.len())
         .collect::<Vec<_>>();
-    let dimensions = var
-        .dimensions()
-        .iter()
-        .map(|dim| dim.name())
-        .collect::<Vec<_>>();
+    let dimensions = phony.apply(
+        &var.dimensions()
+            .iter()
+            .map(|dim| dim.name())
+            .collect::<Vec<_>>(),
+    );
     let var_type = var.vartype();
 
     // The optional CF `calendar` attribute selects how the reference date is

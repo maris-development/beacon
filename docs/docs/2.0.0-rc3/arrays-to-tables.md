@@ -159,7 +159,24 @@ the variable dimension set that, in order:
 4. holds the largest data volume,
 5. was seen first.
 
-Each variable that remains then broadcasts safely. Beacon writes one `info` line. The line names
+Each variable that remains then broadcasts safely.
+
+### A file that names no dimension
+
+A plain HDF5 file carries no dimension scale, so it names no axis at all. Rule 2 then says the
+opposite of what it says above: an instrument writes one payload and hundreds of small metadata
+variables around it, so the count picks a grid of the metadata and drops the payload.
+
+For such a file, and only for such a file, Beacon moves the volume to the front:
+
+1. is non-empty,
+2. holds the largest data volume,
+3. keeps the most variables,
+4. is the native dimension set of the most variables,
+5. was seen first.
+
+One real dimension name is enough to restore the order above. Every NetCDF and Zarr file names its
+dimensions, so none of them moves. Beacon writes one `info` line. The line names
 the variables that it dropped:
 
 ```text

@@ -13,6 +13,11 @@ rust-version.workspace = true
 static = ["netcdf/static", "netcdf-sys/static"]
 
 [dependencies]
+# The `ndarray` requirement of this fork is `>=0.15,<=0.17`, and `lance-index`
+# holds 0.16 in the same graph. A full re-resolve can therefore move this crate
+# onto 0.16 while the workspace stays on 0.17, and the writer below then fails
+# to compile. `Cargo.lock` pins it to 0.17.2. Edit that entry by hand rather
+# than re-resolve, until the fork narrows its own requirement.
 netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["ndarray"], version = "0.11.1"}
 netcdf-sys = { git ="https://github.com/robinskil/netcdf.git", package = "netcdf-sys" }
 # The second reader. It is always compiled; the format picks between the two at

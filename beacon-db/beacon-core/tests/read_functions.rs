@@ -45,6 +45,13 @@ fn seed(rt: TestRuntime) -> TestRuntime {
         .expect("copy netcdf fixture as hdf5");
     std::fs::copy(nested_hdf5_fixture(), rt.datasets_dir().join("nested.h5"))
         .expect("copy nested hdf5 fixture");
+    std::fs::copy(
+        instrument_hdf5_fixture(),
+        rt.datasets_dir().join("instrument.h5"),
+    )
+    .expect("copy instrument hdf5 fixture");
+    std::fs::copy(optodas_hdf5_fixture(), rt.datasets_dir().join("optodas.h5"))
+        .expect("copy optodas hdf5 fixture");
     rt
 }
 
@@ -62,6 +69,25 @@ fn netcdf_fixture() -> std::path::PathBuf {
         .parent()
         .unwrap()
         .join("beacon-file-formats/beacon-arrow-netcdf/test_files/wod_ctd_1964.nc")
+}
+
+/// A plain HDF5 fixture shaped like an instrument file: a payload of two axes
+/// in the root group, a description of each channel in a second group, and
+/// metadata that outnumbers both.
+fn instrument_hdf5_fixture() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("beacon-file-formats/beacon-arrow-hdf5/test_files/instrument.h5")
+}
+
+/// A plain HDF5 fixture in the ASN OptoDAS layout: the instrument fixture plus
+/// the metadata that layout records about itself.
+fn optodas_hdf5_fixture() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("beacon-file-formats/beacon-arrow-hdf5/test_files/optodas.h5")
 }
 
 /// A plain HDF5 fixture, shipped with the HDF5 reader: no netCDF convention,
@@ -177,10 +203,11 @@ async fn read_hdf5_reaches_a_nested_group_on_the_rust_reader() {
 async fn read_hdf5_takes_a_dimensions_argument() {
     let rt = seeded_with_rust_hdf5("read-hdf5-dimensions").await;
 
-    // `nested.h5` carries no dimension scales, so its axes are phony. The 1-d
-    // dataset lives on the first axis alone; the 2-d ones need both.
+    // `nested.h5` carries no dimension scales, so its axes are the ones netCDF
+    // invents. Beacon names each by its length, over every group of the file.
+    // The 1-d dataset lives on the 3-long axis alone; the 2-d ones need both.
     let narrowed = rt
-        .sql("SELECT * FROM read_hdf5(['nested.h5'], ['phony_dim_0'])")
+        .sql("SELECT * FROM read_hdf5(['nested.h5'], ['phony_len_3'])")
         .await;
     let columns: Vec<String> = narrowed[0]
         .schema()
@@ -220,6 +247,127 @@ async fn read_hdf5_schema_lists_the_nested_columns() {
         names.contains(&"observations/qc/flag".to_string()),
         "{names:?}"
     );
+}
+
+/// `SELECT *` over an instrument file lands on the payload, not on the
+/// metadata that outnumbers it.
+///
+/// The file names no dimension, so beacon picks the grid by volume. The
+/// payload holds 24 cells and the largest metadata grid holds 3.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_hdf5_defaults_to_the_payload_grid_of_an_instrument_file() {
+    let rt = seeded_with_rust_hdf5("read-hdf5-instrument").await;
+
+    assert_eq!(
+        scalar_i64(
+            &rt.sql("SELECT count(*) FROM read_hdf5('instrument.h5')")
+                .await
+        ),
+        24,
+        "6 samples x 4 channels"
+    );
+
+    let schema = rt
+        .sql("SELECT column_name FROM read_hdf5_schema('instrument.h5')")
+        .await;
+    let names = common::column_strings(&schema, 0);
+    assert!(names.contains(&"data".to_string()), "{names:?}");
+    assert!(names.contains(&"header/channels".to_string()), "{names:?}");
+}
+
+/// One query reads the payload of one group and the description of another.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_hdf5_joins_two_groups_of_one_file() {
+    let rt = seeded_with_rust_hdf5("read-hdf5-groups").await;
+
+    let rows = rt
+        .sql(
+            r#"SELECT "data", "header/channels", "header/dt"
+               FROM read_hdf5('instrument.h5') ORDER BY "data" LIMIT 4"#,
+        )
+        .await;
+    assert_eq!(total_rows(&rows), 4);
+
+    let batch = &rows[0];
+    let payload = arrow::array::as_primitive_array::<arrow::datatypes::Int16Type>(batch.column(0));
+    let channels = arrow::array::as_primitive_array::<arrow::datatypes::Int32Type>(batch.column(1));
+    let dt = arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(batch.column(2));
+
+    // The first sample holds all four channels, in order.
+    assert_eq!(
+        (0..4).map(|row| payload.value(row)).collect::<Vec<i16>>(),
+        vec![0, 1, 2, 3]
+    );
+    assert_eq!(
+        (0..4).map(|row| channels.value(row)).collect::<Vec<i32>>(),
+        vec![0, 4, 8, 12]
+    );
+    // A scalar of a group reaches every row.
+    assert_eq!(dt.value(0), 0.008);
+}
+
+/// The dimensions argument reaches a grid the default leaves out.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_hdf5_reaches_the_metadata_grid_with_a_dimensions_argument() {
+    let rt = seeded_with_rust_hdf5("read-hdf5-metadata-grid").await;
+
+    let rows = rt
+        .sql(r#"SELECT "instrument/gains" FROM read_hdf5(['instrument.h5'], ['phony_len_3'])"#)
+        .await;
+    assert_eq!(total_rows(&rows), 3, "the metadata grid is 3 long");
+}
+
+/// `read_hdf5` takes the convention as its third argument, and reads the
+/// container alone without it.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_hdf5_takes_a_convention_argument() {
+    let rt = seeded_with_rust_hdf5("read-hdf5-convention").await;
+
+    // No convention: the file holds no `time` column, so naming one is an error.
+    assert!(
+        rt.try_sql("SELECT time FROM read_hdf5('optodas.h5')")
+            .await
+            .is_err(),
+        "the container alone holds no 'time' column"
+    );
+
+    // With it, the coordinates the file describes are columns.
+    let rows = rt
+        .sql(
+            r#"SELECT time, distance, "data"
+               FROM read_hdf5('optodas.h5', NULL, 'optodas')
+               ORDER BY time, distance LIMIT 4"#,
+        )
+        .await;
+    assert_eq!(total_rows(&rows), 4);
+
+    let batch = &rows[0];
+    let distance =
+        arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(batch.column(1));
+    let payload =
+        arrow::array::as_primitive_array::<arrow::datatypes::Float64Type>(batch.column(2));
+    // 4 raw channels apart, 1.25 m each, and counts scaled by 0.5.
+    assert_eq!(
+        (0..4).map(|row| distance.value(row)).collect::<Vec<f64>>(),
+        vec![0.0, 5.0, 10.0, 15.0]
+    );
+    assert_eq!(
+        (0..4).map(|row| payload.value(row)).collect::<Vec<f64>>(),
+        vec![0.0, 0.5, 1.0, 1.5]
+    );
+}
+
+/// An unknown convention is refused by name, at plan time.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_hdf5_refuses_a_convention_it_does_not_know() {
+    let rt = seeded_with_rust_hdf5("read-hdf5-bad-convention").await;
+
+    let error = rt
+        .try_sql("SELECT * FROM read_hdf5('optodas.h5', NULL, 'nope')")
+        .await
+        .err()
+        .expect("an unknown convention is an error");
+    assert!(error.to_string().contains("nope"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

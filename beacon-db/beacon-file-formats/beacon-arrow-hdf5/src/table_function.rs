@@ -83,6 +83,7 @@ impl BeaconTableFunctionImpl for ReadHdf5Func {
                 DataType::List(Arc::new(Field::new("dimension", DataType::Utf8, false))),
                 true,
             ),
+            Field::new("convention", DataType::Utf8, true),
         ])
     }
 }
@@ -126,6 +127,7 @@ impl TableFunctionImpl for ReadHdf5Func {
             })?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_hdf5")?;
         let dimensions = parse_dimensions_arg(args)?;
+        let convention = parse_convention_arg(args)?;
 
         let listing_urls = glob_paths
             .iter()
@@ -137,12 +139,15 @@ impl TableFunctionImpl for ReadHdf5Func {
 
         // Build the file format from the factory registered on the session, so
         // the table function shares the runtime's configured format. Per-call
-        // settings (read dimensions) are passed as table options. No native
-        // root: this reader reads through the object store, so an s3, gs or az
-        // path works.
+        // settings (read dimensions, the convention) are passed as table
+        // options. No native root: this reader reads through the object store,
+        // so an s3, gs or az path works.
         let mut format_options: HashMap<String, String> = HashMap::new();
         if !dimensions.is_empty() {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));
+        }
+        if let Some(convention) = convention {
+            format_options.insert("convention".to_string(), convention);
         }
         let file_format = hdf5_factory.create(&state, &format_options)?;
 
@@ -153,6 +158,26 @@ impl TableFunctionImpl for ReadHdf5Func {
         })?;
 
         Ok(Arc::new(fast_object_table))
+    }
+}
+
+/// The optional third argument: the layout convention to read.
+///
+/// The second argument holds the dimensions, so a call that wants a convention
+/// and no dimensions passes `NULL` for that slot:
+/// `read_hdf5('das/*.h5', NULL, 'optodas')`.
+fn parse_convention_arg(args: &[Expr]) -> datafusion::error::Result<Option<String>> {
+    match args.get(2) {
+        None => Ok(None),
+        Some(Expr::Literal(ScalarValue::Null, _)) => Ok(None),
+        Some(Expr::Literal(ScalarValue::Utf8(None) | ScalarValue::Utf8View(None), _)) => Ok(None),
+        Some(Expr::Literal(
+            ScalarValue::Utf8(Some(name)) | ScalarValue::Utf8View(Some(name)),
+            _,
+        )) => Ok(Some(name.clone())),
+        Some(_) => {
+            plan_err!("read_hdf5 third argument must be a convention name, such as 'optodas'")
+        }
     }
 }
 
