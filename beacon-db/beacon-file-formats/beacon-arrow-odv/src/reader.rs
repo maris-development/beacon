@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io::Read, sync::Arc, task::Poll};
 
 use arrow::{
-    array::{RecordBatch, StringArray},
+    array::{RecordBatch, RecordBatchOptions, StringArray},
     datatypes::{DataType, Field, SchemaRef},
     error::ArrowError,
 };
@@ -104,28 +104,12 @@ impl OdvSchemaMapper {
         batch: RecordBatch,
         projection: Option<Arc<[usize]>>,
     ) -> Result<RecordBatch, ArrowError> {
-        let mut schema = self.output_schema.clone();
-        let mut arrays = batch.columns().to_vec();
-        for (_, value) in self.metadata_fields.iter() {
-            let array = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
-                value.clone(),
-                batch.num_rows(),
-            )));
-
-            arrays.push(array);
-        }
-
-        //Apply the projection
-        if let Some(projection) = projection {
-            let projection = projection.as_ref();
-            arrays = projection
-                .iter()
-                .map(|&idx| arrays[idx].clone())
-                .collect::<Vec<_>>();
-            schema = Arc::new(schema.project(projection)?);
-        }
-
-        RecordBatch::try_new(schema, arrays)
+        AsyncOdvDecoder::decode_batch(
+            self.output_schema.clone(),
+            &self.metadata_fields,
+            projection,
+            batch,
+        )
     }
 }
 
@@ -360,11 +344,12 @@ impl AsyncOdvDecoder {
         batch: RecordBatch,
     ) -> Result<RecordBatch, ArrowError> {
         let mut schema = output_schema;
+        let rows = batch.num_rows();
         let mut arrays = batch.columns().to_vec();
         for (_, value) in metadata_fields.iter() {
             let array = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
                 value.clone(),
-                batch.num_rows(),
+                rows,
             )));
 
             arrays.push(array);
@@ -380,7 +365,14 @@ impl AsyncOdvDecoder {
             schema = Arc::new(schema.project(projection)?);
         }
 
-        RecordBatch::try_new(schema, arrays)
+        // A projection of no columns at all is `COUNT(*)`: the batch then holds
+        // only its row count, which a column-less `RecordBatch` cannot state on
+        // its own.
+        RecordBatch::try_new_with_options(
+            schema,
+            arrays,
+            &RecordBatchOptions::new().with_row_count(Some(rows)),
+        )
     }
 
     fn decode_byte_stream<S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin>(
