@@ -282,7 +282,7 @@ can move one format at a time.
 | --- | --- | --- |
 | `BEACON_HDF5_USE_RUST_READER` | `true` | Read HDF5 with the pure-Rust reader instead of the netCDF-C library. It also reports a nested group and a compound dataset. The netCDF-C library reports neither. |
 | `BEACON_HDF5_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. Needs the pure-Rust reader. |
-| `BEACON_HDF5_CONVENTION` | `none` | The vendor layout every HDF5 table reads on top of the container. `none` reads the container alone and inspects no file. `optodas` reads an ASN OptoDAS acquisition file: it names the axes of the payload, adds the `time` and `distance` columns the file describes, and decodes the payload to the unit the file records. A table sets its own with `OPTIONS ('convention' = ...)`. |
+| `BEACON_HDF5_CONVENTION` | `none` | The vendor layout every HDF5 table reads on top of the container. `none` reads the container alone and inspects no file. `optodas` reads an ASN OptoDAS acquisition file: it names the axes of the payload, adds the `time` and `distance` columns the file describes, and decodes the payload to the unit the file records. A table sets its own with `OPTIONS ('convention' 'optodas')`. |
 | `BEACON_HDF5_UNIFY_PHONY_DIMENSIONS` | `true` | Name every axis a plain HDF5 file leaves unnamed by its length, over the whole file, so two groups broadcast together. Set it to `false` to keep one dimension per length per group. A file that names its dimensions, such as any netCDF-4 file, is unaffected. |
 
 The pure-Rust reader also reads two layouts the netCDF data model cannot express: a nested group,

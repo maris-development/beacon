@@ -20,7 +20,7 @@
 //!
 //! ```sql
 //! CREATE EXTERNAL TABLE das STORED AS HDF5 LOCATION 'acquisition/*.hdf5'
-//! OPTIONS ('convention' = 'optodas');
+//! OPTIONS ('convention' 'optodas');
 //! ```
 //!
 //! Off, this module costs one comparison per file. On, it costs the few hundred

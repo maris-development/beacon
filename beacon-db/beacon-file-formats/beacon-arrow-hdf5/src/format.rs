@@ -13,6 +13,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_arrow_netcdf::datafusion::{statistics, NetCDFFormatFactory, NetcdfFormat};
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
+use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::type_widening::session_widening;
 use datafusion::{
@@ -118,7 +119,7 @@ impl Hdf5FormatFactory {
         &self,
         format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<bool> {
-        match format_options.get("use_rust_reader") {
+        match format_option(format_options, "use_rust_reader") {
             Some(value) => parse_bool_option("use_rust_reader", value),
             None => Ok(self.config.use_rust_reader),
         }
@@ -139,7 +140,7 @@ impl Hdf5FormatFactory {
             },
         };
 
-        if let Some(value) = format_options.get("read_dimensions") {
+        if let Some(value) = format_option(format_options, "read_dimensions") {
             options.read_dimensions = Some(
                 value
                     .split(',')
@@ -148,14 +149,14 @@ impl Hdf5FormatFactory {
                     .collect(),
             );
         }
-        if let Some(value) = format_options.get("enable_statistics") {
+        if let Some(value) = format_option(format_options, "enable_statistics") {
             options.enable_statistics = parse_bool_option("enable_statistics", value)?;
         }
-        if let Some(value) = format_options.get("unify_phony_dimensions") {
+        if let Some(value) = format_option(format_options, "unify_phony_dimensions") {
             options.read.unify_phony_dimensions =
                 parse_bool_option("unify_phony_dimensions", value)?;
         }
-        if let Some(value) = format_options.get("convention") {
+        if let Some(value) = format_option(format_options, "convention") {
             options.read.convention = Hdf5Convention::parse(value).map_err(|value| {
                 exec_datafusion_err!(
                     "unknown HDF5 convention '{value}'; the conventions are 'none' and 'optodas'"

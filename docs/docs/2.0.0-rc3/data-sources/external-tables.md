@@ -24,8 +24,10 @@ also handles partitioned layouts. You write no DDL for each dataset.
 
 This page is a **setup guide** with an example for each format. The
 [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc3/sql/create-external-table) reference gives the full
-statement grammar and every clause: `OR REPLACE`, `IF NOT EXISTS`, `PARTITIONED BY` and
+statement grammar and every clause: `OR REPLACE`, `IF NOT EXISTS`, `PARTITIONED BY`, `OPTIONS` and
 `DROP TABLE`.
+[Keys of each format](/docs/2.0.0-rc3/sql/create-external-table#keys-of-each-format) lists the
+`OPTIONS` keys that each `STORED AS` value reads.
 
 You can send the DDL through any SQL interface of Beacon:
 

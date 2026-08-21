@@ -176,6 +176,22 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **`OPTIONS` on a NetCDF, HDF5, Zarr or BBF external table had no effect**
+  ([#421](https://github.com/maris-development/beacon/issues/421)). DataFusion's SQL planner
+  renames an `OPTIONS` key without a `.` to `format.<key>`. Those four factories read the bare key
+  alone, so `CREATE EXTERNAL TABLE … OPTIONS ('read_dimensions' 'time,lat,lon')` was dropped
+  without a word, and so were `use_rust_reader`, `enable_statistics`, `unify_phony_dimensions`,
+  `convention` and `split_streams_slice`. The table read the default of the server instead. A
+  factory now reads both spellings, as CSV, Delta, Iceberg, Icechunk and the SQL databases already
+  did. A crawler passes the bare key, so a crawler option always worked; only SQL was affected.
+- **`CREATE EXTERNAL TABLE` did not document `OPTIONS`**
+  ([#421](https://github.com/maris-development/beacon/issues/421)). The syntax block omitted the
+  clause, and no page listed the keys of a format, so a reader had to open the Rust source. The
+  [create external table page](docs/docs/2.0.0-rc3/sql/create-external-table.md#options) now holds the clause, the
+  rules that apply to every key, and an index of the keys of each `STORED AS` value. Each format
+  page holds a table of its own keys, with a type, a default and a description. The page for a
+  format that reads no key says so. Two examples also spelled an option `OPTIONS ('convention' =
+  'optodas')`, which does not parse: an `OPTIONS` list takes a key and a value, with no `=`.
 - **A schema merge depended on the disk answer order**
   ([#377](https://github.com/maris-development/beacon/issues/377)). A table over many files merges
   their schemas into one schema, and a query plans against that schema. Beacon's own "super typing"

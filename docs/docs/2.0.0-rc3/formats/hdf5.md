@@ -145,7 +145,7 @@ for one:
 
 ```sql
 CREATE EXTERNAL TABLE das STORED AS HDF5 LOCATION 'acquisition/*.hdf5'
-OPTIONS ('convention' = 'optodas');
+OPTIONS ('convention' 'optodas');
 
 -- or, per query. The second argument holds the dimensions, so pass NULL for it.
 SELECT * FROM read_hdf5('acquisition/*.hdf5', NULL, 'optodas');
@@ -207,6 +207,30 @@ LOCATION 'experiments/';
 ```
 
 `STORED AS H5` is accepted as a synonym.
+
+### `OPTIONS`
+
+`STORED AS HDF5` reads five keys. `STORED AS H5` reads the same five:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `read_dimensions` | List of dimension names | The default grid of each file | The dimensions the table reads. Beacon returns a dataset only if the list holds every dimension of that dataset. |
+| `use_rust_reader` | Boolean | `true` (`BEACON_HDF5_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library reads no nested group and no compound dataset, and it needs anonymous access to a bucket. |
+| `enable_statistics` | Boolean | `true` (`BEACON_HDF5_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_HDF5_ENABLE_STATISTICS` to turn the column ranges off. |
+| `unify_phony_dimensions` | Boolean | `true` (`BEACON_HDF5_UNIFY_PHONY_DIMENSIONS`) | Give every unnamed axis one name per length, over the whole file, so two groups broadcast together. Set it to `false` to keep one dimension per length per group. |
+| `convention` | `none` or `optodas` | `none` (`BEACON_HDF5_CONVENTION`) | The vendor layout the table reads on top of the container. See [Read a vendor layout](#read-a-vendor-layout). |
+
+The pure-Rust reader applies `unify_phony_dimensions` and `convention`. A table with
+`use_rust_reader` set to `false` ignores both.
+
+```sql
+CREATE EXTERNAL TABLE das
+STORED AS HDF5
+LOCATION 'acquisition/*.hdf5'
+OPTIONS ('convention' 'optodas', 'unify_phony_dimensions' 'false')
+```
+
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key.
 
 ## On object storage
 

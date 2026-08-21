@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
+use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::type_widening::session_widening;
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
@@ -117,7 +118,7 @@ impl NetCDFFormatFactory {
         &self,
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<bool> {
-        match format_options.get("enable_statistics") {
+        match format_option(format_options, "enable_statistics") {
             Some(value) => parse_bool_option("enable_statistics", value),
             None => Ok(self.config.enable_statistics),
         }
@@ -143,7 +144,7 @@ impl NetCDFFormatFactory {
         &self,
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<bool> {
-        match format_options.get("use_rust_reader") {
+        match format_option(format_options, "use_rust_reader") {
             Some(value) => parse_bool_option("use_rust_reader", value),
             None => Ok(self.config.use_rust_reader),
         }
@@ -174,7 +175,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
         // defaulting to the runtime config.
         let mut options = self.options.clone();
 
-        if let Some(value) = format_options.get("read_dimensions") {
+        if let Some(value) = format_option(format_options, "read_dimensions") {
             options.read_dimensions = Some(
                 value
                     .split(',')

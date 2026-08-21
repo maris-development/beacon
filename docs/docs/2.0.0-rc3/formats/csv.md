@@ -51,3 +51,22 @@ LOCATION 'metadata/stations/'
 
 See [Create External Tables](/docs/2.0.0-rc3/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc3/data-sources/) for the
 full read model.
+
+### `OPTIONS`
+
+`STORED AS CSV` reads two keys. They are the two optional arguments of `read_csv`:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `delimiter` | One ASCII character, or an escape | `,` | The field separator. The escapes are `\t`, `\n`, `\r`, `\0` and `\\`. A value of two or more characters is an error. |
+| `infer_records` | Whole number | `1000` | The number of rows that Beacon samples for the column types. `read_csv` samples `128000` rows instead. |
+
+```sql
+-- A tab-separated collection, with a deeper sample for the column types
+CREATE EXTERNAL TABLE station_metadata
+STORED AS CSV
+LOCATION 'metadata/stations/'
+OPTIONS ('delimiter' '\t', 'infer_records' '5000')
+```
+
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key.

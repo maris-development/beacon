@@ -42,3 +42,8 @@ LOCATION 'cruises/'
 
 See [Create External Tables](/docs/2.0.0-rc3/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc3/data-sources/) for the
 full read model.
+
+### `OPTIONS`
+
+`STORED AS ARROW` reads no key. Beacon ignores an `OPTIONS` clause on this format. See
+[`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the formats that do read one.

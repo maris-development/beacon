@@ -97,13 +97,15 @@ removes the table root from the path. Beacon reads the rest under `LOCATION`.
 One example. A writer writes a table to `/warehouse/obs`. You mount the table at `datasets://obs`.
 Beacon reads the table. You change no metadata.
 
-### `OPTIONS` and time travel
+### `OPTIONS`
 
 Pin the table to one snapshot:
 
-| Option | Description |
-| ------------- | ------------------------------------------------------------------- |
-| `snapshot_id` | An Iceberg snapshot id. Example: `'3821550127947089060'`. |
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `snapshot_id` | Whole number | The current snapshot | An Iceberg snapshot id, for example `'3821550127947089060'`. |
+
+See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key.
 
 ```sql
 -- Read the table at one snapshot

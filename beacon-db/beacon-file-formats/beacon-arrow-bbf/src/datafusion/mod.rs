@@ -6,6 +6,7 @@ use beacon_binary_format::{
 };
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
+use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::type_widening::session_widening;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
@@ -73,7 +74,7 @@ impl FileFormatFactory for BBFFormatFactory {
         // Per-table override from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
         // defaulting to the runtime config.
         let mut split_streams_slice = self.config.split_streams_slice;
-        if let Some(value) = format_options.get("split_streams_slice") {
+        if let Some(value) = format_option(format_options, "split_streams_slice") {
             split_streams_slice = parse_bool_option("split_streams_slice", value)?;
         }
         Ok(Arc::new(BBFFormat {
