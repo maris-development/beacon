@@ -296,11 +296,29 @@ impl ObjectListing {
     /// Stopping the stream stops the walk.
     pub fn stream(&self) -> futures::stream::BoxStream<'static, datafusion::error::Result<ObjectMeta>> {
         use datafusion::error::DataFusionError;
+        use object_store::ObjectStoreExt;
 
         let store = Arc::clone(&self.store);
         let url = self.url.clone();
         let prefix = url.prefix().clone();
         async_stream::try_stream! {
+            // A URL with no glob and no trailing slash names one object, not a
+            // directory, and a store lists a prefix at segment boundaries — so
+            // listing `obs/a.parquet` looks for a directory of that name and
+            // finds nothing. Ask for the object itself, and fall back to listing
+            // when it turns out to be a directory after all.
+            if !url.is_collection() {
+                match store.head(&prefix).await {
+                    Ok(meta) => {
+                        yield meta;
+                        return;
+                    }
+                    Err(object_store::Error::NotFound { .. }) => {}
+                    Err(e) => Err(DataFusionError::Execution(format!(
+                        "listing `{prefix}` failed: {e}"
+                    )))?,
+                }
+            }
             let mut objects = store.list(Some(&prefix));
             while let Some(object) = objects.next().await {
                 let object = object.map_err(|e| {

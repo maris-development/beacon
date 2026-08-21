@@ -29,7 +29,7 @@ use crate::{
     config::ZarrConfig,
     reader::schema_from_group_path,
     util::{
-        ZarrPath, ZarrStorage, is_zarr_store_root, leaf_group_keys,
+        ZarrPath, ZarrStorage, is_zarr_store_root, leaf_group_keys, top_level_zarr_meta_v3,
     },
 };
 
@@ -155,12 +155,9 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
     /// depends on the whole store: an array added under it changes the schema
     /// while leaving the marker where it was.
     fn schema_units(&self, objects: &[ObjectMeta]) -> Vec<SchemaUnit> {
-        let roots: Vec<_> = objects
-            .iter()
-            .filter(|obj| crate::util::is_zarr_store_root(obj))
-            .cloned()
-            .collect();
-        units_over_stores(objects, &roots)
+        // The same rule `infer_schema` uses, so a cache entry keys on the marker
+        // that read the schema.
+        units_over_stores(objects, &crate::util::top_level_zarr_meta_v3(objects))
     }
 
     fn discover_datasets(
@@ -331,15 +328,13 @@ impl FileFormat for ZarrFormat {
         // `<array>/c/0/0/0` — when the table is created without a `zarr.json`
         // extension filter (e.g. via `read_zarr`). Select the store roots and
         // ignore the rest rather than erroring on the first chunk we encounter.
-        let verified_objects: Vec<ObjectMeta> = objects
-            .iter()
-            .filter(|obj| is_zarr_store_root(obj))
-            .cloned()
-            .collect();
+        // The caller has already named the store, so the root is the shallowest
+        // marker here rather than a `*.zarr` directory. See `is_zarr_store_root`
+        // for why discovery cannot use this rule and this cannot use that one.
+        let verified_objects = top_level_zarr_meta_v3(objects);
         if verified_objects.is_empty() {
             return Err(datafusion::error::DataFusionError::Execution(
-                "No Zarr v3 store found in the provided path(s). A store is a                  `*.zarr` directory holding `zarr.json`, for example                  `gridded-example.zarr/zarr.json`."
-                    .to_string(),
+                "No Zarr v3 metadata (zarr.json) found in the provided path(s)".to_string(),
             ));
         }
         let storage = self.storage(store.clone());
@@ -444,11 +439,7 @@ impl FileFormat for ZarrFormat {
             .runtime_env()
             .object_store(conf.object_store_url.clone())?;
 
-        let top_level_metas: Vec<ObjectMeta> = object_metas
-            .iter()
-            .filter(|obj| is_zarr_store_root(obj))
-            .cloned()
-            .collect();
+        let top_level_metas = top_level_zarr_meta_v3(&object_metas);
         let mut file_groups: Vec<FileGroup> = vec![];
         for meta in top_level_metas {
             let file = self
