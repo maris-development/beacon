@@ -144,11 +144,17 @@ The `beacon.system.file_stats` table holds one row for each file:
 | Column | Meaning |
 | --- | --- |
 | `path` | The file, relative to the datasets store |
+| `file_id` | The number that Beacon gives the file. The segment tables use it. |
 | `state` | `Pending`, `Analyzed`, `Failed`, `Stale` or `Deleted` |
 | `format` | The reader that Beacon used |
 | `column_count` | The columns this file supplied. **A value of zero is important.** |
 | `num_rows`, `total_byte_size` | The values that the reader reported |
 | `stats_epoch` | The number of times that Beacon read this file |
+| `size` | The size in bytes, from the last listing |
+| `last_modified_millis` | The modification time in milliseconds, from the last listing |
+
+Beacon compares `size` and `last_modified_millis` against the store on each pass. A difference marks
+the file `Stale`. An etag settles the question where both sides carry one.
 
 ### One file, column by column
 
@@ -213,13 +219,283 @@ EXPLAIN ANALYZE SELECT * FROM read_parquet('obs/*.parquet') WHERE "TEMP" > 80;
 
 ```
 DataSourceExec: file_groups={1 group: [[obs/hot.parquet]]}
-  metrics=[file_stats_files_considered=3, file_stats_files_pruned=2,
-           file_stats_columns_used=1]
+  metrics=[file_stats_files_considered=3, file_stats_files_pruned=2]
 ```
 
-Read `file_stats_columns_used` first when Beacon prunes no file. A value of zero means the
-statistics hold no data for your filter columns. A filter that matches every file is a different
-condition.
+`file_stats_files_considered` counts the files that the prune examined. `file_stats_files_pruned`
+counts the files that it dropped.
+
+A plan holds no `file_stats_` metric where the prune did not start. Beacon starts no prune in three
+conditions:
+
+- The query has no `WHERE` clause.
+- The filter has a shape that Beacon cannot use.
+- The registry holds no column of the filter.
+
+These metrics therefore keep "the prune did not start" apart from "the prune ran and kept every
+file". The two conditions have different causes.
+
+### The segments
+
+Beacon writes the ranges into segments. Each pass writes one segment for each group of files. The
+`beacon.system.file_stats_segments` table lists them:
+
+```sql
+SELECT segment, seq, min_file_id, max_file_id, num_files, num_columns
+FROM beacon.system.file_stats_segments
+ORDER BY seq;
+```
+
+```
+segment-00000000.bfs | 0 |   1 | 366 | 366 |   6
+segment-00000001.bfs | 1 | 367 | 902 | 536 |  19
+segment-00000007.bfs | 7 |  15 |  15 |   1 |   6
+```
+
+| Column | Meaning |
+| --- | --- |
+| `segment` | The object name inside the statistics prefix |
+| `seq` | The write order. Beacon gives each new segment the next number. |
+| `min_file_id`, `max_file_id` | The lowest and the highest `file_id` in the segment |
+| `num_files` | The files that this segment holds |
+| `num_columns` | The columns that this segment holds. **A large value is a wide segment.** |
+
+`num_columns` gives the width. A query on one column reads each segment that holds that column. A
+narrow segment therefore answers few queries, and each query reads few segments. A segment with
+thousands of columns answers almost every query, and the manifest skips none of them.
+
+The [Groups by folder](#groups-by-folder) section explains the width. Beacon groups the files by
+path, and a folder of similar files gives a narrow segment. A folder that mixes many different
+file layouts gives a wide one.
+
+### Look inside a segment
+
+The table above names each segment. It does not show the ranges inside one. `file_statistics` reads
+them for one file, and its `segment` column names the segment of each row:
+
+```sql
+-- Everything that Beacon stores for one file
+SELECT segment, column, data_type, min, max
+FROM file_statistics('argo/2024/01/20240115_prof.nc')
+ORDER BY column;
+```
+
+```
+segment-00000007.bfs | CONFIG_MISSION_NUMBER | Int32   | 1       | 3
+segment-00000007.bfs | CYCLE_NUMBER          | Int32   | 4       | 312
+segment-00000007.bfs | JULD                  | Float64 | 27042.0 | 27042.9
+segment-00000007.bfs | JULD_LOCATION         | Float64 | 27042.0 | 27042.9
+segment-00000007.bfs | LATITUDE              | Float64 | -58.4   | 61.2
+segment-00000007.bfs | LONGITUDE             | Float64 | -179.9  | 179.8
+```
+
+Six rows. This is the whole content of the segment for that file.
+
+The file declares many more variables than six. `TEMP`, `PSAL` and `PRES` are absent, because a
+netCDF variable of rank 2 supplies no range. Beacon stores a row for a column with a range, and
+nothing at all for a column without one. The [Formats that supply ranges](#formats-that-supply-ranges)
+section gives the rule for each format.
+
+:::tip Absent is not the same as empty
+A column with no row supplies no range, and Beacon prunes no file on it. A column with a row and an
+empty `min` holds a recorded null bound. Read the row count of this query, not the values alone.
+:::
+
+:::info The newest row wins
+One file appears in more than one segment after Beacon reads it a second time. The table above shows
+this condition. `segment-00000000.bfs` holds file 15 from the first pass, and `segment-00000007.bfs`
+holds it again.
+
+Beacon sorts the candidate segments by `seq` and keeps the row with the highest `seq`. It uses
+`segment-00000007.bfs` for file 15, and it uses the old row for no file. The `segment` column of the
+query above names the segment that answered.
+
+The rule follows `seq`, not the position in the table. A future compaction step replaces many
+segments with one. The position is then not the age.
+:::
+
+## Investigate one file
+
+A query is slow. Beacon prunes no file. Four steps find the cause.
+
+The example uses an ARGO dataset. It holds 366 netCDF files under `argo/2024/`, one for each day.
+Each file holds the profiles of that day. The query asks for the profiles of the north:
+
+```sql
+SELECT "LATITUDE", "LONGITUDE", "JULD"
+FROM read_netcdf('argo/2024/**/*.nc')
+WHERE "LATITUDE" > 40;
+```
+
+Each step below shows its own output. Run the four steps in order. Each one removes a cause.
+
+### Step 1. Read the metrics of the query
+
+```sql
+EXPLAIN ANALYZE SELECT "LATITUDE", "LONGITUDE", "JULD"
+FROM read_netcdf('argo/2024/**/*.nc') WHERE "LATITUDE" > 40;
+```
+
+```
+DataSourceExec: file_groups={4 groups: [[argo/2024/01/20240101_prof.nc], ...]}
+  metrics=[file_stats_files_considered=366, file_stats_files_pruned=0]
+```
+
+`file_stats_files_considered=366` proves that the prune ran over each file.
+`file_stats_files_pruned=0` shows that each file survived it.
+
+The ranges therefore cover the filter, or Beacon holds no range. Step 2 and Step 3 separate the two
+causes.
+
+A plan with no `file_stats_` metric reports a different condition. The prune did not start. Read the
+[Check the result](#check-the-result) section for the causes of that condition.
+
+### Step 2. Read the record of the file
+
+Take one file of the query. Read its registry record:
+
+```sql
+SELECT file_id, state, format, column_count, num_rows
+FROM beacon.system.file_stats
+WHERE path = 'argo/2024/01/20240115_prof.nc';
+```
+
+```
+15 | Analyzed | netcdf | 6 |
+```
+
+`state = 'Analyzed'` and `column_count = 6` prove that Beacon read the file and holds ranges for it.
+Go to Step 3.
+
+`column_count = 0` is a different result. Beacon read the file and got no range at all. The
+[Check the result](#check-the-result) section covers that condition, and
+`BEACON_NETCDF_USE_RUST_READER` is the usual reason for a netCDF file.
+
+A value of six is low for an ARGO file. The file declares many more variables. Step 3 shows which
+six Beacon holds.
+
+`num_rows` is empty, because a netCDF file reports no counts. This is normal. It is not a fault.
+
+Keep the `file_id` value. Step 4 needs it.
+
+### Step 3. Compare each range against the filter
+
+The filter names `LATITUDE`. Read the range of that column, and of `TEMP` for comparison:
+
+```sql
+SELECT column, data_type, min, max
+FROM file_statistics('argo/2024/01/20240115_prof.nc')
+WHERE column IN ('LATITUDE', 'TEMP');
+```
+
+```
+LATITUDE | Float64 | -58.4 | 61.2
+```
+
+Two facts come out of one row.
+
+**`LATITUDE` covers the filter.** The filter asks for `LATITUDE > 40`. This file holds a maximum of
+61.2. A row above 40 is therefore possible. Beacon keeps the file, and the prune is correct. The
+range is wide. The [Look inside a segment](#look-inside-a-segment) section lists the other five
+columns of this file.
+
+**`TEMP` returns no row.** Beacon holds no range for `TEMP`, so a filter on `TEMP` prunes no file of
+this dataset. A netCDF variable of rank 2 supplies no range, and `TEMP` has the dimensions `N_PROF`
+and `N_LEVELS`.
+
+:::warning A wide range keeps a file for every query
+One extreme value gives a wide range. Each daily ARGO file holds the profiles of the whole fleet.
+The floats sit in every ocean, so one file covers almost every latitude.
+
+Beacon cannot prune such a file. The range proves nothing about the rows inside. The prune is
+correct, and the file supplies no gain.
+
+Prune on a column with a narrow range for each file. This layout is one file for each day, so time
+is that column.
+:::
+
+Count the files with each condition. The function reports on at most 1000 files in one call, so use
+one month:
+
+```sql
+-- The files of January that hold a range for TEMP
+SELECT count(*) AS files
+FROM file_statistics('argo/2024/01/**')
+WHERE column = 'TEMP';
+```
+
+```
+0
+```
+
+```sql
+-- The files of January that a filter LATITUDE > 40 cannot drop
+SELECT count(DISTINCT path) AS survivors
+FROM file_statistics('argo/2024/01/**')
+WHERE column = 'LATITUDE' AND CAST(max AS DOUBLE) > 40;
+```
+
+```
+31
+```
+
+Each of the 31 files of January survives the filter. `min` and `max` are text, so the query casts
+them to the type of the column.
+
+Now count the same files against a filter on time:
+
+```sql
+SELECT count(DISTINCT path) AS survivors
+FROM file_statistics('argo/2024/01/**')
+WHERE column = 'JULD'
+  AND CAST(min AS DOUBLE) <= 27042.9 AND CAST(max AS DOUBLE) >= 27042.0;
+```
+
+```
+1
+```
+
+`JULD` keeps 1 file of the 31. `LATITUDE` keeps each of the 31. Add a filter on `JULD` to the query,
+and Beacon reads one file for each day that the filter names.
+
+### Step 4. Check the width of the segment
+
+Step 3 gives the answer for the ranges. Step 4 shows the cost of the prune itself. Use the `file_id`
+of Step 2:
+
+```sql
+SELECT segment, seq, min_file_id, max_file_id, num_files, num_columns
+FROM beacon.system.file_stats_segments
+WHERE min_file_id <= 15 AND max_file_id >= 15
+ORDER BY seq;
+```
+
+```
+segment-00000000.bfs | 0 |  1 | 366 | 366 |   6
+segment-00000007.bfs | 7 | 15 |  15 |   1 |   6
+```
+
+Two segments hold file 15. Beacon read the file a second time after a change. **The newest row
+wins**, so Beacon uses `segment-00000007.bfs`. Step 3 confirms this. The `segment` column of the
+[Look inside a segment](#look-inside-a-segment) query names that segment.
+
+`num_columns = 6` is a narrow segment. Beacon reads a segment for a query only where the segment
+holds a column of the filter. A segment of six columns therefore serves few queries. The prune is
+cheap here, and Step 3 holds the full answer.
+
+A large `num_columns` value means a wide segment. Each query then reads that segment, and the prune
+costs more. Read the [Groups by folder](#groups-by-folder) section, and set
+`BEACON_FILE_STATS_PREFIX_DEPTH` for a layout that Beacon groups badly.
+
+### The four results together
+
+| Result | Meaning |
+| --- | --- |
+| The plan holds no `file_stats_` metric | The prune did not start. The filter or the registry is the cause. |
+| `column_count = 0` | Beacon holds no range for the file. Check the reader of the format. |
+| The column has no row | Beacon holds no range for that one column. A filter on it prunes nothing. |
+| The range covers the filter | The prune is correct. The range is too wide for this column. |
+| A large `num_columns` | The segment is wide. Each query reads it, and the prune costs more. |
 
 ## Formats that supply ranges
 
@@ -233,6 +509,22 @@ condition.
 | ODV, TIFF | No | |
 
 A format that supplies no ranges costs nothing. Beacon always reads those files, as before.
+
+:::info netCDF and HDF5 range only rank 0 and rank 1
+Beacon computes a range for a variable of rank 0 or rank 1. A variable of rank 2 or higher is a data
+grid. A full scan of it costs too much, so that variable supplies no range. A string variable
+supplies no range either.
+
+An ARGO file therefore holds a range for `JULD`, `LATITUDE` and `LONGITUDE`. It holds none for
+`TEMP`, `PSAL` and `PRES`, which have the dimensions `N_PROF` and `N_LEVELS`. `column_count` stays
+well below the variable count of the file, and that is normal.
+
+Beacon stores no row for a column with no range. `file_statistics` therefore returns no row for
+`TEMP`. Compare that result against a row with an empty `min`, which holds a recorded null bound.
+
+A CF ragged file follows the same rule. Beacon ranges the instance variables, and skips the
+observation variables.
+:::
 
 :::info Zarr reads only its coordinates
 A Zarr array can state its range in its metadata, with the `actual_range` attribute. Beacon uses
