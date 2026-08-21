@@ -98,7 +98,7 @@ pub(crate) async fn build_listing_table(
             std::slice::from_ref(&spec.listing_table_url),
         )
         .await
-        .map(|mut schemas| schemas.remove(0))
+        .map(|mut schemas| schemas.remove(0).schema)
         {
             Ok(schema) => schema,
             Err(error) => {

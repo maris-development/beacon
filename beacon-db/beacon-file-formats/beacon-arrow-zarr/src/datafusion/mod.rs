@@ -12,7 +12,7 @@ use beacon_datafusion_ext::format_ext::{
     DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
 };
 use beacon_datafusion_ext::format_options::format_option;
-use beacon_datafusion_ext::type_widening::session_widening;
+use beacon_datafusion_ext::type_widening::{LabeledSchema, session_widening};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -356,7 +356,9 @@ impl FileFormat for ZarrFormat {
             )
             .await
             .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-            schemas.push(schema);
+            // The store path names the schema, so a refused column names both
+            // stores.
+            schemas.push(LabeledSchema::new(schema, object.location.as_ref()));
         }
 
         if schemas.is_empty() {

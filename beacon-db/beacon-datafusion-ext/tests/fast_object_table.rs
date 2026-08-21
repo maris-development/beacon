@@ -566,7 +566,9 @@ async fn a_projection_that_names_nothing_leaves_the_schema_alone() {
 /// files that disagree behaves the same however the URLs are spelled.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_caller_can_name_the_merge_rule() {
-    use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
+    use beacon_datafusion_ext::type_widening::{
+        ArrowTypeWideningStrategy, DefaultArrowTypeWidening, LabeledSchema,
+    };
     use datafusion::arrow::array::{Int32Array, Int64Array};
     use datafusion::arrow::datatypes::SchemaRef;
 
@@ -578,11 +580,11 @@ async fn the_caller_can_name_the_merge_rule() {
     impl ArrowTypeWideningStrategy for FirstTypeWins {
         fn merge_schemas(
             &self,
-            schema_refs: &[SchemaRef],
+            schemas: &[LabeledSchema],
         ) -> Result<SchemaRef, datafusion::arrow::error::ArrowError> {
             let mut fields: Vec<datafusion::arrow::datatypes::FieldRef> = Vec::new();
-            for schema in schema_refs {
-                for field in schema.fields() {
+            for labeled in schemas {
+                for field in labeled.schema.fields() {
                     if !fields.iter().any(|kept| kept.name() == field.name()) {
                         fields.push(field.clone());
                     }
