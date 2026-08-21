@@ -856,4 +856,208 @@ mod tests {
             "expected FilterExec → NdBroadcastExec → NdFilterExec:\n{rendered}"
         );
     }
+    /// A narrow select list gives the filter a projection (`FilterExec: …,
+    /// projection=[…]`). The projection is a plain column list. So it sinks with
+    /// the predicate. An `NdProjectionExec` goes between the nd filter and the
+    /// broadcast. No `FilterExec` stays above.
+    #[tokio::test]
+    async fn pushdown_rule_sinks_a_narrowing_filter_projection() {
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datafusion::physical_plan::displayable;
+        use datafusion::physical_plan::filter::FilterExecBuilder;
+
+        let schema = test_source().schema();
+        // The predicate reads `lon`. The select list keeps only `lat`.
+        let predicate: Arc<dyn PhysicalExpr> =
+            binary(col("lon", &schema).unwrap(), Operator::Eq, lit(5i32), &schema).unwrap();
+
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            FilterExecBuilder::new(
+                predicate,
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .apply_projection(Some(vec![schema.index_of("lat").unwrap()]))
+            .unwrap()
+            .build()
+            .unwrap(),
+        );
+        let original_schema = original.schema();
+        let expected = run(original.clone()).await.unwrap();
+
+        let optimized = NdFilterPushdown::new()
+            .optimize(original, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(optimized.schema(), original_schema);
+
+        let rendered = displayable(optimized.as_ref()).indent(true).to_string();
+        assert!(
+            !rendered
+                .lines()
+                .any(|l| l.trim_start().starts_with("FilterExec:")),
+            "the full filter sinks, so no FilterExec stays above:\n{rendered}"
+        );
+        let broadcast = rendered.find("NdBroadcastExec");
+        let projection = rendered.find("NdProjectionExec");
+        let filter = rendered.find("NdFilterExec");
+        let source = rendered.find("NdSourceExec");
+        assert!(
+            broadcast < projection && projection < filter && filter < source,
+            "expected NdBroadcastExec → NdProjectionExec → NdFilterExec → NdSourceExec:\n{rendered}"
+        );
+
+        let actual = run(optimized).await.unwrap();
+        assert_eq!(actual, expected);
+        // One of the two lon values survives. That is half of the 24-cell grid.
+        assert_eq!(actual.num_rows(), 12);
+        assert_eq!(actual.num_columns(), 1);
+    }
+
+    /// `count(*)` gives the filter an *empty* projection. The projection sinks
+    /// the same way. The nd projection keeps the grid selection of the nd filter.
+    /// So the broadcast reports the cells that remain as rows over no columns.
+    #[tokio::test]
+    async fn pushdown_rule_sinks_an_empty_filter_projection() {
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datafusion::physical_plan::displayable;
+        use datafusion::physical_plan::filter::FilterExecBuilder;
+
+        let schema = test_source().schema();
+        let predicate: Arc<dyn PhysicalExpr> =
+            binary(col("lon", &schema).unwrap(), Operator::Eq, lit(5i32), &schema).unwrap();
+
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            FilterExecBuilder::new(
+                predicate,
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .apply_projection(Some(vec![]))
+            .unwrap()
+            .build()
+            .unwrap(),
+        );
+        let expected = run(original.clone()).await.unwrap();
+
+        let optimized = NdFilterPushdown::new()
+            .optimize(original, &ConfigOptions::default())
+            .unwrap();
+
+        let rendered = displayable(optimized.as_ref()).indent(true).to_string();
+        assert!(
+            rendered.contains("NdFilterExec") && rendered.contains("NdProjectionExec: exprs=[]"),
+            "the empty projection sinks with the predicate:\n{rendered}"
+        );
+
+        let actual = run(optimized).await.unwrap();
+        assert_eq!(actual, expected);
+        // An aggregate counts these rows. The batch holds no column.
+        assert_eq!(actual.num_rows(), 12);
+        assert_eq!(actual.num_columns(), 0);
+    }
+
+    /// A conjunct that stays above the broadcast reads the columns that the
+    /// projection drops. So the projection stays with the residual filter. The
+    /// element-wise conjunct still sinks.
+    #[tokio::test]
+    async fn pushdown_rule_keeps_the_projection_with_a_residual_conjunct() {
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::physical_expr::expressions::in_list;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datafusion::physical_plan::displayable;
+        use datafusion::physical_plan::filter::FilterExecBuilder;
+
+        let schema = test_source().schema();
+        // `lon = 5` sinks. `time IN (100, 101)` is outside the whitelist, so it
+        // stays. Both read a column that the select list drops.
+        let predicate: Arc<dyn PhysicalExpr> = binary(
+            binary(col("lon", &schema).unwrap(), Operator::Eq, lit(5i32), &schema).unwrap(),
+            Operator::And,
+            in_list(
+                col("time", &schema).unwrap(),
+                vec![lit(100i32), lit(101i32)],
+                &false,
+                &schema,
+            )
+            .unwrap(),
+            &schema,
+        )
+        .unwrap();
+
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            FilterExecBuilder::new(
+                predicate,
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .apply_projection(Some(vec![schema.index_of("lat").unwrap()]))
+            .unwrap()
+            .build()
+            .unwrap(),
+        );
+        let original_schema = original.schema();
+        let expected = run(original.clone()).await.unwrap();
+
+        let optimized = NdFilterPushdown::new()
+            .optimize(original, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(optimized.schema(), original_schema);
+
+        let rendered = displayable(optimized.as_ref()).indent(true).to_string();
+        let residual = rendered
+            .lines()
+            .find(|l| l.trim_start().starts_with("FilterExec:"))
+            .unwrap_or_else(|| panic!("expected a residual FilterExec:\n{rendered}"));
+        assert!(
+            residual.contains("projection=["),
+            "the residual filter keeps the projection:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("NdFilterExec: predicate=[lon@2 = 5]"),
+            "the element-wise conjunct still sinks:\n{rendered}"
+        );
+
+        let actual = run(optimized).await.unwrap();
+        assert_eq!(actual, expected);
+        // The first chunk holds two time steps. At lon = 5 that gives 6 rows.
+        assert_eq!(actual.num_rows(), 6);
+        assert_eq!(actual.num_columns(), 1);
+    }
+
+    /// A `fetch` caps the rows that the filter returns. The nd filter holds no
+    /// cap. So the rule keeps the filter in place, and the cap stays.
+    #[tokio::test]
+    async fn pushdown_rule_skips_a_filter_with_a_fetch() {
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datafusion::physical_plan::displayable;
+        use datafusion::physical_plan::filter::FilterExecBuilder;
+
+        let schema = test_source().schema();
+        let predicate: Arc<dyn PhysicalExpr> =
+            binary(col("lon", &schema).unwrap(), Operator::Eq, lit(5i32), &schema).unwrap();
+
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            FilterExecBuilder::new(
+                predicate,
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .with_fetch(Some(3))
+            .build()
+            .unwrap(),
+        );
+
+        let optimized = NdFilterPushdown::new()
+            .optimize(original, &ConfigOptions::default())
+            .unwrap();
+
+        let rendered = displayable(optimized.as_ref()).indent(true).to_string();
+        assert!(
+            !rendered.contains("NdFilterExec"),
+            "a capped filter must stay above the broadcast:\n{rendered}"
+        );
+        // The cap still holds.
+        assert_eq!(run(optimized).await.unwrap().num_rows(), 3);
+    }
 }
