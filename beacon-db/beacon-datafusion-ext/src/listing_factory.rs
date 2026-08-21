@@ -440,6 +440,140 @@ mod tests {
 
     use super::*;
 
+    // ---- ObjectListing ----------------------------------------------------
+
+    /// A session over a local directory holding `files`, and the dynamic factory
+    /// that resolves paths against it.
+    fn local_listing(files: &[(&str, &str)]) -> (tempfile::TempDir, SessionContext, ListingFactory) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for (path, body) in files {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        (dir, SessionContext::new(), ListingFactory::dynamic())
+    }
+
+    /// Paths the listing yields, relative to `root`, sorted.
+    async fn streamed(listing: &ObjectListing, root: &std::path::Path) -> Vec<String> {
+        use futures::stream::TryStreamExt;
+        // Anchor on the temp directory name rather than the whole root:
+        // `canonicalize` yields a verbatim prefix on Windows that the object
+        // path does not carry.
+        let anchor = format!("{}/", root.file_name().unwrap().to_string_lossy());
+        let mut paths: Vec<String> = listing
+            .stream()
+            .map_ok(|meta| {
+                let full = meta.location.as_ref().to_string();
+                match full.split_once(&anchor) {
+                    Some((_, rest)) => rest.to_string(),
+                    None => full,
+                }
+            })
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the walk succeeds");
+        paths.sort();
+        paths
+    }
+
+    /// A directory streams everything under it.
+    #[tokio::test]
+    async fn a_directory_streams_its_subtree() {
+        let (dir, ctx, factory) =
+            local_listing(&[("a.csv", "x"), ("sub/b.csv", "y"), ("sub/deep/c.csv", "z")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/", root.display()))
+            .expect("the directory resolves");
+
+        assert_eq!(
+            streamed(&listing, &root).await,
+            vec!["a.csv", "sub/b.csv", "sub/deep/c.csv"]
+        );
+    }
+    /// A glob narrows the stream by extension, and crosses directories while it
+    /// does.
+    ///
+    /// `*` does not stop at a separator here: DataFusion matches listing globs
+    /// with the default `MatchOptions`, where `require_literal_separator` is
+    /// false. That is why one directory level needs its own function rather than
+    /// a cleverer pattern — see `browse_datasets`.
+    #[tokio::test]
+    async fn a_glob_narrows_the_stream_across_directories() {
+        let (dir, ctx, factory) =
+            local_listing(&[("a.csv", "x"), ("a.txt", "y"), ("sub/b.csv", "z")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/*.csv", root.display()))
+            .expect("the glob resolves");
+
+        // The `.txt` is excluded, and the nested `.csv` is not.
+        assert_eq!(streamed(&listing, &root).await, vec!["a.csv", "sub/b.csv"]);
+    }
+
+    /// A path naming one file yields that file. A store lists a prefix at
+    /// segment boundaries, so listing `a.csv` would look for a directory of that
+    /// name and find nothing.
+    #[tokio::test]
+    async fn a_single_file_yields_itself() {
+        let (dir, ctx, factory) = local_listing(&[("a.csv", "x"), ("b.csv", "y")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/a.csv", root.display()))
+            .expect("the file resolves");
+
+        assert_eq!(streamed(&listing, &root).await, vec!["a.csv"]);
+    }
+
+    /// A path that matches nothing is empty, not an error.
+    #[tokio::test]
+    async fn a_missing_path_streams_nothing() {
+        let (dir, ctx, factory) = local_listing(&[("a.csv", "x")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/nope.csv", root.display()))
+            .expect("the path resolves");
+
+        assert!(streamed(&listing, &root).await.is_empty());
+    }
+
+    /// One level reports its sub-folders by name and its own objects, and stops.
+    #[tokio::test]
+    async fn a_level_reads_one_directory() {
+        let (dir, ctx, factory) =
+            local_listing(&[("a.csv", "x"), ("sub/b.csv", "y"), ("sub/deep/c.csv", "z")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/", root.display()))
+            .expect("the directory resolves");
+
+        let level = listing.level().await.expect("one level");
+        assert_eq!(level.folders, vec!["sub"], "folders are named, not pathed");
+        let files: Vec<String> = level
+            .objects
+            .iter()
+            .map(|o| o.location.filename().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(files, vec!["a.csv"], "nothing from below this level");
+    }
+
+    /// The same listing reads more than once: a plan resolves it during `scan`
+    /// and reads it again for every execution.
+    #[tokio::test]
+    async fn a_listing_reads_more_than_once() {
+        let (dir, ctx, factory) = local_listing(&[("a.csv", "x"), ("b.csv", "y")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/", root.display()))
+            .expect("the directory resolves");
+
+        let first = streamed(&listing, &root).await;
+        let second = streamed(&listing, &root).await;
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+    }
+
     /// A configured factory whose default store maps to `root`. The store URL is
     /// irrelevant to the path-resolution these tests exercise (that reads only the
     /// root), so any valid URL will do.

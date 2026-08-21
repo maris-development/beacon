@@ -188,13 +188,19 @@ where
         .await?;
 
         let mut kids = Vec::new();
+        let mut here = Vec::new();
         for r in expanded {
             kids.extend(r.common_prefixes.into_iter().map(Some));
-            above.extend(r.objects);
+            here.extend(r.objects);
         }
+        // No children means this level is the leaf level, and its own walk will
+        // return these objects. Keeping them would emit each one twice.
         if kids.is_empty() {
             break;
         }
+        // Descending past this level, so nothing below will cover what sits
+        // directly in it.
+        above.extend(here);
         level = kids;
     }
 
@@ -282,5 +288,308 @@ where
 
     async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> OsResult<()> {
         self.inner.copy_opts(from, to, options).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    use futures::stream::TryStreamExt;
+    use object_store::{PutMultipartOptions, PutPayload};
+
+    use super::*;
+
+    /// A store built from a list of paths, with just enough behaviour to drive a
+    /// sharded listing: paginated listing that honours `max_keys`, and a
+    /// delimiter listing that reports one directory level.
+    ///
+    /// It records the page sizes it was asked for, which is how the tests below
+    /// tell a sized page from a default one.
+    #[derive(Debug)]
+    struct FakeStore {
+        paths: Vec<Path>,
+        page_sizes: Mutex<Vec<Option<usize>>>,
+    }
+
+    impl FakeStore {
+        fn new(paths: &[&str]) -> Self {
+            let mut paths: Vec<Path> = paths.iter().map(|p| Path::from(*p)).collect();
+            paths.sort();
+            Self {
+                paths,
+                page_sizes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn meta(location: &Path) -> ObjectMeta {
+            ObjectMeta {
+                location: location.clone(),
+                last_modified: Default::default(),
+                size: 1,
+                e_tag: None,
+                version: None,
+            }
+        }
+
+        fn page_sizes(&self) -> Vec<Option<usize>> {
+            self.page_sizes.lock().unwrap().clone()
+        }
+    }
+
+    impl std::fmt::Display for FakeStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FakeStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PaginatedListStore for FakeStore {
+        async fn list_paginated(
+            &self,
+            prefix: Option<&str>,
+            opts: PaginatedListOptions,
+        ) -> object_store::Result<object_store::list::PaginatedListResult> {
+            self.page_sizes.lock().unwrap().push(opts.max_keys);
+
+            let under: Vec<&Path> = self
+                .paths
+                .iter()
+                .filter(|p| match prefix {
+                    None => true,
+                    Some(prefix) if prefix.is_empty() => true,
+                    Some(prefix) => {
+                        let p = p.as_ref();
+                        p.starts_with(prefix)
+                            && p.as_bytes().get(prefix.len()) == Some(&b'/')
+                    }
+                })
+                .collect();
+
+            // The page token is the index of the next path to return.
+            let start: usize = opts
+                .page_token
+                .as_deref()
+                .map(|t| t.parse().unwrap())
+                .unwrap_or(0);
+            let size = opts.max_keys.unwrap_or(1000);
+            let end = (start + size).min(under.len());
+            let objects: Vec<ObjectMeta> = under[start..end].iter().map(|p| Self::meta(p)).collect();
+
+            Ok(object_store::list::PaginatedListResult {
+                result: ListResult {
+                    common_prefixes: Vec::new(),
+                    objects,
+                },
+                page_token: (end < under.len()).then(|| end.to_string()),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for FakeStore {
+        async fn put_opts(
+            &self,
+            _l: &Path,
+            _p: PutPayload,
+            _o: PutOptions,
+        ) -> OsResult<PutResult> {
+            unimplemented!("the tests only list")
+        }
+        async fn put_multipart_opts(
+            &self,
+            _l: &Path,
+            _o: PutMultipartOptions,
+        ) -> OsResult<Box<dyn MultipartUpload>> {
+            unimplemented!("the tests only list")
+        }
+        async fn get_opts(&self, _l: &Path, _o: GetOptions) -> OsResult<GetResult> {
+            unimplemented!("the tests only list")
+        }
+        fn delete_stream(
+            &self,
+            _l: BoxStream<'static, OsResult<Path>>,
+        ) -> BoxStream<'static, OsResult<Path>> {
+            unimplemented!("the tests only list")
+        }
+        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, OsResult<ObjectMeta>> {
+            let prefix = prefix.map(|p| p.as_ref().to_string()).unwrap_or_default();
+            let objects: Vec<OsResult<ObjectMeta>> = self
+                .paths
+                .iter()
+                .filter(|p| prefix.is_empty() || p.as_ref().starts_with(&prefix))
+                .map(|p| Ok(Self::meta(p)))
+                .collect();
+            futures::stream::iter(objects).boxed()
+        }
+        async fn list_with_delimiter(&self, prefix: Option<&Path>) -> OsResult<ListResult> {
+            let base = prefix.map(|p| p.as_ref().to_string()).unwrap_or_default();
+            let mut common = BTreeSet::new();
+            let mut objects = Vec::new();
+            for path in &self.paths {
+                let full = path.as_ref();
+                let rest = if base.is_empty() {
+                    Some(full)
+                } else if full.starts_with(&base) && full.as_bytes().get(base.len()) == Some(&b'/') {
+                    Some(&full[base.len() + 1..])
+                } else {
+                    None
+                };
+                let Some(rest) = rest else { continue };
+                match rest.split_once('/') {
+                    Some((dir, _)) => {
+                        let joined = if base.is_empty() {
+                            dir.to_string()
+                        } else {
+                            format!("{base}/{dir}")
+                        };
+                        common.insert(Path::from(joined));
+                    }
+                    None => objects.push(Self::meta(path)),
+                }
+            }
+            Ok(ListResult {
+                common_prefixes: common.into_iter().collect(),
+                objects,
+            })
+        }
+        async fn copy_opts(&self, _f: &Path, _t: &Path, _o: CopyOptions) -> OsResult<()> {
+            unimplemented!("the tests only list")
+        }
+    }
+
+    /// A tree two levels deep, with an object at each level above the leaves so
+    /// the walk has something to miss if it only reads the leaves.
+    fn tree() -> Vec<&'static str> {
+        vec![
+            "top.txt",
+            "a/mid.txt",
+            "a/one/x1.txt",
+            "a/one/x2.txt",
+            "a/two/y1.txt",
+            "b/one/z1.txt",
+            "b/two/z2.txt",
+        ]
+    }
+
+    async fn listed(store: BigPageList<FakeStore>) -> Vec<String> {
+        let mut paths: Vec<String> = store
+            .list(None)
+            .map_ok(|meta| meta.location.to_string())
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the walk succeeds");
+        paths.sort();
+        paths
+    }
+
+    /// Every object comes back exactly once, including the ones above the leaf
+    /// directories the shards are taken from.
+    #[tokio::test]
+    async fn a_sharded_walk_returns_the_whole_tree() {
+        let expected: Vec<String> = {
+            let mut e: Vec<String> = tree().iter().map(|p| p.to_string()).collect();
+            e.sort();
+            e
+        };
+        let got = listed(BigPageList::new(FakeStore::new(&tree()))).await;
+        assert_eq!(got, expected);
+    }
+
+    /// Depth 0 turns sharding off. The result must not change.
+    #[tokio::test]
+    async fn a_sequential_walk_returns_the_same_tree() {
+        let sharded = listed(BigPageList::new(FakeStore::new(&tree()))).await;
+        let sequential =
+            listed(BigPageList::new(FakeStore::new(&tree())).with_fanout_depth(0)).await;
+        assert_eq!(sharded, sequential);
+    }
+
+    /// The page size reaches the store. Without it a server applies its own
+    /// default, which is the round-trip cost this type exists to remove.
+    #[tokio::test]
+    async fn the_page_size_reaches_the_store() {
+        let store = Arc::new(FakeStore::new(&tree()));
+        let listing = BigPageList {
+            inner: Arc::clone(&store),
+            max_keys: 3,
+            fanout_depth: 0,
+            concurrency: 1,
+        };
+        let mut walked = listing.list(None);
+        while walked.try_next().await.expect("the walk succeeds").is_some() {}
+
+        let sizes = store.page_sizes();
+        assert!(!sizes.is_empty(), "the store was asked for at least one page");
+        assert!(
+            sizes.iter().all(|s| *s == Some(3)),
+            "every page asked for 3 keys, got {sizes:?}"
+        );
+    }
+
+    /// A page size of zero would ask for nothing forever, so it is clamped.
+    #[tokio::test]
+    async fn a_page_size_below_one_is_clamped() {
+        let store = BigPageList::new(FakeStore::new(&tree())).with_max_keys(0);
+        assert_eq!(store.max_keys, 1);
+        // And it still terminates, one key at a time.
+        assert_eq!(listed(store).await.len(), tree().len());
+    }
+
+    /// Concurrency is clamped for the same reason: zero shards in flight would
+    /// never finish.
+    #[test]
+    fn concurrency_below_one_is_clamped() {
+        let store = BigPageList::new(FakeStore::new(&tree())).with_concurrency(0);
+        assert_eq!(store.concurrency, 1);
+    }
+
+    /// A prefix with no sub-directories has one shard, which is the plain
+    /// sequential walk. It must still return that directory's objects.
+    #[tokio::test]
+    async fn a_flat_prefix_walks_sequentially() {
+        let store = BigPageList::new(FakeStore::new(&["only/a.txt", "only/b.txt"]));
+        let mut paths: Vec<String> = store
+            .list(Some(&Path::from("only")))
+            .map_ok(|meta| meta.location.to_string())
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the walk succeeds");
+        paths.sort();
+        assert_eq!(paths, vec!["only/a.txt", "only/b.txt"]);
+    }
+
+    /// The delimiter listing is handed through untouched: it is one request, and
+    /// sharding it would mean sharding the answer it already gives.
+    #[tokio::test]
+    async fn a_delimiter_listing_passes_through() {
+        let store = BigPageList::new(FakeStore::new(&tree()));
+        let level = store.list_with_delimiter(None).await.expect("one level");
+        let dirs: Vec<String> = level
+            .common_prefixes
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        assert_eq!(dirs, vec!["a", "b"]);
+        let files: Vec<String> = level.objects.iter().map(|o| o.location.to_string()).collect();
+        assert_eq!(files, vec!["top.txt"]);
+    }
+
+    /// No object appears twice. The leaf level's own walk covers what sits in
+    /// it, so a level that finds no children must not also contribute its
+    /// objects to the ones gathered above.
+    #[tokio::test]
+    async fn a_sharded_walk_repeats_nothing() {
+        let got = listed(BigPageList::new(FakeStore::new(&tree()))).await;
+        let unique: BTreeSet<&String> = got.iter().collect();
+        assert_eq!(got.len(), unique.len(), "duplicates in {got:?}");
+    }
+
+    /// An empty store yields nothing rather than hanging or erroring.
+    #[tokio::test]
+    async fn an_empty_store_yields_nothing() {
+        let store = BigPageList::new(FakeStore::new(&[]));
+        assert!(listed(store).await.is_empty());
     }
 }
