@@ -20,25 +20,18 @@
 //! # Conventions
 //!
 //! Dimension names come from the HDF5 dimension scales a NetCDF-4 writer
-//! attaches. A file with no scales gets `phony_dim_0`, `phony_dim_1` and so on,
-//! one per axis. The CF rules — `scale_factor` / `add_offset` packing, a CF
+//! attaches. A file with no scales gets the dimensions netCDF invents for it,
+//! and [`oxcdf`] names them as `ncdump` does: one counter over the whole file,
+//! and one `phony_dim_N` for every axis of one length inside one group. Two
+//! groups would then never share a name, so a dataset of one group would not
+//! broadcast against a dataset of another.
+//!
+//! [`beacon_arrow_netcdf::dimensions`] renames them: every invented axis of one
+//! length becomes `phony_len_<length>`, whatever group holds it. An empty or
+//! growable axis keeps the name [`oxcdf`] gave it, and a named dimension is
+//! never touched. The CF rules — `scale_factor` / `add_offset` packing, a CF
 //! `units` string, a fixed-size char string — are applied by
 //! [`beacon_arrow_netcdf::oxcdf_reader::compat`], which both readers share.
-//!
-//! # A known limit of the attribute decoder
-//!
-//! A version-1 object header pads every message to 8 bytes, and the declared
-//! message size includes that padding. [`oxcdf`] takes the whole message body
-//! as the attribute value, so the padding becomes data: a scalar attribute
-//! narrower than 8 bytes decodes as two values, and `int32[3]` as four. Beacon
-//! drops such an attribute rather than surface a wrong one, so it is missing
-//! from the arrays.
-//!
-//! netcdf-c writes version-2 object headers, so a netCDF-4 file is unaffected
-//! and the netCDF reader never meets this. It bites a plain HDF5 file written
-//! with the earliest library version — h5py's default — which is exactly the
-//! population this reader exists for. The fix belongs in [`oxcdf`]; see
-//! <https://github.com/robinskil/oxcdf/issues/1>.
 //!
 //! # Example
 //!
@@ -47,7 +40,9 @@
 //! # async fn example(store: Arc<dyn object_store::ObjectStore>) -> anyhow::Result<()> {
 //! use object_store::path::Path;
 //!
-//! let any = beacon_arrow_hdf5::reader::open_dataset(store, Path::from("data.h5")).await?;
+//! let any =
+//!     beacon_arrow_hdf5::reader::open_dataset(store, Path::from("data.h5"), Default::default())
+//!         .await?;
 //! for name in any.dataset().arrays.keys() {
 //!     println!("{name}");
 //! }
@@ -57,6 +52,7 @@
 
 use std::sync::Arc;
 
+use beacon_arrow_netcdf::dimensions::PhonyDimensions;
 use beacon_arrow_netcdf::oxcdf_reader::compat;
 use beacon_nd_array::{
     dataset::{AnyDataset, Dataset},
@@ -66,10 +62,20 @@ use indexmap::IndexMap;
 use object_store::{path::Path, ObjectStore};
 use oxcdf::{netcdf::NcGroup, AsyncNetcdfFile, AsyncVariable};
 
+use crate::conventions;
 use crate::reader::compound;
+use crate::{Hdf5Convention, ReadOptions};
 
 /// Open an HDF5 object from `store` and return its contents as an
 /// [`AnyDataset`].
+///
+/// [`ReadOptions::unify_phony_dimensions`] renames every invented dimension by
+/// its length, so two groups of one file broadcast against each other. Clear it
+/// to keep the names the reader gave, one per length per group.
+///
+/// [`ReadOptions::convention`] reads a vendor layout on top of the container.
+/// It is [`Hdf5Convention::None`] by default, and then no file is inspected for
+/// one. See [`crate::conventions`].
 ///
 /// The reader fetches byte ranges. It never copies the whole object, so an
 /// object in S3, GCS or Azure needs no local file.
@@ -82,11 +88,50 @@ use crate::reader::compound;
 /// Returns an error when the object cannot be opened. A dataset this reader
 /// cannot model is skipped rather than failing the open, which is what the
 /// netcdf-c path does too.
-pub async fn open_dataset(store: Arc<dyn ObjectStore>, path: Path) -> anyhow::Result<AnyDataset> {
+pub async fn open_dataset(
+    store: Arc<dyn ObjectStore>,
+    path: Path,
+    options: ReadOptions,
+) -> anyhow::Result<AnyDataset> {
     let name = path.to_string();
     let file = Arc::new(AsyncNetcdfFile::open_store(store, path).await?);
-    let arrays = read_arrays(&file)?;
-    let dataset = Dataset::new(name, arrays).await;
+
+    // The file names no dimension, so netCDF invented one per length per group.
+    // Give every length one name instead, or a dataset of one group would not
+    // broadcast against a dataset of another. See
+    // [`beacon_arrow_netcdf::dimensions`].
+    let mut phony = PhonyDimensions::of_file(&file);
+    if !options.unify_phony_dimensions {
+        phony = phony.without_renames();
+    }
+    // The merge is a heuristic: two axes of one length in two groups become one
+    // dimension, whatever they count. Say which, so a join nobody asked for can
+    // be traced back to it.
+    phony.log_merges(&name);
+
+    // A convention names the axes it recognises. It joins the map above, so the
+    // arrays below are built with the names it gives and nothing is rebuilt.
+    // `Hdf5Convention::None` is the default, and reads no byte of the file.
+    let convention = match options.convention {
+        Hdf5Convention::None => None,
+        Hdf5Convention::OptoDas => conventions::optodas::detect(&file, &phony).await?,
+    };
+    if let Some(convention) = &convention {
+        phony = phony.rename(convention.axis_names());
+    }
+
+    let mut arrays = read_arrays(&file, &phony)?;
+
+    // The convention adds what the file describes but does not store.
+    if let Some(convention) = &convention {
+        convention.decorate(&file, &phony, &mut arrays).await?;
+    }
+    // Which dimensions the file itself names decides how `SELECT *` picks its
+    // grid. A file that names none is an instrument file, and its payload is
+    // the largest array, not the most common one.
+    let dataset = Dataset::new(name, arrays)
+        .await
+        .with_invented_dimensions(phony.invented_names().iter().cloned());
     AnyDataset::try_from_dataset(dataset).await
 }
 
@@ -95,7 +140,7 @@ pub async fn open_dataset(store: Arc<dyn ObjectStore>, path: Path) -> anyhow::Re
 ///
 /// Every group is walked, depth first. The map is sorted by key, so iteration
 /// order is stable. This is the lower-level building block behind
-/// [`open_dataset`].
+/// [`open_dataset`], which builds `phony` and records what it invented.
 ///
 /// # Errors
 ///
@@ -103,6 +148,7 @@ pub async fn open_dataset(store: Arc<dyn ObjectStore>, path: Path) -> anyhow::Re
 /// this reader cannot model is skipped and logged.
 pub fn read_arrays(
     file: &Arc<AsyncNetcdfFile>,
+    phony: &PhonyDimensions,
 ) -> anyhow::Result<IndexMap<String, Arc<dyn NdArrayD>>> {
     let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
 
@@ -110,14 +156,14 @@ pub fn read_arrays(
     for variable in file.variables() {
         let name = array_name(&variable);
 
-        match compat::variable_to_nd_array(file.clone(), &variable) {
+        match compat::variable_to_nd_array(file.clone(), &variable, phony) {
             Ok(array) => {
                 arrays.insert(name.clone(), array);
             }
             // The netCDF data model does not cover the type. A compound
             // dataset is the case this crate exists for, so try the HDF5 one.
             Err(_) if compound::members_of(variable.datatype()).is_some() => {
-                match compound::member_arrays(file.clone(), &variable, &name) {
+                match compound::member_arrays(file.clone(), &variable, &name, phony) {
                     Ok(members) => arrays.extend(members),
                     Err(error) => tracing::warn!(dataset = %name, "{error}"),
                 }
@@ -198,7 +244,7 @@ mod tests {
     }
 
     async fn open(file: &str) -> AnyDataset {
-        open_dataset(test_store(), Path::from(file))
+        open_dataset(test_store(), Path::from(file), ReadOptions::default())
             .await
             .unwrap_or_else(|e| panic!("open {file}: {e}"))
     }
@@ -265,22 +311,74 @@ mod tests {
         );
     }
 
-    /// A file with no dimension scales gets phony axis names, one per axis.
-    /// Two datasets of the same rank then share them, so they broadcast.
+    /// A file with no dimension scales gets the dimensions netCDF invents. Every
+    /// axis of one length then carries one name, so two datasets of one group
+    /// broadcast against each other.
     #[tokio::test]
     async fn a_plain_file_gets_phony_dimension_names() {
         let any = open(NESTED_FILE).await;
+        let temperature = any
+            .get_array("observations/temperature")
+            .unwrap()
+            .dimensions();
+
         assert_eq!(
-            any.get_array("observations/temperature")
-                .unwrap()
-                .dimensions(),
-            vec!["phony_dim_0".to_string(), "phony_dim_1".to_string()]
+            temperature,
+            vec!["phony_len_3".to_string(), "phony_len_4".to_string()]
         );
         assert_eq!(
             any.get_array("observations/salinity").unwrap().dimensions(),
-            any.get_array("observations/temperature")
-                .unwrap()
-                .dimensions()
+            temperature
+        );
+    }
+
+    /// [`oxcdf`] names the axes of one group apart from those of another, as
+    /// `ncdump` does. Beacon renames them by length, so a dataset of a nested
+    /// group broadcasts against one of the root.
+    #[tokio::test]
+    async fn every_group_shares_one_name_per_length() {
+        let any = open(NESTED_FILE).await;
+
+        // `qc` is a group of its own, and `station_id` sits in the root. All
+        // three axes 3 long now carry one name.
+        assert_eq!(
+            any.get_array("observations/qc/flag").unwrap().dimensions(),
+            vec!["phony_len_3".to_string(), "phony_len_4".to_string()]
+        );
+        assert_eq!(
+            any.get_array("station_id").unwrap().dimensions(),
+            vec!["phony_len_3".to_string()]
+        );
+
+        // One dimension per name, so the dataset broadcasts as one table.
+        assert_eq!(any.dataset().dimensions.get("phony_len_3"), Some(&3));
+        assert_eq!(any.dataset().dimensions.get("phony_len_4"), Some(&4));
+        assert_eq!(any.dataset().dimensions.len(), 2);
+    }
+
+    /// The unification is a setting. Turned off, the reader reports the names
+    /// [`oxcdf`] gave, one per length per group.
+    #[tokio::test]
+    async fn the_names_of_the_reader_survive_when_the_unification_is_off() {
+        let file = Arc::new(
+            AsyncNetcdfFile::open_store(test_store(), Path::from(NESTED_FILE))
+                .await
+                .unwrap(),
+        );
+        let arrays =
+            read_arrays(&file, &PhonyDimensions::of_file(&file).without_renames()).unwrap();
+
+        assert_eq!(
+            arrays["observations/temperature"].dimensions(),
+            vec!["phony_dim_2".to_string(), "phony_dim_3".to_string()]
+        );
+        assert_eq!(
+            arrays["observations/qc/flag"].dimensions(),
+            vec!["phony_dim_0".to_string(), "phony_dim_1".to_string()]
+        );
+        assert_eq!(
+            arrays["station_id"].dimensions(),
+            vec!["phony_dim_4".to_string()]
         );
     }
 
@@ -369,9 +467,11 @@ mod tests {
 
     #[tokio::test]
     async fn open_dataset_returns_an_error_for_a_missing_object() {
-        assert!(open_dataset(test_store(), Path::from("nope.h5"))
-            .await
-            .is_err());
+        assert!(
+            open_dataset(test_store(), Path::from("nope.h5"), ReadOptions::default())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -387,7 +487,11 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let keys: Vec<String> = read_arrays(&file).unwrap().keys().cloned().collect();
+        let keys: Vec<String> = read_arrays(&file, &PhonyDimensions::of_file(&file))
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted);

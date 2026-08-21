@@ -26,6 +26,7 @@
 
 use std::sync::Arc;
 
+use beacon_arrow_netcdf::dimensions::PhonyDimensions;
 use beacon_nd_array::{
     array::{backend::ArrayBackend, subset::ArraySubset},
     datatypes::NdArrayType,
@@ -51,6 +52,10 @@ pub fn members_of(datatype: &Datatype) -> Option<&[CompoundMember]> {
 /// The names are `dataset/member`, with `dataset` the variable's own array name
 /// (its path, without the leading slash).
 ///
+/// Every member carries the axes of the dataset, so `phony` renames them the
+/// way it renames those of an ordinary variable. A member then broadcasts
+/// against a variable of another group of the same file.
+///
 /// # Errors
 ///
 /// Returns an error when the variable is not a compound dataset, or when no
@@ -60,6 +65,7 @@ pub fn member_arrays(
     file: Arc<AsyncNetcdfFile>,
     variable: &oxcdf::AsyncVariable<'_>,
     array_name: &str,
+    phony: &PhonyDimensions,
 ) -> anyhow::Result<Vec<(String, Arc<dyn NdArrayD>)>> {
     let datatype = variable.datatype();
     let members = members_of(datatype).ok_or_else(|| {
@@ -70,7 +76,7 @@ pub fn member_arrays(
     })?;
 
     let shape: Vec<usize> = variable.shape.iter().map(|&len| len as usize).collect();
-    let dimensions = variable.dimensions.clone();
+    let dimensions = phony.apply(&variable.dimensions);
     let chunk_shape = chunk_shape_of(variable, &shape);
     let record_size = datatype.size as usize;
 

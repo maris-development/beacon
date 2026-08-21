@@ -82,9 +82,9 @@ datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.gi
 datafusion-spatial-kernels = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77" }
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 
-oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.3.0", features = ["async", "object-store", "ndarray"] }
+oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.4.0", features = ["async", "object-store", "ndarray"] }
 
-oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", version = "0.3.0", features = ["async", "object-store"] }
+oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", version = "0.4.0", features = ["async", "object-store"] }
 tonic = "0.14.1"
 
 

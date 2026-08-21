@@ -9,14 +9,21 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_nd_array::dataset::AnyDataset;
+
+use crate::ReadOptions;
 use object_store::{ObjectMeta, ObjectStore};
 
 /// Open an HDF5 dataset through the Rust reader.
+///
+/// `options` carries the table's own settings down to the reader: how the
+/// dimensions netCDF invented are named, and which layout convention to read on
+/// top of the container.
 pub async fn open_dataset(
     store: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
+    options: ReadOptions,
 ) -> anyhow::Result<AnyDataset> {
-    crate::reader::open_dataset(store.clone(), object.location.clone()).await
+    crate::reader::open_dataset(store.clone(), object.location.clone(), options).await
 }
 
 /// Fetch the Arrow schema for an HDF5 object by opening the dataset and
@@ -31,8 +38,9 @@ pub async fn fetch_schema(
     store: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     read_dimensions: Option<Vec<String>>,
+    options: ReadOptions,
 ) -> datafusion::error::Result<SchemaRef> {
-    let dataset = open_dataset(store, object).await.map_err(|e| {
+    let dataset = open_dataset(store, object, options).await.map_err(|e| {
         datafusion::error::DataFusionError::Execution(format!(
             "Failed to open HDF5 dataset {} for schema inference: {e}",
             object.location

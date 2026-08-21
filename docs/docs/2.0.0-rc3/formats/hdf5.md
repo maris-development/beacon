@@ -107,11 +107,85 @@ grid, and Beacon returns a dataset only if the list holds all of that dataset's 
 SELECT * FROM read_hdf5(['experiments/**/*.h5'], ['sample', 'channel']);
 ```
 
-A netCDF-4 file names its axes with HDF5 *dimension scales*, and Beacon uses those names. A plain
-HDF5 file attaches no scales, so Beacon names the axes `phony_dim_0`, `phony_dim_1` and so on, one
-for each axis. Two datasets of the same rank then share those names and broadcast together.
+A netCDF-4 file names its axes with HDF5 *dimension scales*, and Beacon uses those names.
+
+A plain HDF5 file attaches no scales, so netCDF invents a dimension for every axis. Beacon names
+each one by its length, `phony_len_4` for an axis of 4 elements, over the whole file. Two datasets
+in two different groups therefore share an axis of one length and broadcast together, which is what
+lets one query read a payload in the root group and the description of each channel in another:
+
+```sql
+SELECT "data", "header/channels", "cableSpec/sensorDistances"
+FROM read_hdf5('acquisition/135841.hdf5');
+```
+
+Two exceptions keep the name the reader gave them, `phony_dim_7` and the like: an axis of zero
+elements, because netCDF has no fixed dimension of that length, and an axis that can grow, because
+two growable axes of one length are equal by accident rather than by design.
+
+Beacon merges two axes of one length even when they count different things. That is the only rule
+available, because a plain HDF5 file records nothing else about an axis. Set
+`unify_phony_dimensions` to `false` on the table, or `BEACON_HDF5_UNIFY_PHONY_DIMENSIONS=false` on
+the server, to keep one dimension per length per group instead.
+
+A file that names no dimension also picks its `SELECT *` grid by volume rather than by variable
+count, so a query lands on the payload rather than on the metadata around it. See
+[Arrays to tables](/docs/2.0.0-rc3/arrays-to-tables#a-file-that-names-no-dimension).
 
 See [Arrays to tables](/docs/2.0.0-rc3/arrays-to-tables#the-dimensions-argument).
+
+## Read a vendor layout
+
+HDF5 is a container. It says how bytes are stored and nothing about what they mean, so Beacon reads
+a plain HDF5 file as the container describes it and assumes nothing further.
+
+An instrument writes HDF5 directly, and its files follow the vendor's own layout rather than any
+standard. A **convention** reads that layout. It is opt-in, and off by default no file is inspected
+for one:
+
+```sql
+CREATE EXTERNAL TABLE das STORED AS HDF5 LOCATION 'acquisition/*.hdf5'
+OPTIONS ('convention' = 'optodas');
+
+-- or, per query. The second argument holds the dimensions, so pass NULL for it.
+SELECT * FROM read_hdf5('acquisition/*.hdf5', NULL, 'optodas');
+```
+
+Set `BEACON_HDF5_CONVENTION=optodas` to give every HDF5 table of a server the same default.
+
+### `optodas`
+
+An ASN OptoDAS acquisition file holds one payload, `data`, of raw counts on two anonymous axes. The
+file describes those axes in another group, and the convention reads that description:
+
+| The file records | The table gets |
+|---|---|
+| `header/dimensionNames`, `header/dimensionSizes` | the axes of the payload, named `time` and `distance` |
+| `header/time`, `header/dt` | a `time` column of timestamps, one per sample |
+| `header/dimensionRanges/dimension<n>` | a `distance` column in metres, one per channel |
+| `header/dataScale`, `header/unit` | the payload decoded from counts to the unit the file records |
+
+```sql
+SELECT time, distance, "data"
+FROM read_hdf5('acquisition/**/*.hdf5', NULL, 'optodas')
+WHERE distance BETWEEN 1000 AND 2000
+  AND time BETWEEN '2026-03-28 12:00:00' AND '2026-03-28 12:00:30';
+```
+
+Both predicates prune. A `WHERE` clause on a coordinate skips the chunks that hold no matching row,
+so a window of one cable over one minute reads a window of the file. Each file supplies its own
+start time, so a glob over an archive gives one time axis across every file in it.
+
+Every column the file holds keeps its own name and its own values. The convention adds columns; it
+renames nothing and drops nothing.
+
+`time` is the nominal clock: the start the file records, plus one `dt` per sample. The file also
+carries `timing/ppses`, `timing/sampleDelayPPS` and `timing/sampleSkew`, and the convention applies
+none of them. They stay readable, so a query can correct the clock itself. A file that reports
+missing samples gets no `time` column at all rather than a wrong one.
+
+A file that does not follow the layout reads plainly, with one warning in the log. An archive of
+mixed files therefore still reads in one scan.
 
 ## Inspect the schema
 

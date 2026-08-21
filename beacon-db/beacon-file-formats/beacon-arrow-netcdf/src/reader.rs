@@ -43,6 +43,7 @@ use indexmap::IndexMap;
 use netcdf::AttributeValue;
 
 use crate::compat;
+use crate::dimensions::{Axis, PhonyDimensions};
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
@@ -63,8 +64,12 @@ use crate::compat;
 /// unsupported NetCDF type.
 pub async fn open_dataset<P: AsRef<Path>>(path: P) -> anyhow::Result<AnyDataset> {
     let name = path.as_ref().to_string_lossy().to_string();
-    let arrays = read_arrays(&path)?;
-    let dataset = Dataset::new(name, arrays).await;
+    let (arrays, phony) = read_arrays_and_dimensions(&path)?;
+    // A file that names no dimension is an instrument file, and `SELECT *`
+    // picks its grid by volume rather than by variable count.
+    let dataset = Dataset::new(name, arrays)
+        .await
+        .with_invented_dimensions(phony.invented_names().iter().cloned());
     AnyDataset::try_from_dataset(dataset).await
 }
 
@@ -81,10 +86,32 @@ pub async fn open_dataset<P: AsRef<Path>>(path: P) -> anyhow::Result<AnyDataset>
 /// Returns an error if the file cannot be opened or if any variable uses an
 /// unsupported NetCDF type.
 pub fn read_arrays<P: AsRef<Path>>(path: P) -> anyhow::Result<IndexMap<String, Arc<dyn NdArrayD>>> {
+    Ok(read_arrays_and_dimensions(path)?.0)
+}
+
+/// The arrays of one file, and the dimensions netcdf-c invented for it.
+///
+/// [`open_dataset`] needs both, and one open reads both. `read_arrays` is this
+/// without the second half.
+fn read_arrays_and_dimensions<P: AsRef<Path>>(
+    path: P,
+) -> anyhow::Result<(IndexMap<String, Arc<dyn NdArrayD>>, PhonyDimensions)> {
     let file = netcdf::open(&path)?;
     let file_ref = Arc::new(file);
 
     let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
+
+    // netcdf-c invents a dimension for every axis a plain HDF5 file leaves
+    // unnamed. Rename them the way the oxcdf reader does, so a table keeps its
+    // dimension names when the reader changes. A netCDF file names every
+    // dimension, so this renames nothing there.
+    let phony = PhonyDimensions::of_axes(file_ref.dimensions().map(|dimension| {
+        Axis::from_name(
+            dimension.name(),
+            dimension.len() as u64,
+            dimension.is_unlimited(),
+        )
+    }));
 
     // ── Variables and their per-variable attributes ──────────────────────
     for variable in file_ref.variables() {
@@ -94,6 +121,7 @@ pub fn read_arrays<P: AsRef<Path>>(path: P) -> anyhow::Result<IndexMap<String, A
             file_ref.clone(),
             &variable.name(),
             variable_attributes.clone(),
+            &phony,
         ) {
             arrays.insert(variable.name(), variable_array);
         }
@@ -117,7 +145,7 @@ pub fn read_arrays<P: AsRef<Path>>(path: P) -> anyhow::Result<IndexMap<String, A
     // Deterministic ordering by name.
     arrays.sort_keys();
 
-    Ok(arrays)
+    Ok((arrays, phony))
 }
 
 /// Collect every attribute of a NetCDF *file* into a map.

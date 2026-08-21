@@ -29,7 +29,9 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::{source::Hdf5Source, Hdf5Config, HDF5_EXTENSIONS, HDF5_FORMAT_NAME};
+use crate::{
+    source::Hdf5Source, Hdf5Config, Hdf5Convention, ReadOptions, HDF5_EXTENSIONS, HDF5_FORMAT_NAME,
+};
 
 /// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
 fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> {
@@ -48,6 +50,7 @@ struct EffectiveOptions {
     use_rust_reader: bool,
     enable_statistics: bool,
     read_dimensions: Option<Vec<String>>,
+    read: ReadOptions,
 }
 
 /// A `FileFormat` factory for HDF5 files.
@@ -130,6 +133,10 @@ impl Hdf5FormatFactory {
             use_rust_reader: self.uses_rust_reader(format_options)?,
             enable_statistics: self.config.enable_statistics,
             read_dimensions: None,
+            read: ReadOptions {
+                unify_phony_dimensions: self.config.unify_phony_dimensions,
+                convention: self.config.convention,
+            },
         };
 
         if let Some(value) = format_options.get("read_dimensions") {
@@ -144,6 +151,17 @@ impl Hdf5FormatFactory {
         if let Some(value) = format_options.get("enable_statistics") {
             options.enable_statistics = parse_bool_option("enable_statistics", value)?;
         }
+        if let Some(value) = format_options.get("unify_phony_dimensions") {
+            options.read.unify_phony_dimensions =
+                parse_bool_option("unify_phony_dimensions", value)?;
+        }
+        if let Some(value) = format_options.get("convention") {
+            options.read.convention = Hdf5Convention::parse(value).map_err(|value| {
+                exec_datafusion_err!(
+                    "unknown HDF5 convention '{value}'; the conventions are 'none' and 'optodas'"
+                )
+            })?;
+        }
 
         Ok(options)
     }
@@ -153,6 +171,7 @@ impl Hdf5FormatFactory {
         Hdf5Format {
             ext: self.ext.clone(),
             read_dimensions: options.read_dimensions,
+            read: options.read,
             // Carried from the effective options. Every caller but
             // `create_for_analysis` clears it first, so a query computes
             // nothing.
@@ -195,6 +214,10 @@ impl FileFormatFactory for Hdf5FormatFactory {
             // A query never computes statistics. See `create_for_analysis`.
             enable_statistics: false,
             read_dimensions: None,
+            read: ReadOptions {
+                unify_phony_dimensions: self.config.unify_phony_dimensions,
+                convention: self.config.convention,
+            },
         };
         Arc::new(self.build_format(options, self.inner.default()))
     }
@@ -310,6 +333,9 @@ pub struct Hdf5Format {
     ext: String,
     /// Columns to treat as dimensions when reading, or `None` to auto-select.
     read_dimensions: Option<Vec<String>>,
+    /// How this format reads one file: the naming of the invented dimensions,
+    /// and the layout convention. See [`crate::ReadOptions`].
+    read: ReadOptions,
     /// Whether to generate per-file statistics during planning.
     enable_statistics: bool,
     /// The format every write goes to. Always netcdf-c.
@@ -325,6 +351,16 @@ impl Hdf5Format {
     /// The dimensions this format reads, or `None` to auto-select a default.
     pub fn read_dimensions(&self) -> Option<&Vec<String>> {
         self.read_dimensions.as_ref()
+    }
+
+    /// Whether this format unifies the dimensions netCDF invents, by length.
+    pub fn unifies_phony_dimensions(&self) -> bool {
+        self.read.unify_phony_dimensions
+    }
+
+    /// The layout convention this format reads on top of the container.
+    pub fn convention(&self) -> Hdf5Convention {
+        self.read.convention
     }
 
     /// Whether this format writes through netcdf-c.
@@ -379,7 +415,9 @@ impl FileFormat for Hdf5Format {
             .max(1);
         let tasks: Vec<_> = objects
             .iter()
-            .map(|object| crate::open::fetch_schema(store, object, self.read_dimensions.clone()))
+            .map(|object| {
+                crate::open::fetch_schema(store, object, self.read_dimensions.clone(), self.read)
+            })
             .collect();
         let schemas: Vec<SchemaRef> = futures::stream::iter(tasks)
             .buffered(width)
@@ -418,7 +456,7 @@ impl FileFormat for Hdf5Format {
         // Reporting unknown rather than erroring is deliberate. Absent
         // statistics are always a legal answer -- DataFusion prunes nothing and
         // scans everything, which is correct, just slower.
-        let dataset = match crate::open::open_dataset(store, object).await {
+        let dataset = match crate::open::open_dataset(store, object, self.read).await {
             Ok(dataset) => dataset,
             Err(e) => {
                 tracing::warn!(
@@ -460,8 +498,8 @@ impl FileFormat for Hdf5Format {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source =
-            Hdf5Source::new(self.read_dimensions.clone(), table_schema).with_projection(projection);
+        let source = Hdf5Source::new(self.read_dimensions.clone(), self.read, table_schema)
+            .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -488,7 +526,11 @@ impl FileFormat for Hdf5Format {
     }
 
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
-        Arc::new(Hdf5Source::new(self.read_dimensions.clone(), table_schema))
+        Arc::new(Hdf5Source::new(
+            self.read_dimensions.clone(),
+            self.read,
+            table_schema,
+        ))
     }
 }
 
@@ -716,5 +758,39 @@ mod tests {
             hdf5.read_dimensions(),
             Some(&vec!["time".to_string(), "lat".to_string()])
         );
+        // The default: a plain HDF5 file reads as one table.
+        assert!(hdf5.unifies_phony_dimensions());
+    }
+
+    /// One table can keep the names the reader gave, for a file whose groups
+    /// hold unrelated axes of one length.
+    #[test]
+    fn a_table_option_turns_off_the_dimension_unification() {
+        let ctx = session();
+        let f = factory("hdf5", Hdf5Config::default());
+        let format = f
+            .create(
+                &ctx.state(),
+                &HashMap::from([("unify_phony_dimensions".to_string(), "false".to_string())]),
+            )
+            .unwrap();
+        let hdf5 = format.as_any().downcast_ref::<Hdf5Format>().unwrap();
+        assert!(!hdf5.unifies_phony_dimensions());
+    }
+
+    /// The runtime setting decides when the table says nothing.
+    #[test]
+    fn the_runtime_flag_turns_off_the_dimension_unification() {
+        let ctx = session();
+        let f = factory(
+            "hdf5",
+            Hdf5Config {
+                unify_phony_dimensions: false,
+                ..Hdf5Config::default()
+            },
+        );
+        let format = f.create(&ctx.state(), &HashMap::new()).unwrap();
+        let hdf5 = format.as_any().downcast_ref::<Hdf5Format>().unwrap();
+        assert!(!hdf5.unifies_phony_dimensions());
     }
 }
