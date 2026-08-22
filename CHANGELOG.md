@@ -188,6 +188,16 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **Seven statements lowercased a table name.** Beacon turns identifier normalization off, so the
+  catalog holds a table under the exact name the statement writes. `INSERT`, `CREATE TABLE AS
+  SELECT`, `ALTER TABLE`, `CREATE INDEX`, `DROP INDEX`, `SHOW INDEXES`, `REFRESH`, the table
+  extension statements and the admin `table-config` route rebuilt the reference from a string with
+  `TableReference::parse_str`, which lowercases every unquoted part. Each one asked for a name the
+  catalog does not hold, so `CREATE TABLE MyManaged` was followed by `No table named 'mymanaged'`.
+  `CREATE MATERIALIZED VIEW MyView` was worse: it registered `myview` but persisted `MyView`, so a
+  restart renamed the view and broke every query that used the old spelling. A new `table_name`
+  module builds the reference and keeps the case, and every path uses it. A new
+  [identifiers page](docs/docs/2.0.0-rc3/sql/identifiers.md) states the rule and its limits.
 - **`OPTIONS` on a NetCDF, HDF5, Zarr or BBF external table had no effect**
   ([#421](https://github.com/maris-development/beacon/issues/421)). DataFusion's SQL planner
   renames an `OPTIONS` key without a `.` to `format.<key>`. Those four factories read the bare key
