@@ -350,7 +350,7 @@ pub fn show_extensions_arrow_schema() -> SchemaRef {
 /// The table's live Arrow schema, erroring if the table is not registered.
 async fn table_schema(ctx: &Arc<SessionContext>, name: &str) -> anyhow::Result<SchemaRef> {
     let provider = ctx
-        .table_provider(name)
+        .table_provider(crate::table_name::table_reference(name))
         .await
         .map_err(|_| anyhow::anyhow!("table '{name}' not found"))?;
     Ok(provider.schema())
@@ -365,7 +365,10 @@ pub async fn get_table_extensions(
     ctx: &Arc<SessionContext>,
     name: &str,
 ) -> anyhow::Result<TableExtensions> {
-    anyhow::ensure!(ctx.table_exist(name)?, "table '{name}' not found");
+    anyhow::ensure!(
+        ctx.table_exist(crate::table_name::table_reference(name))?,
+        "table '{name}' not found"
+    );
     match persistence(ctx).load_table_extensions_json(name).await? {
         Some(json) => {
             Ok(serde_json::from_str(&json).context("stored table extensions are not valid")?)
@@ -417,7 +420,10 @@ pub async fn set_table_extensions(
 
 /// Remove all extensions for a table.
 pub async fn delete_table_extensions(ctx: &Arc<SessionContext>, name: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(ctx.table_exist(name)?, "table '{name}' not found");
+    anyhow::ensure!(
+        ctx.table_exist(crate::table_name::table_reference(name))?,
+        "table '{name}' not found"
+    );
     persistence(ctx).remove_table_extensions_json(name).await?;
     Ok(())
 }

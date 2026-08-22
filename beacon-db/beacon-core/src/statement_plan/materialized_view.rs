@@ -20,7 +20,6 @@ use datafusion::{
     dataframe::DataFrameWriteOptions,
     parquet::arrow::ArrowWriter,
     prelude::{DataFrame, SessionContext},
-    sql::TableReference,
 };
 use futures::StreamExt;
 use object_store::{GetOptions, ObjectStore, ObjectStoreExt};
@@ -42,7 +41,7 @@ pub(crate) async fn create_materialized_view(
     name: &str,
     query_sql: &str,
 ) -> anyhow::Result<()> {
-    let table_ref = TableReference::parse_str(name);
+    let table_ref = crate::table_name::table_reference(name);
 
     if session_ctx.table_exist(table_ref.clone())? {
         return Err(anyhow::anyhow!("Materialized view '{name}' already exists"));
@@ -86,7 +85,7 @@ pub(crate) async fn refresh_table(
     session_ctx: &Arc<SessionContext>,
     name: &str,
 ) -> anyhow::Result<()> {
-    let table_ref = TableReference::parse_str(name);
+    let table_ref = crate::table_name::table_reference(name);
     let provider = session_ctx
         .table_provider(table_ref)
         .await
@@ -201,7 +200,7 @@ pub(crate) async fn refresh_materialized_view(
     session_ctx: &Arc<SessionContext>,
     name: &str,
 ) -> anyhow::Result<()> {
-    let table_ref = TableReference::parse_str(name);
+    let table_ref = crate::table_name::table_reference(name);
 
     let provider = session_ctx
         .table_provider(table_ref.clone())

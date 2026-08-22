@@ -539,7 +539,7 @@ pub(crate) async fn create_table(
     session.register_table(name.clone(), provider)?;
 
     if is_ctas {
-        let stream = insert_into(session, &table_name, InsertOp::Append, child).await?;
+        let stream = insert_into(session, name, InsertOp::Append, child).await?;
         Ok(Some(build_default_indexes_after(
             stream,
             warehouse,
@@ -588,11 +588,11 @@ fn build_default_indexes_after(
 /// inserted-row count stream.
 pub(crate) async fn insert_into(
     session: &Arc<SessionContext>,
-    table: &str,
+    table: &TableReference,
     op: InsertOp,
     child: Arc<dyn ExecutionPlan>,
 ) -> anyhow::Result<SendableRecordBatchStream> {
-    let provider = session.table_provider(table).await?;
+    let provider = session.table_provider(table.clone()).await?;
     let state = session.state();
     let insert_plan = provider.insert_into(&state, child, op).await?;
     let stream = execute_stream(insert_plan, session.task_ctx())?;
@@ -654,7 +654,7 @@ pub(crate) async fn alter_table(
     session: &Arc<SessionContext>,
     spec: &AlterTableSpec,
 ) -> anyhow::Result<()> {
-    let table_ref = TableReference::parse_str(&spec.name.to_string());
+    let table_ref = crate::table_name::object_name_table_reference(&spec.name);
 
     let provider = session.table_provider(table_ref.clone()).await?;
     let definition = provider
@@ -745,7 +745,9 @@ async fn lance_table_location(
     session: &Arc<SessionContext>,
     table: &str,
 ) -> anyhow::Result<String> {
-    let provider = session.table_provider(table).await?;
+    let provider = session
+        .table_provider(crate::table_name::table_reference(table))
+        .await?;
     provider
         .as_any()
         .downcast_ref::<beacon_lance::LanceTable>()

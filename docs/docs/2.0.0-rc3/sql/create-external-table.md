@@ -22,6 +22,11 @@ LOCATION '<path>'
 [OPTIONS ('<key>' '<value>', ...)]
 ```
 
+::: tip Names keep their case
+`<table_name>` means exactly what you write. `MyTable` and `mytable` are two different tables.
+See [Identifiers and case](/docs/2.0.0-rc3/sql/identifiers).
+:::
+
 Beacon resolves `LOCATION` against its storage root. Give a folder or a glob pattern:
 
 ```sql
