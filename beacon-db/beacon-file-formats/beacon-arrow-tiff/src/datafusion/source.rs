@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use arrow::{
+    datatypes::{FieldRef, SchemaRef},
+    record_batch::RecordBatch,
+};
 use beacon_nd_array::arrow::{
     metrics::ReadMetrics,
     morsel::{morsel_scan, MorselSource, OpenFile},
+    partition::FilePartitions,
     file_read::FileRead,
 };
 use datafusion::{
@@ -78,6 +82,7 @@ impl FileSource for TiffSource {
             self.execution_plan_metrics.clone(),
             partition,
             self.morsel.clone(),
+            base_config.table_partition_cols().clone(),
         )))
     }
 
@@ -202,6 +207,9 @@ struct TiffOpener {
     morsel: Option<Arc<MorselSource>>,
     /// How one raster is opened, for the queue to call.
     rasters: Arc<dyn OpenFile>,
+    /// The table's `PARTITIONED BY` columns, nd-encoded as the scan carries
+    /// them. A file's values for them travel on its `PartitionedFile`.
+    partition_fields: Vec<FieldRef>,
 }
 
 /// How one GeoTIFF becomes a planned [`FileRead`].
@@ -213,6 +221,8 @@ struct TiffRasters {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
+    /// The table's `PARTITIONED BY` columns. Each file brings its own values.
+    partition_fields: Vec<FieldRef>,
 }
 
 impl std::fmt::Debug for TiffRasters {
@@ -239,6 +249,7 @@ impl OpenFile for TiffRasters {
             self.projected_schema.clone(),
             self.batch_size,
             self.predicate.clone(),
+            FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
             Some(&self.metrics),
         )
         .await
@@ -254,6 +265,7 @@ impl TiffOpener {
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
         morsel: Option<Arc<MorselSource>>,
+        partition_fields: Vec<FieldRef>,
     ) -> Self {
         // Once per partition, not once per file: every call registers four
         // counters into the scan's one metrics set, behind a mutex.
@@ -264,6 +276,7 @@ impl TiffOpener {
             batch_size,
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
+            partition_fields: partition_fields.clone(),
         });
 
         Self {
@@ -275,6 +288,7 @@ impl TiffOpener {
             read_metrics,
             morsel,
             rasters,
+            partition_fields,
         }
     }
 
@@ -291,6 +305,7 @@ impl TiffOpener {
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ReadMetrics,
+        partitions: FilePartitions,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(object_store, object.clone())
             .await
@@ -306,6 +321,7 @@ impl TiffOpener {
             projected_schema,
             batch_size,
             predicate,
+            partitions,
             Some(&metrics),
         )
         .await?;
@@ -328,6 +344,8 @@ impl FileOpener for TiffOpener {
             return Ok(futures::future::ready(Ok(stream)).boxed());
         }
 
+        let partitions =
+            FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone());
         Ok(Self::read(
             file.object_meta,
             self.object_store.clone(),
@@ -335,6 +353,7 @@ impl FileOpener for TiffOpener {
             self.batch_size,
             self.predicate.clone(),
             self.read_metrics.clone(),
+            partitions,
         )
         .boxed())
     }

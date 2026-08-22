@@ -4,6 +4,7 @@ pub mod compute;
 pub mod metrics;
 pub mod morsel;
 pub mod nd_provider;
+pub mod partition;
 pub mod pushdown;
 pub mod pushdown_filter;
 pub mod schema;

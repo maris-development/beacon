@@ -495,6 +495,68 @@ async fn a_nested_group_reads_end_to_end() {
     assert_eq!(batch.num_columns(), 3);
 }
 
+/// A partitioned table reads, and every row holds the value of its own file's
+/// path.
+///
+/// A `PARTITIONED BY` column is in the *path* of a file, and an HDF5 scan reads
+/// a whole collection behind one plan entry, so `FileStream` cannot append it:
+/// it does not know which file a batch came from. The reader appends it itself
+/// instead — per file, which is per morsel.
+#[tokio::test]
+async fn a_partitioned_table_gives_every_row_the_value_of_its_path() {
+    use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    for site in ["north", "south"] {
+        let part = dir.path().join(format!("site={site}"));
+        std::fs::create_dir_all(&part).unwrap();
+        std::fs::copy(hdf5_file(NESTED_FILE), part.join("obs.h5")).unwrap();
+    }
+
+    let ctx = session();
+    let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
+    let listing = Arc::new(ListingFactory::dynamic());
+    let format = factory(Backend::Rust)
+        .create_with_native_root(&ctx.state(), &Backend::Rust.options(), &url, &listing)
+        .expect("the HDF5 format builds");
+
+    let options = ListingOptions::new(format)
+        // The format finds its own files, as `CREATE EXTERNAL TABLE` leaves it.
+        .with_file_extension("")
+        .with_collect_stat(false)
+        .with_table_partition_cols(vec![("site".to_string(), arrow::datatypes::DataType::Utf8)]);
+
+    let config = ListingTableConfig::new(url)
+        .with_listing_options(options)
+        .infer_schema(&ctx.state())
+        .await
+        .expect("the partitioned collection infers a schema");
+    ctx.register_table("obs", Arc::new(ListingTable::try_new(config).unwrap()))
+        .unwrap();
+
+    let batch = collect(
+        &ctx,
+        r#"SELECT site, station_id, "observations/temperature"
+           FROM obs ORDER BY site, station_id, "observations/temperature""#,
+    )
+    .await;
+
+    // Twelve rows per copy: 3 stations x 4 samples, as the fixture holds.
+    assert_eq!(batch.num_rows(), 24, "both copies are read, whole");
+    let sites = arrow::array::AsArray::as_string::<i32>(batch.column(0));
+    let seen: Vec<&str> = (0..batch.num_rows()).map(|row| sites.value(row)).collect();
+    assert_eq!(
+        seen.iter().filter(|site| **site == "north").count(),
+        12,
+        "one copy's rows carry north"
+    );
+    assert_eq!(
+        seen.iter().filter(|site| **site == "south").count(),
+        12,
+        "and the other's carry south"
+    );
+}
+
 /// A dataset of one group carries the rows of a dataset of another.
 ///
 /// [`oxcdf`] names the axes of one group apart from those of another, so the

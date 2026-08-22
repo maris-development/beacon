@@ -118,6 +118,19 @@ PARTITIONED BY (year, month)
 SELECT * FROM observations WHERE year = 2024 AND month = 6
 ```
 
+The value comes from the directory name of each file. `NC`, `HDF5` and `TIFF` read a partitioned
+collection the same way:
+
+```sql
+CREATE EXTERNAL TABLE observations
+STORED AS NC
+LOCATION 'obs/'
+PARTITIONED BY (year, month)
+```
+
+`ZARR` does not support this clause. A Zarr table holds groups inside one store, not files in
+directories, so a path holds no partition value.
+
 ## `OPTIONS`
 
 `OPTIONS` tunes the read of one table. Each format reads its own keys. Beacon stores the keys with

@@ -12,6 +12,18 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **`PARTITIONED BY` works for netCDF, HDF5 and GeoTIFF tables.** `CREATE EXTERNAL TABLE
+  observations STORED AS NC LOCATION 'obs/' PARTITIONED BY (year, month)` used to fail with a
+  `NotImplemented` error naming the format and the columns; it now plans and runs, and a filter on
+  a partition column still prunes whole directories out of the listing. A partition value is in the
+  *path* of a file rather than inside it, and DataFusion's `FileStream` appends it per plan entry —
+  which it can do only because an entry is a file. These three formats read a whole collection
+  behind one entry, so each file's values now travel on the queue with that file, and the reader
+  appends them itself: as one value on no axis, which broadcasts over whatever grid the file's own
+  columns define, so nothing is built per row. A query for nothing but the partition column
+  (`SELECT year, count(*) … GROUP BY year`) states the value over the rows of the read instead,
+  because there is no other column to define a grid. `ZARR` still refuses the clause: a Zarr table
+  holds groups inside one store, not files in directories, so a path holds no value to read.
 - **The admin UI shows the disk space of the datasets store.** An operator sees the total space,
   the used space, the free space and the used percent on the Server page and on the Datasets page,
   and no longer opens a shell to read them. The bar turns amber at 70% and red at 85%. The values

@@ -181,18 +181,21 @@ impl FileFormat for TiffFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        beacon_nd_array::arrow::morsel::reject_partition_columns("TIFF", &conf)?;
-
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
         // the file source's schema is the encoded form of the logical table
         // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
         // back to the logical schema above the scan.
+        //
+        // The `PARTITIONED BY` columns are encoded with it. Their values come
+        // from a file's path rather than its contents, and the reader appends
+        // them per file, but they reach the plan the same way every other column
+        // does — so that one decoder reads the whole batch.
         let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
             conf.file_schema(),
         ));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
             encoded_file_schema,
-            conf.table_partition_cols().clone(),
+            beacon_nd_array::arrow::partition::encoded_partition_cols(conf.table_partition_cols()),
         );
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
@@ -384,6 +387,69 @@ mod tests {
             let v = lon_col.value(i);
             assert!(v >= -18.0 && v <= 37.0, "lon[{i}]={v} out of range");
         }
+    }
+
+    /// A partitioned table carries the value of a raster's path on every row
+    /// that raster contributes.
+    ///
+    /// The value is in the *path*, and a TIFF scan reads a whole collection
+    /// behind one plan entry, so `FileStream` cannot append it: it does not know
+    /// which raster a batch came from. The reader appends it itself instead —
+    /// per file, which is per morsel.
+    #[tokio::test]
+    async fn a_partitioned_raster_carries_the_value_of_its_path() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let path = Path::from("year=2024/test.tif");
+        let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
+
+        let file_schema = reader::fetch_schema(object_store.clone(), object.clone())
+            .await
+            .expect("schema");
+
+        // What `create_physical_plan` builds for a partitioned table: the file
+        // schema encoded, and the partition column encoded beside it.
+        let year: arrow::datatypes::FieldRef = Arc::new(arrow::datatypes::Field::new(
+            "year",
+            arrow::datatypes::DataType::Utf8,
+            false,
+        ));
+        let ts = datafusion::datasource::table_schema::TableSchema::new(
+            Arc::new(beacon_datafusion_ext::nd::encoded_schema(&file_schema)),
+            beacon_nd_array::arrow::partition::encoded_partition_cols(&[year]),
+        );
+
+        let source = source::TiffSource::new(ts);
+        let file_opener = {
+            let conf = FileScanConfigBuilder::new(
+                ObjectStoreUrl::parse("memory://").expect("url"),
+                Arc::new(source.clone()) as Arc<dyn FileSource>,
+            )
+            .build();
+            source
+                .create_file_opener(object_store, &conf, 0)
+                .expect("file opener")
+        };
+
+        let mut file = datafusion::datasource::listing::PartitionedFile::from(object);
+        file.partition_values = vec![datafusion::scalar::ScalarValue::Utf8(Some(
+            "2024".to_string(),
+        ))];
+
+        let stream = file_opener.open(file).expect("open").await.expect("stream");
+        let batches = decoded(stream).await;
+        let full = arrow::compute::concat_batches(&batches[0].schema(), &batches).expect("concat");
+
+        assert!(full.num_rows() > 0, "the raster is read");
+        let years = full
+            .column(full.schema().index_of("year").expect("the partition column"))
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("year is Utf8");
+        assert!(
+            (0..full.num_rows()).all(|row| years.value(row) == "2024"),
+            "every row of the raster carries the value of its directory"
+        );
     }
 
     #[tokio::test]
