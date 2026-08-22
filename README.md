@@ -44,7 +44,7 @@ docker run -d --name beacon -p 5001:5001 \
   ghcr.io/maris-development/beacon:latest
 ```
 
-Port `5001` serves the HTTP API and the admin UI at `http://localhost:5001/admin`. Add `-p 32011:32011` for Arrow Flight SQL.
+Port `5001` serves the HTTP API and the admin UI at `/admin`. Add `-p 32011:32011` for Arrow Flight SQL.
 
 ## 2. Point it at your data
 
