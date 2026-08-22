@@ -282,9 +282,10 @@ mod tests {
         assert_eq!(expr, expected);
     }
 
-    /// A GeoJSON filter is rendered through the registered `st_*` UDFs; on a bare
-    /// session (no beacon functions) it must fail with a clear registry error
-    /// rather than panic or silently drop the spatial predicate.
+    /// A GeoJSON filter is rendered through the registered `ST_*` UDFs of
+    /// `datafusion-spatial`; on a bare session (no spatial set) it must fail with a
+    /// clear registry error rather than panic or silently drop the spatial predicate.
+    /// `geo_json::tests` pins the expression itself.
     #[test]
     fn geo_json_filter_requires_the_spatial_functions() {
         let filter: Filter = serde_json::from_str(
@@ -297,9 +298,9 @@ mod tests {
         let session_ctx = SessionContext::new();
         let error = filter
             .parse(&session_ctx.state(), &schema())
-            .expect_err("a bare session has no st_geojson_as_wkt");
+            .expect_err("a bare session has no st_point");
         assert!(
-            error.to_string().contains("st_geojson_as_wkt"),
+            error.to_string().contains("st_point"),
             "unexpected error: {error}"
         );
     }

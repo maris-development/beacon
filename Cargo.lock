@@ -1749,6 +1749,7 @@ dependencies = [
  "chrono",
  "datafusion 53.1.0",
  "datafusion-federation",
+ "datafusion-spatial",
  "deltalake",
  "futures",
  "geojson 0.24.2",
@@ -1874,7 +1875,6 @@ dependencies = [
 name = "beacon-functions"
 version = "2.0.0-rc.3"
 dependencies = [
- "anyhow",
  "arrow 58.4.0",
  "beacon-arrow-bbf",
  "beacon-arrow-csv",
@@ -1892,25 +1892,20 @@ dependencies = [
  "beacon-iceberg",
  "beacon-icechunk",
  "chrono",
- "criterion 0.5.1",
  "csv",
  "datafusion 53.1.0",
  "datafusion-spatial",
  "futures",
- "geo",
- "geojson 0.24.2",
  "gsw",
  "lazy_static",
  "lru 0.18.2",
  "object_store 0.13.2",
  "once_cell",
- "ordered-float 5.3.0",
  "serde",
  "serde_json",
  "strsim",
  "tokio",
  "tracing",
- "wkt",
 ]
 
 [[package]]
