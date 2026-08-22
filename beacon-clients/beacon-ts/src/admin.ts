@@ -184,6 +184,20 @@ export class AdminClient {
     await this.http.fetchRaw("DELETE", "/api/admin/datasets", { query: { path } });
   }
 
+  /**
+   * Reports the disk space of the datasets store
+   * (`GET /api/admin/datasets/storage`).
+   *
+   * A local store answers with the space of the disk that holds the datasets
+   * directory. An S3 bucket has no capacity, so `total_space`, `free_space` and
+   * `used_percent` are `null` and `used_space` is the total size of the objects.
+   * The bucket listing makes the call slow on a large bucket; poll it at a low
+   * rate.
+   */
+  datasetStorage(): Promise<DatasetStorage> {
+    return this.http.fetchJson<DatasetStorage>("GET", "/api/admin/datasets/storage");
+  }
+
   // -- users & roles ----------------------------------------------------------
 
   /** Lists all users (the super-user plus stored local users) with their roles. */
@@ -289,6 +303,31 @@ export interface AuthRole {
   name: string;
   grants: AuthRule[];
   denies: AuthRule[];
+}
+
+/** Which store backs the datasets, and therefore which values are present. */
+export type StorageKind = "local" | "s3";
+
+/**
+ * Disk space of the datasets store. `total_space`, `free_space` and
+ * `used_percent` are `null` for an S3 bucket, which has no capacity.
+ */
+export interface DatasetStorage {
+  kind: StorageKind;
+  /** The datasets directory, or the bucket name for S3. */
+  location: string;
+  /** The mount point of the disk that holds the directory. `null` for S3. */
+  mount_point: string | null;
+  /** The capacity of the disk, in bytes. `null` for S3. */
+  total_space: number | null;
+  /** The used space, in bytes. For S3, the total size of the objects. */
+  used_space: number | null;
+  /** The free space of the disk, in bytes. `null` for S3. */
+  free_space: number | null;
+  /** The used space as a percent of the capacity. `null` for S3. */
+  used_percent: number | null;
+  /** The number of objects in the bucket. `null` for a local directory. */
+  object_count: number | null;
 }
 
 /** Result of a successful dataset upload. */

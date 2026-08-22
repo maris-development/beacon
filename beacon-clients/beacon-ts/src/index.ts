@@ -11,6 +11,8 @@ export type {
   AuthUser,
   AuthRule,
   AuthRole,
+  DatasetStorage,
+  StorageKind,
 } from "./admin.js";
 export { Http, basicAuthHeader, ADMIN_API_PREFIX } from "./http.js";
 export type { ClientOptions, FetchLike } from "./http.js";

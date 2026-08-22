@@ -117,3 +117,63 @@ describe("AdminClient.uploadDataset", () => {
     expect(calls).toContain("DELETE /api/admin/datasets/upload");
   });
 });
+
+describe("AdminClient.datasetStorage", () => {
+  it("reads the disk space of a local datasets directory", async () => {
+    const calls: string[] = [];
+    const fn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push(`${(init?.method ?? "GET").toUpperCase()} ${String(url)}`);
+      return new Response(
+        JSON.stringify({
+          kind: "local",
+          location: "/beacon/data/datasets",
+          mount_point: "/",
+          total_space: 400,
+          used_space: 100,
+          free_space: 300,
+          used_percent: 25,
+          object_count: null,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const client = adminClient(fn as unknown as typeof fetch);
+
+    const info = await client.admin.datasetStorage();
+
+    expect(calls).toEqual(["GET http://beacon.test/api/admin/datasets/storage"]);
+    expect(info.kind).toBe("local");
+    expect(info.used_percent).toBe(25);
+    expect(info.object_count).toBeNull();
+  });
+
+  it("keeps the S3 values that a bucket cannot answer null", async () => {
+    const fn = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            kind: "s3",
+            location: "my-bucket",
+            mount_point: null,
+            total_space: null,
+            used_space: 2048,
+            free_space: null,
+            used_percent: null,
+            object_count: 7,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const client = adminClient(fn as unknown as typeof fetch);
+
+    const info = await client.admin.datasetStorage();
+
+    expect(info.kind).toBe("s3");
+    expect(info.location).toBe("my-bucket");
+    expect(info.used_space).toBe(2048);
+    expect(info.total_space).toBeNull();
+    expect(info.free_space).toBeNull();
+    expect(info.used_percent).toBeNull();
+    expect(info.object_count).toBe(7);
+  });
+});
