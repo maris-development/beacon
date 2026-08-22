@@ -4595,8 +4595,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-spatial"
-version = "0.1.0"
-source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=20a416ff473192f47082dd4b3dcf19340aed3c77#20a416ff473192f47082dd4b3dcf19340aed3c77"
+version = "0.2.0"
+source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=92245ff8e2eaad939425993cff7fa9180d471ec1#92245ff8e2eaad939425993cff7fa9180d471ec1"
 dependencies = [
  "datafusion 53.1.0",
  "datafusion 54.1.0",
@@ -4609,8 +4609,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-spatial-kernels"
-version = "0.1.0"
-source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=20a416ff473192f47082dd4b3dcf19340aed3c77#20a416ff473192f47082dd4b3dcf19340aed3c77"
+version = "0.2.0"
+source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=92245ff8e2eaad939425993cff7fa9180d471ec1#92245ff8e2eaad939425993cff7fa9180d471ec1"
 dependencies = [
  "arrow-array 58.4.0",
  "arrow-buffer 58.4.0",
@@ -4630,8 +4630,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-spatial-udf"
-version = "0.1.0"
-source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=20a416ff473192f47082dd4b3dcf19340aed3c77#20a416ff473192f47082dd4b3dcf19340aed3c77"
+version = "0.2.0"
+source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=92245ff8e2eaad939425993cff7fa9180d471ec1#92245ff8e2eaad939425993cff7fa9180d471ec1"
 dependencies = [
  "arrow-array 58.4.0",
  "arrow-buffer 58.4.0",
