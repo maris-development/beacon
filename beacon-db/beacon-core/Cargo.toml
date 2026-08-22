@@ -82,6 +82,8 @@ beacon-redb-store = { path = "../beacon-redb-store" }
 beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
 
 [dev-dependencies]
+# The GeoJSON filter of the JSON query renders `ST_Within`; its test registers the set.
+datafusion-spatial = { workspace = true }
 deltalake = { workspace = true }
 # Writes the Iceberg fixtures the read tests read; Beacon itself never writes Iceberg.
 iceberg = { workspace = true }

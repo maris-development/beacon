@@ -1,4 +1,4 @@
-"""Spatial queries: GeoParquet I/O, the GeoJSON DSL filter, and geo UDFs.
+"""Spatial queries: GeoParquet I/O, the GeoJSON DSL filter, and the spatial functions.
 
 The PostGIS-named function set comes from ``datafusion-spatial``: 117 scalar, 3
 aggregate and 2 window functions. The second half of this file covers it. Those
@@ -10,7 +10,6 @@ the wrong position for every column after the first one.
 Our generated observations carry ``longitude``/``latitude`` columns, so we can
 exercise the spatial surface without hand-crafting GeoArrow geometry:
 
-* ``st_geojson_as_wkt`` and ``st_within_point`` scalar functions,
 * the JSON-DSL GeoJSON filter (point-in-polygon over lon/lat columns), and
 * GeoParquet OUTPUT round-tripped back through ``read_geoparquet`` (Beacon builds
   a geometry column from lon/lat on write and decodes it on read).
@@ -55,37 +54,22 @@ def _expected_in_box(rows) -> int:
     )
 
 
-def test_st_geojson_as_wkt(client):
-    wkt = client.scalar(
-        "SELECT st_geojson_as_wkt('{\"type\":\"Point\",\"coordinates\":[1.0,2.0]}') AS w"
-    )
-    assert wkt.upper().startswith("POINT")
-    assert "1" in wkt and "2" in wkt
+def test_st_within_from_geojson(client, sample_data):
+    """ST_GeomFromGeoJSON reads the request geometry, with no WKT step between."""
+    import json
 
-
-def test_st_within_point_filter(client, sample_data):
+    geojson = json.dumps(GEOJSON_BOX)
     n = client.count(
         "SELECT * FROM read_parquet(['obs/*.parquet']) "
-        f"WHERE st_within_point('{WKT_BOX}', longitude, latitude)"
+        f"WHERE ST_Within(ST_Point(longitude, latitude), ST_GeomFromGeoJSON('{geojson}'))"
     )
     expected = _expected_in_box(sample_data["rows"])
     assert expected > 0
     assert n == expected
 
 
-def test_st_within_point_with_geojson_wkt(client, sample_data):
-    """st_within_point composed with st_geojson_as_wkt yields the same result."""
-    import json
-
-    geojson = json.dumps(GEOJSON_BOX)
-    n = client.count(
-        "SELECT * FROM read_parquet(['obs/*.parquet']) "
-        f"WHERE st_within_point(st_geojson_as_wkt('{geojson}'), longitude, latitude)"
-    )
-    assert n == _expected_in_box(sample_data["rows"])
-
-
 def test_geojson_dsl_filter(client, sample_data):
+    """The JSON DSL filter plans ST_Within(ST_Point(lon, lat), ST_GeomFromGeoJSON(...))."""
     rows = client.query_json_rows(
         {
             "from": {"parquet": {"paths": ["obs/*.parquet"]}},
@@ -317,9 +301,10 @@ def test_spatial_constructors_are_listed(client):
     names = {f["function_name"].lower() for f in resp.json()}
     for name in ["st_point", "st_makepoint", "st_geomfromtext", "st_geomfromgeojson"]:
         assert name in names, f"{name} is absent from the function catalog"
-    # Beacon's own two geo UDFs keep their names beside the set.
-    assert "st_within_point" in names
-    assert "st_geojson_as_wkt" in names
+    # Beacon carries no geospatial UDF of its own. `st_within_point` and `st_geojson_as_wkt`
+    # were removed; the PostGIS-named set states every spatial test now.
+    assert "st_within_point" not in names
+    assert "st_geojson_as_wkt" not in names
 
 
 @pytest.mark.xfail(

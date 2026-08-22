@@ -41,10 +41,8 @@ tag. Releases before 2.0.0 are recorded in the
   format. A GeoParquet geometry column is a native GeoArrow column, and the functions read it
   directly.
   Each predicate runs a bounding box test before the exact test, and a constant argument gets a
-  cached R-tree. Beacon's own `st_within_point` and `st_geojson_as_wkt` stay beside the set: they
-  need no geometry column, and `beacon-functions/benches/within_point.rs` measures the first one at
-  4 to 12 times the speed of `ST_Within` on a column that repeats its coordinates, which is what
-  one station reporting at many depths produces. Some functions differ from PostGIS. Measurement is
+  cached R-tree. This set is now the whole geospatial surface of Beacon: the two Beacon geo UDFs
+  that used to sit beside it are gone (see Removed). Some functions differ from PostGIS. Measurement is
   planar, so `ST_Distance` over longitude and latitude returns degrees. The coordinate reference
   system belongs to the column, not to the row. The `&&` operator is the
   `ST_BBoxIntersects` function, and the one-argument `ST_Union` is `ST_MemUnion`. `SHOW FUNCTIONS`
@@ -105,6 +103,14 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **The GeoJSON filter of the JSON query plans `ST_Within`.** A request carries
+  `longitude_column`, `latitude_column` and `geometry`. It used to build
+  `st_within_point(st_geojson_as_wkt('<geojson>'), lon, lat)`. That path turned the geometry into
+  WKT text, then parsed the text back. It now builds
+  `ST_Within(ST_Point(lon, lat), ST_GeomFromGeoJSON('<geojson>'))`. The JSON path and the SQL path
+  now state one test under one name. **The request format does not change**, and neither do the
+  rows a request returns. The two functions the old expression called are removed with it; see
+  Removed. Neither expression prunes GeoParquet row groups; that needs a bare geometry column.
 - **File statistics are on by default.** `BEACON_FILE_STATS_ENABLE` now defaults to `true`. The
   reason for the old default is gone. netcdf-c reported no range, and the pure-Rust readers for
   netCDF and HDF5 are the default now, so a pass records a real range. The same store holds the
@@ -174,6 +180,20 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Removed
 
+- **`st_within_point` and `st_geojson_as_wkt`.** These were the two geospatial functions Beacon
+  carried of its own, beside the 123 PostGIS-named ones. Both are gone, and a query that calls
+  either now fails with an unknown-function error. The PostGIS set states the same tests:
+  `st_within_point('<wkt>', lon, lat)` becomes
+  `ST_Within(ST_Point(lon, lat), ST_GeomFromText('<wkt>'))`, and `st_geojson_as_wkt('<geojson>')`
+  becomes `ST_GeomFromGeoJSON('<geojson>')`, which returns a geometry rather than text and so
+  needs no second parse. One spatial vocabulary is easier to explain than two.
+
+  This costs speed. `st_within_point` held a bounding rectangle prefilter and an LRU cache over
+  the coordinate pair, and it read two ordinate columns with no geometry column in between. A
+  bench measured it at 1.6 to 2.5 times the speed of the `ST_Within` expression over a whole
+  query, widest on a table that repeats its coordinates — which one station reporting at many
+  depths produces. The `within_point` bench that measured this is removed with the functions.
+  `geo`, `geojson`, `wkt`, `ordered-float` and `anyhow` leave `beacon-functions` with them.
 - **The netCDF and HDF5 reader caches, with `BEACON_NETCDF_USE_READER_CACHE`,
   `BEACON_NETCDF_READER_CACHE_SIZE`, `BEACON_HDF5_USE_READER_CACHE`, `BEACON_HDF5_READER_CACHE_SIZE`
   and the `use_reader_cache` table option.** Both formats held opened datasets in a `moka` cache

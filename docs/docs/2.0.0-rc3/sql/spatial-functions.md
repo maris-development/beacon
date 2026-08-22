@@ -9,9 +9,6 @@ and 2 window functions. This page lists every one of them.
 
 A name is case insensitive. `ST_Distance` and `st_distance` are the same function.
 
-Beacon adds two spatial functions of its own. Those sit in the
-[function reference](/docs/2.0.0-rc3/sql/function-reference#beacon-geospatial-functions).
-
 ## Types in the tables below
 
 | Type | Meaning |

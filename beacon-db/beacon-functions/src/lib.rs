@@ -6,13 +6,11 @@ use tokio::runtime::Handle;
 
 use crate::{
     blue_cloud::register_blue_cloud_udfs, file_formats::register_table_functions,
-    geo::register_geo_udfs, metadata::register_metadata_functions,
-    util::register_util_udfs,
+    metadata::register_metadata_functions, util::register_util_udfs,
 };
 
 pub mod blue_cloud;
 pub mod file_formats;
-pub mod geo;
 pub mod metadata;
 pub mod util;
 
@@ -28,17 +26,14 @@ pub fn register_functions(
     runtime_handle: Handle,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 ) {
-    // The PostGIS-named spatial set: 117 scalar, 3 aggregate and 2 window functions. It runs
-    // first, so a Beacon UDF below it wins a name it shares. The two Beacon geo UDFs carry names
-    // that this set does not hold (`st_within_point`, `st_geojson_as_wkt`), so neither replaces
-    // a spatial function today. `geo::tests` guards that.
+    // The PostGIS-named spatial set: 118 scalar, 3 aggregate and 2 window functions. It runs
+    // first, so a Beacon UDF below it wins a name it shares. It is the whole geospatial surface
+    // of Beacon: the two Beacon geo UDFs that used to sit beside it are gone, and `ST_Within`,
+    // `ST_Point` and `ST_GeomFromGeoJSON` state their test instead. `tests` below guards that the
+    // set registers.
     datafusion_spatial::register_all(session_context.as_ref());
     register_util_udfs(session_context.as_ref());
     register_blue_cloud_udfs(session_context.as_ref());
-    register_geo_udfs(
-        session_context.as_ref(),
-        128 * 1024, // 128K entries in the LRU cache for st_within_point
-    );
 
     // Both builders only *construct* their functions; registering them on the session
     // is this function's job.
@@ -55,5 +50,54 @@ pub fn register_functions(
             table_function.name().as_str(),
             Arc::clone(table_function) as Arc<dyn TableFunctionImpl>,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every function name the spatial crate registers, in lower case.
+    fn spatial_names() -> Vec<String> {
+        let mut names: Vec<String> = datafusion_spatial::scalar_udfs()
+            .iter()
+            .map(|f| f.name().to_lowercase())
+            .collect();
+        names.extend(
+            datafusion_spatial::aggregate_udfs()
+                .iter()
+                .map(|f| f.name().to_lowercase()),
+        );
+        names.extend(
+            datafusion_spatial::window_udfs()
+                .iter()
+                .map(|f| f.name().to_lowercase()),
+        );
+        names
+    }
+
+    /// One name from each of the three registries. DataFusion keeps a separate registry for a
+    /// scalar function, an aggregate function and a window function.
+    #[test]
+    fn the_spatial_set_covers_the_three_registries() {
+        let names = spatial_names();
+        for expected in ["st_distance", "st_extent", "st_clusterkmeans"] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "{expected} is absent"
+            );
+        }
+        assert!(names.len() >= 122, "{} functions", names.len());
+    }
+
+    /// The spatial set holds every function the GeoJSON filter of the JSON query plans. Beacon
+    /// carries no geospatial UDF of its own any more, so a gap here breaks that filter.
+    #[test]
+    fn the_spatial_set_holds_what_the_geojson_filter_plans() {
+        let names = spatial_names();
+        for expected in ["st_point", "st_within", "st_geomfromgeojson"] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "{expected} is absent"
+            );
+        }
     }
 }
