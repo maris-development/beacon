@@ -20,8 +20,10 @@ import { useBeacon } from "@/lib/beacon-context";
 import { errorMessage } from "@/lib/errors";
 import { formatBytes } from "@/lib/format";
 import { PageContainer } from "@/components/app-shell";
+import { DatasetStorageCard } from "@/components/dataset-storage";
 import { JsonView } from "@/components/json-view";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Meter } from "@/components/ui/meter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -141,6 +143,12 @@ export function ServerInfoPage() {
           value={host?.cpus?.[0]?.brand ?? "—"}
           detail={host?.physical_core_count != null ? `${host.physical_core_count} cores` : undefined}
         />
+      </div>
+
+      {/* Datasets store disk space. The datasets store is the server's own, so
+          this does not depend on BEACON_ENABLE_SYS_INFO. */}
+      <div className="mt-4">
+        <DatasetStorageCard />
       </div>
 
       {host == null && !infoQuery.isLoading && (
@@ -291,38 +299,6 @@ export function ServerInfoPage() {
 function ratio(used?: number, total?: number): number {
   if (!used || !total) return 0;
   return (used / total) * 100;
-}
-
-/** A small labelled horizontal usage bar, coloured by load. */
-function Meter({
-  label,
-  detail,
-  pct,
-  compact,
-}: {
-  label: string;
-  detail?: string;
-  pct: number;
-  compact?: boolean;
-}) {
-  const clamped = Math.max(0, Math.min(100, pct));
-  const color = clamped >= 85 ? "bg-destructive" : clamped >= 70 ? "bg-amber-500" : "bg-primary";
-  return (
-    <div>
-      <div
-        className={cn(
-          "mb-1 flex items-baseline justify-between gap-2",
-          compact ? "text-[11px]" : "text-xs",
-        )}
-      >
-        <span className="truncate font-medium">{label}</span>
-        {detail && <span className="shrink-0 text-muted-foreground">{detail}</span>}
-      </div>
-      <div className={cn("w-full overflow-hidden rounded bg-secondary", compact ? "h-1.5" : "h-2")}>
-        <div className={cn("h-full rounded transition-all", color)} style={{ width: `${clamped}%` }} />
-      </div>
-    </div>
-  );
 }
 
 function StatTile({

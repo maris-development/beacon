@@ -80,6 +80,7 @@ const CLIENT_ENDPOINTS: &[(&str, &str)] = &[
     ("put", "/api/admin/datasets/upload/part"),
     ("post", "/api/admin/datasets/upload/complete"),
     ("delete", "/api/admin/datasets/upload"),
+    ("get", "/api/admin/datasets/storage"),
 ];
 
 async fn app() -> (Router, common::TestServer) {

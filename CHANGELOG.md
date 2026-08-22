@@ -24,6 +24,14 @@ tag. Releases before 2.0.0 are recorded in the
   (`SELECT year, count(*) … GROUP BY year`) states the value over the rows of the read instead,
   because there is no other column to define a grid. `ZARR` still refuses the clause: a Zarr table
   holds groups inside one store, not files in directories, so a path holds no value to read.
+- **The admin UI shows the disk space of the datasets store.** An operator sees the total space,
+  the used space, the free space and the used percent on the Server page and on the Datasets page,
+  and no longer opens a shell to read them. The bar turns amber at 70% and red at 85%. The values
+  come from `GET /api/admin/datasets/storage`, which reads the disk that holds the datasets
+  directory through `sysinfo`; `client.admin.datasetStorage()` calls it from the TypeScript SDK. An
+  S3 bucket has no disk limit, so it answers with the bucket name, the total size of the objects
+  and the object count, and reads `n/a` for the total space, the free space and the used percent.
+  That answer needs a full bucket listing, so poll the endpoint at a low rate.
 - **122 spatial functions with PostGIS names.** `ST_Distance`, `ST_Intersects`, `ST_Buffer`,
   `ST_Centroid`, `ST_Simplify` and the rest now run in SQL — 117 scalar functions, 3 aggregate
   functions (`ST_Extent`, `ST_Collect`, `ST_MemUnion`) and 2 window functions

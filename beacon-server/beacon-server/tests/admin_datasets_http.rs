@@ -340,3 +340,37 @@ async fn chunked_upload_rejects_unknown_session_and_out_of_order() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dataset_storage_reports_the_local_disk_and_needs_the_super_user() {
+    let (harness, config) = app(temp_config(1024)).await;
+    let router = setup_router(harness.server.clone(), config.clone()).unwrap();
+    let admin = basic(&config.admin.username, &config.admin.password);
+    let uri = "/api/admin/datasets/storage";
+
+    // No credentials → 401.
+    let (status, _) = send(&router, request("GET", uri, None, Body::empty())).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = send(&router, request("GET", uri, Some(&admin), Body::empty())).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["kind"], "local");
+    assert_eq!(
+        info["location"].as_str().unwrap(),
+        config.data.datasets.display().to_string()
+    );
+    assert!(info["mount_point"].is_string());
+
+    let total = info["total_space"].as_u64().unwrap();
+    let used = info["used_space"].as_u64().unwrap();
+    let free = info["free_space"].as_u64().unwrap();
+    assert!(total > 0, "a local disk must report a capacity");
+    assert_eq!(used + free, total);
+
+    let percent = info["used_percent"].as_f64().unwrap();
+    assert!((0.0..=100.0).contains(&percent), "used percent: {percent}");
+    // A local directory reports no object count; only a bucket does.
+    assert!(info["object_count"].is_null());
+}
