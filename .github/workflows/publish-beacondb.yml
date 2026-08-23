@@ -1,16 +1,8 @@
 name: Publish beacondb
 
-# Builds the `beacondb` PyO3 wheels and publishes them to PyPI.
-#
-# `beacondb` embeds the whole beacon-db engine (DataFusion + Lance + netCDF/HDF5 + PROJ), so
-# wheels are not pure Python. To produce **portable wheels on every platform, including Windows,
-# which has no system package manager for these libraries, the build links every native library
-# statically**, compiling netCDF and HDF5 from source through the `static-netcdf` cargo feature,
-# PROJ through `spatial-proj-bundled`, and OpenSSL through `vendored-openssl`.
-#
-# Triggered by the workspace release tag `v*`, same as every other publish workflow
-#
-# Release candidates: a pre-release tag (v2.0.0-rc.1) publishes as PyPI version 2.0.0rc1
+# Builds the `beacondb` PyO3 wheels and publishes them to PyPI. A wheel holds the whole engine,
+# so it links netCDF, HDF5, OpenSSL and PROJ statically and needs no library on the machine.
+# The release tag `v*` starts it. A pre-release tag (v2.0.0-rc.1) publishes as 2.0.0rc1.
 
 on:
   push:
@@ -36,10 +28,9 @@ permissions:
   contents: read
 
 jobs:
-  # The committed manifests are the source of truth for what gets published; the tag is a
-  # cross-check. Nothing here rewrites a version — a disagreement fails the release instead, so a
-  # mistyped tag or a forgotten bump is caught before anything reaches PyPI (where a wrong version
-  # cannot be taken back). Release flow: bump pyproject.toml + Cargo.toml, commit, then tag.
+  # The committed manifests are the source of truth; the tag is a cross-check. Nothing here
+  # rewrites a version, so a mistyped tag or a forgotten bump fails the release instead of
+  # reaching PyPI, where a wrong version cannot be taken back. Bump, commit, then tag.
   version:
     name: Verify version
     runs-on: ubuntu-latest
@@ -121,24 +112,16 @@ jobs:
         with:
           submodules: recursive # beacon-binary-format is a submodule
 
-      # protoc and cmake are the build tools needed: netCDF, HDF5 and PROJ are all compiled from
-      # source (the `static-netcdf` and `spatial-proj-bundled` features), so none of the three is
-      # installed as a library here.
-      #
-      # PROJ's build also runs the `sqlite3` command-line tool, which turns the SQL in its source
-      # tree into the `proj.db` CRS database, and links the SQLite *library* to read it back.
-      # macOS gets the program from /usr/bin and the library from the `bundled` feature of
-      # libsqlite3-sys, so it needs neither installed.
+      # protoc and cmake are the build tools: netCDF, HDF5 and PROJ are compiled from source, so
+      # none of them is installed here. PROJ's build also runs the `sqlite3` program, to write its
+      # `proj.db`. macOS holds that program in /usr/bin, and its library comes from libsqlite3-sys.
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         run: brew install protobuf cmake
 
-      # Windows has neither, and cannot use the bundled library: `proj-sys` passes it to PROJ's
-      # cmake under its Unix name (`libsqlite3.a`), which MSVC never writes. So SQLite comes from
-      # vcpkg, which is preinstalled on the runner. The `static-md` triplet is the one that
-      # matches Rust on MSVC: a static library against the dynamic CRT, so nothing extra has to
-      # ship in the wheel. `CMAKE_PREFIX_PATH` is how PROJ's `find_package(SQLite3)` finds it;
-      # the `SQLITE3_*` variables are how libsqlite3-sys finds the same copy for its own linking.
+      # Windows holds neither, and cannot use the bundled library: `proj-sys` passes it to cmake
+      # as `libsqlite3.a`, a name MSVC never writes. SQLite comes from vcpkg instead, in the
+      # `static-md` triplet that matches Rust on MSVC. The variables name it to both consumers.
       - name: Install Windows build dependencies
         if: runner.os == 'Windows'
         shell: bash
@@ -161,45 +144,23 @@ jobs:
           # Pinned: `--compression-method`/`--compression-level` below are recent maturin flags,
           # and an unknown flag would only surface after a 30-100 minute compile.
           maturin-version: v1.14.1
-          # abi3 wheel — no per-interpreter build needed. `static-netcdf` builds+links netCDF/HDF5
-          # into the wheel so it is self-contained on every platform. `vendored-openssl` does the
-          # same for OpenSSL, which the MySQL/PostgreSQL federation drivers need; it applies to the
-          # Linux builds only and is inert on macOS and Windows, so one args string covers them all.
-          # `spatial-proj-bundled` does the same for PROJ, which `ST_Transform` links: a wheel
-          # cannot depend on a PROJ from the build machine, and no runner has one recent enough
-          # anyway (PROJ 9.6.2 is the floor). It carries SQLite along with it, for PROJ's CRS
-          # database.
-          #
-          # `release-wheel` (workspace Cargo.toml) is `release` plus strip + thin LTO +
-          # codegen-units=1.
+          # An abi3 wheel, so one build covers CPython 3.10 and later. The three features move
+          # netCDF/HDF5, OpenSSL and PROJ inside the wheel; `vendored-openssl` acts on Linux alone
+          # and is inert elsewhere. `release-wheel` is `release` plus strip, thin LTO and 1 CGU.
           args: >-
             --profile release-wheel --out dist
             --manifest-path beacon-db/beacon-db-py/Cargo.toml
             --features static-netcdf,vendored-openssl,spatial-proj-bundled
             --compression-method deflated --compression-level 9
           manylinux: ${{ matrix.platform.manylinux }}
-          # Inside the build container, install only the toolchain the static build needs
-          # (protoc for Lance, cmake + a C/C++ compiler + perl to build netCDF/HDF5 and OpenSSL
-          # from source). OpenSSL 3's Configure also needs perl's IPC::Cmd, which the AlmaLinux
-          # `perl` package does not pull in; Alpine's perl ships it. The manylinux container is
-          # AlmaLinux (dnf); the apk branch is kept so restoring the musllinux entries (Alpine)
-          # needs no change here.
-          #
-          # `protobuf-compiler` is 3.14.0 on AlmaLinux 9, which clears the >= 3.12 that
-          # prost-build needs for `--experimental_allow_proto3_optional`. It lives in the CRB
-          # repo, enabled by default in the manylinux_2_34 image. Alpine's own protobuf is
-          # current (29.x), so both branches take protoc from the package manager.
-          #
-          # `protobuf-devel` / `protobuf-dev` is not optional: it carries the well-known types
-          # (google/protobuf/empty.proto and friends) under the include path. protoc alone does
-          # not, and Lance imports them — without it the build fails with
-          # "google/protobuf/empty.proto: File not found".
-          #
-          # POSIX sh, not bash: the musllinux container is Alpine, which has no bash. The
-          # musllinux entries are not in the matrix today, but the branch stays so that
-          # restoring them needs no change here.
+          # The container installs only what the static build needs: protoc plus `protobuf-devel`
+          # for the well-known types Lance imports, cmake and a compiler for netCDF/HDF5/OpenSSL/
+          # PROJ, perl with IPC::Cmd for OpenSSL's Configure, and sqlite3 for PROJ.
           before-script-linux: |
             set -eu
+            # POSIX sh, not bash: the apk branch runs on Alpine, which has no bash. Alpine serves
+            # musllinux. Those entries are out of the matrix today, and the branch stays so that
+            # restoring them needs no change here.
             if command -v apk >/dev/null 2>&1; then
               apk add --no-cache build-base cmake perl protobuf protobuf-dev linux-headers sqlite
             else
@@ -227,10 +188,9 @@ jobs:
             rm -f /tmp/wkt.proto
             echo "protoc well-known types: ok"
             echo "cmake:  $(command -v cmake) -> $(cmake --version | head -n1)"
-            # PROJ's build turns its SQL files into proj.db with the sqlite3 program, and stops
-            # with "sqlite3 binary not found!" without it. The SQLite *library* is not installed:
-            # the `bundled` feature of libsqlite3-sys compiles one and hands it to PROJ's cmake,
-            # which is what keeps `sqlite-devel` off this list.
+            # PROJ writes proj.db with the sqlite3 program, and stops without it. The SQLite
+            # library is not installed: libsqlite3-sys compiles one and hands it to PROJ's cmake,
+            # which is what keeps `sqlite-devel` off the list above.
             if ! command -v sqlite3 >/dev/null 2>&1; then
               echo "error: sqlite3 is not installed; PROJ needs it to build proj.db" >&2
               exit 1
