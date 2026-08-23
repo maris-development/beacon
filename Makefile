@@ -21,7 +21,7 @@ WEB_DIR ?= beacon-clients/beacon-web/dist
 export BEACON_ADMIN_USERNAME
 export BEACON_ADMIN_PASSWORD
 
-.PHONY: help ui-deps ui run run-release run-no-proj run-release-no-proj serve dev-api dev-api-no-proj dev-ui clean-ui wheel-check wheel
+.PHONY: help ui-deps ui run run-release run-no-proj run-release-no-proj serve dev-api dev-api-no-proj dev-ui clean-ui
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -72,13 +72,3 @@ dev-ui: ## Run the Vite dev server with hot-reload on http://localhost:5173
 
 clean-ui: ## Remove the built SPA
 	rm -rf $(WEB_DIR) beacon-clients/beacon-ts/dist
-
-# The beacondb wheel is built in the same container the release workflow uses, so a toolchain
-# break shows up here rather than on a tag. `wheel-check` stops after the toolchain, which is
-# the cheap part; `wheel` compiles the engine, netCDF, HDF5, OpenSSL and PROJ from source.
-wheel-check: ## Verify the beacondb wheel build toolchain in the CI containers (fast)
-	./scripts/build-wheel-docker.sh --deps-only
-	./scripts/build-wheel-docker.sh --libc musllinux --deps-only
-
-wheel: ## Build the beacondb wheel in the CI manylinux container (slow; wheel in target/docker-wheels)
-	./scripts/build-wheel-docker.sh

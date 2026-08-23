@@ -195,9 +195,9 @@ jobs:
           # not, and Lance imports them — without it the build fails with
           # "google/protobuf/empty.proto: File not found".
           #
-          # POSIX sh, not bash: the musllinux container is Alpine, which has no bash.
-          # `scripts/build-wheel-docker.sh` reads this exact block and runs it in the same
-          # container locally, so a toolchain break is reproducible before a tag is cut.
+          # POSIX sh, not bash: the musllinux container is Alpine, which has no bash. The
+          # musllinux entries are not in the matrix today, but the branch stays so that
+          # restoring them needs no change here.
           before-script-linux: |
             set -eu
             if command -v apk >/dev/null 2>&1; then

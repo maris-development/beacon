@@ -56,9 +56,6 @@ publishes to PyPI with trusted publishing. The workflow is
 a beacondb-only release. A manual run with `dry_run` builds and tests every wheel and publishes
 none.
 
-`make wheel` builds the Linux wheel locally, in the same container CI uses. `make wheel-check`
-verifies the container toolchain alone, which is much faster.
-
 There are two drawbacks. The wheel is **large**, because it holds a full DataFusion, Lance and netCDF
 engine. There is also **no minimal build** with feature gates yet.
 

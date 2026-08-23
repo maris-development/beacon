@@ -13,16 +13,15 @@ tag. Releases before 2.0.0 are recorded in the
 ### Added
 
 - **`pip install beacondb` works again.** The release workflow of the `beacondb` wheel is back,
-  together with the manylinux build scripts, the `make wheel` targets and the `beacondb` entry in
-  the version scripts. A `v*` tag publishes the wheels and the sdist to PyPI. A `beacondb-v*` tag
-  publishes the wheel alone, on its own version line. The wheels cover manylinux x86_64 and
-  aarch64, macOS arm64, and Windows x64. Each wheel carries its own netCDF, HDF5, OpenSSL and
-  PROJ, so a machine needs none of them installed. PROJ is the addition: `ST_Transform` links it,
-  and no runner holds a recent enough copy, so the build compiles it from source. That build keeps
-  the CRS database of PROJ inside the compiled library, so the wheel stays self-contained and reads
-  no `PROJ_DATA`. Start the workflow by hand with `dry_run` to build and test every wheel before a
-  tag exists. The wheel is **AGPL-3.0**, like the engine it holds, and carries the licence text
-  next to its metadata.
+  together with the `beacondb` entry in the version scripts. A `v*` tag publishes the wheels and
+  the sdist to PyPI. A `beacondb-v*` tag publishes the wheel alone, on its own version line. The
+  wheels cover manylinux x86_64 and aarch64, macOS arm64, and Windows x64. Each wheel carries its
+  own netCDF, HDF5, OpenSSL and PROJ, so a machine needs none of them installed. PROJ is the
+  addition: `ST_Transform` links it, and no runner holds a recent enough copy, so the build
+  compiles it from source. That build keeps the CRS database of PROJ inside the compiled library,
+  so the wheel stays self-contained and reads no `PROJ_DATA`. Start the workflow by hand with
+  `dry_run` to build and test every wheel before a tag exists. The wheel is **AGPL-3.0**, like the
+  engine it holds, and carries the licence text next to its metadata.
 - **`PARTITIONED BY` works for netCDF, HDF5 and GeoTIFF tables.** `CREATE EXTERNAL TABLE
   observations STORED AS NC LOCATION 'obs/' PARTITIONED BY (year, month)` used to fail with a
   `NotImplemented` error naming the format and the columns; it now plans and runs, and a filter on
