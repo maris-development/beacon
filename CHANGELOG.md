@@ -245,8 +245,7 @@ tag. Releases before 2.0.0 are recorded in the
   [create external table page](docs/docs/2.0.0-rc3/sql/create-external-table.md#options) now holds the clause, the
   rules that apply to every key, and an index of the keys of each `STORED AS` value. Each format
   page holds a table of its own keys, with a type, a default and a description. The page for a
-  format that reads no key says so. Two examples also spelled an option `OPTIONS ('convention' =
-  'optodas')`, which does not parse: an `OPTIONS` list takes a key and a value, with no `=`.
+  format that reads no key says so. Two examples also spelled an option `OPTIONS`, which does not parse: an `OPTIONS` list takes a key and a value, with no `=`.
 - **A schema merge depended on the disk answer order**
   ([#377](https://github.com/maris-development/beacon/issues/377)). A table over many files merges
   their schemas into one schema, and a query plans against that schema. Beacon's own "super typing"
