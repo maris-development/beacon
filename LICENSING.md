@@ -48,7 +48,7 @@ which is AGPL-3.0. No other licence is available to it.
 
 Three places state this, and they must agree:
 
-- `license = "AGPL-3.0-only"` in `beacon-db/beacon-db-py/Cargo.toml`
+- `license = "AGPL-3.0"` in `beacon-db/beacon-db-py/Cargo.toml`
 - `license` and the licence classifier in `beacon-db/beacon-db-py/pyproject.toml`
 - `beacon-db/beacon-db-py/LICENSE`, a copy of the root file
 
