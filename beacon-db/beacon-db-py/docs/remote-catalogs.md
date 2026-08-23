@@ -38,10 +38,10 @@ schema of each table at the first use.
 
 Authenticate with a `username` and `password` pair for HTTP Basic, or with a bearer `token`. Do not
 give both. Omit both only if the remote server allows anonymous access. The remote server applies its
-own [RBAC](/docs/2.0.0-rc3/security/access-control) to your identity. Local file access has no such
+own [RBAC](/docs/2.0.0-rc4/security/access-control) to your identity. Local file access has no such
 boundary. This connection *does* have one.
 
-You can also store the credentials as a [secret](/docs/2.0.0-rc3/beacondb/python/secrets). Then
+You can also store the credentials as a [secret](/docs/2.0.0-rc4/beacondb/python/secrets). Then
 reference the secret:
 
 ```python
@@ -60,4 +60,4 @@ con.execute("ATTACH 'beacon://datalake:50051' AS lake "
 con.execute("DETACH lake")
 ```
 
-See the shared [`ATTACH` reference](/docs/2.0.0-rc3/beacondb/sql/remote-tables).
+See the shared [`ATTACH` reference](/docs/2.0.0-rc4/beacondb/sql/remote-tables).

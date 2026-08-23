@@ -61,7 +61,7 @@ tag. Releases before 2.0.0 are recorded in the
   argument types and so gets no row there
   ([datafusion-spatial#1](https://github.com/robinskil/datafusion-spatial/issues/1)). Every
   function runs, listed or not. See
-  [the function reference](docs/docs/2.0.0-rc3/sql/function-reference.md#geospatial-functions),
+  [the function reference](docs/docs/2.0.0-rc4/sql/function-reference.md#geospatial-functions),
   which is the full list.
 - **`ST_Transform` reprojects a geometry**, and a standard build ships it. That makes 123 spatial
   functions. It links [PROJ](https://proj.org), so **a build from source now needs PROJ 9.6.2 or
@@ -90,7 +90,7 @@ tag. Releases before 2.0.0 are recorded in the
   column another writer commits shows on the next query without a restart. A `WHERE` clause is
   pushed into the Iceberg scan, which drops data files from the manifests' statistics. Reads only:
   no `INSERT`, `MERGE` or snapshot expiry, and no REST or Glue catalog yet. See
-  [Apache Iceberg](docs/docs/2.0.0-rc3/formats/iceberg.md).
+  [Apache Iceberg](docs/docs/2.0.0-rc4/formats/iceberg.md).
 - **Icechunk repositories read through the Zarr reader.** An Icechunk repository is a Zarr v3 store
   with commits, branches and snapshots. `read_icechunk('sst/repo')` and `CREATE EXTERNAL TABLE …
   STORED AS ICECHUNK` read one version of it: the tip of a branch by default, or a fixed `tag` /
@@ -105,11 +105,11 @@ tag. Releases before 2.0.0 are recorded in the
   handler as `POST /api/query`, and `/admin/api/admin/crawlers` the same as `/api/admin/crawlers`.
   The whole alias sits behind the admin Basic auth gate, the client endpoints included: `/api/info`
   answers any caller, `/admin/api/info` only the super-user. The
-  [admin web UI](docs/docs/2.0.0-rc3/connect/web-admin-ui.md) now calls the alias, so a deployment
+  [admin web UI](docs/docs/2.0.0-rc4/connect/web-admin-ui.md) now calls the alias, so a deployment
   that puts its own security in front of `/api/*` keeps a working admin panel. `@beacon/client`
   reaches the alias with the new `apiPrefix: ADMIN_API_PREFIX` client option. The alias stays out of
   `/openapi.json`: publishing it would list every operation twice and repeat each operation id. See
-  [the REST API reference](docs/docs/2.0.0-rc3/api/index.md#admin-path-alias).
+  [the REST API reference](docs/docs/2.0.0-rc4/api/index.md#admin-path-alias).
 
 ### Changed
 
@@ -230,7 +230,7 @@ tag. Releases before 2.0.0 are recorded in the
   `CREATE MATERIALIZED VIEW MyView` was worse: it registered `myview` but persisted `MyView`, so a
   restart renamed the view and broke every query that used the old spelling. A new `table_name`
   module builds the reference and keeps the case, and every path uses it. A new
-  [identifiers page](docs/docs/2.0.0-rc3/sql/identifiers.md) states the rule and its limits.
+  [identifiers page](docs/docs/2.0.0-rc4/sql/identifiers.md) states the rule and its limits.
 - **`OPTIONS` on a NetCDF, HDF5, Zarr or BBF external table had no effect**
   ([#421](https://github.com/maris-development/beacon/issues/421)). DataFusion's SQL planner
   renames an `OPTIONS` key without a `.` to `format.<key>`. Those four factories read the bare key
@@ -242,7 +242,7 @@ tag. Releases before 2.0.0 are recorded in the
 - **`CREATE EXTERNAL TABLE` did not document `OPTIONS`**
   ([#421](https://github.com/maris-development/beacon/issues/421)). The syntax block omitted the
   clause, and no page listed the keys of a format, so a reader had to open the Rust source. The
-  [create external table page](docs/docs/2.0.0-rc3/sql/create-external-table.md#options) now holds the clause, the
+  [create external table page](docs/docs/2.0.0-rc4/sql/create-external-table.md#options) now holds the clause, the
   rules that apply to every key, and an index of the keys of each `STORED AS` value. Each format
   page holds a table of its own keys, with a type, a default and a description. The page for a
   format that reads no key says so. Two examples also spelled an option `OPTIONS`, which does not parse: an `OPTIONS` list takes a key and a value, with no `=`.
