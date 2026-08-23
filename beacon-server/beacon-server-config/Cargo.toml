@@ -4,7 +4,8 @@ version.workspace = true
 edition = "2021"
 
 rust-version.workspace = true
-# The server is the AGPL zone; the beacon-db engine under it is Apache-2.0. See LICENSING.md.
+# The whole repository is AGPL-3.0, from the root LICENSE. This crate restates it because it is
+# publishable, and a published crate needs the field.
 license = "AGPL-3.0-only"
 [dependencies]
 envconfig = {workspace = true}

@@ -25,7 +25,7 @@ requires-python = ">=3.10"
 # AGPL-3.0, like the engine the wheel holds. `beacon-core` links the BBF submodule, which is
 # AGPL-3.0, so the wheel can carry no other licence. The text is the root `LICENSE` of the
 # repository, which is not copied here, so this field and the classifier below are what the
-# wheel states. See LICENSING.md.
+# wheel states.
 license = { text = "AGPL-3.0" }
 authors = [{ name = "Beacon" }]
 keywords = ["beacon", "database", "sql", "arrow", "embedded", "olap", "analytics", "netcdf", "zarr", "parquet"]

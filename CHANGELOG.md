@@ -182,8 +182,8 @@ tag. Releases before 2.0.0 are recorded in the
 - **`BEACON_S3_DATA_LAKE` is now `BEACON_S3_DATASETS`.** The old name still works and still turns
   the S3 datasets store on; it is deprecated and will be removed one major version after 2.0.
 - **Licensing is stated in one place.** The root `LICENSE` (AGPL-3.0) covers the Rust workspace;
-  the `beacon-server` crates restate it in their manifests because they are publishable. The
-  clients under `beacon-clients/` remain Apache-2.0. [LICENSING.md](LICENSING.md) documents it.
+  the `beacon-server` crates and `beacon-db-py` restate it in their manifests because they are
+  published. The clients under `beacon-clients/` remain Apache-2.0, with their own `LICENSE`.
 - **Secrets are documented as an `ATTACH` mechanism only.** A server reads one datasets store,
   local or a single bucket, chosen at startup from configuration. `CREATE SECRET` covers reaching
   another Beacon server.

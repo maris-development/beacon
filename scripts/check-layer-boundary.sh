@@ -6,9 +6,9 @@
 # rule mechanical instead of conventional — a path dependency pointing from the
 # engine into the application is a layering violation, whatever it is called.
 #
-# It is also the licence boundary: beacon-db is Apache-2.0 and beacon-server is
-# AGPL-3.0-only. Apache-2.0 combines into AGPL-3.0 but not the reverse, so an edge
-# in this direction would relicense the engine by accident. See LICENSING.md.
+# It was the licence boundary as well, while the engine was Apache-2.0 and the
+# server AGPL-3.0. Both sides are AGPL-3.0 now, so this is a layering rule alone.
+# It still holds: the engine is the lower layer.
 set -euo pipefail
 
 violations=$(grep -rn --include=Cargo.toml 'path *= *"[^"]*beacon-server' beacon-db/ || true)
