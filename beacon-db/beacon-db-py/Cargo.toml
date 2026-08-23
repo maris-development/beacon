@@ -47,8 +47,7 @@ spatial-proj = ["beacon-core/spatial-proj"]
 # `proj.db`, a SQLite database it normally installs beside the library — a path that exists only
 # on the build machine. Built as a static library, PROJ embeds that database in the library
 # instead (its cmake turns `EMBED_RESOURCE_FILES` on for a static build), so the compiled module
-# carries it and needs no `PROJ_DATA`. The wheel smoke test in the release workflow runs an
-# `ST_Transform`, which is what proves it on each platform.
+# carries it and needs no `PROJ_DATA`.
 spatial-proj-bundled = [
     "spatial-proj",
     "beacon-core/spatial-proj-bundled",

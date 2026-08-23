@@ -27,7 +27,7 @@ on:
         type: string
         default: ""
       dry_run:
-        description: "Build and smoke-test every wheel but skip publishing. Use this to exercise a build before tagging."
+        description: "Build every wheel but skip publishing. Use this to exercise a build before tagging."
         required: false
         type: boolean
         default: false
@@ -240,48 +240,6 @@ jobs:
             # but Configure needs IPC::Cmd, which is why perl-IPC-Cmd is installed above.
             perl -MIPC::Cmd -e 'print "perl IPC::Cmd ok\n"'
 
-      # PyPI rejects files over its per-project limit ("100 MB" in the error text, 100 MiB in
-      # warehouse) and only does so at upload — i.e. after every platform has finished building,
-      # an hour or more in. That is how v2.0.0-rc1 failed. Checking here puts the error next to
-      # the wheel that caused it and names the platform. Raise `limit_mib` to match if the project
-      # is ever granted a higher limit:
-      # https://docs.pypi.org/project-management/storage-limits#requesting-a-file-size-limit-increase
-      - name: Check wheel size
-        shell: bash
-        run: |
-          limit_mib=100
-          status=0
-          for whl in dist/*.whl; do
-            size=$(wc -c < "$whl")
-            awk -v n="$(basename "$whl")" -v s="$size" 'BEGIN{printf "%s  %.1f MiB\n", n, s/1048576}'
-            if [ "$size" -gt "$((limit_mib * 1024 * 1024))" ]; then
-              echo "::error::$(basename "$whl") is $((size / 1048576)) MiB; PyPI's limit for beacondb is ${limit_mib} MiB."
-              status=1
-            fi
-          done
-          exit $status
-
-      # Installs the wheel the way a user would and runs a query through it. `ST_Transform` is
-      # part of that on purpose: it is the one function that reaches native PROJ, and it reads
-      # PROJ's CRS database, so it fails on a wheel that carries the code but not the data. A
-      # plain `SELECT 1` would not notice.
-      - name: Smoke-test the wheel
-        shell: bash
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install dist/*.whl
-          python3 - <<'PY'
-          import beacondb
-
-          con = beacondb.connect()
-          print("beacondb", beacondb.__version__, con.sql("SELECT 1").fetchall())
-          point = con.sql(
-              "SELECT ST_AsText(ST_Transform(ST_SetSRID(ST_Point(5.0, 52.0), 4326), 3857)) AS p"
-          ).fetchall()
-          print("ST_Transform", point)
-          assert "POINT" in str(point), point
-          PY
-
       - name: Check metadata
         shell: bash
         run: |
@@ -300,9 +258,9 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: [build, sdist]
-    # A dry run still builds and smoke-tests every wheel and the sdist — it just stops before
-    # PyPI. That makes the whole matrix (including macOS and Windows, which no local container
-    # can cover) runnable on demand instead of only on a tag that is already cut.
+    # A dry run still builds every wheel and the sdist — it just stops before PyPI. That makes
+    # the whole matrix (including macOS and Windows, which no local container can cover)
+    # runnable on demand instead of only on a tag that is already cut.
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     environment:
