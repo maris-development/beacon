@@ -3,6 +3,7 @@
 | Path | Licence | Licence file |
 |---|---|---|
 | Everything, unless listed below | AGPL-3.0 | [`LICENSE`](LICENSE) |
+| `beacon-db/beacon-db-py/**` | AGPL-3.0 | [`beacon-db/beacon-db-py/LICENSE`](beacon-db/beacon-db-py/LICENSE) |
 | `beacon-clients/**` | Apache-2.0 | [`beacon-clients/LICENSE`](beacon-clients/LICENSE) |
 
 ## The Rust workspace
@@ -15,9 +16,10 @@ The three `beacon-server` crates restate it as `license = "AGPL-3.0-only"` in
 their manifests. They are the crates that could plausibly be published, and a
 published crate needs the field.
 
-`beacon-db/beacon-db-py` sets `publish = false` and carries
-`Private :: Do Not Upload`. It is an in-tree binding for local builds, not a
-distributable — see [Not published](#not-published) below.
+`beacon-db/beacon-db-py` restates it as well, for the same reason: it builds the
+`beacondb` wheel, which is published. It keeps `publish = false`, because the
+crate itself does not go to crates.io — only the wheel it builds goes to PyPI.
+See [The wheel](#the-wheel) below.
 
 ## The clients
 
@@ -38,18 +40,21 @@ are AGPL, but it still holds: the engine is the lower layer.
 
 `scripts/check-layer-boundary.sh` enforces it, and CI runs it on every push.
 
-## Not published
+## The wheel
 
-The `beacondb` wheel is no longer built or released. Its GitHub workflow, the
-manylinux build scripts and the `make wheel` targets have been removed, and
-`scripts/bump-version.py` and `scripts/check-version.py` no longer track its
-version.
+The `beacondb` wheel is AGPL-3.0. It holds the whole engine, and `beacon-core`
+links the BBF submodule (`beacon-db/beacon-file-formats/beacon-binary-format`),
+which is AGPL-3.0. No other licence is available to it.
 
-The crate stays in the workspace and still builds with maturin for local use. It
-is simply not a product.
+Three places state this, and they must agree:
 
-This also resolves a conflict that existed while the engine was Apache-2.0: the
-BBF submodule (`beacon-db/beacon-file-formats/beacon-binary-format`) is AGPL-3.0
-and is linked by `beacon-core`, so an Apache-2.0 wheel built from that graph would
-have been misdeclared. With the engine under the root AGPL and the wheel
-unpublished, there is nothing left to reconcile.
+- `license = "AGPL-3.0-only"` in `beacon-db/beacon-db-py/Cargo.toml`
+- `license` and the licence classifier in `beacon-db/beacon-db-py/pyproject.toml`
+- `beacon-db/beacon-db-py/LICENSE`, a copy of the root file
+
+maturin reads the last one and ships it in the wheel, under
+`beacondb-<version>.dist-info/licenses/`. A user therefore receives the text with
+the package, not only the name of the licence.
+
+This conflicted with the engine while the engine was Apache-2.0. The engine is
+AGPL-3.0 now, so the graph and the wheel state the same licence.

@@ -4,6 +4,10 @@ version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Python bindings for beacon-db: an embeddable, in-process analytical database"
+# The wheel is a distributable, so the licence is stated here as well as in pyproject.toml, the
+# same as the beacon-server crates do. AGPL-3.0, like the engine: `beacon-core` links the BBF
+# submodule, which is AGPL-3.0. The crate itself stays off crates.io.
+license = "AGPL-3.0-only"
 publish = false
 
 [lib]

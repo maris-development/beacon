@@ -469,3 +469,10 @@ pushdown); and a SQLAlchemy `beacondb://` dialect (engine, reflection, `pandas.r
 Not yet: replacement scans (querying a bare local variable), Python UDFs, and multi-statement
 transactions. See
 [plans/python-interface-requirements.md](../../plans/python-interface-requirements.md).
+
+## Licence
+
+AGPL-3.0-only. The wheel holds the whole engine, which is AGPL-3.0, so the package carries the
+same licence. The wheel ships the text under `beacondb-<version>.dist-info/licenses/`. The Beacon
+clients that speak to a server over HTTP or Arrow Flight SQL are Apache-2.0 instead; see
+[LICENSING.md](https://github.com/maris-development/beacon/blob/main/LICENSING.md).
