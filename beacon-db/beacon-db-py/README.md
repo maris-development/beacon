@@ -453,29 +453,6 @@ Reflection (`inspect(engine).get_table_names()`, `get_columns(...)`, `has_table(
 from beacon's `information_schema`. The engine is autocommit — `commit()`/`rollback()` are no-ops,
 since beacon has no multi-statement transactions.
 
-## Status
-
-Working today: `connect()` with both auth modes; the DB-API path (`execute`/`fetchone`/
-`fetchmany`/`fetchall`, `description`/`rowcount`, `cursor`); `connect_as`/`as_anonymous`/
-`whoami`; context managers; the Arrow PyCapsule protocol with `.arrow()`/`.df()`/`.pl()`;
-the lazy relation (`filter`/`project`/`aggregate`/`order`/`limit`/`distinct`/`join`/`union`/
-`count`/`sum`/`min`/`max`/`mean`/`query`, terminals `fetch*`/`arrow`/`df`/`pl`/
-`record_batch`(streaming `pyarrow.RecordBatchReader`, `batch_size=`)/`explain`(+`analyze=True`)/
-`show`/`create`/`create_view`, metadata
-`sql`/`columns`/`types`/`shape`/`__len__`); the catalog-driven `read_*` readers (with keyword
-format options and `columns=[...]` projection); the `to_parquet`/`to_csv`/
-`to_arrow_ipc`/`to_netcdf`/`to_hdf5`/`to_nd_netcdf`/`to_geoparquet`/`to_odv` sinks; `register`/`unregister` of
-pandas/pyarrow/polars frames (session-only or `persist=True`); bound parameters —
-`execute(sql, params)` / `executemany(sql, rows)` with `?` or `$1` placeholders, bound (never
-interpolated) so they are injection-safe; the beacon extras
-(`json_query`/`functions`/`table_functions`/`metrics`/`list_tables`/`refresh`); attaching a remote
-Beacon as a catalog (`attach`/`detach`/`attached`, queryable as `name.schema.table` with Flight SQL
-pushdown); and a SQLAlchemy `beacondb://` dialect (engine, reflection, `pandas.read_sql`).
-
-Not yet: replacement scans (querying a bare local variable), Python UDFs, and multi-statement
-transactions. See
-[plans/python-interface-requirements.md](../../plans/python-interface-requirements.md).
-
 ## Licence
 
 AGPL-3.0. The wheel holds the whole engine, which is AGPL-3.0, so the package carries the
