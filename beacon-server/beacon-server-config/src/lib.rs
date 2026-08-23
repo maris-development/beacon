@@ -401,7 +401,7 @@ struct RawConfig {
     max_age: u64,
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "true")]
     enable_pushdown_projection: bool,
-    #[envconfig(from = "BEACON_ENABLE_ND_PIPELINE", default = "false")]
+    #[envconfig(from = "BEACON_ENABLE_ND_PIPELINE", default = "true")]
     enable_nd_pipeline: bool,
 
     /// Root directory for Beacon's local data (datasets, tables, tmp, etc.).
@@ -647,7 +647,7 @@ impl From<RawConfig> for Config {
                 convention: Hdf5Convention::parse(&raw.hdf5_convention).unwrap_or_else(|value| {
                     tracing::warn!(
                         "BEACON_HDF5_CONVENTION names no convention: '{value}'. \
-                         The conventions are 'none' and 'optodas'. Reading with none."
+                         The conventions are 'none'. Reading with none."
                     );
                     Hdf5Convention::None
                 }),

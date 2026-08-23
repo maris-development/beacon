@@ -115,8 +115,8 @@ in two different groups therefore share an axis of one length and broadcast toge
 lets one query read a payload in the root group and the description of each channel in another:
 
 ```sql
-SELECT "data", "header/channels", "cableSpec/sensorDistances"
-FROM read_hdf5('acquisition/135841.hdf5');
+SELECT "values", "pipe/len", "pos/x"
+FROM read_hdf5('folder/test.hdf5');
 ```
 
 Two exceptions keep the name the reader gave them, `phony_dim_7` and the like: an axis of zero
@@ -133,59 +133,6 @@ count, so a query lands on the payload rather than on the metadata around it. Se
 [Arrays to tables](/docs/2.0.0-rc3/arrays-to-tables#a-file-that-names-no-dimension).
 
 See [Arrays to tables](/docs/2.0.0-rc3/arrays-to-tables#the-dimensions-argument).
-
-## Read a vendor layout
-
-HDF5 is a container. It says how bytes are stored and nothing about what they mean, so Beacon reads
-a plain HDF5 file as the container describes it and assumes nothing further.
-
-An instrument writes HDF5 directly, and its files follow the vendor's own layout rather than any
-standard. A **convention** reads that layout. It is opt-in, and off by default no file is inspected
-for one:
-
-```sql
-CREATE EXTERNAL TABLE das STORED AS HDF5 LOCATION 'acquisition/*.hdf5'
-OPTIONS ('convention' 'optodas');
-
--- or, per query. The second argument holds the dimensions, so pass NULL for it.
-SELECT * FROM read_hdf5('acquisition/*.hdf5', NULL, 'optodas');
-```
-
-Set `BEACON_HDF5_CONVENTION=optodas` to give every HDF5 table of a server the same default.
-
-### `optodas`
-
-An ASN OptoDAS acquisition file holds one payload, `data`, of raw counts on two anonymous axes. The
-file describes those axes in another group, and the convention reads that description:
-
-| The file records | The table gets |
-|---|---|
-| `header/dimensionNames`, `header/dimensionSizes` | the axes of the payload, named `time` and `distance` |
-| `header/time`, `header/dt` | a `time` column of timestamps, one per sample |
-| `header/dimensionRanges/dimension<n>` | a `distance` column in metres, one per channel |
-| `header/dataScale`, `header/unit` | the payload decoded from counts to the unit the file records |
-
-```sql
-SELECT time, distance, "data"
-FROM read_hdf5('acquisition/**/*.hdf5', NULL, 'optodas')
-WHERE distance BETWEEN 1000 AND 2000
-  AND time BETWEEN '2026-03-28 12:00:00' AND '2026-03-28 12:00:30';
-```
-
-Both predicates prune. A `WHERE` clause on a coordinate skips the chunks that hold no matching row,
-so a window of one cable over one minute reads a window of the file. Each file supplies its own
-start time, so a glob over an archive gives one time axis across every file in it.
-
-Every column the file holds keeps its own name and its own values. The convention adds columns; it
-renames nothing and drops nothing.
-
-`time` is the nominal clock: the start the file records, plus one `dt` per sample. The file also
-carries `timing/ppses`, `timing/sampleDelayPPS` and `timing/sampleSkew`, and the convention applies
-none of them. They stay readable, so a query can correct the clock itself. A file that reports
-missing samples gets no `time` column at all rather than a wrong one.
-
-A file that does not follow the layout reads plainly, with one warning in the log. An archive of
-mixed files therefore still reads in one scan.
 
 ## Inspect the schema
 
@@ -218,7 +165,7 @@ LOCATION 'experiments/';
 | `use_rust_reader` | Boolean | `true` (`BEACON_HDF5_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library reads no nested group and no compound dataset, and it needs anonymous access to a bucket. |
 | `enable_statistics` | Boolean | `true` (`BEACON_HDF5_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_HDF5_ENABLE_STATISTICS` to turn the column ranges off. |
 | `unify_phony_dimensions` | Boolean | `true` (`BEACON_HDF5_UNIFY_PHONY_DIMENSIONS`) | Give every unnamed axis one name per length, over the whole file, so two groups broadcast together. Set it to `false` to keep one dimension per length per group. |
-| `convention` | `none` or `optodas` | `none` (`BEACON_HDF5_CONVENTION`) | The vendor layout the table reads on top of the container. See [Read a vendor layout](#read-a-vendor-layout). |
+| `convention` | `none` | `none` (`BEACON_HDF5_CONVENTION`) | The vendor layout the table reads on top of the container. |
 
 The pure-Rust reader applies `unify_phony_dimensions` and `convention`. A table with
 `use_rust_reader` set to `false` ignores both.
@@ -227,7 +174,7 @@ The pure-Rust reader applies `unify_phony_dimensions` and `convention`. A table 
 CREATE EXTERNAL TABLE das
 STORED AS HDF5
 LOCATION 'acquisition/*.hdf5'
-OPTIONS ('convention' 'optodas', 'unify_phony_dimensions' 'false')
+OPTIONS ('unify_phony_dimensions' 'false')
 ```
 
 See [`OPTIONS`](/docs/2.0.0-rc3/sql/create-external-table#options) for the rules that hold for every key.
