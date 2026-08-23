@@ -5,7 +5,7 @@ members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", 
 
 [workspace.package]
 
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.4"
 
 rust-version = "1.94"
 

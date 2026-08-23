@@ -12,6 +12,16 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **`pip install beacondb` works again.** The release workflow of the `beacondb` wheel is back,
+  together with the `beacondb` entry in the version scripts. A `v*` tag publishes the wheels and
+  the sdist to PyPI. A `beacondb-v*` tag publishes the wheel alone, on its own version line. The
+  wheels cover manylinux x86_64 and aarch64, macOS arm64, and Windows x64. Each wheel carries its
+  own netCDF, HDF5, OpenSSL and PROJ, so a machine needs none of them installed. PROJ is the
+  addition: `ST_Transform` links it, and no runner holds a recent enough copy, so the build
+  compiles it from source. That build keeps the CRS database of PROJ inside the compiled library,
+  so the wheel stays self-contained and reads no `PROJ_DATA`. Start the workflow by hand with
+  `dry_run` to build and test every wheel before a tag exists. The wheel is **AGPL-3.0**, like the
+  engine it holds.
 - **`PARTITIONED BY` works for netCDF, HDF5 and GeoTIFF tables.** `CREATE EXTERNAL TABLE
   observations STORED AS NC LOCATION 'obs/' PARTITIONED BY (year, month)` used to fail with a
   `NotImplemented` error naming the format and the columns; it now plans and runs, and a filter on
@@ -172,8 +182,8 @@ tag. Releases before 2.0.0 are recorded in the
 - **`BEACON_S3_DATA_LAKE` is now `BEACON_S3_DATASETS`.** The old name still works and still turns
   the S3 datasets store on; it is deprecated and will be removed one major version after 2.0.
 - **Licensing is stated in one place.** The root `LICENSE` (AGPL-3.0) covers the Rust workspace;
-  the `beacon-server` crates restate it in their manifests because they are publishable. The
-  clients under `beacon-clients/` remain Apache-2.0. [LICENSING.md](LICENSING.md) documents it.
+  the `beacon-server` crates and `beacon-db-py` restate it in their manifests because they are
+  published. The clients under `beacon-clients/` remain Apache-2.0, with their own `LICENSE`.
 - **Secrets are documented as an `ATTACH` mechanism only.** A server reads one datasets store,
   local or a single bucket, chosen at startup from configuration. `CREATE SECRET` covers reaching
   another Beacon server.
@@ -208,11 +218,6 @@ tag. Releases before 2.0.0 are recorded in the
   archive scans 11% slower, and an archive with no statistics store scans 17% slower.
   `ANALYZE FILES` is 6% faster, because a pass paid to fill a cache it never read from. The cache
   size the tuning page recommended, 16384, was slower than the default 128 on every measurement.
-- **The `beacondb` wheel is no longer published.** Its release workflow, the manylinux build
-  scripts and the `make wheel` targets are gone, and the version scripts no longer track it. The
-  crate stays in the workspace and still builds locally with maturin; it is marked
-  `publish = false` and `Private :: Do Not Upload`. Beacon is a server, and the embeddable wheel
-  was the last artifact still selling it as something else.
 
 ### Fixed
 

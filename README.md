@@ -153,4 +153,6 @@ an issue first for a large change. The issue lets you discuss the approach.
 
 Beacon uses the **GNU Affero General Public License v3.0** (AGPL-3.0). Read [LICENSE](LICENSE).
 
-The clients under `beacon-clients/` use **Apache-2.0**. See [LICENSING.md](LICENSING.md).
+The clients under `beacon-clients/` use **Apache-2.0**. Read
+[beacon-clients/LICENSE](beacon-clients/LICENSE). They speak HTTP and Arrow Flight SQL to a
+server, so they link no engine code.
