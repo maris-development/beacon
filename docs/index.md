@@ -11,12 +11,12 @@ hero:
   actions:
     - theme: brand
       text: Get Started
-      # Points at 2.0.0-rc3, not the 1.8.0 stable tree. 2.0 is the release that
+      # Points at 2.0.0-rc4, not the 1.8.0 stable tree. 2.0 is the release that
       # drops the two-product split, so the 1.8.0 pages contradict this page:
       # they still describe "Beacon Data Lake" and know nothing of the current
       # naming. The pre-release banner on those pages carries the caveat.
       # Revisit when 2.0.0 goes GA and LATEST_VERSION moves (theme/version.js).
-      link: /docs/2.0.0-rc3/quickstart
+      link: /docs/2.0.0-rc4/quickstart
     # Was "Explore Public Nodes", pointing at a page whose first line said the
     # nodes were not public. beacon-wod.maris.nl is genuinely open, so this now
     # lands on the section that queries it.

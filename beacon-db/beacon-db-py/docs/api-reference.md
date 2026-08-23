@@ -44,7 +44,7 @@ beacondb.connect(
 | --- | --- | --- |
 | `database` | `":memory:"` | The path to a `beacon.db` file. Use `":memory:"` for a throwaway database in the process. Beacon creates a missing file. |
 | `read_only` | `False` | Refuse every write. This covers DDL, DML and statements with a side effect, such as `ATTACH`, `CREATE SECRET` and `INSERT`. `SELECT` and `SHOW` still work. |
-| `auth` | `False` | Switch the RBAC of Beacon on. With auth off, the file gives full control. See [Getting started](/docs/2.0.0-rc3/beacondb/python/getting-started#authentication). |
+| `auth` | `False` | Switch the RBAC of Beacon on. With auth off, the file gives full control. See [Getting started](/docs/2.0.0-rc4/beacondb/python/getting-started#authentication). |
 | `username`, `password`, `token` | `None` | The credentials of your identity. They need `auth=True`. With auth off they give an error. Beacon does not ignore them. |
 | `admin_username`, `admin_password` | `None` | Create the super-user on a database without an auth store. |
 | `anonymous` | `True` | `True` lets the anonymous, read-only principal connect. |
@@ -53,7 +53,7 @@ beacondb.connect(
 | `memory_limit` | `None` | The soft memory budget of a query, in bytes. |
 | `cpu_limit` | `None` | The maximum number of worker threads. The default is the core count of the machine. |
 | `crawlers` | `False` | Switch the background dataset crawlers on. |
-| `secrets_key` | `None` | A base64 key of 32 bytes. It encrypts the persistent secrets. `$BEACON_SECRETS_KEY` also works. A persistent secret needs it, because Beacon never stores a plaintext credential. See [Secrets](/docs/2.0.0-rc3/beacondb/python/secrets). |
+| `secrets_key` | `None` | A base64 key of 32 bytes. It encrypts the persistent secrets. `$BEACON_SECRETS_KEY` also works. A persistent secret needs it, because Beacon never stores a plaintext credential. See [Secrets](/docs/2.0.0-rc4/beacondb/python/secrets). |
 
 ## `Connection`
 
@@ -228,9 +228,9 @@ The package also exports `Warning`, as PEP 249 requires.
 
 ## See also
 
-- [Getting started](/docs/2.0.0-rc3/beacondb/python/getting-started): connect, auth modes, read-only.
-- [Querying](/docs/2.0.0-rc3/beacondb/python/querying): relations, readers, sinks and streams, with examples.
-- [Bring data in](/docs/2.0.0-rc3/beacondb/python/data-in): `register()` and `append()`.
-- [Remote catalogs](/docs/2.0.0-rc3/beacondb/python/remote-catalogs): `ATTACH` and pushdown.
-- [Secrets](/docs/2.0.0-rc3/beacondb/python/secrets): object store credentials.
-- [SQLAlchemy](/docs/2.0.0-rc3/beacondb/python/sqlalchemy): the `beacondb://` dialect.
+- [Getting started](/docs/2.0.0-rc4/beacondb/python/getting-started): connect, auth modes, read-only.
+- [Querying](/docs/2.0.0-rc4/beacondb/python/querying): relations, readers, sinks and streams, with examples.
+- [Bring data in](/docs/2.0.0-rc4/beacondb/python/data-in): `register()` and `append()`.
+- [Remote catalogs](/docs/2.0.0-rc4/beacondb/python/remote-catalogs): `ATTACH` and pushdown.
+- [Secrets](/docs/2.0.0-rc4/beacondb/python/secrets): object store credentials.
+- [SQLAlchemy](/docs/2.0.0-rc4/beacondb/python/sqlalchemy): the `beacondb://` dialect.
