@@ -23,9 +23,9 @@ description = "An embeddable, in-process analytical database for scientific data
 readme = "README.md"
 requires-python = ">=3.10"
 # AGPL-3.0, like the engine the wheel holds. `beacon-core` links the BBF submodule, which is
-# AGPL-3.0, so the wheel can carry no other licence. See LICENSING.md at the root of the
-# repository. The file beside this one is a copy of that root LICENSE, so the wheel ships the
-# text as well as the name.
+# AGPL-3.0, so the wheel can carry no other licence. The text is the root `LICENSE` of the
+# repository, which is not copied here, so this field and the classifier below are what the
+# wheel states. See LICENSING.md.
 license = { text = "AGPL-3.0" }
 authors = [{ name = "Beacon" }]
 keywords = ["beacon", "database", "sql", "arrow", "embedded", "olap", "analytics", "netcdf", "zarr", "parquet"]

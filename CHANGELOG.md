@@ -21,7 +21,7 @@ tag. Releases before 2.0.0 are recorded in the
   compiles it from source. That build keeps the CRS database of PROJ inside the compiled library,
   so the wheel stays self-contained and reads no `PROJ_DATA`. Start the workflow by hand with
   `dry_run` to build and test every wheel before a tag exists. The wheel is **AGPL-3.0**, like the
-  engine it holds, and carries the licence text next to its metadata.
+  engine it holds.
 - **`PARTITIONED BY` works for netCDF, HDF5 and GeoTIFF tables.** `CREATE EXTERNAL TABLE
   observations STORED AS NC LOCATION 'obs/' PARTITIONED BY (year, month)` used to fail with a
   `NotImplemented` error naming the format and the columns; it now plans and runs, and a filter on

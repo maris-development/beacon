@@ -3,7 +3,6 @@
 | Path | Licence | Licence file |
 |---|---|---|
 | Everything, unless listed below | AGPL-3.0 | [`LICENSE`](LICENSE) |
-| `beacon-db/beacon-db-py/**` | AGPL-3.0 | [`beacon-db/beacon-db-py/LICENSE`](beacon-db/beacon-db-py/LICENSE) |
 | `beacon-clients/**` | Apache-2.0 | [`beacon-clients/LICENSE`](beacon-clients/LICENSE) |
 
 ## The Rust workspace
@@ -46,15 +45,15 @@ The `beacondb` wheel is AGPL-3.0. It holds the whole engine, and `beacon-core`
 links the BBF submodule (`beacon-db/beacon-file-formats/beacon-binary-format`),
 which is AGPL-3.0. No other licence is available to it.
 
-Three places state this, and they must agree:
+Two places state this, and they must agree:
 
 - `license = "AGPL-3.0"` in `beacon-db/beacon-db-py/Cargo.toml`
 - `license` and the licence classifier in `beacon-db/beacon-db-py/pyproject.toml`
-- `beacon-db/beacon-db-py/LICENSE`, a copy of the root file
 
-maturin reads the last one and ships it in the wheel, under
-`beacondb-<version>.dist-info/licenses/`. A user therefore receives the text with
-the package, not only the name of the licence.
+Both reach the wheel, so PyPI names the licence on the page of the package. The
+text itself stays in the root [`LICENSE`](LICENSE) of this repository. There is
+no copy in `beacon-db/beacon-db-py`, so the wheel carries the name and not the
+text.
 
 This conflicted with the engine while the engine was Apache-2.0. The engine is
 AGPL-3.0 now, so the graph and the wheel state the same licence.
