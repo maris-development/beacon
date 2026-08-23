@@ -92,10 +92,6 @@ FROM stations
 WHERE ST_DWithin(ST_Point(longitude, latitude), ST_GeomFromText('POINT(4 52)'), 5.0)
 ```
 
-Beacon also holds
-[`st_within_point`](/docs/2.0.0-rc3/sql/function-reference#st-within-point-wkt-lon-lat). It takes
-a WKT string and two ordinate columns.
-
 A spatial function also reads a GeoParquet geometry column directly:
 
 ```sql

@@ -326,57 +326,6 @@ WHERE ST_Within(
 )
 ```
 
-### Beacon geospatial functions
-
-These two functions come from Beacon, not from the PostGIS set. Both take a WKT string and plain
-ordinate columns, so neither needs a geometry column.
-
-#### `st_within_point(wkt, lon, lat)`
-
-Returns `true` if the point `(lon, lat)` lies inside the geometry of the WKT string. It supports every WKT geometry type, such as polygon and multipolygon. For a constant geometry, Beacon adds a bounding rectangle pre-filter and an LRU cache. Repeated calls are then faster.
-
-Use this function on a table that holds longitude and latitude columns, such as netCDF or CSV.
-It parses the WKT once and caches an answer per coordinate pair. `ST_Within` is the PostGIS
-equivalent, and it takes two geometries.
-
-A measurement decides between the two. One station that reports at many depths repeats its
-coordinate pair on every row, and the cache then makes `st_within_point` 4 to 12 times faster. A
-table of distinct coordinates has no repeat to cache, and `ST_Within` is then the faster of the
-two.
-
-| Argument | Type | Description |
-| -------- | ---- | ----------- |
-| `wkt` | `VARCHAR` | Well-Known Text geometry |
-| `lon` | `DOUBLE` | Longitude |
-| `lat` | `DOUBLE` | Latitude |
-
-Returns `BOOLEAN`. Returns `false` if one argument is `NULL`.
-
-```sql
-SELECT *
-FROM read_netcdf(['argo/**/*.nc'])
-WHERE st_within_point(
-    'POLYGON ((−10 35, 40 35, 40 60, −10 60, −10 35))',
-    longitude,
-    latitude
-)
-```
-
-#### `st_geojson_as_wkt(geojson)`
-
-Converts a GeoJSON geometry string to WKT. Use it to give a GeoJSON polygon to `st_within_point`.
-`ST_GeomFromGeoJSON` is the PostGIS equivalent, and it returns a geometry.
-
-| Argument | Type | Description |
-| -------- | ---- | ----------- |
-| `geojson` | `VARCHAR` | GeoJSON geometry object |
-
-Returns `VARCHAR`.
-
-```sql
-SELECT st_geojson_as_wkt('{"type":"Polygon","coordinates":[[[0,50],[10,50],[10,60],[0,60],[0,50]]]}')
-```
-
 ---
 
 ## Domain mapping functions

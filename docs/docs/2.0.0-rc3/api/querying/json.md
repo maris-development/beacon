@@ -232,6 +232,20 @@ Content-Type: application/json
 }
 ```
 
+The filter plans this expression:
+
+```sql
+ST_Within(
+    ST_Point(longitude, latitude),
+    ST_GeomFromGeoJSON('{"type":"Polygon","coordinates":[[[4,52],[6,52],[6,54],[4,54],[4,52]]]}')
+)
+```
+
+The three functions come from the [spatial
+functions](/docs/2.0.0-rc3/sql/spatial-functions) of the SQL path. A JSON filter and a SQL `WHERE`
+clause therefore state the same test under the same names. Any GeoJSON geometry type works, such
+as `Polygon`, `MultiPolygon` and `Point`.
+
 ### Filter operator reference
 
 Every leaf filter names a column with `column`. The alias is `for_query_parameter`. Each filter also

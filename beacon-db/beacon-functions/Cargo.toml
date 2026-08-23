@@ -22,11 +22,7 @@ proj-bundled = ["datafusion-spatial/proj-bundled"]
 [dependencies]
 datafusion = {workspace = true}
 arrow = {workspace = true}
-geo = {workspace = true}
-geojson = {workspace = true}
-wkt = {workspace = true}
 strsim = {workspace = true}
-anyhow = { workspace = true}
 serde = { workspace = true}
 serde_json = { workspace = true}
 csv = {workspace = true}
@@ -36,7 +32,6 @@ once_cell = { workspace = true }
 lazy_static = {workspace = true}
 gsw = {workspace = true}
 lru = {workspace = true}
-ordered-float = {workspace = true}
 tracing = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -58,12 +53,3 @@ beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparqu
 beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 datafusion-spatial = { workspace=true }
-
-[dev-dependencies]
-criterion = { version = "0.5", default-features = false, features = ["rayon", "html_reports"] }
-
-# `st_within_point` against `ST_Within`. It answers one question: does the Beacon function still
-# earn its place beside the PostGIS set? Run `cargo bench -p beacon-functions --bench within_point`.
-[[bench]]
-name = "within_point"
-harness = false
