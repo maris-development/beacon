@@ -146,6 +146,12 @@ Relational method chaining (`.filter()`, `.aggregate()`, `.join()`, …) is not 
 exposed — write the SQL instead. Inspecting `rel.sql`, `rel.columns` or `rel.types` stays
 free, so you can check a query before paying to run it.
 
+The dialect is the one the Beacon server speaks, and the documentation site covers it:
+the [SQL reference](https://maris-development.github.io/beacon/docs/latest/sql/) for the
+statements, and the
+[function reference](https://maris-development.github.io/beacon/docs/latest/sql/function-reference)
+for every function. The `latest` path always resolves to the current release.
+
 ### Streaming large results
 
 `.arrow()`/`.df()`/`.pl()` collect the whole result into memory. For a result too big for that,
