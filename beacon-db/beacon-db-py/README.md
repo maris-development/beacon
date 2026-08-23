@@ -452,10 +452,3 @@ pd.read_sql("SELECT platform, avg(temperature) AS t FROM obs GROUP BY platform",
 Reflection (`inspect(engine).get_table_names()`, `get_columns(...)`, `has_table(...)`) is answered
 from beacon's `information_schema`. The engine is autocommit — `commit()`/`rollback()` are no-ops,
 since beacon has no multi-statement transactions.
-
-## Licence
-
-AGPL-3.0. The wheel holds the whole engine, which is AGPL-3.0, so the package carries the
-same licence. The wheel ships the text under `beacondb-<version>.dist-info/licenses/`. The Beacon
-clients that speak to a server over HTTP or Arrow Flight SQL are Apache-2.0 instead; see
-[LICENSING.md](https://github.com/maris-development/beacon/blob/main/LICENSING.md).
