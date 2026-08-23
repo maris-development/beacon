@@ -1,0 +1,336 @@
+name: Publish beacondb
+
+# Builds the `beacondb` PyO3 wheels and publishes them to PyPI.
+#
+# `beacondb` embeds the whole beacon-db engine (DataFusion + Lance + netCDF/HDF5 + PROJ), so
+# wheels are not pure Python. To produce **portable wheels on every platform, including Windows,
+# which has no system package manager for these libraries, the build links every native library
+# statically**, compiling netCDF and HDF5 from source through the `static-netcdf` cargo feature,
+# PROJ through `spatial-proj-bundled`, and OpenSSL through `vendored-openssl`.
+#
+# Triggered by the workspace release tag `v*`, same as every other publish workflow
+#
+# Release candidates: a pre-release tag (v2.0.0-rc.1) publishes as PyPI version 2.0.0rc1
+
+on:
+  push:
+    tags:
+      # Covers stable (v1.8.0) and pre-release (v2.0.0-rc.1) tags alike.
+      - "v*"
+      # beacondb-only release, decoupled from the workspace version line.
+      - "beacondb-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Expected version, cross-checked against the manifests. Empty = publish whatever they declare."
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Build and smoke-test every wheel but skip publishing. Use this to exercise a build before tagging."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # The committed manifests are the source of truth for what gets published; the tag is a
+  # cross-check. Nothing here rewrites a version — a disagreement fails the release instead, so a
+  # mistyped tag or a forgotten bump is caught before anything reaches PyPI (where a wrong version
+  # cannot be taken back). Release flow: bump pyproject.toml + Cargo.toml, commit, then tag.
+  version:
+    name: Verify version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify version
+        shell: bash
+        env:
+          # On a tag push the tag is the expected version; on a manual run the (optional) input is.
+          # Empty means "no assertion" — publish whatever the manifests declare.
+          EXPECTED: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+        run: |
+          python3 -m pip install --quiet --upgrade packaging
+          python3 scripts/check-version.py "$EXPECTED"
+
+  # One sdist covers every platform — a source distribution carries no platform tag, so PyPI holds
+  # exactly one per version and pip falls back to it anywhere a wheel is missing (musllinux/Alpine
+  # today, but also ppc64le, s390x, FreeBSD).
+  sdist:
+    name: Build sdist
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive # beacon-binary-format is a submodule, and ships in the sdist
+
+      - name: Build sdist
+        run: |
+          python3 -m pip install --upgrade maturin twine
+          maturin sdist --out dist --manifest-path beacon-db/beacon-db-py/Cargo.toml
+          python3 -m twine check dist/*.tar.gz
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: beacondb-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build:
+    name: Build wheel (${{ matrix.platform.key }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - {
+              key: manylinux-x86_64,
+              runner: ubuntu-latest,
+              target: x86_64,
+              manylinux: "2_34",
+            }
+          - {
+              key: manylinux-aarch64,
+              runner: ubuntu-24.04-arm,
+              target: aarch64,
+              manylinux: "2_34",
+            }
+          - {
+              key: macos-aarch64,
+              runner: macos-15,
+              target: aarch64,
+              manylinux: "off",
+            }
+          - {
+              key: windows-x64,
+              runner: windows-latest,
+              target: x64,
+              manylinux: "off",
+            }
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive # beacon-binary-format is a submodule
+
+      # protoc and cmake are the build tools needed: netCDF, HDF5 and PROJ are all compiled from
+      # source (the `static-netcdf` and `spatial-proj-bundled` features), so none of the three is
+      # installed as a library here.
+      #
+      # PROJ's build also runs the `sqlite3` command-line tool, which turns the SQL in its source
+      # tree into the `proj.db` CRS database, and links the SQLite *library* to read it back.
+      # macOS gets the program from /usr/bin and the library from the `bundled` feature of
+      # libsqlite3-sys, so it needs neither installed.
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install protobuf cmake
+
+      # Windows has neither, and cannot use the bundled library: `proj-sys` passes it to PROJ's
+      # cmake under its Unix name (`libsqlite3.a`), which MSVC never writes. So SQLite comes from
+      # vcpkg, which is preinstalled on the runner. The `static-md` triplet is the one that
+      # matches Rust on MSVC: a static library against the dynamic CRT, so nothing extra has to
+      # ship in the wheel. `CMAKE_PREFIX_PATH` is how PROJ's `find_package(SQLite3)` finds it;
+      # the `SQLITE3_*` variables are how libsqlite3-sys finds the same copy for its own linking.
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install -y protoc sqlite # cmake is preinstalled on the Windows runner
+          vcpkg install sqlite3:x64-windows-static-md
+          root=$(printf '%s' "${VCPKG_INSTALLATION_ROOT:-C:/vcpkg}/installed/x64-windows-static-md" | tr '\\' '/')
+          test -f "$root/lib/sqlite3.lib" || { echo "::error::vcpkg did not produce $root/lib/sqlite3.lib"; exit 1; }
+          {
+            echo "CMAKE_PREFIX_PATH=$root"
+            echo "SQLITE3_INCLUDE_DIR=$root/include"
+            echo "SQLITE3_LIB_DIR=$root/lib"
+            echo "SQLITE3_STATIC=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          # Pinned: `--compression-method`/`--compression-level` below are recent maturin flags,
+          # and an unknown flag would only surface after a 30-100 minute compile.
+          maturin-version: v1.14.1
+          # abi3 wheel — no per-interpreter build needed. `static-netcdf` builds+links netCDF/HDF5
+          # into the wheel so it is self-contained on every platform. `vendored-openssl` does the
+          # same for OpenSSL, which the MySQL/PostgreSQL federation drivers need; it applies to the
+          # Linux builds only and is inert on macOS and Windows, so one args string covers them all.
+          # `spatial-proj-bundled` does the same for PROJ, which `ST_Transform` links: a wheel
+          # cannot depend on a PROJ from the build machine, and no runner has one recent enough
+          # anyway (PROJ 9.6.2 is the floor). It carries SQLite along with it, for PROJ's CRS
+          # database.
+          #
+          # `release-wheel` (workspace Cargo.toml) is `release` plus strip + thin LTO +
+          # codegen-units=1.
+          args: >-
+            --profile release-wheel --out dist
+            --manifest-path beacon-db/beacon-db-py/Cargo.toml
+            --features static-netcdf,vendored-openssl,spatial-proj-bundled
+            --compression-method deflated --compression-level 9
+          manylinux: ${{ matrix.platform.manylinux }}
+          # Inside the build container, install only the toolchain the static build needs
+          # (protoc for Lance, cmake + a C/C++ compiler + perl to build netCDF/HDF5 and OpenSSL
+          # from source). OpenSSL 3's Configure also needs perl's IPC::Cmd, which the AlmaLinux
+          # `perl` package does not pull in; Alpine's perl ships it. The manylinux container is
+          # AlmaLinux (dnf); the apk branch is kept so restoring the musllinux entries (Alpine)
+          # needs no change here.
+          #
+          # `protobuf-compiler` is 3.14.0 on AlmaLinux 9, which clears the >= 3.12 that
+          # prost-build needs for `--experimental_allow_proto3_optional`. It lives in the CRB
+          # repo, enabled by default in the manylinux_2_34 image. Alpine's own protobuf is
+          # current (29.x), so both branches take protoc from the package manager.
+          #
+          # `protobuf-devel` / `protobuf-dev` is not optional: it carries the well-known types
+          # (google/protobuf/empty.proto and friends) under the include path. protoc alone does
+          # not, and Lance imports them — without it the build fails with
+          # "google/protobuf/empty.proto: File not found".
+          #
+          # POSIX sh, not bash: the musllinux container is Alpine, which has no bash.
+          # `scripts/build-wheel-docker.sh` reads this exact block and runs it in the same
+          # container locally, so a toolchain break is reproducible before a tag is cut.
+          before-script-linux: |
+            set -eu
+            if command -v apk >/dev/null 2>&1; then
+              apk add --no-cache build-base cmake perl protobuf protobuf-dev linux-headers sqlite
+            else
+              dnf install -y protobuf-compiler protobuf-devel cmake perl perl-IPC-Cmd sqlite \
+                || yum install -y protobuf-compiler protobuf-devel cmake perl perl-IPC-Cmd sqlite
+            fi
+            # 3.14.0 clears the floor by only two minor versions, and the base image is the only
+            # thing holding it there. Assert it rather than let a future image or repo change
+            # resurface as "protoc failed: Unknown flag" deep inside a Lance build script.
+            echo "protoc: $(command -v protoc) -> $(protoc --version)"
+            protoc_major=$(protoc --version | sed 's/^libprotoc //' | cut -d. -f1)
+            protoc_minor=$(protoc --version | sed 's/^libprotoc //' | cut -d. -f2)
+            if [ "$protoc_major" -eq 3 ] && [ "$protoc_minor" -lt 12 ]; then
+              echo "error: protoc $(protoc --version) is too old; prost-build needs >= 3.12" >&2
+              exit 1
+            fi
+            # The well-known types must resolve on protoc's default include path, or Lance's
+            # imports fail. Checked here because protoc itself reports nothing until a build
+            # script feeds it a .proto that imports one.
+            printf 'syntax = "proto3";\nimport "google/protobuf/empty.proto";\n' > /tmp/wkt.proto
+            if ! protoc --descriptor_set_out=/dev/null -I /tmp /tmp/wkt.proto 2>/dev/null; then
+              echo "error: protoc cannot resolve google/protobuf/empty.proto; install protobuf-devel/protobuf-dev" >&2
+              exit 1
+            fi
+            rm -f /tmp/wkt.proto
+            echo "protoc well-known types: ok"
+            echo "cmake:  $(command -v cmake) -> $(cmake --version | head -n1)"
+            # PROJ's build turns its SQL files into proj.db with the sqlite3 program, and stops
+            # with "sqlite3 binary not found!" without it. The SQLite *library* is not installed:
+            # the `bundled` feature of libsqlite3-sys compiles one and hands it to PROJ's cmake,
+            # which is what keeps `sqlite-devel` off this list.
+            if ! command -v sqlite3 >/dev/null 2>&1; then
+              echo "error: sqlite3 is not installed; PROJ needs it to build proj.db" >&2
+              exit 1
+            fi
+            echo "sqlite3: $(command -v sqlite3) -> $(sqlite3 --version | cut -d' ' -f1)"
+            # OpenSSL is vendored by the `vendored-openssl` feature, so no openssl-devel here —
+            # but Configure needs IPC::Cmd, which is why perl-IPC-Cmd is installed above.
+            perl -MIPC::Cmd -e 'print "perl IPC::Cmd ok\n"'
+
+      # PyPI rejects files over its per-project limit ("100 MB" in the error text, 100 MiB in
+      # warehouse) and only does so at upload — i.e. after every platform has finished building,
+      # an hour or more in. That is how v2.0.0-rc1 failed. Checking here puts the error next to
+      # the wheel that caused it and names the platform. Raise `limit_mib` to match if the project
+      # is ever granted a higher limit:
+      # https://docs.pypi.org/project-management/storage-limits#requesting-a-file-size-limit-increase
+      - name: Check wheel size
+        shell: bash
+        run: |
+          limit_mib=100
+          status=0
+          for whl in dist/*.whl; do
+            size=$(wc -c < "$whl")
+            awk -v n="$(basename "$whl")" -v s="$size" 'BEGIN{printf "%s  %.1f MiB\n", n, s/1048576}'
+            if [ "$size" -gt "$((limit_mib * 1024 * 1024))" ]; then
+              echo "::error::$(basename "$whl") is $((size / 1048576)) MiB; PyPI's limit for beacondb is ${limit_mib} MiB."
+              status=1
+            fi
+          done
+          exit $status
+
+      # Installs the wheel the way a user would and runs a query through it. `ST_Transform` is
+      # part of that on purpose: it is the one function that reaches native PROJ, and it reads
+      # PROJ's CRS database, so it fails on a wheel that carries the code but not the data. A
+      # plain `SELECT 1` would not notice.
+      - name: Smoke-test the wheel
+        shell: bash
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install dist/*.whl
+          python3 - <<'PY'
+          import beacondb
+
+          con = beacondb.connect()
+          print("beacondb", beacondb.__version__, con.sql("SELECT 1").fetchall())
+          point = con.sql(
+              "SELECT ST_AsText(ST_Transform(ST_SetSRID(ST_Point(5.0, 52.0), 4326), 3857)) AS p"
+          ).fetchall()
+          print("ST_Transform", point)
+          assert "POINT" in str(point), point
+          PY
+
+      - name: Check metadata
+        shell: bash
+        run: |
+          python3 -m pip install --upgrade twine
+          python3 -m twine check dist/*.whl
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          # `key` is unique per matrix entry, which matters once a single runner+target builds more
+          # than one wheel (as manylinux + musllinux did) — artifact names must differ.
+          name: beacondb-wheel-${{ matrix.platform.key }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: [build, sdist]
+    # A dry run still builds and smoke-tests every wheel and the sdist — it just stops before
+    # PyPI. That makes the whole matrix (including macOS and Windows, which no local container
+    # can cover) runnable on demand instead of only on a tag that is already cut.
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/beacondb
+    permissions:
+      id-token: write # OIDC token for PyPI Trusted Publishing
+    steps:
+      - name: Download all wheels and the sdist
+        uses: actions/download-artifact@v4
+        with:
+          pattern: beacondb-* # beacondb-wheel-<key> plus beacondb-sdist
+          path: dist
+          merge-multiple: true
+
+      - name: Verify sdist and wheels are present
+        shell: bash
+        working-directory: dist
+        run: |
+          ls -l
+          sdists=$(find . -maxdepth 1 -name '*.tar.gz' | wc -l)
+          wheels=$(find . -maxdepth 1 -name '*.whl' | wc -l)
+          echo "sdists=$sdists wheels=$wheels"
+          [ "$sdists" -eq 1 ] || { echo "::error::Expected exactly 1 sdist, found $sdists. Source installs (Alpine/musl, ppc64le, s390x) depend on it."; exit 1; }
+          [ "$wheels" -ge 1 ] || { echo "::error::No wheels found."; exit 1; }
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true # a re-run of the same tag shouldn't fail

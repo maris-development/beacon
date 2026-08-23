@@ -9,7 +9,10 @@ engine links. A Rust compiler alone is not enough:
 
 - **protoc**. Lance generates protobuf at build time.
 - **HDF5 and netCDF** headers and libraries. The netCDF reader and writer need them.
-- **PROJ, 9.6.2 or later**, and pkg-config. The `ST_Transform` spatial function links it.
+- **PROJ, 9.6.2 or later**, and pkg-config. The `ST_Transform` spatial function links it. A
+  machine without it still builds: the build compiles PROJ from source instead, which needs
+  **cmake** and the **sqlite3** program. `--no-default-features` drops `ST_Transform` and PROJ
+  with it. The other 122 spatial functions stay.
 - A Rust toolchain, **1.94 or later**. See `rust-version` in the workspace `Cargo.toml`. The
   `rust-toolchain.toml` file here selects stable for local development.
 
@@ -28,20 +31,33 @@ The wheel is **abi3** (`cp310-abi3`). One wheel per platform therefore covers CP
 The wheel ships `py.typed` and the `_beacondb.pyi` type stubs. The stubs include the `read_*` readers
 from the catalog.
 
-## Portable wheels (`static-netcdf`)
+## Portable wheels (`static-netcdf`, `spatial-proj-bundled`)
 
-A wheel for distribution links netCDF and HDF5 **statically**. The build compiles them from source.
-The wheel then carries them and needs no system library. This is the only way to ship a portable
-**Windows** wheel:
+A wheel for distribution links every native library **statically**. The build compiles netCDF, HDF5
+and PROJ from source. The wheel then carries them and needs no system library. This is the only way
+to ship a portable **Windows** wheel:
 
 ```bash
-maturin build --release --features static-netcdf   # needs protoc + cmake only
+# needs protoc, cmake and the sqlite3 program
+maturin build --release --features static-netcdf,spatial-proj-bundled
 ```
 
-CI builds this way for Linux (manylinux_2_28, x86_64 and aarch64), macOS (arm64 and x86_64) and
-Windows (x64). It then publishes to PyPI with trusted publishing. The workflow is
+PROJ keeps its CRS database, `proj.db`, in a file beside the library. A static build embeds that
+database in the library instead, so the wheel holds it and needs no `PROJ_DATA`. The build writes
+that database from SQL with the `sqlite3` program, which is why the toolchain lists it. The SQLite
+*library* comes from the build itself, on every platform but Windows. Windows takes it from vcpkg,
+because `proj-sys` passes the built one on under a name that MSVC does not write. The release
+workflow does that step.
+
+CI builds this way for Linux (manylinux_2_34, x86_64 and aarch64), macOS (arm64) and Windows (x64).
+The Linux wheels add `vendored-openssl`, which the MySQL and PostgreSQL drivers need there. CI then
+publishes to PyPI with trusted publishing. The workflow is
 `.github/workflows/publish-beacondb.yml`. The release tag `v*` starts it. A `beacondb-v*` tag starts
-a beacondb-only release.
+a beacondb-only release. A manual run with `dry_run` builds and tests every wheel and publishes
+none.
+
+`make wheel` builds the Linux wheel locally, in the same container CI uses. `make wheel-check`
+verifies the container toolchain alone, which is much faster.
 
 There are two drawbacks. The wheel is **large**, because it holds a full DataFusion, Lance and netCDF
 engine. There is also **no minimal build** with feature gates yet.
@@ -78,12 +94,12 @@ new download on every build.
 
 A source build uses the **default** features of the crate. Those features link netCDF and HDF5
 **dynamically**. The build therefore needs a C and C++ toolchain and the system HDF5 and netCDF
-packages. The published wheels do not need them. To build the fully static variant, pass the feature
-through the PEP 517 hook of maturin. You then need `cmake` instead of the HDF5 and netCDF
-development packages:
+packages. It also needs PROJ, or cmake and sqlite3 to build PROJ from source. The published wheels
+need none of this. To build the fully static variant, pass the features through the PEP 517 hook of
+maturin. You then need `cmake` instead of the HDF5 and netCDF development packages:
 
 ```bash
-MATURIN_PEP517_ARGS="--features static-netcdf" pip install beacondb
+MATURIN_PEP517_ARGS="--features static-netcdf,spatial-proj-bundled" pip install beacondb
 ```
 
 `pip install beacondb --no-binary beacondb` forces a source build on a platform with a wheel.
@@ -94,13 +110,17 @@ Beacon publishes no musllinux wheel at this moment. On Alpine, pip therefore use
 compiles the engine. The supported fix is a glibc image such as `python:3.12-slim`. A build from
 source is the fallback if you must stay on musl.
 
-Rust and protoc install themselves, as described above. Alpine therefore needs only the C toolchain
-and the netCDF and HDF5 libraries:
+Rust and protoc install themselves, as described above. Alpine therefore needs only the C toolchain,
+the netCDF and HDF5 libraries, and what a source build of PROJ uses:
 
 ```bash
-apk add --no-cache build-base linux-headers hdf5-dev netcdf-dev
+apk add --no-cache build-base linux-headers hdf5-dev netcdf-dev cmake sqlite
 pip install beacondb
 ```
+
+The PROJ package of Alpine can be older than the 9.6.2 floor. The build then compiles PROJ itself,
+and `cmake` and `sqlite` are for that step. Add `proj-dev` where the package is new enough. The
+build links that copy and skips the source build.
 
 ::: warning Install `build-base` before pip, not after
 The order matters on Alpine. The musl toolchain of rustup links against `libgcc_s.so.1`. The base

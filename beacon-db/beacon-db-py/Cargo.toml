@@ -28,6 +28,34 @@ static-netcdf = ["beacon-core/static-netcdf"]
 # system libssl-dev/openssl-devel is the faster path). Requires cmake, make and perl at build time.
 vendored-openssl = ["dep:openssl"]
 
+# The `ST_Transform` spatial function, on by default, exactly as in the server. It links PROJ, so
+# the build needs PROJ 9.6.2 or later and pkg-config. `--no-default-features` drops the function
+# and the native dependency with it; the other 122 spatial functions stay and need no library.
+# A machine without a new enough PROJ still builds: `proj-sys` compiles PROJ from source instead,
+# which needs cmake, a C++ toolchain and the `sqlite3` program.
+default = ["spatial-proj"]
+spatial-proj = ["beacon-core/spatial-proj"]
+# The same function, with PROJ always built from source rather than only as a fallback. This is
+# what the distributable wheels use: a wheel cannot link a PROJ from the build machine, and no
+# runner carries one that clears the 9.6.2 floor.
+#
+# A source build is also what makes the wheel self-contained. PROJ reads its CRS definitions from
+# `proj.db`, a SQLite database it normally installs beside the library — a path that exists only
+# on the build machine. Built as a static library, PROJ embeds that database in the library
+# instead (its cmake turns `EMBED_RESOURCE_FILES` on for a static build), so the compiled module
+# carries it and needs no `PROJ_DATA`. The wheel smoke test in the release workflow runs an
+# `ST_Transform`, which is what proves it on each platform.
+spatial-proj-bundled = [
+    "spatial-proj",
+    "beacon-core/spatial-proj-bundled",
+    # PROJ builds that database with SQLite, so a source build of it needs SQLite too. Building
+    # that from source as well keeps the wheel jobs free of a system SQLite: `proj-sys` hands the
+    # compiled headers and static library straight to PROJ's cmake. Inert on Windows, where the
+    # dependency below does not apply — see the note there.
+    "dep:libsqlite3-sys",
+    "libsqlite3-sys/bundled",
+]
+
 # Use jemalloc instead of the platform allocator. Query execution is dominated by
 # short-lived per-batch allocations across many threads (hash aggregation over
 # string columns especially), which the macOS system allocator handles poorly.
@@ -40,7 +68,9 @@ jemalloc = ["dep:tikv-jemallocator"]
 pyo3 = { version = "=0.29.0", features = ["abi3-py310", "extension-module"] }
 tikv-jemallocator = { workspace = true, optional = true }
 
-beacon-core = { path = "../beacon-core" }
+# `default-features = false` so this crate's own `spatial-proj` feature is the one switch that
+# turns PROJ on, and `--no-default-features` here reaches all the way down.
+beacon-core = { path = "../beacon-core", default-features = false }
 # `OdvOptions` for the `to_odv` sink (auto-inferred from the schema). beacon-core does not
 # re-export it, so it is named directly; version follows the workspace path dependency.
 beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
@@ -63,3 +93,16 @@ tokio = { workspace = true }
 # declared for Linux alone — the manylinux containers ship no `openssl-devel`.
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"], optional = true }
+
+# Never called from this crate either. It is reached through PROJ (beacon-functions ->
+# datafusion-spatial -> proj -> proj-sys), and named here for the same reason as `openssl` above:
+# a feature of this crate has to be able to switch on `bundled`, which is what makes `proj-sys`
+# hand its compiled SQLite to PROJ's cmake instead of looking for one on the machine.
+#
+# Not on Windows. `proj-sys` names that library `libsqlite3.a` when it passes it on, which is the
+# name a Unix toolchain produces; MSVC writes `sqlite3.lib`, and PROJ's build then stops at a file
+# that does not exist. The Windows wheel job installs SQLite through vcpkg instead and points both
+# PROJ and this crate at it. Pinned to the version the lockfile already resolves for proj-sys — a
+# second version of it would be a hard error, as both would declare `links = "sqlite3"`.
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libsqlite3-sys = { version = "=0.35.0", optional = true }

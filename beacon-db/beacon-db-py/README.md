@@ -39,8 +39,8 @@ covering CPython 3.10+:
 
 | Platform | Architectures |
 | --- | --- |
-| Linux (glibc, `manylinux_2_28`) | `x86_64`, `aarch64` |
-| macOS | `arm64` (Apple silicon), `x86_64` (Intel) |
+| Linux (glibc, `manylinux_2_34`) | `x86_64`, `aarch64` |
+| macOS | `arm64` (Apple silicon) |
 | Windows | `x64` |
 
 A **source distribution** is published alongside them, so `pip install beacondb` still works where
@@ -53,12 +53,15 @@ isolated build environment, so nothing lands on your system. Opt out of the Rust
 `MATURIN_NO_INSTALL_RUST=1`.
 
 What you *do* need is a C/C++ toolchain and system HDF5/netCDF, because a source build uses the
-crate's default features and links them dynamically. For the static, self-contained variant
-instead, pass the feature through maturin's PEP 517 hook:
+crate's default features and links them dynamically. Those defaults also link **PROJ 9.6.2 or
+later** for `ST_Transform`; without one the build compiles PROJ itself, which needs `cmake` and
+the `sqlite3` program. For the static, self-contained variant instead, pass the features through
+maturin's PEP 517 hook:
 
 ```bash
-MATURIN_PEP517_ARGS="--features static-netcdf" pip install beacondb   # needs cmake, not hdf5-dev
-pip install beacondb --no-binary beacondb                             # force source on a wheel platform
+# needs cmake + sqlite3, not hdf5-dev/netcdf-dev/proj
+MATURIN_PEP517_ARGS="--features static-netcdf,spatial-proj-bundled" pip install beacondb
+pip install beacondb --no-binary beacondb   # force source on a wheel platform
 ```
 
 **No Alpine / musl wheel.** There is currently no musllinux wheel, so on Alpine or any musl-based
@@ -71,9 +74,9 @@ FROM python:3.12-slim      # not python:3.12-alpine
 RUN pip install beacondb
 ```
 
-If you must stay on Alpine, `apk add --no-cache build-base linux-headers hdf5-dev netcdf-dev`
-first, then `pip install beacondb`. musllinux wheels are expected to return; this is a temporary
-gap.
+If you must stay on Alpine, `apk add --no-cache build-base linux-headers hdf5-dev netcdf-dev cmake
+sqlite` first, then `pip install beacondb`. musllinux wheels are expected to return; this is a
+temporary gap.
 
 ## Auth is off by default
 
@@ -382,7 +385,8 @@ links — not just a Rust compiler:
 
 - **protoc** (Lance generates protobuf at build time)
 - **HDF5 + netCDF** headers/libraries (the netCDF reader/writer)
-- **PROJ 9.6.2+** and pkg-config (the `ST_Transform` spatial function links it)
+- **PROJ 9.6.2+** and pkg-config (the `ST_Transform` spatial function links it). Without one, the
+  build compiles PROJ from source, which needs `cmake` and the `sqlite3` program
 - a Rust toolchain — **1.94 or later**, enforced by `rust-version` in the workspace `Cargo.toml`
 
 ```bash
@@ -400,22 +404,27 @@ The wheel is **abi3** (`cp310-abi3`), so one wheel per platform covers CPython 3
 `py.typed` and `_beacondb.pyi` type stubs — including the catalog-driven `read_*` readers — so
 editors get completion.
 
-**Portable wheels (`static-netcdf`).** Distributable wheels link netCDF and HDF5 *statically*,
-compiling them from source, so the wheel carries them and needs no system libraries — the only
-way to ship a portable **Windows** wheel (there's no `apt`/`brew` for HDF5 there):
+**Portable wheels (`static-netcdf`, `spatial-proj-bundled`).** Distributable wheels link netCDF,
+HDF5 and PROJ *statically*, compiling them from source, so the wheel carries them and needs no
+system libraries — the only way to ship a portable **Windows** wheel (there's no `apt`/`brew` for
+HDF5 there):
 
 ```bash
-maturin build --release --features static-netcdf   # needs protoc + cmake only
+# needs protoc, cmake and sqlite3
+maturin build --release --features static-netcdf,spatial-proj-bundled
 ```
 
-CI (`.github/workflows/publish-beacondb.yml`, triggered by the release tag `v*`, or by a
-`beacondb-v*` tag for a beacondb-only release) builds this way for Linux (manylinux_2_28,
-x86_64 + aarch64), macOS (arm64 + x86_64), and Windows (x64), then publishes to PyPI via trusted
-publishing. Local `maturin develop` stays **dynamic** (links system libs) since it's much faster
-to iterate on.
+A static PROJ embeds its CRS database (`proj.db`) inside the library, so `ST_Transform` works out
+of the wheel with no `PROJ_DATA` and no data files beside it.
 
-Two honest caveats: the wheel is **large** (~100 MB — it contains a full DataFusion/Lance/netCDF
-engine), and there is **no minimal build** yet. `beacon-core` compiles every format
+CI (`.github/workflows/publish-beacondb.yml`, triggered by the release tag `v*`, or by a
+`beacondb-v*` tag for a beacondb-only release) builds this way for Linux (manylinux_2_34,
+x86_64 + aarch64), macOS (arm64), and Windows (x64), then publishes to PyPI via trusted
+publishing. The Linux wheels add `vendored-openssl` for the MySQL/PostgreSQL drivers. Local
+`maturin develop` stays **dynamic** (links system libs) since it's much faster to iterate on.
+
+Two honest caveats: the wheel is **large** (60-90 MB, by platform — it contains a full
+DataFusion/Lance/netCDF engine), and there is **no minimal build** yet. `beacon-core` compiles every format
 unconditionally; cargo feature gates that would let a slim wheel drop netCDF/GDAL/TIFF are still
 to be added (see the plan).
 
