@@ -12,9 +12,12 @@
 //! `UPDATE`; discovery rebuilds providers via the definition's `build_provider`.
 //!
 //! Lance's atomic, versioned commits give readers a consistent snapshot with no
-//! torn reads; a per-dataset write lock serializes writers.
+//! torn reads; a per-dataset write lock serializes writers. Those versions never
+//! expire on their own, so [`compact`] holds the `COMPACT TABLE` maintenance
+//! pass that merges fragments and drops the versions that are old enough to go.
 
 pub mod alter;
+pub mod compact;
 pub mod definition;
 pub mod index;
 pub mod io;
@@ -31,6 +34,7 @@ use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt};
 
 pub use alter::{SchemaChange, alter_table};
+pub use compact::{CompactOptions, CompactionReport, compact_table};
 pub use definition::LanceTableDefinition;
 pub use index::{
     IndexInfo, ScalarIndexKind, create_default_indexes, create_index, drop_index, list_indices,

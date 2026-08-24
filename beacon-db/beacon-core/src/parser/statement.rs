@@ -21,6 +21,7 @@ pub enum BeaconStatement {
     CreateIndex(CreateIndexStatement),
     DropIndex(DropIndexStatement),
     ShowIndexes(ShowIndexesStatement),
+    CompactTable(CompactTableStatement),
     Attach(AttachStatement),
     Detach(DetachStatement),
     CreateSecret(CreateSecretStatement),
@@ -260,6 +261,32 @@ impl Display for ShowIndexesStatement {
     }
 }
 
+/// COMPACT TABLE <table> [WITH ('target_rows_per_fragment' '...', 'cleanup_older_than' '...')]
+#[derive(Debug, Clone)]
+pub struct CompactTableStatement {
+    pub table: ObjectName,
+    /// The `WITH (...)` options, validated when the statement is executed (the
+    /// vocabulary lives with the implementation, in `beacon_lance::CompactOptions`).
+    pub options: HashMap<String, String>,
+}
+
+impl Display for CompactTableStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "COMPACT TABLE {}", self.table)?;
+        if !self.options.is_empty() {
+            let mut opts: Vec<_> = self.options.iter().collect();
+            opts.sort_by(|a, b| a.0.cmp(b.0));
+            let rendered = opts
+                .iter()
+                .map(|(k, v)| format!("'{k}' '{v}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(f, " WITH ({rendered})")?;
+        }
+        Ok(())
+    }
+}
+
 /// CREATE CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
 #[derive(Debug, Clone)]
 pub struct CreateCrawlerStatement {
@@ -393,6 +420,7 @@ impl Display for BeaconStatement {
             Self::CreateIndex(s) => write!(f, "{s}"),
             Self::DropIndex(s) => write!(f, "{s}"),
             Self::ShowIndexes(s) => write!(f, "{s}"),
+            Self::CompactTable(s) => write!(f, "{s}"),
             // The token, if any, is a credential — never render it.
             Self::Attach(s) => write!(f, "ATTACH '{}' AS {}", s.url, s.name),
             Self::Detach(s) => write!(f, "DETACH {}", s.name),
