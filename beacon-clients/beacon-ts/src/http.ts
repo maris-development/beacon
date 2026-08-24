@@ -35,8 +35,24 @@ export interface ClientOptions {
    * {@link ADMIN_API_PREFIX} to call the admin-gated alias instead.
    */
   apiPrefix?: string;
-  /** Per-request timeout in milliseconds. Defaults to 60000. Set to 0 to disable. */
+  /**
+   * Per-request timeout in milliseconds for the bounded endpoints — metadata,
+   * schemas, admin calls. Defaults to 60000. Set to 0 to disable.
+   *
+   * Query execution is *not* covered by this: see {@link queryTimeoutMs}.
+   */
   timeoutMs?: number;
+  /**
+   * Timeout in milliseconds for the endpoints that execute a query
+   * (`/api/query`, `/api/explain-query`, `/api/explain-analyze-query`).
+   *
+   * Defaults to 0 — no timeout. A query has no bounded duration: a scan over a
+   * large dataset, or an `EXPLAIN ANALYZE` that runs the query to collect its
+   * metrics, may legitimately take minutes. Cancel one with an `AbortSignal`
+   * instead, which also stops the work on the server. Set a positive value to
+   * impose a deadline.
+   */
+  queryTimeoutMs?: number;
   /** Custom fetch implementation (e.g. for testing or a proxy). */
   fetch?: FetchLike;
   /** Extra headers attached to every request. */
@@ -70,6 +86,8 @@ export class Http {
   readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
+  /** Timeout applied to the query-execution endpoints (0 = none). */
+  readonly queryTimeoutMs: number;
   private readonly authHeader?: string;
   private readonly extraHeaders: Record<string, string>;
 
@@ -89,6 +107,7 @@ export class Http {
     // invocation" in browsers, where `fetch` must run with `this === window`.
     this.fetchImpl = options.fetch ?? fetchImpl.bind(globalThis);
     this.timeoutMs = options.timeoutMs ?? 60_000;
+    this.queryTimeoutMs = options.queryTimeoutMs ?? 0;
     this.extraHeaders = options.headers ?? {};
     if (options.username != null && options.password != null) {
       this.authHeader = basicAuthHeader(options.username, options.password);

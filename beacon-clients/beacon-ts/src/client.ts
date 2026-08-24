@@ -178,7 +178,11 @@ export class BeaconClient {
    */
   queryRaw(query: QueryInput, format?: OutputFormat, signal?: AbortSignal): Promise<Response> {
     const output = format === undefined ? undefined : { format };
-    return this.http.fetchRaw("POST", "/api/query", { json: buildBody(query, output), signal });
+    return this.http.fetchRaw("POST", "/api/query", {
+      json: buildBody(query, output),
+      signal,
+      timeoutMs: this.http.queryTimeoutMs,
+    });
   }
 
   /**
@@ -196,7 +200,11 @@ export class BeaconClient {
 
   /** Returns the planner's explanation of a query without running it. */
   explainQuery<T = unknown>(query: QueryInput, signal?: AbortSignal): Promise<T> {
-    return this.http.fetchJson<T>("POST", "/api/explain-query", { json: buildBody(query), signal });
+    return this.http.fetchJson<T>("POST", "/api/explain-query", {
+      json: buildBody(query),
+      signal,
+      timeoutMs: this.http.queryTimeoutMs,
+    });
   }
 
   /**
@@ -204,11 +212,16 @@ export class BeaconClient {
    * (`EXPLAIN ANALYZE`), as a PostgreSQL-style JSON plan. Unlike `explainQuery`,
    * this executes the query to collect actual row counts and timings. Pass a
    * `signal` to cancel the (potentially long-running) execution.
+   *
+   * The server answers only once the query has run to completion, so this call
+   * takes as long as the query does. It is therefore not subject to the default
+   * request timeout — see {@link ClientOptions.queryTimeoutMs}.
    */
   explainAnalyzeQuery<T = unknown>(query: QueryInput, signal?: AbortSignal): Promise<T> {
     return this.http.fetchJson<T>("POST", "/api/explain-analyze-query", {
       json: buildBody(query),
       signal,
+      timeoutMs: this.http.queryTimeoutMs,
     });
   }
 
