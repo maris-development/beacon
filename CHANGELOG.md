@@ -221,6 +221,24 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **A spatial filter on a federated table stopped with `Unsupported scalar: Union`.** `SELECT *
+  FROM lake.public.lidar WHERE ST_Within(ST_MakePoint(x, y), ST_GeomFromGeoJSON('…'))` failed at
+  plan time against a remote-Beacon table and against a SQL-database table. DataFusion evaluates a
+  constant call before it optimizes, so `ST_GeomFromGeoJSON` left the plan and a geometry value
+  took its place. GeoArrow stores a mixed geometry as an Arrow union, and a point or a box as an
+  Arrow struct. The SQL unparser has no syntax for either, so the federated sub-plan never became
+  SQL. 61 of the 117 spatial functions return such a value — `ST_GeomFromText`, `ST_GeomFromWKB`,
+  `ST_Buffer`, `ST_Union`, `ST_Centroid`, `ST_MakePoint` and `ST_Envelope` among them. The other 56
+  return a number, a boolean or a string, and always worked. A bound parameter did not help,
+  because DataFusion writes one into a literal before it optimizes. A federated sub-plan now
+  rebuilds each geometry constant as `ST_GeomFromText('…')`, wrapped in `ST_SetSRID` where the
+  constant carries an SRID, in the step directly before it becomes SQL. Text keeps every coordinate
+  digit and the z ordinate, which GeoJSON drops. Nothing else changes: a local query still folds
+  the constant once and never rebuilds it, and the plan schema stays as it was. A SQL-database
+  table does this for PostgreSQL alone, because PostGIS reads both calls, while MySQL sets an SRID
+  with `ST_SRID` and SQL Server over ODBC uses `geometry::STGeomFromText`. One case stays open:
+  `ST_AsBinary`, `ST_AsEWKB` and `ST_Dump` fold to plain binary, which carries no GeoArrow mark, so
+  a fully constant call to one of them still has no SQL form.
 - **Seven statements lowercased a table name.** Beacon turns identifier normalization off, so the
   catalog holds a table under the exact name the statement writes. `INSERT`, `CREATE TABLE AS
   SELECT`, `ALTER TABLE`, `CREATE INDEX`, `DROP INDEX`, `SHOW INDEXES`, `REFRESH`, the table
