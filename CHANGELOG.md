@@ -239,6 +239,25 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **A long query in the admin UI failed after a minute.** `@beacon/client` put a 60-second deadline
+  on every request, query execution included, and reported the abort as a `TimeoutError`. Analyze
+  was the visible victim: `/api/explain-analyze-query` runs the query to completion before it
+  answers, so a query slower than a minute never returned a plan. A query has no bounded duration,
+  so the query endpoints (`/api/query`, `/api/explain-query`, `/api/explain-analyze-query`) now run
+  without a deadline. Stop the work with the Stop button, which cancels it on the server too. The
+  60-second default still guards the bounded endpoints — metadata, schemas, admin calls — and a new
+  `queryTimeoutMs` client option puts a deadline back on query execution for a caller that wants
+  one.
+- **Run and Analyze fought over the query editor.** The workbench started an action without
+  stopping the one before it, so an Analyze and a Run raced over the same result panel and the
+  server ran the query twice. Whichever finished last won: an Analyze that failed after a Run had
+  already drawn its rows replaced them with its own error, and the panel stayed on that error
+  because only a *new* action clears it. The editor looked stuck. Run, Explain, Analyze and
+  Download now cancel whatever is still running and take the panel for themselves, and a superseded
+  action writes nothing when it ends. Switching tabs cancels the query filling the panel instead of
+  leaving it to land under another tab's SQL. A second Explain or Analyze also clears the old plan,
+  so the panel shows progress rather than the previous answer, and the panel header names the
+  action that is running.
 - **Seven statements lowercased a table name.** Beacon turns identifier normalization off, so the
   catalog holds a table under the exact name the statement writes. `INSERT`, `CREATE TABLE AS
   SELECT`, `ALTER TABLE`, `CREATE INDEX`, `DROP INDEX`, `SHOW INDEXES`, `REFRESH`, the table
