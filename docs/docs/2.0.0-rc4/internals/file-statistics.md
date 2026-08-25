@@ -562,6 +562,13 @@ Beacon finds these changes. You do not report them.
 the old ranges. It reads the file again. Beacon never prunes a file on a range that describes old
 content.
 
+Each query makes the same comparison. A pass runs every `BEACON_FILE_STATS_INTERVAL_SECS`, so a
+file that changes between two passes keeps the state `Analyzed` for up to one interval. A scan
+lists the file and holds its size, its modification time and its etag, so the comparison costs no
+extra request. A file that does not match its record reads as a file with no ranges, and Beacon
+keeps it. Zarr and Icechunk plan their own scan entries, and those entries carry no such metadata.
+For those two formats the pass makes the comparison alone.
+
 **A file goes.** Beacon lists the datasets store and does not find the file. It does not use
 the ranges of that file.
 

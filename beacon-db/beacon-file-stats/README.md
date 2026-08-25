@@ -3,9 +3,6 @@
 Durable, column-addressable statistics for every file a Beacon instance knows
 about. A query reads only the columns its `WHERE` clause names.
 
-For diagrams of the write path, the read path, the segment layout, and the file
-lifecycle, see [ARCHITECTURE.md](ARCHITECTURE.md).
-
 ## The problem
 
 A Beacon node can hold a million files. Those files draw on 160 000 distinct
@@ -162,6 +159,15 @@ range, and pruning on it would drop files the new content matches. The
 `prune_files` treats those rows as absent, so the file is kept. Membership is
 `stats_epoch > 0 && state != Analyzed`: the second half is the danger, the first
 keeps the table empty through a first ingest.
+
+That covers the file from the pass that noticed the change. The query covers it
+before then. A pass runs every `BEACON_FILE_STATS_INTERVAL_SECS`, so a file
+rewritten between two passes still reads as `Analyzed`, and its rows still
+describe content that is gone. A scan already carries what the listing said about
+each file it plans to read, so `Registry::resolve_observed` resolves the id and
+compares the record against that in one read transaction. `unchanged: false`
+reads as "no statistics", and the file is kept. A caller that states no metadata
+gets the record as it stands, and the pass stays its only check.
 
 After re-analysis the file has rows in two segments. Segments fold oldest first,
 so the newest range wins.
@@ -352,6 +358,18 @@ analyses and the reader's segment fetches are now spawned, with
 `buffer_unordered` kept only to bound how many run at once.
 
 ## Measured, not asserted
+
+From `examples/resolve_scale.rs`, over 3M analyzed files on 12 cores, with the
+1 GiB registry warm in the page cache. This is the conversion every scan pays
+before any statistic is read:
+
+```text
+path -> id                     0.55 s one call,  0.10 s over 12 threads
+path -> id + record comparison 1.5 s  one call,  0.27 s over 12 threads
+```
+
+The comparison costs one further B-tree descent and one record deserialize per
+file. It is what keeps a file rewritten since its analysis out of the prune.
 
 From `tests/scale.rs`:
 
