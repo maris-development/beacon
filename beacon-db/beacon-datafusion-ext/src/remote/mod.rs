@@ -9,11 +9,13 @@ mod catalog;
 mod connection;
 mod definition;
 mod executor;
+mod geometry_sql;
 
 pub use catalog::RemoteCatalogProvider;
 pub use connection::{RemoteConnection, RemoteCredential};
 pub use definition::{BeaconRemoteSqlTable, RemoteTableDefinition, unresolved_schema};
 pub use executor::BeaconFlightSqlExecutor;
+pub use geometry_sql::{geometry_literals_in_expr, geometry_literals_to_calls};
 
 use datafusion::catalog::TableProvider;
 use datafusion_federation::FederatedTableProviderAdaptor;
