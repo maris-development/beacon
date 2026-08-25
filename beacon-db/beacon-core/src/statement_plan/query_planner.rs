@@ -285,6 +285,14 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
+        if let Some(compact) = any.downcast_ref::<logical::CompactTableNode>() {
+            return Ok(Some(Arc::new(physical::CompactTableExec::new(
+                compact.table.clone(),
+                compact.options.clone(),
+                session,
+            ))));
+        }
+
         if let Some(set) = any.downcast_ref::<logical::SetExtensionNode>() {
             return Ok(Some(Arc::new(physical::SetExtensionExec::new(
                 set.kind.clone(),

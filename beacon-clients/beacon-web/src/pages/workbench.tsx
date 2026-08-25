@@ -84,14 +84,37 @@ const DOWNLOAD_FORMATS: DownloadFormat[] = [
  */
 const PREVIEW_ROW_LIMIT = 500;
 
+/**
+ * What the workbench is doing right now.
+ *
+ * Run, Explain, Analyze and Download all describe the SQL of the active tab and
+ * write into the one panel below it, so the workbench does one at a time: a
+ * second action cancels the first instead of racing it. Two of them in flight
+ * only doubled the work the server did, and whichever finished last took the
+ * panel — an EXPLAIN ANALYZE that failed after a Run had already drawn its rows
+ * replaced them with its own error, and the editor looked stuck.
+ */
+type Action = "run" | "explain" | "analyze" | "download";
+
+/** Tooltip note on the buttons that cancel whatever else is running. */
+const SUPERSEDES_TITLE = "Cancels the query that is still running, if any.";
+
+/** What the results header says while each action is in flight. */
+const BUSY_LABEL: Record<Action, string> = {
+  run: "Running…",
+  explain: "Explaining…",
+  analyze: "Analyzing…",
+  download: "Preparing download…",
+};
+
 export function WorkbenchPage() {
   const beacon = useBeacon();
   const location = useLocation();
   const editorRef = React.useRef<SqlEditorHandle>(null);
-  // Tracks the in-flight streaming query so it can be cancelled by the user.
-  const abortRef = React.useRef<AbortController | null>(null);
-  // Tracks the in-flight EXPLAIN ANALYZE run so it can be cancelled.
-  const analyzeAbortRef = React.useRef<AbortController | null>(null);
+  // The in-flight action, so the user (or the next action) can cancel it. Held
+  // in a ref as well as in `busy` because the async bodies below test ownership
+  // of the panel after every await, and state they closed over is stale by then.
+  const inflight = React.useRef<AbortController | null>(null);
   // Open queries, one per tab, kept in local storage so they survive leaving the
   // page (and the browser).
   const queryTabs = useQueryTabs();
@@ -102,15 +125,43 @@ export function WorkbenchPage() {
     [setTabSql, activeId],
   );
 
-  const [running, setRunning] = React.useState(false);
-  const [explaining, setExplaining] = React.useState(false);
-  const [analyzing, setAnalyzing] = React.useState(false);
-  const [downloading, setDownloading] = React.useState(false);
+  const [busy, setBusy] = React.useState<Action | null>(null);
   const [mode, setMode] = React.useState<ViewMode>("results");
   const [result, setResult] = React.useState<RunResult | null>(null);
   const [plan, setPlan] = React.useState<unknown>(null);
   const [analyzed, setAnalyzed] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+
+  const running = busy === "run";
+  const explaining = busy === "explain";
+  const analyzing = busy === "analyze";
+  const downloading = busy === "download";
+
+  /** Cancels whatever is running and hands the panel to `action`. */
+  const begin = React.useCallback((action: Action) => {
+    inflight.current?.abort();
+    const controller = new AbortController();
+    inflight.current = controller;
+    setBusy(action);
+    setError(null);
+    return controller;
+  }, []);
+
+  /**
+   * Whether `controller`'s action still owns the panel. A superseded action must
+   * write no state at all: its result belongs to SQL the user has moved on from.
+   */
+  const owns = React.useCallback(
+    (controller: AbortController) => inflight.current === controller,
+    [],
+  );
+
+  /** Releases the panel, unless a newer action has already taken it. */
+  const end = React.useCallback((controller: AbortController) => {
+    if (inflight.current !== controller) return;
+    inflight.current = null;
+    setBusy(null);
+  }, []);
 
   // Another page (e.g. Datasets → "Query") can open the editor pre-filled by
   // navigating to `/query` with `{ state: { sql } }`. It lands in a tab of its
@@ -128,8 +179,12 @@ export function WorkbenchPage() {
   const [metricsId, setMetricsId] = React.useState<string | null>(null);
 
   // Results describe the query that produced them, so switching tabs clears the
-  // panel rather than showing one tab's rows under another tab's SQL.
+  // panel — and cancels the work still filling it — rather than showing one
+  // tab's rows under another tab's SQL.
   React.useEffect(() => {
+    inflight.current?.abort();
+    inflight.current = null;
+    setBusy(null);
     setResult(null);
     setPlan(null);
     setError(null);
@@ -138,22 +193,20 @@ export function WorkbenchPage() {
 
   const run = React.useCallback(async () => {
     const text = sql.trim();
-    if (!text || running) return;
-    setRunning(true);
-    setError(null);
+    if (!text) return;
+    const controller = begin("run");
     setMode("results");
     setResult(null);
     const started = performance.now();
     // Stream record batches and render them as they arrive, stopping (and
     // aborting the server query) once the preview limit is reached — or when the
     // user cancels.
-    const controller = new AbortController();
-    abortRef.current = controller;
     try {
       const { queryId, batches } = await beacon.queryBatches(text, controller.signal);
       let view = EMPTY_RESULT;
       let truncated = false;
       for await (const batch of batches) {
+        if (!owns(controller)) return;
         // The batch is kept as Arrow columns; nothing is decoded into JS objects
         // until the grid renders a cell.
         truncated = batch.numRows > PREVIEW_ROW_LIMIT - view.numRows;
@@ -165,6 +218,7 @@ export function WorkbenchPage() {
           break;
         }
       }
+      if (!owns(controller)) return;
       // No batches arrived (DDL/DML or an empty result): surface a zero-row result.
       setResult(
         (prev) =>
@@ -176,6 +230,7 @@ export function WorkbenchPage() {
           },
       );
     } catch (err) {
+      if (!owns(controller)) return;
       if (controller.signal.aborted) {
         // User cancelled mid-stream: keep whatever rows already arrived. (Don't
         // relabel a result that stopped because it hit the preview limit.)
@@ -185,90 +240,80 @@ export function WorkbenchPage() {
         setError(errorMessage(err));
       }
     } finally {
-      if (abortRef.current === controller) abortRef.current = null;
-      setRunning(false);
+      end(controller);
     }
-  }, [beacon, sql, running]);
+  }, [beacon, sql, begin, owns, end]);
 
-  /** Aborts the in-flight query (if any); partial results stay on screen. */
+  /** Aborts the in-flight action (if any); partial results stay on screen. */
   const cancel = React.useCallback(() => {
-    abortRef.current?.abort();
-  }, []);
-
-  /** Aborts the in-flight EXPLAIN ANALYZE run (if any). */
-  const cancelAnalyze = React.useCallback(() => {
-    analyzeAbortRef.current?.abort();
+    inflight.current?.abort();
   }, []);
 
   // Abort any in-flight work if the page unmounts.
-  React.useEffect(
-    () => () => {
-      abortRef.current?.abort();
-      analyzeAbortRef.current?.abort();
-    },
-    [],
-  );
+  React.useEffect(() => () => inflight.current?.abort(), []);
 
-  async function explain() {
-    const text = sql.trim();
-    if (!text || explaining) return;
-    setExplaining(true);
-    setError(null);
-    setMode("explain");
-    setAnalyzed(false);
-    try {
-      setPlan(await beacon.explainQuery(text));
-    } catch (err) {
-      setPlan(null);
-      setError(errorMessage(err));
-    } finally {
-      setExplaining(false);
-    }
-  }
-
-  async function analyze() {
-    const text = sql.trim();
-    if (!text || analyzing) return;
-    setAnalyzing(true);
-    setError(null);
-    setMode("explain");
-    setAnalyzed(true);
-    const controller = new AbortController();
-    analyzeAbortRef.current = controller;
-    try {
-      setPlan(await beacon.explainAnalyzeQuery(text, controller.signal));
-    } catch (err) {
-      setPlan(null);
-      // Swallow user cancellation; only surface real failures.
-      if (!controller.signal.aborted) setError(errorMessage(err));
-    } finally {
-      if (analyzeAbortRef.current === controller) analyzeAbortRef.current = null;
-      setAnalyzing(false);
-    }
-  }
-
-  async function download(format: DownloadFormat["format"], ext: string) {
+  const explain = React.useCallback(async () => {
     const text = sql.trim();
     if (!text) return;
-    setDownloading(true);
-    setError(null);
+    const controller = begin("explain");
+    setMode("explain");
+    setAnalyzed(false);
+    // Drop the previous plan: leaving it up makes a second Explain look like it
+    // did nothing, because the pane shows progress only while it is empty.
+    setPlan(null);
     try {
-      const res = await beacon.queryRaw(text, format);
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `beacon-result.${ext}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      const explained = await beacon.explainQuery(text, controller.signal);
+      if (owns(controller)) setPlan(explained);
     } catch (err) {
-      setError(errorMessage(err));
+      // Swallow cancellation; only surface real failures.
+      if (owns(controller) && !controller.signal.aborted) setError(errorMessage(err));
     } finally {
-      setDownloading(false);
+      end(controller);
     }
-  }
+  }, [beacon, sql, begin, owns, end]);
+
+  const analyze = React.useCallback(async () => {
+    const text = sql.trim();
+    if (!text) return;
+    const controller = begin("analyze");
+    setMode("explain");
+    setAnalyzed(true);
+    setPlan(null);
+    try {
+      const analyzedPlan = await beacon.explainAnalyzeQuery(text, controller.signal);
+      if (owns(controller)) setPlan(analyzedPlan);
+    } catch (err) {
+      if (owns(controller) && !controller.signal.aborted) setError(errorMessage(err));
+    } finally {
+      end(controller);
+    }
+  }, [beacon, sql, begin, owns, end]);
+
+  const download = React.useCallback(
+    async (format: DownloadFormat["format"], ext: string) => {
+      const text = sql.trim();
+      if (!text) return;
+      const controller = begin("download");
+      try {
+        const res = await beacon.queryRaw(text, format, controller.signal);
+        const blob = await res.blob();
+        if (!owns(controller)) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `beacon-result.${ext}`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        if (owns(controller) && !controller.signal.aborted) setError(errorMessage(err));
+      } finally {
+        end(controller);
+      }
+    },
+    [beacon, sql, begin, owns, end],
+  );
 
   /** Closing a tab drops its editor model too, undo history and all. */
   const closeWithModel = React.useCallback(
@@ -305,12 +350,19 @@ export function WorkbenchPage() {
               Stop
             </Button>
           ) : (
-            <Button onClick={run} size="sm" className="gap-1.5">
+            <Button onClick={run} size="sm" className="gap-1.5" title={SUPERSEDES_TITLE}>
               <Play className="h-4 w-4" />
               Run
             </Button>
           )}
-          <Button onClick={explain} disabled={explaining} variant="outline" size="sm" className="gap-1.5">
+          <Button
+            onClick={explain}
+            disabled={explaining}
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            title={SUPERSEDES_TITLE}
+          >
             {explaining ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
@@ -320,7 +372,7 @@ export function WorkbenchPage() {
           </Button>
           {analyzing ? (
             <Button
-              onClick={cancelAnalyze}
+              onClick={cancel}
               variant="destructive"
               size="sm"
               className="gap-1.5"
@@ -335,7 +387,7 @@ export function WorkbenchPage() {
               variant="outline"
               size="sm"
               className="gap-1.5"
-              title="Run the query and show its plan with execution metrics"
+              title={`Run the query and show its plan with execution metrics. ${SUPERSEDES_TITLE}`}
             >
               <Gauge className="h-4 w-4" />
               Analyze
@@ -391,6 +443,14 @@ export function WorkbenchPage() {
         {/* Results / plan header */}
         <div className="flex items-center gap-3 border-b bg-secondary/40 px-4 py-1.5 text-xs">
           <span className="font-semibold">{mode === "explain" ? "Query plan" : "Results"}</span>
+          {/* One indicator for the one action in flight. It names that action, so
+              a slow query says which of them the server is still working on. */}
+          {busy && (
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {BUSY_LABEL[busy]}
+            </span>
+          )}
           {mode === "results" && result && (
             <>
               <span className="text-muted-foreground">
@@ -398,7 +458,6 @@ export function WorkbenchPage() {
                 {result.truncated && ` (first ${PREVIEW_ROW_LIMIT} — query stopped)`}
                 {result.cancelled && " (cancelled)"}
               </span>
-              {running && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
               <span className="text-muted-foreground">{result.elapsedMs.toFixed(0)} ms</span>
               {result.queryId && (
                 <button

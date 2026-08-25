@@ -1965,6 +1965,7 @@ dependencies = [
  "arrow 58.4.0",
  "async-trait",
  "beacon-datafusion-ext",
+ "chrono",
  "datafusion 53.1.0",
  "futures",
  "lance",

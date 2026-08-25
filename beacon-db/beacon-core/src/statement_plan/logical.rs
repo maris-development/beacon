@@ -852,6 +852,74 @@ impl UserDefinedLogicalNodeCore for ShowIndexesNode {
     }
 }
 
+/// The report `COMPACT TABLE` returns.
+pub(crate) fn compact_table_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("fragments_removed", DataType::UInt64, false),
+                Field::new("fragments_added", DataType::UInt64, false),
+                Field::new("files_removed", DataType::UInt64, false),
+                Field::new("files_added", DataType::UInt64, false),
+                Field::new("versions_removed", DataType::UInt64, false),
+                Field::new("bytes_removed", DataType::UInt64, false),
+            ]))
+        })
+        .clone()
+}
+
+fn compact_table_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(compact_table_arrow_schema().as_ref().clone())
+                .expect("COMPACT TABLE schema is valid"),
+        )
+    })
+}
+
+/// Logical node for `COMPACT TABLE <table> [WITH (...)]`. Produces the
+/// compaction report, so it carries that schema.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct CompactTableNode {
+    pub(crate) table: String,
+    /// Options as a sorted `(key, value)` list (the node trait needs `Ord`/`Hash`,
+    /// which `HashMap` is not).
+    pub(crate) options: Vec<(String, String)>,
+}
+
+impl CompactTableNode {
+    pub(crate) fn new(table: String, mut options: Vec<(String, String)>) -> Self {
+        options.sort();
+        Self { table, options }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for CompactTableNode {
+    fn name(&self) -> &str {
+        "CompactTable"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        compact_table_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "CompactTable: table={}", self.table)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            table: self.table.clone(),
+            options: self.options.clone(),
+        })
+    }
+}
+
 /// A native row mutation, derived best-effort at lowering time. When present and
 /// the target is a Lance table, it is applied via Lance's native `delete`/update
 /// (deletion vectors / fragment rewrite) instead of the copy-on-write `input`.
