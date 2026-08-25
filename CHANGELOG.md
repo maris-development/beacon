@@ -12,6 +12,24 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **`COMPACT TABLE` reclaims what a managed table's writes leave behind.** A Lance table never
+  shrinks on its own: every `INSERT` commits its own fragments, a `DELETE` writes a deletion file
+  and keeps the rows, an `UPDATE` rewrites fragments, and each superseded version still holds its
+  files. A table filled by a long series of small inserts therefore carries far more fragments than
+  its row count justifies — and a fragment is a scan partition, so that is planning cost as well as
+  disk. `COMPACT TABLE measurements` merges those fragments into target-sized ones, materializes
+  the deletions, drops the versions that are old enough to go, and returns one report row:
+  `fragments_removed`, `fragments_added`, `files_removed`, `files_added`, `versions_removed` and
+  `bytes_removed`. The table's indexes survive — Lance remaps them onto the rewritten fragments as
+  part of the same commit — which is what separates this from rebuilding a table by hand with
+  `CREATE TABLE … AS SELECT`. Two options tune it, as
+  `WITH ('target_rows_per_fragment' '500000', 'cleanup_older_than' '2h')`: the first sets the
+  fragment size to aim for (default 1Mi rows) and thereby which fragments count as too small, the
+  second the age below which a superseded version is kept. That second one defaults to `7d` and is
+  a safety window, not a tuning knob: a running query reads the version it opened at planning time,
+  so a cleanup that deletes those files underneath it breaks the query. `'0s'` reclaims the space
+  immediately and is the right setting on a quiet instance; `'never'` compacts and cleans up
+  nothing. Lance-backed tables only, and super-user only like the rest of managed-table DDL.
 - **`pip install beacondb` works again.** The release workflow of the `beacondb` wheel is back,
   together with the `beacondb` entry in the version scripts. A `v*` tag publishes the wheels and
   the sdist to PyPI. A `beacondb-v*` tag publishes the wheel alone, on its own version line. The

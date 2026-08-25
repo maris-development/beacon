@@ -158,6 +158,22 @@ async fn the_index_statements_reach_a_mixed_case_table() {
     assert!(!indexes.contains(&"id_idx".to_string()), "got {indexes:?}");
 }
 
+/// `COMPACT TABLE` resolves the table through the same lookup as the index
+/// statements, so it has to keep the case too.
+#[tokio::test(flavor = "multi_thread")]
+async fn compact_table_reaches_a_mixed_case_table() {
+    let rt = runtime("case-compact").await;
+    rt.sql("CREATE TABLE MyManaged AS SELECT 1 AS Id").await;
+
+    rt.sql("COMPACT TABLE MyManaged").await;
+
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(*) FROM MyManaged").await),
+        1
+    );
+    assert_missing(rt.try_sql("COMPACT TABLE mymanaged").await, "mymanaged");
+}
+
 /// `REFRESH` used to look up the lowercased name and fail for every name that
 /// was not already lowercase.
 #[tokio::test(flavor = "multi_thread")]

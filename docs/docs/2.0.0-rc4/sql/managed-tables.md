@@ -12,8 +12,8 @@ files. A managed table starts empty, or Beacon fills it from a query. You add ro
 managed table supports `UPDATE`, `DELETE`, schema changes with `ALTER TABLE` and secondary indexes.
 The table definition and the data survive a restart.
 
-A managed table needs write access. `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE INDEX`
-and `DROP INDEX` need admin credentials. Anonymous access stays read-only.
+A managed table needs write access. `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE INDEX`,
+`DROP INDEX` and `COMPACT TABLE` need admin credentials. Anonymous access stays read-only.
 
 ::: tip Names keep their case
 A table name means exactly what you write. `MyTable` and `mytable` are two different tables.
@@ -159,6 +159,58 @@ SHOW INDEXES ON measurements;
 DROP INDEX value_idx ON measurements;
 ```
 
+## `COMPACT TABLE`
+
+::: info Lance engine only
+Compaction is a Lance feature. An Iceberg table does not support it.
+:::
+
+Every write makes a new version of the table. An `INSERT` adds new fragments. A `DELETE` keeps the
+rows on disk and adds a deletion file. Many small writes make many small fragments. A scan of the
+table then plans more work than the row count needs.
+
+`COMPACT TABLE` merges the small fragments into large ones. It also applies the deletions. Then it
+deletes the old versions. The statement returns one report row:
+
+```sql
+COMPACT TABLE measurements;
+```
+
+| Column | Meaning |
+| --- | --- |
+| `fragments_removed` | fragments that the merge replaced |
+| `fragments_added` | fragments that Beacon wrote |
+| `files_removed` | data files and deletion files that the merge replaced |
+| `files_added` | files that Beacon wrote |
+| `versions_removed` | old versions that Beacon deleted |
+| `bytes_removed` | disk space that Beacon released |
+
+Beacon keeps the indexes of the table. It maps each index onto the new fragments. A table with
+nothing to merge is not an error. The report is then all zeros.
+
+### Options
+
+```sql
+COMPACT TABLE measurements WITH (
+  'target_rows_per_fragment' '1048576',
+  'cleanup_older_than' '7d'
+);
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `target_rows_per_fragment` | `1048576` | Rows per fragment. Beacon merges a smaller fragment only. |
+| `cleanup_older_than` | `7d` | Age limit for an old version. `never` keeps all versions. |
+
+The merge alone releases no disk space. The old versions still point to the old files. Beacon
+deletes only the versions that are older than `cleanup_older_than`. Write the age as `30s`, `15m`,
+`2h` or `7d`. A number alone means seconds.
+
+::: warning Keep the default age on a busy server
+A query opens one version, and reads the files of that version until the query stops. A cleanup
+with a short age can delete those files first. Use `'0s'` only when no query runs.
+:::
+
 ## `DROP TABLE`
 
 `DROP TABLE` removes a managed table. It also **deletes the data of the table**. An external table
@@ -177,7 +229,8 @@ DROP TABLE IF EXISTS measurements;
   You configure nothing.
 - **Lance write model**: `INSERT` streams directly into the table. `DELETE` and `UPDATE` are native,
   through deletion vectors and fragment rewrites. `ALTER` needs no rebuild. Each write commits a new
-  dataset version. A reader always sees a consistent snapshot.
+  dataset version. A reader always sees a consistent snapshot. Nothing shrinks on its own. Run
+  `COMPACT TABLE` to merge the fragments and to release the space.
 - **Iceberg write model**: `DELETE` and `UPDATE` are copy-on-write. `ALTER` rebuilds the table. Use
   Iceberg for a table of moderate size with few schema changes, not for frequent row changes.
 - **Scope**: `ALTER` supports `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN` and `ALTER COLUMN TYPE` on
