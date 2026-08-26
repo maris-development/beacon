@@ -8,7 +8,9 @@ use datafusion::catalog::TableProvider;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::TableReference;
 use datafusion_federation::FederatedTableProviderAdaptor;
-use datafusion_federation::sql::{RemoteTableRef, SQLFederationProvider, SQLTable, SQLTableSource};
+use datafusion_federation::sql::{
+    LogicalOptimizer, RemoteTableRef, SQLFederationProvider, SQLTable, SQLTableSource,
+};
 
 use crate::table_ext::TableDefinition;
 
@@ -117,6 +119,16 @@ impl SQLTable for BeaconRemoteSqlTable {
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }
+
+    /// Geometry constants fold to Arrow unions and structs, which the SQL unparser cannot render.
+    /// Rebuild them as constructor calls before this sub-plan becomes SQL for the remote.
+    ///
+    /// Federation calls this inside `final_sql()`, on the federated sub-plan, right before
+    /// `plan_to_statement`. The `SQLExecutor` hook of the same name runs on the wrapping
+    /// `LogicalPlan::Extension` node instead, and never reaches the geometry constant.
+    fn logical_optimizer(&self) -> Option<LogicalOptimizer> {
+        Some(Box::new(super::geometry_literals_to_calls))
+    }
 }
 
 /// Convenience: an empty pinned schema marker meaning "infer from the remote".
@@ -128,6 +140,7 @@ pub fn unresolved_schema() -> SchemaRef {
 mod tests {
     use super::*;
     use arrow::datatypes::{DataType, Field};
+    use datafusion::sql::unparser::Unparser;
 
     #[test]
     /// A remote-table definition round-trips through the typetag `TableDefinition`
@@ -155,5 +168,44 @@ mod tests {
         let restored: Arc<dyn TableDefinition> =
             serde_json::from_value(json).expect("definition should deserialize");
         assert_eq!(restored.table_name(), "remote_obs");
+    }
+
+    #[tokio::test]
+    /// The hook federation actually calls. `final_sql()` gathers `SQLTable::logical_optimizer`
+    /// from every scan in the federated sub-plan and runs it just before `plan_to_statement`, so
+    /// the geometry constant is repaired where the unparser can see it. The `SQLExecutor` hook of
+    /// the same name runs on the wrapping `Extension` node and would never reach the constant.
+    async fn the_sql_table_repairs_a_geometry_constant_before_the_unparse() {
+        let plan = super::super::geometry_sql::tests::folded_geometry_plan().await;
+
+        // Federation would stop here without the hook.
+        Unparser::default()
+            .plan_to_sql(&plan)
+            .expect_err("a folded geometry constant has no SQL syntax");
+
+        let table = BeaconRemoteSqlTable::new(
+            RemoteTableDefinition {
+                name: "lidar".to_string(),
+                url: "http://127.0.0.1:50051".to_string(),
+                remote_table: "public.lidar_optimized".to_string(),
+                schema: unresolved_schema(),
+            },
+            RemoteTableRef::try_from("public.lidar_optimized").expect("the table ref should parse"),
+            plan.schema().as_arrow().clone().into(),
+        );
+
+        let mut optimizer = table
+            .logical_optimizer()
+            .expect("a remote table repairs geometry constants");
+        let rewritten = optimizer(plan).expect("the repair should succeed");
+
+        let sql = Unparser::default()
+            .plan_to_sql(&rewritten)
+            .expect("the repaired plan should unparse")
+            .to_string();
+        assert!(
+            sql.contains("st_geomfromtext('POLYGON((-7 48.5,"),
+            "unexpected SQL: {sql}"
+        );
     }
 }
