@@ -68,7 +68,7 @@ pub use manifest::{Manifest, SegmentEntry};
 pub use pruning::{FileStatsPruningStatistics, prune_files};
 #[cfg(feature = "datafusion")]
 pub use handle::{FileStatsHandle, new_file_stats_handle, try_file_stats_from_session};
-pub use registry::{AnalyzedFile, ReconcileReport, Registry};
+pub use registry::{AnalyzedFile, ReconcileReport, Registry, ResolvedFile};
 pub use scalar::{StatScalar, super_type};
 pub use schema_cache::{
     Counters as SchemaCacheCounters, Digest, FileKey, Lookup, SchemaCache, Stamp, stamp_object,

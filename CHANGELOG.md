@@ -239,6 +239,20 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **A query could lose the rows of a file that changed after its analysis.** File statistics let a
+  `WHERE` drop whole files before the scan opens them, on the column ranges a background pass
+  recorded. That pass compares the size, the modification time and the etag of every listed file
+  against its record, and a file that changed stops being trusted. The query path made no such
+  comparison: it resolved a file by its path alone, so between two passes a rewritten file still
+  carried the ranges of the content it no longer held, and a predicate the new content matched
+  pruned it away. The answer was short by those rows, with nothing to show for it. A scan already
+  holds the metadata of every file it planned to read, so it now checks that metadata against the
+  record itself. A file the record no longer describes reads as unanalyzed and is kept, which is
+  the fail-open rule the rest of pruning follows. This closes a window of one pass interval
+  (`BEACON_FILE_STATS_INTERVAL_SECS`, 900 seconds by default, and longer on a fresh server because
+  `BEACON_FILE_STATS_ON_STARTUP` is off), and it covers a store no pass ever lists at all. Zarr and
+  Icechunk plan entries that state a path and no metadata, so there the pass stays the only check
+  and pruning is unchanged.
 - **A spatial filter on a federated table stopped with `Unsupported scalar: Union`.** `SELECT *
   FROM lake.public.lidar WHERE ST_Within(ST_MakePoint(x, y), ST_GeomFromGeoJSON('…'))` failed at
   plan time against a remote-Beacon table and against a SQL-database table. DataFusion evaluates a

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
 use beacon_file_stats::segment::{ColumnStat, SegmentBuilder};
-use beacon_file_stats::{FileStatsStore, ObservedFile, Registry, StatScalar};
+use beacon_file_stats::{FileState, FileStatsStore, ObservedFile, Registry, StatScalar};
 use datafusion::arrow::array::{Float64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::TableProvider;
@@ -298,6 +298,51 @@ async fn a_file_without_statistics_is_never_dropped() {
         "the analyzed file is ruled out, the unanalyzed one survives"
     );
     assert_eq!(rows(plan, &fixture.ctx).await, 1);
+}
+
+/// A file rewritten after its analysis has statistics that describe content it
+/// no longer holds, so nothing may rule it out either.
+///
+/// No collector pass runs here, which is the window the query path has to cover
+/// on its own: the record still says `Analyzed`, and the segment still carries
+/// the old range. The scan's own listing is what settles it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_changed_since_its_analysis_is_never_dropped() {
+    let fixture = fixture().await;
+    let a = put_parquet(&fixture.objects, "obs/a.parquet", &[1.0]).await;
+    let b = put_parquet(&fixture.objects, "obs/b.parquet", &[2.0]).await;
+    analyze(&fixture.stats, &[(a.clone(), &[1.0]), (b, &[2.0])]).await;
+
+    // The same path, now holding a value the recorded range rules out.
+    let rewritten = put_parquet(&fixture.objects, "obs/a.parquet", &[999.0]).await;
+    assert_ne!(rewritten, a, "the listing reports the object as changed");
+    let id = fixture
+        .stats
+        .registry()
+        .file_id("obs/a.parquet")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fixture.stats.registry().record(id).unwrap().unwrap().state,
+        FileState::Analyzed,
+        "no pass has noticed the change yet"
+    );
+
+    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
+    let filters = vec![col("v").gt(lit(500.0))];
+    let plan = table
+        .scan(&fixture.ctx.state(), None, &filters, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        planned_files(&plan),
+        vec!["obs/a.parquet"],
+        "the changed file survives; the unchanged one is ruled out"
+    );
+    assert_eq!(counter(&plan, "file_stats_files_considered"), Some(2));
+    assert_eq!(counter(&plan, "file_stats_files_pruned"), Some(1));
+    assert_eq!(rows(plan, &fixture.ctx).await, 1, "the new row is returned");
 }
 
 /// The scan is DataFusion's own, so everything it does to one — repartitioning
