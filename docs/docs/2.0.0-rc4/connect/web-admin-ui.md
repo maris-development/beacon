@@ -31,6 +31,41 @@ BEACON_ADMIN_PASSWORD=beacon-password
 The UI checks the credentials with `GET /admin/api/admin/check`. It stores them in
 the `localStorage` of the browser. It then sends them on every request.
 
+## A gateway can sign you in
+
+A gateway in front of Beacon can supply the credentials. nginx and oauth2-proxy
+do this with an injected `Authorization` header. The UI then shows no login
+screen.
+
+On the first load the UI calls `GET /admin/api/admin/check` with no credentials.
+Beacon answers `401` to a request without super-user credentials. A `200`
+therefore proves that a gateway adds them. The UI starts a **proxy session**:
+
+- It stores no credentials in the browser.
+- It sends no `Authorization` header. The header of the gateway stays intact.
+- The user menu shows `Proxy session`.
+
+The check goes to the origin that serves the UI. It fails safe: `401`, `403` or a
+network error gives the login screen.
+
+**Sign out** stops the detection for that browser tab. A new tab starts a proxy
+session again.
+
+An example for nginx:
+
+```nginx
+location /admin/ {
+    proxy_set_header Authorization "Basic YmVhY29uLWFkbWluOmJlYWNvbi1wYXNzd29yZA==";
+    proxy_pass http://beacon:5001;
+}
+```
+
+:::warning
+That header makes every caller behind the gateway a super-user. It also replaces
+the header that a browser sends, so the login screen accepts each password. Put
+your own authentication in front of it.
+:::
+
 ## Every call sits below `/admin`
 
 The UI calls the [admin path alias](/docs/2.0.0-rc4/api/#admin-path-alias) of the
