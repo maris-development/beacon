@@ -52,7 +52,7 @@
 //! [`FormatFileAnalyzer::report_netcdf_c_once`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use arrow::datatypes::{DataType, SchemaRef};
@@ -431,8 +431,12 @@ pub fn new_file_stats_service_handle() -> FileStatsServiceHandle {
 ///    paths get an id and join the queue; changed ones go stale and rejoin it.
 ///    Listing is streamed in chunks so a store of a million files never has to be
 ///    held whole.
-/// 2. **Analyze.** Drain the queue into segments, bounded by `batch_files` per
-///    pass so one tick cannot run away with the machine.
+/// 2. **Analyze.** Drain the queue into segments, one `batch_files` batch at a
+///    time, until nothing is pending. The batch bounds memory, not the pass.
+///
+/// A pass runs alone. [`Self::pass_lock`] is held for the length of it, so a
+/// tick that lands on a running `ANALYZE FILES` is skipped rather than taking
+/// the same files off the queue a second time.
 ///
 /// Discovery here only ever adds or updates. A listing reports what is there,
 /// never what is gone, so tombstoning a deleted file needs
@@ -451,6 +455,19 @@ pub struct FileStatsService {
     /// The timer, and the startup collection when one was asked for. Both are
     /// aborted on drop.
     tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Held for the length of a pass, so only one pass runs at a time.
+    ///
+    /// Three things start a pass: the timer, the startup collection, and
+    /// `ANALYZE FILES`. Nothing claims a file when it is taken off the queue, so
+    /// two passes at once read the same files and write a segment each for them.
+    /// Pruning survives that, because the newest row for a file wins, but every
+    /// one of those reads is paid twice.
+    ///
+    /// An `Arc` of its own, never reached through the service. A pass upgrades
+    /// the [`Weak`] once per batch and drops it again, so that the service, and
+    /// with it the database file, is not held for the length of a backfill.
+    /// Holding a guard that borrowed the service would undo exactly that.
+    pass_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FileStatsService {
@@ -480,6 +497,7 @@ impl FileStatsService {
             datasets_url,
             config,
             tasks: parking_lot::Mutex::new(Vec::new()),
+            pass_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -495,8 +513,14 @@ impl FileStatsService {
     /// trade: it collects immediately instead, which is what a short-lived or
     /// frequently restarted server needs, since the interval starts again on
     /// every boot.
+    ///
+    /// A tick drains the queue. It does not stop after one batch, so a fresh
+    /// store is covered by the first pass that reaches it rather than by as many
+    /// ticks as it has batches. A tick that finds a pass already running is
+    /// skipped.
     pub fn start(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
+        let pass_lock = self.pass_lock.clone();
         let interval = Duration::from_secs(self.config.interval_secs.max(1));
         tracing::debug!(
             interval_secs = interval.as_secs(),
@@ -504,14 +528,31 @@ impl FileStatsService {
         );
         let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
+            // A pass over a large archive outruns the interval. The default
+            // `Burst` then fires every tick it missed back to back, and each one
+            // re-lists the whole store for a queue the pass just emptied.
+            // `Delay` starts the interval again when the pass ends.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticker.tick().await; // consume the immediate first tick
             loop {
                 ticker.tick().await;
-                let Some(service) = weak.upgrade() else {
+                if weak.strong_count() == 0 {
                     break; // the runtime went away
+                }
+                // Skipped, not queued: the work is whatever is pending, and the
+                // running pass is already draining exactly that. Waiting here
+                // would only run a second pass over an empty queue.
+                let Ok(guard) = pass_lock.clone().try_lock_owned() else {
+                    tracing::debug!(
+                        "a file statistics pass is already running; skipping this tick"
+                    );
+                    continue;
                 };
-                if let Err(error) = service.run_once().await {
-                    tracing::warn!(%error, "a file statistics pass failed");
+                let counts = run_pass(&weak).await;
+                drop(guard);
+                match counts {
+                    Some(counts) => counts.report(),
+                    None => break, // the runtime went away mid-pass
                 }
             }
         });
@@ -534,54 +575,22 @@ impl FileStatsService {
     /// before the subsystem existed.
     fn collect_on_startup(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
+        let pass_lock = self.pass_lock.clone();
         let handle = tokio::spawn(async move {
             tracing::info!("collecting file statistics at startup");
-
-            // Discover once, not once per batch: a listing of a large store is
-            // the expensive half, and nothing new appears mid-backfill that the
-            // timer will not pick up afterwards.
-            let discovered = {
-                let Some(service) = weak.upgrade() else {
-                    return; // the runtime went away before this got a turn
-                };
-                match service.discover().await {
-                    Ok(discovered) => discovered,
-                    Err(error) => {
-                        tracing::warn!(%error, "startup file statistics discovery failed");
-                        return;
-                    }
-                }
+            // Waited for, not skipped: this runs once, and a timer tick that got
+            // in first is draining the same queue. The wait ends when it does.
+            let guard = pass_lock.lock_owned().await;
+            let counts = run_pass(&weak).await;
+            drop(guard);
+            let Some(counts) = counts else {
+                return; // the runtime went away mid-pass
             };
-
-            // Then drain, one batch at a time, holding the service only for the
-            // batch. A backfill runs for minutes; keeping the handle across all
-            // of it would stop a dropped runtime from ever tearing this down.
-            let mut analyzed = 0;
-            let mut failed = 0;
-            let mut segments = 0;
-            for _ in 0..MAX_ON_DEMAND_PASSES {
-                let Some(service) = weak.upgrade() else {
-                    return;
-                };
-                match service.collector.run_once().await {
-                    Ok(report) if report.is_idle() => break,
-                    Ok(report) => {
-                        analyzed += report.analyzed;
-                        failed += report.failed;
-                        segments += report.segments;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "startup file statistics collection failed");
-                        break;
-                    }
-                }
-            }
-
             tracing::info!(
-                discovered,
-                analyzed,
-                failed,
-                segments,
+                discovered = counts.discovered,
+                analyzed = counts.analyzed,
+                failed = counts.failed,
+                segments = counts.segments,
                 "startup file statistics collection finished"
             );
         });
@@ -598,12 +607,28 @@ impl FileStatsService {
     /// without it a reader that has only just become able to produce ranges
     /// (netCDF's, after `use_rust_reader`) leaves every file recorded as analyzed
     /// with nothing in it.
+    ///
+    /// Fails when a pass is already running, rather than waiting for it. Only
+    /// one pass runs at a time, and waiting for one over a large archive would
+    /// hold the statement for minutes with nothing to report.
     pub async fn analyze_now(
         &self,
         prefix: Option<&str>,
         force: bool,
     ) -> anyhow::Result<AnalyzePass> {
         tracing::debug!(prefix = ?prefix, force, "ANALYZE FILES started");
+        // Refused, not queued. A pass over a large archive runs for minutes, and
+        // a statement that waited for one would look hung for all of it with
+        // nothing to show. The running pass covers the same queue, so the answer
+        // is to say so and let the caller decide.
+        let _guard = self.pass_lock.try_lock().map_err(|_| {
+            anyhow::anyhow!(
+                "a file statistics pass is already running, over the same files. \
+                 Wait for it to finish and run this again. \
+                 `SELECT state, count(*) FROM beacon.system.file_stats GROUP BY state` \
+                 shows its progress."
+            )
+        })?;
         let requeued = if force {
             self.store.registry().requeue(prefix)?
         } else {
@@ -613,7 +638,7 @@ impl FileStatsService {
         let discovered = self.discover_under(prefix).await?;
         let report = self
             .collector
-            .run_until_idle(MAX_ON_DEMAND_PASSES)
+            .run_until_idle(MAX_BATCHES_PER_PASS)
             .await
             .map_err(|e| anyhow::anyhow!("file statistics collection failed: {e}"))?;
 
@@ -627,7 +652,12 @@ impl FileStatsService {
         })
     }
 
-    /// Discover, then analyze. Exposed so a caller can force a pass.
+    /// Discover, then analyze **one batch**. Exposed so a caller can step the
+    /// subsystem by hand, which is what the tests do.
+    ///
+    /// Neither the timer nor `ANALYZE FILES` goes through here any more: both
+    /// drain. This also takes no pass guard, so a caller that runs it beside
+    /// either of those reads the same files twice.
     pub async fn run_once(&self) -> anyhow::Result<FileStatsPass> {
         let discovered = self.discover().await?;
         let report = self
@@ -643,26 +673,14 @@ impl FileStatsService {
             segments: report.segments,
             pending: self.store.registry().num_pending().unwrap_or(0),
         };
-        // `discovered` counts every file the listing reported, not just the new
-        // ones, so it is above zero on every pass over a store that holds
-        // anything. Only work is worth an INFO line; an idle tick is a DEBUG
-        // heartbeat, which is what tells you the timer is still running.
-        if report.is_idle() {
-            tracing::debug!(
-                discovered = pass.discovered,
-                pending = pass.pending,
-                "file statistics pass found nothing to do"
-            );
-        } else {
-            tracing::info!(
-                discovered = pass.discovered,
-                analyzed = pass.analyzed,
-                failed = pass.failed,
-                segments = pass.segments,
-                pending = pass.pending,
-                "file statistics pass"
-            );
+        PassCounts {
+            discovered: pass.discovered,
+            analyzed: pass.analyzed,
+            failed: pass.failed,
+            segments: pass.segments,
+            pending: pass.pending,
         }
+        .report();
         Ok(pass)
     }
 
@@ -734,11 +752,95 @@ impl Drop for FileStatsService {
     }
 }
 
-/// How many passes `analyze_now` will run before giving up.
+/// How many batches one pass will take before giving up.
 ///
 /// A bound rather than a loop: a file that fails, re-queues and fails again
-/// would otherwise trap the statement forever.
-const MAX_ON_DEMAND_PASSES: usize = 10_000;
+/// would otherwise trap the pass forever.
+const MAX_BATCHES_PER_PASS: usize = 10_000;
+
+/// What one pass did. `None` from [`run_pass`] means the runtime went away.
+#[derive(Debug, Default, Clone, Copy)]
+struct PassCounts {
+    discovered: usize,
+    analyzed: usize,
+    failed: usize,
+    segments: usize,
+    pending: u64,
+}
+
+impl PassCounts {
+    /// `discovered` counts every file the listing reported, not just the new
+    /// ones, so it is above zero on every pass over a store that holds anything.
+    /// Only work is worth an INFO line; an idle pass is a DEBUG heartbeat, which
+    /// is what tells you the timer is still running.
+    fn report(&self) {
+        if self.analyzed == 0 && self.failed == 0 {
+            tracing::debug!(
+                discovered = self.discovered,
+                pending = self.pending,
+                "file statistics pass found nothing to do"
+            );
+        } else {
+            tracing::info!(
+                discovered = self.discovered,
+                analyzed = self.analyzed,
+                failed = self.failed,
+                segments = self.segments,
+                pending = self.pending,
+                "file statistics pass"
+            );
+        }
+    }
+}
+
+/// Discover once, then analyze until the queue is empty.
+///
+/// The caller holds [`FileStatsService::pass_lock`], so this is the only pass
+/// running.
+///
+/// Discovery is once per pass, not once per batch: a listing of a large store is
+/// the expensive half, and nothing new appears mid-backfill that the next pass
+/// will not pick up.
+///
+/// The [`Weak`] is upgraded per batch and dropped again. A backfill runs for
+/// minutes, and holding the service across all of it would hold the database
+/// file with it, so a dropped runtime could never tear this down. Returns `None`
+/// when that drop happens, which ends the pass at the next batch boundary.
+///
+/// [`MAX_BATCHES_PER_PASS`] is a backstop, not the stop condition. A file whose
+/// analysis *panics* is neither marked failed nor analyzed, so it stays at the
+/// head of the queue and comes back in the next batch. A batch of nothing but
+/// such files reports idle, which ends the loop.
+async fn run_pass(weak: &Weak<FileStatsService>) -> Option<PassCounts> {
+    let mut counts = PassCounts::default();
+
+    counts.discovered = match weak.upgrade()?.discover().await {
+        Ok(discovered) => discovered,
+        Err(error) => {
+            tracing::warn!(%error, "file statistics discovery failed");
+            return Some(counts);
+        }
+    };
+
+    for _ in 0..MAX_BATCHES_PER_PASS {
+        let service = weak.upgrade()?;
+        match service.collector.run_once().await {
+            Ok(report) if report.is_idle() => break,
+            Ok(report) => {
+                counts.analyzed += report.analyzed;
+                counts.failed += report.failed;
+                counts.segments += report.segments;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "a file statistics pass failed");
+                break;
+            }
+        }
+    }
+
+    counts.pending = weak.upgrade()?.store.registry().num_pending().unwrap_or(0);
+    Some(counts)
+}
 
 /// What `ANALYZE FILES` did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

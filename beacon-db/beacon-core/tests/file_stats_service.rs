@@ -1426,3 +1426,100 @@ async fn a_partitioned_external_table_keeps_its_partition_columns() {
         "the 2023 partition should not appear:\n{rows}"
     );
 }
+
+/// Counts the files the registry records as analyzed.
+fn num_analyzed(store: &beacon_file_stats::FileStatsStore) -> usize {
+    store
+        .registry()
+        .scan_records()
+        .unwrap()
+        .iter()
+        .filter(|(_, record)| record.state == beacon_file_stats::FileState::Analyzed)
+        .count()
+}
+
+/// One tick drains the queue. It does not stop after `batch_files`.
+///
+/// The config below makes the difference visible: one file per batch, five
+/// files, one second between ticks. A tick that took one batch would need five
+/// ticks, so five seconds, and the deadline here is under three. A tick that
+/// drains covers all five on the first one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_tick_drains_the_queue_rather_than_taking_one_batch() {
+    let root = tempfile::tempdir().unwrap();
+    for (index, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+        write_parquet(
+            &root.path().join(format!("datasets/argo/{name}.parquet")),
+            index as f64,
+            index as f64 + 1.0,
+        );
+    }
+
+    let config = FileStatsConfig {
+        interval_secs: 1,
+        batch_files: 1,
+        // One file per segment too, so a batch really is a batch.
+        target_group_files: 1,
+        min_group_files: 1,
+        ..enabled()
+    };
+    let runtime = builder(root.path(), config).build().await.unwrap();
+    let store = runtime.file_stats().unwrap().store().clone();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_900);
+    let mut analyzed = 0;
+    while std::time::Instant::now() < deadline {
+        analyzed = num_analyzed(&store);
+        if analyzed == 5 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(
+        analyzed, 5,
+        "the first tick should have drained all five files, not taken one batch"
+    );
+}
+
+/// `ANALYZE FILES` says so when a pass is already running. It does not wait.
+///
+/// Nothing claims a file when it comes off the queue, so without the pass guard
+/// both of these take the same three files and read every one of them twice. A
+/// guard that waited instead would hold the statement for the length of the
+/// running pass, which over a large archive is minutes of looking hung.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn analyze_files_says_when_a_pass_is_already_running() {
+    let root = tempfile::tempdir().unwrap();
+    for (index, name) in ["a", "b", "c"].iter().enumerate() {
+        write_parquet(
+            &root.path().join(format!("datasets/argo/{name}.parquet")),
+            index as f64,
+            index as f64 + 1.0,
+        );
+    }
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    let service = runtime.file_stats().unwrap().clone();
+    let other = service.clone();
+
+    let (first, second) = tokio::join!(
+        async move { service.analyze_now(None, false).await },
+        async move { other.analyze_now(None, false).await },
+    );
+
+    let (pass, refused) = match (first, second) {
+        (Ok(pass), Err(refused)) => (pass, refused),
+        (Err(refused), Ok(pass)) => (pass, refused),
+        (Ok(_), Ok(_)) => panic!("both passes ran; the guard did not hold"),
+        (Err(a), Err(b)) => panic!("neither pass ran: {a}, {b}"),
+    };
+
+    assert_eq!(pass.analyzed, 3, "the pass that got the guard did the work");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("already running"),
+        "the error should name the running pass: {refused}"
+    );
+    assert_eq!(num_analyzed(runtime.file_stats().unwrap().store()), 3);
+}
