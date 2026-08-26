@@ -19,6 +19,7 @@ const DOCS_URL = "https://maris-development.github.io/beacon/";
 import { cn } from "@/lib/utils";
 import { assetUrl } from "@/lib/base-path";
 import { useBeaconSession } from "@/lib/beacon-context";
+import { identityLabel } from "@/lib/auth";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
   DropdownMenu,
@@ -48,6 +49,7 @@ export function AppShell() {
   }
 
   const host = connection ? hostLabel(connection.url) : "";
+  const identity = identityLabel(connection);
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -69,14 +71,19 @@ export function AppShell() {
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button className="flex items-center gap-1.5 rounded px-2 py-1 text-sm text-topbar-foreground/90 hover:bg-topbar-foreground/10">
-                {connection?.username ?? "admin"}
+                {identity}
                 <ChevronDown className="h-4 w-4" />
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuLabel className="font-normal">
-                <div className="text-sm font-medium">{connection?.username}</div>
+                <div className="text-sm font-medium">{identity}</div>
                 <div className="text-xs text-muted-foreground">{connection?.url}</div>
+                {connection?.mode === "proxy" && (
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Authenticated by the gateway in front of Beacon.
+                  </div>
+                )}
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleLogout}>

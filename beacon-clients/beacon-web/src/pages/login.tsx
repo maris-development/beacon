@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { HeroBackdrop } from "@/components/hero-backdrop";
+import { SessionSplash } from "@/components/session-splash";
 import { useBeaconSession } from "@/lib/beacon-context";
 import {
   DEFAULT_URL,
@@ -19,7 +20,7 @@ import { assetUrl } from "@/lib/base-path";
 import { errorMessage } from "@/lib/errors";
 
 export function LoginPage() {
-  const { client, login } = useBeaconSession();
+  const { client, initializing, login } = useBeaconSession();
   const navigate = useNavigate();
   const location = useLocation();
   const from = (location.state as { from?: string } | null)?.from ?? "/query";
@@ -39,7 +40,7 @@ export function LoginPage() {
     event.preventDefault();
     setBusy(true);
     setError(null);
-    const conn: Connection = { url: url.trim(), username, password };
+    const conn: Connection = { url: url.trim(), mode: "credentials", username, password };
     try {
       await verifyAdmin(makeClient(conn));
       login(conn);
@@ -50,6 +51,10 @@ export function LoginPage() {
       setBusy(false);
     }
   }
+
+  // The gateway in front of Beacon may authenticate the caller already. Hold the
+  // form back until that check finishes, so a proxy session never sees it.
+  if (initializing) return <SessionSplash />;
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#0b1020] px-4">
