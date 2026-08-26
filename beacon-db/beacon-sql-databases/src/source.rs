@@ -22,6 +22,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use beacon_datafusion_ext::remote::geometry_literals_to_calls;
 use datafusion::sql::TableReference;
 use datafusion_federation::sql::{AstAnalyzer, LogicalOptimizer, SQLTable, SqlQueryRewriter};
 
@@ -67,8 +68,27 @@ impl SQLTable for BeaconSqlTable {
         self.inner.schema()
     }
 
+    /// The engine's own rewrite, preceded by the geometry-constant repair where the engine
+    /// understands a PostGIS constructor.
+    ///
+    /// A constant `ST_GeomFromText('...')` folds to an Arrow union or struct at plan time, and
+    /// the SQL unparser has no syntax for either, so `plan_to_sql` stops with `Unsupported
+    /// scalar`. Rebuilding the call first lets the predicate reach a PostGIS database whole. See
+    /// [`SqlEngine::rebuilds_geometry_constants`] for why the other engines keep the error.
+    ///
+    /// [`SqlEngine::rebuilds_geometry_constants`]: crate::SqlEngine::rebuilds_geometry_constants
     fn logical_optimizer(&self) -> Option<LogicalOptimizer> {
-        self.inner.logical_optimizer()
+        let mut inner = self.inner.logical_optimizer();
+        if !self.definition.engine.rebuilds_geometry_constants() {
+            return inner;
+        }
+        Some(Box::new(move |plan| {
+            let plan = geometry_literals_to_calls(plan)?;
+            match inner.as_mut() {
+                Some(next) => next(plan),
+                None => Ok(plan),
+            }
+        }))
     }
 
     fn ast_analyzer(&self) -> Option<AstAnalyzer> {
@@ -122,6 +142,62 @@ pub(crate) mod tests {
 
     fn test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
+    }
+
+    /// A definition for one named engine, so the geometry gate can be read per engine.
+    fn definition_for(engine: crate::SqlEngine) -> SqlDatabaseTableDefinition {
+        let mut definition = definition(test_schema());
+        definition.engine = engine;
+        definition
+    }
+
+    /// Only PostGIS spells both `ST_GeomFromText` and `ST_SetSRID` the way the repair emits them.
+    /// MySQL sets an SRID with `ST_SRID`, and SQL Server over ODBC has neither name.
+    #[test]
+    fn only_postgres_rebuilds_geometry_constants() {
+        #[cfg(feature = "postgres")]
+        assert!(crate::SqlEngine::Postgres.rebuilds_geometry_constants());
+        #[cfg(feature = "mysql")]
+        assert!(!crate::SqlEngine::MySql.rebuilds_geometry_constants());
+        #[cfg(feature = "odbc")]
+        assert!(!crate::SqlEngine::Odbc.rebuilds_geometry_constants());
+    }
+
+    /// A Postgres table gains the repair even though the table it wraps supplies no optimizer of
+    /// its own, and the repair leaves a plan without a geometry constant alone.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn a_postgres_table_gains_the_geometry_repair() {
+        let schema = test_schema();
+        let wrapped = BeaconSqlTable::new(
+            remote_table(schema),
+            definition_for(crate::SqlEngine::Postgres),
+        );
+
+        let mut optimizer = wrapped
+            .logical_optimizer()
+            .expect("a postgres table repairs geometry constants");
+        let plan = datafusion::logical_expr::LogicalPlanBuilder::empty(true)
+            .build()
+            .expect("the empty plan should build");
+        assert_eq!(
+            plan.clone(),
+            optimizer(plan).expect("the repair should succeed"),
+            "a plan with no geometry constant must pass through untouched"
+        );
+    }
+
+    /// Every other engine keeps whatever the wrapped table supplies, which here is nothing.
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn a_mysql_table_only_delegates() {
+        let schema = test_schema();
+        let wrapped =
+            BeaconSqlTable::new(remote_table(schema), definition_for(crate::SqlEngine::MySql));
+        assert!(
+            wrapped.logical_optimizer().is_none(),
+            "MySQL must not receive a PostGIS constructor call"
+        );
     }
 
     /// The wrapper must report the *remote* table reference (and schema) of the

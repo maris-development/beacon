@@ -239,6 +239,38 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **A query could lose the rows of a file that changed after its analysis.** File statistics let a
+  `WHERE` drop whole files before the scan opens them, on the column ranges a background pass
+  recorded. That pass compares the size, the modification time and the etag of every listed file
+  against its record, and a file that changed stops being trusted. The query path made no such
+  comparison: it resolved a file by its path alone, so between two passes a rewritten file still
+  carried the ranges of the content it no longer held, and a predicate the new content matched
+  pruned it away. The answer was short by those rows, with nothing to show for it. A scan already
+  holds the metadata of every file it planned to read, so it now checks that metadata against the
+  record itself. A file the record no longer describes reads as unanalyzed and is kept, which is
+  the fail-open rule the rest of pruning follows. This closes a window of one pass interval
+  (`BEACON_FILE_STATS_INTERVAL_SECS`, 900 seconds by default, and longer on a fresh server because
+  `BEACON_FILE_STATS_ON_STARTUP` is off), and it covers a store no pass ever lists at all. Zarr and
+  Icechunk plan entries that state a path and no metadata, so there the pass stays the only check
+  and pruning is unchanged.
+- **A spatial filter on a federated table stopped with `Unsupported scalar: Union`.** `SELECT *
+  FROM lake.public.lidar WHERE ST_Within(ST_MakePoint(x, y), ST_GeomFromGeoJSON('…'))` failed at
+  plan time against a remote-Beacon table and against a SQL-database table. DataFusion evaluates a
+  constant call before it optimizes, so `ST_GeomFromGeoJSON` left the plan and a geometry value
+  took its place. GeoArrow stores a mixed geometry as an Arrow union, and a point or a box as an
+  Arrow struct. The SQL unparser has no syntax for either, so the federated sub-plan never became
+  SQL. 61 of the 117 spatial functions return such a value — `ST_GeomFromText`, `ST_GeomFromWKB`,
+  `ST_Buffer`, `ST_Union`, `ST_Centroid`, `ST_MakePoint` and `ST_Envelope` among them. The other 56
+  return a number, a boolean or a string, and always worked. A bound parameter did not help,
+  because DataFusion writes one into a literal before it optimizes. A federated sub-plan now
+  rebuilds each geometry constant as `ST_GeomFromText('…')`, wrapped in `ST_SetSRID` where the
+  constant carries an SRID, in the step directly before it becomes SQL. Text keeps every coordinate
+  digit and the z ordinate, which GeoJSON drops. Nothing else changes: a local query still folds
+  the constant once and never rebuilds it, and the plan schema stays as it was. A SQL-database
+  table does this for PostgreSQL alone, because PostGIS reads both calls, while MySQL sets an SRID
+  with `ST_SRID` and SQL Server over ODBC uses `geometry::STGeomFromText`. One case stays open:
+  `ST_AsBinary`, `ST_AsEWKB` and `ST_Dump` fold to plain binary, which carries no GeoArrow mark, so
+  a fully constant call to one of them still has no SQL form.
 - **A long query in the admin UI failed after a minute.** `@beacon/client` put a 60-second deadline
   on every request, query execution included, and reported the abort as a `TimeoutError`. Analyze
   was the visible victim: `/api/explain-analyze-query` runs the query to completion before it

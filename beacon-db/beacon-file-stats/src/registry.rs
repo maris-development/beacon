@@ -79,6 +79,17 @@ pub struct AnalyzedFile<'a> {
     pub column_count: u32,
 }
 
+/// One path the registry knows, from [`Registry::resolve_observed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedFile {
+    pub id: FileId,
+    /// Whether the record still describes the object the caller observed.
+    ///
+    /// `false` says the statistics under this id were written against content
+    /// the file no longer holds, so a reader must treat them as absent.
+    pub unchanged: bool,
+}
+
 /// File and column identity, backed by redb.
 pub struct Registry {
     db: Arc<Database>,
@@ -239,10 +250,13 @@ impl Registry {
     /// Resolve many paths at once, in order, `None` where the path is unknown.
     ///
     /// One read transaction and one open table for the whole batch. A scan holds
-    /// paths and the store holds ids, so this conversion sits between a query and
-    /// any pruning at all: doing it a path at a time costs a transaction and two
-    /// table opens per file, which at a million files is seconds of pure
-    /// overhead.
+    /// paths and the store holds ids, so this conversion sits before any pruning
+    /// at all: doing it a path at a time costs a transaction and two table opens
+    /// per file, which at a million files is seconds of pure overhead.
+    ///
+    /// A caller holding fresh metadata wants
+    /// [`resolve_observed`](Self::resolve_observed) instead, because the path
+    /// alone does not say whether the record still describes the file.
     pub fn file_ids(&self, paths: &[&str]) -> Result<Vec<Option<FileId>>> {
         let read = self.db.begin_read()?;
         let table = read.open_table(FILES_BY_PATH)?;
@@ -252,6 +266,45 @@ impl Registry {
                 Some(value) => Some(read_path_entry(value.value())?),
                 None => None,
             });
+        }
+        Ok(out)
+    }
+
+    /// Resolve many observed files at once, in order, saying for each whether
+    /// the record still describes what the caller saw.
+    ///
+    /// `None` where the registry has never seen the path. Otherwise the id, and
+    /// [`ResolvedFile::unchanged`] answering [`FileRecord::matches`] against the
+    /// observation.
+    ///
+    /// The second half is what a reader needs between two collector passes. A
+    /// file rewritten after its analysis keeps the state [`FileState::Analyzed`]
+    /// until a pass lists it again, and its segment rows still describe content
+    /// that is gone. A caller that holds fresh metadata can see that for itself.
+    ///
+    /// One read transaction and two open tables for the whole batch, for the
+    /// reason [`file_ids`](Self::file_ids) gives: a transaction per file costs
+    /// seconds at a million files.
+    pub fn resolve_observed(&self, observed: &[ObservedFile]) -> Result<Vec<Option<ResolvedFile>>> {
+        let read = self.db.begin_read()?;
+        let by_path = read.open_table(FILES_BY_PATH)?;
+        let by_id = read.open_table(FILES_BY_ID)?;
+        let mut out = Vec::with_capacity(observed.len());
+        for file in observed {
+            let id = match by_path.get(file.path.as_bytes())? {
+                Some(value) => read_path_entry(value.value())?,
+                None => {
+                    out.push(None);
+                    continue;
+                }
+            };
+            // A path entry without a record is a broken pair, not a reason to
+            // fail the query. It reads as changed, which is the doubtful answer.
+            let unchanged = match read_record(&by_id, id)? {
+                Some(record) => record.matches(file),
+                None => false,
+            };
+            out.push(Some(ResolvedFile { id, unchanged }));
         }
         Ok(out)
     }
@@ -659,6 +712,63 @@ mod tests {
         assert_eq!(batched, vec![Some(1), None, Some(0)]);
         assert_eq!(batched[0], registry.file_id("b.nc").unwrap());
         assert!(registry.file_ids(&[]).unwrap().is_empty());
+    }
+
+    /// Resolving takes what the caller observed, not the path alone. A file
+    /// rewritten after its analysis reads as changed, so a reader keeps it
+    /// until the collector catches up.
+    #[test]
+    fn a_changed_file_resolves_as_changed() {
+        let (registry, _dir) = registry();
+        let ids = registry
+            .intern_files(&[observed("a.nc", 1), observed("b.nc", 1)])
+            .unwrap();
+        for id in &ids {
+            registry.mark_analyzed(*id, "netcdf", Some(1), Some(1), 1).unwrap();
+        }
+
+        let resolved = |files: &[ObservedFile]| {
+            registry
+                .resolve_observed(files)
+                .unwrap()
+                .into_iter()
+                .map(|found| found.map(|f| (f.id, f.unchanged)))
+                .collect::<Vec<_>>()
+        };
+
+        // Nothing has changed yet, so both are unchanged, and an unknown path
+        // still reads as unknown.
+        assert_eq!(
+            resolved(&[observed("a.nc", 1), observed("missing.nc", 1), observed("b.nc", 1)]),
+            vec![Some((ids[0], true)), None, Some((ids[1], true))]
+        );
+
+        // A different size, with no pass in between: the record still says
+        // `Analyzed`, and the caller is the only one that can tell.
+        assert_eq!(
+            resolved(&[observed("a.nc", 999)]),
+            vec![Some((ids[0], false))]
+        );
+        assert_eq!(
+            registry.record(ids[0]).unwrap().unwrap().state,
+            FileState::Analyzed,
+            "resolving reads; it does not re-queue the file"
+        );
+
+        // An etag settles it on its own, whatever the size and mtime say.
+        registry
+            .intern_files(&[observed("c.nc", 1).with_e_tag(Some("v1".into()))])
+            .unwrap();
+        assert_eq!(
+            resolved(&[observed("c.nc", 1).with_e_tag(Some("v2".into()))]),
+            vec![Some((2, false))]
+        );
+        assert_eq!(
+            resolved(&[observed("c.nc", 42).with_e_tag(Some("v1".into()))]),
+            vec![Some((2, true))]
+        );
+
+        assert!(registry.resolve_observed(&[]).unwrap().is_empty());
     }
 
     #[test]

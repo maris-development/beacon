@@ -53,7 +53,12 @@ BEACON_NETCDF_USE_RUST_READER=true   # the default, netCDF ranges
 BEACON_HDF5_USE_RUST_READER=true     # the default, HDF5 ranges
 ```
 
-Beacon runs a pass every 15 minutes. Each pass finds new files and reads them.
+Beacon runs a pass every 15 minutes. Each pass finds new files and reads every one of them. A pass
+does not stop part-way, so one pass covers a fresh archive.
+
+Only one pass runs at a time. A tick that finds a pass still running is skipped. `ANALYZE FILES`
+reports an error rather than waiting, because a pass over a large archive runs for minutes.
+
 [Configuration](/docs/2.0.0-rc4/server/configuration#file-statistics) lists each variable.
 
 The **timer runs its first pass one interval after startup**, not at startup. Beacon starts the
@@ -100,6 +105,20 @@ ANALYZE FILES;              -- read every file now
 ANALYZE FILES 'argo/';      -- read one prefix only
 ANALYZE FILES FORCE;        -- read every file again, after a reader change
 ```
+
+A pass takes `BEACON_FILE_STATS_BATCH_FILES` files at a time, 10 000 by default. The batch bounds
+the memory a pass holds. It does not bound the pass.
+
+`ANALYZE FILES` fails when a pass is already running:
+
+```
+External error: a file statistics pass is already running, over the same files. Wait for it to
+finish and run this again. `SELECT state, count(*) FROM beacon.system.file_stats GROUP BY state`
+shows its progress.
+```
+
+The running pass covers the same files, so nothing is lost. Wait for it, or watch the queue drain
+with the query in the message.
 
 `ANALYZE FILES` runs to completion and returns one row of counts: `discovered`, `requeued`,
 `analyzed`, `failed`, `segments`, and `pending`. A second run reports `analyzed=0`, because the
@@ -561,6 +580,13 @@ Beacon finds these changes. You do not report them.
 **A file changes.** Beacon compares the size, the modification time and the etag. It does not trust
 the old ranges. It reads the file again. Beacon never prunes a file on a range that describes old
 content.
+
+Each query makes the same comparison. A pass runs every `BEACON_FILE_STATS_INTERVAL_SECS`, so a
+file that changes between two passes keeps the state `Analyzed` for up to one interval. A scan
+lists the file and holds its size, its modification time and its etag, so the comparison costs no
+extra request. A file that does not match its record reads as a file with no ranges, and Beacon
+keeps it. Zarr and Icechunk plan their own scan entries, and those entries carry no such metadata.
+For those two formats the pass makes the comparison alone.
 
 **A file goes.** Beacon lists the datasets store and does not find the file. It does not use
 the ranges of that file.
