@@ -11,6 +11,7 @@ indexmap = { workspace = true }
 arrow = { workspace=true}
 arrow-csv = {workspace = true}
 datafusion = { workspace = true }
+datafusion-datasource = { workspace = true }
 tracing = { workspace = true }
 beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }

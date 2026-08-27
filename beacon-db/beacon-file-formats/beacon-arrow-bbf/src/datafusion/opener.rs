@@ -31,7 +31,10 @@ use parking_lot::Mutex;
 use crate::datafusion::{metrics::BBFGlobalMetrics, stream_share::StreamShare};
 
 pub struct BBFOpener {
-    projected_schema: SchemaRef,
+    /// The plain file columns to read, in file order. Every mapped batch is
+    /// produced in this schema; anything else the query asks for is applied by
+    /// the `ProjectionOpener` wrapped around this one.
+    read_schema: SchemaRef,
     pruning_predicate: Option<PruningPredicate>,
     object_store: Arc<dyn ObjectStore>,
     table_schema: Arc<Schema>,
@@ -50,7 +53,7 @@ impl FileOpener for BBFOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let async_reader =
             ArrowBBFObjectReader::new(file.object_meta.location.clone(), self.object_store.clone());
-        let projected_schema = self.projected_schema.clone();
+        let read_schema = self.read_schema.clone();
         let pruning_predicate = self.pruning_predicate.clone();
         let table_schema = self.table_schema.clone();
         let file_tracer = self.file_tracer.clone();
@@ -64,7 +67,7 @@ impl FileOpener for BBFOpener {
                 .clone()
         };
         let metrics = self.metrics.clone();
-        let fut_projected_schema = projected_schema.clone();
+        let fut_read_schema = read_schema.clone();
         let split_streams_slice = self.split_streams_slice;
         let split_batch_size = self.split_batch_size;
 
@@ -86,12 +89,12 @@ impl FileOpener for BBFOpener {
                         .fields()
                         .iter()
                         .enumerate()
-                        .filter(|(_, f)| fut_projected_schema.index_of(f.name()).is_ok())
+                        .filter(|(_, f)| fut_read_schema.index_of(f.name()).is_ok())
                         .map(|(i, _)| i)
                         .collect();
                     let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
                     let schema_mapper = Arc::new(
-                        BatchAdapterFactory::new(fut_projected_schema.clone())
+                        BatchAdapterFactory::new(fut_read_schema.clone())
                             .make_adapter(&source_schema)?,
                     );
                     let mut selection: Option<BooleanArray> = None;
@@ -149,8 +152,8 @@ impl FileOpener for BBFOpener {
                             RecordBatch::new_empty(file_schema.clone())
                         });
                         let batch_schema = arrow_batch.schema();
-                        // Map the batch schema to the table schema.
-                        let schema_mapper = BatchAdapterFactory::new(projected_schema.clone())
+                        // Map the batch schema to the read schema.
+                        let schema_mapper = BatchAdapterFactory::new(read_schema.clone())
                             .make_adapter(&batch_schema)?;
                         let mapped_batch = schema_mapper
                             .adapt_batch(&arrow_batch)
@@ -342,7 +345,7 @@ mod split_tests {
 impl BBFOpener {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        projected_schema: SchemaRef,
+        read_schema: SchemaRef,
         pruning_predicate: Option<PruningPredicate>,
         object_store: Arc<dyn ObjectStore>,
         table_schema: Arc<Schema>,
@@ -353,7 +356,7 @@ impl BBFOpener {
         split_batch_size: usize,
     ) -> Self {
         Self {
-            projected_schema,
+            read_schema,
             object_store,
             pruning_predicate,
             table_schema,
