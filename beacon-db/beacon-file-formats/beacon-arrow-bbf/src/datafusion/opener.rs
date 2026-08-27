@@ -14,7 +14,7 @@ use beacon_binary_format::{
     object_store::ArrowBBFObjectReader,
     reader::async_reader::{AsyncBBFReader, AsyncPruningIndexReader},
 };
-use datafusion::physical_expr_adapter::BatchAdapterFactory;
+use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
 use datafusion::{
     common::pruning::PruningStatistics,
     datasource::{
@@ -91,7 +91,7 @@ impl FileOpener for BBFOpener {
                         .collect();
                     let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
                     let schema_mapper = Arc::new(
-                        BatchAdapterFactory::new(fut_projected_schema.clone())
+                        batch_adapter_factory(fut_projected_schema.clone())
                             .make_adapter(&source_schema)?,
                     );
                     let mut selection: Option<BooleanArray> = None;
@@ -150,7 +150,7 @@ impl FileOpener for BBFOpener {
                         });
                         let batch_schema = arrow_batch.schema();
                         // Map the batch schema to the table schema.
-                        let schema_mapper = BatchAdapterFactory::new(projected_schema.clone())
+                        let schema_mapper = batch_adapter_factory(projected_schema.clone())
                             .make_adapter(&batch_schema)?;
                         let mapped_batch = schema_mapper
                             .adapt_batch(&arrow_batch)

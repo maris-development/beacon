@@ -14,26 +14,60 @@
 //! A scan that skips this step reports a schema it cannot produce. The reader
 //! then fails on the first batch, and `LIMIT 0` still succeeds, because it reads
 //! no batch.
+//!
+//! # A column the merge could not join
+//!
+//! [`TypeConflict::KeepFirst`] lets the merge settle a column that two files
+//! type in two families. The table then reports the type of the first file, and
+//! the merge marks the column with
+//! [`TYPE_CONFLICT_KEY`](crate::type_widening::TYPE_CONFLICT_KEY). The files
+//! disagree on what such a column holds, so its cast may not fail:
+//!
+//! - A value the type cannot hold reads as null. `Utf8` "abc" to `Float64`
+//!   gives null, not an error.
+//! - A type no cast reaches reads as null for the whole file. A list beside a
+//!   number is one such pair.
+//!
+//! Every other cast stays strict, and a value it cannot hold is an error. The
+//! merged schema carries the mark, so no scan reads the setting itself.
+//!
+//! [`TypeConflict::KeepFirst`]: crate::type_widening::TypeConflict::KeepFirst
 
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, RecordBatch, RecordBatchOptions, new_null_array};
-use arrow::compute::{CastOptions, cast_with_options};
+use arrow::compute::{CastOptions, can_cast_types, cast_with_options};
 use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::util::display::FormatOptions;
+use datafusion::common::ScalarValue;
+use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{FileOpenFuture, FileOpener};
 use datafusion::error::{DataFusionError, Result};
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::expressions::{CastColumnExpr, Column, lit};
+use datafusion::physical_expr_adapter::{
+    BatchAdapterFactory, DefaultPhysicalExprAdapterFactory, PhysicalExprAdapter,
+    PhysicalExprAdapterFactory,
+};
 use futures::StreamExt;
+
+use crate::type_widening::is_type_conflict;
 
 /// Where one column of the target schema comes from.
 #[derive(Debug, Clone)]
 enum Source {
     /// The file holds this column, with this type. Take it as it is.
     Column(usize),
-    /// The file holds this column with another type. Cast it.
-    Cast(usize, DataType),
-    /// The file lacks this column. Read nulls of this type.
+    /// The file holds this column with another type. Cast it. `lenient` reads a
+    /// value the type cannot hold as null; see the [module docs](self).
+    Cast {
+        at: usize,
+        data_type: DataType,
+        lenient: bool,
+    },
+    /// The file lacks this column, or no cast reaches its type. Read nulls of
+    /// this type.
     Missing(DataType),
 }
 
@@ -54,6 +88,14 @@ const CAST_OPTIONS: CastOptions<'static> = CastOptions {
     format_options: FormatOptions::new(),
 };
 
+/// The cast for a column the merge could not join, where a null is the answer.
+/// The files state two families, so no value of the other family is a value of
+/// this one. See the [module docs](self).
+const LENIENT_CAST_OPTIONS: CastOptions<'static> = CastOptions {
+    safe: true,
+    format_options: FormatOptions::new(),
+};
+
 impl BatchAdapter {
     /// The map from `source` onto `target`.
     ///
@@ -69,7 +111,28 @@ impl BatchAdapter {
                 Ok(at) if source.field(at).data_type() == field.data_type() => {
                     Ok(Source::Column(at))
                 }
-                Ok(at) => Ok(Source::Cast(at, field.data_type().clone())),
+                // A column the merge could not join reads null where the cast
+                // cannot answer, and null for the whole file where no cast
+                // reaches its type.
+                Ok(at) if is_type_conflict(field) => {
+                    let data_type = field.data_type().clone();
+                    Ok(
+                        if can_cast_types(source.field(at).data_type(), &data_type) {
+                            Source::Cast {
+                                at,
+                                data_type,
+                                lenient: true,
+                            }
+                        } else {
+                            Source::Missing(data_type)
+                        },
+                    )
+                }
+                Ok(at) => Ok(Source::Cast {
+                    at,
+                    data_type: field.data_type().clone(),
+                    lenient: false,
+                }),
                 Err(_) if field.is_nullable() => Ok(Source::Missing(field.data_type().clone())),
                 Err(_) => Err(DataFusionError::Execution(format!(
                     "Non-nullable column '{}' is missing from a file of this collection",
@@ -89,8 +152,17 @@ impl BatchAdapter {
             .map(|source| -> Result<ArrayRef> {
                 Ok(match source {
                     Source::Column(at) => Arc::clone(batch.column(*at)),
-                    Source::Cast(at, data_type) => {
-                        cast_with_options(batch.column(*at), data_type, &CAST_OPTIONS)?
+                    Source::Cast {
+                        at,
+                        data_type,
+                        lenient,
+                    } => {
+                        let options = if *lenient {
+                            &LENIENT_CAST_OPTIONS
+                        } else {
+                            &CAST_OPTIONS
+                        };
+                        cast_with_options(batch.column(*at), data_type, options)?
                     }
                     Source::Missing(data_type) => new_null_array(data_type, rows),
                 })
@@ -160,10 +232,116 @@ impl FileOpener for AdaptingOpener {
     }
 }
 
+/// A [`BatchAdapterFactory`] that reads a column the merge could not join as
+/// null.
+///
+/// Every format that maps its batches with DataFusion's factory builds it here.
+/// The rule reads the mark on the target field, so a schema without a marked
+/// column gets what `BatchAdapterFactory::new` gives: a strict cast, and an
+/// error for a value the type cannot hold. See the [module docs](self).
+pub fn batch_adapter_factory(target: SchemaRef) -> BatchAdapterFactory {
+    BatchAdapterFactory::new(target).with_adapter_factory(Arc::new(LenientCastAdapterFactory))
+}
+
+/// Builds [`LenientCastAdapter`] for one file.
+#[derive(Debug)]
+struct LenientCastAdapterFactory;
+
+impl PhysicalExprAdapterFactory for LenientCastAdapterFactory {
+    fn create(
+        &self,
+        logical_file_schema: SchemaRef,
+        physical_file_schema: SchemaRef,
+    ) -> Result<Arc<dyn PhysicalExprAdapter>> {
+        Ok(Arc::new(LenientCastAdapter {
+            inner: DefaultPhysicalExprAdapterFactory.create(
+                Arc::clone(&logical_file_schema),
+                Arc::clone(&physical_file_schema),
+            )?,
+            logical_file_schema,
+            physical_file_schema,
+        }))
+    }
+}
+
+/// DataFusion's rule, with a null for a column the merge could not join.
+///
+/// Two passes wrap the inner rewrite, because the inner rule refuses a pair no
+/// cast reaches before it builds any cast at all:
+///
+/// 1. Before: a marked column that no cast reaches becomes a null literal. The
+///    inner rule then sees a literal and builds no cast.
+/// 2. After: the cast of a marked column takes [`LENIENT_CAST_OPTIONS`].
+#[derive(Debug)]
+struct LenientCastAdapter {
+    inner: Arc<dyn PhysicalExprAdapter>,
+    /// The schema the table reports, which carries the mark.
+    logical_file_schema: SchemaRef,
+    /// The schema of the file being read.
+    physical_file_schema: SchemaRef,
+}
+
+impl LenientCastAdapter {
+    /// The target field of `column`, when the merge could not join it.
+    fn conflicted(&self, column: &Column) -> Option<&arrow::datatypes::Field> {
+        let at = self.logical_file_schema.index_of(column.name()).ok()?;
+        let field = self.logical_file_schema.field(at);
+        is_type_conflict(field).then_some(field)
+    }
+}
+
+impl PhysicalExprAdapter for LenientCastAdapter {
+    fn rewrite(&self, expr: Arc<dyn PhysicalExpr>) -> Result<Arc<dyn PhysicalExpr>> {
+        let expr = expr
+            .transform_down(|expr| {
+                let Some(column) = expr.as_any().downcast_ref::<Column>() else {
+                    return Ok(Transformed::no(expr));
+                };
+                let Some(field) = self.conflicted(column) else {
+                    return Ok(Transformed::no(expr));
+                };
+                let Ok(at) = self.physical_file_schema.index_of(column.name()) else {
+                    // The file lacks the column. The inner rule fills the null.
+                    return Ok(Transformed::no(expr));
+                };
+                if can_cast_types(
+                    self.physical_file_schema.field(at).data_type(),
+                    field.data_type(),
+                ) {
+                    return Ok(Transformed::no(expr));
+                }
+                // No cast reaches this type. The file reads null for the column.
+                Ok(Transformed::yes(lit(ScalarValue::try_new_null(
+                    field.data_type(),
+                )?)))
+            })
+            .data()?;
+
+        self.inner
+            .rewrite(expr)?
+            .transform_down(|expr| {
+                let Some(cast) = expr.as_any().downcast_ref::<CastColumnExpr>() else {
+                    return Ok(Transformed::no(expr));
+                };
+                if !is_type_conflict(cast.target_field()) {
+                    return Ok(Transformed::no(expr));
+                }
+                Ok(Transformed::yes(Arc::new(CastColumnExpr::new(
+                    Arc::clone(cast.expr()),
+                    Arc::clone(cast.input_field()),
+                    Arc::clone(cast.target_field()),
+                    Some(LENIENT_CAST_OPTIONS),
+                )) as Arc<dyn PhysicalExpr>))
+            })
+            .data()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, Int32Array, Int64Array, StringArray};
+    use crate::type_widening::{TYPE_CONFLICT_FIRST_TYPE, TYPE_CONFLICT_KEY};
+    use arrow::array::{Array, Float64Array, Int32Array, Int64Array, StringArray};
     use arrow::datatypes::Field;
 
     fn batch(fields: Vec<Field>, columns: Vec<ArrayRef>) -> RecordBatch {
@@ -279,5 +457,151 @@ mod tests {
 
         let adapter = BatchAdapter::try_new(target, source.schema().as_ref()).expect("map");
         assert!(adapter.adapt(&source).is_err(), "an overflow must be told");
+    }
+
+    // ── a column the merge could not join ──────────────────────────────
+
+    /// `field`, marked as `TypeConflict::KeepFirst` marks it.
+    fn conflicted(name: &str, data_type: DataType) -> Field {
+        Field::new(name, data_type, true).with_metadata(
+            [(
+                TYPE_CONFLICT_KEY.to_string(),
+                TYPE_CONFLICT_FIRST_TYPE.to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    /// A value the target type cannot hold reads as null, not as an error,
+    /// because the files disagree on what the column holds.
+    #[test]
+    fn a_kept_column_reads_a_value_it_cannot_hold_as_null() {
+        let target = Arc::new(Schema::new(vec![conflicted("v", DataType::Float64)]));
+        let source = batch(
+            vec![Field::new("v", DataType::Utf8, true)],
+            vec![Arc::new(StringArray::from(vec!["1.5", "abc"]))],
+        );
+
+        let adapter = BatchAdapter::try_new(target, source.schema().as_ref()).expect("map");
+        let adapted = adapter.adapt(&source).expect("a marked column may not fail");
+        let values = adapted
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("Float64");
+        assert_eq!(values.value(0), 1.5, "a value the type holds is read");
+        assert!(values.is_null(1), "a value it cannot hold reads null");
+    }
+
+    /// A type no cast reaches reads null for the whole file, rather than
+    /// failing the scan.
+    #[test]
+    fn a_kept_column_no_cast_reaches_reads_null() {
+        let list = DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let target = Arc::new(Schema::new(vec![conflicted("v", DataType::Float64)]));
+        let source = batch(
+            vec![Field::new("v", list, true)],
+            vec![Arc::new(
+                arrow::array::ListArray::from_iter_primitive::<arrow::datatypes::Int32Type, _, _>(
+                    vec![Some(vec![Some(1)]), Some(vec![Some(2)])],
+                ),
+            )],
+        );
+
+        let adapter = BatchAdapter::try_new(target, source.schema().as_ref()).expect("map");
+        let adapted = adapter.adapt(&source).expect("no cast reaches this type");
+        assert_eq!(adapted.num_rows(), 2);
+        assert_eq!(adapted.column(0).null_count(), 2);
+    }
+
+    /// The mark reaches only the column that carries it. Every other cast stays
+    /// strict, so an overflow is still an error.
+    #[test]
+    fn the_mark_leaves_every_other_column_strict() {
+        let target = Arc::new(Schema::new(vec![
+            conflicted("kept", DataType::Float64),
+            Field::new("plain", DataType::Int32, true),
+        ]));
+        let source = batch(
+            vec![
+                Field::new("kept", DataType::Utf8, true),
+                Field::new("plain", DataType::Int64, true),
+            ],
+            vec![
+                Arc::new(StringArray::from(vec!["abc"])),
+                Arc::new(Int64Array::from(vec![i64::MAX])),
+            ],
+        );
+
+        let adapter = BatchAdapter::try_new(target, source.schema().as_ref()).expect("map");
+        assert!(
+            adapter.adapt(&source).is_err(),
+            "the unmarked column still reports its overflow"
+        );
+    }
+
+    /// DataFusion's own adapter reads the mark the same way. Every format that
+    /// maps its batches with `batch_adapter_factory` gets this.
+    #[test]
+    fn the_datafusion_adapter_reads_the_mark() {
+        let target = Arc::new(Schema::new(vec![conflicted("v", DataType::Float64)]));
+        let source = batch(
+            vec![Field::new("v", DataType::Utf8, true)],
+            vec![Arc::new(StringArray::from(vec!["1.5", "abc"]))],
+        );
+
+        let adapted = batch_adapter_factory(target)
+            .make_adapter(&source.schema())
+            .expect("map")
+            .adapt_batch(&source)
+            .expect("a marked column may not fail");
+        let values = adapted
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("Float64");
+        assert_eq!(values.value(0), 1.5);
+        assert!(values.is_null(1), "a value it cannot hold reads null");
+    }
+
+    /// The same, for a type no cast reaches. DataFusion's rule refuses such a
+    /// pair before it builds a cast, so the null comes from the pass above it.
+    #[test]
+    fn the_datafusion_adapter_reads_an_unreachable_type_as_null() {
+        let list = DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let target = Arc::new(Schema::new(vec![conflicted("v", DataType::Float64)]));
+        let source = batch(
+            vec![Field::new("v", list, true)],
+            vec![Arc::new(
+                arrow::array::ListArray::from_iter_primitive::<arrow::datatypes::Int32Type, _, _>(
+                    vec![Some(vec![Some(1)]), Some(vec![Some(2)])],
+                ),
+            )],
+        );
+
+        let adapted = batch_adapter_factory(target)
+            .make_adapter(&source.schema())
+            .expect("map")
+            .adapt_batch(&source)
+            .expect("no cast reaches this type");
+        assert_eq!(adapted.num_rows(), 2);
+        assert_eq!(adapted.column(0).null_count(), 2);
+    }
+
+    /// An unmarked column keeps DataFusion's strict cast.
+    #[test]
+    fn the_datafusion_adapter_leaves_an_unmarked_column_strict() {
+        let target = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, true)]));
+        let source = batch(
+            vec![Field::new("v", DataType::Int64, true)],
+            vec![Arc::new(Int64Array::from(vec![i64::MAX]))],
+        );
+
+        let adapted = batch_adapter_factory(target)
+            .make_adapter(&source.schema())
+            .expect("map")
+            .adapt_batch(&source);
+        assert!(adapted.is_err(), "an overflow must be told");
     }
 }

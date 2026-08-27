@@ -23,7 +23,7 @@ use beacon_nd_array::{
     dataset::resolve_read_dimensions,
     projection::DatasetProjection,
 };
-use datafusion::physical_expr_adapter::BatchAdapterFactory;
+use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
 use datafusion::{
     config::ConfigOptions,
     datasource::{
@@ -454,7 +454,7 @@ fn stream_adapted(
             "Failed to derive Arrow schema for atlas dataset: {e}"
         ))
     })?);
-    let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
+    let adapter = batch_adapter_factory(projected_schema).make_adapter(&source_schema)?;
 
     let pushdown_filter: Option<PushdownFilter> = predicate.map(PushdownFilter::new);
     let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
@@ -599,7 +599,7 @@ mod repartition_tests {
 mod adapter_tests {
     //! The per-dataset schema adaptation contract, exercised directly.
     //!
-    //! [`stream_adapted`] leans entirely on `BatchAdapterFactory`: a dataset is
+    //! [`stream_adapted`] leans entirely on `batch_adapter_factory`: a dataset is
     //! read at its own native dtypes and every batch is mapped onto the merged
     //! table schema. These pin that mapping — cast up, null-fill by name — without
     //! building an atlas store or a DataFusion session, so a behaviour change in
@@ -610,7 +610,7 @@ mod adapter_tests {
     use arrow::array::{Array, Int16Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use datafusion::physical_expr_adapter::BatchAdapterFactory;
+    use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
 
     /// Map `batch` (in `source`) onto `target`, exactly as `stream_adapted` does.
     fn adapt(
@@ -618,7 +618,7 @@ mod adapter_tests {
         target: Arc<Schema>,
         batch: RecordBatch,
     ) -> datafusion::error::Result<RecordBatch> {
-        BatchAdapterFactory::new(target)
+        batch_adapter_factory(target)
             .make_adapter(&source)?
             .adapt_batch(&batch)
     }

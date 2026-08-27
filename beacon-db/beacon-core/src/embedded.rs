@@ -35,6 +35,7 @@ use std::sync::Arc;
 use beacon_auth::{AuthIdentity, Credential, ANONYMOUS_USERNAME};
 use beacon_common::FileStatsConfig;
 use beacon_datafusion_ext::listing_factory::DefaultStore;
+use beacon_datafusion_ext::type_widening::TypeConflict;
 use datafusion::scalar::ScalarValue;
 use tokio::runtime::Handle;
 
@@ -233,6 +234,10 @@ pub struct OpenOptions {
     /// The container file is still opened with an exclusive lock, so this is a per-connection
     /// writability guarantee, not (yet) multi-process concurrent access.
     pub read_only: bool,
+    /// What a schema merge does with a column that no type holds, e.g. a number
+    /// in one file and a string in another. Defaults to [`TypeConflict::Fail`],
+    /// which refuses such a collection.
+    pub type_conflict: TypeConflict,
 }
 
 impl OpenOptions {
@@ -279,6 +284,15 @@ impl OpenOptions {
 
     pub fn with_nd_pipeline(mut self, enabled: bool) -> Self {
         self.nd_pipeline = enabled;
+        self
+    }
+
+    /// Set what a schema merge does with a column that no type holds.
+    ///
+    /// [`TypeConflict::KeepFirst`] reads the type of the first file, and null
+    /// for every value that type cannot hold.
+    pub fn with_type_conflict(mut self, on_conflict: TypeConflict) -> Self {
+        self.type_conflict = on_conflict;
         self
     }
 
@@ -378,6 +392,7 @@ impl Database {
         if options.nd_pipeline {
             builder = builder.with_nd_pipeline();
         }
+        builder = builder.with_type_conflict(options.type_conflict);
         if let Some(datasets) = &options.datasets {
             builder = builder.with_default_store(datasets.url.clone(), datasets.root.clone());
         }

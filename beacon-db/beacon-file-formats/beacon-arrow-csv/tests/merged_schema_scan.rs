@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::DataType;
 use beacon_arrow_csv::datafusion::CsvFormat;
+use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
@@ -270,4 +271,69 @@ async fn a_split_file_reads_its_header_for_every_part() {
         .downcast_ref::<arrow::array::Int64Array>()
         .expect("sum");
     assert_eq!(total.value(0), (0..4000i64).sum::<i64>() + 7);
+}
+
+/// The default merge refuses a column that one file types as a number and
+/// another as a string. The table then answers no query at all.
+#[tokio::test]
+async fn a_column_of_two_families_is_refused_by_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.csv"), "v\n1.5\n2.5\n").expect("write a");
+    std::fs::write(dir.path().join("b.csv"), "v\nabc\ndef\n").expect("write b");
+
+    let ctx = SessionContext::new();
+    let url = ListingTableUrl::parse(format!("file://{}/", dir.path().display())).expect("url");
+    let format = Arc::new(CsvFormat::new(b',', 1000));
+    let options = ListingOptions::new(format).with_file_extension(".csv");
+    let error = options
+        .infer_schema(&ctx.state(), &url)
+        .await
+        .expect_err("a number and a string share no type")
+        .to_string();
+    assert!(error.contains("Incompatible types for field 'v'"), "{error}");
+}
+
+/// `TypeConflict::KeepFirst` reports the type of the first file instead, and a
+/// value that type cannot hold reads as null.
+#[tokio::test]
+async fn a_column_of_two_families_reads_null_under_the_setting() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // `a.csv` is listed first, so the column reads as `Float64`.
+    std::fs::write(dir.path().join("a.csv"), "v\n1.5\n2.5\n").expect("write a");
+    std::fs::write(dir.path().join("b.csv"), "v\nabc\ndef\n").expect("write b");
+
+    let config = datafusion::prelude::SessionConfig::new().with_extension(Arc::new(
+        ArrowTypeWidening::new(Arc::new(DefaultArrowTypeWidening::keeping_first_type())),
+    ));
+    let ctx = SessionContext::new_with_config(config);
+    let url = ListingTableUrl::parse(format!("file://{}/", dir.path().display())).expect("url");
+    let format = Arc::new(CsvFormat::new(b',', 1000));
+    let options = ListingOptions::new(format).with_file_extension(".csv");
+    let schema = options
+        .infer_schema(&ctx.state(), &url)
+        .await
+        .expect("the setting settles the column");
+    assert_eq!(
+        schema.field_with_name("v").unwrap().data_type(),
+        &DataType::Float64,
+        "the first file states the type"
+    );
+
+    let config = ListingTableConfig::new(url)
+        .with_listing_options(options)
+        .with_schema(schema);
+    ctx.register_table("t", Arc::new(ListingTable::try_new(config).expect("table")))
+        .expect("register");
+
+    let batches = ctx
+        .sql("SELECT v FROM t")
+        .await
+        .expect("plan")
+        .collect()
+        .await
+        .expect("a value the type cannot hold may not fail the scan");
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 4, "both files contribute their rows");
+    let nulls: usize = batches.iter().map(|b| b.column(0).null_count()).sum();
+    assert_eq!(nulls, 2, "the two strings read as null");
 }

@@ -6,7 +6,8 @@ use arrow::record_batch::RecordBatch;
 use crossbeam::queue::ArrayQueue;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_expr_adapter::{BatchAdapter, BatchAdapterFactory};
+use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
+use datafusion::physical_expr_adapter::BatchAdapter;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use indexmap::IndexMap;
@@ -461,7 +462,7 @@ impl FileRead {
 
             let partition_columns = partitions.scalar_columns(&projected_schema)?;
             let adapter =
-                BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
+                batch_adapter_factory(projected_schema).make_adapter(&source_schema)?;
             (
                 Output::Columns {
                     adapter: Arc::new(adapter),

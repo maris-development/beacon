@@ -17,6 +17,7 @@ base64 = { workspace = true }
 # Per-format and storage config types are owned by their crates; beacon-config
 # composes them and fills them from the environment.
 beacon-common = { path = "../../beacon-db/beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
 beacon-arrow-netcdf = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-hdf5 = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-hdf5" }
 beacon-arrow-zarr = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-zarr" }

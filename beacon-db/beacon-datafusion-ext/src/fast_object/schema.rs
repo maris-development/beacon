@@ -397,7 +397,7 @@ mod tests {
     /// The tests below compare the merge against this result.
     fn flat_merge(listing: &[LabeledSchema]) -> SchemaRef {
         use crate::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
-        DefaultArrowTypeWidening.merge_schemas(listing).unwrap()
+        DefaultArrowTypeWidening::new().merge_schemas(listing).unwrap()
     }
 
     /// The merge equals the earlier fold of the format, over the same sequence.

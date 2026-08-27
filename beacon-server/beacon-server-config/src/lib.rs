@@ -15,6 +15,7 @@ pub use beacon_arrow_hdf5::{Hdf5Config, Hdf5Convention};
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::CrawlerConfig;
+pub use beacon_datafusion_ext::type_widening::TypeConflict;
 pub use beacon_common::FileStatsConfig;
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,11 @@ pub struct RuntimeConfig {
     pub vm_memory_size: usize,
     pub enable_sys_info: bool,
     pub batch_size: usize,
+    /// What a schema merge does with a column that no type holds, e.g. a number
+    /// in one file and a string in another. From
+    /// `BEACON_TYPE_WIDENING_ON_CONFLICT`. Defaults to [`TypeConflict::Fail`],
+    /// which refuses such a collection and names both files.
+    pub type_conflict: TypeConflict,
 }
 
 #[derive(Debug, Clone)]
@@ -404,6 +410,18 @@ struct RawConfig {
     #[envconfig(from = "BEACON_ENABLE_ND_PIPELINE", default = "true")]
     enable_nd_pipeline: bool,
 
+    /// What a schema merge does with a column that two files type in two
+    /// families, e.g. a number and a string.
+    ///
+    /// `fail`, the default, refuses the collection and names the column, both
+    /// types and both files.
+    ///
+    /// `keep_first` reads the type of the first file. Every other file casts to
+    /// it, and a value that type cannot hold reads as null. The merge then
+    /// reads the listing order, so it drops no repeat and starts no thread.
+    #[envconfig(from = "BEACON_TYPE_WIDENING_ON_CONFLICT", default = "fail")]
+    type_widening_on_conflict: String,
+
     /// Root directory for Beacon's local data (datasets, tables, tmp, etc.).
     #[envconfig(from = "BEACON_DATA_DIR", default = "./data")]
     data_dir: String,
@@ -605,6 +623,17 @@ impl From<RawConfig> for Config {
                 vm_memory_size: raw.vm_memory_size,
                 enable_sys_info: raw.enable_sys_info,
                 batch_size: raw.beacon_batch_size,
+                // An unknown name reads as `fail`, which is the rule a server
+                // ran before this setting existed. A server that cannot start
+                // over a typo is worse than one that names the column.
+                type_conflict: TypeConflict::parse(&raw.type_widening_on_conflict).unwrap_or_else(
+                    |value| {
+                        tracing::warn!(
+                            "BEACON_TYPE_WIDENING_ON_CONFLICT names no setting: '{value}'.                              The settings are 'fail' and 'keep_first'. Refusing a conflict."
+                        );
+                        TypeConflict::Fail
+                    },
+                ),
             },
             sql: SqlConfig {
                 enable: raw.enable_sql,
