@@ -16,7 +16,7 @@
 //! | --- | --- |
 //! | the same type | that type |
 //! | two types of one family | the member that holds both, from the tables below |
-//! | two families (a number and a string) | an error that names the column, both types and both files |
+//! | two families (a number and a string) | an error that names the column, both types and both files, or the first type: see the setting below |
 //! | `Null` and any type | that type, because a null column holds no value |
 //! | one nullable field, one not | a nullable field |
 //! | the column in one file only | a nullable field, because the scan fills the other file with nulls |
@@ -79,9 +79,34 @@
 //! The GeoParquet reader states the extension name and drops the system, so the
 //! merge sees two equal fields and joins them.
 //!
+//! # The setting for a column that no type holds
+//!
+//! [`TypeConflict`] settles a column that two sources type in two families. The
+//! default is [`Fail`], which is the error above. A deployment that reads a
+//! collection of many years takes [`KeepFirst`] instead:
+//!
+//! ```text
+//! BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first
+//! ```
+//!
+//! The table then reports the type of the first source, and the scan casts
+//! every other source to it. A value the type cannot hold reads as null, and so
+//! does a column no cast reaches. The merge marks such a column with
+//! [`TYPE_CONFLICT_KEY`], and `scan_adapt` reads that mark. The merged schema
+//! carries the decision, so no scan needs the setting itself.
+//!
+//! Two costs follow. **The merge reads the order**, so it drops no repeat and
+//! starts no thread: a collection of 100000 files takes one fold. **The first
+//! type is the first in listing order**, which is the disk answer order of issue
+//! #377, so a store that lists in two orders reports two types. A column that
+//! widens keeps the rules above either way.
+//!
 //! A deployment replaces the rules through
 //! [`RuntimeBuilder::with_type_widening`]. Every merge in the process takes the
 //! new strategy.
+//!
+//! [`Fail`]: TypeConflict::Fail
+//! [`KeepFirst`]: TypeConflict::KeepFirst
 //!
 //! # The source of a conflict
 //!
@@ -130,7 +155,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, LazyLock};
 
-use arrow_schema::{ArrowError, DataType, FieldRef, Schema, SchemaRef, TimeUnit};
+use arrow_schema::{ArrowError, DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit};
 use datafusion::catalog::Session;
 use object_store::ObjectMeta;
 
@@ -209,7 +234,7 @@ impl ArrowTypeWidening {
     /// falls back to this value, so a test or an embedded use gets the same rule
     /// and no error.
     pub fn default_extension() -> Arc<Self> {
-        Arc::new(Self::new(Arc::new(DefaultArrowTypeWidening)))
+        Arc::new(Self::new(Arc::new(DefaultArrowTypeWidening::new())))
     }
 
     /// Merge `schemas` into the schema a query plans against.
@@ -280,9 +305,119 @@ pub trait ArrowTypeWideningStrategy: Send + Sync {
 /// The scan fills a missing column with nulls, and a non-nullable column holds no
 /// nulls. Such a table fails with "Non-nullable column X is missing from the
 /// physical schema".
-pub struct DefaultArrowTypeWidening;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DefaultArrowTypeWidening {
+    /// What the merge does with a column that two sources type in two families.
+    pub on_conflict: TypeConflict,
+}
+
+impl DefaultArrowTypeWidening {
+    /// The rule that refuses a column two sources type in two families.
+    pub const fn new() -> Self {
+        Self {
+            on_conflict: TypeConflict::Fail,
+        }
+    }
+
+    /// The rule that keeps the first type of such a column.
+    ///
+    /// See [`TypeConflict::KeepFirst`] for what the table then reports and what
+    /// the scan then reads.
+    pub const fn keeping_first_type() -> Self {
+        Self {
+            on_conflict: TypeConflict::KeepFirst,
+        }
+    }
+}
+
+/// What the merge does with a column that no type holds.
+///
+/// A column that two sources type in one family widens either way. This setting
+/// covers the rest: a number beside a string, a list beside a scalar. See the
+/// [module docs](self).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TypeConflict {
+    /// Refuse the merge. The error names the column, both types and both
+    /// sources. The table then answers no query at all.
+    #[default]
+    Fail,
+    /// Keep the type the merge met first, and mark the column with
+    /// [`TYPE_CONFLICT_KEY`].
+    ///
+    /// The table reports that type, and the scan casts every other source to
+    /// it. A value the type cannot hold reads as null, and so does a column no
+    /// cast reaches. The column is nullable for that reason.
+    ///
+    /// **The first type is the first in listing order.** The merge therefore
+    /// reads the order, and [`is_order_independent`] answers `false` for it:
+    /// the merge drops no repeat and starts no thread. A store that lists in
+    /// two orders also reports two types. See the [module docs](self).
+    ///
+    /// [`is_order_independent`]: ArrowTypeWideningStrategy::is_order_independent
+    KeepFirst,
+}
+
+impl TypeConflict {
+    /// The setting one option value names.
+    ///
+    /// `BEACON_TYPE_WIDENING_ON_CONFLICT` holds the value.
+    ///
+    /// # Errors
+    ///
+    /// Returns the offending value when it names no setting.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fail" | "error" | "" => Ok(Self::Fail),
+            "keep_first" | "keep-first" | "first" => Ok(Self::KeepFirst),
+            other => Err(other.to_string()),
+        }
+    }
+}
+
+/// The field metadata key that marks a column [`TypeConflict::KeepFirst`]
+/// settled.
+///
+/// The scan reads it. A cast of such a column may not fail, because the sources
+/// disagree on what the column holds. `beacon_datafusion_ext::scan_adapt` casts
+/// it to null instead. The merged schema carries the decision, so no scan needs
+/// the setting itself.
+pub const TYPE_CONFLICT_KEY: &str = "beacon.type_conflict";
+
+/// The value of [`TYPE_CONFLICT_KEY`]. The column holds the type of the first
+/// source, and every other source casts to it.
+pub const TYPE_CONFLICT_FIRST_TYPE: &str = "first_type";
+
+/// Whether [`TypeConflict::KeepFirst`] settled this column.
+///
+/// A cast onto such a column reads a value it cannot hold as null. Every other
+/// cast reports that value as an error.
+pub fn is_type_conflict(field: &Field) -> bool {
+    field
+        .metadata()
+        .get(TYPE_CONFLICT_KEY)
+        .is_some_and(|value| value == TYPE_CONFLICT_FIRST_TYPE)
+}
+
+/// `field`, marked as a column [`TypeConflict::KeepFirst`] settled.
+///
+/// The field turns nullable. The cast of a source the type cannot hold reads
+/// null, and a non-nullable column holds no null.
+fn mark_type_conflict(field: Field) -> Field {
+    let mut metadata = field.metadata().clone();
+    metadata.insert(
+        TYPE_CONFLICT_KEY.to_string(),
+        TYPE_CONFLICT_FIRST_TYPE.to_string(),
+    );
+    field.with_nullable(true).with_metadata(metadata)
+}
 
 impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
+    fn is_order_independent(&self) -> bool {
+        // `KeepFirst` reads the order. `Int64` then `Utf8` then `Float64` gives
+        // `Float64`, and the same three in one other grouping give `Int64`.
+        matches!(self.on_conflict, TypeConflict::Fail)
+    }
+
     fn merge_schemas(&self, schemas: &[LabeledSchema]) -> Result<SchemaRef, ArrowError> {
         if schemas.is_empty() {
             return Err(ArrowError::SchemaError(
@@ -305,22 +440,32 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
                     // An `Arc` clone. It ends the borrow of `merged_fields`, so
                     // the write below needs no second lookup.
                     let existing_field = Arc::clone(&merged_fields[at]);
-                    // Two types for one column. A numeric pair widens. Every
-                    // other pair is an error.
+                    // Two types for one column. A numeric pair widens. The
+                    // setting settles every other pair.
+                    let mut conflict = false;
                     let widened = if existing_field.data_type() == field.data_type() {
                         None
                     } else {
                         match super_type(existing_field.data_type(), field.data_type()) {
                             Some(data_type) => Some(data_type),
-                            None => {
-                                return Err(ArrowError::SchemaError(incompatible_types(
-                                    &field_name,
-                                    existing_field.data_type(),
-                                    sources[at].as_deref(),
-                                    field.data_type(),
-                                    labeled.label.as_deref(),
-                                )));
-                            }
+                            None => match self.on_conflict {
+                                TypeConflict::Fail => {
+                                    return Err(ArrowError::SchemaError(incompatible_types(
+                                        &field_name,
+                                        existing_field.data_type(),
+                                        sources[at].as_deref(),
+                                        field.data_type(),
+                                        labeled.label.as_deref(),
+                                    )));
+                                }
+                                // Keep the type the merge met first, and leave
+                                // the source that states it. The mark tells the
+                                // scan to read this source as null.
+                                TypeConflict::KeepFirst => {
+                                    conflict = true;
+                                    None
+                                }
+                            },
                         }
                     };
                     // One file that permits nulls makes the column nullable.
@@ -329,13 +474,16 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
                         sources[at] =
                             source_of(data_type, &existing_field, &sources[at], field, labeled);
                     }
-                    if widened.is_some() || nullable {
+                    if widened.is_some() || nullable || conflict {
                         let mut merged = existing_field.as_ref().clone();
                         if let Some(data_type) = widened {
                             merged = merged.with_data_type(data_type);
                         }
                         if nullable {
                             merged = merged.with_nullable(true);
+                        }
+                        if conflict {
+                            merged = mark_type_conflict(merged);
                         }
                         merged_fields[at] = Arc::new(merged);
                     }
@@ -864,6 +1012,136 @@ mod tests {
                 other => panic!("expected SchemaError, got {other:?}"),
             }
         }
+    }
+
+    // ── the setting for a column that no type holds ────────────────────
+
+    /// The merge rule that keeps the first type of a refused column.
+    fn keeping_first() -> ArrowTypeWidening {
+        ArrowTypeWidening::new(Arc::new(DefaultArrowTypeWidening::keeping_first_type()))
+    }
+
+    /// The column of a merge, by name.
+    fn field_of<'a>(schema: &'a Schema, name: &str) -> &'a FieldRef {
+        schema
+            .fields()
+            .iter()
+            .find(|field| field.name() == name)
+            .unwrap_or_else(|| panic!("the merge holds '{name}'"))
+    }
+
+    /// `KeepFirst` reports the type of the first file instead of an error.
+    #[test]
+    fn the_setting_keeps_the_type_of_the_first_file() {
+        let text = from_file("argo/a.nc", &[("depth", DataType::Utf8)]);
+        let number = from_file("argo/b.nc", &[("depth", DataType::Float64)]);
+
+        let merged = keeping_first()
+            .merge_schemas(&[text, number])
+            .expect("the setting settles the column");
+        assert_eq!(field_of(&merged, "depth").data_type(), &DataType::Utf8);
+    }
+
+    /// The first file is the first in listing order, so the two orders report
+    /// two types. `Fail` refuses both orders alike.
+    #[test]
+    fn the_setting_reads_the_order() {
+        let text = from_file("argo/a.nc", &[("depth", DataType::Utf8)]);
+        let number = from_file("argo/b.nc", &[("depth", DataType::Float64)]);
+
+        let first = keeping_first()
+            .merge_schemas(&[text.clone(), number.clone()])
+            .expect("merge");
+        let second = keeping_first().merge_schemas(&[number, text]).expect("merge");
+        assert_eq!(field_of(&first, "depth").data_type(), &DataType::Utf8);
+        assert_eq!(field_of(&second, "depth").data_type(), &DataType::Float64);
+    }
+
+    /// The merge marks the column, so the scan reads a value the type cannot
+    /// hold as null. The column turns nullable for that reason.
+    #[test]
+    fn a_kept_column_is_marked_and_nullable() {
+        let text = LabeledSchema::unlabeled(Arc::new(Schema::new(vec![Field::new(
+            "depth",
+            DataType::Utf8,
+            false,
+        )])));
+        let number = LabeledSchema::unlabeled(Arc::new(Schema::new(vec![Field::new(
+            "depth",
+            DataType::Float64,
+            false,
+        )])));
+
+        let merged = keeping_first().merge_schemas(&[text, number]).expect("merge");
+        let field = field_of(&merged, "depth");
+        assert!(is_type_conflict(field), "the merge marks the column");
+        assert!(field.is_nullable(), "a null needs a nullable column");
+    }
+
+    /// A column that widens takes the rules of the module either way, and the
+    /// merge leaves it unmarked.
+    #[test]
+    fn the_setting_changes_no_column_that_widens() {
+        let narrow = schema(&[("v", DataType::Int32)]);
+        let wide = schema(&[("v", DataType::Float64)]);
+
+        let merged = keeping_first().merge_schemas(&[narrow, wide]).expect("merge");
+        let field = field_of(&merged, "v");
+        assert_eq!(field.data_type(), &DataType::Float64);
+        assert!(
+            !is_type_conflict(field),
+            "a widened column needs no lenient cast"
+        );
+    }
+
+    /// The mark outlives a later widening. `Utf8` still needs a lenient cast
+    /// after `Int64` and `Float64` join above it.
+    #[test]
+    fn the_mark_survives_a_later_widening() {
+        let schemas = [
+            schema(&[("v", DataType::Int64)]),
+            schema(&[("v", DataType::Utf8)]),
+            schema(&[("v", DataType::Float64)]),
+        ];
+
+        let merged = keeping_first().merge_schemas(&schemas).expect("merge");
+        let field = field_of(&merged, "v");
+        assert_eq!(field.data_type(), &DataType::Float64);
+        assert!(is_type_conflict(field), "the `Utf8` file still casts to null");
+    }
+
+    /// The default refuses the column, as before the setting existed.
+    #[test]
+    fn the_default_still_refuses_a_column_that_no_type_holds() {
+        let widening = ArrowTypeWidening::default_extension();
+        let text = from_file("argo/a.nc", &[("depth", DataType::Utf8)]);
+        let number = from_file("argo/b.nc", &[("depth", DataType::Float64)]);
+
+        assert!(widening.merge_schemas(&[text, number]).is_err());
+    }
+
+    /// `KeepFirst` reads the order, so it gets one fold over every schema.
+    /// `Fail` is a semilattice join and keeps the threads.
+    #[test]
+    fn only_the_default_is_order_independent() {
+        assert!(DefaultArrowTypeWidening::new().is_order_independent());
+        assert!(!DefaultArrowTypeWidening::keeping_first_type().is_order_independent());
+    }
+
+    /// The names `BEACON_TYPE_WIDENING_ON_CONFLICT` takes.
+    #[test]
+    fn the_setting_parses_its_option_names() {
+        for name in ["fail", "FAIL", " error ", ""] {
+            assert_eq!(TypeConflict::parse(name), Ok(TypeConflict::Fail), "{name}");
+        }
+        for name in ["keep_first", "keep-first", "First"] {
+            assert_eq!(
+                TypeConflict::parse(name),
+                Ok(TypeConflict::KeepFirst),
+                "{name}"
+            );
+        }
+        assert_eq!(TypeConflict::parse("widen"), Err("widen".to_string()));
     }
 
     // ── naming the source of a conflict ────────────────────────────────
@@ -1491,7 +1769,7 @@ mod tests {
         let merged = ArrowTypeWidening::default_extension()
             .merge_schemas(&schemas)
             .unwrap();
-        let folded = DefaultArrowTypeWidening.merge_schemas(&schemas).unwrap();
+        let folded = DefaultArrowTypeWidening::new().merge_schemas(&schemas).unwrap();
         assert_eq!(merged, folded, "the split changed the answer");
 
         // Int32 v Float32 needs a Float64, and it reaches every chunk.
@@ -1552,7 +1830,7 @@ mod tests {
             fn merge_schemas(&self, schemas: &[LabeledSchema]) -> Result<SchemaRef, ArrowError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 self.seen.fetch_add(schemas.len(), Ordering::SeqCst);
-                DefaultArrowTypeWidening.merge_schemas(schemas)
+                DefaultArrowTypeWidening::new().merge_schemas(schemas)
             }
 
             fn is_order_independent(&self) -> bool {

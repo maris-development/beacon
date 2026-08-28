@@ -15,6 +15,16 @@
 //! Such a file keeps the positional reading, and so does a file whose header
 //! shares no name with the table. The second case is a table whose schema
 //! renames the columns of its files, which only a positional reading serves.
+//!
+//! # A column the merge could not join
+//!
+//! The parser reads each column straight into the type the table reports, so a
+//! type the value does not hold fails the parse itself. A column that
+//! `TypeConflict::KeepFirst` settled holds one family in one file and another
+//! family in the next, so no such type exists. This source reads that column as
+//! text and leaves the type to `AdaptingOpener`, which reads a value the type
+//! cannot hold as null. See
+//! [`scan_adapt`](beacon_datafusion_ext::scan_adapt).
 
 use std::any::Any;
 use std::io::{Cursor, Read};
@@ -22,6 +32,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
+use beacon_datafusion_ext::type_widening::is_type_conflict;
 use datafusion::common::config::CsvOptions;
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::listing::PartitionedFile;
@@ -254,22 +265,25 @@ async fn file_read_schema(
     file_schema: &SchemaRef,
 ) -> Result<SchemaRef> {
     if !options.has_header.unwrap_or(true) {
-        return Ok(Arc::clone(file_schema));
+        return Ok(positional_schema(file_schema));
     }
 
     let Some(names) = header_names(store, file, options, compression).await? else {
-        return Ok(Arc::clone(file_schema));
+        return Ok(positional_schema(file_schema));
     };
     if !names
         .iter()
         .any(|name| file_schema.field_with_name(name).is_ok())
     {
-        return Ok(Arc::clone(file_schema));
+        return Ok(positional_schema(file_schema));
     }
 
     let fields: Vec<Field> = names
         .iter()
         .map(|name| match file_schema.field_with_name(name) {
+            // A column the merge could not join reads as text. No type parses
+            // every file of it, and the adapter above casts the text.
+            Ok(field) if is_type_conflict(field) => Field::new(name, DataType::Utf8, true),
             // Every column is read as nullable. A file states no null count
             // before it is read, and the merge already widened the type.
             Ok(field) => Field::new(name, field.data_type().clone(), true),
@@ -277,6 +291,29 @@ async fn file_read_schema(
         })
         .collect();
     Ok(Arc::new(Schema::new(fields)))
+}
+
+/// The merged schema, with text for every column the merge could not join.
+///
+/// The positional reading takes this where no header can be matched. The parser
+/// would otherwise read a column into a type that no file of it holds. See the
+/// [module docs](self).
+fn positional_schema(file_schema: &SchemaRef) -> SchemaRef {
+    if !file_schema.fields().iter().any(|f| is_type_conflict(f)) {
+        return Arc::clone(file_schema);
+    }
+    let fields: Vec<Field> = file_schema
+        .fields()
+        .iter()
+        .map(|field| {
+            if is_type_conflict(field) {
+                Field::new(field.name(), DataType::Utf8, true)
+            } else {
+                field.as_ref().clone()
+            }
+        })
+        .collect();
+    Arc::new(Schema::new(fields))
 }
 
 /// The column names the first record of `file` holds, or `None` when it names

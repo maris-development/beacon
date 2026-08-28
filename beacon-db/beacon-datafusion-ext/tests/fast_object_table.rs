@@ -677,7 +677,7 @@ async fn the_caller_can_name_the_merge_rule() {
             &state,
             Arc::new(ParquetFormat::default()),
             urls.clone(),
-            &DefaultArrowTypeWidening,
+            &DefaultArrowTypeWidening::new(),
         )
         .await
         .unwrap(),
