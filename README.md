@@ -57,7 +57,7 @@ A path in a query is relative to the datasets root. A file at `./datasets/obs/a.
 `obs/a.parquet`. Do not repeat `datasets/`. Do not write an `s3://` scheme.
 
 To use a bucket instead of a directory, set `BEACON_S3_DATASETS=true` and `BEACON_S3_BUCKET`. See
-[Object Storage](https://maris-development.github.io/beacon/docs/2.0.0-rc4/data-sources/object-storage).
+[Object Storage](https://maris-development.github.io/beacon/docs/2.0.0-rc5/data-sources/object-storage).
 
 ## 3. Query it from Python
 
@@ -114,24 +114,24 @@ curl -X POST http://localhost:5001/api/query \
 ```
 
 Both interfaces compile to the same plan. See the
-[JSON Query DSL](https://maris-development.github.io/beacon/docs/2.0.0-rc4/api/querying/json).
+[JSON Query DSL](https://maris-development.github.io/beacon/docs/2.0.0-rc5/api/querying/json).
 
 ### Other clients
 
 There is a
-[TypeScript SDK](https://maris-development.github.io/beacon/docs/2.0.0-rc4/connect/typescript), a
-[terminal client](https://maris-development.github.io/beacon/docs/2.0.0-rc4/connect/cli), and an
+[TypeScript SDK](https://maris-development.github.io/beacon/docs/2.0.0-rc5/connect/typescript), a
+[terminal client](https://maris-development.github.io/beacon/docs/2.0.0-rc5/connect/cli), and an
 Arrow Flight SQL endpoint for JDBC and ADBC tools.
 
 ## Next steps
 
 | | |
 | --- | --- |
-| Name your files as tables and views | [Server Setup](https://maris-development.github.io/beacon/docs/2.0.0-rc4/server/) |
-| Set ports, storage and limits | [Configuration](https://maris-development.github.io/beacon/docs/2.0.0-rc4/server/configuration) |
-| Decide who reads what | [Access Control](https://maris-development.github.io/beacon/docs/2.0.0-rc4/security/access-control) |
-| Write queries | [SQL Reference](https://maris-development.github.io/beacon/docs/2.0.0-rc4/sql/) · [REST API](https://maris-development.github.io/beacon/docs/2.0.0-rc4/api/querying/) |
-| Move from an xarray loop | [Coming from xarray](https://maris-development.github.io/beacon/docs/2.0.0-rc4/coming-from-xarray) |
+| Name your files as tables and views | [Server Setup](https://maris-development.github.io/beacon/docs/2.0.0-rc5/server/) |
+| Set ports, storage and limits | [Configuration](https://maris-development.github.io/beacon/docs/2.0.0-rc5/server/configuration) |
+| Decide who reads what | [Access Control](https://maris-development.github.io/beacon/docs/2.0.0-rc5/security/access-control) |
+| Write queries | [SQL Reference](https://maris-development.github.io/beacon/docs/2.0.0-rc5/sql/) · [REST API](https://maris-development.github.io/beacon/docs/2.0.0-rc5/api/querying/) |
+| Move from an xarray loop | [Coming from xarray](https://maris-development.github.io/beacon/docs/2.0.0-rc5/coming-from-xarray) |
 
 Documentation home: <https://maris-development.github.io/beacon/>
 

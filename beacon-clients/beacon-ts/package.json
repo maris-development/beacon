@@ -1,6 +1,6 @@
 {
   "name": "@beacon/client",
-  "version": "2.0.0-rc.4",
+  "version": "2.0.0-rc.5",
   "description": "Isomorphic TypeScript SDK for managing and querying a Beacon instance.",
   "license": "Apache-2.0",
   "repository": {

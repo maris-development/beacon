@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "beacon-datalake-cli"
-version = "2.0.0rc4"
+version = "2.0.0rc5"
 description = "Terminal client for a Beacon server: run SQL, explore tables/datasets, render results, and export to CSV/Parquet/Arrow/NetCDF."
 readme = "README.md"
 requires-python = ">=3.10"
