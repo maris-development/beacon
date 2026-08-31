@@ -6,7 +6,7 @@ description: Give BeaconDB credentials for object stores and remote Beacons as n
 
 Give Beacon the credentials of a cloud object store or a remote Beacon as a named, scoped `SECRET`.
 A secret replaces an environment variable. This page uses the shared
-[`CREATE SECRET`](/docs/2.0.0-rc4/beacondb/sql/secrets) statement. The notes below cover beacondb
+[`CREATE SECRET`](/docs/2.0.0-rc5/beacondb/sql/secrets) statement. The notes below cover beacondb
 only.
 
 ## Object store secrets
@@ -43,7 +43,7 @@ A persistent secret also needs a file-backed database, not `:memory:`.
 ## Remote Beacon secrets
 
 A `TYPE BEACON` secret holds the credentials for
-[`ATTACH`](/docs/2.0.0-rc4/beacondb/python/remote-catalogs):
+[`ATTACH`](/docs/2.0.0-rc5/beacondb/python/remote-catalogs):
 
 ```python
 con.execute("CREATE SECRET lake (TYPE BEACON, USERNAME 'analyst', PASSWORD '…')")  # or TOKEN '…'

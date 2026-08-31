@@ -16,7 +16,7 @@ The wheel is **abi3** (`cp310-abi3`). One wheel per platform therefore covers CP
 Beacon publishes wheels for Linux glibc (`x86_64`, `aarch64`), macOS (`arm64`, `x86_64`) and Windows
 (`x64`). There is **no wheel for Alpine or musl**. There, pip uses the source distribution and
 compiles the engine. See
-[platform support](/docs/2.0.0-rc4/beacondb/python/#platform-support).
+[platform support](/docs/2.0.0-rc5/beacondb/python/#platform-support).
 
 ## Open a database and query
 
@@ -67,7 +67,7 @@ con.whoami()
 # {'username': 'local', 'roles': [], 'is_super_user': True, 'auth': False}
 ```
 
-Pass `auth=True` to switch on the [RBAC](/docs/2.0.0-rc4/security/access-control) of Beacon. A
+Pass `auth=True` to switch on the [RBAC](/docs/2.0.0-rc5/security/access-control) of Beacon. A
 session then starts as the anonymous, read-only principal. It stays that way until you give
 credentials:
 
@@ -95,6 +95,6 @@ and `CREATE SECRET`. `SELECT` and `SHOW …` still work.
 
 ## Next
 
-- [Querying](/docs/2.0.0-rc4/beacondb/python/querying): the lazy relation, the readers and the file sinks.
-- [Bring data in](/docs/2.0.0-rc4/beacondb/python/data-in): `register()` and `append()`.
-- The full [SQL reference](/docs/2.0.0-rc4/beacondb/sql/) applies without a change.
+- [Querying](/docs/2.0.0-rc5/beacondb/python/querying): the lazy relation, the readers and the file sinks.
+- [Bring data in](/docs/2.0.0-rc5/beacondb/python/data-in): `register()` and `append()`.
+- The full [SQL reference](/docs/2.0.0-rc5/beacondb/sql/) applies without a change.

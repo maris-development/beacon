@@ -2,7 +2,7 @@
 
 ## Try it now: the World Ocean Database node
 
-<!-- PUBLIC NODE URL: also in .vitepress/theme/components/HeroQuery.vue and docs/2.0.0-rc4/quickstart.md. -->
+<!-- PUBLIC NODE URL: also in .vitepress/theme/components/HeroQuery.vue and docs/2.0.0-rc5/quickstart.md. -->
 
 One node is **open to everyone**. It needs no account and no token:
 
@@ -24,7 +24,7 @@ curl -X POST https://beacon-wod.maris.nl/api/query \
 | `temperature`, `salinity`, `oxygen` | float |
 
 Reads are anonymous and rate-limited. See the
-[Quick Start](/docs/2.0.0-rc4/quickstart#query-a-public-node) for the Python client.
+[Quick Start](/docs/2.0.0-rc5/quickstart#query-a-public-node) for the Python client.
 
 ## The Blue-Cloud and FAIR-EASE nodes
 

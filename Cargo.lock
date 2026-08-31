@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-bbf"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1413,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-csv"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-geoparquet"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-hdf5"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-ipc"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-netcdf"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-odv"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-parquet"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-tiff"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-zarr"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-auth"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-core"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-datafusion-ext"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1811,7 +1811,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-db-py"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-delta"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-file-stats"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-functions"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "beacon-arrow-bbf",
@@ -1914,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-iceberg"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1937,7 +1937,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-icechunk"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1959,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-lance"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1986,7 +1986,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-mcp"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-array"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2031,7 +2031,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-arrow"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2052,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-redb-store"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "async-trait",
  "bincode",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-server"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2116,7 +2116,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-server-config"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "base64",
  "beacon-arrow-bbf",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-sql-databases"
-version = "2.0.0-rc.4"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",

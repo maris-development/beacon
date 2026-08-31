@@ -100,7 +100,7 @@ A sink writes to a local path only. A `scheme://` destination raises `NotSupport
 con.sql("SUMMARIZE read_parquet('obs/*.parquet')").df()
 ```
 
-See [SUMMARIZE](/docs/2.0.0-rc4/beacondb/sql/summarize).
+See [SUMMARIZE](/docs/2.0.0-rc5/beacondb/sql/summarize).
 
 ## Beyond SQL
 
