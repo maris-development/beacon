@@ -79,7 +79,7 @@ There are clients for [TypeScript](/docs/2.0.0-rc5/connect/typescript), the
 You do not need your own node to try the SQL. `beacon-wod.maris.nl` is open to everyone, with no
 account and no token:
 
-<!-- PUBLIC NODE URL: also in .vitepress/theme/components/HeroQuery.vue and below on this page. -->
+<!-- PUBLIC NODE URL: also in available-nodes/available-nodes.md and below on this page. -->
 
 ```python
 from beacon_api import Client

@@ -1,8 +1,4 @@
 :root {
-    --vp-home-hero-name-color: transparent;
-    --vp-home-hero-name-background: linear-gradient(270deg, #ff512f, #dd2476, #24c6dc);
-    --vp-home-hero-name-background-clip: text;
-
     /* Lucide icon masks for doc callouts (see custom-block styling below) */
     --icon-info: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20%3E%20%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%2210%22%20%2F%3E%20%3Cpath%20d%3D%22M12%2016v-4%22%20%2F%3E%20%3Cpath%20d%3D%22M12%208h.01%22%20%2F%3E%20%3C%2Fsvg%3E");
     --icon-tip: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20%3E%20%3Cpath%20d%3D%22M15%2014c.2-1%20.7-1.7%201.5-2.5%201-.9%201.5-2.2%201.5-3.5A6%206%200%200%200%206%208c0%201%20.2%202.2%201.5%203.5.7.7%201.3%201.5%201.5%202.5%22%20%2F%3E%20%3Cpath%20d%3D%22M9%2018h6%22%20%2F%3E%20%3Cpath%20d%3D%22M10%2022h4%22%20%2F%3E%20%3C%2Fsvg%3E");
@@ -24,255 +20,203 @@
     --vp-c-brand-3: var(--vp-c-deep-iris-3); */
 }
 
-@keyframes gradientMove {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
+
+/* ============================================================
+   Home page header (docs/index.md)
+   Not a band any more: an accent rule, larger type and room to
+   breathe. It keeps the brand edge the old hero had, without a
+   box drawn around the overview diagram below it.
+   ============================================================ */
+.vp-doc .dhead {
+  margin: 2.5rem 0 3.25rem;
+  padding: 0.3rem 0 0.3rem 1.35rem;
+  border-left: 3px solid var(--vp-c-brand-1);
 }
 
-/* ===== hero backdrop stacking ===== */
-.VPHome { position: relative; }
-.VPHome .VPHero,
-.VPHome .home-hero-badges {
-  position: relative;
-  z-index: 1;
-}
-
-/* ===== scroll-reveal (hidden state added by JS only -> no-JS safe) ===== */
-.reveal {
-  opacity: 0;
-  transform: translateY(26px);
-  transition: opacity 0.6s ease, transform 0.6s ease;
-  will-change: opacity, transform;
-}
-.reveal.in-view {
-  opacity: 1;
-  transform: none;
-}
-/* blocks already on screen at landing cascade in (one-shot, JS-added) */
-.land-in {
-  animation: hero-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) backwards;
-}
-@media (prefers-reduced-motion: reduce) {
-  .reveal { opacity: 1; transform: none; transition: none; }
-  .land-in { animation: none; }
-}
-
-/* ===== feature card hover lift / glow ===== */
-.VPFeature {
-  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
-}
-.VPFeature:hover {
-  transform: translateY(-4px);
-  border-color: color-mix(in srgb, var(--vp-c-brand-1) 55%, var(--vp-c-divider));
-  box-shadow:
-    0 14px 32px rgba(0, 0, 0, 0.10),
-    0 0 0 1px color-mix(in srgb, var(--vp-c-brand-1) 20%, transparent);
-}
-
-/* Make the VitePress home hero screenshot larger */
-.VPHero.has-image .container {
-  max-width: 1180px;
-  align-items: center;
-}
-
-.VPHero.has-image .main {
-  max-width: 520px;
-  align-content: center;
-}
-
-.VPHero.has-image .image {
-  flex-grow: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.vp-doc .dhead h1 {
   margin: 0;
-}
-
-.VPHero.has-image .image-container {
-  width: 620px;
-  height: auto;
-  transform: none;
-}
-
-.VPHero.has-image .image-bg {
-  display: none;
-}
-
-.VPHero.has-image .image-src {
-  position: static;
-  width: 620px;
-  max-width: 100%;
-  max-height: none;
-  transform: none;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 8px;
-  box-shadow:
-    0 24px 70px rgba(0, 0, 0, 0.16),
-    0 8px 24px rgba(0, 0, 0, 0.08);
-}
-
-/* .VPHero {
-    justify-content: center;
-    text-align: center;
-}
-
-.actions {
-    justify-content: center;
-}
-
-.heading {
-    display: grid !important;
-    justify-items: center;
-}  */
-
-.heading .name {
-    font-size: 72px;
-    line-height: 82px;
-    background-size: 300% 300%;
-    animation: gradientMove 4s ease infinite;
-}
-
-/* ===== hero entrance on load (one-shot, staggered) =====
-   No-JS safe via `backwards` fill; the name keeps its gradient shimmer because
-   we animate the parent .heading, not the .name itself. */
-.VPHome .VPHero .heading,
-.VPHome .VPHero .tagline,
-.VPHome .VPHero .actions,
-.VPHome .VPHero .image {
-  animation: hero-in 0.65s cubic-bezier(0.22, 1, 0.36, 1) backwards;
-}
-.VPHome .VPHero .heading { animation-delay: 0.05s; }
-.VPHome .VPHero .image   { animation-delay: 0.18s; }
-.VPHome .VPHero .tagline { animation-delay: 0.22s; }
-.VPHome .VPHero .actions { animation-delay: 0.34s; }
-
-@keyframes hero-in {
-  from { opacity: 0; transform: translateY(18px); }
-  to   { opacity: 1; transform: none; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .VPHome .VPHero .heading,
-  .VPHome .VPHero .tagline,
-  .VPHome .VPHero .actions,
-  .VPHome .VPHero .image { animation: none; }
-}
-.format-badges-wrap {
-  margin: 1.75rem auto 3rem;
-  margin-top: 0;
-  margin-bottom: 5rem;
-  max-width: 760px;
-  text-align: center;
-}
-
-.format-badges-label {
-  margin: 0 0 0.75rem;
-  color: var(--vp-c-text-3);
-  font-size: 0.78rem;
+  padding: 0;
+  border-top: 0;
+  font-size: 2.6rem;
   font-weight: 700;
-  letter-spacing: 0.08em;
-  line-height: 1;
-  text-transform: uppercase;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
 }
 
-.format-badges {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.55rem;
-}
-
-.format-badges span {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 999px;
-  padding: 0.35rem 0.75rem;
-  background: var(--vp-c-bg-soft);
+.vp-doc .dhead > p {
+  margin: 0.8rem 0 0;
+  max-width: 44rem;
   color: var(--vp-c-text-2);
-  font-size: 0.85rem;
+  font-size: 1.12rem;
+  line-height: 1.6;
+}
+
+@media (max-width: 640px) {
+  .vp-doc .dhead { margin: 1.75rem 0 2.5rem; padding-left: 1rem; }
+  .vp-doc .dhead h1 { font-size: 1.95rem; }
+  .vp-doc .dhead > p { font-size: 1rem; }
+}
+
+/* ============================================================
+   Home page card grids (docs/index.md)
+   One idiom for both grids: the version router and the task list.
+   The page is plain markdown inside `vp-doc`, so these rules also
+   undo the link styling `vp-doc a` would otherwise apply.
+   ============================================================ */
+.vp-doc .dgrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin: 1.25rem 0 0;
+}
+
+.vp-doc .dcard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  background: var(--vp-c-bg-soft);
+  font-weight: 400;
+  text-decoration: none;
+  transition: border-color 0.25s ease, background-color 0.25s ease,
+              transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.vp-doc .dcard:hover {
+  border-color: var(--vp-c-brand-1);
+  background: var(--vp-c-bg-elv);
+  transform: translateY(-3px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.10);
+}
+
+.vp-doc .dcard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.vp-doc .dcard-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  margin-bottom: 0.15rem;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-brand-1);
+}
+
+.vp-doc .dcard-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.vp-doc .dcard:hover .dcard-icon {
+  border-color: var(--vp-c-brand-1);
+}
+
+.vp-doc .dcard-title {
+  color: var(--vp-c-text-1);
+  font-size: 1rem;
   font-weight: 600;
-  line-height: 1;
+  line-height: 1.3;
 }
 
-.home-hero-badges {
-  margin: 1.75rem auto 3.25rem;
-  max-width: 1000px;
-  padding: 0 1.5rem;
-  text-align: center;
+.vp-doc .dcard-title.mono {
+  font-family: var(--vp-font-family-mono);
+  letter-spacing: -0.01em;
 }
 
-/* Primary row: supported formats */
-
-.format-badges-wrap {
-  margin: 0 auto;
-}
-
-.format-badges-label {
-  margin: 0 0 0.75rem;
-  color: var(--vp-c-text-3);
-  font-size: 0.72rem;
+.vp-doc .dcard-tag {
+  flex: none;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 4px;
+  padding: 0.12rem 0.4rem;
+  color: var(--vp-c-text-2);
+  font-size: 0.68rem;
   font-weight: 700;
-  letter-spacing: 0.11em;
-  line-height: 1;
+  letter-spacing: 0.06em;
+  line-height: 1.4;
   text-transform: uppercase;
 }
 
-.format-badges {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.55rem;
-}
-
-.format-badges span {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 28%, var(--vp-c-divider));
-  border-radius: 999px;
-  padding: 0.35rem 0.78rem;
-  background: color-mix(in srgb, var(--vp-c-brand-soft) 62%, transparent);
-  color: var(--vp-c-brand-1);
-  font-size: 0.84rem;
-  font-weight: 650;
-  line-height: 1;
-}
-
-.format-badges span:hover {
+/* Marks the version `theme/version.js` calls LATEST_VERSION. */
+.vp-doc .dcard-tag.is-stable {
   border-color: var(--vp-c-brand-1);
-  background: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
 }
 
-.integration-strip {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  align-items: center;
-  column-gap: 0.6rem;
-  row-gap: 0.35rem;
-  margin-top: 1.25rem;
-  color: var(--vp-c-text-3);
-  font-size: 0.82rem;
+.vp-doc .dcard-body {
+  flex: 1 1 auto;
+  color: var(--vp-c-text-2);
+  font-size: 0.9rem;
   line-height: 1.5;
 }
 
-.integration-strip-label {
-  color: var(--vp-c-text-2);
-  font-weight: 700;
+/* The button inside a version card. It is a <span>, not a link: the whole
+   card is already one <a>, and an <a> may not hold another. */
+.vp-doc .dcard-cta {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.9rem;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  padding: 0.4rem 0.85rem;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.2;
+  transition: border-color 0.25s ease, background-color 0.25s ease, color 0.25s ease;
 }
 
-.integration-strip-item {
-  position: relative;
-  color: var(--vp-c-text-3);
-  font-weight: 500;
+.vp-doc .dcard-cta svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.25s ease;
 }
 
-.integration-strip-item:not(:last-child)::after {
-  content: "·";
-  margin-left: 0.6rem;
-  color: var(--vp-c-divider);
+.vp-doc .dcard:hover .dcard-cta {
+  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-brand-1);
 }
+
+.vp-doc .dcard:hover .dcard-cta svg {
+  transform: translateX(3px);
+}
+
+/* The version the rest of this page links to. */
+.vp-doc .dcard-cta.is-primary {
+  border-color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-1);
+  color: var(--vp-c-bg);
+}
+
+.vp-doc .dcard:hover .dcard-cta.is-primary {
+  border-color: var(--vp-c-brand-2);
+  background: var(--vp-c-brand-2);
+  color: var(--vp-c-bg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vp-doc .dcard,
+  .vp-doc .dcard-cta,
+  .vp-doc .dcard-cta svg { transition: none; }
+  .vp-doc .dcard:hover { transform: none; box-shadow: none; }
+  .vp-doc .dcard:hover .dcard-cta svg { transform: none; }
+}
+
+@media (max-width: 860px) {
+  .vp-doc .dgrid { grid-template-columns: 1fr; }
+}
+
 
 /* ============================================================
    Documentation (doc layout) — visual polish

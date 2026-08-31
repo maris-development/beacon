@@ -1,52 +1,97 @@
 ---
+# The documentation entry point, and the whole page: no theme slots, and one
+# shared component. `layout: home` with neither `hero:` nor `features:` renders
+# only the markdown below, inside the same `vp-doc` container every documentation
+# page uses, so this page reads in the type and spacing of the rest of the site.
+#
+# The product story lives on beacon-datalake.org, which links straight into
+# /docs/latest. Keep this page navigational and let that site do the pitch.
+#
+# Raw HTML is not base-rewritten by VitePress (only markdown links are), so
+# every `href` here is relative. It resolves against `base` on its own.
+#
+# <SystemDiagram /> is the same component the 2.0 introduction page uses under
+# "How it fits together". It is registered globally in .vitepress/theme/index.js
+# and takes no props, so both pages show one overview and there is one copy of it.
+#
+# The copy follows ASD-STE100, like the rest of the 2.0 documentation: active
+# voice, simple present, one thought per sentence, no em-dashes, and one word
+# for one meaning. "Server" is the thing you run. Do not write "node" for it.
 layout: home
-
-hero:
-  name: "Beacon"
-  text: "Query millions of files with one SQL statement"
-  tagline: "Beacon is a data lake query engine for scientific data. One node serves your whole community over SQL, reading NetCDF, Zarr, Parquet and other formats where the files already are. No download. No conversion. No ETL."
-  image:
-    src: /hero.png
-    alt: Beacon
-  actions:
-    - theme: brand
-      text: Get Started
-      # Points at 2.0.0-rc5, not the 1.8.0 stable tree. 2.0 is the release that
-      # drops the two-product split, so the 1.8.0 pages contradict this page:
-      # they still describe "Beacon Data Lake" and know nothing of the current
-      # naming. The pre-release banner on those pages carries the caveat.
-      # Revisit when 2.0.0 goes GA and LATEST_VERSION moves (theme/version.js).
-      link: /docs/2.0.0-rc5/quickstart
-    # Was "Explore Public Nodes", pointing at a page whose first line said the
-    # nodes were not public. beacon-wod.maris.nl is genuinely open, so this now
-    # lands on the section that queries it.
-    - theme: alt
-      text: Query a live node
-      link: /available-nodes/available-nodes
-
-features:
-  - title: Any data shape, gridded or ragged
-    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></svg>'
-    details: Argo floats, CTD casts, gliders and moorings give ragged profiles, one schema per file and hundreds of thousands of files. Beacon reads that shape directly.
-
-  - title: Filters skip whole files
-    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>'
-    details: Beacon keeps per-file statistics for your archive. A filter on time, depth or position drops files before Beacon opens any array. Large archives stay fast.
-
-  - title: One node, every client
-    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>'
-    details: Stand up one server over your archive and let notebooks, portals, dashboards and BI tools query it concurrently over HTTP or Arrow Flight SQL. Role-based grants decide who reads what.
-
-  - title: Query across institutions
-    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M4.93 19.07a10 10 0 0 1 0-14.14"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M7.76 16.24a6 6 0 0 1 0-8.48"/><path d="M16.24 7.76a6 6 0 0 1 0 8.48"/></svg>'
-    details: ATTACH another node and join its tables against your own in one statement. One query reaches EMODnet and the World Ocean Database, and neither side moves its data.
-
-  - title: Reads your existing formats
-    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>'
-    details: NetCDF, Zarr, Parquet, GeoParquet, CSV, ODV, HDF5, Arrow, GeoTIFF, Delta and BBF. Beacon reads each one in place, on local disk or in S3.
-
-  - title: Open source and self-hosted
-    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.414 14.414C21 12.828 22 11.5 22 9.5a5.5 5.5 0 0 0-9.591-3.676.6.6 0 0 1-.818.001A5.5 5.5 0 0 0 2 9.5c0 2.3 1.5 4 3 5.5l5.535 5.362a2 2 0 0 0 2.879.052 2.12 2.12 0 0 0-.004-3 2.124 2.124 0 1 0 3-3 2.124 2.124 0 0 0 3.004 0 2 2 0 0 0 0-2.828l-1.881-1.882a2.41 2.41 0 0 0-3.409 0l-1.71 1.71a2 2 0 0 1-2.828 0 2 2 0 0 1 0-2.828l2.823-2.762"/></svg>'
-    details: Beacon is AGPL-3.0, and the clients are Apache-2.0. Run it on your own hardware or your own cloud. Your data never leaves your control.
-
+title: Documentation
+description: Beacon documentation. Point a server at your archive. Connect a client. Write queries. Read every version, format and setting.
 ---
+
+<div class="dhead">
+
+# Beacon documentation
+
+Point a server at your archive. Connect a client. Write queries.
+
+</div>
+
+<SystemDiagram />
+
+## Choose a version
+
+<div class="dgrid">
+  <a class="dcard" href="docs/2.0.0-rc5/introduction">
+    <span class="dcard-head">
+      <span class="dcard-title mono">2.0.0-rc5</span>
+      <span class="dcard-tag">Pre-release</span>
+    </span>
+    <span class="dcard-body">This is the upcoming 2.0 version release.</span>
+    <span class="dcard-cta is-primary">Read the docs <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
+  </a>
+  <a class="dcard" href="docs/1.8.0/introduction">
+    <span class="dcard-head">
+      <span class="dcard-title mono">1.8.0</span>
+      <span class="dcard-tag is-stable">Stable</span>
+    </span>
+    <span class="dcard-body">Read this for a 1.8.0 server.</span>
+    <span class="dcard-cta">Read the docs <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
+  </a>
+  <a class="dcard" href="docs/1.7.3/introduction">
+    <span class="dcard-head">
+      <span class="dcard-title mono">1.7.3</span>
+      <span class="dcard-tag">Older</span>
+    </span>
+    <span class="dcard-body">Read this for a 1.7.3 server.</span>
+    <span class="dcard-cta">Read the docs <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
+  </a>
+</div>
+
+## Common tasks
+
+<div class="dgrid">
+  <a class="dcard" href="docs/2.0.0-rc5/getting-started">
+    <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg></span>
+    <span class="dcard-title">Deploy a server</span>
+    <span class="dcard-body">Point Beacon at a directory or a bucket. Set the ports, the storage and the limits.</span>
+  </a>
+  <a class="dcard" href="docs/2.0.0-rc5/connect/python">
+    <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/><path d="M4 4v16"/><path d="M20 4v16"/></svg></span>
+    <span class="dcard-title">Connect a client</span>
+    <span class="dcard-body">Use Python, TypeScript or the terminal client. DataGrip and DBeaver use Arrow Flight SQL.</span>
+  </a>
+  <a class="dcard" href="docs/2.0.0-rc5/sql/">
+    <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg></span>
+    <span class="dcard-title">Write SQL</span>
+    <span class="dcard-body">Query your files with SELECT, JOIN and UNION BY NAME. Beacon adds 123 spatial functions.</span>
+  </a>
+  <a class="dcard" href="docs/2.0.0-rc5/api/">
+    <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
+    <span class="dcard-title">Call the API</span>
+    <span class="dcard-body">One endpoint accepts SQL or a JSON query. It answers in Arrow, Parquet, CSV, NetCDF or ODV.</span>
+  </a>
+  <a class="dcard" href="docs/2.0.0-rc5/formats/">
+    <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg></span>
+    <span class="dcard-title">Read your formats</span>
+    <span class="dcard-body">Beacon reads NetCDF, Zarr, Parquet, GeoParquet, CSV, ODV, HDF5, Arrow, GeoTIFF, Iceberg, Delta and BBF.</span>
+  </a>
+  <a class="dcard" href="docs/2.0.0-rc5/server/configuration">
+    <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></span>
+    <span class="dcard-title">Tune and fix</span>
+    <span class="dcard-body">Set every BEACON_* variable. Find the answer for a common error.</span>
+  </a>
+</div>
