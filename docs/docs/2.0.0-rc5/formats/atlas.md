@@ -1,5 +1,5 @@
 ---
-description: Read Atlas array stores with read_atlas(). Dataset pruning with statistics makes range queries over large collections fast.
+description: Read Atlas collections with read_atlas(). One file holds thousands of datasets, and their statistics let a range query skip whole datasets before it reads them.
 ---
 
 # Atlas
@@ -11,20 +11,19 @@ read_atlas(glob_paths)
 read_atlas(glob_paths, dimensions)
 ```
 
-Beacon reads the [Atlas](/docs/2.0.0-rc5/formats/atlas) array stores that match
-one or more glob patterns. Each path must point at an `atlas.json` marker file. Give an exact path
-or a glob such as `**/atlas.json`.
+Beacon reads the [Atlas](https://github.com/maris-development/atlas) collections that match one or
+more glob patterns. A collection is one file, `data.atlas`, so a path names that file. Give an
+exact path or a glob such as `**/data.atlas`.
 
-The optional `dimensions` argument selects the arrays with the listed dimension names. Atlas holds
-statistics for each column. Beacon drops whole datasets with those statistics. A range query over a
-large collection therefore reads only the datasets that can match the predicate.
+The optional `dimensions` argument keeps the arrays whose dimensions are all in the list. Use it to
+drop the wide grids of a collection and keep its coordinates.
 
 ```sql
-SELECT * FROM read_atlas('collections/sensor/atlas.json')
+SELECT * FROM read_atlas('collections/sensor/data.atlas')
 
--- Combine every Atlas store under a prefix, keeping a subset of dimensions
+-- Combine every collection under a prefix, keeping a subset of dimensions
 SELECT time, temperature
-FROM read_atlas(['collections/**/atlas.json'], ['time', 'latitude', 'longitude'])
+FROM read_atlas(['collections/**/data.atlas'], ['time', 'latitude', 'longitude'])
 WHERE time >= '2024-01-01'
 ```
 
@@ -33,7 +32,7 @@ WHERE time >= '2024-01-01'
 Check the columns and the types before you write a query:
 
 ```sql
-SELECT * FROM read_atlas('collections/sensor/atlas.json') LIMIT 0;
+SELECT * FROM read_atlas('collections/sensor/data.atlas') LIMIT 0;
 ```
 
 [Inspect a schema](/docs/2.0.0-rc5/formats/inspect-a-schema) compares the `_schema` functions,
@@ -41,59 +40,110 @@ SELECT * FROM read_atlas('collections/sensor/atlas.json') LIMIT 0;
 
 ## Format details
 
-[Atlas](https://github.com/maris-development/atlas) is an array store in a directory. It gives fast
-analytical access to multi-dimensional scientific data. Atlas is a file format, like Parquet or
-Zarr. Put an Atlas store in the datasets folder. Beacon then finds it and queries it automatically.
-You register nothing. An Atlas store is a directory with one `atlas.json` registry. The registry
-describes one or more named datasets. Each dataset holds its own arrays.
+Atlas keeps thousands of N-dimensional datasets in one immutable file. A dataset holds what a
+NetCDF file holds: named arrays that share dimensions, plus attributes. A collection holds many:
 
-What it does:
-
-- **Dataset pruning with statistics.** Atlas keeps statistics for each dataset and each column. A
-  query with a predicate, for example a time or latitude range, drops the datasets that cannot
-  match. Beacon drops them *before it reads any array data*. A range query over a large collection
-  therefore touches only the relevant data.
-- **Column projection.** Beacon reads only the arrays that a query names. The I/O stays proportional
-  to the selected columns.
-- **Compact, self-describing layout.** Atlas compresses the arrays with zstd. Beacon opens the
-  `atlas.json` registry once and caches it for the life of the process. It therefore parses the
-  metadata only once.
-- **Object storage support.** An Atlas store lives on local disk or on S3-compatible object storage.
-
-Query an Atlas store with the
-[`read_atlas()`](/docs/2.0.0-rc5/sql/table-functions#read-atlas) table function. Point at
-the `atlas.json` marker file. Give an exact path or a glob such as `**/atlas.json`. The optional
-second argument selects the arrays with the listed dimensions.
-
-```sql
-SELECT * FROM read_atlas(['collections/sensor/atlas.json'])
+```text
+my_collection/
+├── data.atlas      the container: every dataset, then a footer describing them all
+└── deleted.mask    optional: the datasets a delete has hidden
 ```
 
-### External tables over Atlas
+Two properties follow, and they are the point of the format:
 
-For a stable table name, register the store as an
-[external table](/docs/2.0.0-rc5/data-sources/external-tables#atlas). Point the `LOCATION`
-at the `atlas.json` marker, as with Zarr. A glob over several markers also works:
+- **Metadata is one read.** Opening a collection reads its footer and nothing else. Listing the
+  datasets, inspecting a schema and reading an attribute are then free. Ten datasets and a million
+  cost the same.
+- **Data arrives chunk by chunk.** Reading a region of an array fetches only the chunks that region
+  overlaps.
+
+What Beacon does with that:
+
+- **Dataset pruning from the footer.** Every array records its minimum, its maximum and its null
+  count. A query with a predicate — a time or latitude range, say — judges every dataset of a
+  collection in one pass and never opens the ones that cannot match. A dataset-level attribute is
+  exact in the footer, so `WHERE ".platform" = 'p3'` prunes on it too.
+- **One dataset is one unit of work.** A collection's datasets are spread across every core, and a
+  worker takes the next one when it is free, so a collection of a million small datasets and one of
+  four large ones both divide evenly.
+- **Column projection.** Only the arrays a query names get read, and only their attributes are
+  taken from the footer.
+- **Object storage.** A collection reads from local disk, S3, GCS, Azure and HTTP alike.
+
+### Columns
+
+| Atlas | Column |
+| --- | --- |
+| array `temperature` | `temperature` |
+| attribute `units` of `temperature` | `temperature.units` |
+| dataset attribute `platform` | `.platform` |
+
+The leading dot on a dataset attribute is what NetCDF and Zarr use too, and it keeps an attribute
+from colliding with an array of the same name. Quote such a column: `SELECT ".platform"`.
 
 ```sql
-CREATE EXTERNAL TABLE sensor_atlas
-STORED AS ATLAS
-LOCATION 'collections/sensor/atlas.json';
-
-SELECT time, temperature
-FROM sensor_atlas
-WHERE time >= '2024-01-01';
+SELECT temperature, "temperature.units", ".platform"
+FROM read_atlas('collections/sensor/data.atlas')
+LIMIT 1
 ```
+
+### Types and decoding
+
+Atlas stores its own types, including a native nanosecond timestamp, so **Beacon applies no CF
+decoding to a collection**. The ingest path does it instead: `atlas create` reads each NetCDF file
+with xarray, which applies `scale_factor`, `add_offset` and the CF time units before the write. An
+array therefore reads back exactly as it is stored. This is the one place Atlas differs from
+[NetCDF](/docs/2.0.0-rc5/formats/netcdf) and [Zarr](/docs/2.0.0-rc5/formats/zarr) — see
+[CF decoding](/docs/2.0.0-rc5/cf-decoding).
+
+A cell nobody wrote reads as the array's fill value, and the fill reads as null. Two consequences
+are worth knowing:
+
+- A float array ingested from NetCDF carries a `NaN` fill, and `NaN` never equals itself, so a
+  `NaN` cell reads as `NaN` rather than as null. That is the same rule every Beacon format follows.
+- A string array carries an empty-string fill, so an empty string reads as null. The ingest cannot
+  store a null string, so this mirrors what was written.
+
+Not readable as columns: a `Bool` array, a `List` or `FixedSizeList` array, and a list-valued
+attribute. Each is dropped from the schema rather than failing the query.
+
+### Two datasets that disagree
+
+Atlas reconciles nothing: two datasets may declare one array name with two types. Beacon merges
+them the way it merges the files of any other format. Two numeric types widen to one that holds
+both. Two different families — a number and a string — refuse the table by name:
+
+```text
+Incompatible types for field 'value': Utf8 in 'obs/data.atlas#a' vs Int64 in 'obs/data.atlas#b'
+```
+
+Set `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first` to take the first dataset's type instead. See
+[Configuration](/docs/2.0.0-rc5/server/configuration#query-engine).
+
+### Building a collection
+
+`pip install atlas-python` gives the `atlas` command. Point it at a directory of NetCDF files:
+
+```bash
+atlas create /data/argo /collections/argo
+```
+
+That writes `/collections/argo/data.atlas`, one dataset per file, named after the file. It works
+against a local path and against a bucket. See the
+[Atlas documentation](https://github.com/maris-development/atlas).
+
+:::warning Collections written before Atlas 0.16
+Atlas used to be a directory of per-array files behind an `atlas.json` registry. Beacon reads the
+single-file format only, so such a directory is passed over rather than read. Rewrite it with
+`atlas create`, then point at the `data.atlas` it produces.
+:::
 
 ### Optimize NetCDF and Zarr with Atlas
 
 Do you query a large NetCDF or Zarr collection often? Then convert the source files into one Atlas
-collection. Atlas merges many files into one store with statistics. Beacon can then drop whole
-datasets with the column statistics. It reads only the arrays that you select. A spatial or time
-range query is therefore much faster than a scan of the original files.
-
-The [Atlas repository](https://github.com/maris-development/atlas) documents the store format. It
-also holds the tools that build an Atlas collection.
+collection. Atlas merges many files into one container with statistics, so Beacon drops whole
+datasets before it reads an array. A spatial or time range query is therefore much faster than a
+scan of the original files.
 
 :::tip
 Cache a large, repeated aggregation with a
@@ -103,24 +153,43 @@ collection and over any other table. Run `REFRESH` when the source data changes.
 
 ## As an external table
 
-An Atlas table points at the `atlas.json` marker file, not at a folder. This is the same as Zarr:
+An Atlas table points at the `data.atlas` file itself, not at the folder around it:
 
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas
 STORED AS ATLAS
-LOCATION 'collections/sensor/atlas.json'
+LOCATION 'collections/sensor/data.atlas'
 ```
 
-Use a glob over the markers to put several Atlas stores in one table:
+Use a glob to put several collections in one table:
 
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas
 STORED AS ATLAS
-LOCATION 'collections/*/atlas.json'
+LOCATION 'collections/*/data.atlas'
 ```
 
-See [Atlas](/docs/2.0.0-rc5/formats/atlas) for the format details. That page
-also explains how Atlas speeds up NetCDF and Zarr work.
+See [Create External Tables](/docs/2.0.0-rc5/data-sources/external-tables) for the full DDL. See
+[Data Sources](/docs/2.0.0-rc5/data-sources/) for the full read model.
 
-See [Create External Tables](/docs/2.0.0-rc5/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc5/data-sources/) for the
-full read model.
+### `OPTIONS`
+
+`STORED AS ATLAS` reads four keys:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `read_dimensions` | List of dimension names | The default grid of each dataset | The dimensions the table reads. An array survives only when the list holds every one of its own. |
+| `use_pruning` | Boolean | `true` (`BEACON_ATLAS_USE_PRUNING`) | Drop the datasets a predicate rules out before reading them. Turning it off only costs speed: pruning never changes an answer. |
+| `use_reader_cache` | Boolean | `true` (`BEACON_ATLAS_USE_READER_CACHE`) | Reuse an opened collection across queries. |
+| `enable_statistics` | Boolean | `true` (`BEACON_ATLAS_ENABLE_STATISTICS`) | Whether `ANALYZE FILES` records this collection's column ranges. A query never measures a collection, so this affects the analyzer alone. |
+
+```sql
+CREATE EXTERNAL TABLE sensor_atlas
+STORED AS ATLAS
+LOCATION 'collections/*/data.atlas'
+OPTIONS ('read_dimensions' 'time,lat,lon')
+```
+
+See [`OPTIONS`](/docs/2.0.0-rc5/sql/create-external-table#options) for the rules that hold for every
+key. See [Arrays to tables](/docs/2.0.0-rc5/arrays-to-tables#the-dimensions-argument) for the grid
+rule.

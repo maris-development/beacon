@@ -46,7 +46,7 @@ CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
 | `NC` | `.nc` | [NetCDF](/docs/2.0.0-rc5/formats/netcdf) |
 | `HDF5`, `H5` | `.h5`, `.hdf5` | [HDF5](/docs/2.0.0-rc5/formats/hdf5) |
 | `ZARR` | Zarr v3 (`zarr.json`) | [Zarr](/docs/2.0.0-rc5/formats/zarr) |
-| `ATLAS` | Atlas array store (`atlas.json`) | [Atlas](/docs/2.0.0-rc5/formats/atlas) |
+| `ATLAS` | Atlas collection (`data.atlas`) | [Atlas](/docs/2.0.0-rc5/formats/atlas) |
 | `CSV` | `.csv`, `.tsv` | [CSV](/docs/2.0.0-rc5/formats/csv) |
 | `ARROW` | Arrow IPC (`.arrow`, `.feather`) | [Arrow IPC](/docs/2.0.0-rc5/formats/arrow) |
 | `TIFF` | GeoTIFF / Cloud-Optimized GeoTIFF | [GeoTIFF](/docs/2.0.0-rc5/formats/geotiff) |
@@ -69,13 +69,13 @@ federate a table in an external SQL database. See
 [SQL Databases](/docs/2.0.0-rc5/data-sources/sql-databases). Their `LOCATION` is the remote
 table name. The connection details go in `OPTIONS`, with an encrypted `password`.
 
-A Zarr table must point at a `zarr.json` entry file. An Atlas table must point at an `atlas.json`
-marker:
+A Zarr table must point at a `zarr.json` entry file. An Atlas collection is a single file, so an
+Atlas table points at that file:
 
 ```sql
 CREATE EXTERNAL TABLE sst STORED AS ZARR LOCATION 'sst/*/zarr.json'
 
-CREATE EXTERNAL TABLE sensor STORED AS ATLAS LOCATION 'sensor/atlas.json'
+CREATE EXTERNAL TABLE sensor STORED AS ATLAS LOCATION 'sensor/data.atlas'
 ```
 
 `GEOPARQUET` reads Parquet files. Beacon decodes their geometry columns to native GeoArrow. See
@@ -165,6 +165,7 @@ validates it and then reads the server setting alone. See the format page of eac
 | `NC` | `read_dimensions`, `use_rust_reader`, `enable_statistics` | [NetCDF](/docs/2.0.0-rc5/formats/netcdf#options) |
 | `HDF5`, `H5` | `read_dimensions`, `use_rust_reader`, `enable_statistics`, `unify_phony_dimensions`, `convention` | [HDF5](/docs/2.0.0-rc5/formats/hdf5#options) |
 | `ZARR` | `read_dimensions`, `enable_statistics` | [Zarr](/docs/2.0.0-rc5/formats/zarr#options) |
+| `ATLAS` | `read_dimensions`, `use_pruning`, `use_reader_cache`, `enable_statistics` | [Atlas](/docs/2.0.0-rc5/formats/atlas#options) |
 | `CSV` | `delimiter`, `infer_records` | [CSV](/docs/2.0.0-rc5/formats/csv#options) |
 | `BBF` | `split_streams_slice` | [BBF](/docs/2.0.0-rc5/formats/bbf#options) |
 | `DELTA` | `version`, `timestamp` | [Delta Lake](/docs/2.0.0-rc5/formats/delta-lake#options) |

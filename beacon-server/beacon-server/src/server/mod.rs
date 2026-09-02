@@ -278,6 +278,7 @@ async fn build_runtime(
         .with_netcdf_config(config.netcdf.clone())
         .with_hdf5_config(config.hdf5.clone())
         .with_zarr_config(config.zarr.clone())
+        .with_atlas_config(config.atlas.clone())
         .with_sql_settings(SqlSettings {
             default_table: config.sql.default_table.clone(),
             enable_pushdown_projection: config.sql.enable_pushdown_projection,

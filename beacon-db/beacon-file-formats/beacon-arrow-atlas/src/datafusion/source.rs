@@ -1,122 +1,134 @@
-//! DataFusion [`FileSource`]/[`FileOpener`] for atlas stores.
+//! The DataFusion [`FileSource`] and [`FileOpener`] for Atlas collections.
 //!
-//! Each `PartitionedFile` is one atlas store's metadata marker plus a slice of
-//! that store's dataset names (attached as [`AtlasDatasetSlice`] in the file's
-//! `extensions` by [`AtlasFormat::create_physical_plan`](super::AtlasFormat)).
-//! The opener opens the store once over the query's object store and reads only
-//! its assigned datasets — so a store's datasets are spread across DataFusion
-//! partitions and scanned on every core in parallel. Each dataset is built with
-//! just the projected columns and streamed through the shared `beacon-nd-array`
-//! engine (predicate row-masking via [`PushdownFilter`]).
+//! # One dataset is one unit of work
+//!
+//! A plan entry is a *dataset*, not a collection: [`AtlasFormat`] lists each
+//! collection at plan time and emits one [`PartitionedFile`] per dataset, with
+//! the dataset's name in [`PartitionedFile::extensions`]. Every entry carries
+//! the collection's own marker, so the opener knows which container to open and
+//! the reader cache keys on the same object the plan did.
+//!
+//! Those entries go into one [`MorselSource`], and each partition holds a
+//! standing entry pointing at it. A partition takes the next dataset when it is
+//! free, and helps drain an open one when none is left. Balance follows
+//! completion, so a collection of a million small datasets and a collection of
+//! four large ones both divide over every core.
+//!
+//! [`AtlasFormat`]: super::AtlasFormat
 
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::datatypes::SchemaRef;
-use arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use beacon_nd_array::{
-    arrow::{
-        batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
-        pushdown_filter::PushdownFilter, schema::any_dataset_to_arrow_schema,
-    },
-    dataset::resolve_read_dimensions,
-    projection::DatasetProjection,
+use atlas::{Atlas, DatasetView};
+use beacon_nd_array::arrow::{
+    file_read::FileRead,
+    metrics::ReadMetrics,
+    morsel::{MorselSource, OpenFile, morsel_scan},
+    partition::FilePartitions,
 };
-use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
 use datafusion::{
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    physical_expr::{PhysicalExpr, conjunction, projection::ProjectionExprs},
+    error::{DataFusionError, Result},
+    physical_expr::{
+        PhysicalExpr, conjunction, projection::ProjectionExprs, utils::collect_columns,
+    },
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
     },
 };
-use futures::future;
-use futures::{StreamExt, TryStreamExt, stream::BoxStream};
-use object_store::{ObjectMeta, ObjectStore};
+use futures::FutureExt;
+use object_store::ObjectStore;
 
-use crate::datafusion::cache::AtlasReaderCache;
+use crate::compat;
 use crate::datafusion::metrics::AtlasScanMetrics;
-use crate::datafusion::pruning::PruneCache;
+use crate::datafusion::pruning::{CandidateFilter, PruneCache, candidate_filter, logical_schema};
+use crate::reader::{dataset_from_view, project_read_dimensions};
+use crate::store::{AtlasReaderCache, get_or_open_atlas};
 
-/// How many of a partition's datasets the opener reads concurrently. Overlaps
-/// per-dataset I/O and decompression within a partition; cross-partition
-/// parallelism comes from DataFusion running the partitions on separate cores.
-const ATLAS_DATASET_CONCURRENCY: usize = 8;
-
-/// The slice of a store's dataset names assigned to one scan partition.
+/// Which dataset of a collection one plan entry stands for.
 ///
-/// Attached to each [`PartitionedFile::extensions`] by
-/// [`AtlasFormat::create_physical_plan`](super::AtlasFormat). When absent (e.g.
-/// a source built outside the physical plan), the opener falls back to reading
-/// every dataset in the store.
+/// Attached to [`PartitionedFile::extensions`] by
+/// [`AtlasFormat::create_physical_plan`](super::AtlasFormat). The `position` is
+/// the dataset's index in the `list_datasets()` call the plan made, which is
+/// the row a collection-wide pruning index keys on.
 #[derive(Debug, Clone)]
-pub struct AtlasDatasetSlice {
-    pub names: Vec<String>,
+pub struct AtlasEntry {
+    /// The dataset's name, as the collection footer states it.
+    pub dataset: String,
+    /// Its row in the plan-time listing.
+    pub position: usize,
 }
 
-/// DataFusion [`FileSource`] for atlas stores.
+/// DataFusion [`FileSource`] for Atlas collections.
 #[derive(Debug, Clone)]
 pub struct AtlasSource {
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     read_dimensions: Option<Vec<String>>,
-    /// Reader cache to consult for this scan. `None` disables caching.
-    cache: Option<AtlasReaderCache>,
-    /// Whether to prune non-matching datasets before reading them.
-    use_pruning: bool,
-    /// Per-query memo of each store's pruning result, shared across the scan's
-    /// partition openers so a store is pruned once, not once per partition.
-    prune_cache: PruneCache,
-    /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
+    /// The reader cache to consult, or `None` to open every collection afresh.
+    cache: Option<AtlasReaderCache>,
+    /// Whether a predicate scan drops the datasets it can rule out.
+    use_pruning: bool,
+    /// Each collection's pruning result, computed once for this scan and shared
+    /// by every partition's opener.
+    prune_cache: PruneCache,
+    /// The scan's dataset queue, when it is planned morsel-driven. See
+    /// [`morsel_scan`].
+    morsel: Option<Arc<MorselSource>>,
 }
 
 impl AtlasSource {
     pub fn new(read_dimensions: Option<Vec<String>>, table_schema: TableSchema) -> Self {
         Self {
-            schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             batch_size: usize::MAX,
             predicate: None,
             read_dimensions,
+            projection: None,
             cache: None,
             use_pruning: false,
             prune_cache: PruneCache::new(),
-            projection: None,
+            morsel: None,
         }
     }
 
-    /// Returns a copy of this source that consults `cache` (when `Some`) for
-    /// opened atlas stores. The format wires in the runtime's shared cache here.
+    /// Consult `cache` for opened collections, or open them afresh with `None`.
     pub fn with_cache(mut self, cache: Option<AtlasReaderCache>) -> Self {
         self.cache = cache;
         self
     }
 
-    /// Enable or disable dataset pruning for this scan.
+    /// Drop the datasets a predicate rules out, or read them all.
     pub fn with_pruning(mut self, use_pruning: bool) -> Self {
         self.use_pruning = use_pruning;
         self
     }
 
-    /// Returns a copy of this source carrying the given projection. Used to
-    /// preserve a pushed-down projection when the format rebuilds the source in
-    /// `create_physical_plan`.
+    /// Carry a projection the scan pushed down.
+    ///
+    /// The format rebuilds the source in `create_physical_plan`, and without
+    /// this the projection pushed into the old one would be lost.
     pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
         self.projection = projection;
         self
+    }
+
+    /// The datasets this scan's queue holds, when it is planned morsel-driven.
+    #[cfg(test)]
+    pub(crate) fn morsel_datasets(&self) -> Option<usize> {
+        self.morsel.as_ref().map(|source| source.files())
     }
 }
 
@@ -126,24 +138,36 @@ impl FileSource for AtlasSource {
         object_store: Arc<dyn ObjectStore>,
         base_config: &FileScanConfig,
         partition: usize,
-    ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
+    ) -> Result<Arc<dyn FileOpener>> {
         let projected_schema = base_config.projected_schema()?;
+        let read_metrics = ReadMetrics::new(&self.execution_plan_metrics, partition);
+        let scan_metrics = AtlasScanMetrics::new(&self.execution_plan_metrics, partition);
 
-        Ok(Arc::new(AtlasOpener {
+        let datasets = Arc::new(AtlasDatasets {
             object_store,
-            projected_schema,
-            batch_size: self.batch_size,
-            metrics: self.execution_plan_metrics.clone(),
-            partition,
-            read_dimensions: self.read_dimensions.clone(),
-            predicate: self.predicate.clone(),
             cache: self.cache.clone(),
+            // A predicate is written against the values, not the encoding the
+            // scan carries them in.
+            logical_schema: logical_schema(&projected_schema),
+            projected_schema,
             use_pruning: self.use_pruning,
             prune_cache: self.prune_cache.clone(),
+            read_dimensions: self.read_dimensions.clone(),
+            batch_size: self.batch_size,
+            predicate: self.predicate.clone(),
+            read_metrics: read_metrics.clone(),
+            scan_metrics,
+        });
+
+        Ok(Arc::new(AtlasOpener {
+            datasets,
+            morsel: self.morsel.clone(),
+            partition,
+            read_metrics,
         }))
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn Any {
         self
     }
 
@@ -158,25 +182,50 @@ impl FileSource for AtlasSource {
         })
     }
 
-    /// Whether a scan may split one file across partitions. It may not.
+    /// Put every dataset of the scan in one queue, and point each partition at
+    /// it.
     ///
-    /// Atlas divides its own work, and it divides it by dataset name.
-    /// `create_physical_plan` opens each store, lists its datasets, and gives
-    /// every file group one slice of those names in
-    /// [`PartitionedFile::extensions`]. Every slice carries the *same*
-    /// `object_meta`, because they all name the same store.
+    /// Nothing is assigned here. A dataset's cost is the cells the query keeps,
+    /// which no plan-time number states: two datasets of one collection differ
+    /// by orders of magnitude, and a predicate prunes them unevenly. So the
+    /// partitions divide the queue as they drain it.
     ///
-    /// DataFusion's partitioner splits by byte range and copies the extensions
-    /// into each share. Two shares of one slice would therefore carry the same
-    /// [`AtlasDatasetSlice`], and the opener reads by name and never looks at a
-    /// byte range, so each share would return the same datasets over again.
-    ///
-    /// Declining the split does not cost parallelism. The name slices already
-    /// give one partition per share of a store's datasets.
-    ///
-    /// [`PartitionedFile::extensions`]: datafusion::datasource::listing::PartitionedFile::extensions
-    fn supports_repartitioning(&self) -> bool {
-        false
+    /// `repartition_file_min_size` is ignored, as it is for Zarr. It was the
+    /// size a file had to reach before sharing it was worth the seek, and a
+    /// queue makes no such bet. An atlas entry has no size of its own anyway:
+    /// every dataset of a collection reports the container's.
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        _repartition_file_min_size: usize,
+        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+        config: &FileScanConfig,
+    ) -> Result<Option<FileScanConfig>> {
+        if output_ordering.is_some() || target_partitions <= 1 {
+            // A partition holding an arbitrary share of the datasets cannot
+            // emit its rows in collection order.
+            return Ok(None);
+        }
+
+        if let Some((morsel, file_groups)) = morsel_scan(&config.file_groups, target_partitions) {
+            tracing::debug!(
+                "AtlasSource morsel scan: {} datasets over {target_partitions} partitions",
+                morsel.files()
+            );
+            let mut config = config.clone();
+            config.file_groups = file_groups;
+            // The openers are built from the config's source, so the queue has
+            // to travel with it.
+            config.file_source = Arc::new(Self {
+                morsel: Some(morsel),
+                ..self.clone()
+            });
+            return Ok(Some(config));
+        }
+
+        // The queue declined: one partition, or no datasets. Keeping the scan
+        // as planned is the answer to both.
+        Ok(None)
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -187,20 +236,6 @@ impl FileSource for AtlasSource {
         "atlas"
     }
 
-    fn with_schema_adapter_factory(
-        &self,
-        factory: Arc<dyn SchemaAdapterFactory>,
-    ) -> datafusion::error::Result<Arc<dyn FileSource>> {
-        Ok(Arc::new(Self {
-            schema_adapter_factory: Some(factory),
-            ..self.clone()
-        }))
-    }
-
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
-    }
-
     fn projection(&self) -> Option<&ProjectionExprs> {
         self.projection.as_ref()
     }
@@ -208,27 +243,29 @@ impl FileSource for AtlasSource {
     fn try_pushdown_projection(
         &self,
         projection: &ProjectionExprs,
-    ) -> datafusion::error::Result<Option<Arc<dyn FileSource>>> {
-        // Merge with any projection already pushed down, then record it on a new
-        // source. `FileScanConfig::projected_schema` reads this back via
-        // `projection()`, and the opener's schema adapter applies it per dataset.
+    ) -> Result<Option<Arc<dyn FileSource>>> {
         let merged = match &self.projection {
             Some(existing) => existing.try_merge(projection)?,
             None => projection.clone(),
         };
-
-        let source = Self {
+        Ok(Some(Arc::new(Self {
             projection: Some(merged),
             ..self.clone()
-        };
-        Ok(Some(Arc::new(source)))
+        })))
     }
 
+    /// Take the filters as a hint, and leave them above the scan.
+    ///
+    /// The scan uses a predicate twice: to skip a chunk whose coordinates
+    /// cannot hold a matching row, and (once pruning lands) to skip a whole
+    /// dataset whose footer statistics cannot. Neither is exact — both work in
+    /// whole chunks and whole datasets — so the filter above the scan still
+    /// decides each row, and `PushedDown::No` is what says so.
     fn try_pushdown_filters(
         &self,
         filters: Vec<Arc<dyn PhysicalExpr>>,
         _config: &ConfigOptions,
-    ) -> datafusion::error::Result<FilterPushdownPropagation<Arc<dyn FileSource>>> {
+    ) -> Result<FilterPushdownPropagation<Arc<dyn FileSource>>> {
         let predicate = match self.predicate.clone() {
             Some(existing) => conjunction(std::iter::once(existing).chain(filters.clone())),
             None => conjunction(filters.clone()),
@@ -247,452 +284,450 @@ impl FileSource for AtlasSource {
     }
 }
 
-// ─── FileOpener ────────────────────────────────────────────────────────────
+// ─── The opener ──────────────────────────────────────────────────────────────
 
+/// One partition's opener.
 struct AtlasOpener {
-    object_store: Arc<dyn ObjectStore>,
-    projected_schema: SchemaRef,
-    batch_size: usize,
-    metrics: ExecutionPlanMetricsSet,
+    /// How one dataset is opened, for the queue to call.
+    datasets: Arc<dyn OpenFile>,
+    /// The scan's queue, when it is planned morsel-driven. `Some` means the
+    /// entry `FileStream` hands this opener stands for the whole scan.
+    morsel: Option<Arc<MorselSource>>,
     partition: usize,
-    read_dimensions: Option<Vec<String>>,
-    predicate: Option<Arc<dyn PhysicalExpr>>,
-    cache: Option<AtlasReaderCache>,
-    use_pruning: bool,
-    prune_cache: PruneCache,
-}
-
-impl AtlasOpener {
-    #[allow(clippy::too_many_arguments)]
-    async fn read_task(
-        object_store: Arc<dyn ObjectStore>,
-        object_meta: ObjectMeta,
-        assigned_names: Option<Vec<String>>,
-        projected_schema: SchemaRef,
-        batch_size: usize,
-        metrics: ExecutionPlanMetricsSet,
-        partition: usize,
-        read_dimensions: Option<Vec<String>>,
-        predicate: Option<Arc<dyn PhysicalExpr>>,
-        cache: Option<AtlasReaderCache>,
-        use_pruning: bool,
-        prune_cache: PruneCache,
-    ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        let scan_metrics = AtlasScanMetrics::new(&metrics, partition);
-        let read_metrics = DatasetReadMetrics::new(&metrics, partition);
-
-        let open_start = Instant::now();
-        let atlas =
-            crate::datafusion::cache::get_or_open_atlas(cache.as_ref(), object_store, &object_meta)
-                .await?;
-        scan_metrics.open_time.add_elapsed(open_start);
-        let object_path = object_meta.location.clone();
-
-        // The physical plan assigns each partition its slice of dataset names;
-        // fall back to the whole store if a source was built without one.
-        let names = assigned_names.unwrap_or_else(|| atlas.list_datasets());
-        let assigned = names.len();
-
-        // Skip datasets the predicate proves can't match, before opening them.
-        // The store is pruned once per query (memoized by marker path) and every
-        // partition's opener reuses the result; only the projected schema is
-        // needed — it carries the predicate columns (a filter that stays above
-        // the scan forces them in). Fails open.
-        let names = match (use_pruning, &predicate) {
-            (true, Some(pred)) => {
-                let prune_start = Instant::now();
-                let atlas = atlas.clone();
-                let pred = pred.clone();
-                let schema = projected_schema.clone();
-                let filter = prune_cache
-                    .get_or_compute(object_path.to_string(), async move {
-                        Arc::new(
-                            crate::datafusion::pruning::candidate_set(&atlas, &pred, &schema).await,
-                        )
-                    })
-                    .await;
-                let kept = filter.retain(names);
-                scan_metrics.prune_time.add_elapsed(prune_start);
-                kept
-            }
-            _ => names,
-        };
-        scan_metrics.datasets_pruned.add(assigned - names.len());
-        scan_metrics.datasets_scanned.add(names.len());
-
-        let stream = futures::stream::iter(names)
-            .map(move |dataset_name| {
-                let atlas = atlas.clone();
-                let projected_schema = projected_schema.clone();
-                let read_dimensions = read_dimensions.clone();
-                let read_metrics = read_metrics.clone();
-                let scan_metrics = scan_metrics.clone();
-                let object_path = object_path.clone();
-                let predicate = predicate.clone();
-                async move {
-                    read_one_dataset(
-                        atlas,
-                        dataset_name,
-                        object_path,
-                        projected_schema,
-                        read_dimensions,
-                        predicate,
-                        batch_size,
-                        Some(read_metrics),
-                        scan_metrics,
-                    )
-                    .await
-                }
-            })
-            .buffer_unordered(ATLAS_DATASET_CONCURRENCY)
-            .try_flatten()
-            .boxed();
-
-        Ok(stream)
-    }
-}
-
-/// Build and stream one atlas dataset's projected columns, adapting each batch
-/// onto the query's projected output schema.
-#[allow(clippy::too_many_arguments)]
-async fn read_one_dataset(
-    atlas: Arc<atlas::Atlas>,
-    dataset_name: String,
-    object_path: object_store::path::Path,
-    projected_schema: SchemaRef,
-    read_dimensions: Option<Vec<String>>,
-    predicate: Option<Arc<dyn PhysicalExpr>>,
-    batch_size: usize,
-    metrics: Option<DatasetReadMetrics>,
-    scan_metrics: AtlasScanMetrics,
-) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-    // Time everything up to handing back the (still-lazy) stream: opening the
-    // view, reading metadata + projected attributes, wiring backends, and
-    // building the schema adapter. Array *data* is read later, as the returned
-    // stream is polled, and is counted by `DatasetReadMetrics` (rows/batches).
-    let build_start = Instant::now();
-
-    // Push the query's projection straight into the dataset build: only the
-    // requested columns get backends, and only their attribute values are read
-    // from disk. `projected_schema` is the scan's output schema, so its field
-    // names are the exact column set to keep (it also carries any predicate
-    // columns, since a not-fully-consumed filter stays above the scan). A
-    // dataset simply omits any name it doesn't declare. An empty projection is
-    // `COUNT(*)` — no column names, so nothing is built here.
-    let projected_names: Vec<String> = projected_schema
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-
-    let projected = crate::reader::dataset_from_atlas(atlas.clone(), &dataset_name, Some(&projected_names))
-        .await
-        .map_err(|e| {
-            tracing::warn!(dataset = %dataset_name, path = %object_path, error = %e, "failed to read atlas dataset");
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to read atlas dataset '{dataset_name}' at {object_path}: {e}"
-            ))
-        })?;
-
-    // Apply explicit dimensions, or narrow to a broadcast-compatible default so
-    // a mix of incompatible dimension sets can't fail the scan. No log label:
-    // this runs per dataset (logging happens in schema inference).
-    let projected = match resolve_read_dimensions(&projected, read_dimensions, None) {
-        Some(dims) => projected
-            .project(&DatasetProjection::new_with_dimension_projection(dims))
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to project atlas dataset '{dataset_name}' with dimensions: {e}"
-                ))
-            })?,
-        None => projected,
-    };
-
-    let stream = if !projected.dataset().arrays.is_empty() {
-        // Adapt each batch onto the scan's output schema. The dataset's arrays
-        // carry their own (per-dataset) dtypes, which the merged table schema
-        // may have widened — so the source schema reflects the native types and
-        // the adapter casts each column up to the super-type and null-fills any
-        // projected column this dataset doesn't declare, keyed by name.
-        stream_adapted(projected, projected_schema, predicate, batch_size, metrics)?
-    } else {
-        // This dataset declares *none* of the projected columns. Its rows must
-        // still appear, null-filled to the table schema (union semantics):
-        // selecting a column the dataset lacks yields its rows as nulls, and
-        // `COUNT(*)` (an empty projection) counts them. Establish the row count
-        // from the dataset's largest readable array, then let the adapter
-        // null-fill every projected column. The predicate is dropped here —
-        // those columns are all null, and the not-fully-consumed filter kept
-        // above the scan re-checks them, so correctness holds.
-        match driver_dataset(&atlas, &dataset_name, &object_path).await? {
-            Some(driver) => stream_adapted(driver, projected_schema, None, batch_size, metrics)?,
-            None => {
-                // No readable array either (attribute-only / bool / list
-                // dataset): contribute a single broadcast row.
-                let batch = null_row_batch(&projected_schema)?;
-                futures::stream::once(async move { Ok(batch) }).boxed()
-            }
-        }
-    };
-
-    scan_metrics.dataset_build_time.add_elapsed(build_start);
-    Ok(stream)
-}
-
-/// Adapt a dataset's record-batch stream onto `projected_schema`: cast each
-/// column to the table's (possibly widened) type and null-fill any projected
-/// column the dataset lacks, matching by name.
-fn stream_adapted(
-    dataset: beacon_nd_array::dataset::AnyDataset,
-    projected_schema: SchemaRef,
-    predicate: Option<Arc<dyn PhysicalExpr>>,
-    batch_size: usize,
-    metrics: Option<DatasetReadMetrics>,
-) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-    let source_schema: SchemaRef = Arc::new(any_dataset_to_arrow_schema(&dataset).map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!(
-            "Failed to derive Arrow schema for atlas dataset: {e}"
-        ))
-    })?);
-    let adapter = batch_adapter_factory(projected_schema).make_adapter(&source_schema)?;
-
-    let pushdown_filter: Option<PushdownFilter> = predicate.map(PushdownFilter::new);
-    let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-        .map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Error reading atlas dataset as Arrow stream: {e}"
-            ))
-        })
-        .and_then(move |batch| {
-            let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to adapt atlas batch schema: {e}"
-                ))
-            });
-            future::ready(mapped)
-        })
-        .boxed();
-
-    Ok(stream)
-}
-
-/// Build a single-column dataset over `dataset_name`'s largest readable array,
-/// used only to establish the dataset's row count when the query projects no
-/// column it declares. `None` if the dataset has no readable array.
-async fn driver_dataset(
-    atlas: &Arc<atlas::Atlas>,
-    dataset_name: &str,
-    object_path: &object_store::path::Path,
-) -> datafusion::error::Result<Option<beacon_nd_array::dataset::AnyDataset>> {
-    let view = atlas.open_dataset(dataset_name).await.map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!(
-            "Failed to open atlas dataset '{dataset_name}' at {object_path}: {e}"
-        ))
-    })?;
-    let driver = view
-        .schema()
-        .arrays
-        .iter()
-        .filter(|(_, s)| crate::compat::atlas_array_dtype_to_arrow(&s.dtype).is_some())
-        .max_by_key(|(_, s)| s.shape.iter().product::<usize>())
-        .map(|(name, _)| name.clone());
-
-    let Some(driver) = driver else {
-        return Ok(None);
-    };
-    let names = [driver];
-    let dataset = crate::reader::dataset_from_atlas(atlas.clone(), dataset_name, Some(&names))
-        .await
-        .map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to read atlas dataset '{dataset_name}' at {object_path}: {e}"
-            ))
-        })?;
-    Ok(Some(dataset))
-}
-
-/// A single all-null row shaped as `schema` (0 columns → a 0-column, 1-row
-/// batch, the `COUNT(*)` unit for a scalar-only dataset).
-fn null_row_batch(schema: &SchemaRef) -> datafusion::error::Result<RecordBatch> {
-    let columns: Vec<arrow::array::ArrayRef> = schema
-        .fields()
-        .iter()
-        .map(|f| arrow::array::new_null_array(f.data_type(), 1))
-        .collect();
-    RecordBatch::try_new_with_options(
-        schema.clone(),
-        columns,
-        &RecordBatchOptions::new().with_row_count(Some(1)),
-    )
-    .map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!("Failed to build null row batch: {e}"))
-    })
+    read_metrics: ReadMetrics,
 }
 
 impl FileOpener for AtlasOpener {
-    fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
-        let assigned_names = file
+    fn open(&self, file: PartitionedFile) -> Result<FileOpenFuture> {
+        // A morsel-driven scan hands every partition the same standing entry.
+        // It is not a dataset: the datasets are in the queue, and this
+        // partition reads whatever it hands out until the scan is done.
+        if let Some(morsel) = &self.morsel {
+            let stream = morsel.stream(
+                self.partition,
+                Arc::clone(&self.datasets),
+                Some(self.read_metrics.clone()),
+            );
+            return Ok(futures::future::ready(Ok(stream)).boxed());
+        }
+
+        // One partition, or no datasets: `FileStream` walks the real entries
+        // and this opener reads each one whole.
+        let datasets = Arc::clone(&self.datasets);
+        let metrics = self.read_metrics.clone();
+        Ok(async move {
+            let read = datasets.open(&file).await?;
+            Ok(read.stream(Some(metrics)))
+        }
+        .boxed())
+    }
+}
+
+/// How one Atlas dataset becomes a planned [`FileRead`].
+///
+/// This is everything a [`MorselSource`] needs of the format. The queue holds
+/// the datasets; this says what opening one means.
+struct AtlasDatasets {
+    object_store: Arc<dyn ObjectStore>,
+    cache: Option<AtlasReaderCache>,
+    /// The scan's output schema, nd-encoded. Its field *names* are the columns
+    /// to keep, and the encoding leaves names alone.
+    projected_schema: SchemaRef,
+    /// The same schema with the encoding unwrapped, which is what a predicate
+    /// and the pruning engine are written against.
+    logical_schema: SchemaRef,
+    use_pruning: bool,
+    prune_cache: PruneCache,
+    read_dimensions: Option<Vec<String>>,
+    batch_size: usize,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
+    read_metrics: ReadMetrics,
+    scan_metrics: AtlasScanMetrics,
+}
+
+impl AtlasDatasets {
+    /// Which datasets of one collection this scan's predicate can still match.
+    ///
+    /// Built once per collection per scan. Every partition's opener shares one
+    /// memo, so the first to arrive builds the index while the rest await it;
+    /// each then reads its own dataset's bit out of the result.
+    ///
+    /// Without a predicate, or with pruning off, nothing is ruled out and no
+    /// index is built.
+    async fn candidates(&self, atlas: &Arc<Atlas>, marker: &str) -> Arc<CandidateFilter> {
+        let Some(predicate) = self.predicate.clone().filter(|_| self.use_pruning) else {
+            return Arc::new(CandidateFilter::KeepAll);
+        };
+        // DataFusion offers a scan its filters even when it has none, and an
+        // empty conjunction is the literal `true`. Such a predicate names no
+        // column, so it can rule nothing out and is not worth a pass.
+        if collect_columns(&predicate).is_empty() {
+            return Arc::new(CandidateFilter::KeepAll);
+        }
+
+        let started = Instant::now();
+        let atlas = Arc::clone(atlas);
+        let schema = Arc::clone(&self.logical_schema);
+        let metrics = self.scan_metrics.clone();
+        let filter = self
+            .prune_cache
+            .get_or_compute(marker.to_string(), async move {
+                let filter = Arc::new(candidate_filter(&atlas, &predicate, &schema).await);
+                // Only an index that exists is a build. Pruning that did not
+                // apply read nothing and judged nothing.
+                if filter.is_index() {
+                    metrics.index_builds.add(1);
+                    metrics.index_rows.add(filter.rows());
+                }
+                filter
+            })
+            .await;
+        self.scan_metrics.prune_time.add_elapsed(started);
+        filter
+    }
+
+    /// The columns to build for one dataset, or `None` to build every one.
+    ///
+    /// The projection reaches the build, so an unprojected array gets no
+    /// backend and an unprojected attribute is never read out of the footer.
+    ///
+    /// Two cases need care. A `COUNT(*)` projects nothing, and building nothing
+    /// would leave the read with no grid to count; it takes the widest array of
+    /// the dataset instead, which is what states the row count. And a predicate
+    /// column is added to the set: the filter above the scan forces such a
+    /// column into the projection today, but the chunk pruning inside the read
+    /// matches columns by name and would silently stop pruning if that ever
+    /// changed.
+    fn projected_names(&self, view: &DatasetView) -> Option<Vec<String>> {
+        if self.projected_schema.fields().is_empty() {
+            return count_driver(view).map(|driver| vec![driver]);
+        }
+
+        let mut names: Vec<String> = self
+            .projected_schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+
+        if let Some(predicate) = &self.predicate {
+            for column in collect_columns(predicate) {
+                if !names.iter().any(|name| name == column.name()) {
+                    names.push(column.name().to_string());
+                }
+            }
+        }
+        Some(names)
+    }
+}
+
+/// The array a `COUNT(*)` reads to establish a dataset's row count: the widest
+/// one Beacon can read.
+///
+/// From the footer alone, so choosing it costs no I/O and no backend. `None`
+/// for a dataset with no readable array, and the caller then builds what there
+/// is — an attribute-only dataset contributes the one row its scalars define.
+fn count_driver(view: &DatasetView) -> Option<String> {
+    view.schema()
+        .arrays
+        .iter()
+        .filter(|(_, schema)| compat::array_dtype_to_nd(&schema.dtype).is_some())
+        .max_by_key(|(_, schema)| schema.shape.iter().product::<usize>())
+        .map(|(name, _)| name.clone())
+}
+
+#[async_trait::async_trait]
+impl OpenFile for AtlasDatasets {
+    async fn open(&self, file: &PartitionedFile) -> Result<Arc<FileRead>> {
+        let entry = file
             .extensions
             .as_ref()
-            .and_then(|ext| (ext.as_ref() as &dyn Any).downcast_ref::<AtlasDatasetSlice>())
-            .map(|slice| slice.names.clone());
-        let fut = Self::read_task(
-            self.object_store.clone(),
-            file.object_meta,
-            assigned_names,
-            self.projected_schema.clone(),
+            .and_then(|extension| (extension.as_ref() as &dyn Any).downcast_ref::<AtlasEntry>())
+            .ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "the atlas scan entry at '{}' names no dataset",
+                    file.object_meta.location
+                ))
+            })?;
+
+        let open_start = Instant::now();
+        let atlas = get_or_open_atlas(
+            self.cache.as_ref(),
+            Arc::clone(&self.object_store),
+            &file.object_meta,
+        )
+        .await
+        .map_err(|e| DataFusionError::Execution(format!("{e}")))?;
+        self.scan_metrics.open_time.add_elapsed(open_start);
+
+        // One index per collection decides this, and the first opener to reach
+        // the collection builds it. A dataset ruled out costs one pop and no
+        // read at all.
+        if !self
+            .candidates(&atlas, file.object_meta.location.as_ref())
+            .await
+            .keeps(entry.position, &entry.dataset)
+        {
+            self.scan_metrics.datasets_pruned.add(1);
+            return Ok(FileRead::skipped());
+        }
+
+        let build_start = Instant::now();
+        let view = Arc::new(atlas.dataset(&entry.dataset).map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Failed to open atlas dataset '{}' of '{}': {e}",
+                entry.dataset, file.object_meta.location
+            ))
+        })?);
+
+        let projected = self.projected_names(&view);
+        let dataset = dataset_from_view(view, projected.as_deref())
+            .await
+            .map_err(|e| DataFusionError::Execution(format!("{e}")))?;
+        // Explicit dimensions, or a broadcast-compatible default. No log label:
+        // this runs per dataset, and schema inference already logged the choice.
+        let dataset = project_read_dimensions(dataset, self.read_dimensions.clone(), None)
+            .map_err(|e| DataFusionError::Execution(format!("{e}")))?;
+
+        let read = FileRead::plan(
+            dataset,
+            Arc::clone(&self.projected_schema),
             self.batch_size,
-            self.metrics.clone(),
-            self.partition,
-            self.read_dimensions.clone(),
             self.predicate.clone(),
-            self.cache.clone(),
-            self.use_pruning,
-            self.prune_cache.clone(),
-        );
-        Ok(Box::pin(fut))
+            // A dataset lives inside a container, not at a path, so no
+            // `PARTITIONED BY` value can be read off it. The format refuses
+            // such a table outright.
+            FilePartitions::none(),
+            Some(&self.read_metrics),
+        )
+        .await?;
+
+        self.scan_metrics
+            .dataset_build_time
+            .add_elapsed(build_start);
+        self.scan_metrics.datasets_scanned.add(1);
+        Ok(read)
     }
 }
 
 #[cfg(test)]
-mod repartition_tests {
-    //! Atlas divides its own work, by dataset name, so it must refuse
-    //! DataFusion's byte-range split.
-
-    use std::sync::Arc;
-
-    use datafusion::datasource::listing::PartitionedFile;
-    use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
-    use datafusion::datasource::table_schema::TableSchema;
+mod tests {
+    use super::*;
+    use datafusion::datasource::physical_plan::FileScanConfigBuilder;
     use datafusion::execution::object_store::ObjectStoreUrl;
 
-    use super::AtlasSource;
+    fn source() -> AtlasSource {
+        AtlasSource::new(
+            None,
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty())),
+        )
+    }
 
-    /// A store never splits by byte range.
-    ///
-    /// Every name slice of a store carries the same `object_meta`, and the
-    /// partitioner copies `extensions` into each share it makes. Two shares of
-    /// one slice would therefore read the same datasets twice. The count would
-    /// grow with `target_partitions`, silently.
+    fn entry(dataset: &str, position: usize) -> PartitionedFile {
+        let mut file = PartitionedFile::new("obs/data.atlas", 4096);
+        file.extensions = Some(Arc::new(AtlasEntry {
+            dataset: dataset.to_string(),
+            position,
+        }));
+        file
+    }
+
+    /// Every dataset of the scan goes into one queue, and each partition gets a
+    /// standing entry pointing at it.
     #[test]
-    fn a_store_never_splits_by_byte_range() {
-        let table_schema =
-            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-        let source = AtlasSource::new(None, table_schema);
+    fn the_datasets_go_into_one_queue() {
+        const PARTITIONS: usize = 4;
+
+        let source = source();
+        let mut builder = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        );
+        for (position, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            builder = builder.with_file(entry(name, position));
+        }
+        let config = builder.build();
+
+        let planned = source
+            .repartitioned(PARTITIONS, 10 * 1024 * 1024, None, &config)
+            .unwrap()
+            .expect("the datasets are planned across the partitions");
+
+        assert_eq!(planned.file_groups.len(), PARTITIONS);
+        for group in &planned.file_groups {
+            assert_eq!(group.len(), 1, "one standing entry per partition");
+        }
+        let planned = planned
+            .file_source()
+            .as_any()
+            .downcast_ref::<AtlasSource>()
+            .expect("the config carries an AtlasSource");
+        assert_eq!(
+            planned.morsel_datasets(),
+            Some(5),
+            "and the queue holds every dataset"
+        );
+    }
+
+    /// An ordered scan cannot share: a partition holding an arbitrary share of
+    /// the datasets cannot emit its rows in collection order.
+    #[test]
+    fn an_ordered_scan_is_left_alone() {
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+        use datafusion::physical_plan::expressions::Column;
+
+        let source = source();
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
         )
-        // Comfortably over the partitioner's minimum split size.
-        .with_file(PartitionedFile::new("store.atlas", 64 * 1024 * 1024))
+        .with_file(entry("a", 0))
         .build();
 
-        assert!(!source.supports_repartitioning());
+        let ordering = LexOrdering::new(vec![PhysicalSortExpr::new_default(Arc::new(
+            Column::new("time", 0),
+        ))]);
         assert!(
-            source.repartitioned(4, 1, None, &config).unwrap().is_none(),
-            "an atlas store must not split by byte range"
+            source
+                .repartitioned(4, 0, ordering, &config)
+                .unwrap()
+                .is_none()
         );
     }
-}
-
-#[cfg(test)]
-mod adapter_tests {
-    //! The per-dataset schema adaptation contract, exercised directly.
-    //!
-    //! [`stream_adapted`] leans entirely on `batch_adapter_factory`: a dataset is
-    //! read at its own native dtypes and every batch is mapped onto the merged
-    //! table schema. These pin that mapping — cast up, null-fill by name — without
-    //! building an atlas store or a DataFusion session, so a behaviour change in
-    //! the adapter surfaces here rather than as a wrong query result.
-
-    use std::sync::Arc;
-
-    use arrow::array::{Array, Int16Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
-
-    /// Map `batch` (in `source`) onto `target`, exactly as `stream_adapted` does.
-    fn adapt(
-        source: Arc<Schema>,
-        target: Arc<Schema>,
-        batch: RecordBatch,
-    ) -> datafusion::error::Result<RecordBatch> {
-        batch_adapter_factory(target)
-            .make_adapter(&source)?
-            .adapt_batch(&batch)
-    }
 
     #[test]
-    fn casts_a_narrower_dataset_dtype_up_to_the_merged_type() {
-        // The widening case: one dataset stores Int16, the collection merged to Float32.
-        let source = Arc::new(Schema::new(vec![Field::new("value", DataType::Int16, true)]));
-        let target = Arc::new(Schema::new(vec![Field::new("value", DataType::Float32, true)]));
-        let batch = RecordBatch::try_new(
-            source.clone(),
-            vec![Arc::new(Int16Array::from(vec![1, 2]))],
+    fn one_partition_divides_nothing() {
+        let source = source();
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
         )
-        .expect("source batch");
+        .with_file(entry("a", 0))
+        .build();
 
-        let out = adapt(source, target, batch).expect("adapt");
-        assert_eq!(out.schema().field(0).data_type(), &DataType::Float32);
-        let col = out
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Float32Array>()
-            .expect("Float32 column");
-        assert_eq!(col.values(), &[1.0, 2.0]);
+        assert!(source.repartitioned(1, 0, None, &config).unwrap().is_none());
     }
 
-    #[test]
-    fn null_fills_a_column_the_dataset_does_not_declare() {
-        // The dataset has `value`; the table also has `flag`, which this dataset
-        // lacks. Its rows must survive with `flag` null — union semantics.
-        let source = Arc::new(Schema::new(vec![Field::new("value", DataType::Int64, true)]));
-        let target = Arc::new(Schema::new(vec![
-            Field::new("flag", DataType::Int32, true),
-            Field::new("value", DataType::Int64, true),
-        ]));
-        let batch = RecordBatch::try_new(
-            source.clone(),
-            vec![Arc::new(Int64Array::from(vec![10, 20]))],
-        )
-        .expect("source batch");
+    /// An entry that names no dataset is a bug in the planner, not bad input,
+    /// and the error says which collection it came from.
+    #[tokio::test]
+    async fn an_entry_without_a_dataset_is_an_internal_error() {
+        let datasets = AtlasDatasets {
+            object_store: Arc::new(object_store::memory::InMemory::new()),
+            cache: None,
+            projected_schema: Arc::new(arrow::datatypes::Schema::empty()),
+            logical_schema: Arc::new(arrow::datatypes::Schema::empty()),
+            use_pruning: false,
+            prune_cache: PruneCache::new(),
+            read_dimensions: None,
+            batch_size: usize::MAX,
+            predicate: None,
+            read_metrics: ReadMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            scan_metrics: AtlasScanMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+        };
 
-        let out = adapt(source, target, batch).expect("adapt");
-        assert_eq!(out.num_rows(), 2, "rows are kept, not dropped");
-        let flag = out.column(out.schema().index_of("flag").expect("flag"));
-        assert_eq!(flag.null_count(), 2, "missing column is entirely null");
-        let value = out
-            .column(out.schema().index_of("value").expect("value"))
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .expect("Int64 column");
-        assert_eq!(value.values(), &[10, 20], "declared column is untouched");
+        let error = datasets
+            .open(&PartitionedFile::new("obs/data.atlas", 1))
+            .await
+            .expect_err("an entry must name its dataset")
+            .to_string();
+        assert!(error.contains("names no dataset"), "{error}");
+        assert!(error.contains("obs/data.atlas"), "{error}");
     }
 
-    #[test]
-    fn stringifies_a_numeric_dataset_when_the_merge_widened_to_utf8() {
-        // Non-numeric conflict: atlas merges String ∪ Int64 to String, so the
-        // integer dataset must be cast *into* Utf8 rather than erroring. This is
-        // what makes a mixed-dtype collection readable at all.
-        let source = Arc::new(Schema::new(vec![Field::new("value", DataType::Int64, true)]));
-        let target = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
-        let batch = RecordBatch::try_new(
-            source.clone(),
-            vec![Arc::new(Int64Array::from(vec![1, 2]))],
-        )
-        .expect("source batch");
+    // ── which columns a dataset is built with ───────────────────────────
 
-        let out = adapt(source, target, batch).expect("Int64 -> Utf8 must be castable");
-        let col = out
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("Utf8 column");
+    use crate::test_support;
+
+    /// One dataset's view. It owns what it needs, so the collection handle
+    /// behind it may go.
+    async fn view(dir: &std::path::Path, dataset: &str) -> DatasetView {
+        test_support::open(dir)
+            .await
+            .dataset(dataset)
+            .expect("the dataset")
+    }
+
+    fn datasets_wanting(
+        projected: Vec<&str>,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
+    ) -> AtlasDatasets {
+        let fields: Vec<arrow::datatypes::Field> = projected
+            .into_iter()
+            .map(|name| arrow::datatypes::Field::new(name, arrow::datatypes::DataType::Null, true))
+            .collect();
+        let projected_schema = Arc::new(arrow::datatypes::Schema::new(fields));
+        AtlasDatasets {
+            object_store: Arc::new(object_store::memory::InMemory::new()),
+            cache: None,
+            logical_schema: Arc::clone(&projected_schema),
+            projected_schema,
+            use_pruning: false,
+            prune_cache: PruneCache::new(),
+            read_dimensions: None,
+            batch_size: usize::MAX,
+            predicate,
+            read_metrics: ReadMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            scan_metrics: AtlasScanMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scan_builds_the_columns_it_projects() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+
+        let datasets = datasets_wanting(vec!["temperature"], None);
+        let names = datasets
+            .projected_names(&view(tmp.path(), "winter").await)
+            .expect("a projection");
+        assert_eq!(names, vec!["temperature".to_string()]);
+    }
+
+    /// A predicate column joins the set even when the projection leaves it out.
+    /// The chunk pruning inside the read matches by name, so a missing column
+    /// would silently stop it pruning.
+    #[tokio::test]
+    async fn a_predicate_column_is_built_too() {
+        use datafusion::logical_expr::Operator;
+        use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+        use datafusion::scalar::ScalarValue;
+
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+
+        let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::new(Column::new("cycle", 0)),
+            Operator::Gt,
+            Arc::new(Literal::new(ScalarValue::Int32(Some(20)))),
+        ));
+        let datasets = datasets_wanting(vec!["temperature"], Some(predicate));
+        let names = datasets
+            .projected_names(&view(tmp.path(), "winter").await)
+            .expect("a projection");
         assert_eq!(
-            (0..col.len()).map(|i| col.value(i)).collect::<Vec<_>>(),
-            vec!["1", "2"],
+            names,
+            vec!["temperature".to_string(), "cycle".to_string()],
+            "the predicate's column is kept alongside the projection"
+        );
+    }
+
+    /// `COUNT(*)` projects nothing and reads one array: the row count is a
+    /// property of the grid, and building every column to find it would read
+    /// every attribute of the dataset for nothing.
+    #[tokio::test]
+    async fn a_count_reads_the_widest_array_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::chunked_grid(tmp.path()).await;
+
+        let datasets = datasets_wanting(vec![], None);
+        let names = datasets
+            .projected_names(&view(tmp.path(), "grid").await)
+            .expect("a driver");
+        assert_eq!(names.len(), 1);
+        assert!(
+            names[0] == "temperature" || names[0] == "sparse",
+            "either 4x6 array states the row count: {names:?}"
         );
     }
 }

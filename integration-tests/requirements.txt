@@ -8,6 +8,8 @@ pyarrow==21.0.0
 # upgrade changes the bytes of a file, and a new failure after one is a signal worth keeping.
 netCDF4==1.7.4
 zarr==3.3.0
+# Builds an Atlas collection from netCDF files; the Rust side reads it.
+atlas-python==0.16.4
 h5py==3.14.0
 geopandas==1.1.4
 rasterio==1.5.1

@@ -34,6 +34,7 @@ const FORMATS = [
   { value: "nc", label: "NetCDF" },
   { value: "csv", label: "CSV" },
   { value: "zarr", label: "Zarr" },
+  { value: "atlas", label: "Atlas" },
   { value: "arrow", label: "Arrow" },
   { value: "odv", label: "ODV" },
   { value: "tiff", label: "GeoTIFF" },

@@ -1,32 +1,48 @@
-//! Execution metrics for the atlas scan, surfaced through DataFusion's standard
-//! metrics reporting (e.g. `EXPLAIN ANALYZE`).
+//! What one Atlas scan partition did, reported through DataFusion's metrics.
 //!
 //! These complement
-//! [`DatasetReadMetrics`](beacon_nd_array::arrow::metrics::DatasetReadMetrics)
-//! (output rows/batches and engine-level chunk pruning) with the atlas-specific
-//! costs: opening the store, pruning datasets, and building each dataset's lazy
-//! backends. All names are `atlas_`-prefixed so they never collide with
-//! DataFusion's reserved typed metrics (`output_rows`, `output_batches`, …),
-//! which aggregate by name and panic on a variant mismatch.
+//! [`ReadMetrics`](beacon_nd_array::arrow::metrics::ReadMetrics), which counts
+//! the chunks and rows the shared queue handed out. What it cannot see is the
+//! cost of reaching a dataset at all: opening the collection, deciding whether
+//! the dataset is worth reading, and building its lazy columns.
+//!
+//! Every name is `atlas_`-prefixed. DataFusion sums metrics that share a name,
+//! and `output_rows` and `output_batches` are already registered for this
+//! partition by the scan itself.
 
 use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder, Time};
 
-/// Per-partition timings and counts for one atlas scan partition. All fields are
-/// `Arc`-backed handles into the shared [`ExecutionPlanMetricsSet`], so cloning
-/// is cheap and every clone accumulates into the same metric.
+/// Per-partition timings and counts for one Atlas scan partition.
+///
+/// Every field is an `Arc`-backed handle into the shared
+/// [`ExecutionPlanMetricsSet`], so a clone is cheap and every clone accumulates
+/// into the same metric.
 #[derive(Debug, Clone)]
 pub struct AtlasScanMetrics {
-    /// Wall time opening (or cache-hitting) the atlas store for this partition.
+    /// Wall time opening collections, or hitting the reader cache for them.
     pub open_time: Time,
-    /// Wall time computing which datasets the predicate can match (pruning).
+    /// Wall time deciding which datasets a predicate can rule out.
+    ///
+    /// One partition builds a collection's index and the rest wait on it, so
+    /// this is the build for one of them and the wait for the others.
     pub prune_time: Time,
-    /// Wall time building lazy datasets — metadata, backends, projected
-    /// attribute values, and the per-dataset schema adapter.
+    /// Wall time building lazy datasets: resolving the view, reading the
+    /// projected attribute values out of the footer, wiring the backends, and
+    /// planning the chunk queue.
+    ///
+    /// Array data is read later, as the queue is drained, and `ReadMetrics`
+    /// counts that.
     pub dataset_build_time: Time,
-    /// Datasets this partition opened and scanned.
+    /// Datasets this partition opened and read.
     pub datasets_scanned: Count,
-    /// Datasets this partition skipped because pruning ruled them out.
+    /// Datasets it skipped because the collection's statistics ruled them out.
     pub datasets_pruned: Count,
+    /// Pruning indexes built. One per collection a predicate scan touches, so a
+    /// number above the collection count means a partition rebuilt one.
+    pub index_builds: Count,
+    /// Datasets those indexes covered, which is what the pruning pass looked
+    /// at rather than read.
+    pub index_rows: Count,
 }
 
 impl AtlasScanMetrics {
@@ -40,6 +56,8 @@ impl AtlasScanMetrics {
                 .counter("atlas_datasets_scanned", partition),
             datasets_pruned: MetricBuilder::new(metrics)
                 .counter("atlas_datasets_pruned", partition),
+            index_builds: MetricBuilder::new(metrics).counter("atlas_index_builds", partition),
+            index_rows: MetricBuilder::new(metrics).counter("atlas_index_rows", partition),
         }
     }
 }

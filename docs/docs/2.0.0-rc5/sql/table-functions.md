@@ -115,20 +115,20 @@ read_atlas(glob_paths)
 read_atlas(glob_paths, dimensions)
 ```
 
-Beacon reads the [Atlas](/docs/2.0.0-rc5/formats/atlas) array stores that match
-one or more glob patterns. Each path must point at an `atlas.json` marker file. Give an exact path
-or a glob such as `**/atlas.json`.
+Beacon reads the [Atlas](/docs/2.0.0-rc5/formats/atlas) collections that match one or more glob
+patterns. A collection is one file, `data.atlas`, so a path names that file. Give an exact path or
+a glob such as `**/data.atlas`.
 
-The optional `dimensions` argument selects the arrays with the listed dimension names. Atlas holds
-statistics for each column. Beacon drops whole datasets with those statistics. A range query over a
-large collection therefore reads only the datasets that can match the predicate.
+The optional `dimensions` argument keeps the arrays whose dimensions are all in the list. Every
+array of a collection records its own minimum and maximum, so a range query judges every dataset
+in one pass and reads only the ones that can match.
 
 ```sql
-SELECT * FROM read_atlas('collections/sensor/atlas.json')
+SELECT * FROM read_atlas('collections/sensor/data.atlas')
 
--- Combine every Atlas store under a prefix, keeping a subset of dimensions
+-- Combine every collection under a prefix, keeping a subset of dimensions
 SELECT time, temperature
-FROM read_atlas(['collections/**/atlas.json'], ['time', 'latitude', 'longitude'])
+FROM read_atlas(['collections/**/data.atlas'], ['time', 'latitude', 'longitude'])
 WHERE time >= '2024-01-01'
 ```
 

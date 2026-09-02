@@ -12,6 +12,34 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **Atlas is readable again, on the single-file format.** Atlas 0.16 replaced the directory of
+  per-array files with one write-once container, `data.atlas`, holding every dataset and a footer
+  that describes them all. Beacon's reader was written against the old layout and had been
+  excluded from the build, so `STORED AS ATLAS` and `read_atlas` failed. It is rebuilt on the new
+  format and registered again. A `LOCATION` now names the container rather than a marker beside
+  it: `LOCATION 'obs/data.atlas'`, or a glob such as `'obs/**/data.atlas'`. A collection written
+  before 0.16 is not read at all — rewrite it with `atlas create`. Three behaviour changes come
+  with the rebuild. A dataset-level attribute is a column under a leading dot, `".platform"`,
+  matching NetCDF and Zarr instead of the bare key. A scan reads through the shared nd pipeline,
+  so one dataset is one unit of work and a collection divides over every core. And a column two
+  datasets type in two families now refuses the merge by name rather than silently becoming text;
+  `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first` settles it the other way. Atlas collections are
+  also crawlable now, because a collection is one file whose extension is its format.
+  `BEACON_ATLAS_USE_READER_CACHE`, `BEACON_ATLAS_READER_CACHE_SIZE`, `BEACON_ATLAS_USE_PRUNING`
+  and `BEACON_ATLAS_ENABLE_STATISTICS` configure it, and the same keys work per table through
+  `OPTIONS`.
+
+- **A predicate over an Atlas collection skips whole datasets.** The footer records the minimum,
+  the maximum and the null count of every array, so a collection can be judged before it is read.
+  The first scan of a collection pivots those statistics into one index — one row per dataset,
+  one typed Arrow column per column the predicate names — and evaluates the predicate over all of
+  them in a single vectorised pass. A collection of a million datasets therefore costs one pass
+  rather than a million decisions, and a dataset ruled out is never opened. A dataset-level
+  attribute is exact in the footer, so `WHERE ".platform" = 'p3'` prunes on it too. Pruning only
+  ever removes datasets that hold no matching row: every path falls back to reading everything,
+  and the filter above the scan still decides each row. `EXPLAIN ANALYZE` reports it as
+  `atlas_datasets_pruned`, `atlas_index_builds` and `atlas_index_rows`.
+
 - **`BEACON_TYPE_WIDENING_ON_CONFLICT` settles a column that no type holds.** A collection can
   type one column as a number in one file and as a string in another. No type holds both, so the
   schema merge refused the whole table and the table answered no query: `Incompatible types for

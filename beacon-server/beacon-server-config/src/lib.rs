@@ -10,6 +10,7 @@ use error::Result;
 
 // Per-format and storage config types are owned by their crates; beacon-config
 // composes them here and fills them from the environment.
+pub use beacon_arrow_atlas::AtlasConfig;
 pub use beacon_arrow_bbf::datafusion::BbfConfig;
 pub use beacon_arrow_hdf5::{Hdf5Config, Hdf5Convention};
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
@@ -31,6 +32,7 @@ pub struct Config {
     pub netcdf: NetcdfConfig,
     pub hdf5: Hdf5Config,
     pub zarr: ZarrConfig,
+    pub atlas: AtlasConfig,
     pub bbf: BbfConfig,
     pub crawler: CrawlerConfig,
     pub file_stats: FileStatsConfig,
@@ -493,6 +495,31 @@ struct RawConfig {
     #[envconfig(from = "BEACON_ZARR_ENABLE_STATISTICS", default = "true")]
     zarr_enable_statistics: bool,
 
+    /// Whether a read reuses an opened Atlas collection.
+    ///
+    /// A collection is immutable, so a cached handle stays good until its
+    /// deletion mask changes. Caching saves the footer read and keeps the
+    /// decompressed blocks of a collection between queries.
+    #[envconfig(from = "BEACON_ATLAS_USE_READER_CACHE", default = "true")]
+    atlas_use_reader_cache: bool,
+
+    /// How many opened Atlas collections to keep.
+    ///
+    /// Each entry owns 256 MiB of decompressed blocks and 64 MiB of raw slabs,
+    /// so this bounds memory as well as handles.
+    #[envconfig(from = "BEACON_ATLAS_READER_CACHE_SIZE", default = "32")]
+    atlas_reader_cache_size: u64,
+
+    /// Whether a predicate scan drops the Atlas datasets it can rule out from
+    /// the collection's statistics, before reading them.
+    #[envconfig(from = "BEACON_ATLAS_USE_PRUNING", default = "true")]
+    atlas_use_pruning: bool,
+
+    /// Whether `ANALYZE FILES` measures the column ranges of an Atlas
+    /// collection. They come from its footer, so they cost no array read.
+    #[envconfig(from = "BEACON_ATLAS_ENABLE_STATISTICS", default = "true")]
+    atlas_enable_statistics: bool,
+
     /// The batch size for NetCDF reads, in number of rows. This is used for both local and MPIO reads.
     #[envconfig(from = "BEACON_BATCH_SIZE", default = "64000")]
     beacon_batch_size: usize,
@@ -684,6 +711,12 @@ impl From<RawConfig> for Config {
             },
             zarr: ZarrConfig {
                 enable_statistics: raw.zarr_enable_statistics,
+            },
+            atlas: AtlasConfig {
+                use_reader_cache: raw.atlas_use_reader_cache,
+                reader_cache_size: raw.atlas_reader_cache_size,
+                use_pruning: raw.atlas_use_pruning,
+                enable_statistics: raw.atlas_enable_statistics,
             },
             bbf: BbfConfig {
                 split_streams_slice: raw.bbf_split_streams_slice,

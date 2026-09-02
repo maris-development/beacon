@@ -105,24 +105,24 @@ LOCATION 'sst/*/zarr.json'
 
 ### Atlas
 
-An Atlas table points at the `atlas.json` marker file, not at a folder. This is the same as Zarr:
+An Atlas table points at the `data.atlas` file itself, not at the folder around it:
 
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas
 STORED AS ATLAS
-LOCATION 'collections/sensor/atlas.json'
+LOCATION 'collections/sensor/data.atlas'
 ```
 
-Use a glob over the markers to put several Atlas stores in one table:
+Use a glob to put several collections in one table:
 
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas
 STORED AS ATLAS
-LOCATION 'collections/*/atlas.json'
+LOCATION 'collections/*/data.atlas'
 ```
 
-See [Atlas](/docs/2.0.0-rc5/formats/atlas) for the format details. That page
-also explains how Atlas speeds up NetCDF and Zarr work.
+See [Atlas](/docs/2.0.0-rc5/formats/atlas) for the format details, its `OPTIONS` and its column
+naming. That page also explains how Atlas speeds up NetCDF and Zarr work.
 
 ### CSV
 

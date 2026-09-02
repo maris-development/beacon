@@ -21,4 +21,5 @@ beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
 beacon-arrow-netcdf = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-hdf5 = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-hdf5" }
 beacon-arrow-zarr = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-zarr" }
+beacon-arrow-atlas = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-atlas" }
 beacon-arrow-bbf = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-bbf" }

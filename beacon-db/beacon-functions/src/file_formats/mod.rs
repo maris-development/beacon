@@ -47,6 +47,10 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
         )),
+        Arc::new(beacon_arrow_atlas::ReadAtlasFunc::new(
+            runtime_handle.clone(),
+            Arc::downgrade(&session_ctx),
+        )),
         Arc::new(beacon_arrow_netcdf::datafusion::ReadNetCDFFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),

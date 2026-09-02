@@ -4,7 +4,12 @@ version.workspace = true
 edition = "2024"
 
 rust-version.workspace = true
+
 [dependencies]
+# The reader. Pinned exactly in the workspace: the container embeds
+# `array-format` files verbatim, so a change to those bytes is a format change.
+atlas-rust = { workspace = true }
+
 object_store = { workspace = true }
 datafusion = { workspace = true }
 arrow = { workspace = true }
@@ -16,9 +21,7 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 ndarray = { workspace = true }
 chrono = { workspace = true }
-crossbeam = { workspace = true }
 moka = { workspace = true }
-atlas-rust = "0.14.0"
 
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-array = { path = "../beacon-nd-array" }

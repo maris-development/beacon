@@ -359,6 +359,24 @@ pub struct FileRead {
 }
 
 impl FileRead {
+    /// A file the scan decided not to read at all.
+    ///
+    /// Nothing is queued and nothing is streamed, so the file costs one pop and
+    /// no I/O. This is what a format returns for a file it ruled out *before*
+    /// opening it — an Atlas dataset whose footer statistics cannot satisfy the
+    /// predicate, say. That decision belongs to the format, because only the
+    /// format knows what it can prove from its own metadata.
+    ///
+    /// This is not the same as a file that holds none of the projected columns.
+    /// [`plan`](Self::plan) reaches that state on its own, having opened the
+    /// file to find out.
+    pub fn skipped() -> Arc<Self> {
+        Arc::new(Self {
+            queue: None,
+            output: Output::Nothing,
+        })
+    }
+
     /// Plan `dataset` for a scan that wants `projected_schema`.
     ///
     /// Resolves the projection, fills the queue, and decides what a batch off it
@@ -1210,6 +1228,25 @@ mod tests {
             .try_collect()
             .await
             .expect("and the stream is clean, not an error");
+        assert!(batches.is_empty(), "it contributes no rows");
+    }
+
+    /// A file the scan ruled out before opening reads as nothing.
+    ///
+    /// The format decides this from its own metadata — Atlas from the
+    /// statistics in a collection footer — so nothing here can check the
+    /// decision. What this pins is the shape of the answer: no work queued, no
+    /// batch emitted, and a clean stream rather than an error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_skipped_file_queues_nothing_and_emits_nothing() {
+        let skipped = FileRead::skipped();
+
+        assert_eq!(skipped.remaining(), 0, "nothing is queued to read");
+        let batches: Vec<RecordBatch> = skipped
+            .stream(None)
+            .try_collect()
+            .await
+            .expect("the stream is clean, not an error");
         assert!(batches.is_empty(), "it contributes no rows");
     }
 

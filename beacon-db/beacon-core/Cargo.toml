@@ -72,6 +72,7 @@ beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
 beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
 beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
+beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
@@ -82,6 +83,9 @@ beacon-redb-store = { path = "../beacon-redb-store" }
 beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
 
 [dev-dependencies]
+# Writes the Atlas fixtures the read tests read; the atlas writer takes ndarray
+# views, and Beacon itself never writes a collection.
+ndarray = { workspace = true }
 # The GeoJSON filter of the JSON query renders `ST_Within`; its test registers the set.
 datafusion-spatial = { workspace = true }
 deltalake = { workspace = true }

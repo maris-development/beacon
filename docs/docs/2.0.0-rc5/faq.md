@@ -40,8 +40,8 @@ schema. It reads no data:
 SELECT * FROM read_netcdf_schema('argo/**/*.nc');
 ```
 
-It covers `parquet`, `netcdf`, `zarr`, `arrow`, `csv`, `bbf` and `tiff`. For GeoParquet, Atlas, Delta
-Lake and ODV, use a `LIMIT 0` query. [`SUMMARIZE`](/docs/2.0.0-rc5/sql/summarize) also
+It covers `parquet`, `netcdf`, `zarr`, `atlas`, `arrow`, `csv`, `bbf` and `tiff`. For GeoParquet,
+Delta Lake and ODV, use a `LIMIT 0` query. [`SUMMARIZE`](/docs/2.0.0-rc5/sql/summarize) also
 works.
 
 ### My files have different columns
