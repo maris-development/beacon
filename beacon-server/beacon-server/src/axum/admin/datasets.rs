@@ -15,6 +15,7 @@ use ::axum::{
 };
 use crate::server::{
     files::{FileError, UploadResult},
+    storage::DatasetStorageInfo,
     Server,
 };
 use futures::TryStreamExt;
@@ -113,6 +114,25 @@ pub(crate) async fn download_dataset(
         body,
     )
         .into_response())
+}
+
+/// Reports the disk space of the datasets store.
+///
+/// A local store answers with the space of the disk that holds the datasets
+/// directory. An S3 bucket has no capacity, so it answers with the bucket name
+/// and the total size of the objects; the free space and the used percent stay
+/// `null`. The bucket listing makes this call slow on a large bucket, so poll it
+/// at a low rate.
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "admin",
+    get,
+    path = "/api/admin/datasets/storage",
+    responses((status = 200, description = "Disk space of the datasets store", body = DatasetStorageInfo)),
+    security(("basic-auth" = []))
+)]
+pub(crate) async fn dataset_storage(State(state): State<Arc<Server>>) -> Json<DatasetStorageInfo> {
+    Json(state.dataset_storage().await)
 }
 
 /// Query parameters identifying a chunked upload and a part within it.

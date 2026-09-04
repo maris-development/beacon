@@ -242,11 +242,24 @@ pub fn encode_flat_batch_as_nd(batch: &RecordBatch) -> Result<RecordBatch> {
 
 /// The logical (decoded) schema of an nd-encoded schema: each `beacon.nd`
 /// struct column becomes its element type.
+///
+/// Nullability follows the encoded field. [`nd_encoded_field`] makes every
+/// column of a file nullable, because a file a collection is not obliged to be
+/// uniform over is null-filled for the columns it lacks. A `PARTITIONED BY`
+/// column is not read from a file at all — its value is in the path, and the
+/// scan always has it — so a format may encode it as the table declared it, and
+/// the table gets that column back exactly as it declared it.
 pub fn logical_schema(encoded: &Schema) -> Result<SchemaRef> {
     let fields = encoded
         .fields()
         .iter()
-        .map(|field| Ok(Field::new(field.name(), nd_value_type(field.data_type())?, true)))
+        .map(|field| {
+            Ok(Field::new(
+                field.name(),
+                nd_value_type(field.data_type())?,
+                field.is_nullable(),
+            ))
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(Arc::new(Schema::new(fields)))
 }

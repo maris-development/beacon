@@ -1,32 +1,30 @@
 [build-system]
 requires = [
-    # >=1.8.4 is the release that installs a Rust toolchain into a temp dir when `cargo` is
-    # missing, which a source build (sdist on a platform with no wheel) relies on.
+    # Release 1.8.4 and later install a Rust toolchain in a temporary directory when `cargo` is
+    # absent. A source build needs that. pip makes a source build where no wheel exists.
     "maturin>=1.8.4,<2.0",
-    # `prost-build` (reached through Lance) needs protoc at build time and does not bundle one.
-    # pip installs this into the isolated build environment and puts that environment's scripts
-    # directory on PATH, so prost-build finds it like a system install. Pinned to one protoc major
-    # so a protobuf release cannot silently change the compiler used.
-    #
-    # Gated on architecture: wheels exist for x86_64/aarch64/arm64/AMD64 (manylinux, musllinux,
-    # macOS, Windows) but not for e.g. ppc64le or s390x. Requiring it unconditionally would break
-    # source builds on those even where a perfectly good system protoc is installed; there, this
-    # is skipped and the system one is used.
+    # `prost-build`, through Lance, needs protoc and holds none. pip installs this wheel in the
+    # build environment, and prost-build finds it there. The pin holds one major version.
+    # The marker skips an architecture with no wheel, such as ppc64le. Those use a system protoc.
     "protoc-wheel-0>=30,<31; platform_machine == 'x86_64' or platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'AMD64'",
 ]
 build-backend = "maturin"
 
 [project]
 name = "beacondb"
-version = "2.0.0rc2"
-description = "In-tree Python binding for the Beacon engine. Not published; build locally with maturin."
+version = "2.0.0rc5"
+description = "An embeddable, in-process analytical database for scientific data."
 readme = "README.md"
 requires-python = ">=3.10"
+# The licence is AGPL-3.0, as the engine in the wheel is. `beacon-core` links the AGPL-3.0 BBF
+# submodule. The root `LICENSE` of the repository holds the text, and no copy is here.
+# This field and the classifier below state the licence in the wheel.
+license = { text = "AGPL-3.0" }
 authors = [{ name = "Beacon" }]
 keywords = ["beacon", "database", "sql", "arrow", "embedded", "olap", "analytics", "netcdf", "zarr", "parquet"]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Private :: Do Not Upload",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
@@ -39,9 +37,8 @@ classifiers = [
     "Topic :: Database :: Database Engines/Servers",
     "Topic :: Scientific/Engineering",
 ]
-# No required runtime dependencies: results cross into Python over the Arrow
-# PyCapsule protocol, so pyarrow/pandas/polars are only needed by the methods
-# that explicitly return their types.
+# The package needs no runtime dependency. A result crosses into Python over the Arrow PyCapsule
+# protocol. Only the methods that return a pyarrow, pandas or polars type need those packages.
 dependencies = []
 
 [project.optional-dependencies]
@@ -49,15 +46,14 @@ arrow = ["pyarrow>=14.0"]
 pandas = ["pyarrow>=14.0", "pandas>=2.0"]
 polars = ["polars>=1.0"]
 sqlalchemy = ["sqlalchemy>=2.0"]
-# Every optional runtime integration in one install: `pip install "beacondb[all]"`.
-# Written as a self-referential extra (PEP 508 recursive extras) rather than a copied dependency
-# list, so adding an extra above cannot leave this one silently behind. `dev` is deliberately not
-# included — pytest/ruff/h5py are our test tooling, not something a user of the library wants.
+# One command installs every optional integration: `pip install "beacondb[all]"`. This extra
+# names the extras above, and holds no copy of their lists. A new extra therefore stays correct
+# here. `dev` stays out. pytest, ruff and h5py test the package. A user needs none of them.
 all = ["beacondb[arrow,pandas,polars,sqlalchemy]"]
 dev = ["pytest>=8.0", "pyarrow>=14.0", "pandas>=2.0", "polars>=1.0", "h5py>=3.0", "sqlalchemy>=2.0", "ruff>=0.6"]
 
-# Registers the `beacondb://` dialect so `create_engine("beacondb:///...")` works with no manual
-# setup once the package is installed.
+# This entry point registers the `beacondb://` dialect. `create_engine("beacondb:///...")` then
+# works after the install, with no other step.
 [project.entry-points."sqlalchemy.dialects"]
 beacondb = "beacondb.sqlalchemy:BeacondbDialect"
 
@@ -67,13 +63,13 @@ Repository = "https://github.com/maris-development/beacon"
 Source = "https://github.com/maris-development/beacon/tree/main/beacon-db/beacon-db-py"
 
 [tool.maturin]
-# Mixed Rust/Python layout: hand-written Python in python/beacondb, the compiled
-# extension dropped in beside it as `beacondb._beacondb`.
+# The layout holds Rust and Python. The Python code is in python/beacondb. The build puts the
+# compiled module beside it, as `beacondb._beacondb`.
 python-source = "python"
 module-name = "beacondb._beacondb"
 features = ["pyo3/extension-module"]
-# Never ship compiled bytecode: the wheel is abi3 (one wheel for many CPythons), so a
-# version-specific `.pyc` baked in from a local build is both wrong and stale.
+# The wheel holds no compiled bytecode. The wheel is abi3, and serves many CPython versions.
+# A `.pyc` file from a local build is therefore wrong, and old as well.
 exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.pyo"]
 
 [tool.ruff]

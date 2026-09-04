@@ -73,7 +73,7 @@ pytest -v
 | `test_sql_databases.py` | external `STORED AS POSTGRES` tables: federated query/pushdown, cross-source joins, credential redaction, restart survival (PostgreSQL sidecar) |
 | `test_mysql.py` | external `STORED AS MYSQL` tables: query, filter pushdown (federated plan), credential redaction (MySQL sidecar) |
 | `test_nd_formats.py` | NetCDF & Zarr (`read_netcdf`/`read_zarr`, `SELECT *` dimension auto-selection, explicit dims); flat & ND `netcdf` output round-tripped through the reader |
-| `test_spatial.py` | `st_within_point`, `st_geojson_as_wkt`, the GeoJSON DSL filter, and GeoParquet output round-tripped through `read_geoparquet` |
+| `test_spatial.py` | The PostGIS-named spatial functions, the GeoJSON DSL filter, and GeoParquet output round-tripped through `read_geoparquet` |
 | `test_materialized_views.py` | `CREATE MATERIALIZED VIEW` / `REFRESH` / drop; snapshot-until-refresh semantics; admin gate |
 | `test_indexes.py` | `CREATE INDEX` (btree/bitmap/inverted) / `SHOW INDEXES` / `DROP INDEX` on Lance; results unchanged; rejected on external tables |
 | `test_sql_features.py` | window functions, CTEs, `HAVING`, `min/max/avg/stddev`, `count(DISTINCT)`, `CASE`, string functions, numeric DSL `BETWEEN` |

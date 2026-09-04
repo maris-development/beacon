@@ -44,7 +44,7 @@ columns do not match.
 ## Managed tables in SQL
 
 You can create and change the same managed tables with standard SQL. See
-[Managed tables](/docs/2.0.0-rc3/beacondb/sql/managed-tables):
+[Managed tables](/docs/2.0.0-rc5/beacondb/sql/managed-tables):
 
 ```python
 con.execute("CREATE TABLE obs AS SELECT * FROM read_parquet('obs/*.parquet')")

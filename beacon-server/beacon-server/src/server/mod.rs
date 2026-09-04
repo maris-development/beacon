@@ -16,6 +16,7 @@
 pub mod catalog;
 pub mod files;
 pub mod sql;
+pub mod storage;
 pub mod sys;
 pub mod uploads;
 
@@ -74,6 +75,19 @@ impl Server {
     /// Host and build information for `GET /api/info`.
     pub fn system_info(&self) -> sys::SystemInfo {
         sys::SystemInfo::new(self.config.runtime.enable_sys_info)
+    }
+
+    /// Disk space of the datasets store, for `GET /api/admin/datasets/storage`.
+    ///
+    /// A local store reads the disk that holds the datasets directory. An S3
+    /// store has no capacity, so it lists the bucket to get the used space —
+    /// which makes this call slow on a large bucket.
+    pub async fn dataset_storage(&self) -> storage::DatasetStorageInfo {
+        let s3 = &self.config.s3;
+        match (s3.datasets_on_s3, s3.bucket.as_deref()) {
+            (true, Some(bucket)) => storage::s3_storage(self.store.as_ref(), bucket).await,
+            _ => storage::local_storage(&self.config.data.datasets),
+        }
     }
 
     /// The cap on a single upload, in bytes. `0` means unlimited.
@@ -286,6 +300,8 @@ async fn build_runtime(
     if config.sql.enable_nd_pipeline {
         builder = builder.with_nd_pipeline();
     }
+    // The rule for a column that no type holds. Every schema merge takes it.
+    builder = builder.with_type_conflict(config.runtime.type_conflict);
     if config.auth.anonymous_enabled {
         builder = builder.with_anonymous_user(ANONYMOUS_USERNAME);
     }

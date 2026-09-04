@@ -3,6 +3,7 @@ pub mod big_page_list;
 pub mod consts;
 pub mod fast_object;
 pub mod format_ext;
+pub mod format_options;
 pub mod listing_factory;
 pub mod listing_table_factory_ext;
 pub mod listing_url_resolver;

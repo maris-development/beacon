@@ -30,8 +30,8 @@ use futures::{StreamExt, TryStreamExt};
 use super::{
     actions, crawler,
     logical::{
-        analyze_files_arrow_schema, count_arrow_schema, run_crawler_arrow_schema,
-        show_crawlers_arrow_schema,
+        analyze_files_arrow_schema, compact_table_arrow_schema, count_arrow_schema,
+        run_crawler_arrow_schema, show_crawlers_arrow_schema,
         show_indexes_arrow_schema, show_secrets_arrow_schema, AlterTableSpec,
         Mutation,
     },
@@ -864,7 +864,9 @@ impl ExecutionPlan for InsertExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let session = upgrade_session(&self.session)?;
-        let table = self.table.table().to_string();
+        // The planner's reference, not its table name: rebuilding one from a
+        // string lowercases it, and the catalog holds the name as written.
+        let table = self.table.clone();
         let op = self.op;
         let child = self.child.clone();
         Ok(forward_stream(count_arrow_schema(), async move {
@@ -1408,6 +1410,80 @@ impl ExecutionPlan for ShowIndexesExec {
         let schema = show_indexes_arrow_schema();
         let stream = futures::stream::once(async move {
             actions::list_indexes(&session, &table).await.map_err(to_df_err)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
+
+/// Physical node for `COMPACT TABLE <table> [WITH (...)]`. Produces one report row.
+#[derive(Debug)]
+pub(crate) struct CompactTableExec {
+    table: String,
+    options: Vec<(String, String)>,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl CompactTableExec {
+    pub(crate) fn new(
+        table: String,
+        options: Vec<(String, String)>,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            table,
+            options,
+            session,
+            // Row-producing: the compaction report is the result, the way
+            // `ANALYZE FILES` returns its pass report.
+            cache: Arc::new(plan_properties(compact_table_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for CompactTableExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "CompactTableExec: table={}", self.table)
+            }
+            DisplayFormatType::TreeRender => write!(f, "CompactTableExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for CompactTableExec {
+    fn name(&self) -> &str {
+        "CompactTableExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let table = self.table.clone();
+        let options = self.options.clone();
+        let schema = compact_table_arrow_schema();
+        let stream = futures::stream::once(async move {
+            actions::compact_table(&session, &table, &options)
+                .await
+                .map_err(to_df_err)
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }

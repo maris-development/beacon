@@ -101,6 +101,27 @@ impl SqlEngine {
         }
     }
 
+    /// Does this engine spell a geometry constructor the way PostGIS does?
+    ///
+    /// A geometry constant folds at plan time and then has no SQL syntax, so a federated
+    /// sub-plan rebuilds it as `ST_GeomFromText(...)`, optionally wrapped in `ST_SetSRID`, just
+    /// before it becomes SQL. PostGIS reads both calls. MySQL has `ST_GeomFromText` but sets an
+    /// SRID with `ST_SRID`, and SQL Server over ODBC uses `geometry::STGeomFromText`. A rebuilt
+    /// call would name a function neither one has, so they keep the plain unparse error rather
+    /// than a wrong function name.
+    ///
+    /// See [`beacon_datafusion_ext::remote::geometry_literals_to_calls`].
+    pub fn rebuilds_geometry_constants(self) -> bool {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Postgres => true,
+            #[cfg(feature = "mysql")]
+            Self::MySql => false,
+            #[cfg(feature = "odbc")]
+            Self::Odbc => false,
+        }
+    }
+
     /// The connection-pool key this engine uses for the TCP port. Postgres uses
     /// `port`; MySQL uses `tcp_port`.
     fn port_key(self) -> &'static str {

@@ -34,6 +34,20 @@
 //! work the caller waits on before planning starts. It runs in parallel above
 //! 65 536 candidates: see [`prune`].
 //!
+//! A file is looked up by what the listing said about it, not by its path
+//! alone: the size and modification time, or the etag, must still match the
+//! record the statistics were written against. A file rewritten after its
+//! analysis therefore reads as unknown and is kept. The background pass notices
+//! the same change and marks the record stale, but it runs every
+//! `BEACON_FILE_STATS_INTERVAL_SECS`, and over a store Beacon never lists it
+//! never runs at all. The scan holds the metadata already, so the check costs
+//! no request.
+//!
+//! An entry a format planned itself may carry no such metadata — Zarr states
+//! the group keys its reader opens and nothing else — so there is nothing to
+//! compare, and the record stands as it always did. For those the pass remains
+//! the only check.
+//!
 //! What it costs is peak memory. `list_files_for_scan` materialises a
 //! `PartitionedFile` per listed file — ~280 bytes plus a path — before pruning
 //! sees any of them, so a selective query over a very large collection still

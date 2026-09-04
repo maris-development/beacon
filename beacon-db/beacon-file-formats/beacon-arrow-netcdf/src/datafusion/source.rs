@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use arrow::{
+    datatypes::{FieldRef, SchemaRef},
+    record_batch::RecordBatch,
+};
 use beacon_nd_array::{
     arrow::{
         file_read::FileRead,
         metrics::ReadMetrics,
         morsel::{morsel_scan, MorselSource, OpenFile},
+        partition::FilePartitions,
     },
     projection::DatasetProjection,
 };
@@ -101,6 +105,7 @@ impl FileSource for NetCDFSource {
             partition,
             object_store,
             self.morsel.clone(),
+            base_config.table_partition_cols().clone(),
         )))
     }
 
@@ -170,10 +175,8 @@ impl FileSource for NetCDFSource {
             return Ok(Some(config));
         }
 
-        // The queue declined. It only does that for a partitioned table, and
-        // `NetcdfFormat::create_physical_plan` refuses those before a scan is
-        // built, so this is unreachable in practice. Keeping the scan as it was
-        // planned is the safe answer either way.
+        // The queue declined: one partition, or no files. Keeping the scan as it
+        // was planned is the answer to both.
         Ok(None)
     }
 
@@ -247,6 +250,9 @@ struct NetCDFOpener {
     morsel: Option<Arc<MorselSource>>,
     /// How one file is opened, for the queue to call.
     files: Arc<dyn OpenFile>,
+    /// The table's `PARTITIONED BY` columns, nd-encoded as the scan carries
+    /// them. A file's values for them travel on its `PartitionedFile`.
+    partition_fields: Vec<FieldRef>,
 }
 
 impl NetCDFOpener {
@@ -261,6 +267,7 @@ impl NetCDFOpener {
         partition: usize,
         object_store: Arc<dyn object_store::ObjectStore>,
         morsel: Option<Arc<MorselSource>>,
+        partition_fields: Vec<FieldRef>,
     ) -> Self {
         let read_metrics = ReadMetrics::new(&metrics, partition);
         let files = Arc::new(NetCDFFiles {
@@ -271,6 +278,7 @@ impl NetCDFOpener {
             batch_size,
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
+            partition_fields: partition_fields.clone(),
         });
 
         Self {
@@ -284,6 +292,7 @@ impl NetCDFOpener {
             partition,
             access,
             object_store,
+            partition_fields,
         }
     }
 
@@ -307,6 +316,7 @@ impl NetCDFOpener {
         batch_size: usize,
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        partitions: FilePartitions,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
@@ -316,14 +326,16 @@ impl NetCDFOpener {
                 projected_schema,
                 batch_size,
                 predicate,
+                partitions,
                 Some(&planning),
             )
             .await
         };
 
         // This partition's own file. Nothing is shared here: a scan that can be
-        // divided goes through the queue, and one that cannot is refused before
-        // it is planned.
+        // divided goes through the queue, and one that cannot — a single
+        // partition, or no files — reads each file whole, as `FileStream` hands
+        // it over.
         let dataset = plan().await?;
 
         Ok(dataset.stream(Some(metrics)))
@@ -376,6 +388,8 @@ struct NetCDFFiles {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
+    /// The table's `PARTITIONED BY` columns. Each file brings its own values.
+    partition_fields: Vec<FieldRef>,
 }
 
 impl std::fmt::Debug for NetCDFFiles {
@@ -404,6 +418,7 @@ impl OpenFile for NetCDFFiles {
             self.projected_schema.clone(),
             self.batch_size,
             self.predicate.clone(),
+            FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
             Some(&self.metrics),
         )
         .await
@@ -439,6 +454,8 @@ impl FileOpener for NetCDFOpener {
         let input = self
             .access
             .input_for(&self.object_store, &file.object_meta)?;
+        let partitions =
+            FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone());
 
         Ok(Self::read(
             input,
@@ -448,6 +465,7 @@ impl FileOpener for NetCDFOpener {
             self.batch_size,
             metrics,
             self.predicate.clone(),
+            partitions,
         )
         .boxed())
     }

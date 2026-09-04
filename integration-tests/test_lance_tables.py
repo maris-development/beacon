@@ -155,3 +155,128 @@ def test_insert_select_from_parquet(client, sample_data):
         assert client.count(f"SELECT * FROM {name}") == expected
     finally:
         _drop(client, name)
+
+
+def _compact(client, table, options: str = "") -> dict[str, int]:
+    """Run ``COMPACT TABLE`` and return its report row as a dict."""
+    rows = client.sql_rows(f"COMPACT TABLE {table}{options}", admin=True)
+    header, values = rows[0], rows[1]
+    return {name: int(value) for name, value in zip(header, values)}
+
+
+def _seed_three_fragments(client, table):
+    """A table of three two-row fragments (one commit per pair)."""
+    client.execute(f"CREATE TABLE {table} (id BIGINT, name VARCHAR)", admin=True)
+    for pair in range(3):
+        first, second = pair * 2 + 1, pair * 2 + 2
+        client.execute(
+            f"INSERT INTO {table} VALUES ({first}, 'row-{first}'), ({second}, 'row-{second}')",
+            admin=True,
+        )
+
+
+def test_compact_merges_fragments_and_preserves_rows(client, table):
+    """Each INSERT commits its own fragment; COMPACT merges them without changing rows."""
+    _seed_three_fragments(client, table)
+    # The deleted row leaves its fragment alive (a fragment whose rows are all
+    # deleted is dropped by the DELETE itself), so COMPACT materializes it.
+    client.execute(f"DELETE FROM {table} WHERE id = 1", admin=True)
+
+    report = _compact(client, table)
+    assert report["fragments_removed"] == 3
+    assert report["fragments_added"] == 1
+    # The default retention window (7d) keeps every version just written.
+    assert report["versions_removed"] == 0
+    assert client.count(f"SELECT * FROM {table}") == 5
+    assert client.scalar(f"SELECT name FROM {table} WHERE id = 3") == "row-3"
+
+    # Nothing left to merge; a zero window releases the superseded versions.
+    report = _compact(client, table, " WITH ('cleanup_older_than' '0s')")
+    assert report["fragments_removed"] == 0
+    assert report["versions_removed"] > 0
+    assert report["bytes_removed"] > 0
+    assert client.count(f"SELECT * FROM {table}") == 5
+
+
+def test_compact_keeps_indexes(client, table):
+    client.execute(f"CREATE TABLE {table} (id BIGINT, name VARCHAR)", admin=True)
+    client.execute(f"INSERT INTO {table} VALUES (1, 'a')", admin=True)
+    client.execute(f"INSERT INTO {table} VALUES (2, 'b')", admin=True)
+    client.execute(f"CREATE INDEX {table}_id_idx ON {table} (id) USING btree", admin=True)
+
+    _compact(client, table)
+
+    names = {r[0] for r in client.sql_rows(f"SHOW INDEXES ON {table}", admin=True)[1:]}
+    assert f"{table}_id_idx" in names, "Lance remaps indexes onto the rewritten fragments"
+    assert client.count(f"SELECT * FROM {table} WHERE id = 2") == 1
+
+
+def test_compact_rejects_unknown_option(client, table):
+    client.execute(f"CREATE TABLE {table} (id BIGINT)", admin=True)
+    assert client.status(f"COMPACT TABLE {table} WITH ('target_rows' '10')", admin=True) == 400
+
+
+def test_compact_requires_admin(client, table):
+    client.execute(f"CREATE TABLE {table} (id BIGINT)", admin=True)
+    assert client.status(f"COMPACT TABLE {table}", admin=False) == 400
+
+
+def test_compact_honours_target_rows_per_fragment(client, table):
+    """The target decides which fragments are too small, so a tiny one merges nothing."""
+    _seed_three_fragments(client, table)
+
+    report = _compact(client, table, " WITH ('target_rows_per_fragment' '1')")
+    assert report["fragments_removed"] == 0, "every fragment already meets a 1-row target"
+    assert client.count(f"SELECT * FROM {table}") == 6
+
+    # The same table, at the default target, merges all three.
+    report = _compact(client, table)
+    assert report["fragments_removed"] == 3
+    assert report["fragments_added"] == 1
+    assert client.count(f"SELECT * FROM {table}") == 6
+
+
+def test_compact_never_keeps_every_version(client, table):
+    """``cleanup_older_than never`` compacts and releases nothing."""
+    _seed_three_fragments(client, table)
+
+    report = _compact(client, table, " WITH ('cleanup_older_than' 'never')")
+    assert report["fragments_removed"] == 3
+    assert report["versions_removed"] == 0
+    assert report["bytes_removed"] == 0
+    assert client.count(f"SELECT * FROM {table}") == 6
+
+
+def test_compact_after_update_preserves_values(client, table):
+    """UPDATE rewrites a fragment; the merge that follows must keep its values."""
+    _seed_three_fragments(client, table)
+    client.execute(f"UPDATE {table} SET name = 'updated' WHERE id = 2", admin=True)
+
+    report = _compact(client, table)
+    assert report["fragments_added"] == 1
+    assert client.count(f"SELECT * FROM {table}") == 6
+    assert client.scalar(f"SELECT name FROM {table} WHERE id = 2") == "updated"
+    assert client.scalar(f"SELECT name FROM {table} WHERE id = 5") == "row-5"
+
+
+def test_compact_empty_table_reports_zeros(client, table):
+    """A table with nothing to merge is not an error."""
+    client.execute(f"CREATE TABLE {table} (id BIGINT)", admin=True)
+
+    report = _compact(client, table)
+    assert set(report.values()) == {0}, report
+
+
+def test_compact_on_external_table_is_rejected(client):
+    """Compaction is a Lance feature; an external table must be refused."""
+    name = "mt_compact_ext"
+    _drop(client, name)
+    client.execute(f"CREATE EXTERNAL TABLE {name} STORED AS PARQUET LOCATION 'obs/'", admin=True)
+    try:
+        assert client.status(f"COMPACT TABLE {name}", admin=True) == 400
+    finally:
+        _drop(client, name)
+
+
+def test_compact_unknown_table_is_rejected(client):
+    assert client.status("COMPACT TABLE mt_compact_missing", admin=True) == 400

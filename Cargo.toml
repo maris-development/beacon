@@ -5,7 +5,7 @@ members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", 
 
 [workspace.package]
 
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 
 rust-version = "1.94"
 
@@ -77,14 +77,14 @@ datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 
 datafusion-table-providers = { version = "=0.11.2", default-features = false }
 
-datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77", default-features = false, features = ["df53", "sql"] }
+datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "92245ff8e2eaad939425993cff7fa9180d471ec1", default-features = false, features = ["df53", "sql"] }
 
-datafusion-spatial-kernels = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "20a416ff473192f47082dd4b3dcf19340aed3c77" }
+datafusion-spatial-kernels = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "92245ff8e2eaad939425993cff7fa9180d471ec1" }
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 
-oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.3.0", features = ["async", "object-store", "ndarray"] }
+oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.4.0", features = ["async", "object-store", "ndarray"] }
 
-oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", version = "0.3.0", features = ["async", "object-store"] }
+oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", version = "0.4.0", features = ["async", "object-store"] }
 tonic = "0.14.1"
 
 

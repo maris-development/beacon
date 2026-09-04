@@ -30,13 +30,15 @@
 //! - [`Hdf5Config`] — the runtime settings, including the reader flag.
 
 mod config;
+/// Layout conventions read on top of the HDF5 container.
+pub mod conventions;
 mod format;
 mod open;
 pub mod reader;
 mod source;
 mod table_function;
 
-pub use config::Hdf5Config;
+pub use config::{Hdf5Config, Hdf5Convention, ReadOptions};
 pub use format::{Hdf5Format, Hdf5FormatFactory};
 pub use open::{fetch_schema, open_dataset};
 pub use source::Hdf5Source;

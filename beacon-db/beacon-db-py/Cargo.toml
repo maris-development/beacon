@@ -4,62 +4,86 @@ version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Python bindings for beacon-db: an embeddable, in-process analytical database"
+# The wheel is published, so this file states the licence, and pyproject.toml states it too. The
+# beacon-server crates do the same. The licence is AGPL-3.0, because `beacon-core` links the
+# AGPL-3.0 BBF submodule. The crate itself stays off crates.io.
+license = "AGPL-3.0"
 publish = false
 
 [lib]
-# The compiled module is imported as `beacondb._beacondb`; the Python package
-# `beacondb` (python/beacondb) re-exports it. A `cdylib` only — nothing in the
-# workspace may depend on this crate.
+# Python imports the compiled module as `beacondb._beacondb`. The package `beacondb`, in
+# python/beacondb, re-exports it. The crate is a `cdylib` only. No crate in the workspace
+# depends on it.
 name = "_beacondb"
 crate-type = ["cdylib"]
 
 [features]
-# Statically build+link netCDF/HDF5 so the wheel carries them and needs no system libraries.
-# Enabled for the distributable wheels (`maturin build --features static-netcdf`), off for
-# `maturin develop` and local iteration. Requires `cmake` at build time.
+# This feature compiles netCDF and HDF5 from source and links them statically. The wheel then
+# holds them, and needs no system library. The wheel jobs use it. `maturin develop` does not,
+# because a local build is faster without it. The build needs cmake.
 static-netcdf = ["beacon-core/static-netcdf"]
 
-# Build OpenSSL from source and link it statically, so the wheel carries no system libssl.
-# The MySQL/PostgreSQL federation drivers (datafusion-table-providers -> native-tls) need
-# OpenSSL, but only on Linux: native-tls uses SChannel on Windows and Security.framework on
-# macOS. The dependency below is therefore Linux-only, and this feature is a no-op elsewhere —
-# the release workflow can pass it unconditionally for every platform.
-# Enabled for the distributable wheels, off for `maturin develop` and local iteration (where a
-# system libssl-dev/openssl-devel is the faster path). Requires cmake, make and perl at build time.
+# This feature compiles OpenSSL from source, so the wheel needs no system libssl. Only the
+# MySQL and PostgreSQL drivers need OpenSSL, and only on Linux. The feature is inert elsewhere,
+# so the wheel jobs pass it on every platform. The build needs cmake, make and perl.
 vendored-openssl = ["dep:openssl"]
 
-# Use jemalloc instead of the platform allocator. Query execution is dominated by
-# short-lived per-batch allocations across many threads (hash aggregation over
-# string columns especially), which the macOS system allocator handles poorly.
+# This feature gives the `ST_Transform` spatial function, as the server does. It links PROJ 9.6.2
+# or later, from pkg-config. Without such a PROJ, `proj-sys` compiles PROJ from source.
+# `--no-default-features` drops the function. The other 122 spatial functions need no library.
+default = ["spatial-proj"]
+spatial-proj = ["beacon-core/spatial-proj"]
+# The same function, but `proj-sys` always compiles PROJ from source. The wheels need this,
+# because a wheel cannot link the PROJ of the build machine. A static PROJ also holds its CRS
+# database, `proj.db`, in the library. The module needs no `PROJ_DATA`.
+spatial-proj-bundled = [
+    "spatial-proj",
+    "beacon-core/spatial-proj-bundled",
+    # PROJ writes that database with SQLite, so the build compiles SQLite from source as well.
+    # `proj-sys` gives it to the cmake of PROJ, so a wheel job needs no system SQLite.
+    # This is inert on Windows, where the dependency below does not apply.
+    "dep:libsqlite3-sys",
+    "libsqlite3-sys/bundled",
+]
+
+# This feature puts jemalloc in the place of the platform allocator. A query makes many small
+# allocations per batch, on many threads. A hash aggregate over string columns is the worst case.
+# The system allocator of macOS is slow for that work.
 jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
-# Pinned exactly. 0.29.0 (2026-06-11) is the current release and predates our
-# no-fresh-packages window. `abi3-py310` builds one wheel for CPython >= 3.10,
-# matching `requires-python` in pyproject.toml.
+# The version is exact. Release 0.29.0, of 2026-06-11, is current and older than our
+# no-fresh-packages window. `abi3-py310` builds one wheel for CPython 3.10 and later.
+# That agrees with `requires-python` in pyproject.toml.
 pyo3 = { version = "=0.29.0", features = ["abi3-py310", "extension-module"] }
 tikv-jemallocator = { workspace = true, optional = true }
 
-beacon-core = { path = "../beacon-core" }
-# `OdvOptions` for the `to_odv` sink (auto-inferred from the schema). beacon-core does not
-# re-export it, so it is named directly; version follows the workspace path dependency.
+# `default-features = false`, so the `spatial-proj` feature of this crate is the one switch for
+# PROJ. `--no-default-features` on this crate then reaches the whole graph.
+beacon-core = { path = "../beacon-core", default-features = false }
+# `OdvOptions` for the `to_odv` sink. The crate reads those options from the schema.
+# `beacon-core` does not re-export the type, so this file names the crate.
 beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
 
 anyhow = { workspace = true }
 arrow = { workspace = true }
-# Reads the Arrow IPC stream `register()` produces from a pandas/pyarrow/polars object back
-# into `RecordBatch`es. Version-locked to the workspace arrow (^58).
+# `register()` writes an Arrow IPC stream from a pandas, pyarrow or polars object. This crate
+# reads that stream back into record batches. The version follows the workspace arrow (^58).
 arrow-ipc = { workspace = true }
 datafusion = { workspace = true }
 futures = { workspace = true }
-# Deserializes the `json_query()` dict (as JSON text) into beacon's `InnerQuery`.
+# This crate reads the `json_query()` dictionary, as JSON text, into the `InnerQuery` of beacon.
 serde_json = { workspace = true }
 tokio = { workspace = true }
 
-# Never called from this crate. It exists so `vendored-openssl` can reach `openssl-sys`'s
-# `vendored` feature; cargo unifies features per package, so the transitive `native-tls` build
-# (MySQL/PostgreSQL federation) then compiles and statically links its own OpenSSL instead of
-# looking for one via pkg-config. Only Linux resolves openssl-sys at all, so the dependency is
-# declared for Linux alone — the manylinux containers ship no `openssl-devel`.
+# This crate never calls openssl. The dependency lets `vendored-openssl` reach the `vendored`
+# feature of `openssl-sys`. The `native-tls` build then takes that feature. Linux only: no other
+# platform resolves openssl-sys, and a manylinux container holds no `openssl-devel`.
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"], optional = true }
+
+# This crate never calls libsqlite3-sys either. `spatial-proj-bundled` needs it to reach the
+# `bundled` feature. The pin stops a second version, which would clash over `links = "sqlite3"`.
+# Not on Windows: `proj-sys` gives cmake a Unix name that MSVC never writes, so that job uses vcpkg.
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libsqlite3-sys = { version = "=0.35.0", optional = true }

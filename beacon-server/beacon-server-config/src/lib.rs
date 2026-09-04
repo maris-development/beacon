@@ -11,10 +11,11 @@ use error::Result;
 // Per-format and storage config types are owned by their crates; beacon-config
 // composes them here and fills them from the environment.
 pub use beacon_arrow_bbf::datafusion::BbfConfig;
-pub use beacon_arrow_hdf5::Hdf5Config;
+pub use beacon_arrow_hdf5::{Hdf5Config, Hdf5Convention};
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::CrawlerConfig;
+pub use beacon_datafusion_ext::type_widening::TypeConflict;
 pub use beacon_common::FileStatsConfig;
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,11 @@ pub struct RuntimeConfig {
     pub vm_memory_size: usize,
     pub enable_sys_info: bool,
     pub batch_size: usize,
+    /// What a schema merge does with a column that no type holds, e.g. a number
+    /// in one file and a string in another. From
+    /// `BEACON_TYPE_WIDENING_ON_CONFLICT`. Defaults to [`TypeConflict::Fail`],
+    /// which refuses such a collection and names both files.
+    pub type_conflict: TypeConflict,
 }
 
 #[derive(Debug, Clone)]
@@ -401,8 +407,20 @@ struct RawConfig {
     max_age: u64,
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "true")]
     enable_pushdown_projection: bool,
-    #[envconfig(from = "BEACON_ENABLE_ND_PIPELINE", default = "false")]
+    #[envconfig(from = "BEACON_ENABLE_ND_PIPELINE", default = "true")]
     enable_nd_pipeline: bool,
+
+    /// What a schema merge does with a column that two files type in two
+    /// families, e.g. a number and a string.
+    ///
+    /// `fail`, the default, refuses the collection and names the column, both
+    /// types and both files.
+    ///
+    /// `keep_first` reads the type of the first file. Every other file casts to
+    /// it, and a value that type cannot hold reads as null. The merge then
+    /// reads the listing order, so it drops no repeat and starts no thread.
+    #[envconfig(from = "BEACON_TYPE_WIDENING_ON_CONFLICT", default = "fail")]
+    type_widening_on_conflict: String,
 
     /// Root directory for Beacon's local data (datasets, tables, tmp, etc.).
     #[envconfig(from = "BEACON_DATA_DIR", default = "./data")]
@@ -439,6 +457,30 @@ struct RawConfig {
 
     #[envconfig(from = "BEACON_HDF5_ENABLE_STATISTICS", default = "true")]
     hdf5_enable_statistics: bool,
+
+    /// Give every dimension netCDF invents for a plain HDF5 file one name per
+    /// length, over every group of the file.
+    ///
+    /// On by default, and the reason a plain HDF5 file reads as one table: the
+    /// payload of one group and the description of each column in another then
+    /// share an axis and broadcast.
+    ///
+    /// Set it to false to keep the names the reader gave, one per length per
+    /// group, which is right for a file whose groups hold unrelated axes of one
+    /// length. A file that names its dimensions, such as any NetCDF-4 file, is
+    /// unaffected either way.
+    #[envconfig(from = "BEACON_HDF5_UNIFY_PHONY_DIMENSIONS", default = "true")]
+    hdf5_unify_phony_dimensions: bool,
+
+    /// The layout convention every HDF5 table of this server reads.
+    ///
+    /// `none` by default, so a file is read as its container describes it and
+    /// nothing is assumed. `optodas` reads an ASN OptoDAS acquisition file: it
+    /// names the axes of the payload, builds the `time` and `distance`
+    /// coordinates the file describes, and decodes the payload to the unit the
+    /// file records. A table sets its own with `OPTIONS ('convention' 'optodas')`.
+    #[envconfig(from = "BEACON_HDF5_CONVENTION", default = "none")]
+    hdf5_convention: String,
 
     /// Compute per-file statistics for Zarr stores.
     ///
@@ -581,6 +623,17 @@ impl From<RawConfig> for Config {
                 vm_memory_size: raw.vm_memory_size,
                 enable_sys_info: raw.enable_sys_info,
                 batch_size: raw.beacon_batch_size,
+                // An unknown name reads as `fail`, which is the rule a server
+                // ran before this setting existed. A server that cannot start
+                // over a typo is worse than one that names the column.
+                type_conflict: TypeConflict::parse(&raw.type_widening_on_conflict).unwrap_or_else(
+                    |value| {
+                        tracing::warn!(
+                            "BEACON_TYPE_WIDENING_ON_CONFLICT names no setting: '{value}'.                              The settings are 'fail' and 'keep_first'. Refusing a conflict."
+                        );
+                        TypeConflict::Fail
+                    },
+                ),
             },
             sql: SqlConfig {
                 enable: raw.enable_sql,
@@ -617,6 +670,16 @@ impl From<RawConfig> for Config {
             },
             hdf5: Hdf5Config {
                 use_rust_reader: raw.hdf5_use_rust_reader,
+                unify_phony_dimensions: raw.hdf5_unify_phony_dimensions,
+                // An unknown name reads as no convention. A server that cannot
+                // start over a typo is worse than one that reads the container.
+                convention: Hdf5Convention::parse(&raw.hdf5_convention).unwrap_or_else(|value| {
+                    tracing::warn!(
+                        "BEACON_HDF5_CONVENTION names no convention: '{value}'. \
+                         The conventions are 'none'. Reading with none."
+                    );
+                    Hdf5Convention::None
+                }),
                 enable_statistics: raw.hdf5_enable_statistics,
             },
             zarr: ZarrConfig {
@@ -870,7 +933,7 @@ fn create_dir(path: &Path) -> Result<()> {
 mod tests {
     use super::{
         decode_master_key, normalize_base_path, normalize_log_level, validate_storage, Config,
-        PathBuf, RawConfig,
+        Hdf5Convention, PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1238,5 +1301,41 @@ mod tests {
         let hdf5_c = config(&[("BEACON_HDF5_USE_RUST_READER", "false")]);
         assert!(hdf5_c.netcdf.use_rust_reader);
         assert!(!hdf5_c.hdf5.use_rust_reader);
+    }
+
+    /// No file is read for a convention it may not follow, unless a server asks.
+    #[test]
+    fn the_hdf5_convention_is_none_by_default() {
+        assert_eq!(config(&[]).hdf5.convention, Hdf5Convention::None);
+        assert_eq!(
+            config(&[("BEACON_HDF5_CONVENTION", "optodas")])
+                .hdf5
+                .convention,
+            Hdf5Convention::OptoDas
+        );
+    }
+
+    /// A name the server does not know reads the container, and says so. A
+    /// typo must not stop a node from starting.
+    #[test]
+    fn an_unknown_hdf5_convention_falls_back_to_none() {
+        assert_eq!(
+            config(&[("BEACON_HDF5_CONVENTION", "opto-dass")])
+                .hdf5
+                .convention,
+            Hdf5Convention::None
+        );
+    }
+
+    /// A plain HDF5 file reads as one table by default, and one variable turns
+    /// that off.
+    #[test]
+    fn the_dimension_unification_is_on_by_default() {
+        assert!(config(&[]).hdf5.unify_phony_dimensions);
+        assert!(
+            !config(&[("BEACON_HDF5_UNIFY_PHONY_DIMENSIONS", "false")])
+                .hdf5
+                .unify_phony_dimensions
+        );
     }
 }

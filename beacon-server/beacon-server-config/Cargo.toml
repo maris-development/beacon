@@ -4,7 +4,8 @@ version.workspace = true
 edition = "2021"
 
 rust-version.workspace = true
-# The server is the AGPL zone; the beacon-db engine under it is Apache-2.0. See LICENSING.md.
+# The whole repository is AGPL-3.0, from the root LICENSE. This crate restates it because it is
+# publishable, and a published crate needs the field.
 license = "AGPL-3.0-only"
 [dependencies]
 envconfig = {workspace = true}
@@ -16,6 +17,7 @@ base64 = { workspace = true }
 # Per-format and storage config types are owned by their crates; beacon-config
 # composes them and fills them from the environment.
 beacon-common = { path = "../../beacon-db/beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
 beacon-arrow-netcdf = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-hdf5 = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-hdf5" }
 beacon-arrow-zarr = { path = "../../beacon-db/beacon-file-formats/beacon-arrow-zarr" }

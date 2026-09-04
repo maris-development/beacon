@@ -26,6 +26,13 @@
 //! Only the root group is read, which is what netcdf-c's `File::variables`
 //! returns. Both readers therefore report the same variables.
 //!
+//! # Dimensions
+//!
+//! A file that names no dimension, which is every plain HDF5 file, gets the
+//! dimensions netCDF invents. [`crate::dimensions`] gives every invented axis of
+//! one length one name, so two groups of one file broadcast against each other.
+//! A NetCDF-4 file names every dimension and is untouched.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -52,6 +59,7 @@ use indexmap::IndexMap;
 use object_store::{path::Path, ObjectStore};
 use oxcdf::AsyncNetcdfFile;
 
+use crate::dimensions::PhonyDimensions;
 use crate::oxcdf_reader::compat;
 
 /// Open a NetCDF object from `store` and return its contents as an
@@ -70,8 +78,13 @@ use crate::oxcdf_reader::compat;
 pub async fn open_dataset(store: Arc<dyn ObjectStore>, path: Path) -> anyhow::Result<AnyDataset> {
     let name = path.to_string();
     let file = Arc::new(AsyncNetcdfFile::open_store(store, path).await?);
+    let phony = PhonyDimensions::of_file(&file);
     let arrays = read_arrays(&file)?;
-    let dataset = Dataset::new(name, arrays).await;
+    // A file that names no dimension is an instrument file, and `SELECT *`
+    // picks its grid by volume rather than by variable count.
+    let dataset = Dataset::new(name, arrays)
+        .await
+        .with_invented_dimensions(phony.invented_names().iter().cloned());
     AnyDataset::try_from_dataset(dataset).await
 }
 
@@ -90,13 +103,19 @@ pub fn read_arrays(
 ) -> anyhow::Result<IndexMap<String, Arc<dyn NdArrayD>>> {
     let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
 
+    // A file that names no dimension gets one invented name per length per
+    // group. Give every length one name instead, so two groups of one file
+    // broadcast against each other. A NetCDF-4 file names every dimension, so
+    // this renames nothing there.
+    let phony = PhonyDimensions::of_file(file);
+
     // ── Variables and their per-variable attributes ──────────────────────
     for info in &file.root().variables {
         let Some(variable) = file.variable(&info.path) else {
             continue;
         };
 
-        if let Ok(array) = compat::variable_to_nd_array(file.clone(), &variable) {
+        if let Ok(array) = compat::variable_to_nd_array(file.clone(), &variable, &phony) {
             arrays.insert(info.name.clone(), array);
         }
 

@@ -539,7 +539,7 @@ pub(crate) async fn create_table(
     session.register_table(name.clone(), provider)?;
 
     if is_ctas {
-        let stream = insert_into(session, &table_name, InsertOp::Append, child).await?;
+        let stream = insert_into(session, name, InsertOp::Append, child).await?;
         Ok(Some(build_default_indexes_after(
             stream,
             warehouse,
@@ -588,11 +588,11 @@ fn build_default_indexes_after(
 /// inserted-row count stream.
 pub(crate) async fn insert_into(
     session: &Arc<SessionContext>,
-    table: &str,
+    table: &TableReference,
     op: InsertOp,
     child: Arc<dyn ExecutionPlan>,
 ) -> anyhow::Result<SendableRecordBatchStream> {
-    let provider = session.table_provider(table).await?;
+    let provider = session.table_provider(table.clone()).await?;
     let state = session.state();
     let insert_plan = provider.insert_into(&state, child, op).await?;
     let stream = execute_stream(insert_plan, session.task_ctx())?;
@@ -654,7 +654,7 @@ pub(crate) async fn alter_table(
     session: &Arc<SessionContext>,
     spec: &AlterTableSpec,
 ) -> anyhow::Result<()> {
-    let table_ref = TableReference::parse_str(&spec.name.to_string());
+    let table_ref = crate::table_name::object_name_table_reference(&spec.name);
 
     let provider = session.table_provider(table_ref.clone()).await?;
     let definition = provider
@@ -740,19 +740,23 @@ fn lance_warehouse(
 }
 
 /// Resolve a managed table to the on-disk location of its Lance dataset, erroring
-/// if the table is not Lance-backed (indexes are a Lance-only feature).
+/// if the table is not Lance-backed. `feature` names the caller in that error
+/// (indexes and compaction are both Lance-only).
 async fn lance_table_location(
     session: &Arc<SessionContext>,
     table: &str,
+    feature: &str,
 ) -> anyhow::Result<String> {
-    let provider = session.table_provider(table).await?;
+    let provider = session
+        .table_provider(crate::table_name::table_reference(table))
+        .await?;
     provider
         .as_any()
         .downcast_ref::<beacon_lance::LanceTable>()
         .map(|t| t.definition().location.clone())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Indexes are only supported on Lance-backed tables, but '{table}' is not one"
+                "{feature} is only supported on Lance-backed tables, but '{table}' is not one"
             )
         })
 }
@@ -767,7 +771,7 @@ pub(crate) async fn create_index(
     name: Option<String>,
     using: Option<String>,
 ) -> anyhow::Result<()> {
-    let location = lance_table_location(session, table).await?;
+    let location = lance_table_location(session, table, "Index management").await?;
     let kind = match using {
         Some(using) => using
             .parse::<beacon_lance::ScalarIndexKind>()
@@ -785,7 +789,7 @@ pub(crate) async fn drop_index(
     table: &str,
     name: &str,
 ) -> anyhow::Result<()> {
-    let location = lance_table_location(session, table).await?;
+    let location = lance_table_location(session, table, "Index management").await?;
     let warehouse = lance_warehouse(session)?;
     beacon_lance::drop_index(&warehouse, &location, name).await
 }
@@ -796,7 +800,7 @@ pub(crate) async fn list_indexes(
     session: &Arc<SessionContext>,
     table: &str,
 ) -> anyhow::Result<arrow::record_batch::RecordBatch> {
-    let location = lance_table_location(session, table).await?;
+    let location = lance_table_location(session, table, "Index management").await?;
     let warehouse = lance_warehouse(session)?;
     let indices = beacon_lance::list_indices(&warehouse, &location).await?;
 
@@ -811,6 +815,36 @@ pub(crate) async fn list_indexes(
         vec![
             Arc::new(arrow::array::StringArray::from_iter_values(names)),
             Arc::new(arrow::array::StringArray::from_iter_values(columns)),
+        ],
+    )?;
+    Ok(batch)
+}
+
+/// `COMPACT TABLE <table> [WITH (...)]`: merge a Lance table's small fragments
+/// into target-sized ones, materialize its deletions, and drop the superseded
+/// versions the retention window allows. Returns the report as a single row.
+pub(crate) async fn compact_table(
+    session: &Arc<SessionContext>,
+    table: &str,
+    options: &[(String, String)],
+) -> anyhow::Result<arrow::record_batch::RecordBatch> {
+    use arrow::array::{ArrayRef, UInt64Array};
+
+    let location = lance_table_location(session, table, "Compaction").await?;
+    let options = beacon_lance::CompactOptions::from_pairs(options)
+        .map_err(|e| anyhow::anyhow!("Invalid COMPACT TABLE option: {e}"))?;
+    let warehouse = lance_warehouse(session)?;
+    let report = beacon_lance::compact_table(&warehouse, &location, &options).await?;
+
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        super::logical::compact_table_arrow_schema(),
+        vec![
+            Arc::new(UInt64Array::from(vec![report.fragments_removed])) as ArrayRef,
+            Arc::new(UInt64Array::from(vec![report.fragments_added])),
+            Arc::new(UInt64Array::from(vec![report.files_removed])),
+            Arc::new(UInt64Array::from(vec![report.files_added])),
+            Arc::new(UInt64Array::from(vec![report.versions_removed])),
+            Arc::new(UInt64Array::from(vec![report.bytes_removed])),
         ],
     )?;
     Ok(batch)

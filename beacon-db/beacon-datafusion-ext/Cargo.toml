@@ -39,6 +39,12 @@ tracing = { workspace = true }
 url = {workspace = true}
 glob = {workspace = true}
 
+# Rebuilding a folded geometry constant as an `ST_GeomFromText` call before a federated
+# sub-plan is unparsed. See `remote/geometry_sql.rs`.
+datafusion-spatial = { workspace = true }
+geoarrow-array = { workspace = true }
+geoarrow-schema = { workspace = true }
+
 beacon-common = { path = "../beacon-common" }
 
 [dev-dependencies]

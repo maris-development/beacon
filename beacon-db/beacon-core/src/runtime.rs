@@ -562,6 +562,9 @@ impl Runtime {
             BeaconStatement::ShowIndexes(statement) => {
                 Ok(crate::statement_plan::show_indexes_plan(statement))
             }
+            BeaconStatement::CompactTable(statement) => {
+                Ok(crate::statement_plan::compact_table_plan(statement))
+            }
             BeaconStatement::Attach(statement) => {
                 crate::statement_plan::attach_plan(statement)
             }

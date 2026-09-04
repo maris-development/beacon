@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-bbf"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1413,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-csv"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-geoparquet"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-hdf5"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-ipc"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-netcdf"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-odv"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-parquet"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-tiff"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-zarr"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-auth"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-core"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1749,6 +1749,7 @@ dependencies = [
  "chrono",
  "datafusion 53.1.0",
  "datafusion-federation",
+ "datafusion-spatial",
  "deltalake",
  "futures",
  "geojson 0.24.2",
@@ -1774,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-datafusion-ext"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1789,7 +1790,10 @@ dependencies = [
  "chrono",
  "datafusion 53.1.0",
  "datafusion-federation",
+ "datafusion-spatial",
  "futures",
+ "geoarrow-array",
+ "geoarrow-schema",
  "glob",
  "indexmap 2.14.0",
  "moka",
@@ -1808,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-db-py"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1817,6 +1821,7 @@ dependencies = [
  "beacon-core",
  "datafusion 53.1.0",
  "futures",
+ "libsqlite3-sys",
  "openssl",
  "pyo3",
  "serde_json",
@@ -1826,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-delta"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1847,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-file-stats"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1873,9 +1878,8 @@ dependencies = [
 
 [[package]]
 name = "beacon-functions"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
- "anyhow",
  "arrow 58.4.0",
  "async-stream",
  "async-trait",
@@ -1895,30 +1899,25 @@ dependencies = [
  "beacon-iceberg",
  "beacon-icechunk",
  "chrono",
- "criterion 0.5.1",
  "csv",
  "datafusion 53.1.0",
  "datafusion-spatial",
  "futures",
- "geo",
- "geojson 0.24.2",
  "gsw",
  "lazy_static",
  "lru 0.18.2",
  "object_store 0.13.2",
  "once_cell",
- "ordered-float 5.3.0",
  "serde",
  "serde_json",
  "strsim",
  "tokio",
  "tracing",
- "wkt",
 ]
 
 [[package]]
 name = "beacon-iceberg"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1941,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-icechunk"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1963,12 +1962,13 @@ dependencies = [
 
 [[package]]
 name = "beacon-lance"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
  "async-trait",
  "beacon-datafusion-ext",
+ "chrono",
  "datafusion 53.1.0",
  "futures",
  "lance",
@@ -1989,7 +1989,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-mcp"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-array"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2034,7 +2034,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-arrow"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2055,7 +2055,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-redb-store"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "async-trait",
  "bincode",
@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-server"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-server-config"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "base64",
  "beacon-arrow-bbf",
@@ -2127,6 +2127,7 @@ dependencies = [
  "beacon-arrow-netcdf",
  "beacon-arrow-zarr",
  "beacon-common",
+ "beacon-datafusion-ext",
  "envconfig",
  "object_store 0.13.2",
  "thiserror 2.0.20",
@@ -2135,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-sql-databases"
-version = "2.0.0-rc.3"
+version = "2.0.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -4598,8 +4599,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-spatial"
-version = "0.1.0"
-source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=20a416ff473192f47082dd4b3dcf19340aed3c77#20a416ff473192f47082dd4b3dcf19340aed3c77"
+version = "0.2.0"
+source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=92245ff8e2eaad939425993cff7fa9180d471ec1#92245ff8e2eaad939425993cff7fa9180d471ec1"
 dependencies = [
  "datafusion 53.1.0",
  "datafusion 54.1.0",
@@ -4612,8 +4613,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-spatial-kernels"
-version = "0.1.0"
-source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=20a416ff473192f47082dd4b3dcf19340aed3c77#20a416ff473192f47082dd4b3dcf19340aed3c77"
+version = "0.2.0"
+source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=92245ff8e2eaad939425993cff7fa9180d471ec1#92245ff8e2eaad939425993cff7fa9180d471ec1"
 dependencies = [
  "arrow-array 58.4.0",
  "arrow-buffer 58.4.0",
@@ -4633,8 +4634,8 @@ dependencies = [
 
 [[package]]
 name = "datafusion-spatial-udf"
-version = "0.1.0"
-source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=20a416ff473192f47082dd4b3dcf19340aed3c77#20a416ff473192f47082dd4b3dcf19340aed3c77"
+version = "0.2.0"
+source = "git+https://github.com/robinskil/datafusion-spatial.git?rev=92245ff8e2eaad939425993cff7fa9180d471ec1#92245ff8e2eaad939425993cff7fa9180d471ec1"
 dependencies = [
  "arrow-array 58.4.0",
  "arrow-buffer 58.4.0",
@@ -7581,6 +7582,7 @@ version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -8938,8 +8940,8 @@ checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
 
 [[package]]
 name = "oxcdf"
-version = "0.3.0"
-source = "git+https://github.com/robinskil/oxcdf.git#312164f8eede63ae945ae862ea9629a4a13d06c8"
+version = "0.4.0"
+source = "git+https://github.com/robinskil/oxcdf.git#f52e3fe3879a62784ba14dd4c7b3102abbb98ef7"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8952,8 +8954,8 @@ dependencies = [
 
 [[package]]
 name = "oxcdf-hdf5"
-version = "0.3.0"
-source = "git+https://github.com/robinskil/oxcdf.git#312164f8eede63ae945ae862ea9629a4a13d06c8"
+version = "0.4.0"
+source = "git+https://github.com/robinskil/oxcdf.git#f52e3fe3879a62784ba14dd4c7b3102abbb98ef7"
 dependencies = [
  "async-trait",
  "bytes",

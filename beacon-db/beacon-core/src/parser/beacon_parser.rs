@@ -10,7 +10,7 @@ use datafusion::sql::{
 use beacon_auth::{Privilege, PrivilegeTarget};
 
 use super::statement::{
-    AttachStatement, AuthStatement, BeaconStatement, CreateCrawlerStatement, CreateIndexStatement,
+    AttachStatement, AuthStatement, BeaconStatement, CompactTableStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
     AnalyzeFilesStatement, RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
@@ -81,6 +81,10 @@ impl<'a> BeaconParser<'a> {
 
         if self.is_show_indexes() {
             return self.parse_show_indexes();
+        }
+
+        if self.is_compact_table() {
+            return self.parse_compact_table();
         }
 
         if self.is_attach() {
@@ -450,6 +454,40 @@ impl<'a> BeaconParser<'a> {
             .parse_object_name(false)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         Ok(BeaconStatement::ShowIndexes(ShowIndexesStatement { table }))
+    }
+
+    /// Whether the next two tokens are `COMPACT TABLE`.
+    ///
+    /// Both words are required: `COMPACT` is not a reserved word, so a bare
+    /// `COMPACT` would shadow any identifier a query starts with.
+    fn is_compact_table(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.value.to_uppercase() == "COMPACT")
+            && matches!(t2, Token::Word(w) if w.keyword == Keyword::TABLE)
+    }
+
+    /// Parse: COMPACT TABLE <table> [WITH (k 'v', ...)]
+    fn parse_compact_table(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // COMPACT
+        self.df_parser.parser.next_token(); // TABLE
+
+        let table = self.parse_object_name()?;
+
+        let options = if matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.keyword == Keyword::WITH
+        ) {
+            self.df_parser.parser.next_token(); // WITH
+            self.parse_with_options()?
+        } else {
+            HashMap::new()
+        };
+
+        Ok(BeaconStatement::CompactTable(CompactTableStatement {
+            table,
+            options,
+        }))
     }
 
     fn is_attach(&self) -> bool {
@@ -1168,6 +1206,55 @@ mod tests {
                 p.parse_statement().unwrap(),
                 BeaconStatement::DFStatement(_)
             ));
+        }
+    }
+
+    #[test]
+    fn test_parse_compact_table() {
+        let mut p = BeaconParser::new("COMPACT TABLE obs").unwrap();
+        match p.parse_statement().unwrap() {
+            BeaconStatement::CompactTable(s) => {
+                assert_eq!(s.table.to_string(), "obs");
+                assert!(s.options.is_empty());
+            }
+            other => panic!("expected CompactTable, got {other:?}"),
+        }
+
+        let sql = "COMPACT TABLE schema.obs WITH ('target_rows_per_fragment' '500000', 'cleanup_older_than' '0s')";
+        let mut p = BeaconParser::new(sql).unwrap();
+        match p.parse_statement().unwrap() {
+            BeaconStatement::CompactTable(s) => {
+                assert_eq!(s.table.to_string(), "schema.obs");
+                assert_eq!(
+                    s.options.get("target_rows_per_fragment").map(String::as_str),
+                    Some("500000")
+                );
+                assert_eq!(
+                    s.options.get("cleanup_older_than").map(String::as_str),
+                    Some("0s")
+                );
+            }
+            other => panic!("expected CompactTable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compact_table_display_roundtrip() {
+        let sql = "COMPACT TABLE obs WITH ('cleanup_older_than' '7d')";
+        let stmt = BeaconParser::new(sql).unwrap().parse_statement().unwrap();
+        assert_eq!(stmt.to_string(), sql);
+    }
+
+    /// `COMPACT` is not a reserved word: only `COMPACT TABLE` is beacon's, and a
+    /// query over a column or table called `compact` must still reach DataFusion.
+    #[test]
+    fn test_compact_does_not_shadow_standard_sql() {
+        for sql in ["SELECT compact FROM t", "SELECT * FROM compact"] {
+            let mut p = BeaconParser::new(sql).unwrap();
+            assert!(
+                matches!(p.parse_statement().unwrap(), BeaconStatement::DFStatement(_)),
+                "`{sql}` should be a DataFusion statement"
+            );
         }
     }
 

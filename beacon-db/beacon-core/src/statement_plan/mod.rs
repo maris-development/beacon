@@ -33,7 +33,7 @@ use datafusion::{
 };
 
 use crate::parser::statement::{
-    AttachStatement, AuthStatement, CreateCrawlerStatement, CreateIndexStatement,
+    AttachStatement, AuthStatement, CompactTableStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
     AnalyzeFilesStatement, RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
@@ -537,6 +537,17 @@ pub(crate) fn show_indexes_plan(statement: ShowIndexesStatement) -> LogicalPlan 
         node: Arc::new(logical::ShowIndexesNode {
             table: object_name_value(&statement.table),
         }),
+    })
+}
+
+/// Build the logical plan for `COMPACT TABLE <table> [WITH (...)]`.
+pub(crate) fn compact_table_plan(statement: CompactTableStatement) -> LogicalPlan {
+    let options: Vec<(String, String)> = statement.options.into_iter().collect();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::CompactTableNode::new(
+            object_name_value(&statement.table),
+            options,
+        )),
     })
 }
 

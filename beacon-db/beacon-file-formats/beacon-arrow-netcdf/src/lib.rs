@@ -25,6 +25,8 @@
 //! - [`writer`]: high-level Arrow -> NetCDF writer API.
 //! - [`compat`]: variable/attribute conversion helpers.
 //! - [`decoders`] and [`encoders`]: pluggable conversion components.
+//! - [`dimensions`]: unifies the dimensions netCDF invents for a plain HDF5
+//!   file, so two groups of one file broadcast against each other.
 
 use std::ffi::{CStr, CString};
 
@@ -52,6 +54,8 @@ pub mod compat;
 pub mod datafusion;
 /// Decoder implementations and decoder traits.
 pub mod decoders;
+/// Unifies the dimensions netCDF invents for a file that names none.
+pub mod dimensions;
 /// Pure-Rust NetCDF reader over `object_store`.
 pub mod oxcdf_reader;
 

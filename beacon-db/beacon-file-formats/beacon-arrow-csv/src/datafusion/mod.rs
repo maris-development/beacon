@@ -20,7 +20,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
-use beacon_datafusion_ext::type_widening::session_widening;
+use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
 
 pub const DEFAULT_CSV_EXTENSION: &str = "csv";
 pub const DEFAULT_TSV_EXTENSION: &str = "tsv";
@@ -193,9 +193,10 @@ impl FileFormat for CsvFormat {
             .await?;
 
         // The rule of the session decides the result for a column that two
-        // files describe differently.
+        // files describe differently. Each schema names its file, so a refused
+        // column names both files.
         session_widening(state)
-            .merge_schemas(&schemas)
+            .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
                     "Failed to infer schema: {}",
@@ -393,6 +394,28 @@ mod tests {
             .expect("agreeing files merge");
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(names, vec!["value", "other"]);
+    }
+
+    /// A column that two files give two types names both files. A collection of
+    /// 10000 files is otherwise a search. See issue #424.
+    #[tokio::test]
+    async fn infer_schema_names_the_file_of_each_type() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let numbers = put(&store, &Path::from("argo/a.csv"), "depth\n1.5\n").await;
+        let words = put(&store, &Path::from("argo/b.csv"), "depth\nsurface\n").await;
+
+        let ctx = SessionContext::new();
+        let error = CsvFormat::new(b',', 1000)
+            .infer_schema(&ctx.state(), &object_store, &[numbers, words])
+            .await
+            .expect_err("a number beside a string has no common type");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("'argo/a.csv'") && message.contains("'argo/b.csv'"),
+            "the error must name both files: {message}"
+        );
     }
 
     /// A non-default delimiter must reach the wrapped DataFusion format, otherwise

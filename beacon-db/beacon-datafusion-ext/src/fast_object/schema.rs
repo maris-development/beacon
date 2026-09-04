@@ -57,7 +57,7 @@ use futures::{StreamExt, TryStreamExt, future};
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::format_ext::{FileFormatFactoryExt, SchemaUnit, try_file_format_factory_ext};
-use crate::type_widening::{ArrowTypeWidening, session_widening};
+use crate::type_widening::{ArrowTypeWidening, LabeledSchema, label_by_object, session_widening};
 
 /// One schema per URL, cached where the cache can answer.
 ///
@@ -65,11 +65,14 @@ use crate::type_widening::{ArrowTypeWidening, session_widening};
 /// rule, and an external table has one URL and takes it as it is — so the split
 /// stays here rather than being folded into one schema, and neither caller's
 /// merge changes.
+///
+/// Each schema names its URL. A merge across URLs that refuses a column then
+/// names both URLs. A merge inside one URL names the two files. See issue #424.
 pub async fn infer_url_schemas(
     state: &dyn Session,
     options: &ListingOptions,
     urls: &[ListingTableUrl],
-) -> Result<Vec<SchemaRef>, DataFusionError> {
+) -> Result<Vec<LabeledSchema>, DataFusionError> {
     let cached = CachedInference::for_session(state, &options.format);
 
     let mut schemas = Vec::with_capacity(urls.len());
@@ -81,7 +84,8 @@ pub async fn infer_url_schemas(
                 options.infer_schema(state, url).await
             }
         };
-        schemas.push(name_the_path_if_nothing_matched(state, options, url, outcome).await?);
+        let schema = name_the_path_if_nothing_matched(state, options, url, outcome).await?;
+        schemas.push(LabeledSchema::new(schema, url.as_str()));
     }
     Ok(schemas)
 }
@@ -241,7 +245,16 @@ impl CachedInference {
             .into_iter()
             .map(|schema| schema.expect("every miss was just inferred"))
             .collect();
-        merge_in_listing_order(&session_widening(state), &resolved)
+        // One unit per source object, in listing order, so a refused column names
+        // the two files it came from.
+        let sources: Vec<ObjectMeta> = units
+            .iter()
+            .map(|unit| objects[unit.source].clone())
+            .collect();
+        merge_in_listing_order(
+            &session_widening(state),
+            &label_by_object(&sources, &resolved),
+        )
     }
 
     /// What to ask the cache, one entry per unit, in listing order.
@@ -349,7 +362,7 @@ fn stamp_unit(objects: &[ObjectMeta], unit: &SchemaUnit) -> Stamp {
 /// order still sets the column order. See the [module docs](self).
 fn merge_in_listing_order(
     widening: &ArrowTypeWidening,
-    schemas: &[SchemaRef],
+    schemas: &[LabeledSchema],
 ) -> Result<SchemaRef, DataFusionError> {
     widening
         .merge_schemas(schemas)
@@ -361,13 +374,13 @@ mod tests {
     use super::*;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
 
-    fn schema(fields: &[(&str, DataType)]) -> SchemaRef {
-        Arc::new(Schema::new(
+    fn schema(fields: &[(&str, DataType)]) -> LabeledSchema {
+        LabeledSchema::unlabeled(Arc::new(Schema::new(
             fields
                 .iter()
                 .map(|(name, kind)| Field::new(*name, kind.clone(), true))
                 .collect::<Vec<_>>(),
-        ))
+        )))
     }
 
     fn names(schema: &Schema) -> Vec<&str> {
@@ -382,9 +395,9 @@ mod tests {
 
     /// One flat fold over every schema, in order. It skips and splits nothing.
     /// The tests below compare the merge against this result.
-    fn flat_merge(listing: &[SchemaRef]) -> SchemaRef {
+    fn flat_merge(listing: &[LabeledSchema]) -> SchemaRef {
         use crate::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
-        DefaultArrowTypeWidening.merge_schemas(listing).unwrap()
+        DefaultArrowTypeWidening::new().merge_schemas(listing).unwrap()
     }
 
     /// The merge equals the earlier fold of the format, over the same sequence.
@@ -396,12 +409,12 @@ mod tests {
 
         // A collection with repeats, as a real collection has.
         let listing = vec![
-            Arc::clone(&a),
-            Arc::clone(&a),
-            Arc::clone(&b),
-            Arc::clone(&a),
-            Arc::clone(&c),
-            Arc::clone(&b),
+            a.clone(),
+            a.clone(),
+            b.clone(),
+            a.clone(),
+            c.clone(),
+            b.clone(),
         ];
 
         let merged = merge_in_listing_order(&widening(), &listing).unwrap();
@@ -420,14 +433,13 @@ mod tests {
         let one = schema(&[("TEMP", DataType::Int32)]);
         let two = schema(&[("PSAL", DataType::Float64)]);
 
-        let once =
-            merge_in_listing_order(&widening(), &[Arc::clone(&one), Arc::clone(&two)]).unwrap();
+        let once = merge_in_listing_order(&widening(), &[one.clone(), two.clone()]).unwrap();
         let repeated = merge_in_listing_order(
             &widening(),
             &[
-                Arc::clone(&one),
+                one.clone(),
                 two,
-                Arc::clone(&one),
+                one.clone(),
                 schema(&[("TEMP", DataType::Int32)]),
             ],
         )
@@ -444,8 +456,7 @@ mod tests {
         let a = schema(&[("A", DataType::Int32)]);
         let b = schema(&[("B", DataType::Int32)]);
 
-        let forward =
-            merge_in_listing_order(&widening(), &[Arc::clone(&a), Arc::clone(&b)]).unwrap();
+        let forward = merge_in_listing_order(&widening(), &[a.clone(), b.clone()]).unwrap();
         let backward = merge_in_listing_order(&widening(), &[b, a]).unwrap();
         assert_eq!(names(&forward), vec!["A", "B"]);
         assert_eq!(names(&backward), vec!["B", "A"]);
@@ -496,7 +507,7 @@ mod tests {
 
     /// A pool of schemas over one set of column names. The merges then get fields
     /// to union and fields to skip.
-    fn schema_pool(rng: &mut Rng) -> Vec<SchemaRef> {
+    fn schema_pool(rng: &mut Rng) -> Vec<LabeledSchema> {
         let columns = column_types();
         (0..6)
             .map(|_| {
@@ -513,7 +524,7 @@ mod tests {
                         }
                         kept
                     });
-                Arc::new(Schema::new(fields))
+                LabeledSchema::unlabeled(Arc::new(Schema::new(fields)))
             })
             .collect()
     }
@@ -530,8 +541,8 @@ mod tests {
         for case in 0..500 {
             let pool = schema_pool(&mut rng);
             let length = 1 + rng.next(40);
-            let listing: Vec<SchemaRef> = (0..length)
-                .map(|_| Arc::clone(&pool[rng.next(pool.len())]))
+            let listing: Vec<LabeledSchema> = (0..length)
+                .map(|_| pool[rng.next(pool.len())].clone())
                 .collect();
 
             assert_eq!(
@@ -553,14 +564,15 @@ mod tests {
         for case in 0..500 {
             let pool = schema_pool(&mut rng);
             let length = 2 + rng.next(20);
-            let listing: Vec<SchemaRef> = (0..length)
-                .map(|_| Arc::clone(&pool[rng.next(pool.len())]))
+            let listing: Vec<LabeledSchema> = (0..length)
+                .map(|_| pool[rng.next(pool.len())].clone())
                 .collect();
 
             let split = 1 + rng.next(listing.len() - 1);
-            let combined: Vec<SchemaRef> = std::iter::once(flat_merge(&listing[..split]))
-                .chain(listing[split..].iter().cloned())
-                .collect();
+            let combined: Vec<LabeledSchema> =
+                std::iter::once(LabeledSchema::unlabeled(flat_merge(&listing[..split])))
+                    .chain(listing[split..].iter().cloned())
+                    .collect();
 
             assert_eq!(
                 flat_merge(&combined),
@@ -588,10 +600,13 @@ mod tests {
         // Every order, every group boundary and every repeat count gives the same
         // fields with the same types.
         for listing in [
-            vec![Arc::clone(&temp), Arc::clone(&psal)],
-            vec![Arc::clone(&psal), Arc::clone(&temp)],
-            vec![Arc::clone(&both), Arc::clone(&temp), Arc::clone(&psal)],
-            vec![flat_merge(&[Arc::clone(&temp)]), Arc::clone(&psal)],
+            vec![temp.clone(), psal.clone()],
+            vec![psal.clone(), temp.clone()],
+            vec![both.clone(), temp.clone(), psal.clone()],
+            vec![
+                LabeledSchema::unlabeled(flat_merge(std::slice::from_ref(&temp))),
+                psal.clone(),
+            ],
         ] {
             let merged = merge_in_listing_order(&widening(), &listing).unwrap();
             assert_eq!(merged.fields().len(), 2);

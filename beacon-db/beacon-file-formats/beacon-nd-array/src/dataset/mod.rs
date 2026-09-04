@@ -15,13 +15,34 @@ pub struct Dataset {
     pub name: String,
     pub dimensions: IndexMap<String, usize>,
     pub arrays: IndexMap<String, Arc<dyn NdArrayD>>,
+    /// The dimensions the reader invented because the file names none.
+    ///
+    /// A plain HDF5 file holds no dimension scale, so every axis of it lands
+    /// here. A file that names its axes leaves this empty, and so does a reader
+    /// that does not know. See [`Dataset::default_broadcast_dimensions`], the
+    /// one place it decides anything.
+    pub invented_dimensions: HashSet<String>,
 }
 
 impl Dataset {
     pub async fn new(name: String, arrays: IndexMap<String, Arc<dyn NdArrayD>>) -> Self {
         let mut dimensions = indexmap::IndexMap::new();
-        for array in arrays.values() {
+        for (array_name, array) in arrays.iter() {
             for (dim_name, dim_size) in array.dimensions().iter().zip(array.shape().iter()) {
+                // One name, two lengths: the reader gave two axes one name, and
+                // every broadcast onto the loser is then wrong. The last one
+                // wins, as it always has, but say so rather than hide it.
+                if let Some(held) = dimensions.get(dim_name)
+                    && held != dim_size
+                {
+                    tracing::warn!(
+                        dataset = %name,
+                        array = %array_name,
+                        dimension = %dim_name,
+                        "dimension '{dim_name}' holds {held} elements for one array and \
+                         {dim_size} for '{array_name}'; the broadcast takes {dim_size}"
+                    );
+                }
                 dimensions.insert(dim_name.clone(), *dim_size);
             }
         }
@@ -29,7 +50,21 @@ impl Dataset {
             name,
             dimensions,
             arrays,
+            invented_dimensions: HashSet::new(),
         }
+    }
+
+    /// Record which dimensions the reader invented, because the file names
+    /// none of them.
+    ///
+    /// Only a reader knows this. It decides how `SELECT *` picks its grid, and
+    /// nothing else. See [`Dataset::default_broadcast_dimensions`].
+    pub fn with_invented_dimensions(
+        mut self,
+        dimensions: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.invented_dimensions = dimensions.into_iter().collect();
+        self
     }
 
     pub fn get_array(&self, name: &str) -> Option<&Arc<dyn NdArrayD>> {
@@ -77,6 +112,7 @@ impl Dataset {
             name: self.name.clone(),
             dimensions,
             arrays,
+            invented_dimensions: self.invented_dimensions.clone(),
         })
     }
 
@@ -98,6 +134,23 @@ impl Dataset {
     /// variable's dimensions, so that variable survives and becomes the
     /// max-dimensionality array, and every other survivor has dimensions that are a
     /// subset of it.
+    ///
+    /// # A file that names no dimension
+    ///
+    /// Rule (2) reads the variable count as "which grid is this file about". A
+    /// name carries meaning, so that holds for every file that names its axes.
+    ///
+    /// A plain HDF5 file names none, and then the count says the opposite of
+    /// what it says elsewhere. An instrument writes one payload and hundreds of
+    /// metadata variables around it, so the count picks a grid of the metadata:
+    /// a real 1250 x 23250 file picks a 3-element axis and drops its payload
+    /// altogether. Length is the only thing an unnamed axis carries, so the
+    /// order becomes (1) non-empty, (2) **largest data volume**, (3) most
+    /// variables retained, (4) native home of the most variables.
+    ///
+    /// This applies only when [`Dataset::invented_dimensions`] covers every
+    /// dimension of the dataset, which is exactly a file that names none of
+    /// them. One real name is enough to keep the order above.
     ///
     /// Returns `None` when no narrowing is needed — i.e. every variable already
     /// broadcasts onto the highest-dimensionality variable — so callers can
@@ -169,6 +222,14 @@ impl Dataset {
                 .map(|d| self.dimensions.get(d).copied().unwrap_or(0) as u128)
                 .product()
         };
+        // Whether the file names any dimension at all. One real name is enough
+        // to keep the variable count first; see the note on the doc above.
+        let names_no_dimension = !self.invented_dimensions.is_empty()
+            && self
+                .dimensions
+                .keys()
+                .all(|dim| self.invented_dimensions.contains(dim));
+
         // Selection key, compared lexicographically, larger wins:
         //   1. non-empty before empty — never auto-pick a grid that yields 0 rows when
         //      a non-empty alternative exists, even if the empty grid scores higher;
@@ -178,22 +239,34 @@ impl Dataset {
         //      "higher dimensionality" tie-break;
         //   5. first-encountered order (equal keys keep the earlier candidate) for
         //      determinism.
-        let mut best: Option<(bool, usize, usize, u128, Vec<String>)> = None;
+        //
+        // A file that names no dimension moves the volume to the front and the
+        // other two down, and keeps 1 and 5 where they are. Every rank is a
+        // `u128` so one comparison serves both orders.
+        let key = |candidate: &[String]| -> (bool, u128, u128, u128) {
+            let rows = grid_rows(candidate);
+            let score = score(candidate) as u128;
+            let exact = exact_count(candidate) as u128;
+            if names_no_dimension {
+                (rows > 0, rows, score, exact)
+            } else {
+                (rows > 0, score, exact, rows)
+            }
+        };
+
+        let mut best: Option<((bool, u128, u128, u128), Vec<String>)> = None;
         for candidate in candidates {
-            let rows = grid_rows(&candidate);
-            let key = (rows > 0, score(&candidate), exact_count(&candidate), rows);
+            let candidate_key = key(&candidate);
             let is_better = match &best {
                 // Strictly greater key wins; equal keys keep the earlier candidate.
-                Some((b_nonempty, b_score, b_exact, b_rows, _)) => {
-                    key > (*b_nonempty, *b_score, *b_exact, *b_rows)
-                }
+                Some((best_key, _)) => candidate_key > *best_key,
                 None => true,
             };
             if is_better {
-                best = Some((key.0, key.1, key.2, key.3, candidate));
+                best = Some((candidate_key, candidate));
             }
         }
-        best.map(|(_, _, _, _, dims)| dims)
+        best.map(|(_, dims)| dims)
     }
 
     pub fn project(&self, indices: &[usize]) -> anyhow::Result<Dataset> {
@@ -212,6 +285,7 @@ impl Dataset {
             name: self.name.clone(),
             dimensions: self.dimensions.clone(),
             arrays,
+            invented_dimensions: self.invented_dimensions.clone(),
         })
     }
 
@@ -1209,6 +1283,83 @@ mod tests {
         assert_eq!(
             ds.default_broadcast_dimensions(),
             Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    /// An instrument file names no dimension, and holds one payload among many
+    /// small metadata variables. The count picks the metadata; the volume picks
+    /// the payload.
+    ///
+    /// The shape is that of a real DAS file: `data(1250, 23250)` in one group,
+    /// three metadata variables on a 3-long axis in another.
+    #[tokio::test]
+    async fn test_default_dims_of_an_unnamed_file_follow_the_volume() {
+        let arrays = vec![
+            ("data", arr_shaped(&["len_1250", "len_23250"], &[1250, 23250]).await),
+            ("meta_a", arr_shaped(&["len_3"], &[3]).await),
+            ("meta_b", arr_shaped(&["len_3"], &[3]).await),
+            ("meta_c", arr_shaped(&["len_3"], &[3]).await),
+        ];
+
+        // Named: the count wins, as it always has, and the payload is dropped.
+        let named = make_dataset("named", arrays.clone()).await;
+        assert_eq!(
+            named.default_broadcast_dimensions(),
+            Some(vec!["len_3".to_string()])
+        );
+
+        // Invented: the volume wins, and the payload survives.
+        let unnamed = make_dataset("unnamed", arrays)
+            .await
+            .with_invented_dimensions(
+                ["len_1250", "len_23250", "len_3"].map(String::from),
+            );
+        assert_eq!(
+            unnamed.default_broadcast_dimensions(),
+            Some(vec!["len_1250".to_string(), "len_23250".to_string()])
+        );
+    }
+
+    /// One real name is enough to keep the count first. A file that names some
+    /// axes and not others is a file with a convention, so it keeps the rule
+    /// every other file follows.
+    #[tokio::test]
+    async fn test_one_named_dimension_keeps_the_variable_count_first() {
+        let ds = make_dataset(
+            "mixed",
+            vec![
+                ("data", arr_shaped(&["time", "len_23250"], &[1250, 23250]).await),
+                ("meta_a", arr_shaped(&["len_3"], &[3]).await),
+                ("meta_b", arr_shaped(&["len_3"], &[3]).await),
+                ("meta_c", arr_shaped(&["len_3"], &[3]).await),
+            ],
+        )
+        .await
+        .with_invented_dimensions(["len_23250", "len_3"].map(String::from));
+
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["len_3".to_string()])
+        );
+    }
+
+    /// An empty grid never wins, whatever names the file gives.
+    #[tokio::test]
+    async fn test_an_unnamed_file_still_skips_an_empty_grid() {
+        let ds = make_dataset(
+            "unnamed-empty",
+            vec![
+                // The largest grid by shape holds no rows at all.
+                ("growing", arr_shaped(&["len_0", "len_9"], &[0, 9]).await),
+                ("payload", arr_shaped(&["len_4"], &[4]).await),
+            ],
+        )
+        .await
+        .with_invented_dimensions(["len_0", "len_9", "len_4"].map(String::from));
+
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["len_4".to_string()])
         );
     }
 

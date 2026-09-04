@@ -101,6 +101,12 @@ async fn beacon_file_formats_are_registered_on_the_session() {
         ("f_zarr", "ZARR"),
         ("f_tiff", "TIFF"),
         ("f_geoparquet", "GEOPARQUET"),
+        // netCDF and HDF5 register under their extensions, not their format
+        // names: `NETCDF` is not a key (see issue #420), `NC` is. HDF5 takes
+        // both `HDF5` and the `H5` alias registered alongside it.
+        ("f_nc", "NC"),
+        ("f_hdf5", "HDF5"),
+        ("f_h5", "H5"),
         ("f_parquet", "PARQUET"), // a DataFusion built-in, as the control
     ] {
         let sql = format!("CREATE EXTERNAL TABLE {name} STORED AS {format} LOCATION 'missing/'");

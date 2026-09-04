@@ -5,6 +5,7 @@
 
 use std::{any::Any, sync::Arc};
 
+use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
 use datafusion::{
     common::exec_datafusion_err,
     datasource::{
@@ -14,7 +15,6 @@ use datafusion::{
         table_schema::TableSchema,
     },
     physical_expr::{LexOrdering, projection::ProjectionExprs},
-    physical_expr_adapter::BatchAdapterFactory,
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
@@ -196,7 +196,7 @@ impl FileOpener for OdvOpener {
             // cast, and null-fill columns the file lacks.
             let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
             let adapter =
-                BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
+                batch_adapter_factory(projected_schema).make_adapter(&source_schema)?;
 
             // Open and decode the file body
             let body_stream = object_store

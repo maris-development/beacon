@@ -19,6 +19,7 @@ use oxcdf::{AsyncNetcdfFile, AsyncVariable, AttributeValue, DType};
 use crate::{
     backend::AttributeBackend,
     decoders::cf_time::parse_time_units,
+    dimensions::PhonyDimensions,
     oxcdf_reader::backend::{
         NumericBackend, ScaleOffsetBackend, StringBackend, StringSource, TimestampBackend,
         VariableRef,
@@ -143,9 +144,31 @@ pub fn attribute_to_nd_array(
 /// - CF `scale_factor` / `add_offset` packing.
 /// - netCDF string variables and char arrays with a trailing length dimension.
 /// - `_FillValue` for the numeric and string types.
+///
+/// `phony` renames the dimensions netCDF invented for a file that names none,
+/// so two groups of one file broadcast against each other. Pass
+/// [`PhonyDimensions::none`] to keep the names the reader gave. A NetCDF-4 file
+/// names every dimension, so the argument does nothing there.
 pub fn variable_to_nd_array(
     file: Arc<AsyncNetcdfFile>,
     variable: &AsyncVariable<'_>,
+    phony: &PhonyDimensions,
+) -> anyhow::Result<Arc<dyn NdArrayD>> {
+    variable_to_nd_array_packed(file, variable, phony, None)
+}
+
+/// [`variable_to_nd_array`] with the packing supplied rather than read.
+///
+/// CF puts `scale_factor` and `add_offset` on the variable itself, and the
+/// function above reads them there. A vendor layout can put the same numbers
+/// somewhere else — an OptoDAS file keeps one `dataScale` for its payload in
+/// another group — and `packing` carries them in from wherever the convention
+/// found them. It wins over the attributes of the variable.
+pub fn variable_to_nd_array_packed(
+    file: Arc<AsyncNetcdfFile>,
+    variable: &AsyncVariable<'_>,
+    phony: &PhonyDimensions,
+    packing: Option<(f64, f64)>,
 ) -> anyhow::Result<Arc<dyn NdArrayD>> {
     // The path, not the leaf name. `AsyncNetcdfFile::variable` takes either for
     // a root variable, because it trims the leading slash, but only the path
@@ -153,7 +176,7 @@ pub fn variable_to_nd_array(
     // `beacon-arrow-hdf5` walks every group with the same conversion.
     let name = variable.path.clone();
     let shape: Vec<usize> = variable.shape.iter().map(|&len| len as usize).collect();
-    let dimensions = variable.dimensions.clone();
+    let dimensions = phony.apply(&variable.dimensions);
 
     // The optional CF `calendar` attribute selects how the reference date is
     // read. It defaults to Gregorian when absent.
@@ -174,8 +197,9 @@ pub fn variable_to_nd_array(
     let offset = variable
         .attribute("add_offset")
         .and_then(|a| attribute_as_f64(&a.value));
-    let scale_offset = (scale.is_some() || offset.is_some())
-        .then(|| (scale.unwrap_or(1.0), offset.unwrap_or(0.0)));
+    let scale_offset = packing.or_else(|| {
+        (scale.is_some() || offset.is_some()).then(|| (scale.unwrap_or(1.0), offset.unwrap_or(0.0)))
+    });
 
     let variable_ref = || {
         VariableRef::new(

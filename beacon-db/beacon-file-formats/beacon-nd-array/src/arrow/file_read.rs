@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use arrow::array::RecordBatchOptions;
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::array::{ArrayRef, RecordBatchOptions};
+use arrow::datatypes::{FieldRef, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use crossbeam::queue::ArrayQueue;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_expr_adapter::{BatchAdapter, BatchAdapterFactory};
+use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
+use datafusion::physical_expr_adapter::BatchAdapter;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use indexmap::IndexMap;
@@ -22,6 +23,7 @@ use crate::arrow::batch::{
 };
 use crate::arrow::metrics::ReadMetrics;
 use crate::arrow::nd_provider::read_nd_chunk;
+use crate::arrow::partition::FilePartitions;
 use crate::arrow::pushdown_filter::PushdownFilter;
 use crate::dataset::AnyDataset;
 
@@ -36,10 +38,26 @@ use crate::dataset::AnyDataset;
 enum Output {
     /// Columns: nd-encoded batches, reordered and null-filled onto the
     /// projected schema.
-    Columns(Arc<BatchAdapter>),
+    Columns {
+        adapter: Arc<BatchAdapter>,
+        /// What the file's `PARTITIONED BY` columns are called, when the scan
+        /// projects any.
+        partition_fields: Vec<FieldRef>,
+        /// Those columns, nd-encoded as rank-0 arrays. One value each, constant
+        /// for the whole file, so they are built once here and appended to
+        /// every batch of it. See [`FilePartitions`].
+        partition_columns: Vec<ArrayRef>,
+    },
     /// `COUNT(*)`: flat batches, of which only the row count leaves, under the
     /// (empty) projected schema. See [`count_projection`].
-    Rows(SchemaRef),
+    ///
+    /// A scan of nothing but partition columns comes here too. It wants no
+    /// column of the file either, and the row count is what says how many times
+    /// each partition value repeats.
+    Rows {
+        schema: SchemaRef,
+        partitions: FilePartitions,
+    },
     /// The file holds none of the columns the query projects, so it has nothing
     /// to contribute and is not read at all.
     Nothing,
@@ -48,7 +66,7 @@ enum Output {
 impl Output {
     /// Whether the read encodes its chunks, rather than broadcasting them flat.
     fn encoded(&self) -> bool {
-        matches!(self, Output::Columns(_))
+        matches!(self, Output::Columns { .. })
     }
 }
 
@@ -350,11 +368,17 @@ impl FileRead {
     /// `metrics` belong to the partition that plans. They take the counts made
     /// here rather than per chunk: a chunk the predicate excluded is dropped
     /// before the queue exists, so no reader of the queue can account for it.
+    ///
+    /// `partitions` are the table's `PARTITIONED BY` columns and this file's
+    /// values for them. They are in the file's path rather than in the file, so
+    /// they are appended to its batches here — see [`FilePartitions`]. Pass
+    /// [`FilePartitions::none`] for an unpartitioned table.
     pub async fn plan(
         dataset: AnyDataset,
         projected_schema: SchemaRef,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        partitions: FilePartitions,
         metrics: Option<&ReadMetrics>,
     ) -> Result<Arc<Self>> {
         let dataset_schema: SchemaRef = Arc::new(
@@ -365,22 +389,34 @@ impl FileRead {
             })?,
         );
 
-        // The columns of this file the query needs, in file order.
+        // The `PARTITIONED BY` columns this scan projects, in the order it wants
+        // them. They are added to every batch below rather than read: the value
+        // is in the file's path, not in the file.
+        let partition_fields = partitions.projected_fields(&projected_schema);
+
+        // The columns of this file the query needs, in file order. A partition
+        // column shadows a variable of the same name — the path wins, as it does
+        // for every other format — so it never counts as one of these.
         let projection: Vec<usize> = dataset_schema
             .fields()
             .iter()
             .enumerate()
-            .filter(|(_, field)| projected_schema.index_of(field.name()).is_ok())
+            .filter(|(_, field)| {
+                !partitions.holds(field.name()) && projected_schema.index_of(field.name()).is_ok()
+            })
             .map(|(index, _)| index)
             .collect();
 
         let pushdown = predicate.clone().map(PushdownFilter::new);
 
+        // How much of the file itself the query wants, partition columns aside.
+        let wanted_file_columns = projected_schema.fields().len() - partition_fields.len();
+
         // Nothing of this file was projected. That is two different situations,
         // and they must not be confused: the query wanted no column at all, or
         // it wanted columns this file does not have.
         let (output, projection) = if projection.is_empty() {
-            if !projected_schema.fields().is_empty() {
+            if wanted_file_columns > 0 {
                 // The query named columns and this file has none of them. A
                 // collection is not obliged to be uniform — of one CORA year, 2%
                 // of the files carry no `TEMP` and 10% no `DEPH` — so this is an
@@ -401,19 +437,40 @@ impl FileRead {
                 }));
             }
 
-            // `COUNT(*)`: no column is wanted, so the read is driven by columns
-            // of its own and only the row counts leave.
+            // `COUNT(*)`, or a scan of nothing but partition columns: no column
+            // of the file is wanted, so the read is driven by columns of its own
+            // and only the row counts leave.
             let counted = count_projection(&dataset, &dataset_schema, &predicate);
-            (Output::Rows(projected_schema), counted)
+            (
+                Output::Rows {
+                    schema: projected_schema,
+                    partitions,
+                },
+                counted,
+            )
         } else {
             // The scan carries nd columns, so adaptation happens in the encoded
             // (struct) domain: reorder and null-fill onto the projected schema.
-            let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-                &dataset_schema.project(&projection)?,
-            ));
+            // The partition columns join the source there, so the adapter puts
+            // them wherever the projection asked for them.
+            let mut source_fields: Vec<FieldRef> =
+                beacon_datafusion_ext::nd::encoded_schema(&dataset_schema.project(&projection)?)
+                    .fields()
+                    .to_vec();
+            source_fields.extend(partition_fields.iter().cloned());
+            let source_schema: SchemaRef = Arc::new(Schema::new(source_fields));
+
+            let partition_columns = partitions.scalar_columns(&projected_schema)?;
             let adapter =
-                BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
-            (Output::Columns(Arc::new(adapter)), projection)
+                batch_adapter_factory(projected_schema).make_adapter(&source_schema)?;
+            (
+                Output::Columns {
+                    adapter: Arc::new(adapter),
+                    partition_fields,
+                    partition_columns,
+                },
+                projection,
+            )
         };
 
         let dataset = project(dataset, &dataset_schema, projection)?;
@@ -448,34 +505,33 @@ impl FileRead {
         };
         let batches = queue.stream(metrics);
         match &self.output {
-            Output::Columns(adapter) => {
+            Output::Columns {
+                adapter,
+                partition_fields,
+                partition_columns,
+            } => {
                 let adapter = adapter.clone();
+                let fields = partition_fields.clone();
+                let columns = partition_columns.clone();
                 batches
                     .and_then(move |batch| {
-                        let adapted = adapter.adapt_batch(&batch).map_err(|e| {
-                            DataFusionError::Execution(format!(
-                                "Failed to adapt the batch onto the scan's schema: {e}"
-                            ))
-                        });
+                        let adapted = with_partitions(&batch, &fields, &columns)
+                            .and_then(|batch| adapter.adapt_batch(&batch))
+                            .map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "Failed to adapt the batch onto the scan's schema: {e}"
+                                ))
+                            });
                         futures::future::ready(adapted)
                     })
                     .boxed()
             }
-            Output::Rows(schema) => {
+            Output::Rows { schema, partitions } => {
                 let schema = schema.clone();
+                let partitions = partitions.clone();
                 batches
                     .and_then(move |batch| {
-                        let counted = RecordBatch::try_new_with_options(
-                            schema.clone(),
-                            vec![],
-                            &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
-                        )
-                        .map_err(|e| {
-                            DataFusionError::Execution(format!(
-                                "Failed to build a count batch: {e}"
-                            ))
-                        });
-                        futures::future::ready(counted)
+                        futures::future::ready(count_batch(&schema, &partitions, batch.num_rows()))
                     })
                     .boxed()
             }
@@ -484,6 +540,68 @@ impl FileRead {
             Output::Nothing => futures::stream::empty().boxed(),
         }
     }
+}
+
+/// `batch` with the file's `PARTITIONED BY` columns appended.
+///
+/// Each is one value on no axis, so it broadcasts over whatever grid the file's
+/// own columns define and reaches every row the file contributes. Nothing is
+/// built per row, and nothing is built per batch: the columns are the file's,
+/// and [`FileRead::plan`] made them once.
+fn with_partitions(
+    batch: &RecordBatch,
+    fields: &[FieldRef],
+    columns: &[ArrayRef],
+) -> Result<RecordBatch> {
+    if fields.is_empty() {
+        return Ok(batch.clone());
+    }
+
+    let schema: Vec<FieldRef> = batch
+        .schema()
+        .fields()
+        .iter()
+        .cloned()
+        .chain(fields.iter().cloned())
+        .collect();
+    let values: Vec<ArrayRef> = batch
+        .columns()
+        .iter()
+        .cloned()
+        .chain(columns.iter().cloned())
+        .collect();
+
+    RecordBatch::try_new_with_options(
+        Arc::new(Schema::new(schema)),
+        values,
+        &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+    )
+    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// The batch a read that wants no column of the file emits for `rows` rows.
+///
+/// A plain `COUNT(*)` emits the row count and nothing else. A scan of nothing
+/// but partition columns emits those columns instead: rank-0 columns alone
+/// would define a rank-0 grid, which holds one row, so the rows of the read are
+/// stated as an axis of their own.
+fn count_batch(
+    schema: &SchemaRef,
+    partitions: &FilePartitions,
+    rows: usize,
+) -> Result<RecordBatch> {
+    let (columns, encoded_rows) = if schema.fields().is_empty() {
+        (Vec::new(), rows)
+    } else {
+        (partitions.row_columns(schema, rows)?, 1)
+    };
+
+    RecordBatch::try_new_with_options(
+        schema.clone(),
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(encoded_rows)),
+    )
+    .map_err(|e| DataFusionError::Execution(format!("Failed to build a count batch: {e}")))
 }
 
 /// The columns a `COUNT(*)` reads, out of a file the query wants no column of.
@@ -1075,9 +1193,16 @@ mod tests {
             true,
         )]));
 
-        let planned = FileRead::plan(dataset(64).await, wanted, 16, None, None)
-            .await
-            .expect("a file without the column is planned, not rejected");
+        let planned = FileRead::plan(
+            dataset(64).await,
+            wanted,
+            16,
+            None,
+            FilePartitions::none(),
+            None,
+        )
+        .await
+        .expect("a file without the column is planned, not rejected");
 
         assert_eq!(planned.remaining(), 0, "nothing is queued to read");
         let batches: Vec<RecordBatch> = planned
@@ -1094,9 +1219,16 @@ mod tests {
     async fn a_count_over_the_same_file_still_counts_it() {
         const ROWS: usize = 64;
 
-        let planned = FileRead::plan(dataset(ROWS).await, no_columns(), 16, None, None)
-            .await
-            .expect("a count is planned");
+        let planned = FileRead::plan(
+            dataset(ROWS).await,
+            no_columns(),
+            16,
+            None,
+            FilePartitions::none(),
+            None,
+        )
+        .await
+        .expect("a count is planned");
 
         assert!(planned.remaining() > 0, "a count has work to do");
         assert_eq!(drain_flat(planned.stream(None)).await, ROWS);

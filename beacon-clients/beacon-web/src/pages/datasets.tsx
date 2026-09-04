@@ -27,6 +27,7 @@ import { useBeacon } from "@/lib/beacon-context";
 import { COLUMN_PAGE_SIZE, parseSchema } from "@/lib/schema";
 import { errorMessage } from "@/lib/errors";
 import { PageContainer } from "@/components/app-shell";
+import { DatasetStorageBar } from "@/components/dataset-storage";
 import { InfoBanner } from "@/components/info-banner";
 import { ResultsGrid } from "@/components/results-grid";
 import { Card } from "@/components/ui/card";
@@ -241,6 +242,8 @@ export function DatasetsPage() {
   const refreshDatasets = React.useCallback(() => {
     qc.invalidateQueries({ queryKey: ["datasets-browse"] });
     qc.invalidateQueries({ queryKey: ["datasets-all"] });
+    // An upload or a delete moves the used space, so the disk values are stale.
+    qc.invalidateQueries({ queryKey: ["dataset-storage"] });
   }, [qc]);
 
   const deleteMutation = useMutation({
@@ -539,6 +542,7 @@ export function DatasetsPage() {
         adds files at any path you choose &mdash; type a destination folder to drop them into an
         existing folder or create a new one.
       </InfoBanner>
+      <DatasetStorageBar />
       {banner && (
         <div
           className={cn(

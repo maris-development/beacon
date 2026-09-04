@@ -28,7 +28,9 @@ use beacon_datafusion_ext::{
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
-    type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening},
+    type_widening::{
+        ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening, TypeConflict,
+    },
 };
 use beacon_functions::register_functions;
 use beacon_redb_store::RedbStore;
@@ -255,6 +257,18 @@ impl RuntimeBuilder {
     pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
         self.type_widening = Some(strategy);
         self
+    }
+
+    /// Set what a schema merge does with a column that no type holds.
+    ///
+    /// The default is [`TypeConflict::Fail`], which refuses such a table. Take
+    /// [`TypeConflict::KeepFirst`] to read the type of the first file instead,
+    /// and null for every value that type cannot hold.
+    ///
+    /// This replaces the rule of [`with_type_widening`](Self::with_type_widening),
+    /// so call one or the other.
+    pub fn with_type_conflict(self, on_conflict: TypeConflict) -> Self {
+        self.with_type_widening(Arc::new(DefaultArrowTypeWidening { on_conflict }))
     }
 
     pub fn with_tmp_dir_path(mut self, path: PathBuf) -> Self {
@@ -911,7 +925,7 @@ fn build_session_config(
             builder
                 .type_widening
                 .clone()
-                .unwrap_or_else(|| Arc::new(DefaultArrowTypeWidening)),
+                .unwrap_or_else(|| Arc::new(DefaultArrowTypeWidening::new())),
         )))
         // Resolves user-supplied dataset paths (a `LOCATION`, a `read_*` argument)
         // to object-store URLs and to native reader paths. Configured against the

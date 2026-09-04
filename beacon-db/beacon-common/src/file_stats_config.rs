@@ -15,6 +15,10 @@ pub struct FileStatsConfig {
     /// the schema of each file again on each cold query.
     pub enable: bool,
     /// Seconds between passes.
+    ///
+    /// A pass drains the queue rather than taking one batch, so this is the gap
+    /// between drains, not the rate at which an archive is covered. A tick that
+    /// lands on a running pass is skipped.
     pub interval_secs: u64,
     /// Collect at startup instead of waiting for the first tick.
     ///
@@ -24,6 +28,9 @@ pub struct FileStatsConfig {
     /// starts again on each boot. This runs a pass as soon as the runtime is up,
     /// in the background, and keeps going until the queue is empty. The timer
     /// takes over from there.
+    ///
+    /// Only the wait is what this removes. A timer pass drains too, so the flag
+    /// changes when the first one runs, not how much it covers.
     ///
     /// Off by default. The pass holds the service, and thus the database file,
     /// while it reads a batch. A process that exits does not see this. A caller
@@ -36,8 +43,11 @@ pub struct FileStatsConfig {
     /// default. Raise it well above the core count when datasets live in object
     /// storage, where the work is waiting on round trips rather than parsing.
     pub concurrency: usize,
-    /// Files taken off the queue per pass. Bounds the segment builder's memory,
+    /// Files taken off the queue at a time. Bounds the segment builder's memory,
     /// roughly `batch_files x columns-per-file x 50 bytes`.
+    ///
+    /// It bounds memory, not the pass: a pass takes batch after batch until the
+    /// queue is empty.
     pub batch_files: usize,
     /// Files a segment should aim to cover.
     ///

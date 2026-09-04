@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
+use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
 use datafusion::{
     datasource::{
         listing::{FileRange, PartitionedFile},
         physical_plan::{FileOpenFuture, FileOpener},
     },
     error::{DataFusionError, Result},
-    physical_expr_adapter::BatchAdapterFactory,
     physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder},
 };
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
@@ -177,7 +177,7 @@ impl GeoParquetOpener {
         // Adapt the file's own fields onto the table's: cast a column whose type
         // this file states differently, and null-fill one it does not hold. The
         // column *selection* is already done, above and in the reader.
-        let adapter = BatchAdapterFactory::new(read_schema).make_adapter(&read_file_schema)?;
+        let adapter = batch_adapter_factory(read_schema).make_adapter(&read_file_schema)?;
 
         let stream = batches
             .map(move |batch| {

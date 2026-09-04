@@ -61,7 +61,7 @@ Interactive API docs are at <http://localhost:5001/swagger/>.
 ## Next steps
 
 - [README](README.md) — start a server, point it at data, query it from Python.
-- [Quick Start](https://maris-development.github.io/beacon/docs/2.0.0-rc3/quickstart) — the same steps, with a public server to try.
+- [Quick Start](https://maris-development.github.io/beacon/docs/2.0.0-rc5/quickstart) — the same steps, with a public server to try.
 - [Documentation](https://maris-development.github.io/beacon/) — full data model and API reference.
-- [Configuration reference](https://maris-development.github.io/beacon/docs/2.0.0-rc3/server/configuration.html) — all `BEACON_*` settings.
+- [Configuration reference](https://maris-development.github.io/beacon/docs/2.0.0-rc5/server/configuration.html) — all `BEACON_*` settings.
 - Community [Slack](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg).
