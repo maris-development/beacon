@@ -450,7 +450,6 @@ pub struct FileStatsService {
     store: Arc<FileStatsStore>,
     collector: StatsCollector,
     session: SessionCell,
-    datasets_url: ObjectStoreUrl,
     config: FileStatsConfig,
     /// The timer, and the startup collection when one was asked for. Both are
     /// aborted on drop.
@@ -471,11 +470,13 @@ pub struct FileStatsService {
 }
 
 impl FileStatsService {
+    /// Takes no datasets store URL. Discovery resolves the scan prefix through
+    /// the listing factory on the session, so the store it reads is the store a
+    /// query would read.
     pub fn new(
         store: Arc<FileStatsStore>,
         analyzer: Arc<dyn FileAnalyzer>,
         session: SessionCell,
-        datasets_url: ObjectStoreUrl,
         config: FileStatsConfig,
     ) -> Arc<Self> {
         let collector = StatsCollector::new(
@@ -494,7 +495,6 @@ impl FileStatsService {
             store,
             collector,
             session,
-            datasets_url,
             config,
             tasks: parking_lot::Mutex::new(Vec::new()),
             pass_lock: Arc::new(tokio::sync::Mutex::new(())),

@@ -18,6 +18,6 @@ pub mod provider;
 pub use browse_datasets::BrowseDatasetsFunc;
 pub use exec::DatasetsExec;
 pub use list_datasets::{list_datasets, ListDatasetsFunc};
-pub use provider::{list_datasets_schema, DatasetsTable, Listing};
+pub use provider::{list_datasets_schema, DatasetsTable, Listing, Row};
 
 pub(crate) mod args;

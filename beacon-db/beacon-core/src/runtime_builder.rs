@@ -447,13 +447,12 @@ async fn init_file_stats(
 
     let analyzer = Arc::new(crate::file_stats::FormatFileAnalyzer::new(
         session_cell.clone(),
-        datasets.clone(),
+        datasets,
     ));
     let service = crate::file_stats::FileStatsService::new(
         store,
         analyzer,
         session_cell,
-        datasets,
         builder.file_stats.clone(),
     );
     service.start();

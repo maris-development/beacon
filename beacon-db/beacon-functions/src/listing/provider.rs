@@ -46,15 +46,19 @@ pub fn list_datasets_schema() -> Arc<Schema> {
 }
 
 /// One row of a listing: a dataset, or a sub-directory of one.
+///
+/// The Rust shape of [`list_datasets_schema`], field for field. Public because
+/// [`DatasetsExec`] streams it, and a plan node that cannot name its own rows
+/// cannot be built by a caller.
 #[derive(Debug, Clone)]
-pub(super) struct Row {
-    pub(super) file_name: String,
-    pub(super) file_format: String,
-    pub(super) can_inspect: bool,
-    pub(super) can_partial_explore: bool,
-    pub(super) size: Option<u64>,
-    pub(super) last_modified: Option<String>,
-    pub(super) is_directory: bool,
+pub struct Row {
+    pub file_name: String,
+    pub file_format: String,
+    pub can_inspect: bool,
+    pub can_partial_explore: bool,
+    pub size: Option<u64>,
+    pub last_modified: Option<String>,
+    pub is_directory: bool,
 }
 
 impl From<DatasetMetadata> for Row {
