@@ -30,6 +30,7 @@ use beacon_datafusion_ext::listing_factory::RootStore;
 use beacon_server_config::Config;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use object_store::ObjectStore;
+use tokio::runtime::Handle;
 
 /// The URL scheme bare dataset paths resolve against inside the runtime.
 pub const DATASETS_STORE_URL: &str = "datasets://";
@@ -52,15 +53,19 @@ impl Server {
     /// Open the server described by `config`: build the datasets store, then
     /// start a runtime over it.
     ///
+    /// `query_runtime` is the Tokio runtime queries run on. The binary gives it a
+    /// runtime of its own, apart from the one that serves the API, so a long scan
+    /// never holds an API worker. A test passes the runtime it runs on.
+    ///
     /// A server is always persistent — the tables store is the single redb file at
     /// `config.data.db_file`. To get throwaway state, point `config` at a
     /// temporary directory; there is no separate in-memory mode.
-    pub async fn open(config: Arc<Config>) -> anyhow::Result<Self> {
+    pub async fn open(config: Arc<Config>, query_runtime: Handle) -> anyhow::Result<Self> {
         let (store, root) = build_datasets_store(&config)?;
         let store_url =
             ObjectStoreUrl::parse(DATASETS_STORE_URL).context("invalid datasets store URL")?;
 
-        let runtime = build_runtime(&config, store_url, root, store.clone())
+        let runtime = build_runtime(&config, store_url, root, store.clone(), query_runtime)
             .await
             .context("failed to start the beacon runtime")?;
 
@@ -258,9 +263,10 @@ async fn build_runtime(
     store_url: ObjectStoreUrl,
     root: RootStore,
     store: Arc<dyn ObjectStore>,
+    query_runtime: Handle,
 ) -> anyhow::Result<Runtime> {
     let mut builder = RuntimeBuilder::new()
-        .with_runtime_handle(tokio::runtime::Handle::current())
+        .with_runtime_handle(query_runtime)
         // The store the server owns; the root is what native readers (netCDF-c)
         // translate object paths against.
         .with_default_store(store_url, root)

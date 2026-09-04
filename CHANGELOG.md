@@ -293,6 +293,15 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **A long query no longer makes the API unreachable.** The HTTP API, Flight SQL and every query
+  shared one Tokio runtime of `BEACON_WORKER_THREADS` threads. A scan holds a thread until a
+  partition yields, and one query starts as many partitions as the machine has cores, so a long
+  query took every thread and a login, a health check or the admin UI waited for it to finish.
+  Queries now run on a runtime of their own. The API runs on a second runtime, sized by the new
+  `BEACON_API_THREADS` (default `4`), so it always has a thread to answer with. The result stream
+  crosses between the two over a bounded channel: a slow client holds at most a few batches ahead
+  of what it has read, and a client that disconnects cancels its query at once. A panic inside a
+  query reaches the client as an error instead of a result that ends early.
 - **A query could lose the rows of a file that changed after its analysis.** File statistics let a
   `WHERE` drop whole files before the scan opens them, on the column ranges a background pass
   recorded. That pass compares the size, the modification time and the etag of every listed file

@@ -10,6 +10,7 @@ use futures::TryStreamExt;
 
 use crate::{
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
+    query_executor::QueryExecutor,
     query_metrics_store::QueryMetricsStore,
     query_result::{ArrowOutputStream, QueryOutput, QueryResult},
 };
@@ -29,7 +30,15 @@ use crate::{
 /// ([`Self::get_query_metrics`]). Those answer in Arrow and in beacon's own
 /// types; turning them into a wire format is the transport's job, not this
 /// one's.
+///
+/// Every field is shared, so a clone is cheap. [`Self::run_query`] clones the
+/// runtime into the task it spawns on the query executor.
+#[derive(Clone)]
 pub struct Runtime {
+    /// The runtime queries run on. The server gives it a runtime of its own, so
+    /// a long scan never holds an API worker. The embedded database gives it the
+    /// one runtime it has.
+    pub(crate) executor: QueryExecutor,
     pub(crate) session_ctx: Arc<SessionContext>,
     /// Where a completed query's metrics are written: the managed table that
     /// `beacon.system.query_metrics` exposes, which is how callers read them.
@@ -92,6 +101,19 @@ impl Runtime {
     /// returned as a file download.
     #[tracing::instrument(skip(self, query, identity))]
     pub async fn run_query(
+        &self,
+        query: crate::query::Query,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<QueryResult> {
+        // Planning reads metadata too, so the whole query moves to the executor.
+        let runtime = self.clone();
+        self.executor
+            .run(async move { runtime.run_query_on_executor(query, identity).await })
+            .await
+    }
+
+    /// [`Self::run_query`], on the query executor.
+    async fn run_query_on_executor(
         &self,
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
@@ -179,6 +201,9 @@ impl Runtime {
         if let Some(physical_plan) = physical_plan {
             metrics.set_physical_plan(physical_plan);
         }
+        // The caller drains the result on its own runtime. The bridge keeps the
+        // scan, and the tasks DataFusion spawns on first poll, on the executor.
+        let stream = self.executor.bridge_stream(stream);
         let output_stream = ArrowOutputStream::new(stream, metrics, self.query_metrics.clone());
         Ok(QueryResult {
             query_output: QueryOutput::Stream(output_stream),
@@ -446,6 +471,18 @@ impl Runtime {
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<String> {
+        let runtime = self.clone();
+        self.executor
+            .run(async move { runtime.explain_query_on_executor(query, identity).await })
+            .await
+    }
+
+    /// [`Self::explain_query`], on the query executor.
+    async fn explain_query_on_executor(
+        &self,
+        query: crate::query::Query,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<String> {
         // `output` (file format) is meaningless here: only the query body is planned.
         let plan = self.lower_query(query.inner).await?;
         crate::statement_plan::validate_query_plan(&plan, false)?;
@@ -473,6 +510,22 @@ impl Runtime {
     /// it through `run_query` would have. A read-only runtime therefore refuses
     /// anything that does not produce a result set, exactly as `run_query` does.
     pub async fn explain_analyze_query(
+        &self,
+        query: crate::query::Query,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<String> {
+        let runtime = self.clone();
+        self.executor
+            .run(async move {
+                runtime
+                    .explain_analyze_query_on_executor(query, identity)
+                    .await
+            })
+            .await
+    }
+
+    /// [`Self::explain_analyze_query`], on the query executor.
+    async fn explain_analyze_query_on_executor(
         &self,
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,

@@ -7,7 +7,7 @@
 use std::{net::IpAddr, str::FromStr, sync::Arc};
 
 use anyhow::Context;
-use tokio::runtime::Builder;
+use tokio::runtime::{Builder, Handle};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use beacon_server::{axum::setup_router, flight_sql, Server};
@@ -21,7 +21,12 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Builds the Tokio runtime and hands control to the async entrypoint.
+/// Builds the two Tokio runtimes and hands control to the async entrypoint.
+///
+/// The API runtime serves HTTP and Flight SQL. The query runtime plans and runs
+/// queries, and hosts the crawler and file statistics timers. A partition decode
+/// holds a worker until it yields, and Tokio cannot preempt it, so a query on
+/// the API runtime would make every other request wait.
 fn main() -> anyhow::Result<()> {
     // Load and validate configuration up front so problems (e.g. a malformed
     // `BEACON_BASE_PATH`) surface as a clean error here. The config is owned and
@@ -29,25 +34,51 @@ fn main() -> anyhow::Result<()> {
     // a process-global.
     let config = Arc::new(beacon_server_config::Config::load().context("failed to load configuration")?);
 
-    let rt = Builder::new_multi_thread()
-        .worker_threads(config.server.worker_threads)
+    let api_runtime = Builder::new_multi_thread()
+        .worker_threads(config.server.api_threads)
+        .thread_name("beacon-api")
         .enable_all()
         .build()
-        .context("failed to build Tokio runtime")?;
+        .context("failed to build the API Tokio runtime")?;
+    let query_runtime = Builder::new_multi_thread()
+        .worker_threads(config.server.worker_threads)
+        .thread_name("beacon-query")
+        .enable_all()
+        .build()
+        .context("failed to build the query Tokio runtime")?;
 
-    rt.block_on(async_main(config))
+    // Both runtimes live until this returns, so a task on one can always reach the other.
+    api_runtime.block_on(async_main(config, query_runtime.handle().clone()))
 }
 
 /// Initializes shared services and starts all configured API transports.
-async fn async_main(config: Arc<beacon_server_config::Config>) -> anyhow::Result<()> {
+async fn async_main(
+    config: Arc<beacon_server_config::Config>,
+    query_runtime: Handle,
+) -> anyhow::Result<()> {
     let log_filter = setup_tracing(&config);
     install_panic_hook();
 
     tracing::info!("Beacon v{}", BEACON_VERSION);
     // This line only prints when DEBUG is on, so it confirms the level took effect.
     tracing::debug!(filter = %log_filter, "debug logging is on");
+    tracing::info!(
+        api_threads = config.server.api_threads,
+        query_threads = config.server.worker_threads,
+        "runtime threads"
+    );
     // The server owns the datasets store and hosts the runtime that queries it.
-    let server = Arc::new(Server::open(config.clone()).await?);
+    // It opens on the query runtime: the timers it starts spawn onto the ambient
+    // runtime, and they belong with the queries, not with the API.
+    let server = {
+        let config = config.clone();
+        let handle = query_runtime.clone();
+        query_runtime
+            .spawn(async move { Server::open(config, handle).await })
+            .await
+            .context("the server did not finish opening")??
+    };
+    let server = Arc::new(server);
     // Keep both transports on the same server so metadata and access rules stay aligned.
     let router = setup_router(server.clone(), config.clone())?;
 

@@ -53,6 +53,7 @@ use tokio::runtime::Handle;
 
 use crate::{
     auth_store::TablesAuthStore,
+    query_executor::QueryExecutor,
     runtime::Runtime,
     settings::{SqlSettings, SqlStreamCoalesceSettings},
     statement_plan::{new_session_cell, BeaconQueryPlanner, CoalesceSqlStream, SessionCell},
@@ -354,7 +355,7 @@ impl RuntimeBuilder {
         // only a hydrated catalog lets their `CREATE TABLE IF NOT EXISTS` see them —
         // otherwise the managed-table create path re-creates them and Lance rejects
         // the duplicate dataset.
-        register_schema_provider(&self, &session_ctx).await?;
+        register_schema_provider(&runtime_handle, &session_ctx).await?;
 
         // The session and its tables now exist and the session cell is filled, so the auth store can
         // reach its tables. Ensure they exist, hydrate the in-memory user/role copies from whatever
@@ -390,6 +391,7 @@ impl RuntimeBuilder {
         crate::query::temp_object::sweep_stale_outputs(&tmp_dir);
 
         Ok(Runtime {
+            executor: QueryExecutor::new(runtime_handle),
             session_ctx,
             query_metrics,
             auth: auth_context,
@@ -676,11 +678,13 @@ async fn init_session_ctx(
 }
 
 async fn register_schema_provider(
-    _runtime_builder: &RuntimeBuilder,
+    runtime_handle: &Handle,
     session_ctx: &Arc<SessionContext>,
 ) -> anyhow::Result<()> {
+    // The provider blocks on this handle from inside DataFusion's sync API. It
+    // must be the query runtime, not the runtime `build` happens to run on.
     let schema_provider = Arc::new(PersistentSchemaProvider::new(
-        tokio::runtime::Handle::current(),
+        runtime_handle.clone(),
         session_ctx.clone(),
         DEFAULT_DB_STORE_URL_OBJECT_URL.clone(),
     ));
