@@ -193,6 +193,12 @@ async fn the_root_serves_a_home_page_linking_to_every_surface() {
     let web = web_build();
     let (_harness, router) = app("/beacon", &web).await;
 
+    // A visitor types the base path with a trailing slash as readily as without.
+    // The nest serves the bare form, so the other one lands on it.
+    let (status, location, _) = get(&router, "/beacon/").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(location.as_deref(), Some("/beacon"));
+
     let (status, _, body) = get(&router, "/beacon").await;
     assert_eq!(status, StatusCode::OK);
     for href in [

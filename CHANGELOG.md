@@ -19,7 +19,8 @@ tag. Releases before 2.0.0 are recorded in the
   running version. The documentation link is pinned to that version, so a server two releases old
   no longer sends its operator to the newest manual. The admin card appears only when the admin UI
   is mounted, and the MCP address only when MCP is enabled. Every link carries the configured
-  `BEACON_BASE_PATH`. The page carries the colors, the type and the card layout of the
+  `BEACON_BASE_PATH`, and that root now answers in both forms: `/prefix/` redirects to `/prefix`,
+  where it used to be a `404`. The page carries the colors, the type and the card layout of the
   documentation site, and it loads nothing from the network, so it also renders on a server with
   no route out. Swagger keeps its own path, so a bookmark to `/swagger` is unaffected.
 - **`BEACON_TYPE_WIDENING_ON_CONFLICT` settles a column that no type holds.** A collection can

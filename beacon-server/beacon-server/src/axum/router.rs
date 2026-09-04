@@ -151,8 +151,16 @@ pub fn setup_router(
             .merge(setup_tracing_router(router))
             .merge(swagger_ui))
     } else {
+        // `nest` claims `{base_path}` and `{base_path}/{*rest}`, and that wildcard
+        // matches no empty rest. A visitor who types the trailing slash would get
+        // a 404, so that form redirects to the root the nest does serve.
+        let root: &'static str = base_path.clone().leak();
         Ok(Router::new()
             .nest(base_path, setup_tracing_router(router))
+            .route(
+                &format!("{base_path}/"),
+                get(move || async move { Redirect::to(root) }),
+            )
             .merge(swagger_ui))
     }
 }
