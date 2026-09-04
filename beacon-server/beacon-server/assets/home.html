@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<style>
+/* Colors, type and card idiom follow the documentation site (VitePress default
+   theme, indigo brand). The tokens below are that theme's values, copied because
+   this page ships inside the server and loads nothing from the network. */
+:root {
+  --bg: #ffffff;
+  --bg-soft: #f6f6f7;
+  --bg-elv: #ffffff;
+  --divider: #e2e2e3;
+  --text-1: #3c3c43;
+  --text-2: #67676c;
+  --brand-1: #3451b2;
+  --brand-2: #3a5ccc;
+  --shadow: rgba(0, 0, 0, 0.1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1b1f;
+    --bg-soft: #202127;
+    --bg-elv: #252529;
+    --divider: #2e2e32;
+    --text-1: #dfdfd6;
+    --text-2: #98989f;
+    --brand-1: #a8b1ff;
+    --brand-2: #5c73e7;
+    --shadow: rgba(0, 0, 0, 0.36);
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 64px 32px 80px;
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+main { max-width: 1152px; margin: 0 auto; }
+
+/* The documentation home page header: an accent rule, no band. */
+.dhead {
+  margin: 0 0 3.25rem;
+  padding: 0.3rem 0 0.3rem 1.35rem;
+  border-left: 3px solid var(--brand-1);
+}
+.dhead h1 {
+  margin: 0;
+  font-size: 2.6rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+.dhead p {
+  margin: 0.8rem 0 0;
+  max-width: 44rem;
+  color: var(--text-2);
+  font-size: 1.12rem;
+  line-height: 1.6;
+}
+
+.dgrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.dcard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  height: 100%;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  background: var(--bg-soft);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.25s ease, background-color 0.25s ease,
+              transform 0.25s ease, box-shadow 0.25s ease;
+}
+.dcard:hover, .dcard:focus-visible {
+  border-color: var(--brand-1);
+  background: var(--bg-elv);
+  transform: translateY(-3px);
+  box-shadow: 0 10px 24px var(--shadow);
+}
+.dcard-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  margin-bottom: 0.15rem;
+  background: var(--bg);
+  color: var(--brand-1);
+  transition: border-color 0.25s ease;
+}
+.dcard-icon svg { width: 17px; height: 17px; }
+.dcard:hover .dcard-icon { border-color: var(--brand-1); }
+.dcard-title {
+  color: var(--text-1);
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.dcard-body {
+  flex: 1 1 auto;
+  color: var(--text-2);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.note {
+  margin: 2.5rem 0 0;
+  color: var(--text-2);
+  font-size: 0.9rem;
+}
+code {
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  padding: 0.15rem 0.4rem;
+  background: var(--bg-soft);
+  color: var(--text-1);
+  font-family: ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.85em;
+}
+
+.foot {
+  max-width: 1152px;
+  margin: 4rem auto 0;
+  border-top: 1px solid var(--divider);
+  padding-top: 2rem;
+  color: var(--text-2);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.7;
+  text-align: center;
+}
+.foot p { margin: 0; }
+
+@media (max-width: 860px) {
+  .dgrid { grid-template-columns: 1fr; }
+  body { padding: 40px 20px 56px; }
+  .dhead { margin-bottom: 2.5rem; padding-left: 1rem; }
+  .dhead h1 { font-size: 1.95rem; }
+  .dhead p { font-size: 1rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dcard, .dcard-icon { transition: none; }
+  .dcard:hover, .dcard:focus-visible { transform: none; box-shadow: none; }
+}
+</style>
+</head>
+<body>
+<main>
+<div class="dhead">
+<h1>{{title}}</h1>
+<p>Beacon {{version}}. Query the data. Read the API. Manage the server.</p>
+</div>
+<ul class="dgrid">
+<!--[admin]-->
+<li><a class="dcard" href="{{base}}/admin/">
+<span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg></span>
+<span class="dcard-title">Admin panel</span>
+<span class="dcard-body">Write queries. Manage tables, datasets and access.</span>
+</a></li>
+<!--[/admin]-->
+<li><a class="dcard" href="{{base}}/swagger">
+<span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m10 8 6 4-6 4z"/></svg></span>
+<span class="dcard-title">Swagger UI</span>
+<span class="dcard-body">Send a request to any endpoint from the browser.</span>
+</a></li>
+<li><a class="dcard" href="{{base}}/scalar/">
+<span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
+<span class="dcard-title">API reference</span>
+<span class="dcard-body">Read every endpoint, parameter and response.</span>
+</a></li>
+<li><a class="dcard" href="{{base}}/openapi.json">
+<span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 21H6a2 2 0 0 1-2-2v-5a2 2 0 0 0-2-2 2 2 0 0 0 2-2V5a2 2 0 0 1 2-2h1"/><path d="M17 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"/></svg></span>
+<span class="dcard-title">OpenAPI document</span>
+<span class="dcard-body">Generate a client from the machine-readable schema.</span>
+</a></li>
+<li><a class="dcard" href="{{docs}}" target="_blank" rel="noopener">
+<span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg></span>
+<span class="dcard-title">Documentation</span>
+<span class="dcard-body">Read the guides, the SQL reference and every setting.</span>
+</a></li>
+<li><a class="dcard" href="{{base}}/api/health">
+<span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg></span>
+<span class="dcard-title">Health</span>
+<span class="dcard-body">Check that the server answers.</span>
+</a></li>
+</ul>
+<!--[mcp]-->
+<p class="note">MCP endpoint: <code>{{base}}/mcp</code></p>
+<!--[/mcp]-->
+</main>
+<footer class="foot">
+<p>Released under the AGPL-3.0 License.</p>
+<p>Copyright &copy; MARIS &amp; the Beacon contributors</p>
+</footer>
+</body>
+</html>
