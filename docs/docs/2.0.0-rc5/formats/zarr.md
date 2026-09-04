@@ -52,6 +52,21 @@ multi-dimensional store.
 - One external table can hold several Zarr stores. Use a glob pattern such as `sst/*/zarr.json`.
 - Beacon fully supports S3 and other object stores.
 
+### Discovery in the datasets store
+
+`list_datasets` and `browse_datasets` report a Zarr store as one dataset. A store is a directory
+with the `.zarr` suffix that holds `zarr.json`:
+
+```text
+sst/gridded-example.zarr/zarr.json      the store
+sst/gridded-example.zarr/lat/zarr.json  an array inside it
+```
+
+Zarr v3 gives every group and every array a `zarr.json`, so the marker alone does not name the
+store. The suffix does. A store in a directory without the suffix stays out of the listing.
+
+`read_zarr` needs no suffix. The path already names the store.
+
 ### Array attributes
 
 A Zarr array holds its attributes in the `attributes` section of its `zarr.json`. Beacon shows these

@@ -50,22 +50,82 @@ WHERE data_type LIKE 'Timestamp%';
 ## `list_datasets`
 
 ```text
-list_datasets()
+list_datasets(pattern, offset, limit)
 ```
 
-Lists every file in the dataset storage root of Beacon. Returns one row for each file.
+Lists every file in the dataset storage root of Beacon. Returns one row for each file. Beacon
+descends the full tree below `pattern`.
+
+All three arguments are optional and positional:
+
+| Argument | Type | Description |
+| -------- | ---- | ----------- |
+| `pattern` | `TEXT` | A glob that filters the paths. The default is `**/*` |
+| `offset` | `INTEGER` | The number of rows to skip. The default is `0` |
+| `limit` | `INTEGER` | The maximum number of rows. The default is no limit |
+
+The output columns are:
 
 | Column | Type | Description |
 | ------ | ---- | ----------- |
 | `file_name` | `TEXT` | The path, relative to the storage root |
 | `file_format` | `TEXT` | The format that Beacon detects |
+| `can_inspect` | `BOOLEAN` | Whether Beacon reads a schema from this file |
+| `can_partial_explore` | `BOOLEAN` | Whether Beacon reads a part of this file |
+| `size` | `UBIGINT` | The size in bytes. Null when the store reports none |
+| `last_modified` | `TEXT` | The modification time, in RFC 3339. Null when the store reports none |
+| `is_directory` | `BOOLEAN` | Always false here. See `browse_datasets` |
 
 ```sql
 SELECT * FROM list_datasets()
 
 -- Find all NetCDF files
 SELECT file_name FROM list_datasets() WHERE file_format = 'nc'
+
+-- One page of one subtree
+SELECT file_name FROM list_datasets('argo/**/*.nc', 0, 50)
 ```
+
+A `LIMIT` stops the walk. Beacon reads one page of the store for `LIMIT 50`, not the full store.
+
+## `browse_datasets`
+
+```text
+browse_datasets(prefix, offset, limit)
+```
+
+Lists one directory level of the dataset storage root. Returns one row for each file and one row
+for each sub-directory. Beacon does not descend.
+
+All three arguments are optional and positional:
+
+| Argument | Type | Description |
+| -------- | ---- | ----------- |
+| `prefix` | `TEXT` | The directory to read. The default is the storage root |
+| `offset` | `INTEGER` | The number of rows to skip. The default is `0` |
+| `limit` | `INTEGER` | The maximum number of rows. The default is no limit |
+
+The output columns are the columns of `list_datasets`. A sub-directory row sets `is_directory` and
+holds the directory path in `file_name`.
+
+Use this function for a folder view. One level costs one request, so the time does not increase
+with the size of the store below `prefix`. `list_datasets` reads every object below its pattern.
+
+```sql
+-- The root level
+SELECT * FROM browse_datasets()
+
+-- The files of one directory
+SELECT file_name FROM browse_datasets('argo') WHERE NOT is_directory
+
+-- The sub-directories of one directory
+SELECT file_name FROM browse_datasets('argo') WHERE is_directory
+```
+
+::: info A directory-shaped dataset
+A Zarr store is a directory. At its own level Beacon reports it as a sub-directory. Descend into it
+to see the dataset row.
+:::
 
 ## `view_dataset_statistics`
 

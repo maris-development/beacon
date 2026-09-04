@@ -39,6 +39,7 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Server>>, utoipa::openapi::Op
         .routes(routes!(query::available_columns))
         .routes(routes!(datasets::datasets))
         .routes(routes!(datasets::list_datasets))
+        .routes(routes!(datasets::browse_datasets))
         .routes(routes!(datasets::list_dataset_schema))
         .routes(routes!(datasets::total_datasets))
         .routes(routes!(tables::list_tables))

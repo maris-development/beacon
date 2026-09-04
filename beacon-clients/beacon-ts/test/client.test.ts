@@ -175,6 +175,21 @@ describe("BeaconClient metadata paths", () => {
     expect(calls[0]!.url).toBe("http://beacon.test/api/table-schema?table_name=my+table");
   });
 
+  it("browses one directory level, and omits an absent prefix", async () => {
+    const { fn, calls } = stubFetch(() =>
+      jsonResponse({ prefix: "argo", folders: ["2024"], datasets: [] }),
+    );
+    const client = new BeaconClient({ url: "http://beacon.test", fetch: fn });
+
+    await client.browseDatasets("argo/floats");
+    expect(calls[0]!.url).toBe("http://beacon.test/api/browse-datasets?prefix=argo%2Ffloats");
+
+    // No prefix means the root, so the parameter is left off rather than sent
+    // empty.
+    await client.browseDatasets();
+    expect(calls[1]!.url).toBe("http://beacon.test/api/browse-datasets");
+  });
+
   it("respects basePath", async () => {
     const { fn, calls } = stubFetch(() => jsonResponse([]));
     const client = new BeaconClient({ url: "http://beacon.test", basePath: "/beacon", fetch: fn });

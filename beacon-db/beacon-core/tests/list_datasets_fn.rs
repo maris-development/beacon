@@ -163,3 +163,158 @@ async fn listing_composes_with_sql() {
     );
     assert_eq!(csv_count, 3, "the three CSVs should be countable through SQL");
 }
+
+// ---- browse_datasets -------------------------------------------------------
+
+/// Sorted file names from a `browse_datasets` invocation.
+async fn browsed(rt: &TestRuntime, args: &str) -> Vec<String> {
+    let mut names = column_strings(
+        &rt.sql(&format!(
+            "SELECT file_name FROM browse_datasets({args}) WHERE NOT is_directory ORDER BY file_name"
+        ))
+        .await,
+        0,
+    );
+    names.sort();
+    names
+}
+
+/// The browse reads one level. The root holds `a.csv` and `p.parquet`; the CSVs
+/// under `sub/` belong to the levels below and must not appear.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_reads_one_directory_level() {
+    let rt = seeded_runtime("browse_one_level").await;
+    assert_eq!(browsed(&rt, "''").await, vec!["a.csv", "p.parquet"]);
+}
+
+/// No arguments reads the root, the same as an empty prefix. The prefix
+/// defaults to the empty string, which names the root of the store.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_without_arguments_reads_the_root() {
+    let rt = seeded_runtime("browse_no_args").await;
+    assert_eq!(browsed(&rt, "").await, browsed(&rt, "''").await);
+    assert_eq!(browsed(&rt, "").await, vec!["a.csv", "p.parquet"]);
+}
+
+/// Descending shows that level and no deeper one.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_descends_by_prefix() {
+    let rt = seeded_runtime("browse_descend").await;
+    assert_eq!(browsed(&rt, "'sub'").await, vec!["sub/b.csv"]);
+    assert_eq!(browsed(&rt, "'sub/deep'").await, vec!["sub/deep/c.csv"]);
+}
+
+/// The whole point: a browse is not a recursive listing. `list_datasets` sees
+/// every CSV under the root, a browse of the root sees one.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_is_not_a_recursive_listing() {
+    let rt = seeded_runtime("browse_vs_list").await;
+    let recursive = names(&rt, "'**/*.csv'").await;
+    assert_eq!(recursive.len(), 3, "got {recursive:?}");
+
+    let one_level: Vec<String> = browsed(&rt, "''")
+        .await
+        .into_iter()
+        .filter(|n| n.ends_with(".csv"))
+        .collect();
+    assert_eq!(one_level, vec!["a.csv"]);
+}
+
+/// An empty directory returns no rows rather than failing.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_of_an_unknown_prefix_is_empty() {
+    let rt = seeded_runtime("browse_unknown").await;
+    assert!(browsed(&rt, "'nope'").await.is_empty());
+}
+
+/// The listing is inert until it is scanned, so building the plan must not
+/// touch the store. `EXPLAIN` plans without executing.
+#[tokio::test(flavor = "multi_thread")]
+async fn planning_a_listing_does_not_run_it() {
+    let rt = seeded_runtime("browse_plan_only").await;
+    let batches = rt.sql("EXPLAIN SELECT file_name FROM list_datasets()").await;
+    assert!(total_rows(&batches) > 0, "EXPLAIN should produce a plan");
+}
+
+/// Sub-directories come back as rows, flagged, so one query describes a level.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_reports_sub_directories_as_rows() {
+    let rt = seeded_runtime("browse_dirs").await;
+    let dirs = column_strings(
+        &rt.sql(
+            "SELECT file_name FROM browse_datasets('') \
+             WHERE is_directory ORDER BY file_name",
+        )
+        .await,
+        0,
+    );
+    assert_eq!(dirs, vec!["sub"]);
+}
+
+/// A recursive listing describes files, so the flag is never set there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recursive_listing_reports_no_directories() {
+    let rt = seeded_runtime("list_no_dirs").await;
+    let dirs = column_strings(
+        &rt.sql("SELECT file_name FROM list_datasets() WHERE is_directory")
+            .await,
+        0,
+    );
+    assert!(dirs.is_empty(), "got {dirs:?}");
+}
+
+// ---- the streaming plan ----------------------------------------------------
+
+/// The listing is its own plan node, not a materialised table. `EXPLAIN` names
+/// it, and names what it will list.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listing_plans_as_its_own_node() {
+    let rt = seeded_runtime("plan_node").await;
+    let plan = column_strings(
+        &rt.sql("EXPLAIN SELECT file_name FROM list_datasets('**/*.csv')").await,
+        1,
+    )
+    .join("\n");
+    assert!(plan.contains("DatasetsExec"), "plan was:\n{plan}");
+    assert!(plan.contains("glob=**/*.csv"), "plan was:\n{plan}");
+}
+
+/// A browse names the level it reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browse_plans_as_a_level() {
+    let rt = seeded_runtime("plan_level").await;
+    let plan = column_strings(
+        &rt.sql("EXPLAIN SELECT file_name FROM browse_datasets('sub')").await,
+        1,
+    )
+    .join("\n");
+    assert!(plan.contains("level=sub"), "plan was:\n{plan}");
+}
+
+/// A `LIMIT` reaches the node, which is what lets it stop the walk rather than
+/// list everything and discard the tail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_limit_reaches_the_listing_node() {
+    let rt = seeded_runtime("plan_limit").await;
+    let plan = column_strings(
+        &rt.sql("EXPLAIN SELECT file_name FROM list_datasets() LIMIT 2").await,
+        1,
+    )
+    .join("\n");
+    assert!(plan.contains("limit=2"), "plan was:\n{plan}");
+
+    // And it returns that many.
+    let rows = rt.sql("SELECT file_name FROM list_datasets() LIMIT 2").await;
+    assert_eq!(total_rows(&rows), 2);
+}
+
+/// Rows survive the trip through the stream unchanged: the same four datasets,
+/// with their sizes and timestamps still attached.
+#[tokio::test(flavor = "multi_thread")]
+async fn streamed_rows_keep_their_object_metadata() {
+    let rt = seeded_runtime("stream_meta").await;
+    let sized = rt
+        .sql("SELECT file_name FROM list_datasets() WHERE size > 0 AND last_modified IS NOT NULL")
+        .await;
+    assert_eq!(total_rows(&sized), 4, "every dataset carries its object metadata");
+}

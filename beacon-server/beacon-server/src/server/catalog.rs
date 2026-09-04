@@ -214,6 +214,61 @@ pub(crate) async fn list_datasets(
         .collect())
 }
 
+/// One directory level of the datasets store.
+///
+/// Goes through the same SQL surface as [`list_datasets`], because it is the
+/// same provider: `browse_datasets` stops at one level and reports the
+/// sub-directories as rows. Splitting those rows out here is all this adds.
+pub(crate) async fn browse_datasets(
+    server: &Arc<Server>,
+    prefix: &str,
+    identity: AuthIdentity,
+) -> anyhow::Result<crate::api::BrowseDatasetsResponse> {
+    let sql = format!("SELECT * FROM browse_datasets({})", quote_literal(prefix));
+    let rows = query_rows(server, sql, identity).await?;
+
+    let is_dir = |row: &Value| {
+        row.get("is_directory")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+
+    let folders = rows
+        .iter()
+        .filter(|row| is_dir(row))
+        // Rows carry the full path; a folder view wants the name below `prefix`.
+        .map(|row| {
+            let full = str_field(row, "file_name");
+            full.rsplit('/').next().unwrap_or(full).to_string()
+        })
+        .collect();
+
+    let datasets = rows
+        .iter()
+        .filter(|row| !is_dir(row))
+        .map(|row| DatasetInfo {
+            file_path: str_field(row, "file_name").to_string(),
+            format: str_field(row, "file_format").to_string(),
+            can_inspect: row.get("can_inspect").and_then(Value::as_bool).unwrap_or(false),
+            can_partial_explore: row
+                .get("can_partial_explore")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            size: row.get("size").and_then(Value::as_u64),
+            last_modified: row
+                .get("last_modified")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+        .collect();
+
+    Ok(crate::api::BrowseDatasetsResponse {
+        prefix: prefix.trim_end_matches('/').to_string(),
+        folders,
+        datasets,
+    })
+}
+
 /// The `read_*` table function that reads a dataset file with the given
 /// extension, or `None` when the extension is not one beacon reads by path.
 fn read_function_for_extension(ext: &str) -> Option<&'static str> {

@@ -62,6 +62,26 @@ pub struct DatasetInfo {
     pub last_modified: Option<String>,
 }
 
+/// One directory level of the datasets store.
+///
+/// What a folder view needs, and nothing more. `/api/list-datasets` walks the
+/// whole subtree under its pattern; this reads a single level, so its cost does
+/// not grow with the size of the store below it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct BrowseDatasetsResponse {
+    /// The directory this describes, relative to the datasets store root.
+    #[schema(example = "argo/floats")]
+    pub prefix: String,
+    /// Immediate sub-folder names, relative to `prefix`, sorted.
+    ///
+    /// A directory-shaped dataset (Zarr, Atlas) appears here rather than in
+    /// `datasets`: its marker lives inside the directory, one level down.
+    #[schema(example = json!(["2023", "2024"]))]
+    pub folders: Vec<String>,
+    /// Datasets sitting directly in `prefix`, sorted by path.
+    pub datasets: Vec<DatasetInfo>,
+}
+
 impl From<DatasetMetadata> for DatasetInfo {
     fn from(value: DatasetMetadata) -> Self {
         Self {

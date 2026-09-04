@@ -1781,6 +1781,7 @@ dependencies = [
  "arrow 58.4.0",
  "arrow-flight",
  "arrow-schema 58.4.0",
+ "async-stream",
  "async-trait",
  "base64",
  "beacon-common",
@@ -1880,6 +1881,8 @@ name = "beacon-functions"
 version = "2.0.0-rc.5"
 dependencies = [
  "arrow 58.4.0",
+ "async-stream",
+ "async-trait",
  "beacon-arrow-bbf",
  "beacon-arrow-csv",
  "beacon-arrow-geoparquet",

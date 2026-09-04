@@ -29,7 +29,9 @@ use zarrs::group::Group;
 use crate::{
     config::ZarrConfig,
     reader::schema_from_group_path,
-    util::{ZarrPath, ZarrStorage, is_zarr_v3_metadata, leaf_group_keys, top_level_zarr_meta_v3},
+    util::{
+        ZarrPath, ZarrStorage, is_zarr_store_root, leaf_group_keys, top_level_zarr_meta_v3,
+    },
 };
 
 pub mod source;
@@ -154,6 +156,8 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
     /// depends on the whole store: an array added under it changes the schema
     /// while leaving the marker where it was.
     fn schema_units(&self, objects: &[ObjectMeta]) -> Vec<SchemaUnit> {
+        // The same rule `infer_schema` uses, so a cache entry keys on the marker
+        // that read the schema.
         units_over_stores(objects, &crate::util::top_level_zarr_meta_v3(objects))
     }
 
@@ -161,15 +165,12 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-        let datasets: Vec<ObjectMeta> = objects
+        // A store is a `*.zarr` directory holding `zarr.json`. Decided per
+        // object, so this classifies a listing without holding it.
+        let zarr_paths: Vec<ZarrPath> = objects
             .iter()
-            .filter(|obj| is_zarr_v3_metadata(obj))
+            .filter(|obj| is_zarr_store_root(obj))
             .cloned()
-            .collect();
-
-        let top_level_datasets = top_level_zarr_meta_v3(&datasets);
-        let zarr_paths: Vec<ZarrPath> = top_level_datasets
-            .into_iter()
             .filter_map(|path| match ZarrPath::new_from_object_meta(path) {
                 Ok(zarr_path) => Some(zarr_path),
                 Err(e) => {
@@ -326,9 +327,11 @@ impl FileFormat for ZarrFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         // The listing may include non-metadata objects — chunk data files such as
         // `<array>/c/0/0/0` — when the table is created without a `zarr.json`
-        // extension filter (e.g. via `read_zarr`). Select the top-level group
-        // metadata files and ignore the rest rather than erroring on the first
-        // chunk we encounter.
+        // extension filter (e.g. via `read_zarr`). Select the store roots and
+        // ignore the rest rather than erroring on the first chunk we encounter.
+        // The caller has already named the store, so the root is the shallowest
+        // marker here rather than a `*.zarr` directory. See `is_zarr_store_root`
+        // for why discovery cannot use this rule and this cannot use that one.
         let verified_objects = top_level_zarr_meta_v3(objects);
         if verified_objects.is_empty() {
             return Err(datafusion::error::DataFusionError::Execution(

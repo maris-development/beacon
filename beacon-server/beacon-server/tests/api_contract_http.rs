@@ -54,6 +54,7 @@ const CLIENT_ENDPOINTS: &[(&str, &str)] = &[
     ("get", "/api/default-table-schema"),
     // -- datasets ------------------------------------------------------------
     ("get", "/api/list-datasets"),
+    ("get", "/api/browse-datasets"),
     ("get", "/api/dataset-schema"),
     ("get", "/api/total-datasets"),
     // -- functions & info ----------------------------------------------------
@@ -196,6 +197,7 @@ async fn admin_alias_get_endpoints_answer_successfully() {
         "/admin/api/tables",
         "/admin/api/tables-with-schema",
         "/admin/api/list-datasets",
+        "/admin/api/browse-datasets",
         "/admin/api/functions",
         "/admin/api/admin/check",
         "/admin/api/admin/auth/users",
@@ -372,6 +374,7 @@ async fn client_get_endpoints_answer_successfully() {
         ("/api/tables-with-schema", false),
         ("/api/default-table", false),
         ("/api/list-datasets", false),
+        ("/api/browse-datasets", false),
         ("/api/total-datasets", false),
         ("/api/functions", false),
         ("/api/table-functions", false),

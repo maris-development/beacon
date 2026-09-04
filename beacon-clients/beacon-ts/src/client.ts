@@ -323,6 +323,19 @@ export class BeaconClient {
     return this.http.fetchJson<T>("GET", "/api/dataset-schema", { query: { file } });
   }
 
+  /**
+   * Reads one directory level of the datasets store (`GET /api/browse-datasets`).
+   *
+   * Prefer this over {@link datasets} for a folder view. `datasets` globs, so it
+   * enumerates every object under the pattern before it answers; this reads a
+   * single level and its cost does not grow with the store below it.
+   */
+  browseDatasets<T = unknown>(prefix?: string): Promise<T> {
+    return this.http.fetchJson<T>("GET", "/api/browse-datasets", {
+      query: { prefix },
+    });
+  }
+
   /** Counts the total number of datasets (`GET /api/total-datasets`). */
   totalDatasets(): Promise<number> {
     return this.http.fetchJson<number>("GET", "/api/total-datasets");
