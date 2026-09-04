@@ -379,6 +379,10 @@ export function DatasetsPage() {
     return list;
   }, [items, path, search, searching, sort, browseQuery.data]);
 
+  // What the badge counts: the folders and files of this view. The `..` entry is
+  // navigation, not content, so it is left out.
+  const shown = rows.filter((row) => row.type !== "up").length;
+
   function toggleSort(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
@@ -523,9 +527,7 @@ export function DatasetsPage() {
       description="Browse the datasets store. Preview rows or inspect a file's schema."
       actions={
         <div className="flex items-center gap-2">
-          {rows.length > 0 && (
-            <Badge variant="secondary">{items.length} here</Badge>
-          )}
+          {shown > 0 && <Badge variant="secondary">{shown} here</Badge>}
           <Button size="sm" className="gap-1.5" onClick={() => openUpload([])}>
             <Upload className="h-4 w-4" />
             Upload

@@ -12,6 +12,22 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **`browse_datasets` reads one directory level.** A folder view needs the files and the
+  sub-directories of one directory, and got them by listing the whole store and grouping the paths
+  in the browser. `browse_datasets([prefix[, offset[, limit]]])` reads a single level with one
+  delimiter request. On a bucket of 2 853 217 objects that measured 14 milliseconds, against 79.9
+  seconds to enumerate the same bucket. It shares its provider with `list_datasets`, so the columns
+  are the same, and a new `is_directory` column marks a sub-directory row. `GET
+  /api/browse-datasets?prefix=…` runs the same SQL and splits the rows into `folders` and
+  `datasets`, and the admin UI folder view calls it. A directory-shaped dataset (Zarr, Atlas) is a
+  folder at its own level; descend into it to see the dataset. Neither listing filters by grant
+  rules, as before. See
+  [Introspection](docs/docs/2.0.0-rc5/sql/table-functions-utility.md#browse-datasets) and
+  [the REST API](docs/docs/2.0.0-rc5/api/exploring-data.md#browse-one-directory-level).
+- **`list_datasets` takes a pattern, an offset and a limit.** All three were already accepted and
+  none were documented. `list_datasets([pattern[, offset[, limit]]])` globs (default `**/*`), skips
+  and caps, and the full row shape — `can_inspect`, `can_partial_explore`, `size`, `last_modified`
+  — is now written down beside it.
 - **`BEACON_TYPE_WIDENING_ON_CONFLICT` settles a column that no type holds.** A collection can
   type one column as a number in one file and as a string in another. No type holds both, so the
   schema merge refused the whole table and the table answered no query: `Incompatible types for
@@ -157,6 +173,36 @@ tag. Releases before 2.0.0 are recorded in the
   [the REST API reference](docs/docs/2.0.0-rc5/api/index.md#admin-path-alias).
 
 ### Changed
+
+- **A large S3 dataset listing is sharded, streamed and paged.** Beacon listed the whole datasets
+  store for every browse. A recursive listing is a chain of pages, and each page needs the
+  continuation token of the one before it, so a bucket of 2 853 217 objects cost 2854 strictly
+  sequential requests and 79.9 seconds. Three changes. Beacon asks for 5000 keys per page instead
+  of the server default of 1000, which removes 80% of the round trips. It then reads three
+  directory levels with a delimiter listing and walks each leaf prefix as its own page chain, 16 at
+  a time. The same walk now takes 19.4 seconds. And the listing streams: a plan node emits rows as
+  pages arrive, so `LIMIT 50` over a bucket of millions reads one page rather than all of it, and
+  the walk no longer holds every object in memory first. Two consequences. Shards interleave, so
+  objects no longer arrive sorted — `ObjectStore::list` never guaranteed an order, and a query that
+  needs one must say `ORDER BY`. And a directory-shaped dataset (Zarr, Atlas) reports no `size` or
+  `last_modified` in a recursive listing, because those are an aggregate over the directory and a
+  streamed row cannot wait for it. Raise `AWS_TIMEOUT` before raising the page size.
+- **The listing ran during query planning, on a worker thread.** `list_datasets` did its walk
+  inside `TableFunctionImpl::call`, a synchronous method, so it reached the store through
+  `block_in_place` and held a worker thread for the length of the walk — before anything decided to
+  read the result. The walk now belongs to the table provider, and it starts when the plan is
+  executed. `EXPLAIN SELECT … FROM list_datasets()` touches the store not at all, and names the
+  node and what it will list.
+- **A discovered Zarr store is a `*.zarr` directory.** Zarr v3 gives every group *and every array*
+  a `zarr.json`, so the marker alone does not say which one it belongs to. Beacon compared each
+  marker against the others to find the shallowest, which needs the whole listing in memory and
+  cannot be done as it streams. Discovery now reads the directory that holds the marker: only a
+  store carries the `.zarr` suffix. A store in a directory without the suffix stays out of
+  `list_datasets`. `read_zarr` is unaffected — the path already names the store, so that directory
+  needs no suffix. See [Zarr](docs/docs/2.0.0-rc5/formats/zarr.md#discovery-in-the-datasets-store).
+- **A dropped object-store error no longer shortens a dataset listing.** `list_datasets` discarded
+  a failure part-way through the walk, so a timeout on object 2 000 000 of 2 850 000 returned the
+  first two million as a complete listing. It now reports the error and names how far it got.
 
 - **A file statistics pass drains the queue, and one pass runs at a time.** A pass used to stop
   after one batch of `BEACON_FILE_STATS_BATCH_FILES` files, 10 000 by default. A fresh archive of
