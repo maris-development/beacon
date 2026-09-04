@@ -20,7 +20,8 @@ docker run -d \
   ghcr.io/maris-development/beacon:latest
 ```
 
-That's it — Beacon is now serving on <http://localhost:5001>.
+That's it — Beacon is now serving on <http://localhost:5001>. That page links to the
+admin UI, the API docs and this documentation.
 
 ## 2. Add data
 

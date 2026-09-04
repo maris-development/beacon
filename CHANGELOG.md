@@ -12,6 +12,17 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **The server root is a home page instead of a jump to Swagger.** `http://localhost:5001/` sent
+  every visitor straight to the Swagger UI, which hid the admin panel, the API reference and the
+  documentation from anyone who did not know their paths. The root now answers with a small page
+  that links to all of them, plus the OpenAPI document and the health endpoint, and names the
+  running version. The documentation link is pinned to that version, so a server two releases old
+  no longer sends its operator to the newest manual. The admin card appears only when the admin UI
+  is mounted, and the MCP address only when MCP is enabled. Every link carries the configured
+  `BEACON_BASE_PATH`, and that root now answers in both forms: `/prefix/` redirects to `/prefix`,
+  where it used to be a `404`. The page carries the colors, the type and the card layout of the
+  documentation site, and it loads nothing from the network, so it also renders on a server with
+  no route out. Swagger keeps its own path, so a bookmark to `/swagger` is unaffected.
 - **`BEACON_TYPE_WIDENING_ON_CONFLICT` settles a column that no type holds.** A collection can
   type one column as a number in one file and as a string in another. No type holds both, so the
   schema merge refused the whole table and the table answered no query: `Incompatible types for
