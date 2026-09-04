@@ -80,7 +80,11 @@ pub struct OidcConfig {
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
+    /// Threads of the query runtime. From `BEACON_WORKER_THREADS`.
     pub worker_threads: usize,
+    /// Threads of the runtime that serves HTTP and Flight SQL. From
+    /// `BEACON_API_THREADS`. Its own runtime, so a long query does not block it.
+    pub api_threads: usize,
     /// URL prefix for all HTTP routes, e.g. `/base-path`. Empty string means serve at `/`.
     pub base_path: String,
     /// Directory holding the built admin web UI (Vite `dist/`). Served at
@@ -348,6 +352,8 @@ struct RawConfig {
     sql_stream_coalesce_max_rows: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
     worker_threads: usize,
+    #[envconfig(from = "BEACON_API_THREADS", default = "4")]
+    api_threads: usize,
     #[envconfig(from = "BEACON_BASE_PATH", default = "")]
     base_path: String,
     /// Directory containing the built admin web UI. Defaults to `web` (resolved
@@ -614,6 +620,7 @@ impl From<RawConfig> for Config {
                 port: raw.port,
                 host: raw.host,
                 worker_threads: raw.worker_threads,
+                api_threads: raw.api_threads,
                 base_path: raw.base_path,
                 web_ui_dir: raw.web_ui_dir,
                 max_upload_bytes: raw.max_upload_bytes,
@@ -756,6 +763,24 @@ fn validate_storage(s3: &S3Config) -> Result<()> {
     Ok(())
 }
 
+/// Rejects a runtime with no threads.
+///
+/// Tokio panics on a zero thread count. A clean error at startup names the
+/// variable instead.
+fn validate_threads(server: &ServerConfig) -> Result<()> {
+    for (name, count) in [
+        ("BEACON_WORKER_THREADS", server.worker_threads),
+        ("BEACON_API_THREADS", server.api_threads),
+    ] {
+        if count == 0 {
+            return Err(ConfigError::InvalidThreads(format!(
+                "{name} must be at least 1"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Levels accepted by `BEACON_LOG_LEVEL`, in the spelling `tracing` expects.
 const LOG_LEVELS: [&str; 6] = ["trace", "debug", "info", "warn", "error", "off"];
 
@@ -841,6 +866,7 @@ impl Config {
         config.server.log_level =
             normalize_log_level(&config.server.log_level).map_err(ConfigError::InvalidLogLevel)?;
 
+        validate_threads(&config.server)?;
         validate_storage(&config.s3)?;
 
         // Create the configured data directories (idempotent). `db_file` is a file,
@@ -932,8 +958,8 @@ fn create_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_master_key, normalize_base_path, normalize_log_level, validate_storage, Config,
-        Hdf5Convention, PathBuf, RawConfig,
+        decode_master_key, normalize_base_path, normalize_log_level, validate_storage,
+        validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -954,6 +980,28 @@ mod tests {
     /// decoding, and creating the data directories.
     fn config(vars: &[(&str, &str)]) -> Config {
         Config::from(raw(vars).expect("config should parse"))
+    }
+
+    /// Both runtimes have a default size, and neither accepts zero threads:
+    /// Tokio would panic where the config can name the variable instead.
+    #[test]
+    fn thread_counts_default_and_reject_zero() {
+        let defaults = config(&[]);
+        assert_eq!(defaults.server.worker_threads, 8);
+        assert_eq!(defaults.server.api_threads, 4);
+        assert!(validate_threads(&defaults.server).is_ok());
+
+        let no_query_threads = config(&[("BEACON_WORKER_THREADS", "0")]);
+        let error = validate_threads(&no_query_threads.server)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("BEACON_WORKER_THREADS"), "{error}");
+
+        let no_api_threads = config(&[("BEACON_API_THREADS", "0")]);
+        let error = validate_threads(&no_api_threads.server)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("BEACON_API_THREADS"), "{error}");
     }
 
     /// Every data path derives from `BEACON_DATA_DIR`. This is a regression guard:
