@@ -9,7 +9,7 @@ pyarrow==21.0.0
 netCDF4==1.7.4
 zarr==3.3.0
 # Builds an Atlas collection from netCDF files; the Rust side reads it.
-atlas-python==0.16.4
+atlas-python==0.17.0
 h5py==3.14.0
 geopandas==1.1.4
 rasterio==1.5.1

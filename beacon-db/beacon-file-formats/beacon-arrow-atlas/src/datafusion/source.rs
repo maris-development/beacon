@@ -14,6 +14,11 @@
 //! completion, so a collection of a million small datasets and a collection of
 //! four large ones both divide over every core.
 //!
+//! The second level of the queue is the dataset's own chunk grid, the one the
+//! writer chose. A dataset stored as a single chunk is one unit of work; a
+//! chunked one is as many as it has chunks, and several partitions drain it
+//! together. Each unit becomes one nd record batch.
+//!
 //! [`AtlasFormat`]: super::AtlasFormat
 
 use std::any::Any;
@@ -256,11 +261,11 @@ impl FileSource for AtlasSource {
 
     /// Take the filters as a hint, and leave them above the scan.
     ///
-    /// The scan uses a predicate twice: to skip a chunk whose coordinates
-    /// cannot hold a matching row, and (once pruning lands) to skip a whole
-    /// dataset whose footer statistics cannot. Neither is exact — both work in
-    /// whole chunks and whole datasets — so the filter above the scan still
-    /// decides each row, and `PushedDown::No` is what says so.
+    /// The scan uses a predicate twice: to skip a whole dataset whose recorded
+    /// statistics cannot hold a matching row, and to skip a chunk whose
+    /// coordinates cannot. Neither is exact — both work in whole datasets and
+    /// whole chunks — so the filter above the scan still decides each row, and
+    /// `PushedDown::No` is what says so.
     fn try_pushdown_filters(
         &self,
         filters: Vec<Arc<dyn PhysicalExpr>>,
@@ -398,9 +403,9 @@ impl AtlasDatasets {
     /// column into the projection today, but the chunk pruning inside the read
     /// matches columns by name and would silently stop pruning if that ever
     /// changed.
-    fn projected_names(&self, view: &DatasetView) -> Option<Vec<String>> {
+    async fn projected_names(&self, view: &DatasetView) -> Result<Option<Vec<String>>> {
         if self.projected_schema.fields().is_empty() {
-            return count_driver(view).map(|driver| vec![driver]);
+            return Ok(count_driver(view).await?.map(|driver| vec![driver]));
         }
 
         let mut names: Vec<String> = self
@@ -417,23 +422,43 @@ impl AtlasDatasets {
                 }
             }
         }
-        Some(names)
+        Ok(Some(names))
     }
 }
 
 /// The array a `COUNT(*)` reads to establish a dataset's row count: the widest
 /// one Beacon can read.
 ///
-/// From the footer alone, so choosing it costs no I/O and no backend. `None`
-/// for a dataset with no readable array, and the caller then builds what there
-/// is — an attribute-only dataset contributes the one row its scalars define.
-fn count_driver(view: &DatasetView) -> Option<String> {
-    view.schema()
-        .arrays
+/// The footer names the candidates, and their sizes come from the segments
+/// those arrays live in — one open each for the whole collection, however many
+/// datasets a `COUNT(*)` walks. No array data is read, and the driver gets the
+/// only backend the dataset builds.
+///
+/// `None` for a dataset with no readable array, and the caller then builds what
+/// there is — an attribute-only dataset contributes the one row its scalars
+/// define.
+async fn count_driver(view: &DatasetView) -> Result<Option<String>> {
+    let readable: Vec<String> = view
+        .schema()
         .iter()
-        .filter(|(_, schema)| compat::array_dtype_to_nd(&schema.dtype).is_some())
-        .max_by_key(|(_, schema)| schema.shape.iter().product::<usize>())
-        .map(|(name, _)| name.clone())
+        .filter(|meta| compat::array_dtype_to_nd(meta.dtype()).is_some())
+        .map(|meta| meta.name().to_string())
+        .collect();
+
+    let mut widest: Option<(String, usize)> = None;
+    for array in readable {
+        let layout = view.array_layout(&array).await.map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Failed to read the layout of atlas array '{array}' of dataset '{}': {e}",
+                view.name()
+            ))
+        })?;
+        let cells = layout.element_count();
+        if widest.as_ref().is_none_or(|(_, held)| cells > *held) {
+            widest = Some((array, cells));
+        }
+    }
+    Ok(widest.map(|(array, _)| array))
 }
 
 #[async_trait::async_trait]
@@ -480,7 +505,7 @@ impl OpenFile for AtlasDatasets {
             ))
         })?);
 
-        let projected = self.projected_names(&view);
+        let projected = self.projected_names(&view).await?;
         let dataset = dataset_from_view(view, projected.as_deref())
             .await
             .map_err(|e| DataFusionError::Execution(format!("{e}")))?;
@@ -680,6 +705,8 @@ mod tests {
         let datasets = datasets_wanting(vec!["temperature"], None);
         let names = datasets
             .projected_names(&view(tmp.path(), "winter").await)
+            .await
+            .expect("the layouts resolve")
             .expect("a projection");
         assert_eq!(names, vec!["temperature".to_string()]);
     }
@@ -704,6 +731,8 @@ mod tests {
         let datasets = datasets_wanting(vec!["temperature"], Some(predicate));
         let names = datasets
             .projected_names(&view(tmp.path(), "winter").await)
+            .await
+            .expect("the layouts resolve")
             .expect("a projection");
         assert_eq!(
             names,
@@ -723,6 +752,8 @@ mod tests {
         let datasets = datasets_wanting(vec![], None);
         let names = datasets
             .projected_names(&view(tmp.path(), "grid").await)
+            .await
+            .expect("the layouts resolve")
             .expect("a driver");
         assert_eq!(names.len(), 1);
         assert!(

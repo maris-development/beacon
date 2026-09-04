@@ -12,16 +12,19 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
-- **Atlas is readable again, on the single-file format.** Atlas 0.16 replaced the directory of
-  per-array files with one write-once container, `data.atlas`, holding every dataset and a footer
-  that describes them all. Beacon's reader was written against the old layout and had been
-  excluded from the build, so `STORED AS ATLAS` and `read_atlas` failed. It is rebuilt on the new
-  format and registered again. A `LOCATION` now names the container rather than a marker beside
+- **Atlas is readable again, on the single-file format.** Atlas replaced the directory of
+  per-array files with one write-once container, `data.atlas`: one segment per variable, holding
+  that array for every dataset, and a footer that names them all. Beacon's reader was written
+  against the old layout and had been excluded from the build, so `STORED AS ATLAS` and
+  `read_atlas` failed. It is rebuilt on the new format — container version 8, which Atlas 0.17
+  writes — and registered again. A `LOCATION` now names the container rather than a marker beside
   it: `LOCATION 'obs/data.atlas'`, or a glob such as `'obs/**/data.atlas'`. A collection written
-  before 0.16 is not read at all — rewrite it with `atlas create`. Three behaviour changes come
+  before 0.17 is not read at all — rewrite it with `atlas create`. Three behaviour changes come
   with the rebuild. A dataset-level attribute is a column under a leading dot, `".platform"`,
   matching NetCDF and Zarr instead of the bare key. A scan reads through the shared nd pipeline,
-  so one dataset is one unit of work and a collection divides over every core. And a column two
+  so one dataset is one unit of work and a collection divides over every core — and a dataset
+  stored in several chunks divides further, so one large dataset still uses all of them. And a
+  column two
   datasets type in two families now refuses the merge by name rather than silently becoming text;
   `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first` settles it the other way. Atlas collections are
   also crawlable now, because a collection is one file whose extension is its format.
@@ -29,13 +32,15 @@ tag. Releases before 2.0.0 are recorded in the
   and `BEACON_ATLAS_ENABLE_STATISTICS` configure it, and the same keys work per table through
   `OPTIONS`.
 
-- **A predicate over an Atlas collection skips whole datasets.** The footer records the minimum,
-  the maximum and the null count of every array, so a collection can be judged before it is read.
+- **A predicate over an Atlas collection skips whole datasets.** Atlas records the minimum, the
+  maximum and the null count of every array, so a collection can be judged before it is read.
   The first scan of a collection pivots those statistics into one index — one row per dataset,
   one typed Arrow column per column the predicate names — and evaluates the predicate over all of
-  them in a single vectorised pass. A collection of a million datasets therefore costs one pass
-  rather than a million decisions, and a dataset ruled out is never opened. A dataset-level
-  attribute is exact in the footer, so `WHERE ".platform" = 'p3'` prunes on it too. Pruning only
+  them in a single vectorised pass. Because a variable lives in one segment, gathering a column's
+  statistics is one request whatever the dataset count, so a collection of a million datasets
+  costs one request per column and one pass rather than a million decisions; a dataset ruled out
+  is never opened. A dataset-level attribute is exact, so `WHERE ".platform" = 'p3'` prunes on it
+  too, and at the same cost. Pruning only
   ever removes datasets that hold no matching row: every path falls back to reading everything,
   and the filter above the scan still decides each row. `EXPLAIN ANALYZE` reports it as
   `atlas_datasets_pruned`, `atlas_index_builds` and `atlas_index_rows`.

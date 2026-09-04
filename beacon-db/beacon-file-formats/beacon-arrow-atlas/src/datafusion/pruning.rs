@@ -3,9 +3,8 @@
 //! # One index, not a decision per dataset
 //!
 //! A collection can hold millions of datasets. Evaluating a predicate against
-//! each one in turn would cost millions of evaluations, and each would need its
-//! own `DatasetView` — a linear scan of the footer — so the pass would be
-//! quadratic before it did any work.
+//! each one in turn would cost millions of evaluations, and each would open the
+//! dataset to get its numbers.
 //!
 //! Instead the first opener that reaches a collection builds one
 //! [`PruningIndex`] over it: one row per live dataset, and one column of typed
@@ -13,9 +12,11 @@
 //! [`PruningPredicate`] then evaluates the whole collection in one vectorised
 //! pass, and the result is a bit per dataset that every partition reads.
 //!
-//! The statistics come from the footer the open already held, so the build
-//! costs no I/O. An array column costs one linear pass through
-//! [`Atlas::array_stats_by_dataset`], with no view and no name lookup at all.
+//! One column is one request. Atlas stores a variable in one segment, so
+//! [`Atlas::array_stats_by_dataset`] and [`Atlas::attributes_by_dataset`] each
+//! return every live dataset's value from a single open — however many datasets
+//! there are. The index costs one open per column the predicate names, and no
+//! array data at all.
 //!
 //! # Pruning is only ever an optimization
 //!
@@ -29,24 +30,14 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use atlas::{Atlas, Attr, StatValue};
+use atlas::{ArrayStats, Atlas, Attr, StatValue};
 use datafusion::common::Column;
 use datafusion::common::pruning::PruningStatistics;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::scalar::ScalarValue;
-
-/// Above this many datasets, an attribute column stays out of the index.
-///
-/// An array column costs one footer pass. An attribute has no bulk accessor in
-/// the reader, so its value needs one `DatasetView` per dataset and each of
-/// those is a linear scan — the pass is quadratic. It is worth paying on a
-/// collection of thousands and not on one of millions, and the only cost of
-/// skipping it is that a predicate on that attribute prunes nothing.
-///
-/// `Atlas::attribute_by_dataset` upstream would remove the limit.
-const ATTRIBUTE_INDEX_LIMIT: usize = 100_000;
+use indexmap::IndexMap;
 
 // ─── What a scan does with the answer ────────────────────────────────────────
 
@@ -244,17 +235,46 @@ pub async fn candidate_filter(
         return CandidateFilter::KeepAll;
     }
 
-    // The pivot is pure CPU over data already in memory. A million rows is real
-    // work, so it does not run on the async runtime.
-    let atlas = Arc::clone(atlas);
-    let schema = Arc::clone(logical_schema);
-    let wanted: Vec<String> = referenced
+    // Fetching is one request per column, whatever the dataset count. The
+    // pivot after it is pure CPU over what is then in memory, and a million
+    // rows is real work, so it does not run on the async runtime.
+    let wanted: Vec<(String, DataType)> = referenced
         .iter()
-        .map(|column| column.name().to_string())
+        .filter_map(|column| {
+            let field = schema_field(logical_schema, column.name())?;
+            Some((column.name().to_string(), field))
+        })
         .collect();
 
+    let mut fetched: Vec<(String, DataType, Measured)> = Vec::with_capacity(wanted.len());
+    let arrays = atlas.list_arrays();
+    for (column, target) in wanted {
+        let measured = if arrays.iter().any(|array| array == &column) {
+            match atlas.array_stats_by_dataset(&column).await {
+                Ok(stats) => Some(Measured::Array(stats)),
+                Err(e) => {
+                    tracing::debug!(column, "atlas statistics unavailable for pruning: {e}");
+                    None
+                }
+            }
+        } else {
+            attribute_values(atlas, &column)
+                .await
+                .map(Measured::Attribute)
+        };
+        if let Some(measured) = measured {
+            fetched.push((column, target, measured));
+        }
+    }
+
+    if fetched.is_empty() {
+        // Nothing the predicate names has statistics, so nothing can be ruled
+        // out.
+        return CandidateFilter::KeepAll;
+    }
+
     let built = tokio::task::spawn_blocking(move || {
-        let index = build_index(&atlas, &names, &wanted, &schema);
+        let index = build_index(&names, fetched);
         (names, index)
     })
     .await;
@@ -262,11 +282,6 @@ pub async fn candidate_filter(
     let Ok((names, index)) = built else {
         return CandidateFilter::KeepAll;
     };
-    if index.columns.is_empty() {
-        // Nothing the predicate names has statistics, so nothing can be ruled
-        // out.
-        return CandidateFilter::KeepAll;
-    }
 
     match pruning.prune(&index) {
         Ok(kept) => CandidateFilter::Rows {
@@ -280,42 +295,72 @@ pub async fn candidate_filter(
     }
 }
 
-/// Pivot the footer into one [`StatColumn`] per column that has statistics.
-fn build_index(
-    atlas: &Atlas,
-    names: &[String],
-    wanted: &[String],
-    schema: &SchemaRef,
-) -> PruningIndex {
-    // Where each dataset sits, so a footer pass in write order can be scattered
-    // into rows without a search.
+/// The type a column carries in the scan's own schema, or `None` when it holds
+/// no such column and nothing can be typed against it.
+fn schema_field(schema: &SchemaRef, column: &str) -> Option<DataType> {
+    schema
+        .field_with_name(column)
+        .ok()
+        .map(|field| field.data_type().clone())
+}
+
+/// What one request measured about one column, across every live dataset.
+enum Measured {
+    /// An array's statistics. A dataset that wrote the array has an entry, and
+    /// [`ArrayStats::name`] names it.
+    Array(Vec<ArrayStats>),
+    /// An attribute's value, keyed by dataset.
+    Attribute(IndexMap<String, Attr>),
+}
+
+/// Every live dataset's value for one attribute column, or `None` when the
+/// collection carries no such attribute.
+///
+/// A column is `.key` at dataset scope, or `array.key` at array scope. An array
+/// name and an attribute key may both hold dots, so every split of the latter
+/// is a candidate and the first that finds a value wins.
+async fn attribute_values(atlas: &Atlas, column: &str) -> Option<IndexMap<String, Attr>> {
+    let found = |values: IndexMap<String, Attr>| (!values.is_empty()).then_some(values);
+
+    if let Some(key) = column.strip_prefix('.') {
+        return found(atlas.attributes_by_dataset(None, key).await.ok()?);
+    }
+    for (index, character) in column.char_indices() {
+        if character != '.' {
+            continue;
+        }
+        let (array, rest) = column.split_at(index);
+        if let Ok(values) = atlas.attributes_by_dataset(Some(array), &rest[1..]).await
+            && let Some(values) = found(values)
+        {
+            return Some(values);
+        }
+    }
+    None
+}
+
+/// Pivot what was fetched into one [`StatColumn`] per column.
+fn build_index(names: &[String], fetched: Vec<(String, DataType, Measured)>) -> PruningIndex {
+    // Where each dataset sits, so a pass in write order can be scattered into
+    // rows without a search.
     let row_of: HashMap<&str, usize> = names
         .iter()
         .enumerate()
         .map(|(row, name)| (name.as_str(), row))
         .collect();
-    let arrays = atlas.list_arrays();
 
     let mut columns = HashMap::new();
-    for column in wanted {
-        let Ok(field) = schema.field_with_name(column) else {
-            continue;
-        };
-        let target = field.data_type();
-
-        let packed = if arrays.iter().any(|array| array == column) {
-            Some(pack_array_column(
-                atlas,
-                names.len(),
-                &row_of,
-                column,
-                target,
-            ))
-        } else {
-            pack_attribute_column(atlas, names, &row_of, column, target)
+    for (column, target, measured) in fetched {
+        let packed = match measured {
+            Measured::Array(stats) => {
+                Some(pack_array_column(&stats, names.len(), &row_of, &target))
+            }
+            Measured::Attribute(values) => {
+                pack_attribute_column(&values, names.len(), &row_of, &target)
+            }
         };
         if let Some(packed) = packed {
-            columns.insert(column.clone(), packed);
+            columns.insert(column, packed);
         }
     }
 
@@ -325,17 +370,16 @@ fn build_index(
     }
 }
 
-/// One array column, from one linear pass over the footer.
+/// One array column.
 ///
 /// A dataset with no entry for the array keeps a null bound and unknown counts.
 /// That is what a dataset which does not declare the array looks like, and it
 /// is also what one that declared it and never wrote it looks like — both must
 /// stay in, and a null does exactly that.
 fn pack_array_column(
-    atlas: &Atlas,
+    stats: &[ArrayStats],
     rows: usize,
     row_of: &HashMap<&str, usize>,
-    column: &str,
     target: &DataType,
 ) -> StatColumn {
     let null = ScalarValue::try_from(target).unwrap_or(ScalarValue::Null);
@@ -344,14 +388,15 @@ fn pack_array_column(
     let mut null_counts: Vec<Option<u64>> = vec![None; rows];
     let mut row_counts: Vec<Option<u64>> = vec![None; rows];
 
-    for (dataset, stats) in atlas.array_stats_by_dataset(column) {
-        let Some(&row) = row_of.get(dataset.as_str()) else {
+    for entry in stats {
+        // A per-dataset entry names its dataset, not its array.
+        let Some(&row) = row_of.get(entry.name.as_str()) else {
             continue;
         };
-        mins[row] = stat_to_scalar(stats.min.as_ref(), target, &null);
-        maxes[row] = stat_to_scalar(stats.max.as_ref(), target, &null);
-        null_counts[row] = Some(stats.null_count);
-        row_counts[row] = Some(stats.row_count);
+        mins[row] = stat_to_scalar(entry.min.as_ref(), target, &null);
+        maxes[row] = stat_to_scalar(entry.max.as_ref(), target, &null);
+        null_counts[row] = Some(entry.null_count);
+        row_counts[row] = Some(entry.row_count);
     }
 
     StatColumn {
@@ -362,44 +407,27 @@ fn pack_array_column(
     }
 }
 
-/// One attribute column, or `None` when it is not worth the pass.
+/// One attribute column, or `None` when no value of it casts.
 ///
 /// An attribute's value is exact, so it is both the minimum and the maximum of
 /// its dataset. That prunes an equality on a dataset-level attribute — the
-/// platform a file came from, say — out of the footer alone.
+/// platform a file came from, say — from one request.
 fn pack_attribute_column(
-    atlas: &Atlas,
-    names: &[String],
+    found: &IndexMap<String, Attr>,
+    rows: usize,
     row_of: &HashMap<&str, usize>,
-    column: &str,
     target: &DataType,
 ) -> Option<StatColumn> {
-    if names.len() > ATTRIBUTE_INDEX_LIMIT {
-        tracing::debug!(
-            datasets = names.len(),
-            column,
-            "not indexing an attribute over a collection this large; see ATTRIBUTE_INDEX_LIMIT"
-        );
-        return None;
-    }
-
-    let rows = names.len();
     let null = ScalarValue::try_from(target).unwrap_or(ScalarValue::Null);
     let mut values = vec![null.clone(); rows];
     let mut null_counts: Vec<Option<u64>> = vec![None; rows];
     let mut seen = false;
 
-    for name in names {
-        let Some(&row) = row_of.get(name.as_str()) else {
+    for (dataset, attr) in found {
+        let Some(&row) = row_of.get(dataset.as_str()) else {
             continue;
         };
-        let Ok(view) = atlas.dataset(name) else {
-            continue;
-        };
-        let Some(value) = attribute_of(&view, column) else {
-            continue;
-        };
-        let Some(scalar) = attr_to_scalar(&value) else {
+        let Some(scalar) = attr_to_scalar(attr) else {
             continue;
         };
         values[row] = scalar.cast_to(target).unwrap_or_else(|_| null.clone());
@@ -422,24 +450,6 @@ fn pack_attribute_column(
         // has, so its row count is not the dataset's. Unknown is honest.
         row_count: Arc::new(UInt64Array::from(vec![None::<u64>; rows])),
     })
-}
-
-/// The attribute a column name refers to, dataset-level or per-array.
-fn attribute_of(view: &atlas::DatasetView, column: &str) -> Option<Attr> {
-    if let Some(key) = column.strip_prefix('.') {
-        return view.get_attribute(key);
-    }
-    // An array name and an attribute key may both hold dots, so every split is
-    // a candidate.
-    for (index, character) in column.char_indices() {
-        if character == '.' {
-            let (array, rest) = column.split_at(index);
-            if let Some(value) = view.get_array_attribute(array, &rest[1..]) {
-                return Some(value);
-            }
-        }
-    }
-    None
 }
 
 /// Pack scalars into one typed array, or a column of nulls when they will not.
@@ -487,7 +497,6 @@ fn attr_to_scalar(attr: &Attr) -> Option<ScalarValue> {
         Attr::Float64(v) => ScalarValue::Float64(Some(*v)),
         Attr::String(v) => ScalarValue::Utf8(Some(v.clone())),
         Attr::Binary(v) => ScalarValue::Binary(Some(v.clone())),
-        Attr::TimestampNanoseconds(v) => ScalarValue::TimestampNanosecond(Some(*v), None),
         _ => return None,
     })
 }

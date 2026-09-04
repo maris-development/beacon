@@ -222,13 +222,13 @@ def test_pruning_can_be_turned_off_per_table(datasets, tmp_path):
 # --- what is not supported ----------------------------------------------------
 
 
-def test_a_pre_0_16_collection_is_passed_over(con, datasets):
+def test_a_stale_collection_is_passed_over(con, datasets):
     """Atlas before 0.16 was a directory behind an `atlas.json` registry.
 
-    This build reads the single-file format alone. Such a directory holds no container, so
-    nothing recognises it and no row of it reaches a query. Whether that surfaces as an error
-    or as an empty result is not the point and not asserted — what matters is that a stale
-    collection is never half-read as if it were a current one.
+    This build reads container version 8 alone, which Atlas 0.17 writes. Such a directory
+    holds no container at all, so nothing recognises it and no row of it reaches a query.
+    Whether that surfaces as an error or as an empty result is not the point and not asserted —
+    what matters is that a stale collection is never half-read as if it were a current one.
     """
     legacy = datasets / "legacy"
     legacy.mkdir(exist_ok=True)
@@ -238,4 +238,4 @@ def test_a_pre_0_16_collection_is_passed_over(con, datasets):
         rows = con.sql("SELECT * FROM read_atlas('legacy/atlas.json')").fetchall()
     except Exception:
         return
-    assert rows == [], "a pre-0.16 directory holds no container, so it contributes no rows"
+    assert rows == [], "a legacy directory holds no container, so it contributes no rows"

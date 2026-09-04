@@ -45,29 +45,36 @@ NetCDF file holds: named arrays that share dimensions, plus attributes. A collec
 
 ```text
 my_collection/
-├── data.atlas      the container: every dataset, then a footer describing them all
+├── data.atlas      one segment per variable, then a footer describing them all
 └── deleted.mask    optional: the datasets a delete has hidden
 ```
 
-Two properties follow, and they are the point of the format:
+The file stores one segment per **variable**, not one per dataset. A segment holds one array name
+across the whole collection, and each dataset's copy sits inside it. Three properties follow, and
+they are the point of the format:
 
-- **Metadata is one read.** Opening a collection reads its footer and nothing else. Listing the
-  datasets, inspecting a schema and reading an attribute are then free. Ten datasets and a million
-  cost the same.
-- **Data arrives chunk by chunk.** Reading a region of an array fetches only the chunks that region
-  overlaps.
+- **The catalogue is one read.** Opening a collection reads its footer and nothing else. Listing
+  the datasets and asking what each declares are then free. Ten datasets and a million cost the
+  same.
+- **One variable is one read.** Everything else about a column — its shape, its statistics, its
+  attribute values — sits in that variable's segment, and one open answers for every dataset in the
+  collection.
+- **Data arrives block by block.** Reading a region of an array fetches only the blocks that region
+  overlaps, and a block holds one type for a run of neighbouring datasets, so it compresses well.
 
 What Beacon does with that:
 
-- **Dataset pruning from the footer.** Every array records its minimum, its maximum and its null
-  count. A query with a predicate — a time or latitude range, say — judges every dataset of a
-  collection in one pass and never opens the ones that cannot match. A dataset-level attribute is
-  exact in the footer, so `WHERE ".platform" = 'p3'` prunes on it too.
+- **Dataset pruning.** Every array records its minimum, its maximum and its null count. A query
+  with a predicate — a time or latitude range, say — judges every dataset of a collection in one
+  vectorised pass and never opens the ones that cannot match. Judging a column costs one request,
+  whatever the dataset count. A dataset-level attribute is exact, so `WHERE ".platform" = 'p3'`
+  prunes on it too.
 - **One dataset is one unit of work.** A collection's datasets are spread across every core, and a
   worker takes the next one when it is free, so a collection of a million small datasets and one of
-  four large ones both divide evenly.
+  four large ones both divide evenly. A dataset stored in several chunks divides further, so a
+  single large dataset still uses every core.
 - **Column projection.** Only the arrays a query names get read, and only their attributes are
-  taken from the footer.
+  fetched.
 - **Object storage.** A collection reads from local disk, S3, GCS, Azure and HTTP alike.
 
 ### Columns
@@ -77,6 +84,9 @@ What Beacon does with that:
 | array `temperature` | `temperature` |
 | attribute `units` of `temperature` | `temperature.units` |
 | dataset attribute `platform` | `.platform` |
+
+An attribute holds a number, a string or a boolean. Atlas stores no timestamp attribute, so a date
+kept as an attribute arrives as the number or the string it was written as.
 
 The leading dot on a dataset attribute is what NetCDF and Zarr use too, and it keeps an attribute
 from colliding with an array of the same name. Quote such a column: `SELECT ".platform"`.
@@ -109,8 +119,8 @@ attribute. Each is dropped from the schema rather than failing the query.
 
 ### Two datasets that disagree
 
-Atlas reconciles nothing: two datasets may declare one array name with two types. Beacon merges
-them the way it merges the files of any other format. Two numeric types widen to one that holds
+Atlas reconciles nothing: two datasets may declare one array name with two types, and it stores
+each as declared. Beacon merges them the way it merges the files of any other format. Two numeric types widen to one that holds
 both. Two different families — a number and a string — refuse the table by name:
 
 ```text
@@ -132,10 +142,11 @@ That writes `/collections/argo/data.atlas`, one dataset per file, named after th
 against a local path and against a bucket. See the
 [Atlas documentation](https://github.com/maris-development/atlas).
 
-:::warning Collections written before Atlas 0.16
-Atlas used to be a directory of per-array files behind an `atlas.json` registry. Beacon reads the
-single-file format only, so such a directory is passed over rather than read. Rewrite it with
-`atlas create`, then point at the `data.atlas` it produces.
+:::warning Collections written before Atlas 0.17
+Beacon reads container format version 8, which Atlas 0.17 writes. An older collection — a v1
+container from Atlas 0.16, or the directory of per-array files behind an `atlas.json` registry that
+came before it — is not read. Rewrite it with `atlas create`, then point at the `data.atlas` it
+produces.
 :::
 
 ### Optimize NetCDF and Zarr with Atlas

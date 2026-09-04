@@ -391,7 +391,7 @@ impl FileFormat for AtlasFormat {
         }
 
         match get_or_open_atlas(self.cache.as_ref(), Arc::clone(store), object).await {
-            Ok(atlas) => Ok(statistics::collection_statistics(&atlas, &table_schema)),
+            Ok(atlas) => Ok(statistics::collection_statistics(&atlas, &table_schema).await),
             Err(e) => {
                 tracing::debug!(object = %object.location, "not measuring this collection: {e}");
                 Ok(Statistics::new_unknown(&table_schema))

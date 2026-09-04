@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow::datatypes::{Schema, SchemaRef};
-use atlas::{Atlas, DatasetView};
+use atlas::{Atlas, Attr, DType, DatasetView};
 use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema};
 use beacon_nd_array::{
     NdArrayD,
@@ -39,7 +39,15 @@ use crate::compat;
 ///
 /// A value Beacon cannot surface — a `Bool` or list array, a list attribute —
 /// is dropped with a `debug` log. A collection can hold a million datasets, so
-/// a louder log would be a flood.
+/// a louder log would be a flood. Such an array is settled from the footer
+/// alone, so its segment is never opened.
+///
+/// # What this reads
+///
+/// Names and element types come from the footer the open already held. A
+/// layout and an attribute value live in the variable's own segment, so the
+/// first dataset to want one opens it. A segment covers that variable across
+/// the whole collection, so every later dataset reuses the same handle.
 pub async fn dataset_from_view(
     view: Arc<DatasetView>,
     projected_names: Option<&[String]>,
@@ -57,20 +65,40 @@ pub async fn dataset_from_view(
     let wants_global_attrs =
         projected_names.is_none_or(|names| names.iter().any(|name| name.starts_with('.')));
 
-    let schema = view.schema();
-    let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> =
-        IndexMap::with_capacity(schema.arrays.len());
+    // The schema borrows the footer, so it is resolved before the first await
+    // rather than held across one.
+    let declared = declared_arrays(&view);
+    let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::with_capacity(declared.len());
 
-    for (array_name, array_schema) in &schema.arrays {
+    for (array_name, dtype) in &declared {
         if included(array_name) {
-            match compat::array_to_nd_array(Arc::clone(&view), array_name, array_schema) {
-                Ok(nd) => {
-                    arrays.insert(array_name.clone(), nd);
+            match compat::array_dtype_to_nd(dtype) {
+                // The layout is in the variable's segment, so it is asked for
+                // only once the dtype says the column can exist at all.
+                Some(_) => {
+                    let layout = view.array_layout(array_name).await.map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to read the layout of atlas array '{array_name}' \
+                             of dataset '{}': {e}",
+                            view.name()
+                        )
+                    })?;
+                    match compat::array_to_nd_array(Arc::clone(&view), array_name, dtype, &layout) {
+                        Ok(nd) => {
+                            arrays.insert(array_name.clone(), nd);
+                        }
+                        Err(e) => tracing::debug!(
+                            dataset = %view.name(),
+                            array = %array_name,
+                            "atlas array left out of the dataset: {e}"
+                        ),
+                    }
                 }
-                Err(e) => tracing::debug!(
+                None => tracing::debug!(
                     dataset = %view.name(),
                     array = %array_name,
-                    "atlas array left out of the dataset: {e}"
+                    "atlas array left out of the dataset: {} is no Beacon column",
+                    compat::dtype_tag(dtype)
                 ),
             }
         }
@@ -78,7 +106,7 @@ pub async fn dataset_from_view(
         if !wants_attrs_of(array_name) {
             continue;
         }
-        for (key, value) in view.array_attributes(array_name) {
+        for (key, value) in attributes_of(&view, Some(array_name)).await? {
             let column = compat::array_attr_column(array_name, &key);
             if !included(&column) {
                 continue;
@@ -97,7 +125,7 @@ pub async fn dataset_from_view(
     }
 
     if wants_global_attrs {
-        for (key, value) in view.attributes() {
+        for (key, value) in attributes_of(&view, None).await? {
             let column = compat::global_attr_column(&key);
             if !included(&column) {
                 continue;
@@ -121,6 +149,43 @@ pub async fn dataset_from_view(
     AnyDataset::try_from_dataset(dataset)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to wrap atlas dataset '{}': {e}", view.name()))
+}
+
+/// Every array the dataset declares, as owned name and element type.
+///
+/// The schema borrows the collection footer. Resolving it up front keeps that
+/// borrow off the async path, where the same view is also cloned into a
+/// backend.
+fn declared_arrays(view: &DatasetView) -> Vec<(String, DType)> {
+    view.schema()
+        .iter()
+        .map(|meta| (meta.name().to_string(), meta.dtype().clone()))
+        .collect()
+}
+
+/// The attribute values of one scope: `Some(array)` for an array's own,
+/// `None` for the dataset's.
+///
+/// Values live in a segment, not in the footer, so this reads one. An array
+/// with no attribute costs nothing, because the schema settles it first.
+async fn attributes_of(
+    view: &DatasetView,
+    array: Option<&str>,
+) -> anyhow::Result<IndexMap<String, Attr>> {
+    let scope = match array {
+        Some(array) => view.array_attributes(array).await,
+        None => view.attributes().await,
+    };
+    scope.map_err(|e| {
+        let what = array.map_or_else(
+            || "the dataset attributes".to_string(),
+            |array| format!("the attributes of array '{array}'"),
+        );
+        anyhow::anyhow!(
+            "Failed to read {what} of atlas dataset '{}': {e}",
+            view.name()
+        )
+    })
 }
 
 /// Narrow `dataset` to `read_dimensions`, or to a broadcast-compatible default
@@ -175,13 +240,11 @@ pub async fn open_dataset(
 ///
 /// # Cost
 ///
-/// No I/O: everything read here came in with the footer. The pass is linear in
-/// the dataset count, but resolving each dataset by name is itself a linear
-/// scan of the footer, so the whole pass is quadratic in the dataset count.
-/// That is a limit of the reader's API, which offers no lookup by ordinal, and
-/// it is why a collection of more than a few tens of thousands of datasets
-/// needs `Atlas::dataset_at` upstream. The result is cached above this crate,
-/// so a table pays it once rather than once per query.
+/// Linear in the dataset count, and every step is in memory: the footer keys
+/// its datasets by name, so resolving one is a single hash lookup, and a key is
+/// built from the footer and from segments that one open serves collection
+/// wide. Only the distinct keys are derived into a schema. The result is cached
+/// above this crate, so a table pays even that once rather than once per query.
 pub async fn collection_schema(
     atlas: &Arc<Atlas>,
     read_dimensions: Option<&[String]>,
@@ -196,7 +259,7 @@ pub async fn collection_schema(
             .dataset(&name)
             .map_err(|e| anyhow::anyhow!("Failed to open atlas dataset '{name}': {e}"))?;
 
-        if !seen.insert(shape_key(&view)) {
+        if !seen.insert(shape_key(&view).await?) {
             continue;
         }
 
@@ -228,32 +291,71 @@ pub async fn collection_schema(
 
 /// What makes two datasets produce the same columns and types.
 ///
-/// The interned schema decides the arrays, and it is shared by address between
-/// datasets that declare the same ones, so its pointer is the cheap half of the
-/// key. Attribute *values* live outside the schema, so the keys and their types
-/// are the other half. Two datasets that differ only in an attribute's value
-/// share a key, which is exactly the fleet case.
-fn shape_key(view: &DatasetView) -> String {
-    let schema = view.schema();
-    let mut key = format!("{:x}", std::ptr::from_ref(schema) as usize);
+/// Three things decide a dataset's Arrow schema, and the key holds all three:
+///
+/// - The arrays it declares, with their element types. Datasets that declare
+///   the same ones share one interned schema in the footer, and `atlas create`
+///   writes a fleet of files that way.
+/// - Its attribute keys and their types, at both scopes. Those are named in the
+///   interned schema too, so two datasets that differ only in an attribute's
+///   *value* share a key. That is exactly the fleet case.
+/// - Each array's dimension names, which the interned schema does **not** hold.
+///   They pick the default grid, and a different grid keeps different columns,
+///   so two datasets that agree on everything else can still differ here.
+///
+/// A shape is deliberately left out: an array of a different length is the same
+/// column.
+///
+/// # Cost
+///
+/// The names and the types come from the footer. A dimension name comes from
+/// its variable's segment, which one open serves for every dataset of the
+/// collection, so the lookup is in memory after the first.
+async fn shape_key(view: &DatasetView) -> anyhow::Result<String> {
+    let mut key = String::new();
 
-    for array in schema.arrays.keys() {
-        for (attr, value) in view.array_attributes(array) {
-            key.push('|');
-            key.push_str(array);
-            key.push('.');
-            key.push_str(&attr);
-            key.push(':');
-            key.push_str(&compat::dtype_tag(&value.dtype()));
+    for (array, dtype) in declared_arrays(view) {
+        key.push('|');
+        key.push_str(&array);
+        key.push(':');
+        key.push_str(&compat::dtype_tag(&dtype));
+
+        // An array Beacon cannot read is no column, so its grid decides
+        // nothing and its segment stays shut.
+        if compat::array_dtype_to_nd(&dtype).is_some() {
+            let layout = view.array_layout(&array).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read the layout of atlas array '{array}' of dataset '{}': {e}",
+                    view.name()
+                )
+            })?;
+            key.push('@');
+            key.push_str(&layout.dimension_names().join(","));
         }
     }
-    for (attr, value) in view.attributes() {
-        key.push_str("|.");
-        key.push_str(&attr);
+
+    // Attribute keys and types are in the interned schema, so this reads
+    // nothing. The values are not, and they do not belong in the key.
+    fn push(key: &mut String, array: &str, attr: &str, dtype: &DType) {
+        key.push('|');
+        key.push_str(array);
+        key.push('.');
+        key.push_str(attr);
         key.push(':');
-        key.push_str(&compat::dtype_tag(&value.dtype()));
+        key.push_str(&compat::dtype_tag(dtype));
     }
-    key
+    let schema = view.schema();
+    for meta in schema.iter() {
+        let array = meta.name();
+        for (attr, dtype) in meta.attribute_pairs() {
+            push(&mut key, array, attr, dtype);
+        }
+    }
+    for (attr, dtype) in schema.attribute_pairs() {
+        push(&mut key, "", attr, dtype);
+    }
+
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -656,7 +758,7 @@ mod tests {
 
         let mut keys = HashSet::new();
         for name in atlas.list_datasets() {
-            keys.insert(shape_key(&atlas.dataset(&name).unwrap()));
+            keys.insert(shape_key(&atlas.dataset(&name).unwrap()).await.unwrap());
         }
         assert_eq!(keys.len(), 1, "and every dataset reduces to one key");
 
@@ -675,8 +777,8 @@ mod tests {
         test_support::two_datasets(tmp.path()).await;
         let atlas = test_support::open(tmp.path()).await;
 
-        let winter = shape_key(&atlas.dataset("winter").unwrap());
-        let summer = shape_key(&atlas.dataset("summer").unwrap());
+        let winter = shape_key(&atlas.dataset("winter").unwrap()).await.unwrap();
+        let summer = shape_key(&atlas.dataset("summer").unwrap()).await.unwrap();
         assert_ne!(winter, summer);
     }
 

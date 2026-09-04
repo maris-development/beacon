@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType;
-use atlas::{ArraySchema, Attr, DType, DatasetView, FillValue};
+use atlas::{ArrayLayout, Attr, DType, DatasetView, FillValue};
 use beacon_nd_array::{
     NdArray, NdArrayD, datatypes::NdArrayDataType, datatypes::TimestampNanosecond,
 };
@@ -104,9 +104,10 @@ pub(crate) fn dtype_tag(dtype: &DType) -> String {
 
 /// Wrap one atlas array as a lazy [`NdArrayD`] over `view`.
 ///
-/// Nothing is read here. The shape, the dimension names, the chunk shape and
-/// the fill value all come from the collection footer, which the open already
-/// held; the values arrive when the engine asks the backend for a subset.
+/// No array data is read here. `dtype` comes from the collection footer, and
+/// `layout` from the variable's segment, which one open serves for the whole
+/// collection. The values themselves arrive when the engine asks the backend
+/// for a subset.
 ///
 /// The chunk shape is the one the writer chose. It is what lets the scan cut a
 /// dataset on the grid the file actually stores, so one unit of work is one
@@ -114,9 +115,10 @@ pub(crate) fn dtype_tag(dtype: &DType) -> String {
 pub fn array_to_nd_array(
     view: Arc<DatasetView>,
     array_name: &str,
-    schema: &ArraySchema,
+    dtype: &DType,
+    layout: &ArrayLayout,
 ) -> anyhow::Result<Arc<dyn NdArrayD>> {
-    let fill: Option<FillValue> = schema.fill_value.clone().map(Into::into);
+    let fill: Option<FillValue> = layout.fill_value().cloned();
 
     macro_rules! lazy {
         ($ty:ty) => {{
@@ -126,16 +128,20 @@ pub fn array_to_nd_array(
             let backend = AtlasArrayBackend::<$ty>::new(
                 view,
                 array_name.to_string(),
-                schema.shape.clone(),
-                schema.dimension_names.clone(),
-                schema.chunk_shape.clone(),
+                layout.shape().to_vec(),
+                layout
+                    .dimension_names()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                layout.chunk_shape().to_vec(),
                 fill,
             );
             Ok(Arc::new(NdArray::new_with_backend(backend)?) as Arc<dyn NdArrayD>)
         }};
     }
 
-    match &schema.dtype {
+    match dtype {
         DType::Int8 => lazy!(i8),
         DType::Int16 => lazy!(i16),
         DType::Int32 => lazy!(i32),
@@ -190,7 +196,6 @@ pub fn attribute_to_nd_array(attr: &Attr) -> anyhow::Result<Arc<dyn NdArrayD>> {
         Attr::Float64(v) => scalar!(*v),
         Attr::String(v) => scalar!(v.clone()),
         Attr::Binary(v) => scalar!(v.clone()),
-        Attr::TimestampNanoseconds(v) => scalar!(TimestampNanosecond(*v)),
         other => Err(anyhow::anyhow!(
             "attribute is a {} list, which has no rank-0 form in Beacon",
             dtype_tag(&other.dtype())
@@ -299,21 +304,6 @@ mod tests {
         assert!(nd.shape().is_empty(), "an attribute has no axis");
         let typed = nd.as_any().downcast_ref::<NdArray<i64>>().unwrap();
         assert_eq!(typed.clone_into_raw_vec().await, vec![2024]);
-    }
-
-    #[tokio::test]
-    async fn a_timestamp_attribute_keeps_its_type() {
-        let nanos = 1_700_000_000_000_000_000;
-        let nd = attribute_to_nd_array(&Attr::TimestampNanoseconds(nanos)).unwrap();
-        assert_eq!(nd.datatype(), NdArrayDataType::Timestamp);
-        let typed = nd
-            .as_any()
-            .downcast_ref::<NdArray<TimestampNanosecond>>()
-            .unwrap();
-        assert_eq!(
-            typed.clone_into_raw_vec().await,
-            vec![TimestampNanosecond(nanos)]
-        );
     }
 
     #[tokio::test]

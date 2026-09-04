@@ -1,9 +1,9 @@
 //! The column ranges of a whole collection, for the file analyzer.
 //!
-//! A collection reports one range per column, folded over its live datasets out
-//! of the footer. It costs no array read: the writer computed each dataset's
-//! minimum and maximum while it staged the data, and the open already holds
-//! them.
+//! A collection reports one range per column, folded over its live datasets.
+//! It costs no array read: the writer computed each dataset's minimum and
+//! maximum while it staged the data, and stored them in that variable's
+//! segment. One open per column answers for the whole collection.
 //!
 //! # Why a wrong answer here is worse than no answer
 //!
@@ -18,19 +18,18 @@ use datafusion::common::{ColumnStatistics, Statistics, stats::Precision};
 use datafusion::scalar::ScalarValue;
 
 /// The statistics of one collection, in `table_schema` order.
-pub fn collection_statistics(atlas: &Atlas, table_schema: &Schema) -> Statistics {
+pub async fn collection_statistics(atlas: &Atlas, table_schema: &Schema) -> Statistics {
     let arrays = atlas.list_arrays();
     let live = atlas.dataset_count();
 
     let mut statistics = Statistics::default();
     for field in table_schema.fields() {
         let range = if arrays.iter().any(|array| array == field.name()) {
-            column_range(atlas, field.name(), field.data_type(), live)
+            column_range(atlas, field.name(), field.data_type(), live).await
         } else {
-            // An attribute column would need one `DatasetView` per dataset, and
-            // each of those is a linear scan of the footer. The query-time
-            // pruning index pays that where it is bounded and worth it; a
-            // background pass over every collection is not the place.
+            // An attribute is exact rather than a range, and bounding a column
+            // by it says nothing a scan can use. The query-time pruning index
+            // reads attributes; the analyzer has no use for them.
             None
         };
 
@@ -54,26 +53,25 @@ pub fn collection_statistics(atlas: &Atlas, table_schema: &Schema) -> Statistics
 /// report would then produce a range those zeros sit outside of, and pruning
 /// would drop the collection for a query that matches them.
 ///
-/// The footer cannot tell "declares it and never wrote it" from "does not
-/// declare it" without a view per dataset, which is a linear scan each. So the
+/// A segment holds an entry only for a dataset that wrote the array, so the
 /// count is the proof: a bound is claimed only when every live dataset reported
 /// one. A uniform collection — which is what `atlas create` writes, and what
 /// this format exists for — satisfies that; a heterogeneous one goes unknown
 /// and is read in full.
-fn column_range(
+async fn column_range(
     atlas: &Atlas,
     column: &str,
     target: &DataType,
     live: usize,
 ) -> Option<(ScalarValue, ScalarValue)> {
-    let per_dataset = atlas.array_stats_by_dataset(column);
+    let per_dataset = atlas.array_stats_by_dataset(column).await.ok()?;
     if per_dataset.is_empty() || per_dataset.len() != live {
         return None;
     }
 
     let mut low: Option<ScalarValue> = None;
     let mut high: Option<ScalarValue> = None;
-    for (_, stats) in per_dataset {
+    for stats in per_dataset {
         // One dataset without a bound leaves the column unbounded: its values
         // may lie anywhere.
         let min = bound(stats.min.as_ref(), target)?;
@@ -155,7 +153,8 @@ mod tests {
         let statistics = collection_statistics(
             &atlas,
             &schema(vec![Field::new("temperature", DataType::Float32, true)]),
-        );
+        )
+        .await;
         let (min, max) = range(&statistics, 0);
         // d0 starts at 0 and d9 ends at 93.
         assert_eq!(min, Precision::Exact(ScalarValue::Float32(Some(0.0))));
@@ -179,7 +178,8 @@ mod tests {
                 // both declare `temperature`.
                 Field::new("temperature", DataType::Float32, true),
             ]),
-        );
+        )
+        .await;
         assert_eq!(range(&statistics, 0).0, Precision::Absent);
         assert_eq!(
             range(&statistics, 1).0,
@@ -202,7 +202,8 @@ mod tests {
         let statistics = collection_statistics(
             &atlas,
             &schema(vec![Field::new("value", DataType::Float64, true)]),
-        );
+        )
+        .await;
         let (min, max) = range(&statistics, 0);
         // a holds [1, 2] as Int16 and b holds [3.5, 4.5] as Float32.
         assert_eq!(min, Precision::Exact(ScalarValue::Float64(Some(1.0))));
@@ -223,7 +224,8 @@ mod tests {
                 Field::new("ghost", DataType::Float32, true),
                 Field::new(".platform", DataType::Utf8, true),
             ]),
-        );
+        )
+        .await;
         assert_eq!(range(&statistics, 0).0, Precision::Absent);
         assert_eq!(
             range(&statistics, 1).0,
@@ -241,7 +243,8 @@ mod tests {
         let statistics = collection_statistics(
             &atlas,
             &schema(vec![Field::new("temperature", DataType::Float32, true)]),
-        );
+        )
+        .await;
         assert_eq!(range(&statistics, 0).0, Precision::Absent);
     }
 
@@ -259,7 +262,8 @@ mod tests {
         let statistics = collection_statistics(
             &atlas,
             &schema(vec![Field::new("temperature", DataType::Float32, true)]),
-        );
+        )
+        .await;
         assert_eq!(
             range(&statistics, 0).1,
             Precision::Exact(ScalarValue::Float32(Some(83.0))),

@@ -289,11 +289,12 @@ dependencies = [
 
 [[package]]
 name = "array-format"
-version = "0.12.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7379c3303a9b9f0693ccd040d85da31e302a601efeafae8a6cb69341e42de41"
+checksum = "672b40e04f7c403e9322972c476414f8847e5e0aed0006b80128977d39138ab9"
 dependencies = [
  "bytes",
+ "ecow",
  "futures",
  "indexmap 2.14.0",
  "lz4_flex 0.11.6",
@@ -1192,9 +1193,9 @@ dependencies = [
 
 [[package]]
 name = "atlas-rust"
-version = "0.16.4"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f7ba85f9c7eee0f991be08eefbbe9eef18fc9daf0992fde1a4215b6befd2fec"
+checksum = "4dfadaa65a76f424f053c764cd439ab61c22ffade15ade54fe35432df2561e5b"
 dependencies = [
  "array-format",
  "async-trait",
@@ -1207,6 +1208,8 @@ dependencies = [
  "parking_lot",
  "rmp-serde",
  "serde",
+ "smallvec",
+ "smol_str 0.3.6",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -5135,6 +5138,12 @@ checksum = "88459a2a8e3a514b6e6de38cf3aaa9250a894cb098f74a932db77fcc8341b6d0"
 dependencies = [
  "num-traits",
 ]
+
+[[package]]
+name = "ecow"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78e4f79b296fbaab6ce2e22d52cb4c7f010fe0ebe7a32e34fa25885fd797bd02"
 
 [[package]]
 name = "either"
@@ -11143,6 +11152,9 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smol_str"
@@ -11158,6 +11170,10 @@ name = "smol_str"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
+dependencies = [
+ "borsh",
+ "serde_core",
+]
 
 [[package]]
 name = "snafu"
