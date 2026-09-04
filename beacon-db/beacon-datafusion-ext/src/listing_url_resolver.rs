@@ -111,8 +111,17 @@ pub fn parse_listing_table_url(
         }
         // No default + no scheme → a local filesystem path.
         (None, None) => {
-            let abs = std::path::absolute(base_path.as_path()).map_err(|e| {
-                exec_datafusion_err!("failed to absolutize path {}: {e}", base_path.display())
+            // An empty path names the root of the store, which for a local store
+            // is the current directory. `std::path::absolute` refuses an empty
+            // path, so name the directory the way the glob branch already does.
+            // `browse_datasets()` arrives here: its default prefix is the root.
+            let base = if base_path.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                base_path.as_path()
+            };
+            let abs = std::path::absolute(base).map_err(|e| {
+                exec_datafusion_err!("failed to absolutize path {}: {e}", base.display())
             })?;
             let file_url = Url::from_file_path(&abs).map_err(|_| {
                 exec_datafusion_err!("failed to build file URL for {}", abs.display())
@@ -610,5 +619,33 @@ mod tests {
         let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
         let url = Url::parse(store_url.as_str()).unwrap();
         assert_eq!(url.scheme(), "datasets");
+    }
+
+    /// An empty path names the root of the configured store, which is the whole
+    /// store. `browse_datasets()` asks for exactly this.
+    #[test]
+    fn an_empty_path_is_the_root_of_the_configured_store() {
+        let registry = registry_with_datasets();
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        let url = parse_listing_table_url(Some(store_url), "", &registry).unwrap();
+
+        assert_eq!(url.prefix().as_ref(), "", "the whole store");
+        assert!(url.is_collection(), "a directory, not one object");
+        assert!(url.get_glob().is_none());
+    }
+
+    /// The same path in dynamic mode names the current directory, the root of
+    /// the local store. `std::path::absolute` refuses an empty path, so this
+    /// used to fail rather than list the directory.
+    #[test]
+    fn an_empty_path_is_the_current_directory_in_dynamic_mode() {
+        let registry = DefaultObjectStoreRegistry::new();
+        let url = parse_listing_table_url(None, "", &registry).unwrap();
+
+        assert!(url.as_str().starts_with("file:///"), "url={}", url.as_str());
+        assert!(url.is_collection(), "a directory, not one object");
+        // The same directory a lone glob resolves against.
+        let dot = parse_listing_table_url(None, ".", &registry).unwrap();
+        assert_eq!(url.prefix(), dot.prefix());
     }
 }

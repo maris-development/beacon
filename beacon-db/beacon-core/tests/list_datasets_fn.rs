@@ -187,6 +187,15 @@ async fn browse_reads_one_directory_level() {
     assert_eq!(browsed(&rt, "''").await, vec!["a.csv", "p.parquet"]);
 }
 
+/// No arguments reads the root, the same as an empty prefix. The prefix
+/// defaults to the empty string, which names the root of the store.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_without_arguments_reads_the_root() {
+    let rt = seeded_runtime("browse_no_args").await;
+    assert_eq!(browsed(&rt, "").await, browsed(&rt, "''").await);
+    assert_eq!(browsed(&rt, "").await, vec!["a.csv", "p.parquet"]);
+}
+
 /// Descending shows that level and no deeper one.
 #[tokio::test(flavor = "multi_thread")]
 async fn browse_descends_by_prefix() {

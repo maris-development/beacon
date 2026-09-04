@@ -54,7 +54,7 @@ use std::sync::Arc;
 
 use futures::stream::{BoxStream, StreamExt, TryStreamExt};
 use object_store::list::{PaginatedListOptions, PaginatedListStore};
-use object_store::path::Path;
+use object_store::path::{Path, DELIMITER};
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as OsResult,
@@ -122,6 +122,22 @@ impl<T: fmt::Debug> fmt::Display for BigPageList<T> {
     }
 }
 
+/// A directory prefix as the raw string a paginated listing wants.
+///
+/// [`PaginatedListStore::list_paginated`] states that it adds no trailing
+/// delimiter, where [`ObjectStore::list`] does. Without one the prefix matches
+/// by byte, not by directory: a shard of `a/one` also returns `a/one.txt` from
+/// the level above it and everything under a sibling `a/one2/`. Both are
+/// duplicates, because the level above is emitted separately and the sibling is
+/// a shard of its own.
+///
+/// An empty path selects the whole store, and `/` selects nothing, so it maps to
+/// `None` as it does in `ObjectStore::list`.
+fn shard_prefix(prefix: Option<&Path>) -> Option<String> {
+    let prefix = prefix?.as_ref();
+    (!prefix.is_empty()).then(|| format!("{prefix}{DELIMITER}"))
+}
+
 /// One prefix, walked to exhaustion as a lazy chain of sized pages.
 fn walk_shard<T>(
     inner: Arc<T>,
@@ -131,6 +147,7 @@ fn walk_shard<T>(
 where
     T: PaginatedListStore + 'static,
 {
+    let prefix = shard_prefix(prefix.as_ref());
     // `None` state means the previous page carried no continuation token.
     futures::stream::try_unfold(Some(None::<String>), move |state| {
         let inner = Arc::clone(&inner);
@@ -144,9 +161,7 @@ where
                 page_token: token,
                 ..Default::default()
             };
-            let page = inner
-                .list_paginated(prefix.as_ref().map(|p| p.as_ref()), opts)
-                .await?;
+            let page = inner.list_paginated(prefix.as_deref(), opts).await?;
             Ok(Some((
                 futures::stream::iter(page.result.objects.into_iter().map(Ok)),
                 page.page_token.map(Some),
@@ -305,6 +320,11 @@ mod tests {
     /// sharded listing: paginated listing that honours `max_keys`, and a
     /// delimiter listing that reports one directory level.
     ///
+    /// [`PaginatedListStore::list_paginated`] matches its prefix by byte and
+    /// adds no trailing delimiter, so this one does too. A fake that split on
+    /// directories instead would accept a prefix S3 rejects, and hide what
+    /// [`shard_prefix`] is for.
+    ///
     /// It records the page sizes it was asked for, which is how the tests below
     /// tell a sized page from a default one.
     #[derive(Debug)]
@@ -358,12 +378,7 @@ mod tests {
                 .iter()
                 .filter(|p| match prefix {
                     None => true,
-                    Some(prefix) if prefix.is_empty() => true,
-                    Some(prefix) => {
-                        let p = p.as_ref();
-                        p.starts_with(prefix)
-                            && p.as_bytes().get(prefix.len()) == Some(&b'/')
-                    }
+                    Some(prefix) => p.as_ref().starts_with(prefix),
                 })
                 .collect();
 
@@ -591,5 +606,59 @@ mod tests {
     async fn an_empty_store_yields_nothing() {
         let store = BigPageList::new(FakeStore::new(&[]));
         assert!(listed(store).await.is_empty());
+    }
+
+    /// A tree where names share a prefix: a directory `one`, a sibling
+    /// directory `one2`, and a file `one.txt` beside them.
+    fn shared_prefix_tree() -> Vec<&'static str> {
+        vec![
+            "a/one.txt",
+            "a/one/x.txt",
+            "a/one2/y.txt",
+            "a/onemore/z.txt",
+        ]
+    }
+
+    /// A shard is a directory, not a byte prefix.
+    ///
+    /// The shard of `a/one` must not also return `a/one.txt`, which the level
+    /// above already emitted, nor `a/one2/y.txt`, which the shard of `a/one2`
+    /// returns. Both come back twice when the trailing delimiter is missing.
+    #[tokio::test]
+    async fn a_shard_does_not_reach_a_sibling_that_shares_its_name() {
+        let got = listed(BigPageList::new(FakeStore::new(&shared_prefix_tree()))).await;
+        let mut expected: Vec<String> = shared_prefix_tree()
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(got, expected, "every object exactly once");
+    }
+
+    /// The same rule for the prefix a caller asks for. Listing `a/one` names
+    /// that directory, so a sibling `a/one2` is not part of the answer.
+    #[tokio::test]
+    async fn a_listed_prefix_is_a_directory_not_a_byte_prefix() {
+        let store = BigPageList::new(FakeStore::new(&shared_prefix_tree()));
+        let mut paths: Vec<String> = store
+            .list(Some(&Path::from("a/one")))
+            .map_ok(|meta| meta.location.to_string())
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the walk succeeds");
+        paths.sort();
+        assert_eq!(paths, vec!["a/one/x.txt"]);
+    }
+
+    /// An empty prefix selects the whole store, so it reaches the store as
+    /// `None` rather than as a bare `/` that matches nothing.
+    #[test]
+    fn an_empty_prefix_selects_the_whole_store() {
+        assert_eq!(shard_prefix(None), None);
+        assert_eq!(shard_prefix(Some(&Path::from(""))), None);
+        assert_eq!(
+            shard_prefix(Some(&Path::from("a/one"))),
+            Some("a/one/".to_string())
+        );
     }
 }

@@ -333,6 +333,69 @@ mod tests {
         assert!(!is_zarr_store_root(&meta("cube.zarr/data.nc")));
     }
 
+    // ---- top_level_zarr_meta_v3 -------------------------------------------
+    //
+    // The other rule, for a caller that has already named the store. It reads a
+    // listing rather than one object, so it needs no `.zarr` suffix.
+
+    fn extract_paths(metas: &[ObjectMeta]) -> Vec<String> {
+        let mut paths: Vec<String> = metas.iter().map(|m| m.location.to_string()).collect();
+        paths.sort();
+        paths
+    }
+
+    /// One marker is its own store root.
+    #[test]
+    fn a_single_marker_is_the_root() {
+        let metas = vec![meta("a/zarr.json")];
+        assert_eq!(extract_paths(&top_level_zarr_meta_v3(&metas)), vec!["a/zarr.json"]);
+    }
+
+    /// A marker below another one describes an array or a sub-group, so only the
+    /// shallowest survives.
+    #[test]
+    fn a_marker_below_the_root_is_dropped() {
+        let metas = vec![meta("a/zarr.json"), meta("a/b/zarr.json")];
+        assert_eq!(extract_paths(&top_level_zarr_meta_v3(&metas)), vec!["a/zarr.json"]);
+    }
+
+    /// Two unrelated stores keep a root each.
+    #[test]
+    fn two_stores_keep_a_root_each() {
+        let metas = vec![meta("a/zarr.json"), meta("b/zarr.json")];
+        assert_eq!(
+            extract_paths(&top_level_zarr_meta_v3(&metas)),
+            vec!["a/zarr.json", "b/zarr.json"]
+        );
+    }
+
+    /// Chunk files and look-alike names are not markers.
+    #[test]
+    fn a_non_marker_is_never_a_root() {
+        let metas = vec![
+            meta("a/zarr.json"),
+            meta("b/not_zarr.json"),
+            meta("c/zarr.txt"),
+        ];
+        assert_eq!(extract_paths(&top_level_zarr_meta_v3(&metas)), vec!["a/zarr.json"]);
+    }
+
+    /// However deep the nesting, only the shallowest ancestor of each store
+    /// survives.
+    #[test]
+    fn every_marker_below_a_root_is_dropped() {
+        let metas = vec![
+            meta("root/zarr.json"),
+            meta("root/a/zarr.json"),
+            meta("root/a/b/zarr.json"),
+            meta("other/zarr.json"),
+        ];
+        assert_eq!(
+            extract_paths(&top_level_zarr_meta_v3(&metas)),
+            vec!["other/zarr.json", "root/zarr.json"]
+        );
+    }
+
     #[test]
     fn path_parent_walks_up_one_level() {
         assert_eq!(

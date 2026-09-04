@@ -42,6 +42,52 @@ The optional query parameters are:
 GET /api/list-datasets?pattern=argo/**/*.nc&limit=50&offset=0
 ```
 
+This endpoint reads every object below `pattern`. The time increases with the size of the store.
+Use `/api/browse-datasets` for a folder view.
+
+### Browse one directory level
+
+```http
+GET /api/browse-datasets
+```
+
+Returns the files and the sub-directories of one directory. Beacon does not descend, so the time
+does not increase with the size of the store below the directory.
+
+The optional query parameter is:
+
+| Parameter | Description |
+| --------- | ----------- |
+| `prefix` | The directory to read. The default is the storage root |
+
+```http
+GET /api/browse-datasets?prefix=argo/floats
+```
+
+The response holds the directory, the sub-directory names and the datasets:
+
+```json
+{
+  "prefix": "argo/floats",
+  "folders": ["2023", "2024"],
+  "datasets": [
+    {
+      "file_path": "argo/floats/index.parquet",
+      "format": "parquet",
+      "can_inspect": true,
+      "can_partial_explore": true,
+      "size": 20480,
+      "last_modified": "2026-01-14T09:12:03Z"
+    }
+  ]
+}
+```
+
+::: info A directory-shaped dataset
+A Zarr store is a directory. Beacon reports it in `folders`, not in `datasets`. Descend into it to
+see the dataset.
+:::
+
 ### Dataset count
 
 ```http

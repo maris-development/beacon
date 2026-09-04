@@ -231,13 +231,10 @@ impl TableProvider for DatasetsTable {
 
         // The two listings differ only here.
         let rows: RowStreamFactory = match &self.listing {
-            // A glob streams. The store is resolved now, against this session;
-            // the stream owns it, so the walk can start at execute time.
+            // A glob streams. The path is resolved here, against this session.
+            // The handle holds no session, so each execute rebuilds the walk
+            // from it and the plan can run more than once.
             Listing::Glob { pattern } => {
-                // Resolve now, against this session. The walk is rebuilt per
-                // execute from the resolved parts, so the plan can run again.
-                // Resolved once, against this session. The handle holds no
-                // session, so the walk is rebuilt per execute from it.
                 let listing = factory.listing(state, pattern)?;
                 let formats = self.file_formats.clone();
                 Arc::new(move || {

@@ -731,6 +731,7 @@ impl Connection {
 /// here is not a real table function. A build without an optional format still lists its reader
 /// here; calling it fails at planning time, as it would for any unregistered function.
 const TABLE_FUNCTIONS: &[(&str, &[&str])] = &[
+    ("browse_datasets", &[]),
     ("list_datasets", &[]),
     ("read_arrow", &["glob_paths"]),
     ("read_arrow_schema", &["glob_paths"]),
