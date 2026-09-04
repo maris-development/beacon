@@ -185,3 +185,40 @@ async fn no_web_ui_directory_leaves_the_admin_path_unmounted() {
     let (status, _, _) = get(&router, "/admin").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// The root serves the home page itself, not a redirect to the API docs. Its
+/// links are absolute, because the root also answers without a trailing slash.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_root_serves_a_home_page_linking_to_every_surface() {
+    let web = web_build();
+    let (_harness, router) = app("/beacon", &web).await;
+
+    let (status, _, body) = get(&router, "/beacon").await;
+    assert_eq!(status, StatusCode::OK);
+    for href in [
+        "/beacon/admin/",
+        "/beacon/swagger",
+        "/beacon/scalar/",
+        "/beacon/openapi.json",
+        "/beacon/api/health",
+    ] {
+        assert!(body.contains(&format!("href=\"{href}\"")), "missing {href}");
+    }
+}
+
+/// Without an admin build there is no admin panel to offer, so the card goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_home_page_drops_the_admin_card_without_a_web_ui() {
+    let empty = tempfile::tempdir().expect("create temp dir");
+    let mut config = common::config(false);
+    config.server.web_ui_dir = empty.path().to_string_lossy().into_owned();
+
+    let harness = common::server_with(config).await;
+    let router = setup_router(harness.server.clone(), harness.server.config().clone())
+        .expect("router should build");
+
+    let (status, _, body) = get(&router, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("href=\"/swagger\""));
+    assert!(!body.contains("href=\"/admin/\""));
+}

@@ -7,7 +7,7 @@ use ::axum::{
     body::Bytes,
     extract::MatchedPath,
     http::{HeaderMap, HeaderName, HeaderValue, Method, Request},
-    response::{IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{any, get},
     Router,
 };
@@ -72,7 +72,6 @@ pub fn setup_router(
     // Redirect targets must be absolute and include the base path. Relative
     // targets (e.g. "./swagger") resolve against the incoming request URI, which
     // breaks once the router is nested under a non-empty base path.
-    let swagger_redirect: &'static str = format!("{base_path}/swagger").leak();
     let scalar_redirect: &'static str = format!("{base_path}/scalar/").leak();
 
     let docs = if base_path.is_empty() {
@@ -82,8 +81,8 @@ pub fn setup_router(
     };
 
     // Mount the bundled admin web UI when its build directory is present (it is in
-    // the Docker image; usually absent for a bare `cargo run`). The bare root then
-    // lands on the UI instead of the API docs.
+    // the Docker image; usually absent for a bare `cargo run`). Its absence also
+    // drops the admin card from the home page below.
     let web_ui = web_ui_router(&config.server.web_ui_dir, base_path);
 
     // MCP streamable-HTTP endpoint, gated by BEACON_MCP_ENABLED (default on). It
@@ -111,6 +110,17 @@ pub fn setup_router(
             ));
         router = router.merge(mcp_router);
     }
+    // The home page is fixed once the router is built, so it is rendered here and
+    // leaked as a constant rather than rebuilt per request.
+    let home_page: &'static str = crate::axum::home::render(
+        &config.api_docs.title,
+        BEACON_VERSION,
+        base_path,
+        web_ui.is_some(),
+        mcp_enabled,
+    )
+    .leak();
+
     let mut router = router
         .merge(Scalar::with_url("/scalar/", docs.clone()))
         .route(
@@ -118,10 +128,7 @@ pub fn setup_router(
             get(move || async move { Redirect::to(scalar_redirect) }),
         )
         .route("/api/health", get(health))
-        .route(
-            "/",
-            get(move || async move { Redirect::to(swagger_redirect) }),
-        );
+        .route("/", get(move || async move { Html(home_page) }));
 
     if let Some(web_ui) = web_ui {
         router = router.merge(web_ui);
