@@ -20,7 +20,8 @@ See [S3 object storage](#s3-object-storage).
 | --- | --- | --- |
 | `BEACON_HOST` | `0.0.0.0` | IP address the HTTP API listens on. |
 | `BEACON_PORT` | `5001` | Port the HTTP API listens on. |
-| `BEACON_WORKER_THREADS` | `8` | Number of worker threads for the async runtime. |
+| `BEACON_WORKER_THREADS` | `8` | Number of threads of the query runtime. This runtime plans and runs queries, and hosts the crawlers and the file statistics. |
+| `BEACON_API_THREADS` | `4` | Number of threads of the API runtime. This runtime serves HTTP and Flight SQL. A long query does not block it. |
 | `BEACON_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error`, or `off`. Case does not matter. The level applies to all Beacon crates. At `debug` and `trace`, loud dependencies such as DataFusion, Arrow, `object_store`, and hyper stay at `info`. An unknown value stops the server at startup. |
 | `RUST_LOG` | _(unset)_ | Full log filter, in [`tracing-subscriber` EnvFilter](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (e.g. `debug,datafusion=trace`). It replaces `BEACON_LOG_LEVEL`. Use it to see the dependency logs that `BEACON_LOG_LEVEL` holds back. An invalid value prints a warning, and Beacon uses `BEACON_LOG_LEVEL`. |
 | `BEACON_BASE_PATH` | _(empty)_ | Optional URL path prefix for the HTTP API, OpenAPI document, and Swagger UI (e.g. `/beacon`). Useful behind a reverse proxy. Normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character causes Beacon to exit at startup with a descriptive error. |
