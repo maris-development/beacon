@@ -23,6 +23,30 @@ tag. Releases before 2.0.0 are recorded in the
   where it used to be a `404`. The page carries the colors, the type and the card layout of the
   documentation site, and it loads nothing from the network, so it also renders on a server with
   no route out. Swagger keeps its own path, so a bookmark to `/swagger` is unaffected.
+- **`BEACON_TYPE_WIDENING_STRATEGY=numpy` merges schemas as numpy promotes types.** The schema
+  merge widens a column inside one family: a wider integer, a finer timestamp, a longer string. It
+  refuses every other pair, and it reads every integer beside a `Float32` as `Float64`, because a
+  lattice holds no other answer that is free of the listing order. A collection written by numpy or
+  xarray expects the rules of `numpy.result_type` instead. The new strategy applies them: a boolean
+  joins the numbers (`bool` + `int8` is `int8`), `Float16` joins the floats, a narrow integer beside
+  a `Float32` stays a `Float32`, a number or a boolean beside a string reads as text, and a date
+  beside a timestamp is a timestamp at the finer unit. numpy resolves a set of types at once, and
+  the answer differs from a chain of pairs: `int8` + `uint8` is `int16` and `int16` + `float16` is
+  `float32`, yet `result_type(int8, uint8, float16)` is `float16`. The strategy therefore gathers
+  the types of each column across every file and resolves the set once, so the listing order does
+  not change the result. The cost is one pass over every schema, as `keep_first` pays. Four numpy
+  rules stay behind, because Arrow has no cast for them: an integer beside a `timedelta64`, a
+  `timedelta64` beside a `datetime64`, and a number or a text string beside a byte string are
+  conflicts, and a time of day keeps the default chain. One limit is the CSV reader's: a text file
+  holds no types, so it parses each column as the merged type. A number beside a string reads as
+  the text of the file, and a boolean literal beside a number fails at read time, where every typed
+  format casts `true` to `1`. `BEACON_TYPE_WIDENING_ON_CONFLICT` applies under either strategy.
+  `default` keeps the merge every server ran before, and an unknown value logs a warning and reads
+  as `default`. The strategy is an `ArrowTypeWideningStrategy` like the default one, so an embedded
+  build passes `NumpyArrowTypeWidening` to `RuntimeBuilder::with_type_widening` or
+  `OpenOptions::with_type_widening`. See
+  [Configuration](docs/docs/2.0.0-rc5/server/configuration.md#query-engine) and
+  [Troubleshooting](docs/docs/2.0.0-rc5/troubleshooting.md#a-column-has-two-types-across-the-files).
 - **`BEACON_TYPE_WIDENING_ON_CONFLICT` settles a column that no type holds.** A collection can
   type one column as a number in one file and as a string in another. No type holds both, so the
   schema merge refused the whole table and the table answered no query: `Incompatible types for

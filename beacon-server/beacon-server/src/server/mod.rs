@@ -301,8 +301,8 @@ async fn build_runtime(
     if config.sql.enable_nd_pipeline {
         builder = builder.with_nd_pipeline();
     }
-    // The rule for a column that no type holds. Every schema merge takes it.
-    builder = builder.with_type_conflict(config.runtime.type_conflict);
+    // The rule for every schema merge in this process.
+    builder = builder.with_type_widening(config.runtime.type_widening.clone());
     if config.auth.anonymous_enabled {
         builder = builder.with_anonymous_user(ANONYMOUS_USERNAME);
     }
