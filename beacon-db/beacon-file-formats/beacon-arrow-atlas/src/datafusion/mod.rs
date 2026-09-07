@@ -1216,4 +1216,526 @@ mod tests {
                 .is_none()
         );
     }
+    // ── a wide collection on two dimensions, through SQL ─────────────────
+
+    /// The shapes every test in this section reads: three datasets whose
+    /// profile and level counts all differ.
+    const WIDE: &[(usize, usize)] = &[(3, 4), (5, 4), (2, 6)];
+
+    /// Rows a full-grid read returns: `profiles * levels`, summed per dataset.
+    const WIDE_GRID_ROWS: usize = 44;
+
+    /// Rows a read narrowed to `profile` returns: the profiles themselves.
+    const WIDE_PROFILE_ROWS: usize = 10;
+
+    /// Columns the merged collection carries: eight arrays, four attributes
+    /// each, and two dataset attributes.
+    const WIDE_COLUMNS: usize = 42;
+
+    /// Columns that survive a narrowing to `profile`. The four grid arrays go;
+    /// their attributes stay.
+    const WIDE_PROFILE_COLUMNS: usize = 38;
+
+    /// A wide collection in a temporary directory, and a table over it.
+    ///
+    /// The caller holds the returned directory. It deletes the collection when
+    /// it drops.
+    async fn wide_table(ctx: &SessionContext, format: Arc<dyn FileFormat>) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        register_with(ctx, tmp.path(), "wide", format).await;
+        tmp
+    }
+
+    /// One scalar, as its rendered text. Enough to pin a value without a
+    /// downcast per Arrow type.
+    async fn scalar(ctx: &SessionContext, sql: &str) -> String {
+        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        arrow::util::pretty::pretty_format_batches(&batches)
+            .unwrap()
+            .to_string()
+            .lines()
+            .nth(3)
+            .expect("a one-row result")
+            .trim()
+            .trim_matches('|')
+            .trim()
+            .to_string()
+    }
+
+    /// The row count is the grid every dataset contributes, and not the
+    /// profile count.
+    #[tokio::test]
+    async fn a_wide_collection_reads_every_row() {
+        let ctx = context(4);
+        let _tmp = wide_table(&ctx, Arc::new(AtlasFormat::default())).await;
+
+        assert_eq!(
+            count(&ctx, "SELECT COUNT(*) FROM wide").await as usize,
+            WIDE_GRID_ROWS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wide_table_carries_every_column() {
+        let ctx = context(1);
+        let _tmp = wide_table(&ctx, Arc::new(AtlasFormat::default())).await;
+
+        let df = ctx.sql("SELECT * FROM wide").await.unwrap();
+        assert_eq!(df.schema().fields().len(), WIDE_COLUMNS);
+    }
+
+    /// A per-profile array beside a per-level one, in one result.
+    #[tokio::test]
+    async fn a_wide_row_carries_both_of_its_grids() {
+        let ctx = context(1);
+        let _tmp = wide_table(&ctx, Arc::new(AtlasFormat::default())).await;
+
+        let batches = ctx
+            .sql(
+                "SELECT platform, latitude, pressure, temperature, salinity \
+                 FROM wide WHERE platform = 'set1' AND pressure = 2.0 \
+                 ORDER BY latitude LIMIT 1",
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let rendered = arrow::util::pretty::pretty_format_batches(&batches)
+            .unwrap()
+            .to_string();
+        // set1 holds temperature = 100 + level, and level 2 is pressure 2.
+        assert!(rendered.contains("102.0"), "{rendered}");
+        assert!(rendered.contains("32.0"), "{rendered}");
+    }
+
+    /// An attribute rides along as a constant column.
+    #[tokio::test]
+    async fn an_attribute_of_a_wide_collection_reads_as_a_column() {
+        let ctx = context(1);
+        let _tmp = wide_table(&ctx, Arc::new(AtlasFormat::default())).await;
+
+        assert_eq!(
+            scalar(&ctx, "SELECT DISTINCT \".title\" FROM wide").await,
+            "wide profiles"
+        );
+        assert_eq!(
+            scalar(&ctx, "SELECT DISTINCT \"temperature.long_name\" FROM wide").await,
+            "the temperature"
+        );
+    }
+
+    /// A predicate over a real column, with a known answer. Each dataset owns a
+    /// disjoint `temperature` range, so this is the pruning arithmetic too.
+    #[tokio::test]
+    async fn a_predicate_over_a_wide_collection_selects_the_rows_that_match() {
+        let ctx = context(4);
+        let _tmp = wide_table(&ctx, Arc::new(AtlasFormat::default())).await;
+
+        // Only set2 reaches past 150: its 2 * 6 cells hold 200 to 205.
+        assert_eq!(
+            count(&ctx, "SELECT COUNT(*) FROM wide WHERE temperature > 150.0").await,
+            12
+        );
+        assert_eq!(
+            count(&ctx, "SELECT COUNT(DISTINCT platform) FROM wide").await,
+            3
+        );
+    }
+
+    /// Pruning reads the footer's per-dataset ranges and drops what cannot
+    /// match. It must not change an answer, whichever way the switch is set.
+    #[tokio::test]
+    async fn pruning_does_not_change_the_answers_over_a_wide_collection() {
+        let queries = [
+            "SELECT COUNT(*) FROM wide WHERE temperature > 150.0",
+            "SELECT COUNT(*) FROM wide WHERE latitude > 12.0",
+            "SELECT COUNT(*) FROM wide WHERE platform = 'set1'",
+            "SELECT COUNT(*) FROM wide WHERE salinity < 32.0",
+        ];
+
+        let pruned = context(4);
+        let _a = wide_table(&pruned, Arc::new(AtlasFormat::default())).await;
+        let whole = context(4);
+        let _b = wide_table(&whole, Arc::new(AtlasFormat::default().with_pruning(false))).await;
+
+        for sql in queries {
+            assert_eq!(
+                count(&pruned, sql).await,
+                count(&whole, sql).await,
+                "pruning changed the answer to: {sql}"
+            );
+        }
+    }
+
+    /// A projected scan over a pruned collection.
+    ///
+    /// The predicate is indexed against the table schema, and the pruning
+    /// engine reads it against the projected one. `temperature` sits at column
+    /// 32 of 42, so a five-column projection puts that index out of range. This
+    /// is the case where the two must be brought into step.
+    #[tokio::test]
+    async fn a_projected_scan_prunes_without_losing_its_columns() {
+        let ctx = context(4);
+        let _tmp = wide_table(&ctx, Arc::new(AtlasFormat::default())).await;
+
+        let rows = rows(
+            &ctx,
+            "SELECT platform, latitude, longitude, pressure, temperature \
+             FROM wide WHERE temperature IS NOT NULL \
+             ORDER BY platform, latitude, pressure LIMIT 5",
+        )
+        .await;
+        assert_eq!(rows, 5);
+    }
+
+    /// A narrowing to `profile` reads the profiles and not their levels.
+    ///
+    /// `COUNT(*)` projects nothing, so the scan picks the widest array of the
+    /// dataset to count. That array lives on both dimensions, and this
+    /// narrowing drops it. So the driver has to respect the dimensions too.
+    #[tokio::test]
+    async fn narrowing_a_wide_table_to_one_dimension_reads_one_row_per_profile() {
+        let ctx = context(4);
+        let _tmp = wide_table(
+            &ctx,
+            Arc::new(AtlasFormat::new(AtlasOptions {
+                read_dimensions: Some(vec!["profile".to_string()]),
+            })),
+        )
+        .await;
+
+        assert_eq!(
+            count(&ctx, "SELECT COUNT(*) FROM wide").await as usize,
+            WIDE_PROFILE_ROWS
+        );
+        // The same number through a column, rather than the count driver.
+        assert_eq!(
+            count(&ctx, "SELECT COUNT(latitude) FROM wide").await as usize,
+            WIDE_PROFILE_ROWS
+        );
+        assert_eq!(
+            ctx.sql("SELECT * FROM wide")
+                .await
+                .unwrap()
+                .schema()
+                .fields()
+                .len(),
+            WIDE_PROFILE_COLUMNS
+        );
+    }
+
+    /// A narrowed read whose projection names only attributes builds no
+    /// dimensioned array. The narrowing has nothing to drop and must still
+    /// succeed.
+    #[tokio::test]
+    async fn a_narrowed_read_of_attributes_alone_succeeds() {
+        let ctx = context(1);
+        let _tmp = wide_table(
+            &ctx,
+            Arc::new(AtlasFormat::new(AtlasOptions {
+                read_dimensions: Some(vec!["profile".to_string()]),
+            })),
+        )
+        .await;
+
+        assert_eq!(
+            scalar(&ctx, "SELECT DISTINCT \"temperature.units\" FROM wide").await,
+            "1"
+        );
+        assert_eq!(
+            scalar(&ctx, "SELECT DISTINCT \".institution\" FROM wide").await,
+            "test"
+        );
+    }
+
+    /// Every dataset is one unit of work, and a partitioned scan divides them
+    /// without reading one twice.
+    #[tokio::test]
+    async fn a_partitioned_scan_of_a_wide_collection_reads_every_row_once() {
+        for partitions in [1, 2, 8] {
+            let ctx = context(partitions);
+            let _tmp = wide_table(&ctx, Arc::new(AtlasFormat::default())).await;
+            assert_eq!(
+                count(&ctx, "SELECT COUNT(*) FROM wide").await as usize,
+                WIDE_GRID_ROWS,
+                "over {partitions} partitions"
+            );
+        }
+    }
+
+    // ── STORED AS ATLAS ──────────────────────────────────────────────────
+
+    /// A session that answers `STORED AS ATLAS`, as the runtime builds one.
+    ///
+    /// Two lookups sit behind that clause, under two spellings of one name.
+    /// DataFusion resolves the `STORED AS` word in `table_factories`, upper
+    /// cased, and Beacon registers [`ListingTableFactoryExt`] there. That
+    /// factory then resolves the *file format* by the same word lower cased,
+    /// which is where [`ATLAS_FORMAT`] answers.
+    fn ddl_context(partitions: usize) -> SessionContext {
+        use beacon_datafusion_ext::listing_table_factory_ext::ListingTableFactoryExt;
+        use datafusion::execution::session_state::SessionStateBuilder;
+
+        let mut config = SessionConfig::new()
+            .with_target_partitions(partitions)
+            .with_extension(Arc::new(ListingFactory::dynamic()))
+            .with_extension(Arc::new(ListingTableFactoryExt));
+        // What the runtime sets. DataFusion's default matches a glob against
+        // the file name alone, and a collection is always one directory down,
+        // so `**/data.atlas` would list nothing and the table would be empty.
+        config
+            .options_mut()
+            .execution
+            .listing_table_ignore_subdirectory = false;
+        let state = SessionStateBuilder::new()
+            .with_config(config)
+            .with_default_features()
+            .with_table_factory(
+                ATLAS_FORMAT.to_uppercase(),
+                Arc::new(ListingTableFactoryExt),
+            )
+            .build();
+        let ctx = SessionContext::new_with_state(state);
+        ctx.state_ref()
+            .write()
+            .register_file_format(
+                Arc::new(AtlasFormatFactory::new(
+                    Default::default(),
+                    Default::default(),
+                )),
+                true,
+            )
+            .expect("the atlas format registers under its own name");
+        ctx
+    }
+
+    /// A directory as SQL takes it: forward slashes, whatever the platform.
+    fn location(dir: &Path) -> String {
+        dir.to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/")
+    }
+
+    /// Run one DDL statement, and name the statement if it is refused.
+    async fn run_ddl(ctx: &SessionContext, sql: &str) {
+        ctx.sql(sql)
+            .await
+            .unwrap_or_else(|e| panic!("refused `{sql}`: {e}"))
+            .collect()
+            .await
+            .unwrap();
+    }
+
+    /// The clause a user writes, over the directory that holds the container.
+    #[tokio::test]
+    async fn stored_as_atlas_reads_a_collection_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let ctx = ddl_context(4);
+
+        run_ddl(
+            &ctx,
+            &format!(
+                "CREATE EXTERNAL TABLE t STORED AS ATLAS LOCATION '{}/'",
+                location(tmp.path())
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            count(&ctx, "SELECT COUNT(*) FROM t").await as usize,
+            WIDE_GRID_ROWS
+        );
+        assert_eq!(
+            ctx.sql("SELECT * FROM t")
+                .await
+                .unwrap()
+                .schema()
+                .fields()
+                .len(),
+            WIDE_COLUMNS
+        );
+    }
+
+    /// The container object names the collection just as well as its directory
+    /// does. That is what a `LOCATION` copied out of a listing looks like.
+    #[tokio::test]
+    async fn stored_as_atlas_reads_the_container_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let ctx = ddl_context(4);
+
+        run_ddl(
+            &ctx,
+            &format!(
+                "CREATE EXTERNAL TABLE t STORED AS ATLAS LOCATION '{}/{ATLAS_MARKER}'",
+                location(tmp.path())
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            count(&ctx, "SELECT COUNT(*) FROM t").await as usize,
+            WIDE_GRID_ROWS
+        );
+    }
+
+    /// SQL folds the `STORED AS` word, so either spelling reaches the format.
+    #[tokio::test]
+    async fn stored_as_atlas_is_case_insensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+
+        for spelling in ["ATLAS", "atlas", "Atlas"] {
+            let ctx = ddl_context(1);
+            run_ddl(
+                &ctx,
+                &format!(
+                    "CREATE EXTERNAL TABLE t STORED AS {spelling} LOCATION '{}/'",
+                    location(tmp.path())
+                ),
+            )
+            .await;
+
+            assert_eq!(
+                count(&ctx, "SELECT COUNT(*) FROM t").await as usize,
+                WIDE_GRID_ROWS,
+                "STORED AS {spelling}"
+            );
+        }
+    }
+
+    /// `OPTIONS` reaches the format, so a table can name its dimensions
+    /// without the `read_atlas` function.
+    #[tokio::test]
+    async fn stored_as_atlas_takes_its_options() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let ctx = ddl_context(4);
+
+        run_ddl(
+            &ctx,
+            &format!(
+                "CREATE EXTERNAL TABLE t STORED AS ATLAS \
+                 OPTIONS ('read_dimensions' 'profile') LOCATION '{}/'",
+                location(tmp.path())
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            count(&ctx, "SELECT COUNT(*) FROM t").await as usize,
+            WIDE_PROFILE_ROWS
+        );
+    }
+
+    /// An `OPTIONS` value is a string, so a list of dimensions is one comma
+    /// separated string. `read_atlas` takes a real SQL list and joins it into
+    /// the same option, so both spellings reach one place.
+    ///
+    /// Both dimensions of this collection reads it whole, which is what the
+    /// default already does. The point is the parse, not the answer.
+    #[tokio::test]
+    async fn stored_as_atlas_takes_a_comma_separated_dimension_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+
+        // A space after a comma, and a trailing comma, are both tolerated.
+        for list in ["profile,level", "profile, level", "level,profile,"] {
+            let ctx = ddl_context(4);
+            run_ddl(
+                &ctx,
+                &format!(
+                    "CREATE EXTERNAL TABLE t STORED AS ATLAS \
+                     OPTIONS ('read_dimensions' '{list}') LOCATION '{}/'",
+                    location(tmp.path())
+                ),
+            )
+            .await;
+
+            assert_eq!(
+                count(&ctx, "SELECT COUNT(*) FROM t").await as usize,
+                WIDE_GRID_ROWS,
+                "'{list}' did not name the whole grid"
+            );
+            assert_eq!(
+                ctx.sql("SELECT * FROM t")
+                    .await
+                    .unwrap()
+                    .schema()
+                    .fields()
+                    .len(),
+                WIDE_COLUMNS,
+                "'{list}'"
+            );
+        }
+    }
+
+    /// A glob puts several collections in one table, and the rows are their
+    /// union.
+    ///
+    /// This is the form the docs give for a data lake:
+    /// `LOCATION 'collections/**/data.atlas'`. It rests on
+    /// `listing_table_ignore_subdirectory` being off, because a collection's
+    /// container always sits one directory below the glob's prefix.
+    #[tokio::test]
+    async fn stored_as_atlas_globs_several_collections_into_one_table() {
+        // Two collections under one root, so the union is a number neither one
+        // could produce alone.
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["one", "two"] {
+            test_support::wide_profiles(&tmp.path().join(name), WIDE).await;
+        }
+        let root = location(tmp.path());
+
+        for glob in ["**/data.atlas", "*/data.atlas"] {
+            let ctx = ddl_context(4);
+            run_ddl(
+                &ctx,
+                &format!("CREATE EXTERNAL TABLE t STORED AS ATLAS LOCATION '{root}/{glob}'"),
+            )
+            .await;
+
+            assert_eq!(
+                count(&ctx, "SELECT COUNT(*) FROM t").await as usize,
+                2 * WIDE_GRID_ROWS,
+                "'{glob}' did not read both collections"
+            );
+            // One schema over both, merged under the session's widening rule.
+            assert_eq!(
+                ctx.sql("SELECT * FROM t")
+                    .await
+                    .unwrap()
+                    .schema()
+                    .fields()
+                    .len(),
+                WIDE_COLUMNS,
+                "'{glob}'"
+            );
+        }
+    }
+
+    /// A bad option is an error at `CREATE EXTERNAL TABLE`, not at the first
+    /// query against the table.
+    #[tokio::test]
+    async fn stored_as_atlas_refuses_a_bad_option_at_ddl() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let ctx = ddl_context(1);
+
+        let error = ctx
+            .sql(&format!(
+                "CREATE EXTERNAL TABLE t STORED AS ATLAS \
+                 OPTIONS ('use_pruning' 'maybe') LOCATION '{}/'",
+                location(tmp.path())
+            ))
+            .await
+            .expect_err("'maybe' is no boolean")
+            .to_string();
+
+        assert!(error.contains("use_pruning"), "{error}");
+        assert!(error.contains("maybe"), "{error}");
+    }
 }

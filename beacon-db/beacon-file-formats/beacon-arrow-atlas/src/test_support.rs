@@ -351,3 +351,121 @@ pub async fn empty(dir: &Path) {
         .expect("create the collection");
     writer.finish().await.expect("finish the collection");
 }
+
+/// A wide collection on two dimensions, `profile` and `level`.
+///
+/// Dataset `i` is named `set{i}` and holds `shapes[i]` as
+/// `(profiles, levels)`. The pairs differ per dataset, so a row count is a sum
+/// and not a product.
+///
+/// Four arrays live on `profile` alone: `latitude`, `longitude`, `time` and
+/// `platform`. Four live on `profile` and `level`: `pressure`, `temperature`,
+/// `salinity` and `quality`. So a read narrowed to `profile` keeps the first
+/// four and drops the rest.
+///
+/// Every array carries four attributes, so the collection is wide. A predicate
+/// column then sits far past the length of a small projection, which is what a
+/// projection pushed down after a filter has to be re-indexed against.
+///
+/// `temperature` holds `100 * i + level`, so each dataset owns a disjoint
+/// range and a predicate over it has a known answer.
+pub async fn wide_profiles(dir: &Path, shapes: &[(usize, usize)]) {
+    let writer = AtlasWriter::create_path(dir, WriterConfig::default())
+        .await
+        .expect("create the collection");
+
+    for (index, &(profiles, levels)) in shapes.iter().enumerate() {
+        let mut set = writer
+            .add_dataset(&format!("set{index}"))
+            .await
+            .expect("add a dataset");
+        let flat = vec!["profile".to_string()];
+        let grid = vec!["profile".to_string(), "level".to_string()];
+
+        set.define_array::<f64>("latitude", flat.clone(), vec![profiles], None, None)
+            .await
+            .expect("define latitude");
+        set.define_array::<f64>("longitude", flat.clone(), vec![profiles], None, None)
+            .await
+            .expect("define longitude");
+        set.define_array::<TimestampNs>("time", flat.clone(), vec![profiles], None, None)
+            .await
+            .expect("define time");
+        set.define_array::<String>("platform", flat, vec![profiles], None, None)
+            .await
+            .expect("define platform");
+        for name in ["pressure", "temperature", "salinity"] {
+            set.define_array::<f32>(name, grid.clone(), vec![profiles, levels], None, None)
+                .await
+                .unwrap_or_else(|e| panic!("define {name}: {e}"));
+        }
+        set.define_array::<String>("quality", grid, vec![profiles, levels], None, None)
+            .await
+            .expect("define quality");
+
+        let latitudes: Vec<f64> = (0..profiles).map(|p| 10.0 + p as f64).collect();
+        let longitudes: Vec<f64> = (0..profiles).map(|p| 100.0 + p as f64).collect();
+        let times: Vec<TimestampNs> = (0..profiles)
+            .map(|p| TimestampNs(EPOCH_NANOS + p as i64 * DAY_NANOS))
+            .collect();
+        let platforms: Vec<String> = (0..profiles).map(|_| format!("set{index}")).collect();
+        set.write_array("latitude", vec![0], arr1(&latitudes).into_dyn().view())
+            .await
+            .expect("write latitude");
+        set.write_array("longitude", vec![0], arr1(&longitudes).into_dyn().view())
+            .await
+            .expect("write longitude");
+        set.write_array("time", vec![0], arr1(&times).into_dyn().view())
+            .await
+            .expect("write time");
+        set.write_array("platform", vec![0], arr1(&platforms).into_dyn().view())
+            .await
+            .expect("write platform");
+
+        let shape = IxDyn(&[profiles, levels]);
+        let base = 100.0 * index as f32;
+        let pressure = ArrayD::from_shape_fn(shape.clone(), |i| i[1] as f32);
+        let temperature = ArrayD::from_shape_fn(shape.clone(), |i| base + i[1] as f32);
+        let salinity = ArrayD::from_shape_fn(shape.clone(), |i| 30.0 + i[1] as f32);
+        let quality = ArrayD::from_shape_fn(shape, |_| "1".to_string());
+        set.write_array("pressure", vec![0, 0], pressure.view())
+            .await
+            .expect("write pressure");
+        set.write_array("temperature", vec![0, 0], temperature.view())
+            .await
+            .expect("write temperature");
+        set.write_array("salinity", vec![0, 0], salinity.view())
+            .await
+            .expect("write salinity");
+        set.write_array("quality", vec![0, 0], quality.view())
+            .await
+            .expect("write quality");
+
+        // The attributes make the collection wide. Four per array, so the
+        // column count is well past the arrays alone.
+        for name in [
+            "latitude",
+            "longitude",
+            "time",
+            "platform",
+            "pressure",
+            "temperature",
+            "salinity",
+            "quality",
+        ] {
+            set.set_array_attribute(name, "long_name", Attr::String(format!("the {name}")))
+                .expect("set long_name");
+            set.set_array_attribute(name, "units", Attr::String("1".into()))
+                .expect("set units");
+            set.set_array_attribute(name, "valid_min", Attr::Float64(-1000.0))
+                .expect("set valid_min");
+            set.set_array_attribute(name, "valid_max", Attr::Float64(1000.0))
+                .expect("set valid_max");
+        }
+        set.set_attribute("title", Attr::String("wide profiles".into()));
+        set.set_attribute("institution", Attr::String("test".into()));
+        set.finish().await.expect("finish a dataset");
+    }
+
+    writer.finish().await.expect("finish the collection");
+}

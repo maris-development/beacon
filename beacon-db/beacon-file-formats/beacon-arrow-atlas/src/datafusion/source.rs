@@ -42,7 +42,9 @@ use datafusion::{
     },
     error::{DataFusionError, Result},
     physical_expr::{
-        PhysicalExpr, conjunction, projection::ProjectionExprs, utils::collect_columns,
+        PhysicalExpr, conjunction,
+        projection::ProjectionExprs,
+        utils::{collect_columns, reassign_expr_columns},
     },
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
@@ -370,6 +372,14 @@ impl AtlasDatasets {
             return Arc::new(CandidateFilter::KeepAll);
         }
 
+        // The predicate is indexed against the table schema, the pruning
+        // engine reads it against the projected one. A projection pushed down
+        // after the filter leaves the two out of step, so the columns are
+        // re-indexed by name here.
+        let Ok(predicate) = reassign_expr_columns(predicate, &self.logical_schema) else {
+            return Arc::new(CandidateFilter::KeepAll);
+        };
+
         let started = Instant::now();
         let atlas = Arc::clone(atlas);
         let schema = Arc::clone(&self.logical_schema);
@@ -405,7 +415,9 @@ impl AtlasDatasets {
     /// changed.
     async fn projected_names(&self, view: &DatasetView) -> Result<Option<Vec<String>>> {
         if self.projected_schema.fields().is_empty() {
-            return Ok(count_driver(view).await?.map(|driver| vec![driver]));
+            return Ok(count_driver(view, self.read_dimensions.as_deref())
+                .await?
+                .map(|driver| vec![driver]));
         }
 
         let mut names: Vec<String> = self
@@ -437,7 +449,15 @@ impl AtlasDatasets {
 /// `None` for a dataset with no readable array, and the caller then builds what
 /// there is — an attribute-only dataset contributes the one row its scalars
 /// define.
-async fn count_driver(view: &DatasetView) -> Result<Option<String>> {
+///
+/// `read_dimensions` rules out the arrays the narrowing after the build would
+/// drop. The widest array of a dataset is the one on the most dimensions, and
+/// a query that asked for fewer would lose exactly that one and leave the read
+/// with no grid at all.
+async fn count_driver(
+    view: &DatasetView,
+    read_dimensions: Option<&[String]>,
+) -> Result<Option<String>> {
     let readable: Vec<String> = view
         .schema()
         .iter()
@@ -453,6 +473,14 @@ async fn count_driver(view: &DatasetView) -> Result<Option<String>> {
                 view.name()
             ))
         })?;
+        if let Some(wanted) = read_dimensions
+            && !layout
+                .dimension_names()
+                .iter()
+                .all(|dim| wanted.iter().any(|kept| kept == dim))
+        {
+            continue;
+        }
         let cells = layout.element_count();
         if widest.as_ref().is_none_or(|(_, held)| cells > *held) {
             widest = Some((array, cells));

@@ -201,9 +201,23 @@ pub fn project_read_dimensions(
     log_label: Option<&str>,
 ) -> anyhow::Result<AnyDataset> {
     match resolve_read_dimensions(&dataset, read_dimensions, log_label) {
-        Some(dims) => dataset
-            .project(&DatasetProjection::new_with_dimension_projection(dims))
-            .map_err(|e| anyhow::anyhow!("Failed to project the atlas dataset by dimension: {e}")),
+        Some(dims) => {
+            // A projection names the dimensions of a whole collection, and one
+            // dataset need not hold them all. Narrowing to those it does hold
+            // drops the same arrays — an array survives only when every one of
+            // its own dimensions is kept, and a dimension this dataset lacks
+            // cannot be one of them — and leaves an all-scalar projection with
+            // nothing to narrow rather than an unknown dimension to refuse.
+            let held: Vec<String> = dims
+                .into_iter()
+                .filter(|dim| dataset.dataset().dimensions.contains_key(dim))
+                .collect();
+            dataset
+                .project(&DatasetProjection::new_with_dimension_projection(held))
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to project the atlas dataset by dimension: {e}")
+                })
+        }
         None => Ok(dataset),
     }
 }
@@ -800,5 +814,135 @@ mod tests {
             !columns.contains(&"temperature"),
             "a 2-D array does not fit a 1-D grid: {columns:?}"
         );
+    }
+    // ── a wide collection on two dimensions ─────────────────────────────
+
+    /// The shapes every test in this section reads: three datasets whose
+    /// profile and level counts all differ.
+    const WIDE: &[(usize, usize)] = &[(3, 4), (5, 4), (2, 6)];
+
+    /// A dataset per name the writer added, in write order.
+    #[tokio::test]
+    async fn a_wide_collection_lists_every_dataset() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let atlas = test_support::open(tmp.path()).await;
+
+        assert_eq!(atlas.list_datasets(), vec!["set0", "set1", "set2"]);
+    }
+
+    /// The footer types every array without a segment read, so this is what one
+    /// open already knows.
+    #[tokio::test]
+    async fn every_dataset_of_a_wide_collection_declares_the_same_arrays() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let atlas = test_support::open(tmp.path()).await;
+
+        for name in atlas.list_datasets() {
+            let view = atlas.dataset(&name).expect("the dataset is listed");
+            assert_eq!(view.schema().len(), 8, "{name} declares eight arrays");
+        }
+    }
+
+    /// The datasets share one interned schema, so the merge derives once.
+    #[tokio::test]
+    async fn a_wide_collection_types_every_column_from_the_footer() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let atlas = test_support::open(tmp.path()).await;
+        let schema = collection_schema(&atlas, None, "wide", &widening())
+            .await
+            .unwrap();
+
+        // Eight arrays, four attributes each, and two dataset attributes.
+        assert_eq!(schema.fields().len(), 42);
+
+        let column = |name: &str| {
+            schema
+                .field_with_name(name)
+                .unwrap_or_else(|_| panic!("{name} is a column of the collection"))
+                .data_type()
+                .clone()
+        };
+        // Atlas has a native timestamp, so `time` arrives as one.
+        assert_eq!(
+            column("time"),
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(column("latitude"), DataType::Float64);
+        assert_eq!(column("temperature"), DataType::Float32);
+        assert_eq!(column("platform"), DataType::Utf8);
+        // An attribute is a column under `{array}.{attr}`, and a dataset
+        // attribute under `.{attr}`.
+        assert_eq!(column("temperature.units"), DataType::Utf8);
+        assert_eq!(column("temperature.valid_max"), DataType::Float64);
+        assert_eq!(column(".title"), DataType::Utf8);
+    }
+
+    /// `profile` and `level` are the two dimensions. A list that holds only the
+    /// first keeps the arrays on it and drops the arrays that need both.
+    #[tokio::test]
+    async fn narrowing_to_one_dimension_drops_the_two_dimensional_arrays() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let atlas = test_support::open(tmp.path()).await;
+        let dims = ["profile".to_string()];
+        let schema = collection_schema(&atlas, Some(&dims), "wide", &widening())
+            .await
+            .unwrap();
+
+        // The four grid arrays are gone; their attributes are scalars and stay.
+        assert_eq!(schema.fields().len(), 38);
+        for kept in ["latitude", "longitude", "time", "platform"] {
+            assert!(
+                schema.field_with_name(kept).is_ok(),
+                "{kept} is per profile"
+            );
+        }
+        for dropped in ["pressure", "temperature", "salinity", "quality"] {
+            assert!(
+                schema.field_with_name(dropped).is_err(),
+                "{dropped} needs level as well"
+            );
+        }
+        assert!(schema.field_with_name("temperature.units").is_ok());
+    }
+
+    /// A projection that names only attributes builds a dataset of scalars.
+    /// A narrowing by a dimension no surviving array carries must leave it
+    /// alone, and not refuse a dimension the dataset no longer has.
+    #[tokio::test]
+    async fn narrowing_an_attribute_only_dataset_keeps_its_scalars() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let view = view(tmp.path(), "set0").await;
+        let dataset = dataset_from_view(
+            view,
+            Some(&["temperature.units".to_string(), ".title".to_string()]),
+        )
+        .await
+        .unwrap();
+
+        let narrowed =
+            project_read_dimensions(dataset, Some(vec!["profile".to_string()]), None).unwrap();
+        assert_eq!(names(&narrowed), vec![".title", "temperature.units"]);
+    }
+
+    /// The values themselves, out of the first dataset.
+    #[tokio::test]
+    async fn wide_collection_array_values_read_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::wide_profiles(tmp.path(), WIDE).await;
+        let view = view(tmp.path(), "set0").await;
+        let dataset = dataset_from_view(
+            view,
+            Some(&["latitude".to_string(), "temperature".to_string()]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(dataset.get_array("latitude").unwrap().shape(), &[3]);
+        assert_eq!(dataset.get_array("temperature").unwrap().shape(), &[3, 4]);
     }
 }
