@@ -225,6 +225,56 @@ async fn create_external_table_from_fields() {
     assert_eq!(count_rows(&router, &admin, "ext_obs").await, 3);
 }
 
+/// The configured default table is a name an external table can claim. The
+/// startup stand-in yields it, so no `DROP TABLE` has to come first.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_external_table_takes_the_default_table_name() {
+    let (router, _lake, cfg) = app(config(false)).await;
+    let admin = admin(&cfg);
+    let default_table = cfg.sql.default_table.clone();
+    place_dataset(&cfg, "obs/a.csv", "v\n1\n2\n3\n");
+
+    // The stand-in holds the name, and it is column-less.
+    assert_eq!(count_rows(&router, &admin, r#""default""#).await, 0);
+
+    let created = send(
+        &router,
+        json_req(
+            "POST",
+            "/api/admin/external-tables",
+            json!({ "name": default_table, "location": "obs/", "file_type": "CSV" }),
+            Some(&admin),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        created.status,
+        StatusCode::OK,
+        "the stand-in should not block the create, got: {}",
+        String::from_utf8_lossy(&created.body)
+    );
+    assert_eq!(count_rows(&router, &admin, r#""default""#).await, 3);
+
+    // The endpoint that reports the default table now answers with the real one.
+    let schema = send(
+        &router,
+        req(
+            "GET",
+            "/api/default-table-schema",
+            Some(&admin),
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(schema.status, StatusCode::OK);
+    let body = String::from_utf8_lossy(&schema.body).to_string();
+    assert!(
+        body.contains("\"v\""),
+        "the default-table schema should report the external table's column, got: {body}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn create_external_table_rejects_an_unknown_format() {
     let (router, _lake, cfg) = app(config(false)).await;
