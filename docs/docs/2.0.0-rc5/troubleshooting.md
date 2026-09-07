@@ -141,7 +141,21 @@ BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first
 The table then reports the type of the first file. Every other file casts to it, and a value that
 type cannot hold reads as `NULL`. The first file is the first in listing order, so a store that
 lists in two orders reports two types. A numeric pair, such as `Int32` beside `Float64`, widens
-either way. See [Configuration](/docs/2.0.0-rc5/server/configuration#query-engine).
+either way.
+
+A number beside a string is no conflict in numpy: the number reads as text. Take the numpy
+strategy to apply that rule, and the rest of the promotion table of `numpy.result_type`:
+
+```bash
+BEACON_TYPE_WIDENING_STRATEGY=numpy
+```
+
+The column then reports `Utf8`, and the scan writes each number as text. No value is lost, and the
+listing order does not change the result. The numpy strategy also joins a boolean with a number, a
+`Float16` with the other floats, and a date with a timestamp. The default strategy refuses each of
+those pairs. A number beside a timestamp stays a conflict under both strategies, and
+`BEACON_TYPE_WIDENING_ON_CONFLICT` settles it. See
+[Configuration](/docs/2.0.0-rc5/server/configuration#query-engine).
 
 ### New files do not appear
 

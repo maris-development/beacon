@@ -35,7 +35,7 @@ use std::sync::Arc;
 use beacon_auth::{AuthIdentity, Credential, ANONYMOUS_USERNAME};
 use beacon_common::FileStatsConfig;
 use beacon_datafusion_ext::listing_factory::DefaultStore;
-use beacon_datafusion_ext::type_widening::TypeConflict;
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, TypeConflict};
 use datafusion::scalar::ScalarValue;
 use tokio::runtime::Handle;
 
@@ -234,6 +234,11 @@ pub struct OpenOptions {
     /// The container file is still opened with an exclusive lock, so this is a per-connection
     /// writability guarantee, not (yet) multi-process concurrent access.
     pub read_only: bool,
+    /// A merge rule of the embedder's own, such as
+    /// [`NumpyArrowTypeWidening`](beacon_datafusion_ext::type_widening::NumpyArrowTypeWidening).
+    /// It replaces the default rule and [`Self::type_conflict`]. `None` takes the
+    /// default rule with that setting.
+    pub type_widening: Option<Arc<dyn ArrowTypeWideningStrategy>>,
     /// What a schema merge does with a column that no type holds, e.g. a number
     /// in one file and a string in another. Defaults to [`TypeConflict::Fail`],
     /// which refuses such a collection.
@@ -284,6 +289,15 @@ impl OpenOptions {
 
     pub fn with_nd_pipeline(mut self, enabled: bool) -> Self {
         self.nd_pipeline = enabled;
+        self
+    }
+
+    /// Set the rule for every schema merge, in place of the default rule.
+    ///
+    /// The rule carries its own conflict setting, so
+    /// [`with_type_conflict`](Self::with_type_conflict) does not apply to it.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = Some(strategy);
         self
     }
 
@@ -392,7 +406,10 @@ impl Database {
         if options.nd_pipeline {
             builder = builder.with_nd_pipeline();
         }
-        builder = builder.with_type_conflict(options.type_conflict);
+        builder = match options.type_widening.clone() {
+            Some(strategy) => builder.with_type_widening(strategy),
+            None => builder.with_type_conflict(options.type_conflict),
+        };
         if let Some(datasets) = &options.datasets {
             builder = builder.with_default_store(datasets.url.clone(), datasets.root.clone());
         }

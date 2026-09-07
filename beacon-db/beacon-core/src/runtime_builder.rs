@@ -255,6 +255,8 @@ impl RuntimeBuilder {
     /// The default is
     /// [`DefaultArrowTypeWidening`](beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening).
     /// It unions the fields that agree and refuses the rest.
+    /// [`NumpyArrowTypeWidening`](beacon_datafusion_ext::type_widening::NumpyArrowTypeWidening)
+    /// promotes as `numpy.result_type` does.
     pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
         self.type_widening = Some(strategy);
         self

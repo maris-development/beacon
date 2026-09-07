@@ -620,6 +620,7 @@ async fn the_caller_can_name_the_merge_rule() {
     /// A rule of its own: keep the first type seen for a column instead of
     /// refusing the second. Order-sensitive by construction, so it says so and
     /// the merge folds it over every schema in order.
+    #[derive(Debug)]
     struct FirstTypeWins;
 
     impl ArrowTypeWideningStrategy for FirstTypeWins {
