@@ -515,16 +515,16 @@ pub(crate) async fn create_table(
 ) -> anyhow::Result<Option<SendableRecordBatchStream>> {
     let table_name = name.table().to_string();
 
-    // The default-table stand-in holds its name only until a real table takes it,
-    // so it never blocks a create.
-    let occupied = session.table_exist(name.clone())?
-        && !crate::schema_persistence::default_table::holds_placeholder(session, name.clone())
-            .await;
-    if occupied {
+    if session.table_exist(name.clone())? {
         if if_not_exists {
             return Ok(None);
         }
-        return Err(anyhow::anyhow!("Table '{table_name}' already exists"));
+        return Err(crate::schema_persistence::default_table::already_exists_error(
+            session,
+            name.clone(),
+            "Table",
+        )
+        .await);
     }
 
     let arrow_schema = child.schema();

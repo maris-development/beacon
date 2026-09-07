@@ -225,17 +225,34 @@ async fn create_external_table_from_fields() {
     assert_eq!(count_rows(&router, &admin, "ext_obs").await, 3);
 }
 
-/// The configured default table is a name an external table can claim. The
-/// startup stand-in yields it, so no `DROP TABLE` has to come first.
+/// The operator cycle over HTTP: drop the startup stand-in, then create an
+/// external table under the default-table name. The endpoint that reports the
+/// default table then answers with the real one.
 #[tokio::test(flavor = "multi_thread")]
-async fn create_external_table_takes_the_default_table_name() {
+async fn an_external_table_takes_the_default_table_name_after_a_drop() {
     let (router, _lake, cfg) = app(config(false)).await;
     let admin = admin(&cfg);
     let default_table = cfg.sql.default_table.clone();
     place_dataset(&cfg, "obs/a.csv", "v\n1\n2\n3\n");
 
-    // The stand-in holds the name, and it is column-less.
+    // The stand-in holds the name, and it is empty.
     assert_eq!(count_rows(&router, &admin, r#""default""#).await, 0);
+    let dropped = send(
+        &router,
+        json_req(
+            "POST",
+            "/api/query",
+            json!({ "sql": r#"DROP TABLE "default""# }),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert_eq!(
+        dropped.status,
+        StatusCode::OK,
+        "the drop should succeed, got: {}",
+        String::from_utf8_lossy(&dropped.body)
+    );
 
     let created = send(
         &router,
@@ -251,12 +268,11 @@ async fn create_external_table_takes_the_default_table_name() {
     assert_eq!(
         created.status,
         StatusCode::OK,
-        "the stand-in should not block the create, got: {}",
+        "the freed name should accept the external table, got: {}",
         String::from_utf8_lossy(&created.body)
     );
     assert_eq!(count_rows(&router, &admin, r#""default""#).await, 3);
 
-    // The endpoint that reports the default table now answers with the real one.
     let schema = send(
         &router,
         req(

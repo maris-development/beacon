@@ -5,10 +5,12 @@
 //! plans on a fresh database, and drops the stand-in as soon as a real table
 //! takes the name.
 //!
+//! A `CREATE` statement on that name fails, as it does on any other table that
+//! exists. Run `DROP TABLE` first to take the name.
+//!
 //! The stand-in is a distinct type, not a bare
 //! [`EmptyTable`](datafusion::datasource::empty::EmptyTable), so the `CREATE`
-//! paths recognize it. A `CREATE` statement replaces the stand-in instead of
-//! reporting that the table exists.
+//! paths recognize it and say that in the error.
 
 use std::{any::Any, sync::Arc};
 
@@ -70,12 +72,28 @@ impl TableProvider for DefaultTablePlaceholder {
 }
 
 /// True when `name` holds nothing but the default-table stand-in.
-///
-/// The `CREATE` paths call this to tell an occupied name from a name that only
-/// carries the stand-in: the second one is free to take.
 pub async fn holds_placeholder(session_ctx: &SessionContext, name: TableReference) -> bool {
     match session_ctx.table_provider(name).await {
         Ok(provider) => provider.as_any().is::<DefaultTablePlaceholder>(),
         Err(_) => false,
     }
+}
+
+/// The reason a `CREATE` statement refuses `name`.
+///
+/// A name the stand-in holds looks free to the user, because no one made that
+/// table. The message therefore names the stand-in and says how to free the name.
+pub async fn already_exists_error(
+    session_ctx: &SessionContext,
+    name: TableReference,
+    subject: &str,
+) -> anyhow::Error {
+    let table = name.table().to_string();
+    if holds_placeholder(session_ctx, name).await {
+        return anyhow::anyhow!(
+            "{subject} '{table}' already exists. Beacon creates it at startup as the default \
+             table. Run `DROP TABLE \"{table}\"` first to take the name."
+        );
+    }
+    anyhow::anyhow!("{subject} '{table}' already exists")
 }

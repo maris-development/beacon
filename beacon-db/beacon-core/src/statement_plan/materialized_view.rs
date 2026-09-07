@@ -43,16 +43,13 @@ pub(crate) async fn create_materialized_view(
 ) -> anyhow::Result<()> {
     let table_ref = crate::table_name::table_reference(name);
 
-    // The default-table stand-in holds its name only until a real table takes it,
-    // so it never blocks a create.
-    let occupied = session_ctx.table_exist(table_ref.clone())?
-        && !crate::schema_persistence::default_table::holds_placeholder(
+    if session_ctx.table_exist(table_ref.clone())? {
+        return Err(crate::schema_persistence::default_table::already_exists_error(
             session_ctx,
             table_ref.clone(),
+            "Materialized view",
         )
-        .await;
-    if occupied {
-        return Err(anyhow::anyhow!("Materialized view '{name}' already exists"));
+        .await);
     }
 
     // Execute the defining query and persist its result as a single Parquet file

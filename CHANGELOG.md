@@ -317,18 +317,16 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
-- **The default table is a name you can claim.** At startup Beacon registers an empty stand-in
-  table, so a JSON query without a `from` field reports no missing table. That stand-in blocked
-  the name. `CREATE TABLE "default" (id BIGINT)` answered `Table 'default' already exists`, and a
-  `CREATE MATERIALIZED VIEW` on the same name answered the same way, while `CREATE EXTERNAL TABLE`
-  replaced the stand-in without a word. The stand-in now gives up the name to the first real
-  table, whichever `CREATE` statement makes it. No `DROP TABLE` is necessary first. Only the
-  stand-in yields: a real table under that name still refuses a second `CREATE TABLE` or
-  `CREATE MATERIALIZED VIEW`. It also keeps the name across a restart, because startup registers
-  the stand-in only for a name no loaded table holds. The stand-in also takes the configured name. `BEACON_DEFAULT_TABLE=observations` created a table called `default` and
-  left `observations` missing, so a `from`-less query failed on a fresh server. It now creates
-  `observations`. See
-  [Configuration](docs/docs/2.0.0-rc5/server/configuration.md#the-default-table).
+- **The default table takes the name you configured.** At startup Beacon registers an empty
+  stand-in table, so a JSON query without a `from` field reports no missing table. The stand-in
+  ignored `BEACON_DEFAULT_TABLE` and always took the literal name `default`. A server started with
+  `BEACON_DEFAULT_TABLE=observations` therefore held a table called `default`, left `observations`
+  missing, and answered a `from`-less query with a missing-table error. Startup now registers the
+  stand-in under the configured name. The rest of the rule is unchanged and now under test: Beacon
+  fills that name only when the name is free, so your own table under it survives a restart, and a
+  `CREATE` on a name a table holds still fails. That last error now names the stand-in and tells
+  you to run `DROP TABLE` first, because a table nobody made is a confusing thing to collide with.
+  See [Configuration](docs/docs/2.0.0-rc5/server/configuration.md#the-default-table).
 - **A long query no longer makes the API unreachable.** The HTTP API, Flight SQL and every query
   shared one Tokio runtime of `BEACON_WORKER_THREADS` threads. A scan holds a thread until a
   partition yields, and one query starts as many partitions as the machine has cores, so a long

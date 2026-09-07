@@ -52,8 +52,9 @@ async fn rows_from_default_table(rt: &TestRuntime) -> usize {
 }
 
 /// Fills a runtime's configured default table with `row_count` rows of `id`.
-/// The startup stand-in yields the name, so no `DROP` is needed first.
+/// The startup stand-in holds the name, so drop it before the create.
 async fn fill_default_table(rt: &TestRuntime, table: &str, row_count: usize) {
+    rt.sql(&format!("DROP TABLE {table}")).await;
     rt.sql(&format!("CREATE TABLE {table} (id BIGINT)")).await;
     let values = (1..=row_count)
         .map(|row| format!("({row})"))

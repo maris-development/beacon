@@ -85,13 +85,23 @@ rejects that `CREATE`. Beacon never writes plaintext.
 
 ### The default table
 
-At startup Beacon puts an empty stand-in table under the `BEACON_DEFAULT_TABLE` name.
-The stand-in keeps a JSON query without a `from` field from a missing-table error.
+Beacon fills the `BEACON_DEFAULT_TABLE` name only when the name is free. At startup
+it puts an empty stand-in table there. The stand-in keeps a JSON query without a
+`from` field from a missing-table error.
 
-The stand-in gives up the name to the first real table. Use `CREATE TABLE`,
-`CREATE EXTERNAL TABLE`, `CREATE VIEW` or `CREATE MATERIALIZED VIEW` on that
-name. No `DROP TABLE` is necessary first. Your table then holds the name, and it
-survives a restart.
+To put your own table under that name, drop the stand-in first:
+
+```sql
+DROP TABLE "default";
+CREATE EXTERNAL TABLE "default" STORED AS PARQUET LOCATION 'obs/';
+```
+
+Beacon then leaves the name alone. Your table holds it after a restart, because
+startup adds a stand-in only for a free name. Drop your table and Beacon puts a
+stand-in back on the next start.
+
+A `CREATE` on a name that a table holds fails, the stand-in included. The error
+names the stand-in and tells you to drop it.
 
 ### SQL result-stream coalescing
 

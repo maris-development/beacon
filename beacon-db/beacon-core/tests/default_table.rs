@@ -1,9 +1,9 @@
-//! The default table (`sql.default_table`) is a name, not a fixed table.
+//! The default table (`sql.default_table`) is a name Beacon fills only when it is free.
 //!
-//! Beacon registers an empty stand-in under that name so a `from`-less JSON query
-//! plans on a fresh database. These tests prove the stand-in yields: any `CREATE`
-//! statement takes the name, the resulting table persists, and a real table under
-//! that name is never replaced.
+//! At startup Beacon registers an empty stand-in under that name, so a `from`-less
+//! JSON query plans on a fresh database. The stand-in is an ordinary table: a
+//! `CREATE` on that name fails, and you run `DROP TABLE` first to take it. Once a
+//! real table holds the name, Beacon leaves it alone, restart included.
 
 mod common;
 
@@ -34,80 +34,31 @@ async fn rows_without_from(rt: &common::TestRuntime) -> usize {
     common::total_rows(&batches)
 }
 
-/// `CREATE TABLE` takes the default-table name without a `DROP` first: the
-/// stand-in is a placeholder, not a table the user has to clear out of the way.
+/// The stand-in is an ordinary table: `CREATE TABLE` on its name fails. The error
+/// names the stand-in, because no user made that table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_table_takes_the_default_table_name() {
-    let rt = common::runtime("default-create-table").await;
-
-    rt.sql(r#"CREATE TABLE "default" (id BIGINT)"#).await;
-    rt.sql(r#"INSERT INTO "default" VALUES (1), (2)"#).await;
-
-    let rows = rt.sql(r#"SELECT count(*) FROM "default""#).await;
-    assert_eq!(common::scalar_i64(&rows), 2);
-    assert_eq!(
-        rows_without_from(&rt).await,
-        2,
-        "a from-less JSON query should read the table the user created"
-    );
-}
-
-/// A real table under the default-table name still blocks a second `CREATE TABLE`.
-/// Only the stand-in yields.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_real_default_table_blocks_a_second_create() {
-    let rt = common::runtime("default-create-twice").await;
-    rt.sql(r#"CREATE TABLE "default" (id BIGINT)"#).await;
+async fn create_table_fails_while_the_stand_in_holds_the_name() {
+    let rt = common::runtime("default-create-blocked").await;
 
     let error = rt
         .try_sql(r#"CREATE TABLE "default" (id BIGINT)"#)
         .await
-        .expect_err("a real table must not be overwritten");
+        .expect_err("the name is taken, so the create should fail");
 
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("already exists"),
-        "unexpected error: {error}"
+        message.contains("already exists"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("DROP TABLE"),
+        "the error should say how to free the name: {message}"
     );
 }
 
-/// `CREATE VIEW` takes the default-table name too.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_view_takes_the_default_table_name() {
-    let rt = common::runtime("default-view").await;
-
-    rt.sql(r#"CREATE VIEW "default" AS SELECT 1 AS id"#).await;
-
-    assert_eq!(rows_without_from(&rt).await, 1);
-}
-
-/// `DROP` then `CREATE EXTERNAL TABLE` leaves a table called `default`, and the
-/// startup stand-in does not take the name back on the next start.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_external_default_table_survives_a_restart() {
-    let rt = common::restartable_runtime("default-external", |b| b).await;
-    common::write_file(&rt.datasets_dir().join("obs/a.csv"), "id,v\n1,2\n3,4\n");
-
-    rt.sql(r#"DROP TABLE "default""#).await;
-    rt.sql(r#"CREATE EXTERNAL TABLE "default" STORED AS CSV LOCATION 'obs/'"#)
-        .await;
-    assert_eq!(
-        common::scalar_i64(&rt.sql(r#"SELECT count(*) FROM "default""#).await),
-        2
-    );
-
-    let rt = rt.restart().await;
-
-    assert_eq!(
-        common::scalar_i64(&rt.sql(r#"SELECT count(*) FROM "default""#).await),
-        2,
-        "the stand-in must not replace the user's table after a restart"
-    );
-    assert_eq!(rows_without_from(&rt).await, 2);
-}
-
-/// The whole cycle an operator runs: start, `DROP` the stand-in, `CREATE TABLE`
-/// under the same name, restart. The managed table and its rows come back, and
-/// startup registers no stand-in over them.
+/// The cycle an operator runs: `DROP` the stand-in, `CREATE TABLE` under the same
+/// name, restart. The table and its rows come back, and Beacon adds no stand-in
+/// over them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_managed_default_table_survives_a_restart() {
     let rt = common::restartable_runtime("default-managed", |b| b).await;
@@ -132,15 +83,81 @@ async fn a_managed_default_table_survives_a_restart() {
     );
 }
 
-/// `CREATE MATERIALIZED VIEW` takes the default-table name too.
+/// The same cycle with `CREATE EXTERNAL TABLE`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_materialized_view_takes_the_default_table_name() {
+async fn an_external_default_table_survives_a_restart() {
+    let rt = common::restartable_runtime("default-external", |b| b).await;
+    common::write_file(&rt.datasets_dir().join("obs/a.csv"), "id,v\n1,2\n3,4\n");
+
+    rt.sql(r#"DROP TABLE "default""#).await;
+    rt.sql(r#"CREATE EXTERNAL TABLE "default" STORED AS CSV LOCATION 'obs/'"#)
+        .await;
+    assert_eq!(
+        common::scalar_i64(&rt.sql(r#"SELECT count(*) FROM "default""#).await),
+        2
+    );
+
+    let rt = rt.restart().await;
+
+    assert_eq!(
+        common::scalar_i64(&rt.sql(r#"SELECT count(*) FROM "default""#).await),
+        2,
+        "Beacon must not put a stand-in over the user's table after a restart"
+    );
+    assert_eq!(rows_without_from(&rt).await, 2);
+}
+
+/// `CREATE MATERIALIZED VIEW` refuses the name for the same reason, and its error
+/// names the stand-in too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_materialized_view_fails_while_the_stand_in_holds_the_name() {
     let rt = common::runtime("default-materialized-view").await;
 
+    let error = rt
+        .try_sql(r#"CREATE MATERIALIZED VIEW "default" AS SELECT 1 AS id"#)
+        .await
+        .expect_err("the name is taken, so the create should fail");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("already exists") && message.contains("DROP TABLE"),
+        "unexpected error: {message}"
+    );
+
+    // After the drop the name is free.
+    rt.sql(r#"DROP TABLE "default""#).await;
     rt.sql(r#"CREATE MATERIALIZED VIEW "default" AS SELECT 1 AS id"#)
         .await;
-
     assert_eq!(rows_without_from(&rt).await, 1);
+}
+
+/// A dropped default table comes back as an empty stand-in on the next start,
+/// because the name is free again. This is what keeps a `from`-less query planning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_free_name_gets_a_stand_in_on_the_next_start() {
+    let rt = common::restartable_runtime("default-dropped", |b| b).await;
+
+    rt.sql(r#"DROP TABLE "default""#).await;
+    assert!(
+        !common::column_strings(&rt.sql("SHOW TABLES").await, 2)
+            .iter()
+            .any(|name| name == "default"),
+        "the drop should hold for this run"
+    );
+
+    let rt = rt.restart().await;
+
+    assert!(
+        common::column_strings(&rt.sql("SHOW TABLES").await, 2)
+            .iter()
+            .any(|name| name == "default"),
+        "a free default-table name gets a stand-in again"
+    );
+    assert_eq!(
+        common::total_rows(&rt.sql(r#"SELECT * FROM "default""#).await),
+        0,
+        "the fresh stand-in is empty"
+    );
 }
 
 /// The stand-in uses the configured name. A deployment that sets
@@ -170,7 +187,8 @@ async fn the_stand_in_uses_the_configured_name() {
         "the stand-in should be queryable under the configured name"
     );
 
-    // The stand-in yields to a real table under the configured name too.
+    // The configured name behaves like any other: drop, then create.
+    rt.sql("DROP TABLE observations").await;
     rt.sql("CREATE TABLE observations (id BIGINT)").await;
     rt.sql("INSERT INTO observations VALUES (7)").await;
     assert_eq!(rows_without_from(&rt).await, 1);
