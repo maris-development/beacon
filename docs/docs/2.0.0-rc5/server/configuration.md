@@ -82,6 +82,16 @@ rejects that `CREATE`. Beacon never writes plaintext.
 | `BEACON_STATS_CACHE_CAPACITY` | `10000` | Maximum number of per-file statistics entries cached for query pruning. Read once at startup. |
 | `BEACON_TYPE_WIDENING_ON_CONFLICT` | `fail` | What a schema merge does with a column that two files type in two families, such as a number and a string. `fail` refuses the collection and names the column, both types and both files. `keep_first` keeps the type of the first file, casts every other file to it, and reads a value that type cannot hold as null. A numeric pair widens either way. An unknown value logs a warning and reads as `fail`. See [a column has two types](/docs/2.0.0-rc5/troubleshooting#a-column-has-two-types-across-the-files). |
 
+### The default table
+
+At startup Beacon puts an empty stand-in table under the `BEACON_DEFAULT_TABLE` name.
+The stand-in keeps a JSON query without a `from` field from a missing-table error.
+
+The stand-in gives up the name to the first real table. Use `CREATE TABLE`,
+`CREATE EXTERNAL TABLE`, `CREATE VIEW` or `CREATE MATERIALIZED VIEW` on that
+name. No `DROP TABLE` is necessary first. Your table then holds the name, and it
+survives a restart.
+
 ### SQL result-stream coalescing
 
 A query can produce small record batches. Beacon merges them into larger batches

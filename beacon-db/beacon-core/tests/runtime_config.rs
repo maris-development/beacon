@@ -8,6 +8,7 @@ use beacon_core::settings::SqlSettings;
 use beacon_datafusion_ext::listing_factory::RootStore;
 use common::TestRuntime;
 use datafusion::execution::object_store::ObjectStoreUrl;
+use futures::TryStreamExt;
 
 /// Builds a runtime whose `sql.default_table` is `default_table`, on its own temp
 /// root with its own (in-memory) tables store. Config is passed explicitly to the
@@ -30,20 +31,36 @@ fn json_query_without_from() -> Query {
     serde_json::from_str(r#"{"select": [{"column": "id"}]}"#).expect("a valid JSON query body")
 }
 
-/// Reads back the default table a runtime resolves a `from`-less JSON query against.
+/// Reads back how many rows a runtime's `from`-less JSON query returns.
 ///
-/// `Runtime` exposes no config getter — the setting is observed through behavior:
-/// the table is never created, so planning fails with an error naming the exact
-/// table the runtime resolved to.
-async fn resolved_default_table_error(rt: &TestRuntime) -> String {
-    match rt
+/// `Runtime` exposes no config getter, so the setting is observed through
+/// behavior: each runtime holds a distinct number of rows under its own
+/// configured default-table name, and the row count identifies the table the
+/// runtime resolved to.
+async fn rows_from_default_table(rt: &TestRuntime) -> usize {
+    let batches = rt
         .runtime
         .run_query(json_query_without_from(), beacon_core::AuthIdentity::system())
         .await
-    {
-        Ok(_) => panic!("expected the (never-created) default table to be missing"),
-        Err(error) => error.to_string(),
-    }
+        .expect("a from-less query should resolve the configured default table")
+        .into_record_stream()
+        .expect("the result should be a record stream")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the stream should run");
+    common::total_rows(&batches)
+}
+
+/// Fills a runtime's configured default table with `row_count` rows of `id`.
+/// The startup stand-in yields the name, so no `DROP` is needed first.
+async fn fill_default_table(rt: &TestRuntime, table: &str, row_count: usize) {
+    rt.sql(&format!("CREATE TABLE {table} (id BIGINT)")).await;
+    let values = (1..=row_count)
+        .map(|row| format!("({row})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    rt.sql(&format!("INSERT INTO {table} VALUES {values}"))
+        .await;
 }
 
 /// Two runtimes built from different configs in the same process each reflect
@@ -54,23 +71,26 @@ async fn two_runtimes_honor_their_own_config() {
     let rt_alpha = runtime_with_default_table("alpha_table", "alpha").await;
     let rt_bravo = runtime_with_default_table("bravo_table", "bravo").await;
 
-    let alpha = resolved_default_table_error(&rt_alpha).await;
-    assert!(
-        alpha.contains("alpha_table") && !alpha.contains("bravo_table"),
-        "alpha runtime should resolve its own default table: {alpha}"
-    );
+    // Distinct row counts, so a `from`-less query names the table it read.
+    fill_default_table(&rt_alpha, "alpha_table", 1).await;
+    fill_default_table(&rt_bravo, "bravo_table", 2).await;
 
-    let bravo = resolved_default_table_error(&rt_bravo).await;
-    assert!(
-        bravo.contains("bravo_table") && !bravo.contains("alpha_table"),
-        "bravo runtime should resolve its own default table: {bravo}"
+    assert_eq!(
+        rows_from_default_table(&rt_alpha).await,
+        1,
+        "alpha runtime should resolve its own default table"
+    );
+    assert_eq!(
+        rows_from_default_table(&rt_bravo).await,
+        2,
+        "bravo runtime should resolve its own default table"
     );
 
     // The first runtime is unaffected by the second's construction.
-    let alpha_again = resolved_default_table_error(&rt_alpha).await;
-    assert!(
-        alpha_again.contains("alpha_table") && !alpha_again.contains("bravo_table"),
-        "alpha runtime should still resolve its own default table: {alpha_again}"
+    assert_eq!(
+        rows_from_default_table(&rt_alpha).await,
+        1,
+        "alpha runtime should still resolve its own default table"
     );
 }
 

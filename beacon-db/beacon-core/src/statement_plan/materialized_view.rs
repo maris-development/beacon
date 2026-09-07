@@ -43,7 +43,15 @@ pub(crate) async fn create_materialized_view(
 ) -> anyhow::Result<()> {
     let table_ref = crate::table_name::table_reference(name);
 
-    if session_ctx.table_exist(table_ref.clone())? {
+    // The default-table stand-in holds its name only until a real table takes it,
+    // so it never blocks a create.
+    let occupied = session_ctx.table_exist(table_ref.clone())?
+        && !crate::schema_persistence::default_table::holds_placeholder(
+            session_ctx,
+            table_ref.clone(),
+        )
+        .await;
+    if occupied {
         return Err(anyhow::anyhow!("Materialized view '{name}' already exists"));
     }
 

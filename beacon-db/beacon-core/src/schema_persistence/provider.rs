@@ -12,10 +12,8 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use arrow::datatypes::Schema;
 use datafusion::{
     catalog::{MemorySchemaProvider, SchemaProvider, TableProvider},
-    datasource::empty::EmptyTable,
     error::DataFusionError,
     execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
@@ -23,6 +21,7 @@ use datafusion::{
 
 use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
 
+use super::default_table::DefaultTablePlaceholder;
 use super::service::SchemaPersistenceService;
 
 /// Schema provider for `beacon.public` that persists table definitions on
@@ -127,16 +126,18 @@ impl PersistentSchemaProvider {
         self.inner.register_table(name, table)
     }
 
-    /// Register the in-memory `default` table backed by an empty provider.
+    /// Register the in-memory stand-in for `name`, the configured default table.
     ///
-    /// The default table is not persisted; it is recreated on every startup so
-    /// queries against the configured default table always resolve.
-    pub fn ensure_default_table(&self) {
-        if self.inner.table_exist("default") {
+    /// A no-op when `name` already holds a table, so a table the user created
+    /// under that name keeps the name. The stand-in itself is not persisted; it
+    /// is recreated on every startup, so a query against the default table
+    /// always plans.
+    pub fn ensure_default_table(&self, name: &str) {
+        if self.inner.table_exist(name) {
             return;
         }
-        let provider: Arc<dyn TableProvider> = Arc::new(EmptyTable::new(Arc::new(Schema::empty())));
-        let _ = self.inner.register_table("default".to_string(), provider);
+        let provider: Arc<dyn TableProvider> = Arc::new(DefaultTablePlaceholder::new());
+        let _ = self.inner.register_table(name.to_string(), provider);
     }
 }
 
@@ -312,8 +313,8 @@ mod tests {
         let (provider, _ctx, _store) = fixture();
         assert!(!provider.table_exist("default"));
 
-        provider.ensure_default_table();
-        provider.ensure_default_table();
+        provider.ensure_default_table("default");
+        provider.ensure_default_table("default");
 
         assert!(provider.table_exist("default"));
         assert_eq!(
@@ -324,6 +325,40 @@ mod tests {
                 .count(),
             1,
             "the default table should be registered exactly once"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_default_table_uses_the_configured_name() {
+        let (provider, _ctx, _store) = fixture();
+
+        provider.ensure_default_table("observations");
+
+        assert!(provider.table_exist("observations"));
+        assert!(
+            !provider.table_exist("default"),
+            "the stand-in takes the configured name, not the literal 'default'"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_default_table_keeps_an_existing_table() {
+        let (provider, ctx, _store) = fixture();
+        provider
+            .register_table("default".to_string(), view(&ctx, "SELECT 1 AS x").await)
+            .expect("registration should succeed");
+
+        provider.ensure_default_table("default");
+
+        let table = provider
+            .table("default")
+            .await
+            .expect("lookup should succeed")
+            .expect("table should be present");
+        assert_eq!(
+            table.schema().field(0).name(),
+            "x",
+            "the user's table keeps the name; the stand-in must not replace it"
         );
     }
 }
