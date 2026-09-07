@@ -5,9 +5,12 @@
 
 use std::sync::Arc;
 
+use arrow::array::Array;
 use arrow::datatypes::DataType;
 use beacon_arrow_csv::datafusion::CsvFormat;
-use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
+use beacon_datafusion_ext::type_widening::{
+    ArrowTypeWidening, DefaultArrowTypeWidening, NumpyArrowTypeWidening,
+};
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
@@ -336,4 +339,64 @@ async fn a_column_of_two_families_reads_null_under_the_setting() {
     assert_eq!(rows, 4, "both files contribute their rows");
     let nulls: usize = batches.iter().map(|b| b.column(0).null_count()).sum();
     assert_eq!(nulls, 2, "the two strings read as null");
+}
+
+/// The numpy method promotes a number beside a string to the string, as
+/// `numpy.result_type` does. A CSV file holds text, so the reader parses the
+/// column as text and keeps the text of the file: `2`, not `2.0`. No value reads
+/// as null.
+///
+/// A boolean literal beside a number is the pair this reader cannot honour. It
+/// parses each column as the merged type, and `true` parses as no `Int64`. A
+/// typed format casts the value instead. See the `numpy` module docs.
+#[tokio::test]
+async fn the_numpy_method_reads_a_number_beside_a_string_as_text() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.csv"), "v\n1.5\n2\n").expect("write a");
+    std::fs::write(dir.path().join("b.csv"), "v\nabc\ndef\n").expect("write b");
+
+    let config = datafusion::prelude::SessionConfig::new().with_extension(Arc::new(
+        ArrowTypeWidening::new(Arc::new(NumpyArrowTypeWidening::new())),
+    ));
+    let ctx = SessionContext::new_with_config(config);
+    let url = ListingTableUrl::parse(format!("file://{}/", dir.path().display())).expect("url");
+    let format = Arc::new(CsvFormat::new(b',', 1000));
+    let options = ListingOptions::new(format).with_file_extension(".csv");
+    let schema = options
+        .infer_schema(&ctx.state(), &url)
+        .await
+        .expect("numpy promotes a number and a string");
+    assert_eq!(
+        schema.field_with_name("v").unwrap().data_type(),
+        &DataType::Utf8,
+        "the number reads as text"
+    );
+
+    let config = ListingTableConfig::new(url)
+        .with_listing_options(options)
+        .with_schema(schema);
+    ctx.register_table("t", Arc::new(ListingTable::try_new(config).expect("table")))
+        .expect("register");
+
+    let batches = ctx
+        .sql("SELECT v FROM t ORDER BY v")
+        .await
+        .expect("plan")
+        .collect()
+        .await
+        .expect("every file reads as the promoted type");
+    let values = arrow::compute::concat_batches(&batches[0].schema(), &batches).expect("concat");
+    assert_eq!(values.num_rows(), 4, "both files contribute their rows");
+    let v = values
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("Utf8 column");
+    assert_eq!(v.null_count(), 0, "no value reads as null");
+    let texts: Vec<&str> = v.iter().map(|value| value.expect("no null")).collect();
+    assert_eq!(
+        texts,
+        ["1.5", "2", "abc", "def"],
+        "the numbers read as text"
+    );
 }
