@@ -56,6 +56,43 @@ async fn create_table_fails_while_the_stand_in_holds_the_name() {
     );
 }
 
+/// Every `CREATE` statement refuses the name the stand-in holds, and each one
+/// says how to free it. No statement replaces the stand-in quietly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_create_statement_refuses_the_stand_in_name() {
+    let rt = common::runtime("default-create-blocked-all").await;
+    common::write_file(&rt.datasets_dir().join("obs/a.csv"), "id\n1\n");
+
+    for statement in [
+        r#"CREATE TABLE "default" (id BIGINT)"#,
+        r#"CREATE EXTERNAL TABLE "default" STORED AS CSV LOCATION 'obs/'"#,
+        r#"CREATE VIEW "default" AS SELECT 1 AS id"#,
+        r#"CREATE MATERIALIZED VIEW "default" AS SELECT 1 AS id"#,
+    ] {
+        let message = rt
+            .try_sql(statement)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("should fail while the stand-in holds the name: {statement}"))
+            .to_string();
+
+        assert!(
+            message.contains("already exists"),
+            "`{statement}` gave an unexpected error: {message}"
+        );
+        assert!(
+            message.contains("DROP TABLE"),
+            "`{statement}` should say how to free the name: {message}"
+        );
+    }
+
+    // The stand-in is still there, and still empty.
+    assert_eq!(
+        common::total_rows(&rt.sql(r#"SELECT * FROM "default""#).await),
+        0
+    );
+}
+
 /// The cycle an operator runs: `DROP` the stand-in, `CREATE TABLE` under the same
 /// name, restart. The table and its rows come back, and Beacon adds no stand-in
 /// over them.

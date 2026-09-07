@@ -100,8 +100,13 @@ Beacon then leaves the name alone. Your table holds it after a restart, because
 startup adds a stand-in only for a free name. Drop your table and Beacon puts a
 stand-in back on the next start.
 
-A `CREATE` on a name that a table holds fails, the stand-in included. The error
-names the stand-in and tells you to drop it.
+A `CREATE` on a name that a table holds fails, the stand-in included. This covers
+`CREATE TABLE`, `CREATE EXTERNAL TABLE`, `CREATE VIEW` and
+`CREATE MATERIALIZED VIEW`. The error names the stand-in and tells you to drop it.
+
+Three forms take a name that a table holds. `CREATE EXTERNAL TABLE IF NOT EXISTS`
+keeps the table and reports success. `CREATE OR REPLACE EXTERNAL TABLE` and
+`CREATE OR REPLACE VIEW` overwrite it.
 
 ### SQL result-stream coalescing
 

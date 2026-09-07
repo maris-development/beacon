@@ -92,3 +92,116 @@ async fn dropped_external_table_is_gone_and_the_name_is_reusable() {
         "the re-created table should read the new location"
     );
 }
+
+/// A name a table holds is not free. `CREATE EXTERNAL TABLE` refuses it rather
+/// than replacing the table under it, so no statement discards a table silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_external_table_refuses_a_name_a_table_holds() {
+    let rt = runtime("ext-collision").await;
+    write_file(&rt.datasets_dir().join("d/a.csv"), "v\n1\n");
+    write_file(&rt.datasets_dir().join("d2/b.csv"), "v\n1\n2\n");
+    rt.sql("CREATE EXTERNAL TABLE taken STORED AS CSV LOCATION 'd/'")
+        .await;
+
+    let error = rt
+        .try_sql("CREATE EXTERNAL TABLE taken STORED AS CSV LOCATION 'd2/'")
+        .await
+        .expect_err("the second create should fail");
+
+    assert!(
+        error.to_string().contains("already exists"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(*) FROM taken").await),
+        1,
+        "the first table should survive the refused create"
+    );
+}
+
+/// `IF NOT EXISTS` keeps the table that holds the name and reports success.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_external_table_if_not_exists_keeps_the_existing_table() {
+    let rt = runtime("ext-if-not-exists").await;
+    write_file(&rt.datasets_dir().join("d/a.csv"), "v\n1\n");
+    write_file(&rt.datasets_dir().join("d2/b.csv"), "v\n1\n2\n");
+    rt.sql("CREATE EXTERNAL TABLE keep STORED AS CSV LOCATION 'd/'")
+        .await;
+
+    rt.sql("CREATE EXTERNAL TABLE IF NOT EXISTS keep STORED AS CSV LOCATION 'd2/'")
+        .await;
+
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(*) FROM keep").await),
+        1,
+        "the existing table should be untouched"
+    );
+}
+
+/// A view follows the same rule, and `OR REPLACE` is how you swap one.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_view_refuses_a_taken_name_unless_it_replaces() {
+    let rt = runtime("view-collision").await;
+    rt.sql("CREATE VIEW v AS SELECT 1 AS a").await;
+
+    let error = rt
+        .try_sql("CREATE VIEW v AS SELECT 2 AS a")
+        .await
+        .expect_err("the second create should fail");
+    assert!(
+        error.to_string().contains("already exists"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(scalar_i64(&rt.sql("SELECT a FROM v").await), 1);
+
+    rt.sql("CREATE OR REPLACE VIEW v AS SELECT 2 AS a").await;
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT a FROM v").await),
+        2,
+        "OR REPLACE should swap the view"
+    );
+}
+
+/// A view cannot take a table's name either, and the reverse holds too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_and_a_table_do_not_share_a_name() {
+    let rt = runtime("view-table-collision").await;
+    write_file(&rt.datasets_dir().join("d/a.csv"), "v\n1\n");
+    rt.sql("CREATE EXTERNAL TABLE both STORED AS CSV LOCATION 'd/'")
+        .await;
+
+    assert!(
+        rt.try_sql("CREATE VIEW both AS SELECT 1 AS a")
+            .await
+            .is_err(),
+        "a view should not take a table's name"
+    );
+
+    rt.sql("CREATE VIEW only_view AS SELECT 1 AS a").await;
+    assert!(
+        rt.try_sql("CREATE EXTERNAL TABLE only_view STORED AS CSV LOCATION 'd/'")
+            .await
+            .is_err(),
+        "an external table should not take a view's name"
+    );
+}
+
+/// `OR REPLACE` is how you repoint a table without a `DROP`, as the SQL reference
+/// documents.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_or_replace_external_table_repoints_the_name() {
+    let rt = runtime("ext-or-replace").await;
+    write_file(&rt.datasets_dir().join("d/a.csv"), "v\n1\n");
+    write_file(&rt.datasets_dir().join("d2/b.csv"), "v\n1\n2\n");
+    rt.sql("CREATE EXTERNAL TABLE swap STORED AS CSV LOCATION 'd/'")
+        .await;
+
+    rt.sql("CREATE OR REPLACE EXTERNAL TABLE swap STORED AS CSV LOCATION 'd2/'")
+        .await;
+
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(*) FROM swap").await),
+        2,
+        "OR REPLACE should repoint the table at the new location"
+    );
+}

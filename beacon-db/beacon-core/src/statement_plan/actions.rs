@@ -218,10 +218,26 @@ pub(crate) async fn show_secrets(
 
 /// Register a `CREATE EXTERNAL TABLE` via the listing-table factory and persist
 /// it to the catalog.
+///
+/// Errors if a table with `cmd.name` already exists. `IF NOT EXISTS` keeps the
+/// existing table instead, and `OR REPLACE` overwrites it. The guard covers every
+/// `STORED AS` variant below, so no variant replaces a table the user did not drop.
 pub(crate) async fn create_external_table(
     session: &Arc<SessionContext>,
     cmd: &CreateExternalTable,
 ) -> anyhow::Result<()> {
+    if !cmd.or_replace && session.table_exist(cmd.name.clone())? {
+        if cmd.if_not_exists {
+            return Ok(());
+        }
+        return Err(crate::schema_persistence::default_table::already_exists_error(
+            session,
+            cmd.name.clone(),
+            "Table",
+        )
+        .await);
+    }
+
     // `STORED AS REMOTE` registers a federated table pointing at another Beacon
     // instance, rather than a listing table over the datasets store.
     if cmd.file_type.eq_ignore_ascii_case("REMOTE") {
@@ -491,12 +507,25 @@ async fn create_sql_db_table(
 }
 
 /// Register a `CREATE VIEW` as a `ViewTable` (re-plans its query on each scan).
-pub(crate) fn create_view(
+///
+/// Errors if a table or view with `name` already exists. `CREATE OR REPLACE VIEW`
+/// (`or_replace`) swaps it instead.
+pub(crate) async fn create_view(
     session: &Arc<SessionContext>,
     name: &TableReference,
     input: &LogicalPlan,
     definition: &Option<String>,
+    or_replace: bool,
 ) -> anyhow::Result<()> {
+    if !or_replace && session.table_exist(name.clone())? {
+        return Err(crate::schema_persistence::default_table::already_exists_error(
+            session,
+            name.clone(),
+            "View",
+        )
+        .await);
+    }
+
     let table = ViewTable::new(input.clone(), definition.clone());
     session.register_table(name.clone(), Arc::new(table))?;
     Ok(())
