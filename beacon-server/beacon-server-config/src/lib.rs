@@ -515,11 +515,6 @@ struct RawConfig {
     #[envconfig(from = "BEACON_ATLAS_USE_PRUNING", default = "true")]
     atlas_use_pruning: bool,
 
-    /// Whether `ANALYZE FILES` measures the column ranges of an Atlas
-    /// collection. They come from its footer, so they cost no array read.
-    #[envconfig(from = "BEACON_ATLAS_ENABLE_STATISTICS", default = "true")]
-    atlas_enable_statistics: bool,
-
     /// The batch size for NetCDF reads, in number of rows. This is used for both local and MPIO reads.
     #[envconfig(from = "BEACON_BATCH_SIZE", default = "64000")]
     beacon_batch_size: usize,
@@ -716,7 +711,6 @@ impl From<RawConfig> for Config {
                 use_reader_cache: raw.atlas_use_reader_cache,
                 reader_cache_size: raw.atlas_reader_cache_size,
                 use_pruning: raw.atlas_use_pruning,
-                enable_statistics: raw.atlas_enable_statistics,
             },
             bbf: BbfConfig {
                 split_streams_slice: raw.bbf_split_streams_slice,

@@ -35,13 +35,13 @@
 //! derives the Arrow schema of a whole collection. [`compat`] holds the type
 //! and column-name mapping the two share.
 //!
-//! # One dataset is one unit of work
+//! # One collection is one unit of work
 //!
-//! The scan plans one entry per dataset and puts them all in one morsel queue,
-//! as the netCDF and Zarr scans do for their files. A partition takes the next
-//! dataset when it is free, and each dataset is cut on the chunk grid the
-//! writer actually chose, so a dataset stored as one chunk yields one unit and
-//! a chunked one yields many. See [`datafusion::source`].
+//! The scan plans one entry per collection and deals them over the partitions.
+//! A partition opens each collection it holds once, prunes every dataset in one
+//! pass over the footer, and streams the survivors one after another. A pruned
+//! dataset therefore costs nothing, and parallelism is bounded by the
+//! collection count. See [`datafusion::source`].
 //!
 //! # Columns
 //!

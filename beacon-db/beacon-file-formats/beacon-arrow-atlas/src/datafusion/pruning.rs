@@ -94,46 +94,6 @@ impl CandidateFilter {
     }
 }
 
-/// Each collection's [`CandidateFilter`], computed once per scan.
-///
-/// Keyed by the container's path. The predicate and the schema are fixed for a
-/// scan, so the container identifies the answer. Every partition's opener holds
-/// a clone of this cache, and the clones share one store: the first opener to
-/// reach a collection builds the index while the rest await the same future.
-#[derive(Clone)]
-pub struct PruneCache {
-    cache: moka::future::Cache<String, Arc<CandidateFilter>>,
-}
-
-impl PruneCache {
-    pub fn new() -> Self {
-        Self {
-            cache: moka::future::Cache::builder().max_capacity(256).build(),
-        }
-    }
-
-    /// The memoized filter for `key`, computing it with `init` on first use.
-    /// Concurrent callers for one key share the one computation.
-    pub async fn get_or_compute<F>(&self, key: String, init: F) -> Arc<CandidateFilter>
-    where
-        F: std::future::Future<Output = Arc<CandidateFilter>>,
-    {
-        self.cache.get_with(key, init).await
-    }
-}
-
-impl Default for PruneCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Debug for PruneCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PruneCache").finish_non_exhaustive()
-    }
-}
-
 // ─── The index ───────────────────────────────────────────────────────────────
 
 /// One column's statistics, one row per dataset.

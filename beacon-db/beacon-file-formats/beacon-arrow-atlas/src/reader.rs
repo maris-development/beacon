@@ -6,7 +6,6 @@
 //! footer, which the open already held, and its columns fetch their bytes when
 //! the scan asks for them.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow::datatypes::{Schema, SchemaRef};
@@ -202,12 +201,6 @@ pub fn project_read_dimensions(
 ) -> anyhow::Result<AnyDataset> {
     match resolve_read_dimensions(&dataset, read_dimensions, log_label) {
         Some(dims) => {
-            // A projection names the dimensions of a whole collection, and one
-            // dataset need not hold them all. Narrowing to those it does hold
-            // drops the same arrays — an array survives only when every one of
-            // its own dimensions is kept, and a dimension this dataset lacks
-            // cannot be one of them — and leaves an all-scalar projection with
-            // nothing to narrow rather than an unknown dimension to refuse.
             let held: Vec<String> = dims
                 .into_iter()
                 .filter(|dim| dataset.dataset().dimensions.contains_key(dim))
@@ -241,41 +234,20 @@ pub async fn open_dataset(
 /// The Arrow schema of a whole collection: every live dataset, merged.
 ///
 /// Atlas reconciles nothing. Two datasets may declare one array name with two
-/// dtypes, so the collection's schema is the widening merge of its datasets'
+/// dtypes, so the collection's schema is the widening merge of its datasets
 /// schemas, under the rule the session carries.
-///
-/// # One schema per shape, not per dataset
-///
-/// Datasets that declare the same arrays share one interned schema in the
-/// footer, and `atlas create` writes a fleet of files that way. Each dataset is
-/// therefore reduced to a key over its interned schema and its attribute
-/// namespace, and a schema is derived once per distinct key. A thousand
-/// datasets of one shape cost one derivation.
-///
-/// # Cost
-///
-/// Linear in the dataset count, and every step is in memory: the footer keys
-/// its datasets by name, so resolving one is a single hash lookup, and a key is
-/// built from the footer and from segments that one open serves collection
-/// wide. Only the distinct keys are derived into a schema. The result is cached
-/// above this crate, so a table pays even that once rather than once per query.
 pub async fn collection_schema(
     atlas: &Arc<Atlas>,
     read_dimensions: Option<&[String]>,
     label: &str,
     widening: &ArrowTypeWidening,
 ) -> anyhow::Result<SchemaRef> {
-    let mut seen: HashSet<String> = HashSet::new();
     let mut schemas: Vec<LabeledSchema> = Vec::new();
 
     for name in atlas.list_datasets() {
         let view = atlas
             .dataset(&name)
             .map_err(|e| anyhow::anyhow!("Failed to open atlas dataset '{name}': {e}"))?;
-
-        if !seen.insert(shape_key(&view).await?) {
-            continue;
-        }
 
         let dataset = dataset_from_view(Arc::new(view), None).await?;
         // The same narrowing the scan applies, so the schema states what a
@@ -301,75 +273,6 @@ pub async fn collection_schema(
     widening
         .merge_schemas(&schemas)
         .map_err(|e| anyhow::anyhow!("Failed to merge the schemas of the atlas datasets: {e}"))
-}
-
-/// What makes two datasets produce the same columns and types.
-///
-/// Three things decide a dataset's Arrow schema, and the key holds all three:
-///
-/// - The arrays it declares, with their element types. Datasets that declare
-///   the same ones share one interned schema in the footer, and `atlas create`
-///   writes a fleet of files that way.
-/// - Its attribute keys and their types, at both scopes. Those are named in the
-///   interned schema too, so two datasets that differ only in an attribute's
-///   *value* share a key. That is exactly the fleet case.
-/// - Each array's dimension names, which the interned schema does **not** hold.
-///   They pick the default grid, and a different grid keeps different columns,
-///   so two datasets that agree on everything else can still differ here.
-///
-/// A shape is deliberately left out: an array of a different length is the same
-/// column.
-///
-/// # Cost
-///
-/// The names and the types come from the footer. A dimension name comes from
-/// its variable's segment, which one open serves for every dataset of the
-/// collection, so the lookup is in memory after the first.
-async fn shape_key(view: &DatasetView) -> anyhow::Result<String> {
-    let mut key = String::new();
-
-    for (array, dtype) in declared_arrays(view) {
-        key.push('|');
-        key.push_str(&array);
-        key.push(':');
-        key.push_str(&compat::dtype_tag(&dtype));
-
-        // An array Beacon cannot read is no column, so its grid decides
-        // nothing and its segment stays shut.
-        if compat::array_dtype_to_nd(&dtype).is_some() {
-            let layout = view.array_layout(&array).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to read the layout of atlas array '{array}' of dataset '{}': {e}",
-                    view.name()
-                )
-            })?;
-            key.push('@');
-            key.push_str(&layout.dimension_names().join(","));
-        }
-    }
-
-    // Attribute keys and types are in the interned schema, so this reads
-    // nothing. The values are not, and they do not belong in the key.
-    fn push(key: &mut String, array: &str, attr: &str, dtype: &DType) {
-        key.push('|');
-        key.push_str(array);
-        key.push('.');
-        key.push_str(attr);
-        key.push(':');
-        key.push_str(&compat::dtype_tag(dtype));
-    }
-    let schema = view.schema();
-    for meta in schema.iter() {
-        let array = meta.name();
-        for (attr, dtype) in meta.attribute_pairs() {
-            push(&mut key, array, attr, dtype);
-        }
-    }
-    for (attr, dtype) in schema.attribute_pairs() {
-        push(&mut key, "", attr, dtype);
-    }
-
-    Ok(key)
 }
 
 #[cfg(test)]
@@ -763,37 +666,19 @@ mod tests {
     /// gives ten datasets one shape, and they differ only in an attribute
     /// value.
     #[tokio::test]
-    async fn a_fleet_of_one_shape_derives_one_schema() {
+    async fn a_fleet_of_one_shape_merges_to_one_set_of_columns() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::ranged(tmp.path(), 10).await;
         let atlas = test_support::open(tmp.path()).await;
 
         assert_eq!(atlas.interned_schemas(), 1, "the fixture shares its schema");
 
-        let mut keys = HashSet::new();
-        for name in atlas.list_datasets() {
-            keys.insert(shape_key(&atlas.dataset(&name).unwrap()).await.unwrap());
-        }
-        assert_eq!(keys.len(), 1, "and every dataset reduces to one key");
-
+        // Ten datasets, one schema. The merge folds the repeats away.
         let schema = collection_schema(&atlas, None, "c", &widening())
             .await
             .unwrap();
         let columns: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(columns, vec![".platform", "temperature"]);
-    }
-
-    /// Two datasets that share arrays but not attribute *keys* produce two
-    /// column sets, so the key has to separate them.
-    #[tokio::test]
-    async fn a_different_attribute_namespace_is_a_different_shape() {
-        let tmp = tempfile::tempdir().unwrap();
-        test_support::two_datasets(tmp.path()).await;
-        let atlas = test_support::open(tmp.path()).await;
-
-        let winter = shape_key(&atlas.dataset("winter").unwrap()).await.unwrap();
-        let summer = shape_key(&atlas.dataset("summer").unwrap()).await.unwrap();
-        assert_ne!(winter, summer);
     }
 
     // ── dimensions ──────────────────────────────────────────────────────

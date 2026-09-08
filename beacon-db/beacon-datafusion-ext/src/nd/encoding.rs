@@ -17,7 +17,6 @@
 //! normal `RecordBatch`; [`NdSourceExec`](crate::nd::exec::NdSourceExec) decodes
 //! it back into an [`NdRecordBatch`] on the way out.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -69,11 +68,22 @@ pub fn nd_encoded_type(value_type: &DataType) -> DataType {
 /// An nd column field named `name` carrying values of `value_type`, tagged with
 /// the `beacon.nd` extension type.
 pub fn nd_encoded_field(name: &str, value_type: &DataType) -> Field {
-    let metadata = HashMap::from([
-        ("ARROW:extension:name".to_string(), ND_EXTENSION_NAME.to_string()),
-        ("ARROW:extension:metadata".to_string(), "{}".to_string()),
-    ]);
-    Field::new(name, nd_encoded_type(value_type), true).with_metadata(metadata)
+    nd_encoded_field_of(&Field::new(name, value_type.clone(), true))
+}
+
+/// `field`, with its values carried as a `beacon.nd` struct.
+///
+/// The field's own metadata travels with it, and the extension keys go on top.
+/// That matters because a scan's target schema is the *encoded* one: a column
+/// the merge marked with
+/// [`TYPE_CONFLICT_KEY`](crate::type_widening::TYPE_CONFLICT_KEY) has to stay
+/// marked. Without the mark `scan_adapt` casts strictly, and a value the merged
+/// type cannot hold fails the scan instead of reading as null.
+pub fn nd_encoded_field_of(field: &Field) -> Field {
+    let mut metadata = field.metadata().clone();
+    metadata.insert("ARROW:extension:name".to_string(), ND_EXTENSION_NAME.to_string());
+    metadata.insert("ARROW:extension:metadata".to_string(), "{}".to_string());
+    Field::new(field.name(), nd_encoded_type(field.data_type()), true).with_metadata(metadata)
 }
 
 /// The nd-encoded schema of a logical schema: every field becomes a `beacon.nd`
@@ -83,7 +93,7 @@ pub fn encoded_schema(logical: &Schema) -> Schema {
     let fields: Vec<Field> = logical
         .fields()
         .iter()
-        .map(|f| nd_encoded_field(f.name(), f.data_type()))
+        .map(|f| nd_encoded_field_of(f))
         .collect();
     Schema::new_with_metadata(fields, logical.metadata().clone())
 }

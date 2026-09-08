@@ -36,19 +36,16 @@ use object_store::{ObjectMeta, ObjectStore};
 
 use crate::config::AtlasConfig;
 use crate::reader::collection_schema;
-use crate::store::{
-    ATLAS_MARKER, AtlasReaderCache, get_or_open_atlas, is_atlas_marker, top_level_atlas_markers,
-};
+use crate::store::{ATLAS_MARKER, AtlasReaderCache, get_or_open_atlas, top_level_atlas_markers};
 
 pub mod metrics;
 pub mod options;
 pub mod pruning;
 pub mod source;
-pub mod statistics;
 pub mod table_function;
 
 pub use options::AtlasOptions;
-pub use source::{AtlasEntry, AtlasSource};
+pub use source::AtlasSource;
 pub use table_function::ReadAtlasFunc;
 
 /// The name this format answers to: `STORED AS ATLAS`, `read_atlas`.
@@ -90,26 +87,16 @@ impl AtlasFormatFactory {
 
     /// A format with this table's effective settings, wired to the shared cache
     /// when caching is on.
-    fn build(
+    pub(crate) fn build(
         &self,
         options: AtlasOptions,
         use_reader_cache: bool,
         use_pruning: bool,
     ) -> AtlasFormat {
-        AtlasFormat::new(options)
-            .with_cache(use_reader_cache.then(|| self.cache.clone()))
-            .with_pruning(use_pruning)
-    }
-
-    /// Whether this table wants its columns measured at all.
-    ///
-    /// Only the file analyzer measures a collection, through
-    /// [`FileFormatFactoryExt::create_for_analysis`]. This is the switch that
-    /// turns even that off, per table or per runtime.
-    fn statistics_wanted(&self, format_options: &HashMap<String, String>) -> Result<bool> {
-        match format_option(format_options, "enable_statistics") {
-            Some(value) => parse_bool_option("enable_statistics", value),
-            None => Ok(self.config.enable_statistics),
+        AtlasFormat {
+            options,
+            cache: use_reader_cache.then(|| self.cache.clone()),
+            use_pruning,
         }
     }
 }
@@ -139,11 +126,6 @@ impl FileFormatFactory for AtlasFormatFactory {
         if let Some(value) = format_option(format_options, "use_pruning") {
             use_pruning = parse_bool_option("use_pruning", value)?;
         }
-        // Parsed here only so a bad value is an error at `CREATE EXTERNAL
-        // TABLE` rather than at the first analysis pass. A query measures
-        // nothing whatever it says: see `create_for_analysis`.
-        self.statistics_wanted(format_options)?;
-
         Ok(Arc::new(self.build(options, use_reader_cache, use_pruning)))
     }
 
@@ -184,11 +166,6 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
     }
 
     /// One schema per collection, not per object.
-    ///
-    /// `infer_schema` reads the container and derives the schema from the
-    /// footer inside it, so the entry is keyed on the container and depends on
-    /// everything beside it — the deletion mask included, which changes which
-    /// datasets the schema covers.
     fn schema_units(&self, objects: &[ObjectMeta]) -> Vec<SchemaUnit> {
         units_over_stores(objects, &top_level_atlas_markers(objects))
     }
@@ -207,29 +184,18 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
         Some(SchemaOptions::new(ATLAS_FORMAT).finish())
     }
 
-    /// The same format, with the column measurement switched on.
+    /// The plain format. Atlas measures no column.
     ///
-    /// `infer_stats` folds a collection's footer, which is cheap but not free
-    /// over a listing of thousands. Only the file analyzer asks for it, and a
-    /// scan prunes from what that recorded. See
-    /// [`FileFormatFactoryExt::create_for_analysis`].
+    /// The analyzer asks a format to measure a collection, and this one reports
+    /// unknown for every column. See [`AtlasFormat::infer_stats`].
     fn create_for_analysis(
         &self,
-        state: &dyn Session,
-        format_options: &HashMap<String, String>,
-        url: &ListingTableUrl,
-        listing: &ListingFactory,
+        _state: &dyn Session,
+        _format_options: &HashMap<String, String>,
+        _url: &ListingTableUrl,
+        _listing: &ListingFactory,
     ) -> Result<Arc<dyn FileFormat>> {
-        let wanted = self.statistics_wanted(format_options)?;
-        let format = self.create_with_native_root(state, format_options, url, listing)?;
-        let atlas = format
-            .as_any()
-            .downcast_ref::<AtlasFormat>()
-            .ok_or_else(|| {
-                exec_datafusion_err!("the atlas factory did not produce an AtlasFormat")
-            })?
-            .clone();
-        Ok(Arc::new(atlas.with_enable_statistics(wanted)))
+        Ok(Arc::new(AtlasFormat::default()))
     }
 }
 
@@ -243,8 +209,6 @@ pub struct AtlasFormat {
     cache: Option<AtlasReaderCache>,
     /// Whether a predicate scan drops the datasets it can rule out.
     use_pruning: bool,
-    /// Whether [`FileFormat::infer_stats`] measures a collection's columns.
-    enable_statistics: bool,
 }
 
 impl Default for AtlasFormat {
@@ -261,29 +225,7 @@ impl AtlasFormat {
             cache: None,
             // A query prunes by default: it only ever saves reads.
             use_pruning: defaults.use_pruning,
-            // A query measures nothing. Only the analyzer asks, through
-            // `create_for_analysis`.
-            enable_statistics: false,
         }
-    }
-
-    /// Wire in a reader cache (`Some`), or bypass caching (`None`).
-    pub fn with_cache(mut self, cache: Option<AtlasReaderCache>) -> Self {
-        self.cache = cache;
-        self
-    }
-
-    /// Drop the datasets a predicate rules out, or read them all.
-    pub fn with_pruning(mut self, use_pruning: bool) -> Self {
-        self.use_pruning = use_pruning;
-        self
-    }
-
-    /// Measure a collection's columns in [`FileFormat::infer_stats`], or report
-    /// them unknown.
-    pub fn with_enable_statistics(mut self, enable_statistics: bool) -> Self {
-        self.enable_statistics = enable_statistics;
-        self
     }
 }
 
@@ -373,47 +315,35 @@ impl FileFormat for AtlasFormat {
         Ok(schema)
     }
 
-    /// The column ranges of one collection, folded out of its footer.
+    /// Unknown for every column.
     ///
-    /// Reporting unknown rather than erroring is deliberate throughout: absent
-    /// statistics are always a legal answer, and they only mean Beacon reads
-    /// what it might have skipped. A listing also hands this method every
-    /// object it matched, and only a container has a collection behind it.
+    /// Atlas measures nothing for the analyzer. A recorded range prunes whole
+    /// collections before a scan opens them, so a range that is too narrow
+    /// deletes matching rows from an answer. The scan prunes from the footer
+    /// itself instead, per dataset, where the numbers are exact and cost no
+    /// array read. See [`pruning`].
     async fn infer_stats(
         &self,
         _state: &dyn Session,
-        store: &Arc<dyn ObjectStore>,
+        _store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
-        object: &ObjectMeta,
+        _object: &ObjectMeta,
     ) -> Result<Statistics> {
-        if !self.enable_statistics || !is_atlas_marker(object) {
-            return Ok(Statistics::new_unknown(&table_schema));
-        }
-
-        match get_or_open_atlas(self.cache.as_ref(), Arc::clone(store), object).await {
-            Ok(atlas) => Ok(statistics::collection_statistics(&atlas, &table_schema).await),
-            Err(e) => {
-                tracing::debug!(object = %object.location, "not measuring this collection: {e}");
-                Ok(Statistics::new_unknown(&table_schema))
-            }
-        }
+        Ok(Statistics::new_unknown(&table_schema))
     }
 
-    /// Plan one entry per dataset, then wrap the scan in the nd spine.
+    /// Plan one entry per collection, then wrap the scan in the nd spine.
     ///
-    /// Opening each collection here is one metadata read, and the openers reuse
-    /// the same handle through the reader cache. `list_datasets` is in memory.
+    /// Nothing is opened here. The markers the listing found are deduped to the
+    /// outermost collections and dealt round-robin over the target partitions,
+    /// and each partition's opener lists, prunes and reads the collections it
+    /// holds. Parallelism is therefore bounded by the collection count.
     async fn create_physical_plan(
         &self,
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         beacon_nd_array::arrow::morsel::reject_partition_columns("Atlas", &conf)?;
-
-        let started = std::time::Instant::now();
-        let object_store = state
-            .runtime_env()
-            .object_store(conf.object_store_url.clone())?;
 
         let listed: Vec<ObjectMeta> = conf
             .file_groups
@@ -423,32 +353,24 @@ impl FileFormat for AtlasFormat {
             .collect();
         let markers = top_level_atlas_markers(&listed);
 
-        let mut datasets = 0usize;
-        let mut file_groups: Vec<FileGroup> = Vec::with_capacity(markers.len());
-        for marker in &markers {
-            let atlas = get_or_open_atlas(self.cache.as_ref(), Arc::clone(&object_store), marker)
-                .await
-                .map_err(|e| exec_datafusion_err!("{e}"))?;
-            let names = atlas.list_datasets();
-            datasets += names.len();
-
-            let entries: Vec<PartitionedFile> = names
-                .into_iter()
-                .enumerate()
-                .map(|(position, dataset)| {
-                    // `From<ObjectMeta>` keeps the container's freshness, so
-                    // the opener's cache key matches this plan-time open.
-                    let mut entry = PartitionedFile::from(marker.clone());
-                    entry.extensions = Some(Arc::new(AtlasEntry { dataset, position }));
-                    entry
-                })
-                .collect();
-            file_groups.push(FileGroup::new(entries));
+        // One collection is one unit of work, and a container is never split,
+        // so the deal here is the whole distribution.
+        let partitions = state
+            .config()
+            .target_partitions()
+            .clamp(1, markers.len().max(1));
+        let mut dealt: Vec<Vec<PartitionedFile>> = vec![Vec::new(); partitions];
+        for (index, marker) in markers.iter().enumerate() {
+            dealt[index % partitions].push(PartitionedFile::from(marker.clone()));
         }
+        let file_groups: Vec<FileGroup> = dealt
+            .into_iter()
+            .filter(|group| !group.is_empty())
+            .map(FileGroup::new)
+            .collect();
         tracing::debug!(
-            elapsed_ms = started.elapsed().as_millis() as u64,
             collections = markers.len(),
-            datasets,
+            partitions = file_groups.len(),
             "atlas create_physical_plan",
         );
 
@@ -706,7 +628,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_widened_column_is_cast_from_each_dataset() {
-        use arrow::array::Float64Array;
+        use arrow::array::{Array, Float64Array};
 
         let tmp = tempfile::tempdir().unwrap();
         test_support::widening(tmp.path()).await;
@@ -807,9 +729,10 @@ mod tests {
         }
     }
 
-    /// The scan is planned across every partition, through the queue.
+    /// The unit of work is the collection, so one collection is one partition
+    /// however many datasets it holds.
     #[tokio::test]
-    async fn a_collection_is_planned_across_every_partition() {
+    async fn one_collection_is_one_partition() {
         use datafusion::physical_plan::ExecutionPlanProperties;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -833,10 +756,56 @@ mod tests {
         }
         assert_eq!(
             scan.output_partitioning().partition_count(),
-            4,
-            "the datasets divide over the partitions:\n{}",
+            1,
+            "twelve datasets of one collection stay together:
+{}",
             datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
         );
+    }
+
+    /// Several collections deal round-robin over the partitions, and never
+    /// past the collection count.
+    #[tokio::test]
+    async fn collections_deal_across_the_partitions() {
+        use datafusion::physical_plan::ExecutionPlanProperties;
+
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c"] {
+            test_support::ranged(&tmp.path().join(name), 2).await;
+        }
+        let root = tmp
+            .path()
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+
+        for (target, expected) in [(8, 3), (2, 2), (1, 1)] {
+            let ctx = ddl_context(target);
+            ctx.sql(&format!(
+                "CREATE EXTERNAL TABLE t STORED AS ATLAS LOCATION '{root}/**/data.atlas'"
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+            let plan = ctx
+                .sql("SELECT temperature FROM t")
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            let mut scan = Arc::clone(&plan);
+            while let Some(child) = scan.children().first() {
+                scan = Arc::clone(child);
+            }
+            assert_eq!(
+                scan.output_partitioning().partition_count(),
+                expected,
+                "three collections over {target} target partitions"
+            );
+        }
     }
 
     // ── predicates ──────────────────────────────────────────────────────
@@ -870,11 +839,23 @@ mod tests {
 
     // ── pruning, end to end ─────────────────────────────────────────────
 
+    /// A format with pruning on or off, built the way a table is.
+    ///
+    /// `use_pruning` reaches a format through the factory alone, as
+    /// `CREATE EXTERNAL TABLE ... OPTIONS ('use_pruning' '...')` does.
+    fn format_with_pruning(use_pruning: bool) -> Arc<dyn FileFormat> {
+        Arc::new(
+            AtlasFormatFactory::new(Default::default(), Default::default()).build(
+                AtlasOptions::default(),
+                false,
+                use_pruning,
+            ),
+        )
+    }
+
     /// Register the collection twice, once pruning and once not.
     async fn register_pruning(ctx: &SessionContext, dir: &Path, name: &str, use_pruning: bool) {
-        let format: Arc<dyn FileFormat> =
-            Arc::new(AtlasFormat::default().with_pruning(use_pruning));
-        register_with(ctx, dir, name, format).await;
+        register_with(ctx, dir, name, format_with_pruning(use_pruning)).await;
     }
 
     async fn values(ctx: &SessionContext, sql: &str) -> Vec<f32> {
@@ -1039,54 +1020,58 @@ mod tests {
 
     // ── measuring a collection ──────────────────────────────────────────
 
-    /// A query never measures a collection, whatever the option says. Only the
-    /// analyzer asks, through `create_for_analysis`.
-    #[test]
-    fn a_query_never_measures_a_collection() {
-        let factory = AtlasFormatFactory::new(Default::default(), Default::default());
+    /// Atlas measures no column, for any caller.
+    ///
+    /// A recorded range prunes whole collections before a scan opens them, so a
+    /// range that is too narrow deletes matching rows from an answer. The scan
+    /// prunes from the footer instead, per dataset, where the numbers are exact
+    /// and cost no array read.
+    #[tokio::test]
+    async fn a_collection_reports_no_column_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::ranged(tmp.path(), 4).await;
+        let (store, marker) = test_support::store_and_marker(tmp.path());
         let ctx = SessionContext::new();
-        let on = HashMap::from([("enable_statistics".to_string(), "true".to_string())]);
 
-        for options in [HashMap::new(), on] {
-            let format = factory.create(&ctx.state(), &options).unwrap();
+        let format = AtlasFormat::default();
+        let schema = format
+            .infer_schema(&ctx.state(), &store, std::slice::from_ref(&marker))
+            .await
+            .unwrap();
+        let statistics = format
+            .infer_stats(&ctx.state(), &store, Arc::clone(&schema), &marker)
+            .await
+            .unwrap();
+
+        assert_eq!(statistics.column_statistics.len(), schema.fields().len());
+        for (column, field) in statistics.column_statistics.iter().zip(schema.fields()) {
             assert!(
-                !format
-                    .as_any()
-                    .downcast_ref::<AtlasFormat>()
-                    .unwrap()
-                    .enable_statistics,
-                "a format built for a query measures nothing"
+                column.min_value.is_exact().is_none(),
+                "{} reports a minimum",
+                field.name()
+            );
+            assert!(
+                column.max_value.is_exact().is_none(),
+                "{} reports a maximum",
+                field.name()
             );
         }
+        assert!(statistics.num_rows.is_exact().is_none());
     }
 
-    /// The analyzer layers the per-table option over the runtime default.
+    /// The analyzer gets the same format a query does, because neither
+    /// measures anything.
     #[test]
-    fn analysis_layers_the_statistics_option_over_the_runtime() {
-        let measured = |config: AtlasConfig, options: HashMap<String, String>| {
-            let ctx = SessionContext::new();
-            let listing = Arc::new(ListingFactory::dynamic());
-            let url = ListingTableUrl::parse("file:///tmp/").unwrap();
-            AtlasFormatFactory::new(Default::default(), config)
-                .create_for_analysis(&ctx.state(), &options, &url, &listing)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<AtlasFormat>()
-                .unwrap()
-                .enable_statistics
-        };
-        let off = HashMap::from([("enable_statistics".to_string(), "false".to_string())]);
-        let on = HashMap::from([("enable_statistics".to_string(), "yes".to_string())]);
+    fn analysis_asks_for_no_measurement() {
+        let ctx = SessionContext::new();
+        let listing = Arc::new(ListingFactory::dynamic());
+        let url = ListingTableUrl::parse("file:///tmp/").unwrap();
+        let factory = AtlasFormatFactory::new(Default::default(), Default::default());
 
-        assert!(measured(AtlasConfig::default(), HashMap::new()));
-        assert!(!measured(AtlasConfig::default(), off));
-
-        let disabled = AtlasConfig {
-            enable_statistics: false,
-            ..Default::default()
-        };
-        assert!(!measured(disabled.clone(), HashMap::new()));
-        assert!(measured(disabled, on), "one table can turn them back on");
+        let analysis = factory
+            .create_for_analysis(&ctx.state(), &HashMap::new(), &url, &listing)
+            .unwrap();
+        assert!(analysis.as_any().downcast_ref::<AtlasFormat>().is_some());
     }
 
     // ── dimensions ──────────────────────────────────────────────────────
@@ -1359,7 +1344,7 @@ mod tests {
         let pruned = context(4);
         let _a = wide_table(&pruned, Arc::new(AtlasFormat::default())).await;
         let whole = context(4);
-        let _b = wide_table(&whole, Arc::new(AtlasFormat::default().with_pruning(false))).await;
+        let _b = wide_table(&whole, format_with_pruning(false)).await;
 
         for sql in queries {
             assert_eq!(
@@ -1737,5 +1722,212 @@ mod tests {
 
         assert!(error.contains("use_pruning"), "{error}");
         assert!(error.contains("maybe"), "{error}");
+    }
+    /// A session whose merge keeps the first type of a conflicting column.
+    ///
+    /// The default refuses such a column outright, so a test of the cast has to
+    /// ask for `KeepFirst`.
+    fn keep_first_context(partitions: usize) -> SessionContext {
+        use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
+
+        SessionContext::new_with_config(
+            SessionConfig::new()
+                .with_target_partitions(partitions)
+                .with_extension(Arc::new(ArrowTypeWidening::new(Arc::new(
+                    DefaultArrowTypeWidening::keeping_first_type(),
+                )))),
+        )
+    }
+
+    /// A value the merged type cannot hold reads as null, and does not fail the
+    /// query.
+    ///
+    /// `KeepFirst` keeps `Float64` and marks the column. The mark has to
+    /// survive the nd encoding, because the scan's target schema is the encoded
+    /// one. Without it `scan_adapt` casts strictly and `'0.-90'` fails the whole
+    /// scan.
+    ///
+    /// `'3.5'` casts cleanly beside it, so this separates "one value is null"
+    /// from "the column gave up".
+    #[tokio::test]
+    async fn a_value_the_merged_type_cannot_hold_reads_as_null() {
+        use arrow::array::{Array, Float64Array};
+
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::conflicting_numbers(tmp.path()).await;
+        let ctx = keep_first_context(1);
+        register(&ctx, tmp.path(), "t").await;
+
+        let batches = ctx
+            .sql("SELECT value FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect("an unparseable value is null, not an error");
+
+        let mut seen: Vec<Option<f64>> = Vec::new();
+        for batch in &batches {
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("the merge kept the first type");
+            for row in 0..column.len() {
+                seen.push((!column.is_null(row)).then(|| column.value(row)));
+            }
+        }
+        seen.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(seen, vec![None, Some(1.5), Some(2.5), Some(3.5)]);
+    }
+
+    /// The mark itself, on the schema the scan carries.
+    ///
+    /// The logical schema is marked, and the encoded schema has to stay marked.
+    /// This is the step that used to drop it.
+    #[test]
+    fn the_nd_encoding_keeps_the_type_conflict_mark() {
+        use beacon_datafusion_ext::nd::encoded_schema;
+        use beacon_datafusion_ext::type_widening::{
+            TYPE_CONFLICT_FIRST_TYPE, TYPE_CONFLICT_KEY, is_type_conflict,
+        };
+
+        let marked = arrow::datatypes::Field::new("value", DataType::Float64, true).with_metadata(
+            std::collections::HashMap::from([(
+                TYPE_CONFLICT_KEY.to_string(),
+                TYPE_CONFLICT_FIRST_TYPE.to_string(),
+            )]),
+        );
+        let plain = arrow::datatypes::Field::new("other", DataType::Float64, true);
+        let logical = Schema::new(vec![marked, plain]);
+
+        let encoded = encoded_schema(&logical);
+        assert!(
+            is_type_conflict(encoded.field_with_name("value").unwrap()),
+            "the encoded field lost the mark"
+        );
+        assert!(
+            !is_type_conflict(encoded.field_with_name("other").unwrap()),
+            "an unmarked column must not gain the mark"
+        );
+        // The extension tag still identifies the column as nd-encoded.
+        assert!(beacon_datafusion_ext::nd::is_nd_encoded(
+            encoded.field_with_name("value").unwrap()
+        ));
+    }
+    /// What the *default* widening does with Float64 beside Utf8.
+    #[tokio::test]
+    async fn probe_default_widening() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::conflicting_numbers(tmp.path()).await;
+
+        // Default session: no widening extension registered at all.
+        let ctx = context(1);
+        let dir = tmp
+            .path()
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let url = ListingTableUrl::parse(format!("file://{dir}/")).unwrap();
+        let format: Arc<dyn FileFormat> = Arc::new(AtlasFormat::default());
+        let listing = ListingOptions::new(format).with_file_extension(ATLAS_MARKER);
+        match ListingTableConfig::new(url)
+            .with_listing_options(listing)
+            .infer_schema(&ctx.state())
+            .await
+        {
+            Ok(config) => {
+                let schema = config.file_schema.clone().unwrap();
+                let field = schema.field_with_name("value").unwrap();
+                println!("PROBE default infer OK type={:?}", field.data_type());
+                println!(
+                    "PROBE default marked={}",
+                    beacon_datafusion_ext::type_widening::is_type_conflict(field)
+                );
+                ctx.register_table("t", Arc::new(ListingTable::try_new(config).unwrap()))
+                    .unwrap();
+                match ctx
+                    .sql("SELECT value FROM t")
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+                {
+                    Ok(b) => println!(
+                        "PROBE default query OK\n{}",
+                        arrow::util::pretty::pretty_format_batches(&b).unwrap()
+                    ),
+                    Err(e) => println!("PROBE default query ERR {e}"),
+                }
+            }
+            Err(e) => println!("PROBE default infer ERR {e}"),
+        }
+    }
+
+    /// The same value, with no mark on the column at all.
+    ///
+    /// An nd cast lands on the `values` list inside the `beacon.nd` struct, and
+    /// it reads leniently whether or not the merge marked the column. A table
+    /// whose schema says `Float64` therefore survives a dataset that stores the
+    /// array as text, however the schema came to say so.
+    #[tokio::test]
+    async fn an_unparseable_nd_value_reads_as_null_without_a_mark() {
+        use arrow::array::{Array, Float64Array};
+
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::value_typed(&tmp.path().join("one"), false).await;
+        test_support::value_typed(&tmp.path().join("two"), true).await;
+
+        // Two paths, so the table schema comes from the first collection alone
+        // and carries no mark. That is the shape a scan cannot rely on one.
+        let ctx = keep_first_context(4);
+        let urls: Vec<ListingTableUrl> = ["one", "two"]
+            .iter()
+            .map(|name| {
+                let dir = tmp
+                    .path()
+                    .join(name)
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                ListingTableUrl::parse(format!("file://{dir}/")).unwrap()
+            })
+            .collect();
+        let format: Arc<dyn FileFormat> = Arc::new(AtlasFormat::default());
+        let listing = ListingOptions::new(format).with_file_extension(ATLAS_MARKER);
+        let config = ListingTableConfig::new_with_multi_paths(urls)
+            .with_listing_options(listing)
+            .infer_schema(&ctx.state())
+            .await
+            .expect("the collections type");
+        let schema = config.file_schema.clone().unwrap();
+        let field = schema.field_with_name("value").unwrap();
+        assert_eq!(field.data_type(), &DataType::Float64);
+        assert!(
+            !beacon_datafusion_ext::type_widening::is_type_conflict(field),
+            "this shape is the one with no mark; the test is pointless with one"
+        );
+
+        ctx.register_table("t", Arc::new(ListingTable::try_new(config).unwrap()))
+            .unwrap();
+        let batches = ctx
+            .sql("SELECT value FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect("an unparseable value is null, not an error");
+
+        let mut seen: Vec<Option<f64>> = Vec::new();
+        for batch in &batches {
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("the table type");
+            for row in 0..column.len() {
+                seen.push((!column.is_null(row)).then(|| column.value(row)));
+            }
+        }
+        seen.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(seen, vec![None, Some(1.5), Some(2.5), Some(3.5)]);
     }
 }

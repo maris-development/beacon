@@ -22,16 +22,7 @@ pub struct AtlasScanMetrics {
     /// Wall time opening collections, or hitting the reader cache for them.
     pub open_time: Time,
     /// Wall time deciding which datasets a predicate can rule out.
-    ///
-    /// One partition builds a collection's index and the rest wait on it, so
-    /// this is the build for one of them and the wait for the others.
     pub prune_time: Time,
-    /// Wall time building lazy datasets: resolving the view, reading the
-    /// projected attribute values out of the footer, wiring the backends, and
-    /// planning the chunk queue.
-    ///
-    /// Array data is read later, as the queue is drained, and `ReadMetrics`
-    /// counts that.
     pub dataset_build_time: Time,
     /// Datasets this partition opened and read.
     pub datasets_scanned: Count,

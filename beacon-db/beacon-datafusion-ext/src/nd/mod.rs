@@ -31,7 +31,7 @@ pub use broadcast::BroadcastMap;
 pub use dimensions::{Dimension, Dimensions};
 pub use encoding::{
     decode_nd_record_batch, encode_flat_batch_as_nd, encode_nd_record_batch, encoded_schema,
-    is_nd_encoded, logical_schema, nd_encoded_field, nd_encoded_type,
+    is_nd_encoded, logical_schema, nd_encoded_field, nd_encoded_field_of, nd_encoded_type,
 };
 pub use optimizer::{NdFilterPushdown, NdProjectionPushdown, is_pushable_expr};
 

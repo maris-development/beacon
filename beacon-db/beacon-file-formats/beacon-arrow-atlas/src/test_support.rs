@@ -469,3 +469,82 @@ pub async fn wide_profiles(dir: &Path, shapes: &[(usize, usize)]) {
 
     writer.finish().await.expect("finish the collection");
 }
+
+/// A number column that one dataset stores as text a cast cannot read.
+///
+/// - `a`: `value: Float64[2] = [1.5, 2.5]`.
+/// - `b`: `value: String[2] = ["0.-90", "3.5"]`.
+///
+/// `Float64` and `String` share no type, so `KeepFirst` keeps `Float64` and
+/// marks the column. `'0.-90'` is not a number, so its cast has to read as
+/// null. `'3.5'` casts cleanly, which separates "the cast ran" from "the cast
+/// gave up on the column".
+pub async fn conflicting_numbers(dir: &Path) {
+    let writer = AtlasWriter::create_path(dir, WriterConfig::default())
+        .await
+        .expect("create the collection");
+
+    {
+        let mut a = writer.add_dataset("a").await.expect("add a");
+        a.define_array::<f64>("value", vec!["obs".into()], vec![2], None, None)
+            .await
+            .expect("define value");
+        a.write_array("value", vec![0], arr1(&[1.5f64, 2.5]).into_dyn().view())
+            .await
+            .expect("write value");
+        a.finish().await.expect("finish a");
+    }
+
+    {
+        let mut b = writer.add_dataset("b").await.expect("add b");
+        b.define_array::<String>("value", vec!["obs".into()], vec![2], None, None)
+            .await
+            .expect("define value");
+        b.write_array(
+            "value",
+            vec![0],
+            arr1(&["0.-90".to_string(), "3.5".to_string()])
+                .into_dyn()
+                .view(),
+        )
+        .await
+        .expect("write value");
+        b.finish().await.expect("finish b");
+    }
+
+    writer.finish().await.expect("finish the collection");
+}
+
+/// One dataset, `d`, holding `value` as a number or as text.
+///
+/// Two collections built this way put the conflict across the *collection*
+/// merge rather than inside one collection's own merge.
+pub async fn value_typed(dir: &Path, as_text: bool) {
+    let writer = AtlasWriter::create_path(dir, WriterConfig::default())
+        .await
+        .expect("create the collection");
+    let mut d = writer.add_dataset("d").await.expect("add d");
+    if as_text {
+        d.define_array::<String>("value", vec!["obs".into()], vec![2], None, None)
+            .await
+            .expect("define value");
+        d.write_array(
+            "value",
+            vec![0],
+            arr1(&["0.-30".to_string(), "3.5".to_string()])
+                .into_dyn()
+                .view(),
+        )
+        .await
+        .expect("write value");
+    } else {
+        d.define_array::<f64>("value", vec!["obs".into()], vec![2], None, None)
+            .await
+            .expect("define value");
+        d.write_array("value", vec![0], arr1(&[1.5f64, 2.5]).into_dyn().view())
+            .await
+            .expect("write value");
+    }
+    d.finish().await.expect("finish d");
+    writer.finish().await.expect("finish the collection");
+}
