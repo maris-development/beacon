@@ -43,7 +43,7 @@ use datafusion::{
         runtime_env::{RuntimeEnv, RuntimeEnvBuilder},
         SessionStateBuilder,
     },
-    optimizer::OptimizerRule,
+    optimizer::{optimize_projections::OptimizeProjections, OptimizerRule},
     prelude::{SessionConfig, SessionContext},
 };
 use object_store::ObjectStore;
@@ -853,7 +853,11 @@ fn build_session_state(
     runtime_env: Arc<RuntimeEnv>,
     session_cell: SessionCell,
 ) -> anyhow::Result<datafusion::execution::context::SessionState> {
-    let mut optimizer_rules: Vec<Arc<dyn OptimizerRule + Send + Sync>> = vec![];
+    // Narrow every scan to the columns the query reads before any other rule.
+    // CSE copies every input column into an intermediate projection, one linear
+    // schema lookup per column, which is quadratic on a scan of 100k+ columns.
+    let mut optimizer_rules: Vec<Arc<dyn OptimizerRule + Send + Sync>> =
+        vec![Arc::new(OptimizeProjections::new())];
     // This is DataFusion's default logical rule set with `FederationOptimizerRule`
     // inserted, so replacing the defaults with it is intentional: sub-plans rooted
     // at remote tables get pushed down. The matching `FederatedPlanner` lives in
