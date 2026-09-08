@@ -2,35 +2,26 @@
 //!
 //! A column view says where one column of the scan comes from, for every
 //! dataset at once: the variable's segment, or the attribute values keyed by
-//! dataset. One dataset then reads as one [`NdRecordBatch`], each column on the
-//! axes the dataset stores it on.
+//! dataset. One dataset is then a lazy [`Dataset`] over those views. It reads
+//! one stored chunk at a time as an [`NdRecordBatch`], each column on the axes
+//! the dataset stores it on.
 
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
 use arrow::{
-    array::{
-        ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
-        Int32Array, Int64Array, PrimitiveArray, StringArray, UInt8Array, UInt16Array, UInt32Array,
-        UInt64Array, new_null_array,
-    },
-    buffer::{NullBuffer, ScalarBuffer},
-    compute::{cast, kernels::cmp::neq},
-    datatypes::{
-        ArrowPrimitiveType, Field, FieldRef, Float32Type, Float64Type, Int8Type, Int16Type,
-        Int32Type, Int64Type, Schema, SchemaRef, TimestampNanosecondType, UInt8Type, UInt16Type,
-        UInt32Type, UInt64Type,
-    },
+    array::{ArrayRef, RecordBatch, new_null_array},
+    compute::cast,
+    datatypes::{Field, FieldRef, Schema, SchemaRef},
 };
-use atlas::{
-    ArrayElement, ArrayFile, Atlas, Attr, DType, FillValue, TimestampNs, array_format::ArrayInfo,
-};
-use beacon_datafusion_ext::nd::{
-    Dimension, Dimensions, NdArrowArray, NdRecordBatch, encode_nd_record_batch, infer_target,
-};
+use atlas::{ArrayFile, Atlas, Attr};
+use beacon_datafusion_ext::nd::{Dimensions, NdArrowArray, NdRecordBatch, encode_nd_record_batch};
 use beacon_datafusion_ext::type_widening::is_type_conflict;
-use beacon_nd_array::arrow::metrics::ReadMetrics;
+use beacon_nd_array::{
+    NdArrayD,
+    arrow::metrics::ReadMetrics,
+    dataset::{default::Dataset, source::DatasetSource},
+};
 use datafusion::{
-    common::exec_err,
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener},
@@ -38,11 +29,12 @@ use datafusion::{
     error::{DataFusionError, Result},
     physical_plan::PhysicalExpr,
 };
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
 use indexmap::IndexMap;
 use object_store::ObjectStore;
 
 use crate::{
+    compat,
     datafusion::{metrics::AtlasScanMetrics, pruning::prune_datasets},
     store::{AtlasReaderCache, get_or_open_atlas},
 };
@@ -69,7 +61,8 @@ pub struct AtlasOpener {
 }
 
 impl FileOpener for AtlasOpener {
-    /// One collection in, one encoded batch per dataset worth reading out.
+    /// One collection in, one encoded batch per stored chunk of every dataset
+    /// worth reading out.
     ///
     /// The column views are built once per collection, and every dataset then
     /// reads against them. A dataset the deletion mask hides is not read, and
@@ -105,20 +98,15 @@ impl FileOpener for AtlasOpener {
             }
 
             let stream = futures::stream::iter(datasets)
-                .then(move |dataset| {
-                    let views = Arc::clone(&views);
-                    let schema = Arc::clone(&projected_schema);
-                    let metrics = scan_metrics.clone();
-                    async move {
-                        let nd = fast_view_read_to_record_batch(&views, &dataset).await?;
-                        metrics.datasets_scanned.add(1);
-                        // The encoding names the columns and types the scan
-                        // declared. The scan's schema carries each field's
-                        // marks as well, so the batch takes that schema.
-                        let batch = encode_nd_record_batch(&nd)?.with_schema(schema)?;
-                        Ok::<_, DataFusionError>(batch)
-                    }
+                .map(move |dataset| {
+                    dataset_stream(
+                        Arc::clone(&views),
+                        dataset,
+                        Arc::clone(&projected_schema),
+                        scan_metrics.clone(),
+                    )
                 })
+                .flatten()
                 .boxed();
             Ok(stream)
         };
@@ -168,89 +156,128 @@ pub(crate) async fn column_views(
     Ok(views)
 }
 
-/// One dataset of the collection as an nd batch, one column per field.
+/// One dataset's batches: one encoded nd batch per stored chunk, in C order.
 ///
-/// A column comes out on the axes the dataset stores it on, and the target
-/// grid is their union. A field the dataset lacks is a rank-0 null, which
-/// broadcasts to an all-null column: an array no dataset declares, a segment
-/// without this dataset's entry, or an attribute nobody set. The decoder makes
-/// the same of a null struct row, so the scan sees one thing either way.
-async fn fast_view_read_to_record_batch(
-    views: &IndexMap<FieldRef, Option<AtlasColumnView>>,
-    dataset: &str,
-) -> Result<NdRecordBatch> {
-    let mut columns = Vec::with_capacity(views.len());
-    for (field, view) in views {
-        let column = match view {
-            None => null_scalar(field),
-            Some(AtlasColumnView::Array { segment }) => match segment.array(dataset) {
-                Some(info) => array_column(segment, dataset, info, field).await?,
-                None => null_scalar(field),
-            },
-            Some(AtlasColumnView::GlobalAttribute { map })
-            | Some(AtlasColumnView::VariableAttribute { map, .. }) => match map.get(dataset) {
-                Some(attr) => attr_column(attr, field)?,
-                None => null_scalar(field),
-            },
-        };
-        columns.push(column);
+/// The dataset is built when the stream reaches it, and each chunk is read
+/// when the stream reaches that, so the next dataset is not touched before
+/// this one is drained.
+fn dataset_stream(
+    views: Arc<IndexMap<FieldRef, Option<AtlasColumnView>>>,
+    dataset: String,
+    schema: SchemaRef,
+    metrics: AtlasScanMetrics,
+) -> BoxStream<'static, Result<RecordBatch>> {
+    futures::stream::once(async move {
+        let read = Arc::new(DatasetRead::build(&views, &dataset)?);
+        metrics.datasets_scanned.add(1);
+        let chunks = read.dataset.chunks();
+        Ok::<_, DataFusionError>(futures::stream::iter(chunks).then(move |chunk| {
+            let read = Arc::clone(&read);
+            let schema = Arc::clone(&schema);
+            async move {
+                let nd = read.chunk(chunk).await?;
+                // The encoding names the columns and types the scan declared.
+                // The scan's schema carries each field's marks as well, so the
+                // batch takes that schema.
+                let batch = encode_nd_record_batch(&nd)?.with_schema(schema)?;
+                Ok::<_, DataFusionError>(batch)
+            }
+        }))
+    })
+    .try_flatten()
+    .boxed()
+}
+
+/// One dataset of the collection as a lazy nd dataset, under the scan's fields.
+///
+/// The dataset holds an array for every field it has: the variable's entry in
+/// its segment, read on demand through the atlas backend, or an attribute
+/// value on no axis. A field it lacks has no array, and reads as a rank-0
+/// null.
+struct DatasetRead {
+    /// The scan's fields, in order.
+    fields: Vec<FieldRef>,
+    /// The lazy dataset, its arrays keyed by field name.
+    dataset: Dataset,
+}
+
+impl DatasetRead {
+    /// No array data is read here. The dataset's layout comes from the
+    /// segments, and its chunk grid is the one the writer chose.
+    fn build(views: &IndexMap<FieldRef, Option<AtlasColumnView>>, dataset: &str) -> Result<Self> {
+        let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
+        for (field, view) in views {
+            let array = match view {
+                None => None,
+                Some(AtlasColumnView::Array { segment }) => match segment.array(dataset) {
+                    Some(info) => Some(
+                        compat::array_to_nd_array(Arc::clone(segment), dataset, &info.dtype)
+                            .map_err(execution)?,
+                    ),
+                    None => None,
+                },
+                Some(AtlasColumnView::GlobalAttribute { map })
+                | Some(AtlasColumnView::VariableAttribute { map, .. }) => {
+                    // A list has no rank-0 form, and the schema holds no list
+                    // column. A dataset that stores a list under a scalar
+                    // column's key reads as null.
+                    map.get(dataset)
+                        .and_then(|attr| compat::attribute_to_nd_array(attr).ok())
+                }
+            };
+            if let Some(array) = array {
+                arrays.insert(field.name().clone(), array);
+            }
+        }
+        let dataset = Dataset::new(dataset.to_string(), arrays).map_err(execution)?;
+        Ok(Self {
+            fields: views.keys().cloned().collect(),
+            dataset,
+        })
     }
-    let schema = Arc::new(Schema::new(views.keys().cloned().collect::<Vec<_>>()));
-    let target = infer_target(&columns)?;
-    NdRecordBatch::try_new(schema, columns, target)
+
+    /// One chunk of the dataset, under the scan's fields.
+    ///
+    /// A column comes out under the array's own type, and the table may
+    /// declare a wider one: that is a cast. A field the dataset lacks is a
+    /// rank-0 null, which broadcasts to an all-null column. The decoder makes
+    /// the same of a null struct row, so the scan sees one thing either way.
+    async fn chunk(&self, chunk: Arc<dyn Any + Send + Sync>) -> Result<NdRecordBatch> {
+        let nd = self
+            .dataset
+            .poll_next(chunk)
+            .await
+            .map_err(execution)?
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "dataset '{}' read no batch for a chunk of its own grid",
+                    self.dataset.name
+                ))
+            })?;
+
+        let mut columns = Vec::with_capacity(self.fields.len());
+        for field in &self.fields {
+            let column = match nd.schema().column_with_name(field.name()) {
+                Some((index, _)) => {
+                    let column = nd.column(index);
+                    match as_field_type(Arc::clone(column.values()), field)? {
+                        Some(values) => NdArrowArray::try_new(values, column.dims().clone())?,
+                        None => null_scalar(field),
+                    }
+                }
+                None => null_scalar(field),
+            };
+            columns.push(column);
+        }
+        let schema = Arc::new(Schema::new(self.fields.clone()));
+        NdRecordBatch::try_new(schema, columns, nd.target().clone())
+    }
 }
 
 /// A rank-0 null. It broadcasts to an all-null column of the target grid.
 fn null_scalar(field: &Field) -> NdArrowArray {
     NdArrowArray::try_new(new_null_array(field.data_type(), 1), Dimensions::scalar())
         .expect("one element on no axis")
-}
-
-/// `dataset`'s entry of one variable, on the axes the segment records for it.
-async fn array_column(
-    segment: &ArrayFile,
-    dataset: &str,
-    info: &ArrayInfo,
-    field: &Field,
-) -> Result<NdArrowArray> {
-    let dims = Dimensions::try_new(
-        info.dimension_names
-            .iter()
-            .zip(&info.shape)
-            .map(|(name, &size)| Dimension::new(name.as_str(), size as usize))
-            .collect(),
-    )?;
-    let values = read_values(segment, dataset, info).await?;
-    match as_field_type(values, field)? {
-        Some(values) => NdArrowArray::try_new(values, dims),
-        None => Ok(null_scalar(field)),
-    }
-}
-
-/// One attribute value of `dataset`, on no axis.
-fn attr_column(attr: &Attr, field: &Field) -> Result<NdArrowArray> {
-    let values: ArrayRef = match attr {
-        Attr::Bool(v) => Arc::new(BooleanArray::from(vec![*v])),
-        Attr::Int8(v) => Arc::new(Int8Array::from(vec![*v])),
-        Attr::Int16(v) => Arc::new(Int16Array::from(vec![*v])),
-        Attr::Int32(v) => Arc::new(Int32Array::from(vec![*v])),
-        Attr::Int64(v) => Arc::new(Int64Array::from(vec![*v])),
-        Attr::UInt8(v) => Arc::new(UInt8Array::from(vec![*v])),
-        Attr::UInt16(v) => Arc::new(UInt16Array::from(vec![*v])),
-        Attr::UInt32(v) => Arc::new(UInt32Array::from(vec![*v])),
-        Attr::UInt64(v) => Arc::new(UInt64Array::from(vec![*v])),
-        Attr::Float32(v) => Arc::new(Float32Array::from(vec![*v])),
-        Attr::Float64(v) => Arc::new(Float64Array::from(vec![*v])),
-        Attr::String(v) => Arc::new(StringArray::from(vec![v.as_str()])),
-        Attr::Binary(v) => Arc::new(BinaryArray::from(vec![v.as_slice()])),
-        // A list has no rank-0 form, and the schema holds no list column. A
-        // dataset that stores a list under a scalar column's key reads as null.
-        _ => return Ok(null_scalar(field)),
-    };
-    match as_field_type(values, field)? {
-        Some(values) => NdArrowArray::try_new(values, Dimensions::scalar()),
-        None => Ok(null_scalar(field)),
-    }
 }
 
 /// `values` in the type the table declares for `field`, or `None` for values
@@ -271,122 +298,14 @@ fn as_field_type(values: ArrayRef, field: &Field) -> Result<Option<ArrayRef>> {
     }
 }
 
-/// The flat values of `dataset`'s entry in `segment`, its fill read as null.
-async fn read_values(segment: &ArrayFile, dataset: &str, info: &ArrayInfo) -> Result<ArrayRef> {
-    let fill = info.fill_value.as_ref();
-    match info.dtype {
-        DType::Int8 => primitive_values::<Int8Type>(segment, dataset, fill).await,
-        DType::Int16 => primitive_values::<Int16Type>(segment, dataset, fill).await,
-        DType::Int32 => primitive_values::<Int32Type>(segment, dataset, fill).await,
-        DType::Int64 => primitive_values::<Int64Type>(segment, dataset, fill).await,
-        DType::UInt8 => primitive_values::<UInt8Type>(segment, dataset, fill).await,
-        DType::UInt16 => primitive_values::<UInt16Type>(segment, dataset, fill).await,
-        DType::UInt32 => primitive_values::<UInt32Type>(segment, dataset, fill).await,
-        DType::UInt64 => primitive_values::<UInt64Type>(segment, dataset, fill).await,
-        DType::Float32 => primitive_values::<Float32Type>(segment, dataset, fill).await,
-        DType::Float64 => primitive_values::<Float64Type>(segment, dataset, fill).await,
-        DType::TimestampNs => timestamp_values(segment, dataset, fill).await,
-        DType::String => text_values(segment, dataset, fill).await,
-        DType::Binary => binary_values(segment, dataset, fill).await,
-        DType::Bool | DType::List { .. } | DType::FixedSizeList { .. } => exec_err!(
-            "dataset '{dataset}' holds a {:?} array, which Beacon does not read",
-            info.dtype
-        ),
-    }
-}
-
-/// The whole entry of `dataset` in `segment`, flat in row-major order.
-async fn read_flat<T: ArrayElement>(segment: &ArrayFile, dataset: &str) -> Result<Vec<T>> {
-    let values = segment
-        .read_array::<T>(dataset, vec![], vec![])
-        .await
-        .map_err(external)?;
-    Ok(values.into_owned().into_raw_vec_and_offset().0)
-}
-
-async fn primitive_values<A>(
-    segment: &ArrayFile,
-    dataset: &str,
-    fill: Option<&FillValue>,
-) -> Result<ArrayRef>
-where
-    A: ArrowPrimitiveType,
-    A::Native: ArrayElement,
-{
-    let values = read_flat::<A::Native>(segment, dataset).await?;
-    let fill = fill.map(|fill| <A::Native as ArrayElement>::fill_element(Some(fill)));
-    mask_fill(
-        PrimitiveArray::<A>::new(ScalarBuffer::from(values), None),
-        fill,
-    )
-}
-
-/// Both types are `#[repr(transparent)]` over `i64`. The rename is done
-/// element by element all the same, on the type system rather than on layout.
-async fn timestamp_values(
-    segment: &ArrayFile,
-    dataset: &str,
-    fill: Option<&FillValue>,
-) -> Result<ArrayRef> {
-    let values: Vec<i64> = read_flat::<TimestampNs>(segment, dataset)
-        .await?
-        .into_iter()
-        .map(|ts| ts.0)
-        .collect();
-    let fill = fill.map(|fill| <TimestampNs as ArrayElement>::fill_element(Some(fill)).0);
-    mask_fill(
-        PrimitiveArray::<TimestampNanosecondType>::from(values),
-        fill,
-    )
-}
-
-async fn text_values(
-    segment: &ArrayFile,
-    dataset: &str,
-    fill: Option<&FillValue>,
-) -> Result<ArrayRef> {
-    let values = read_flat::<String>(segment, dataset).await?;
-    let fill = fill.map(|fill| <String as ArrayElement>::fill_element(Some(fill)));
-    Ok(Arc::new(StringArray::from_iter(values.into_iter().map(
-        |value| (fill.as_ref() != Some(&value)).then_some(value),
-    ))))
-}
-
-async fn binary_values(
-    segment: &ArrayFile,
-    dataset: &str,
-    fill: Option<&FillValue>,
-) -> Result<ArrayRef> {
-    let values = read_flat::<Vec<u8>>(segment, dataset).await?;
-    let fill = fill.map(|fill| <Vec<u8> as ArrayElement>::fill_element(Some(fill)));
-    Ok(Arc::new(BinaryArray::from_iter(values.into_iter().map(
-        |value| (fill.as_ref() != Some(&value)).then_some(value),
-    ))))
-}
-
-/// `array`, with every element equal to `fill` read as null.
-///
-/// One vectorised compare gives the validity. A `NaN` fill masks nothing, as
-/// `NaN` equals no value, and the same holds in every other nd format.
-fn mask_fill<A: ArrowPrimitiveType>(
-    array: PrimitiveArray<A>,
-    fill: Option<A::Native>,
-) -> Result<ArrayRef> {
-    let Some(fill) = fill else {
-        return Ok(Arc::new(array));
-    };
-    let fill = PrimitiveArray::<A>::new_scalar(fill);
-    let kept = neq(&array, &fill)?;
-    let nulls = NullBuffer::new(kept.values().clone());
-    Ok(Arc::new(PrimitiveArray::<A>::new(
-        array.values().clone(),
-        Some(nulls),
-    )))
-}
-
 /// An atlas error, as the scan reports it.
 fn external(error: impl std::error::Error + Send + Sync + 'static) -> DataFusionError {
     DataFusionError::External(Box::new(error))
+}
+
+/// A read error, as the scan reports it.
+fn execution(error: impl std::fmt::Display) -> DataFusionError {
+    DataFusionError::Execution(error.to_string())
 }
 
 /// Where one column of the scan comes from, for every dataset of a collection.
@@ -434,13 +353,19 @@ mod tests {
         column_views(&atlas, &schema).await.unwrap()
     }
 
-    async fn read(dir: &std::path::Path, dataset: &str) -> (NdRecordBatch, RecordBatch) {
+    /// Every chunk of `dataset`, read as the opener reads it, and the rows of
+    /// all of them in chunk order.
+    async fn read(dir: &std::path::Path, dataset: &str) -> (Vec<NdRecordBatch>, RecordBatch) {
         let views = views(dir).await;
-        let nd = fast_view_read_to_record_batch(&views, dataset)
-            .await
-            .unwrap();
-        let batch = nd.materialize().unwrap();
-        (nd, batch)
+        let read = DatasetRead::build(&views, dataset).unwrap();
+        let mut chunks = Vec::new();
+        for chunk in read.dataset.chunks() {
+            chunks.push(read.chunk(chunk).await.unwrap());
+        }
+        let batches: Vec<RecordBatch> = chunks.iter().map(|nd| nd.materialize().unwrap()).collect();
+        let schema = Arc::new(Schema::new(views.keys().cloned().collect::<Vec<_>>()));
+        let batch = arrow::compute::concat_batches(&schema, &batches).unwrap();
+        (chunks, batch)
     }
 
     fn column<'a>(batch: &'a RecordBatch, name: &str) -> &'a ArrayRef {
@@ -458,7 +383,8 @@ mod tests {
 
         let (nd, batch) = read(tmp.path(), "winter").await;
 
-        assert_eq!(nd.target().shape(), vec![4]);
+        assert_eq!(nd.len(), 1, "an unchunked array is one chunk");
+        assert_eq!(nd[0].target().shape(), vec![4]);
         assert_eq!(batch.num_rows(), 4);
         assert_eq!(
             column(&batch, "temperature")
@@ -520,7 +446,8 @@ mod tests {
         );
     }
 
-    /// A 2-D array keeps both axes, and a cell nobody wrote reads as null.
+    /// A 2-D array reads one stored chunk at a time, keeps both axes, and a
+    /// cell nobody wrote reads as null.
     #[tokio::test]
     async fn a_fill_value_reads_as_null_on_a_two_dimensional_grid() {
         let tmp = tempfile::tempdir().unwrap();
@@ -528,14 +455,27 @@ mod tests {
 
         let (nd, batch) = read(tmp.path(), "grid").await;
 
-        assert_eq!(nd.target().shape(), vec![4, 6]);
+        assert_eq!(nd.len(), 4, "a [4, 6] grid chunked [2, 3]");
+        for chunk in &nd {
+            assert_eq!(chunk.target().shape(), vec![2, 3]);
+        }
         assert_eq!(batch.num_rows(), 24);
         let temperature = column(&batch, "temperature").as_primitive::<Float64Type>();
-        assert_eq!(temperature.value(7), 7.0, "row 1, column 1 of a 4x6 grid");
+        assert_eq!(
+            temperature.value(4),
+            7.0,
+            "row 1, column 1 of the grid: the fifth cell of the first chunk"
+        );
+        let mut cells = temperature.values().to_vec();
+        cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(cells, (0..24).map(f64::from).collect::<Vec<_>>());
         let sparse = column(&batch, "sparse");
         assert_eq!(sparse.null_count(), 12, "two of four rows were written");
-        assert!(sparse.is_valid(0));
-        assert!(sparse.is_null(23));
+        assert!(
+            sparse.is_valid(0),
+            "the first chunk lies in the written rows"
+        );
+        assert!(sparse.is_null(23), "the last chunk lies outside them");
     }
 
     /// `a` stores `value` as `Int16` and `b` as `Float32`. The table declares
