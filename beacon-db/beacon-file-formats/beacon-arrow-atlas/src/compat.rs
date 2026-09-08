@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
-use atlas::{ArrayLayout, Attr, CollectionSchema, DType, DatasetView, FillValue};
+use atlas::{ArrayFile, Attr, CollectionSchema, DType};
 use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema};
 use beacon_nd_array::{
     NdArray, NdArrayD, datatypes::NdArrayDataType, datatypes::TimestampNanosecond,
 };
 
-use crate::backend::{AtlasArrayBackend, AtlasElement, AttributeBackend};
+use crate::backend::{AtlasArrayBackend, AttributeBackend};
 
 // ─── Column names ────────────────────────────────────────────────────────────
 
@@ -200,41 +200,23 @@ fn merge_types(
 
 // ─── Lazy arrays ─────────────────────────────────────────────────────────────
 
-/// Wrap one atlas array as a lazy [`NdArrayD`] over `view`.
+/// Wrap one dataset's entry of an atlas segment as a lazy [`NdArrayD`].
 ///
 /// No array data is read here. `dtype` comes from the collection footer, and
-/// `layout` from the variable's segment, which one open serves for the whole
-/// collection. The values themselves arrive when the engine asks the backend
-/// for a subset.
+/// the layout from `segment`, which one open serves for the whole collection.
+/// The values themselves arrive when the engine asks the backend for a subset.
 ///
 /// The chunk shape is the one the writer chose. It is what lets the scan cut a
 /// dataset on the grid the file actually stores, so one unit of work is one
 /// stored chunk.
 pub fn array_to_nd_array(
-    view: Arc<DatasetView>,
-    array_name: &str,
+    segment: Arc<ArrayFile>,
+    dataset: &str,
     dtype: &DType,
-    layout: &ArrayLayout,
 ) -> anyhow::Result<Arc<dyn NdArrayD>> {
-    let fill: Option<FillValue> = layout.fill_value().cloned();
-
     macro_rules! lazy {
         ($ty:ty) => {{
-            let fill = fill
-                .as_ref()
-                .map(|value| <$ty as AtlasElement>::fill_element(Some(value)));
-            let backend = AtlasArrayBackend::<$ty>::new(
-                view,
-                array_name.to_string(),
-                layout.shape().to_vec(),
-                layout
-                    .dimension_names()
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-                layout.chunk_shape().to_vec(),
-                fill,
-            );
+            let backend = AtlasArrayBackend::<$ty>::try_new(segment, dataset.to_string())?;
             Ok(Arc::new(NdArray::new_with_backend(backend)?) as Arc<dyn NdArrayD>)
         }};
     }
@@ -254,13 +236,13 @@ pub fn array_to_nd_array(
         DType::Binary => lazy!(Vec<u8>),
         DType::TimestampNs => lazy!(TimestampNanosecond),
         DType::Bool => Err(anyhow::anyhow!(
-            "array '{array_name}' is Bool, which atlas stores no elements of"
+            "dataset '{dataset}' holds a Bool array, which atlas stores no elements of"
         )),
         DType::FixedSizeList { .. } => Err(anyhow::anyhow!(
-            "array '{array_name}' is a FixedSizeList, which Beacon does not model"
+            "dataset '{dataset}' holds a FixedSizeList array, which Beacon does not model"
         )),
         DType::List { .. } => Err(anyhow::anyhow!(
-            "array '{array_name}' is a List, which Beacon does not model"
+            "dataset '{dataset}' holds a List array, which Beacon does not model"
         )),
     }
 }

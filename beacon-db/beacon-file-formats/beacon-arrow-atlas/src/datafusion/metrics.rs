@@ -16,12 +16,6 @@ pub struct AtlasScanMetrics {
     pub datasets_scanned: Count,
     /// Datasets it skipped because the collection's statistics ruled them out.
     pub datasets_pruned: Count,
-    /// Pruning indexes built. One per collection a predicate scan touches, so a
-    /// number above the collection count means a partition rebuilt one.
-    pub index_builds: Count,
-    /// Datasets those indexes covered, which is what the pruning pass looked
-    /// at rather than read.
-    pub index_rows: Count,
 }
 
 impl AtlasScanMetrics {
@@ -35,8 +29,6 @@ impl AtlasScanMetrics {
                 .counter("atlas_datasets_scanned", partition),
             datasets_pruned: MetricBuilder::new(metrics)
                 .counter("atlas_datasets_pruned", partition),
-            index_builds: MetricBuilder::new(metrics).counter("atlas_index_builds", partition),
-            index_rows: MetricBuilder::new(metrics).counter("atlas_index_rows", partition),
         }
     }
 }

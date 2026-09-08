@@ -1,11 +1,11 @@
 //! The lazy array backends the Atlas reader hands to `beacon-nd-array`.
 //!
-//! [`AtlasArrayBackend`] reads a region of one atlas array on demand.
-//! [`AttributeBackend`] holds one attribute value as a rank-0 array.
+//! [`AtlasArrayBackend`] reads one dataset's entry of a variable's segment on
+//! demand. [`AttributeBackend`] holds one attribute value as a rank-0 array.
 
 use std::sync::Arc;
 
-use atlas::{DatasetView, FillValue};
+use atlas::{ArrayFile, FillValue};
 use beacon_nd_array::{
     array::{backend::ArrayBackend, subset::ArraySubset},
     datatypes::{NdArrayType, TimestampNanosecond},
@@ -21,10 +21,10 @@ use ndarray::ArrayD;
 /// entry point, so [`AtlasArrayBackend`] stays generic.
 #[async_trait::async_trait]
 pub trait AtlasElement: NdArrayType {
-    /// Read `shape` elements of `array` from `start`.
+    /// Read `shape` elements of `dataset`'s entry in `segment` from `start`.
     async fn read(
-        view: &DatasetView,
-        array: &str,
+        segment: &ArrayFile,
+        dataset: &str,
         start: Vec<usize>,
         shape: Vec<usize>,
     ) -> anyhow::Result<ArrayD<Self>>;
@@ -42,18 +42,17 @@ macro_rules! passthrough {
         #[async_trait::async_trait]
         impl AtlasElement for $ty {
             async fn read(
-                view: &DatasetView,
-                array: &str,
+                segment: &ArrayFile,
+                dataset: &str,
                 start: Vec<usize>,
                 shape: Vec<usize>,
             ) -> anyhow::Result<ArrayD<Self>> {
-                let values = view
-                    .read_array::<$ty>(array, start, shape)
+                let values = segment
+                    .read_array::<$ty>(dataset, start, shape)
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!(
-                            "Failed to read atlas array '{array}' of dataset '{}': {e}",
-                            view.name()
+                            "Failed to read dataset '{dataset}' from its atlas segment: {e}"
                         )
                     })?;
                 Ok(values.into_owned())
@@ -86,18 +85,17 @@ passthrough!(Vec<u8>);
 #[async_trait::async_trait]
 impl AtlasElement for TimestampNanosecond {
     async fn read(
-        view: &DatasetView,
-        array: &str,
+        segment: &ArrayFile,
+        dataset: &str,
         start: Vec<usize>,
         shape: Vec<usize>,
     ) -> anyhow::Result<ArrayD<Self>> {
-        let values = view
-            .read_array::<atlas::TimestampNs>(array, start, shape)
+        let values = segment
+            .read_array::<atlas::TimestampNs>(dataset, start, shape)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to read atlas timestamp array '{array}' of dataset '{}': {e}",
-                    view.name()
+                    "Failed to read the timestamps of dataset '{dataset}' from its atlas segment: {e}"
                 )
             })?;
         Ok(values.into_owned().mapv(|ts| TimestampNanosecond(ts.0)))
@@ -108,14 +106,16 @@ impl AtlasElement for TimestampNanosecond {
     }
 }
 
-/// Reads one atlas array lazily, one requested region at a time.
+/// Reads one dataset's entry of an atlas segment lazily, one region at a time.
 ///
-/// The backend holds the [`DatasetView`] rather than the collection and a
-/// name. A view is resolved once, when the dataset is built; resolving it per
-/// read would cost a linear scan of the collection footer every time.
+/// The backend holds the segment itself, not a
+/// [`DatasetView`](atlas::DatasetView). A segment holds one variable for every
+/// dataset in the collection, keyed by dataset name, so a read is one call on
+/// it. A view would resolve the segment through the footer and re-check the
+/// element type on every read.
 pub struct AtlasArrayBackend<T: NdArrayType> {
-    view: Arc<DatasetView>,
-    array: String,
+    segment: Arc<ArrayFile>,
+    dataset: String,
     shape: Vec<usize>,
     dimensions: Vec<String>,
     chunk_shape: Vec<usize>,
@@ -125,8 +125,7 @@ pub struct AtlasArrayBackend<T: NdArrayType> {
 impl<T: NdArrayType> std::fmt::Debug for AtlasArrayBackend<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AtlasArrayBackend")
-            .field("dataset", &self.view.name())
-            .field("array", &self.array)
+            .field("dataset", &self.dataset)
             .field("shape", &self.shape)
             .field("dimensions", &self.dimensions)
             .field("chunk_shape", &self.chunk_shape)
@@ -134,23 +133,31 @@ impl<T: NdArrayType> std::fmt::Debug for AtlasArrayBackend<T> {
     }
 }
 
-impl<T: NdArrayType> AtlasArrayBackend<T> {
-    pub fn new(
-        view: Arc<DatasetView>,
-        array: String,
-        shape: Vec<usize>,
-        dimensions: Vec<String>,
-        chunk_shape: Vec<usize>,
-        fill_value: Option<T>,
-    ) -> Self {
-        Self {
-            view,
-            array,
+impl<T: NdArrayType + AtlasElement> AtlasArrayBackend<T> {
+    /// The backend for `dataset`'s entry in `segment`.
+    ///
+    /// The layout comes from the segment, which records the shape, chunking,
+    /// dimension names and fill value of every entry. The lookup costs no I/O.
+    /// A dataset the segment does not hold is refused by name.
+    pub fn try_new(segment: Arc<ArrayFile>, dataset: String) -> anyhow::Result<Self> {
+        let info = segment.array(&dataset).ok_or_else(|| {
+            anyhow::anyhow!("dataset '{dataset}' has no entry in this atlas segment")
+        })?;
+        let shape = info.shape.iter().map(|&s| s as usize).collect();
+        let dimensions = info.dimension_names.clone();
+        let chunk_shape = info.chunk_shape.iter().map(|&s| s as usize).collect();
+        let fill_value = info
+            .fill_value
+            .as_ref()
+            .map(|fill| T::fill_element(Some(fill)));
+        Ok(Self {
+            segment,
+            dataset,
             shape,
             dimensions,
             chunk_shape,
             fill_value,
-        }
+        })
     }
 }
 
@@ -181,7 +188,7 @@ impl<T: NdArrayType + AtlasElement> ArrayBackend<T> for AtlasArrayBackend<T> {
     }
 
     async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayD<T>> {
-        T::read(&self.view, &self.array, subset.start, subset.shape).await
+        T::read(&self.segment, &self.dataset, subset.start, subset.shape).await
     }
 }
 
@@ -228,27 +235,25 @@ mod tests {
     use super::*;
     use crate::test_support;
 
-    /// Open one dataset of a fixture collection.
-    async fn view(dir: &std::path::Path, dataset: &str) -> Arc<DatasetView> {
-        let atlas = atlas::Atlas::open_path(dir).await.expect("open");
-        Arc::new(atlas.dataset(dataset).expect("dataset"))
+    /// The segment of one variable of a fixture collection.
+    async fn segment(dir: &std::path::Path, array: &str) -> Arc<ArrayFile> {
+        let atlas = test_support::open(dir).await;
+        Arc::clone(atlas.segment(array).await.expect("segment"))
     }
 
     // ── AtlasArrayBackend ───────────────────────────────────────────────
 
+    /// Shape, dimensions, chunking and fill all come from the segment.
     #[tokio::test]
-    async fn the_backend_reports_what_the_footer_holds() {
+    async fn the_backend_reports_what_the_segment_holds() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
 
-        let backend = AtlasArrayBackend::<i32>::new(
-            view(tmp.path(), "winter").await,
-            "cycle".to_string(),
-            vec![4],
-            vec!["obs".to_string()],
-            vec![4],
-            Some(-1),
-        );
+        let backend = AtlasArrayBackend::<i32>::try_new(
+            segment(tmp.path(), "cycle").await,
+            "winter".to_string(),
+        )
+        .unwrap();
         assert_eq!(ArrayBackend::<i32>::shape(&backend), vec![4]);
         assert_eq!(
             ArrayBackend::<i32>::dimensions(&backend),
@@ -259,19 +264,32 @@ mod tests {
         assert_eq!(backend.len(), 4);
     }
 
+    /// A segment holds an entry per dataset that declares the variable. A
+    /// dataset that does not is refused by name, not read as empty.
+    #[tokio::test]
+    async fn a_dataset_the_segment_lacks_is_refused_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+
+        let error = AtlasArrayBackend::<i32>::try_new(
+            segment(tmp.path(), "cycle").await,
+            "summer".to_string(),
+        )
+        .expect_err("only `winter` declares `cycle`")
+        .to_string();
+        assert!(error.contains("summer"), "{error}");
+    }
+
     #[tokio::test]
     async fn a_full_read_returns_every_value() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
 
-        let backend = AtlasArrayBackend::<f32>::new(
-            view(tmp.path(), "winter").await,
-            "temperature".to_string(),
-            vec![4],
-            vec!["obs".to_string()],
-            vec![4],
-            None,
-        );
+        let backend = AtlasArrayBackend::<f32>::try_new(
+            segment(tmp.path(), "temperature").await,
+            "winter".to_string(),
+        )
+        .unwrap();
         let values = backend
             .read_subset(ArraySubset::new(vec![0], vec![4]))
             .await
@@ -284,14 +302,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
 
-        let backend = AtlasArrayBackend::<i32>::new(
-            view(tmp.path(), "winter").await,
-            "cycle".to_string(),
-            vec![4],
-            vec!["obs".to_string()],
-            vec![4],
-            None,
-        );
+        let backend = AtlasArrayBackend::<i32>::try_new(
+            segment(tmp.path(), "cycle").await,
+            "winter".to_string(),
+        )
+        .unwrap();
         let values = backend
             .read_subset(ArraySubset::new(vec![1], vec![2]))
             .await
@@ -306,14 +321,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         test_support::chunked_grid(tmp.path()).await;
 
-        let backend = AtlasArrayBackend::<f64>::new(
-            view(tmp.path(), "grid").await,
-            "temperature".to_string(),
-            vec![4, 6],
-            vec!["lat".to_string(), "lon".to_string()],
-            vec![2, 3],
-            None,
-        );
+        let backend = AtlasArrayBackend::<f64>::try_new(
+            segment(tmp.path(), "temperature").await,
+            "grid".to_string(),
+        )
+        .unwrap();
+        assert_eq!(ArrayBackend::<f64>::chunk_shape(&backend), vec![2, 3]);
         // Rows 1..3, columns 2..4 of a 4x6 grid whose value is row * 6 + col.
         // That window straddles all four chunk columns and both chunk rows.
         let values = backend
@@ -333,14 +346,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         test_support::chunked_grid(tmp.path()).await;
 
-        let backend = AtlasArrayBackend::<f64>::new(
-            view(tmp.path(), "grid").await,
-            "sparse".to_string(),
-            vec![4, 6],
-            vec!["lat".to_string(), "lon".to_string()],
-            vec![2, 3],
-            Some(-999.0),
-        );
+        let backend = AtlasArrayBackend::<f64>::try_new(
+            segment(tmp.path(), "sparse").await,
+            "grid".to_string(),
+        )
+        .unwrap();
+        assert_eq!(ArrayBackend::<f64>::fill_value(&backend), Some(-999.0));
         let values = backend
             .read_subset(ArraySubset::new(vec![2, 0], vec![1, 3]))
             .await
@@ -353,14 +364,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
 
-        let backend = AtlasArrayBackend::<TimestampNanosecond>::new(
-            view(tmp.path(), "winter").await,
-            "time".to_string(),
-            vec![4],
-            vec!["obs".to_string()],
-            vec![4],
-            None,
-        );
+        let backend = AtlasArrayBackend::<TimestampNanosecond>::try_new(
+            segment(tmp.path(), "time").await,
+            "winter".to_string(),
+        )
+        .unwrap();
         let values = backend
             .read_subset(ArraySubset::new(vec![0], vec![2]))
             .await
@@ -379,14 +387,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         test_support::incompatible(tmp.path()).await;
 
-        let backend = AtlasArrayBackend::<String>::new(
-            view(tmp.path(), "a").await,
-            "value".to_string(),
-            vec![2],
-            vec!["obs".to_string()],
-            vec![2],
-            None,
-        );
+        let backend = AtlasArrayBackend::<String>::try_new(
+            segment(tmp.path(), "value").await,
+            "a".to_string(),
+        )
+        .unwrap();
         let values = backend
             .read_subset(ArraySubset::new(vec![0], vec![2]))
             .await

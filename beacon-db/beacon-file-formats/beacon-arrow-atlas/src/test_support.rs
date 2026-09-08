@@ -352,6 +352,40 @@ pub async fn empty(dir: &Path) {
     writer.finish().await.expect("finish the collection");
 }
 
+/// One dataset declares an array and never writes it, beside one that does.
+///
+/// - `d`: `value: Int32[2]`, defined with no fill and never written. It reads
+///   as zeros, while its statistics count both cells as null.
+/// - `w`: `value: Int32[2] = [5, 6]`.
+///
+/// A predicate on `value` can rule `w` out and must leave `d` in.
+pub async fn declared_unwritten(dir: &Path) {
+    let writer = AtlasWriter::create_path(dir, WriterConfig::default())
+        .await
+        .expect("create the collection");
+
+    {
+        let mut d = writer.add_dataset("d").await.expect("add d");
+        d.define_array::<i32>("value", vec!["obs".into()], vec![2], None, None)
+            .await
+            .expect("define value");
+        d.finish().await.expect("finish d");
+    }
+
+    {
+        let mut w = writer.add_dataset("w").await.expect("add w");
+        w.define_array::<i32>("value", vec!["obs".into()], vec![2], None, None)
+            .await
+            .expect("define value");
+        w.write_array("value", vec![0], arr1(&[5i32, 6]).into_dyn().view())
+            .await
+            .expect("write value");
+        w.finish().await.expect("finish w");
+    }
+
+    writer.finish().await.expect("finish the collection");
+}
+
 /// A wide collection on two dimensions, `profile` and `level`.
 ///
 /// Dataset `i` is named `set{i}` and holds `shapes[i]` as

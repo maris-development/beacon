@@ -51,8 +51,9 @@ use datafusion::{
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 
+use beacon_datafusion_ext::nd::logical_schema;
+
 use crate::datafusion::metrics::AtlasScanMetrics;
-use crate::datafusion::pruning::{CandidateFilter, candidate_filter, logical_schema};
 use crate::store::{AtlasReaderCache, get_or_open_atlas};
 use crate::{compat, datafusion::opener::AtlasOpener};
 
@@ -115,7 +116,7 @@ impl FileSource for AtlasSource {
             cache: self.cache.clone(),
             // A predicate is written against the values, not the encoding the
             // scan carries them in.
-            logical_schema: logical_schema(&projected_schema),
+            logical_schema: logical_schema(&projected_schema)?,
             projected_schema,
             read_dimensions: self.read_dimensions.clone(),
             batch_size: self.batch_size,

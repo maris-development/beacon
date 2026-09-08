@@ -322,7 +322,10 @@ pub fn decode_nd_record_batch_row(batch: &RecordBatch, row: usize) -> Result<NdR
 /// Infer the target grid from decoded columns: the highest-rank column defines
 /// the axis order (it spans the grid in C-order), and any axis only present on
 /// lower-rank columns is appended.
-fn infer_target(columns: &[NdArrowArray]) -> Result<Dimensions> {
+///
+/// A file opener that builds nd batches itself uses the same rule, so a batch
+/// it emits and a batch the decoder rebuilds agree on the grid.
+pub fn infer_target(columns: &[NdArrowArray]) -> Result<Dimensions> {
     let mut order: Vec<Dimension> = Vec::new();
     if let Some(widest) = columns.iter().max_by_key(|c| c.dims().rank()) {
         order.extend(widest.dims().iter().cloned());

@@ -1,36 +1,45 @@
-//! Dropping the datasets a predicate cannot match, from the collection footer.
+//! Dropping the datasets a predicate cannot match, from what is in memory.
 //!
 //! # One index, not a decision per dataset
 //!
 //! A collection can hold millions of datasets. Evaluating a predicate against
-//! each one in turn would cost millions of evaluations, and each would open the
-//! dataset to get its numbers.
+//! each one in turn would cost millions of evaluations. Instead the opener
+//! builds one [`PruningIndex`] over the collection: one row per live dataset,
+//! and one column of typed Arrow statistics per column the predicate names.
+//! DataFusion's [`PruningPredicate`] then judges the whole collection in one
+//! vectorised pass, and the result is one bit per dataset.
 //!
-//! Instead the first opener that reaches a collection builds one
-//! [`PruningIndex`] over it: one row per live dataset, and one column of typed
-//! Arrow statistics per column the predicate names. DataFusion's
-//! [`PruningPredicate`] then evaluates the whole collection in one vectorised
-//! pass, and the result is a bit per dataset that every partition reads.
+//! The inputs are the opener's own column views. A variable's segment records
+//! the statistics of every dataset that wrote it, and an attribute view holds
+//! every dataset's value. Both are in memory once the views exist, so the
+//! index costs no I/O. Reading the views rather than asking the collection
+//! again also keeps pruning on the columns the scan reads: a column resolves
+//! one way, in [`column_views`](super::opener::column_views).
 //!
-//! One column is one request. Atlas stores a variable in one segment, so
-//! [`Atlas::array_stats_by_dataset`] and [`Atlas::attributes_by_dataset`] each
-//! return every live dataset's value from a single open — however many datasets
-//! there are. The index costs one open per column the predicate names, and no
-//! array data at all.
+//! # A column the dataset lacks
+//!
+//! The scan reads such a column as nulls, so the index says so:
+//! `null_count == row_count`. DataFusion then drops the dataset for `x > 5`
+//! and for `x IS NOT NULL`, and keeps it for `x IS NULL`.
+//!
+//! The writer counts a cell nobody wrote as null too. With a fill value that is
+//! what the scan reads, and the counts hold. Without one the scan reads zeros,
+//! so an entry with unwritten cells and no fill value says nothing about its
+//! values. Its counts stay unknown, and its dataset stays in.
 //!
 //! # Pruning is only ever an optimization
 //!
-//! Every path here fails open: an error, a predicate the engine cannot use, a
-//! column with no statistics, or a bound that will not cast all leave the
-//! datasets in. A dataset that survives is still filtered row by row above the
-//! scan, so a hiccup here costs time and never a row.
+//! Every path here fails open: an error, a predicate the engine cannot use, or
+//! a bound that will not cast all leave the datasets in. A dataset that
+//! survives is still filtered row by row above the scan, so a hiccup here
+//! costs time and never a row.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use atlas::{ArrayStats, Atlas, Attr, StatValue};
+use arrow::array::{ArrayRef, UInt64Array, new_null_array};
+use arrow::datatypes::{DataType, FieldRef, SchemaRef};
+use atlas::{ArrayFile, Attr, StatValue};
 use datafusion::common::Column;
 use datafusion::common::pruning::PruningStatistics;
 use datafusion::physical_expr::PhysicalExpr;
@@ -39,57 +48,66 @@ use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::scalar::ScalarValue;
 use indexmap::IndexMap;
 
-// ─── What a scan does with the answer ────────────────────────────────────────
+use super::opener::AtlasColumnView;
 
-/// Which datasets of one collection a predicate could still match.
-#[derive(Debug)]
-pub enum CandidateFilter {
-    /// Pruning did not apply. Every dataset is read.
-    KeepAll,
-    /// One bit per dataset, in the order the plan listed them.
-    Rows {
-        kept: BooleanArray,
-        /// The dataset at each row, so a listing that changed under the plan is
-        /// detected rather than mis-indexed.
-        names: Vec<String>,
-    },
-}
-
-impl CandidateFilter {
-    /// Whether the dataset at `position` is worth reading.
-    ///
-    /// The name is checked against the row it indexes. A collection is
-    /// immutable, but its deletion mask is not, so a delete between the plan
-    /// and the open would shift every row after it. A mismatch keeps the
-    /// dataset: the filter above the scan decides it either way.
-    pub fn keeps(&self, position: usize, dataset: &str) -> bool {
-        match self {
-            Self::KeepAll => true,
-            Self::Rows { kept, names } => match names.get(position) {
-                Some(name) if name == dataset => kept.value(position),
-                _ => true,
-            },
-        }
+/// The datasets of `names` that `predicate` could still match, in order.
+///
+/// `logical_schema` must type every column the predicate names, which the
+/// scan's own projected schema does: a filter that stays above the scan forces
+/// its columns into the projection. `views` must resolve those columns the way
+/// the scan reads them.
+///
+/// Fails open to `names` on anything it cannot prove.
+pub(crate) async fn prune_datasets(
+    views: &Arc<IndexMap<FieldRef, Option<AtlasColumnView>>>,
+    names: Vec<String>,
+    predicate: &Arc<dyn PhysicalExpr>,
+    logical_schema: &SchemaRef,
+) -> Vec<String> {
+    let Ok(pruning) = PruningPredicate::try_new(Arc::clone(predicate), Arc::clone(logical_schema))
+    else {
+        // The engine cannot use this predicate shape.
+        return names;
+    };
+    let referenced = collect_columns(pruning.orig_expr());
+    if referenced.is_empty() || names.is_empty() {
+        return names;
     }
 
-    /// Whether an index was built at all, as opposed to pruning not applying.
-    pub fn is_index(&self) -> bool {
-        matches!(self, Self::Rows { .. })
+    // A column the predicate names, with the type the table gives it.
+    let wanted: Vec<(String, DataType)> = referenced
+        .iter()
+        .filter_map(|column| {
+            let (field, _) = views
+                .iter()
+                .find(|(field, _)| field.name() == column.name())?;
+            Some((column.name().to_string(), field.data_type().clone()))
+        })
+        .collect();
+    if wanted.is_empty() {
+        // Nothing the predicate names is a column of the scan.
+        return names;
     }
 
-    /// How many datasets this filter drops. For diagnostics.
-    pub fn pruned(&self) -> usize {
-        match self {
-            Self::KeepAll => 0,
-            Self::Rows { kept, .. } => kept.len() - kept.true_count(),
-        }
-    }
+    // The pivot is pure CPU over what is in memory, and a million rows is
+    // real work, so it does not run on the async runtime.
+    let names: Arc<[String]> = names.into();
+    let (views, rows) = (Arc::clone(views), Arc::clone(&names));
+    let built = tokio::task::spawn_blocking(move || build_index(&views, &rows, &wanted)).await;
+    let Ok(index) = built else {
+        return names.to_vec();
+    };
 
-    /// How many rows the index behind this filter holds.
-    pub fn rows(&self) -> usize {
-        match self {
-            Self::KeepAll => 0,
-            Self::Rows { kept, .. } => kept.len(),
+    match pruning.prune(&index) {
+        Ok(kept) => names
+            .iter()
+            .zip(kept)
+            .filter(|(_, keep)| *keep)
+            .map(|(name, _)| name.clone())
+            .collect(),
+        Err(e) => {
+            tracing::debug!("atlas pruning fell back to reading every dataset: {e}");
+            names.to_vec()
         }
     }
 }
@@ -139,7 +157,7 @@ impl PruningStatistics for PruningIndex {
         &self,
         _column: &Column,
         _values: &std::collections::HashSet<ScalarValue>,
-    ) -> Option<BooleanArray> {
+    ) -> Option<arrow::array::BooleanArray> {
         // An attribute's value is exact, so an `IN` list could prune on one.
         // Not yet: every column here reports a range, and a range says nothing
         // about membership.
@@ -149,180 +167,30 @@ impl PruningStatistics for PruningIndex {
 
 // ─── Building it ─────────────────────────────────────────────────────────────
 
-/// The logical schema behind an nd-encoded one.
-///
-/// A scan carries its columns as `beacon.nd` structs, and a predicate is
-/// written against the values inside them. A field whose type does not decode
-/// keeps its own type, which simply leaves it unprunable.
-pub fn logical_schema(encoded: &Schema) -> SchemaRef {
-    let fields: Vec<Arc<Field>> = encoded
-        .fields()
+/// Pivot the views into one [`StatColumn`] per wanted column.
+fn build_index(
+    views: &IndexMap<FieldRef, Option<AtlasColumnView>>,
+    names: &[String],
+    wanted: &[(String, DataType)],
+) -> PruningIndex {
+    let columns = wanted
         .iter()
-        .map(|field| {
-            let value_type = beacon_datafusion_ext::nd::encoding::nd_value_type(field.data_type())
-                .unwrap_or_else(|_| field.data_type().clone());
-            Arc::new(Field::new(field.name(), value_type, true))
-        })
-        .collect();
-    Arc::new(Schema::new(fields))
-}
-
-/// Which datasets of `atlas` could satisfy `predicate`.
-///
-/// `logical_schema` must type every column the predicate names, which the
-/// scan's own projected schema does: a filter that stays above the scan forces
-/// its columns into the projection.
-///
-/// Fails open to [`CandidateFilter::KeepAll`] on anything it cannot prove.
-pub async fn candidate_filter(
-    atlas: &Arc<Atlas>,
-    predicate: &Arc<dyn PhysicalExpr>,
-    logical_schema: &SchemaRef,
-) -> CandidateFilter {
-    let Ok(pruning) = PruningPredicate::try_new(Arc::clone(predicate), Arc::clone(logical_schema))
-    else {
-        // The engine cannot use this predicate shape.
-        return CandidateFilter::KeepAll;
-    };
-
-    let referenced = collect_columns(pruning.orig_expr());
-    if referenced.is_empty() {
-        return CandidateFilter::KeepAll;
-    }
-
-    let names = atlas.list_datasets();
-    if names.is_empty() {
-        return CandidateFilter::KeepAll;
-    }
-
-    // Fetching is one request per column, whatever the dataset count. The
-    // pivot after it is pure CPU over what is then in memory, and a million
-    // rows is real work, so it does not run on the async runtime.
-    let wanted: Vec<(String, DataType)> = referenced
-        .iter()
-        .filter_map(|column| {
-            let field = schema_field(logical_schema, column.name())?;
-            Some((column.name().to_string(), field))
-        })
-        .collect();
-
-    let mut fetched: Vec<(String, DataType, Measured)> = Vec::with_capacity(wanted.len());
-    let arrays = atlas.list_arrays();
-    for (column, target) in wanted {
-        let measured = if arrays.iter().any(|array| array == &column) {
-            match atlas.array_stats_by_dataset(&column).await {
-                Ok(stats) => Some(Measured::Array(stats)),
-                Err(e) => {
-                    tracing::debug!(column, "atlas statistics unavailable for pruning: {e}");
-                    None
+        .filter_map(|(column, target)| {
+            let (_, view) = views.iter().find(|(field, _)| field.name() == column)?;
+            let packed = match view {
+                // No dataset declares the column. The scan reads nulls.
+                None => all_null_column(names.len(), target),
+                Some(AtlasColumnView::Array { segment }) => {
+                    pack_array_column(segment, names, target)
                 }
-            }
-        } else {
-            attribute_values(atlas, &column)
-                .await
-                .map(Measured::Attribute)
-        };
-        if let Some(measured) = measured {
-            fetched.push((column, target, measured));
-        }
-    }
-
-    if fetched.is_empty() {
-        // Nothing the predicate names has statistics, so nothing can be ruled
-        // out.
-        return CandidateFilter::KeepAll;
-    }
-
-    let built = tokio::task::spawn_blocking(move || {
-        let index = build_index(&names, fetched);
-        (names, index)
-    })
-    .await;
-
-    let Ok((names, index)) = built else {
-        return CandidateFilter::KeepAll;
-    };
-
-    match pruning.prune(&index) {
-        Ok(kept) => CandidateFilter::Rows {
-            kept: BooleanArray::from(kept),
-            names,
-        },
-        Err(e) => {
-            tracing::debug!("atlas pruning fell back to reading every dataset: {e}");
-            CandidateFilter::KeepAll
-        }
-    }
-}
-
-/// The type a column carries in the scan's own schema, or `None` when it holds
-/// no such column and nothing can be typed against it.
-fn schema_field(schema: &SchemaRef, column: &str) -> Option<DataType> {
-    schema
-        .field_with_name(column)
-        .ok()
-        .map(|field| field.data_type().clone())
-}
-
-/// What one request measured about one column, across every live dataset.
-enum Measured {
-    /// An array's statistics. A dataset that wrote the array has an entry, and
-    /// [`ArrayStats::name`] names it.
-    Array(Vec<ArrayStats>),
-    /// An attribute's value, keyed by dataset.
-    Attribute(IndexMap<String, Attr>),
-}
-
-/// Every live dataset's value for one attribute column, or `None` when the
-/// collection carries no such attribute.
-///
-/// A column is `.key` at dataset scope, or `array.key` at array scope. An array
-/// name and an attribute key may both hold dots, so every split of the latter
-/// is a candidate and the first that finds a value wins.
-async fn attribute_values(atlas: &Atlas, column: &str) -> Option<IndexMap<String, Attr>> {
-    let found = |values: IndexMap<String, Attr>| (!values.is_empty()).then_some(values);
-
-    if let Some(key) = column.strip_prefix('.') {
-        return found(atlas.attributes_by_dataset(None, key).await.ok()?);
-    }
-    for (index, character) in column.char_indices() {
-        if character != '.' {
-            continue;
-        }
-        let (array, rest) = column.split_at(index);
-        if let Ok(values) = atlas.attributes_by_dataset(Some(array), &rest[1..]).await
-            && let Some(values) = found(values)
-        {
-            return Some(values);
-        }
-    }
-    None
-}
-
-/// Pivot what was fetched into one [`StatColumn`] per column.
-fn build_index(names: &[String], fetched: Vec<(String, DataType, Measured)>) -> PruningIndex {
-    // Where each dataset sits, so a pass in write order can be scattered into
-    // rows without a search.
-    let row_of: HashMap<&str, usize> = names
-        .iter()
-        .enumerate()
-        .map(|(row, name)| (name.as_str(), row))
+                Some(AtlasColumnView::GlobalAttribute { map })
+                | Some(AtlasColumnView::VariableAttribute { map, .. }) => {
+                    pack_attribute_column(map, names, target)
+                }
+            };
+            Some((column.clone(), packed))
+        })
         .collect();
-
-    let mut columns = HashMap::new();
-    for (column, target, measured) in fetched {
-        let packed = match measured {
-            Measured::Array(stats) => {
-                Some(pack_array_column(&stats, names.len(), &row_of, &target))
-            }
-            Measured::Attribute(values) => {
-                pack_attribute_column(&values, names.len(), &row_of, &target)
-            }
-        };
-        if let Some(packed) = packed {
-            columns.insert(column, packed);
-        }
-    }
 
     PruningIndex {
         rows: names.len(),
@@ -330,33 +198,39 @@ fn build_index(names: &[String], fetched: Vec<(String, DataType, Measured)>) -> 
     }
 }
 
-/// One array column.
+/// One array column, from the segment that holds the variable.
 ///
-/// A dataset with no entry for the array keeps a null bound and unknown counts.
-/// That is what a dataset which does not declare the array looks like, and it
-/// is also what one that declared it and never wrote it looks like — both must
-/// stay in, and a null does exactly that.
-fn pack_array_column(
-    stats: &[ArrayStats],
-    rows: usize,
-    row_of: &HashMap<&str, usize>,
-    target: &DataType,
-) -> StatColumn {
-    let null = ScalarValue::try_from(target).unwrap_or(ScalarValue::Null);
+/// A dataset the segment has no entry for does not declare the array. The scan
+/// reads it as nulls, and `null_count == row_count` says so. An entry without
+/// statistics, or one whose unwritten cells read as zeros rather than as the
+/// nulls the writer counted, says nothing, and that dataset stays in.
+fn pack_array_column(segment: &ArrayFile, names: &[String], target: &DataType) -> StatColumn {
+    let rows = names.len();
+    let null = null_of(target);
     let mut mins = vec![null.clone(); rows];
     let mut maxes = vec![null.clone(); rows];
     let mut null_counts: Vec<Option<u64>> = vec![None; rows];
     let mut row_counts: Vec<Option<u64>> = vec![None; rows];
 
-    for entry in stats {
-        // A per-dataset entry names its dataset, not its array.
-        let Some(&row) = row_of.get(entry.name.as_str()) else {
+    for (row, name) in names.iter().enumerate() {
+        let Some(info) = segment.array(name) else {
+            null_counts[row] = Some(1);
+            row_counts[row] = Some(1);
             continue;
         };
-        mins[row] = stat_to_scalar(entry.min.as_ref(), target, &null);
-        maxes[row] = stat_to_scalar(entry.max.as_ref(), target, &null);
-        null_counts[row] = Some(entry.null_count);
-        row_counts[row] = Some(entry.row_count);
+        let Some(stats) = info.stats.as_ref() else {
+            continue;
+        };
+        if info.fill_value.is_none() && stats.null_count > 0 {
+            // The nulls the writer counted are cells nobody wrote. Without a
+            // fill value the scan reads them as zeros, which the bounds do
+            // not cover either.
+            continue;
+        }
+        mins[row] = stat_to_scalar(stats.min.as_ref(), target, &null);
+        maxes[row] = stat_to_scalar(stats.max.as_ref(), target, &null);
+        null_counts[row] = Some(stats.null_count);
+        row_counts[row] = Some(stats.row_count);
     }
 
     StatColumn {
@@ -367,55 +241,66 @@ fn pack_array_column(
     }
 }
 
-/// One attribute column, or `None` when no value of it casts.
+/// One attribute column.
 ///
 /// An attribute's value is exact, so it is both the minimum and the maximum of
-/// its dataset. That prunes an equality on a dataset-level attribute — the
-/// platform a file came from, say — from one request.
+/// its dataset, on the one cell the scan reads. That prunes an equality on a
+/// dataset-level attribute, the platform a file came from, say. A dataset
+/// without the key reads as null, and the counts say so. A list, a `NaN`, or a
+/// value that will not cast bounds nothing, and that dataset stays in.
 fn pack_attribute_column(
-    found: &IndexMap<String, Attr>,
-    rows: usize,
-    row_of: &HashMap<&str, usize>,
+    values: &IndexMap<String, Attr>,
+    names: &[String],
     target: &DataType,
-) -> Option<StatColumn> {
-    let null = ScalarValue::try_from(target).unwrap_or(ScalarValue::Null);
-    let mut values = vec![null.clone(); rows];
+) -> StatColumn {
+    let rows = names.len();
+    let null = null_of(target);
+    let mut bounds = vec![null.clone(); rows];
     let mut null_counts: Vec<Option<u64>> = vec![None; rows];
-    let mut seen = false;
+    let mut row_counts: Vec<Option<u64>> = vec![None; rows];
 
-    for (dataset, attr) in found {
-        let Some(&row) = row_of.get(dataset.as_str()) else {
+    for (row, name) in names.iter().enumerate() {
+        let Some(attr) = values.get(name) else {
+            null_counts[row] = Some(1);
+            row_counts[row] = Some(1);
             continue;
         };
-        let Some(scalar) = attr_to_scalar(attr) else {
+        let Some(scalar) = attr_to_scalar(attr).and_then(|scalar| scalar.cast_to(target).ok())
+        else {
             continue;
         };
-        values[row] = scalar.cast_to(target).unwrap_or_else(|_| null.clone());
-        // One value, and it is not the fill of anything.
+        bounds[row] = scalar;
         null_counts[row] = Some(0);
-        seen = true;
+        row_counts[row] = Some(1);
     }
 
-    if !seen {
-        return None;
-    }
-
-    let min = scalars_to_array(values.clone(), rows, target);
-    let max = scalars_to_array(values, rows, target);
-    Some(StatColumn {
-        min,
-        max,
+    StatColumn {
+        min: scalars_to_array(bounds.clone(), rows, target),
+        max: scalars_to_array(bounds, rows, target),
         null_count: Arc::new(UInt64Array::from(null_counts)),
-        // An attribute is one value broadcast over whatever grid the dataset
-        // has, so its row count is not the dataset's. Unknown is honest.
-        row_count: Arc::new(UInt64Array::from(vec![None::<u64>; rows])),
-    })
+        row_count: Arc::new(UInt64Array::from(row_counts)),
+    }
+}
+
+/// A column every dataset reads as null.
+fn all_null_column(rows: usize, target: &DataType) -> StatColumn {
+    let ones = || Arc::new(UInt64Array::from(vec![1u64; rows])) as ArrayRef;
+    StatColumn {
+        min: new_null_array(target, rows),
+        max: new_null_array(target, rows),
+        null_count: ones(),
+        row_count: ones(),
+    }
+}
+
+/// The null of `target`, or the untyped null for a type that has none.
+fn null_of(target: &DataType) -> ScalarValue {
+    ScalarValue::try_from(target).unwrap_or(ScalarValue::Null)
 }
 
 /// Pack scalars into one typed array, or a column of nulls when they will not.
 fn scalars_to_array(values: Vec<ScalarValue>, rows: usize, target: &DataType) -> ArrayRef {
-    ScalarValue::iter_to_array(values)
-        .unwrap_or_else(|_| arrow::array::new_null_array(target, rows))
+    ScalarValue::iter_to_array(values).unwrap_or_else(|_| new_null_array(target, rows))
 }
 
 /// An atlas statistic as a scalar of the table's own type.
@@ -463,10 +348,16 @@ fn attr_to_scalar(attr: &Attr) -> Option<ScalarValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_support;
+    use arrow::datatypes::{Field, Schema};
+    use atlas::Atlas;
     use datafusion::logical_expr::Operator;
-    use datafusion::physical_expr::expressions::{BinaryExpr, Column as ColumnExpr, Literal};
+    use datafusion::physical_expr::expressions::{
+        BinaryExpr, Column as ColumnExpr, IsNullExpr, Literal,
+    };
+
+    use super::*;
+    use crate::datafusion::opener::column_views;
+    use crate::test_support;
 
     fn schema(name: &str, data_type: DataType) -> SchemaRef {
         Arc::new(Schema::new(vec![Field::new(name, data_type, true)]))
@@ -480,20 +371,19 @@ mod tests {
         ))
     }
 
-    /// The datasets a predicate leaves in, in listing order.
+    fn is_null(column: &str) -> Arc<dyn PhysicalExpr> {
+        Arc::new(IsNullExpr::new(Arc::new(ColumnExpr::new(column, 0))))
+    }
+
+    /// The datasets a predicate leaves in, in listing order. The views are the
+    /// ones the scan would read.
     async fn kept(
         atlas: &Arc<Atlas>,
         predicate: Arc<dyn PhysicalExpr>,
         schema: SchemaRef,
     ) -> Vec<String> {
-        let filter = candidate_filter(atlas, &predicate, &schema).await;
-        atlas
-            .list_datasets()
-            .into_iter()
-            .enumerate()
-            .filter(|(position, name)| filter.keeps(*position, name))
-            .map(|(_, name)| name)
-            .collect()
+        let views = Arc::new(column_views(atlas, &schema).await.unwrap());
+        prune_datasets(&views, atlas.list_datasets(), &predicate, &schema).await
     }
 
     // ── the index over array statistics ─────────────────────────────────
@@ -505,7 +395,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         test_support::ranged(tmp.path(), 10).await;
         let atlas = test_support::open(tmp.path()).await;
-        let schema = schema("temperature", DataType::Float32);
 
         let survivors = kept(
             &atlas,
@@ -514,7 +403,7 @@ mod tests {
                 Operator::Gt,
                 ScalarValue::Float32(Some(45.0)),
             ),
-            schema,
+            schema("temperature", DataType::Float32),
         )
         .await;
         assert_eq!(survivors, vec!["d5", "d6", "d7", "d8", "d9"]);
@@ -558,56 +447,26 @@ mod tests {
         assert_eq!(survivors, atlas.list_datasets());
     }
 
-    /// The index holds one row per live dataset, in listing order, and the
-    /// filter reads it by position.
+    /// A deleted dataset is not in the list, so it is neither judged nor read.
+    /// The segment still holds its entry, and that entry is never looked at.
     #[tokio::test]
-    async fn the_index_holds_one_row_per_live_dataset() {
-        let tmp = tempfile::tempdir().unwrap();
-        test_support::ranged(tmp.path(), 10).await;
-        let atlas = test_support::open(tmp.path()).await;
-
-        let filter = candidate_filter(
-            &atlas,
-            &binary(
-                "temperature",
-                Operator::Gt,
-                ScalarValue::Float32(Some(45.0)),
-            ),
-            &schema("temperature", DataType::Float32),
-        )
-        .await;
-        assert_eq!(filter.rows(), 10);
-        assert_eq!(filter.pruned(), 5);
-    }
-
-    /// A deleted dataset has no row at all, and the rows after it shift up.
-    /// That is why the filter checks the name it was given against the row it
-    /// indexes.
-    #[tokio::test]
-    async fn a_delete_shifts_the_rows_and_the_name_check_catches_it() {
+    async fn a_deleted_dataset_is_neither_judged_nor_read() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::ranged(tmp.path(), 6).await;
         let atlas = test_support::open(tmp.path()).await;
         atlas.delete_dataset("d0").await.unwrap();
 
-        let filter = candidate_filter(
+        let survivors = kept(
             &atlas,
-            &binary(
+            binary(
                 "temperature",
-                Operator::Gt,
-                ScalarValue::Float32(Some(45.0)),
+                Operator::GtEq,
+                ScalarValue::Float32(Some(0.0)),
             ),
-            &schema("temperature", DataType::Float32),
+            schema("temperature", DataType::Float32),
         )
         .await;
-        assert_eq!(filter.rows(), 5, "the deleted dataset has no row");
-
-        // Row 0 is now d1. A plan made before the delete would ask about d0
-        // there, and that must not read as d1's answer.
-        assert!(
-            filter.keeps(0, "d0"),
-            "a name that does not match its row is kept, not mis-indexed"
-        );
+        assert_eq!(survivors, vec!["d1", "d2", "d3", "d4", "d5"]);
     }
 
     // ── mixed and awkward types ─────────────────────────────────────────
@@ -652,8 +511,8 @@ mod tests {
         );
     }
 
-    /// A dataset-level attribute is exact, so an equality on it prunes from the
-    /// footer alone.
+    /// A dataset-level attribute is exact, so an equality on it prunes from
+    /// what is in memory alone.
     #[tokio::test]
     async fn an_attribute_predicate_prunes() {
         let tmp = tempfile::tempdir().unwrap();
@@ -673,40 +532,103 @@ mod tests {
         assert_eq!(survivors, vec!["d3"]);
     }
 
-    // ── failing open ────────────────────────────────────────────────────
+    // ── a column the dataset lacks ──────────────────────────────────────
 
+    /// `summer` never set `year`. The scan reads the column as null for it, so
+    /// an equality drops it and an `IS NULL` keeps it alone.
     #[tokio::test]
-    async fn a_column_with_no_statistics_prunes_nothing() {
+    async fn a_missing_attribute_reads_as_null_and_prunes_as_null() {
         let tmp = tempfile::tempdir().unwrap();
-        test_support::ranged(tmp.path(), 4).await;
+        test_support::two_datasets(tmp.path()).await;
         let atlas = test_support::open(tmp.path()).await;
+        let schema = schema(".year", DataType::Int64);
 
-        let survivors = kept(
-            &atlas,
-            binary("ghost", Operator::Gt, ScalarValue::Float32(Some(0.0))),
-            schema("ghost", DataType::Float32),
-        )
-        .await;
-        assert_eq!(survivors, atlas.list_datasets());
+        assert_eq!(
+            kept(
+                &atlas,
+                binary(".year", Operator::Eq, ScalarValue::Int64(Some(2024))),
+                Arc::clone(&schema)
+            )
+            .await,
+            vec!["winter"]
+        );
+        assert_eq!(kept(&atlas, is_null(".year"), schema).await, vec!["summer"]);
     }
 
-    /// A column one dataset declares and another does not: the one without it
-    /// has no bound, so it stays in and its rows are decided above the scan.
+    /// Only `a` declares `flag`, and it holds [7, 8]. `b` reads the column as
+    /// null, so a comparison drops it and an `IS NULL` keeps it alone.
     #[tokio::test]
-    async fn a_dataset_that_lacks_the_column_is_never_pruned_on_it() {
+    async fn a_dataset_that_lacks_the_array_reads_as_null_and_prunes_as_null() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::widening(tmp.path()).await;
         let atlas = test_support::open(tmp.path()).await;
+        let schema = schema("flag", DataType::Int32);
 
-        // Only `a` declares `flag`, and it holds [7, 8].
+        assert_eq!(
+            kept(
+                &atlas,
+                binary("flag", Operator::Gt, ScalarValue::Int32(Some(5))),
+                Arc::clone(&schema)
+            )
+            .await,
+            vec!["a"]
+        );
+        assert!(
+            kept(
+                &atlas,
+                binary("flag", Operator::Gt, ScalarValue::Int32(Some(100))),
+                Arc::clone(&schema)
+            )
+            .await
+            .is_empty(),
+            "a is ruled out by its range, b by its nulls"
+        );
+        assert_eq!(kept(&atlas, is_null("flag"), schema).await, vec!["b"]);
+    }
+
+    /// A column no dataset declares is null everywhere the scan looks.
+    #[tokio::test]
+    async fn a_column_no_dataset_declares_is_null_everywhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::ranged(tmp.path(), 4).await;
+        let atlas = test_support::open(tmp.path()).await;
+        let schema = schema("ghost", DataType::Float32);
+
+        assert!(
+            kept(
+                &atlas,
+                binary("ghost", Operator::Gt, ScalarValue::Float32(Some(0.0))),
+                Arc::clone(&schema)
+            )
+            .await
+            .is_empty()
+        );
+        assert_eq!(
+            kept(&atlas, is_null("ghost"), schema).await,
+            atlas.list_datasets()
+        );
+    }
+
+    /// `d` declares `value` with no fill value and never writes it. The writer
+    /// counted both cells as null, yet the scan reads them as zeros, so the
+    /// index must not trust the count. `d` stays in. `w` wrote [5, 6], and
+    /// its statistics rule it out.
+    #[tokio::test]
+    async fn a_declared_array_nobody_wrote_is_never_pruned() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::declared_unwritten(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+
         let survivors = kept(
             &atlas,
-            binary("flag", Operator::Gt, ScalarValue::Int32(Some(100))),
-            schema("flag", DataType::Int32),
+            binary("value", Operator::Eq, ScalarValue::Int32(Some(0))),
+            schema("value", DataType::Int32),
         )
         .await;
-        assert_eq!(survivors, vec!["b"], "a is ruled out, b cannot be");
+        assert_eq!(survivors, vec!["d"]);
     }
+
+    // ── failing open ────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn a_collection_with_no_datasets_prunes_nothing() {
@@ -714,13 +636,13 @@ mod tests {
         test_support::empty(tmp.path()).await;
         let atlas = test_support::open(tmp.path()).await;
 
-        let filter = candidate_filter(
+        let survivors = kept(
             &atlas,
-            &binary("temperature", Operator::Gt, ScalarValue::Float32(Some(0.0))),
-            &schema("temperature", DataType::Float32),
+            binary("temperature", Operator::Gt, ScalarValue::Float32(Some(0.0))),
+            schema("temperature", DataType::Float32),
         )
         .await;
-        assert!(matches!(filter, CandidateFilter::KeepAll));
+        assert!(survivors.is_empty(), "nothing in, nothing out");
     }
 
     // ── the pieces ──────────────────────────────────────────────────────
@@ -759,16 +681,13 @@ mod tests {
         assert!(attr_to_scalar(&Attr::Int32List(vec![1, 2])).is_none());
         assert!(attr_to_scalar(&Attr::Float64(f64::NAN)).is_none());
         assert_eq!(
-            attr_to_scalar(&Attr::Int64(7)),
-            Some(ScalarValue::Int64(Some(7)))
+            attr_to_scalar(&Attr::String("p1".into())),
+            Some(ScalarValue::Utf8(Some("p1".into())))
         );
     }
 
-    /// The whole point of an index: a collection of hundreds of thousands of
-    /// datasets is judged in one vectorised pass.
-    ///
     /// The index is built by hand here. Writing that many real datasets would
-    /// take minutes and prove nothing extra — what this pins is that the
+    /// take minutes and prove nothing extra. What this pins is that the
     /// evaluation is one pass over Arrow arrays rather than a decision per
     /// dataset.
     #[test]
@@ -814,22 +733,5 @@ mod tests {
         // survivors are the rows from the threshold onward.
         let expected = ROWS - THRESHOLD as usize;
         assert_eq!(kept.iter().filter(|keep| **keep).count(), expected);
-    }
-
-    /// The scan's schema is nd-encoded; a predicate is written against the
-    /// values inside it.
-    #[test]
-    fn the_logical_schema_unwraps_the_encoding() {
-        let logical = Schema::new(vec![Field::new("temperature", DataType::Float32, true)]);
-        let encoded = beacon_datafusion_ext::nd::encoded_schema(&logical);
-        assert_ne!(
-            encoded.field(0).data_type(),
-            &DataType::Float32,
-            "the encoded form is a struct"
-        );
-        assert_eq!(
-            logical_schema(&encoded).field(0).data_type(),
-            &DataType::Float32
-        );
     }
 }
