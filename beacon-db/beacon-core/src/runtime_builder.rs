@@ -1,12 +1,11 @@
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::{Arc, OnceLock},
 };
 
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
-use beacon_arrow_atlas::{AtlasConfig, AtlasFormatFactory, AtlasOptions};
+use beacon_arrow_atlas::{AtlasFormatFactory, AtlasOptions};
 use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
@@ -99,7 +98,6 @@ pub struct RuntimeBuilder {
     pub netcdf: NetcdfConfig,
     pub hdf5: Hdf5Config,
     pub zarr: ZarrConfig,
-    pub atlas: AtlasConfig,
 
     pub auth_provider: Option<Arc<dyn beacon_auth::AuthProvider>>,
     pub secrets_encryption_key: Option<[u8; 32]>,
@@ -235,12 +233,6 @@ impl RuntimeBuilder {
     /// Replaces the whole Zarr reader configuration.
     pub fn with_zarr_config(mut self, zarr: ZarrConfig) -> Self {
         self.zarr = zarr;
-        self
-    }
-
-    /// Replaces the whole Atlas reader configuration.
-    pub fn with_atlas_config(mut self, atlas: AtlasConfig) -> Self {
-        self.atlas = atlas;
         self
     }
 
@@ -799,10 +791,7 @@ fn register_file_formats(
         Arc::new(ArrowFormatFactory),
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory::new(builder.zarr.clone())),
-        Arc::new(AtlasFormatFactory::new(
-            AtlasOptions::default(),
-            builder.atlas.clone(),
-        )),
+        Arc::new(AtlasFormatFactory::new(AtlasOptions::default())),
         Arc::new(BBFFormatFactory::new(Default::default())),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(

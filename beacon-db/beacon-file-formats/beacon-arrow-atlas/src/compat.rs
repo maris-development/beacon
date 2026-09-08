@@ -5,10 +5,13 @@
 //! [`NdArrayDataType`] through `beacon-nd-array`'s own conversion, so a schema
 //! derived here and a batch produced by a scan can never disagree.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arrow::datatypes::DataType;
-use atlas::{ArrayLayout, Attr, DType, DatasetView, FillValue};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::error::ArrowError;
+use atlas::{ArrayLayout, Attr, CollectionSchema, DType, DatasetView, FillValue};
+use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema};
 use beacon_nd_array::{
     NdArray, NdArrayD, datatypes::NdArrayDataType, datatypes::TimestampNanosecond,
 };
@@ -98,6 +101,101 @@ pub fn attr_dtype_to_arrow(dtype: &DType) -> Option<DataType> {
 /// A stable tag for a dtype, for keys that group datasets by shape.
 pub(crate) fn dtype_tag(dtype: &DType) -> String {
     format!("{dtype:?}")
+}
+
+// ─── Collection schema ───────────────────────────────────────────────────────
+
+/// The Arrow schema of one collection, from its footer alone.
+///
+/// One nullable field per array, under the array's own name. A dataset
+/// attribute becomes `.{attr}`, and an array attribute `{array}.{attr}`. A
+/// name that two datasets type differently takes the type `widening` gives
+/// the set, with the conflict mark it applies. A dtype Beacon cannot read is
+/// dropped with a `debug` log.
+///
+/// Every dataset in the container counts, deleted ones too. A column only a
+/// deleted dataset declares reads as null. `read_dimensions` does not narrow
+/// this schema: the footer holds no dimension name.
+///
+/// The fields are sorted by name. Atlas permits an array named `.season` or
+/// `temperature.units`, so one column name can come from two maps. Their types
+/// then merge as one column.
+pub fn collection_arrow_schema(
+    schema: &CollectionSchema<'_>,
+    widening: &ArrowTypeWidening,
+) -> Result<Schema, ArrowError> {
+    let mut columns: BTreeMap<String, Vec<DataType>> = BTreeMap::new();
+    for (array, dtypes) in &schema.arrays {
+        let types = readable_types(array, dtypes, array_dtype_to_arrow);
+        columns.entry(array.to_string()).or_default().extend(types);
+    }
+    for (key, dtypes) in &schema.attributes {
+        let column = global_attr_column(key);
+        let types = readable_types(&column, dtypes, attr_dtype_to_arrow);
+        columns.entry(column).or_default().extend(types);
+    }
+    for (array, attributes) in &schema.array_attributes {
+        for (key, dtypes) in attributes {
+            let column = array_attr_column(array, key);
+            let types = readable_types(&column, dtypes, attr_dtype_to_arrow);
+            columns.entry(column).or_default().extend(types);
+        }
+    }
+
+    let mut fields = Vec::with_capacity(columns.len());
+    for (name, types) in &columns {
+        if types.is_empty() {
+            continue;
+        }
+        fields.push(merge_types(widening, name, types)?);
+    }
+    Ok(Schema::new(fields))
+}
+
+/// The Arrow types of `dtypes` that Beacon can read as column `column`.
+///
+/// A dtype `to_arrow` refuses is logged at `debug` and dropped. A collection
+/// can hold a million datasets, so a `warn` per skip would be a flood.
+fn readable_types(
+    column: &str,
+    dtypes: &[&DType],
+    to_arrow: fn(&DType) -> Option<DataType>,
+) -> Vec<DataType> {
+    dtypes
+        .iter()
+        .filter_map(|dtype| {
+            let data_type = to_arrow(dtype);
+            if data_type.is_none() {
+                tracing::debug!(column, ?dtype, "no column for this atlas dtype, skipped");
+            }
+            data_type
+        })
+        .collect()
+}
+
+/// The field column `name` takes when its sources state `types`.
+///
+/// One nullable single-field schema per type, merged under the session rule.
+/// That is [`ArrowTypeWidening::merge_schemas`] for one column: the same
+/// widening, the same conflict setting, and the same conflict mark, which the
+/// scan reads to cast a source the type cannot hold as null.
+fn merge_types(
+    widening: &ArrowTypeWidening,
+    name: &str,
+    types: &[DataType],
+) -> Result<Field, ArrowError> {
+    if let [only] = types {
+        return Ok(Field::new(name, only.clone(), true));
+    }
+    let schemas: Vec<LabeledSchema> = types
+        .iter()
+        .map(|data_type| {
+            let field = Field::new(name, data_type.clone(), true);
+            LabeledSchema::unlabeled(Arc::new(Schema::new(vec![field])))
+        })
+        .collect();
+    let merged = widening.merge_schemas(&schemas)?;
+    Ok(merged.field(0).clone())
 }
 
 // ─── Lazy arrays ─────────────────────────────────────────────────────────────
@@ -318,5 +416,179 @@ mod tests {
             .expect_err("a list has no rank-0 form")
             .to_string();
         assert!(error.contains("list"), "{error}");
+    }
+
+    // ── the collection schema ───────────────────────────────────────────
+
+    use crate::test_support;
+    use arrow::datatypes::TimeUnit;
+    use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, is_type_conflict};
+
+    fn widening() -> Arc<ArrowTypeWidening> {
+        ArrowTypeWidening::default_extension()
+    }
+
+    fn names(schema: &Schema) -> Vec<&str> {
+        schema.fields().iter().map(|f| f.name().as_str()).collect()
+    }
+
+    /// Every array and every attribute of every dataset is a column, in name
+    /// order. The footer's maps have no order of their own.
+    #[tokio::test]
+    async fn a_collections_schema_is_the_union_of_its_datasets_in_name_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+
+        let schema =
+            collection_arrow_schema(&atlas.footer().collection_schema(), &widening()).unwrap();
+
+        assert_eq!(
+            names(&schema),
+            vec![
+                ".season",
+                ".year",
+                "cycle",
+                "temperature",
+                "temperature.units",
+                "time"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn every_column_keeps_the_type_the_footer_gave_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+
+        let schema =
+            collection_arrow_schema(&atlas.footer().collection_schema(), &widening()).unwrap();
+        let field = |name: &str| schema.field_with_name(name).unwrap();
+
+        assert_eq!(field("temperature").data_type(), &DataType::Float32);
+        assert_eq!(field("cycle").data_type(), &DataType::Int32);
+        assert_eq!(
+            field("time").data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(field(".year").data_type(), &DataType::Int64);
+        assert_eq!(field(".season").data_type(), &DataType::Utf8);
+        assert_eq!(field("temperature.units").data_type(), &DataType::Utf8);
+        assert!(
+            schema.fields().iter().all(|f| f.is_nullable()),
+            "a dataset may lack any column, so every column is nullable"
+        );
+    }
+
+    /// Two datasets that give one array two numeric types merge to the type
+    /// that holds both, by the rule of the session rather than one of atlas's
+    /// own. `Int16` beside `Float32` gives `Float64`. See issue #377.
+    #[tokio::test]
+    async fn a_shared_array_widens_to_a_type_that_holds_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::widening(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+
+        let schema =
+            collection_arrow_schema(&atlas.footer().collection_schema(), &widening()).unwrap();
+
+        assert_eq!(
+            schema.field_with_name("value").unwrap().data_type(),
+            &DataType::Float64,
+            "Int16 and Float32 widen to Float64"
+        );
+        assert_eq!(
+            schema.field_with_name("flag").unwrap().data_type(),
+            &DataType::Int32,
+            "a column only one dataset declares keeps its own type"
+        );
+    }
+
+    /// A column two datasets type in two families is refused, and the error
+    /// names the column and both types. The footer's type set names no
+    /// dataset, so the error cannot.
+    #[tokio::test]
+    async fn types_that_do_not_widen_are_refused_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::incompatible(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+
+        let error = collection_arrow_schema(&atlas.footer().collection_schema(), &widening())
+            .expect_err("Utf8 and Int64 are two families")
+            .to_string();
+
+        assert!(error.contains("value"), "the column: {error}");
+        assert!(
+            error.contains("Utf8") && error.contains("Int64"),
+            "both types: {error}"
+        );
+    }
+
+    /// A deployment that reads such a collection anyway sets `keep_first`. The
+    /// column then takes the type the footer states first, which is the type
+    /// of the dataset written first, and carries the mark the scan reads.
+    #[tokio::test]
+    async fn keep_first_settles_a_conflict_with_the_first_type_and_marks_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::incompatible(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+        let keep_first =
+            ArrowTypeWidening::new(Arc::new(DefaultArrowTypeWidening::keeping_first_type()));
+
+        let schema =
+            collection_arrow_schema(&atlas.footer().collection_schema(), &keep_first).unwrap();
+        let value = schema.field_with_name("value").unwrap();
+
+        assert_eq!(value.data_type(), &DataType::Utf8, "dataset `a` came first");
+        assert!(is_type_conflict(value), "the scan must cast `b` to null");
+        assert_eq!(
+            schema.field_with_name("only_a").unwrap().data_type(),
+            &DataType::Int32
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_attribute_is_dropped_and_the_rest_survives() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::skips(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+
+        let schema =
+            collection_arrow_schema(&atlas.footer().collection_schema(), &widening()).unwrap();
+
+        assert_eq!(names(&schema), vec![".title", "value", "value.units"]);
+    }
+
+    #[tokio::test]
+    async fn an_empty_collection_has_no_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::empty(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+
+        let schema =
+            collection_arrow_schema(&atlas.footer().collection_schema(), &widening()).unwrap();
+
+        assert!(schema.fields().is_empty(), "{:?}", names(&schema));
+    }
+
+    /// The footer reports every dataset the container holds. A deleted one
+    /// still shapes the schema: its columns stay, and read as null.
+    #[tokio::test]
+    async fn a_deleted_dataset_still_shapes_the_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+        atlas.delete_dataset("winter").await.unwrap();
+        let atlas = test_support::open(tmp.path()).await;
+
+        let schema =
+            collection_arrow_schema(&atlas.footer().collection_schema(), &widening()).unwrap();
+
+        assert!(
+            schema.field_with_name("cycle").is_ok(),
+            "only `winter` declares `cycle`: {:?}",
+            names(&schema)
+        );
     }
 }

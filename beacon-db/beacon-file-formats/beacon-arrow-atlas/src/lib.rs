@@ -29,11 +29,9 @@
 //! # What this crate does with it
 //!
 //! [`store`] finds a collection's marker and opens it, through a reader cache.
-//! [`reader`] turns one dataset into a Beacon
-//! [`AnyDataset`](beacon_nd_array::dataset::AnyDataset) whose columns are lazy
-//! [`NdArrayD`](beacon_nd_array::NdArrayD) values backed by [`backend`], and
-//! derives the Arrow schema of a whole collection. [`compat`] holds the type
-//! and column-name mapping the two share.
+//! [`compat`] holds the column-name and type mapping, and derives the Arrow
+//! schema of a whole collection from its footer. [`backend`] holds the lazy
+//! [`NdArrayD`](beacon_nd_array::NdArrayD) values a scan reads through.
 //!
 //! # One collection is one unit of work
 //!
@@ -77,12 +75,9 @@ pub use atlas;
 
 pub mod backend;
 pub mod compat;
-pub mod config;
 pub mod datafusion;
-pub mod reader;
 pub mod store;
 
-pub use config::AtlasConfig;
 pub use datafusion::{AtlasFormat, AtlasFormatFactory, AtlasOptions, ReadAtlasFunc};
 
 #[cfg(test)]

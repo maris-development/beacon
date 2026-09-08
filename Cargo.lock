@@ -1193,9 +1193,9 @@ dependencies = [
 
 [[package]]
 name = "atlas-rust"
-version = "0.17.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dfadaa65a76f424f053c764cd439ab61c22ffade15ade54fe35432df2561e5b"
+checksum = "7af7d700a1036f8630d57847273e9a5f438b6ee0c5361ada94991f46f7feb6ef"
 dependencies = [
  "array-format",
  "async-trait",

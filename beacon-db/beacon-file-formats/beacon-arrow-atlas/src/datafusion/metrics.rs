@@ -1,15 +1,3 @@
-//! What one Atlas scan partition did, reported through DataFusion's metrics.
-//!
-//! These complement
-//! [`ReadMetrics`](beacon_nd_array::arrow::metrics::ReadMetrics), which counts
-//! the chunks and rows the shared queue handed out. What it cannot see is the
-//! cost of reaching a dataset at all: opening the collection, deciding whether
-//! the dataset is worth reading, and building its lazy columns.
-//!
-//! Every name is `atlas_`-prefixed. DataFusion sums metrics that share a name,
-//! and `output_rows` and `output_batches` are already registered for this
-//! partition by the scan itself.
-
 use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder, Time};
 
 /// Per-partition timings and counts for one Atlas scan partition.
