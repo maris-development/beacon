@@ -13,7 +13,7 @@ mod common;
 use std::path::Path;
 
 use beacon_arrow_atlas::atlas::{AtlasWriter, Attr, WriterConfig};
-use common::{scalar_i64, total_rows, TestRuntime};
+use common::{TestRuntime, scalar_i64, total_rows};
 use ndarray::arr1;
 
 /// Write a collection of `n` datasets at `dir`, named `d0..d{n-1}`.
@@ -163,42 +163,36 @@ async fn read_atlas_takes_a_dimension_list() {
 
 // ── pruning, through the assembled runtime ──────────────────────────────
 
-/// A predicate returns the same rows whether or not whole datasets were
-/// skipped to find them.
+/// A predicate returns the same rows as a full read filtered afterwards, so
+/// skipping whole datasets to find them changes no answer.
 #[tokio::test(flavor = "multi_thread")]
 async fn pruning_does_not_change_the_answer() {
-    let rt = common::runtime_with("atlas-pruning-on", |builder| {
-        builder.with_atlas_config(beacon_arrow_atlas::AtlasConfig {
-            use_pruning: true,
-            ..Default::default()
-        })
-    })
+    let rt = common::runtime("atlas-pruning").await;
+    write_collection(&rt.datasets_dir().join("obs"), 10).await;
+    let all = temperatures(
+        &rt,
+        "SELECT temperature FROM read_atlas('obs/data.atlas') ORDER BY temperature",
+    )
     .await;
-    let unpruned = common::runtime_with("atlas-pruning-off", |builder| {
-        builder.with_atlas_config(beacon_arrow_atlas::AtlasConfig {
-            use_pruning: false,
-            ..Default::default()
-        })
-    })
-    .await;
+    assert_eq!(all.len(), 40, "ten datasets of four rows");
 
-    for rt in [&rt, &unpruned] {
-        write_collection(&rt.datasets_dir().join("obs"), 10).await;
-    }
-
-    for predicate in [
-        "temperature > 45",
-        "temperature < 25",
-        "temperature > 1000",
-        "temperature > 45 AND temperature < 75",
-    ] {
+    let cases: [(&str, fn(f32) -> bool); 4] = [
+        ("temperature > 45", |t| t > 45.0),
+        ("temperature < 25", |t| t < 25.0),
+        ("temperature > 1000", |t| t > 1000.0),
+        ("temperature > 45 AND temperature < 75", |t| {
+            t > 45.0 && t < 75.0
+        }),
+    ];
+    for (predicate, keep) in cases {
         let sql = format!(
             "SELECT temperature FROM read_atlas('obs/data.atlas') \
              WHERE {predicate} ORDER BY temperature"
         );
+        let expected: Vec<f32> = all.iter().copied().filter(|&t| keep(t)).collect();
         assert_eq!(
             temperatures(&rt, &sql).await,
-            temperatures(&unpruned, &sql).await,
+            expected,
             "pruning changed the answer for `{predicate}`"
         );
     }

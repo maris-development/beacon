@@ -218,31 +218,16 @@ with statistics, next to the chunk pruning. It drops whole datasets before it re
 ## Atlas Tuning
 
 Beacon opens an [Atlas](/docs/2.0.0-rc5/formats/atlas) collection by reading the footer of its
-`data.atlas` file. Beacon caches the open collections. It therefore does not read that footer again
-for every query.
+`data.atlas` file. Each table keeps its open collections in a cache of 512 entries, so a query
+does not read that footer again. Each cached collection holds its own block cache, 256 MiB of
+decompressed blocks and 64 MiB of raw slabs, so the cache is a memory bound as much as a handle
+count. There is no setting for it.
 
-### Reader cache (no repeated store open)
+### Dataset pruning
 
-#### `BEACON_ATLAS_USE_READER_CACHE` and `BEACON_ATLAS_READER_CACHE_SIZE`
+Pruning is always on. A query with a predicate judges every dataset of a collection against the
+statistics in its footer, in one pass, and never opens the ones that cannot match. Pruning never
+changes an answer, and the filter above the scan still decides every row.
 
-With the reader cache on, Beacon uses an open collection again. It therefore does not read the
-footer for every query, and the decompressed blocks of a collection stay warm between them.
-
-Each cached collection holds its own block cache — 256 MiB of decompressed blocks and 64 MiB of raw
-slabs — so the size is a memory bound as much as a handle count.
-
-Recommendations:
-
-- Keep `BEACON_ATLAS_USE_READER_CACHE=true`, the default, when several queries read the same Atlas
-  collections.
-- Increase `BEACON_ATLAS_READER_CACHE_SIZE`, default `32`, if you query more Atlas collections than
-  the cache holds. Remember the memory bound above before raising it far.
-
-#### `BEACON_ATLAS_USE_PRUNING`
-
-On by default. A query with a predicate judges every dataset of a collection against the statistics
-in its footer, in one pass, and never opens the ones that cannot match. Turning it off only costs
-speed: pruning never changes an answer, and the filter above the scan still decides every row.
-
-`EXPLAIN ANALYZE` reports what it did as `atlas_datasets_pruned`, `atlas_datasets_scanned` and
-`atlas_index_rows`.
+`EXPLAIN ANALYZE` reports what it did as `atlas_datasets_pruned` and `atlas_datasets_scanned`, with
+the time spent as `atlas_open_time` and `atlas_prune_time`.

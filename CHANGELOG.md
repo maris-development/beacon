@@ -22,15 +22,11 @@ tag. Releases before 2.0.0 are recorded in the
   before 0.17 is not read at all — rewrite it with `atlas create`. Three behaviour changes come
   with the rebuild. A dataset-level attribute is a column under a leading dot, `".platform"`,
   matching NetCDF and Zarr instead of the bare key. A scan reads through the shared nd pipeline,
-  so one dataset is one unit of work and a collection divides over every core — and a dataset
-  stored in several chunks divides further, so one large dataset still uses all of them. And a
-  column two
-  datasets type in two families now refuses the merge by name rather than silently becoming text;
-  `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first` settles it the other way. Atlas collections are
-  also crawlable now, because a collection is one file whose extension is its format.
-  `BEACON_ATLAS_USE_READER_CACHE`, `BEACON_ATLAS_READER_CACHE_SIZE`, `BEACON_ATLAS_USE_PRUNING`
-  and `BEACON_ATLAS_ENABLE_STATISTICS` configure it, and the same keys work per table through
-  `OPTIONS`.
+  so one dataset is one unit of work: every partition of a query helps drain every collection,
+  and a dataset is read once. And a column two datasets type in two families now refuses the
+  merge by name rather than silently becoming text; `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first`
+  settles it the other way. Atlas collections are also crawlable now, because a collection is
+  one file whose extension is its format.
 
 - **A predicate over an Atlas collection skips whole datasets.** Atlas records the minimum, the
   maximum and the null count of every array, so a collection can be judged before it is read.
@@ -43,7 +39,8 @@ tag. Releases before 2.0.0 are recorded in the
   too, and at the same cost. Pruning only
   ever removes datasets that hold no matching row: every path falls back to reading everything,
   and the filter above the scan still decides each row. `EXPLAIN ANALYZE` reports it as
-  `atlas_datasets_pruned`, `atlas_index_builds` and `atlas_index_rows`.
+  `atlas_datasets_pruned` and `atlas_datasets_scanned`, with the time spent as `atlas_open_time`
+  and `atlas_prune_time`.
 
 - **`BEACON_TYPE_WIDENING_ON_CONFLICT` settles a column that no type holds.** A collection can
   type one column as a number in one file and as a string in another. No type holds both, so the

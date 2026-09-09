@@ -88,6 +88,13 @@ impl DatasetSource for DefaultDataset {
             .collect()
     }
 
+    /// The cells of the chunk's grid. A scalar dataset has one.
+    fn chunk_rows(&self, chunk: &Arc<dyn std::any::Any + Send + Sync>) -> Option<usize> {
+        chunk
+            .downcast_ref::<ArraySubset>()
+            .map(|subset| subset.shape.iter().product())
+    }
+
     /// Read one chunk into an un-broadcast [`NdRecordBatch`].
     ///
     /// `chunk` is one of [`DatasetSource::chunks`]. Each array is sliced on
@@ -299,6 +306,18 @@ mod tests {
             chunk_shape: chunk.to_vec(),
             arrays,
         }
+    }
+
+    /// A chunk states its own row count, so a count reads nothing.
+    #[test]
+    fn a_chunk_states_its_rows() {
+        let ds = gridded(&[2, 2]);
+        let rows: Vec<usize> = ds
+            .chunks()
+            .iter()
+            .map(|chunk| ds.chunk_rows(chunk).unwrap())
+            .collect();
+        assert_eq!(rows, vec![4, 2, 4, 2], "a [4, 3] grid chunked [2, 2]");
     }
 
     /// Poll every chunk, broadcast each, and stitch the rows back together.

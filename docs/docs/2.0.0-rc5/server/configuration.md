@@ -304,15 +304,6 @@ small stores, where even a rank-1 read per store adds up.
 `valid_min` and `valid_max` are never used as a range. They state which values are *valid*, not
 which values a store holds, so a store may hold values outside them.
 
-### Atlas
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `BEACON_ATLAS_USE_READER_CACHE` | `true` | Keep opened Atlas collections in memory, so a repeated query does not read the footer of `data.atlas` again. |
-| `BEACON_ATLAS_READER_CACHE_SIZE` | `32` | How many opened collections to keep. Each holds its own 256 MiB block cache and 64 MiB slab cache, so this bounds memory as well as handles. |
-| `BEACON_ATLAS_USE_PRUNING` | `true` | Skip the datasets a predicate rules out from the collection's own statistics, before reading them. Off only costs speed; pruning never changes an answer. |
-| `BEACON_ATLAS_ENABLE_STATISTICS` | `true` | Let `ANALYZE FILES` record a collection's column ranges. They come from the footer, so they cost no array read. |
-
 ### Beacon Binary Format (BBF)
 
 | Variable | Default | Description |

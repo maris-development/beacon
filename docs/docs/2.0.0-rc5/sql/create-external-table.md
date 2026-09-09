@@ -165,7 +165,7 @@ validates it and then reads the server setting alone. See the format page of eac
 | `NC` | `read_dimensions`, `use_rust_reader`, `enable_statistics` | [NetCDF](/docs/2.0.0-rc5/formats/netcdf#options) |
 | `HDF5`, `H5` | `read_dimensions`, `use_rust_reader`, `enable_statistics`, `unify_phony_dimensions`, `convention` | [HDF5](/docs/2.0.0-rc5/formats/hdf5#options) |
 | `ZARR` | `read_dimensions`, `enable_statistics` | [Zarr](/docs/2.0.0-rc5/formats/zarr#options) |
-| `ATLAS` | `read_dimensions`, `use_pruning`, `use_reader_cache`, `enable_statistics` | [Atlas](/docs/2.0.0-rc5/formats/atlas#options) |
+| `ATLAS` | `read_dimensions` | [Atlas](/docs/2.0.0-rc5/formats/atlas#options) |
 | `CSV` | `delimiter`, `infer_records` | [CSV](/docs/2.0.0-rc5/formats/csv#options) |
 | `BBF` | `split_streams_slice` | [BBF](/docs/2.0.0-rc5/formats/bbf#options) |
 | `DELTA` | `version`, `timestamp` | [Delta Lake](/docs/2.0.0-rc5/formats/delta-lake#options) |

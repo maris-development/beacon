@@ -489,13 +489,15 @@ mod deal_tests {
 mod scan_tests {
     use super::*;
     use crate::test_support;
+    use arrow::array::AsArray;
+    use arrow::datatypes::Int64Type;
     use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
     use datafusion::prelude::{SessionConfig, SessionContext};
     use std::path::Path;
 
-    /// The rows of every collection under `dir`, read in a session of
-    /// `partitions` target partitions, and the partition count of the plan.
-    async fn rows(dir: &Path, partitions: usize) -> (usize, usize) {
+    /// A table over every collection under `dir`, in a session of
+    /// `partitions` target partitions.
+    async fn table(dir: &Path, partitions: usize) -> (SessionContext, Arc<ListingTable>) {
         // The collections sit in subdirectories, which a listing skips by
         // default.
         let config = SessionConfig::new()
@@ -514,8 +516,22 @@ mod scan_tests {
             .infer_schema(&ctx.state())
             .await
             .unwrap();
-        let table = Arc::new(ListingTable::try_new(config).unwrap());
+        (ctx, Arc::new(ListingTable::try_new(config).unwrap()))
+    }
 
+    /// Three collections of five datasets, four rows each, under `dir`.
+    async fn three_collections(dir: &Path) {
+        for name in ["a", "b", "c"] {
+            let dir = dir.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            test_support::ranged(&dir, 5).await;
+        }
+    }
+
+    /// The rows of every collection under `dir`, read in a session of
+    /// `partitions` target partitions, and the partition count of the plan.
+    async fn rows(dir: &Path, partitions: usize) -> (usize, usize) {
+        let (ctx, table) = table(dir, partitions).await;
         let df = ctx.read_table(table).unwrap();
         let plan = df.clone().create_physical_plan().await.unwrap();
         let partition_count = plan.properties().output_partitioning().partition_count();
@@ -528,11 +544,7 @@ mod scan_tests {
     #[tokio::test]
     async fn every_partition_reads_through_the_pool_and_no_dataset_twice() {
         let tmp = tempfile::tempdir().unwrap();
-        for name in ["a", "b", "c"] {
-            let dir = tmp.path().join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            test_support::ranged(&dir, 5).await;
-        }
+        three_collections(tmp.path()).await;
 
         let (alone, one) = rows(tmp.path(), 1).await;
         let (shared, three) = rows(tmp.path(), 3).await;
@@ -548,5 +560,26 @@ mod scan_tests {
             shared, alone,
             "a dataset is read by one partition and no other"
         );
+    }
+
+    /// A count projects no column. It still counts every row of every
+    /// dataset, once, across the partitions, and reads no cell to do so.
+    #[tokio::test]
+    async fn a_count_reads_no_column_and_counts_every_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        three_collections(tmp.path()).await;
+        let (ctx, table) = table(tmp.path(), 3).await;
+        ctx.register_table("obs", table).unwrap();
+
+        let batches = ctx
+            .sql("SELECT count(*) FROM obs")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let count = batches[0].column(0).as_primitive::<Int64Type>().value(0);
+        assert_eq!(count, 60, "three collections of five datasets of four rows");
     }
 }

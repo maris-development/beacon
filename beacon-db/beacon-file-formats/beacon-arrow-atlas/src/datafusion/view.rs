@@ -37,12 +37,23 @@ use crate::{
     store::{AtlasReaderCache, get_or_open_atlas},
 };
 
+/// The segment of every array of a collection, by name.
+type DrivingSegments = Arc<[(String, Arc<ArrayFile>)]>;
+
 /// An open collection and the resolution of every column of the table.
 #[derive(Clone)]
 pub struct AtlasView {
     atlas: Arc<Atlas>,
     table_schema: SchemaRef,
     column_views: Arc<IndexMap<FieldRef, Option<AtlasColumnView>>>,
+    /// The segment of every array, by name, for a read that projects no
+    /// column.
+    ///
+    /// Such a read counts rows. With no array read, every dataset would sit
+    /// on a rank-0 grid of one row. The read is driven by the widest array of
+    /// each dataset instead, so the count is the dataset's full grid. `None`
+    /// when the table projects a column.
+    driving: Option<DrivingSegments>,
 }
 
 impl AtlasView {
@@ -58,11 +69,20 @@ impl AtlasView {
         let views = column_views(&atlas, &table_schema)
             .await
             .with_context(|| format!("resolving the columns of '{}'", object_meta.location))?;
+        let driving = if table_schema.fields().is_empty() {
+            let segments = driving_segments(&atlas)
+                .await
+                .with_context(|| format!("resolving the arrays of '{}'", object_meta.location))?;
+            Some(segments)
+        } else {
+            None
+        };
 
         Ok(Self {
             atlas,
             table_schema,
             column_views: Arc::new(views),
+            driving,
         })
     }
 
@@ -133,6 +153,11 @@ impl AtlasView {
                 arrays.insert(field.name().clone(), array);
             }
         }
+        if let Some(segments) = &self.driving
+            && let Some((name, array)) = widest_array(segments, dataset_name)
+        {
+            arrays.insert(name, array);
+        }
         let dataset = DefaultDataset::new(dataset_name.to_string(), arrays)
             .with_context(|| format!("laying out dataset '{dataset_name}'"))?;
         Ok(Arc::new(dataset))
@@ -187,6 +212,50 @@ pub(crate) async fn column_views(
         views.insert(Arc::clone(field), view);
     }
     Ok(views)
+}
+
+/// The segment of every array of the collection, by name.
+async fn driving_segments(atlas: &Atlas) -> anyhow::Result<DrivingSegments> {
+    let names: Vec<String> = atlas
+        .footer()
+        .collection_schema()
+        .arrays
+        .keys()
+        .map(|name| name.to_string())
+        .collect();
+    let mut segments = Vec::with_capacity(names.len());
+    for name in names {
+        let segment = atlas
+            .try_segment(&name)
+            .await
+            .with_context(|| format!("opening the segment of array '{name}'"))?;
+        if let Some(segment) = segment {
+            segments.push((name, Arc::clone(segment)));
+        }
+    }
+    Ok(segments.into())
+}
+
+/// The array of `dataset` with the most cells, out of `segments`, with its
+/// name. An array Beacon cannot read is passed over: it drives nothing.
+fn widest_array(
+    segments: &[(String, Arc<ArrayFile>)],
+    dataset: &str,
+) -> Option<(String, Arc<dyn NdArrayD>)> {
+    let mut widest: Option<(usize, String, Arc<dyn NdArrayD>)> = None;
+    for (name, segment) in segments {
+        let Some(info) = segment.array(dataset) else {
+            continue;
+        };
+        let Ok(array) = compat::array_to_nd_array(Arc::clone(segment), dataset, &info.dtype) else {
+            continue;
+        };
+        let cells: usize = array.shape().iter().product();
+        if widest.as_ref().is_none_or(|(most, _, _)| cells > *most) {
+            widest = Some((cells, name.clone(), array));
+        }
+    }
+    widest.map(|(_, name, array)| (name, array))
 }
 
 /// `nd` under `fields`: every field in order, on the same target grid.
@@ -337,6 +406,28 @@ mod tests {
                 .value(3),
             "celsius"
         );
+    }
+
+    /// A read of no column is driven by each dataset's widest array, so a
+    /// count sees the dataset's full grid without reading a cell.
+    #[tokio::test]
+    async fn a_read_of_no_column_counts_the_full_grid() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+        let (store, marker) = test_support::store_and_marker(tmp.path());
+        let view = AtlasView::new(None, store, marker, Arc::new(Schema::empty()))
+            .await
+            .unwrap();
+
+        for (dataset, rows) in [("winter", 4), ("summer", 3)] {
+            let source = view.dataset(dataset).await.unwrap();
+            let counted: usize = source
+                .chunks()
+                .iter()
+                .map(|chunk| source.chunk_rows(chunk).unwrap())
+                .sum();
+            assert_eq!(counted, rows, "{dataset}");
+        }
     }
 
     /// `summer` declares neither `cycle` nor `time`, sets no `year`, and has no

@@ -8,6 +8,7 @@
 //! that poll at once drain different datasets, so a dataset is read by one
 //! partition and by no other.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::pin::Pin;
@@ -15,9 +16,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::Context as _;
-use arrow::array::RecordBatch;
+use arrow::array::{RecordBatch, RecordBatchOptions};
 use arrow::datatypes::SchemaRef;
-use beacon_datafusion_ext::nd::encode_nd_record_batch;
+use beacon_datafusion_ext::nd::{NdRecordBatch, encode_nd_record_batch};
+use beacon_nd_array::dataset::source::DatasetSource;
 use crossbeam::queue::ArrayQueue;
 use datafusion::physical_plan::PhysicalExpr;
 use futures::stream::BoxStream;
@@ -216,15 +218,16 @@ fn dataset_stream(
             let source = Arc::clone(&source);
             let dataset = Arc::clone(&dataset);
             async move {
-                let nd = source
-                    .poll_next(chunk)
-                    .await
-                    .with_context(|| format!("reading a chunk of dataset '{dataset}'"))?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "dataset '{dataset}' read no batch for a chunk of its own grid"
-                        )
-                    })?;
+                // A read of no column counts rows. A chunk that states its
+                // rows is not read at all.
+                if pool.projected_schema.fields().is_empty() {
+                    let rows = match source.chunk_rows(&chunk) {
+                        Some(rows) => rows,
+                        None => read_chunk(&source, chunk, &dataset).await?.num_rows(),
+                    };
+                    return count_batch(Arc::clone(&pool.projected_schema), rows);
+                }
+                let nd = read_chunk(&source, chunk, &dataset).await?;
                 let nd = under_fields(&nd, pool.atlas_view.table_schema().fields())?;
                 let batch =
                     encode_nd_record_batch(&nd)?.with_schema(Arc::clone(&pool.projected_schema))?;
@@ -234,6 +237,32 @@ fn dataset_stream(
     })
     .try_flatten()
     .boxed()
+}
+
+/// One chunk of `source`, read.
+async fn read_chunk(
+    source: &Arc<dyn DatasetSource>,
+    chunk: Arc<dyn Any + Send + Sync>,
+    dataset: &str,
+) -> anyhow::Result<NdRecordBatch> {
+    source
+        .poll_next(chunk)
+        .await
+        .with_context(|| format!("reading a chunk of dataset '{dataset}'"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("dataset '{dataset}' read no batch for a chunk of its own grid")
+        })
+}
+
+/// The batch a read of no column emits for `rows` rows: the count, and
+/// nothing else. The decoder reads a zero-column batch's row count as its
+/// payload.
+fn count_batch(schema: SchemaRef, rows: usize) -> anyhow::Result<RecordBatch> {
+    Ok(RecordBatch::try_new_with_options(
+        schema,
+        Vec::new(),
+        &RecordBatchOptions::new().with_row_count(Some(rows)),
+    )?)
 }
 
 #[cfg(test)]

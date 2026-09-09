@@ -69,10 +69,9 @@ What Beacon does with that:
   vectorised pass and never opens the ones that cannot match. Judging a column costs one request,
   whatever the dataset count. A dataset-level attribute is exact, so `WHERE ".platform" = 'p3'`
   prunes on it too.
-- **One dataset is one unit of work.** A collection's datasets are spread across every core, and a
-  worker takes the next one when it is free, so a collection of a million small datasets and one of
-  four large ones both divide evenly. A dataset stored in several chunks divides further, so a
-  single large dataset still uses every core.
+- **One dataset is one unit of work.** Every core reads from every collection of a query. A core
+  takes the next dataset when it is free, and a dataset is read once, so a collection of a million
+  small datasets and one of four large ones both divide evenly.
 - **Column projection.** Only the arrays a query names get read, and only their attributes are
   fetched.
 - **Object storage.** A collection reads from local disk, S3, GCS, Azure and HTTP alike.
@@ -185,14 +184,11 @@ See [Create External Tables](/docs/2.0.0-rc5/data-sources/external-tables) for t
 
 ### `OPTIONS`
 
-`STORED AS ATLAS` reads four keys:
+`STORED AS ATLAS` reads one key:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `read_dimensions` | List of dimension names | The default grid of each dataset | The dimensions the table reads. An array survives only when the list holds every one of its own. |
-| `use_pruning` | Boolean | `true` (`BEACON_ATLAS_USE_PRUNING`) | Drop the datasets a predicate rules out before reading them. Turning it off only costs speed: pruning never changes an answer. |
-| `use_reader_cache` | Boolean | `true` (`BEACON_ATLAS_USE_READER_CACHE`) | Reuse an opened collection across queries. |
-| `enable_statistics` | Boolean | `true` (`BEACON_ATLAS_ENABLE_STATISTICS`) | Whether `ANALYZE FILES` records this collection's column ranges. A query never measures a collection, so this affects the analyzer alone. |
 
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas
