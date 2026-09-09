@@ -1,31 +1,20 @@
-//! Execution metrics for the atlas scan, surfaced through DataFusion's standard
-//! metrics reporting (e.g. `EXPLAIN ANALYZE`).
-//!
-//! These complement
-//! [`DatasetReadMetrics`](beacon_nd_array::arrow::metrics::DatasetReadMetrics)
-//! (output rows/batches and engine-level chunk pruning) with the atlas-specific
-//! costs: opening the store, pruning datasets, and building each dataset's lazy
-//! backends. All names are `atlas_`-prefixed so they never collide with
-//! DataFusion's reserved typed metrics (`output_rows`, `output_batches`, …),
-//! which aggregate by name and panic on a variant mismatch.
-
 use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder, Time};
 
-/// Per-partition timings and counts for one atlas scan partition. All fields are
-/// `Arc`-backed handles into the shared [`ExecutionPlanMetricsSet`], so cloning
-/// is cheap and every clone accumulates into the same metric.
+/// Per-partition timings and counts for one Atlas scan partition.
+///
+/// Every field is an `Arc`-backed handle into the shared
+/// [`ExecutionPlanMetricsSet`], so a clone is cheap and every clone accumulates
+/// into the same metric.
 #[derive(Debug, Clone)]
 pub struct AtlasScanMetrics {
-    /// Wall time opening (or cache-hitting) the atlas store for this partition.
+    /// Wall time opening collections, or hitting the reader cache for them.
     pub open_time: Time,
-    /// Wall time computing which datasets the predicate can match (pruning).
+    /// Wall time deciding which datasets a predicate can rule out.
     pub prune_time: Time,
-    /// Wall time building lazy datasets — metadata, backends, projected
-    /// attribute values, and the per-dataset schema adapter.
     pub dataset_build_time: Time,
-    /// Datasets this partition opened and scanned.
+    /// Datasets this partition opened and read.
     pub datasets_scanned: Count,
-    /// Datasets this partition skipped because pruning ruled them out.
+    /// Datasets it skipped because the collection's statistics ruled them out.
     pub datasets_pruned: Count,
 }
 

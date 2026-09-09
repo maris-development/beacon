@@ -1,11 +1,11 @@
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::{Arc, OnceLock},
 };
 
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
+use beacon_arrow_atlas::{AtlasFormatFactory, AtlasOptions};
 use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
@@ -43,7 +43,7 @@ use datafusion::{
         runtime_env::{RuntimeEnv, RuntimeEnvBuilder},
         SessionStateBuilder,
     },
-    optimizer::OptimizerRule,
+    optimizer::{optimize_projections::OptimizeProjections, OptimizerRule},
     prelude::{SessionConfig, SessionContext},
 };
 use object_store::ObjectStore;
@@ -797,6 +797,7 @@ fn register_file_formats(
         Arc::new(ArrowFormatFactory),
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory::new(builder.zarr.clone())),
+        Arc::new(AtlasFormatFactory::new(AtlasOptions::default())),
         Arc::new(BBFFormatFactory::new(Default::default())),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
@@ -858,7 +859,11 @@ fn build_session_state(
     runtime_env: Arc<RuntimeEnv>,
     session_cell: SessionCell,
 ) -> anyhow::Result<datafusion::execution::context::SessionState> {
-    let mut optimizer_rules: Vec<Arc<dyn OptimizerRule + Send + Sync>> = vec![];
+    // Narrow every scan to the columns the query reads before any other rule.
+    // CSE copies every input column into an intermediate projection, one linear
+    // schema lookup per column, which is quadratic on a scan of 100k+ columns.
+    let mut optimizer_rules: Vec<Arc<dyn OptimizerRule + Send + Sync>> =
+        vec![Arc::new(OptimizeProjections::new())];
     // This is DataFusion's default logical rule set with `FederationOptimizerRule`
     // inserted, so replacing the defaults with it is intentional: sub-plans rooted
     // at remote tables get pushed down. The matching `FederatedPlanner` lives in

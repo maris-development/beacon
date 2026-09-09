@@ -181,7 +181,7 @@ pub(crate) async fn read_ragged_range(
 /// observation variables (all obs-dim groups), variable attributes,
 /// and global attributes. Row-size variables are excluded. Fields are
 /// sorted alphabetically.
-fn ragged_record_batch_schema(ragged: &RaggedDataset) -> Arc<Schema> {
+pub(crate) fn ragged_record_batch_schema(ragged: &RaggedDataset) -> Arc<Schema> {
     let mut fields: Vec<Field> = Vec::new();
 
     for (name, var) in &ragged.variables {
@@ -244,7 +244,7 @@ fn plan_ragged_batches(
 /// observation row belonging to cast `i`. Observation variables are
 /// already contiguous across all casts. Attributes are repeated to
 /// fill all rows.
-async fn ragged_batch_to_record_batch(
+pub(crate) async fn ragged_batch_to_record_batch(
     cast_data: &Dataset,
     schema: &Arc<Schema>,
     obs_dims: &std::collections::HashSet<String>,

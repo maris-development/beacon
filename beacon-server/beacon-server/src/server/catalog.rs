@@ -223,6 +223,7 @@ fn read_function_for_extension(ext: &str) -> Option<&'static str> {
         "nc" | "cdf" | "netcdf" => "read_netcdf",
         "arrow" | "arrows" | "ipc" => "read_arrow",
         "zarr" => "read_zarr",
+        "atlas" => "read_atlas",
         "tif" | "tiff" => "read_tiff",
         "bbf" => "read_bbf",
         _ => return None,

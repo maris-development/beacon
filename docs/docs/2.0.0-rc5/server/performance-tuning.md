@@ -227,20 +227,17 @@ with statistics, next to the chunk pruning. It drops whole datasets before it re
 
 ## Atlas Tuning
 
-Beacon opens an [Atlas](/docs/2.0.0-rc5/formats/atlas) store through its
-`atlas.json` registry. Beacon caches the open Atlas readers. It therefore does not open the same
-store for every query.
+Beacon opens an [Atlas](/docs/2.0.0-rc5/formats/atlas) collection by reading the footer of its
+`data.atlas` file. Each table keeps its open collections in a cache of 512 entries, so a query
+does not read that footer again. Each cached collection holds its own block cache, 256 MiB of
+decompressed blocks and 64 MiB of raw slabs, so the cache is a memory bound as much as a handle
+count. There is no setting for it.
 
-### Reader cache (no repeated store open)
+### Dataset pruning
 
-#### `BEACON_ATLAS_USE_READER_CACHE` and `BEACON_ATLAS_READER_CACHE_SIZE`
+Pruning is always on. A query with a predicate judges every dataset of a collection against the
+statistics in its footer, in one pass, and never opens the ones that cannot match. Pruning never
+changes an answer, and the filter above the scan still decides every row.
 
-With the reader cache on, Beacon uses an open Atlas reader again. It therefore does not parse the
-`atlas.json` registry for every query.
-
-Recommendations:
-
-- Keep `BEACON_ATLAS_USE_READER_CACHE=true`, the default, when several queries read the same Atlas
-  collections.
-- Increase `BEACON_ATLAS_READER_CACHE_SIZE`, default `32`, if you query more Atlas stores than the
-  cache holds.
+`EXPLAIN ANALYZE` reports what it did as `atlas_datasets_pruned` and `atlas_datasets_scanned`, with
+the time spent as `atlas_open_time` and `atlas_prune_time`.

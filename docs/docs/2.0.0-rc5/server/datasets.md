@@ -21,7 +21,7 @@ The default local path in the Docker container is `/beacon/data/datasets/`.
 | [Arrow IPC](/docs/2.0.0-rc5/formats/arrow) | `.arrow`, `.feather` | `ARROW` | `read_arrow` | yes (`ipc`) |
 | [NetCDF](/docs/2.0.0-rc5/formats/netcdf) | `.nc` | `NC` | `read_netcdf` | yes (+ ND-NetCDF) |
 | [Zarr](/docs/2.0.0-rc5/formats/zarr) | `zarr.json` marker | `ZARR` | `read_zarr` | no |
-| [Atlas](/docs/2.0.0-rc5/formats/atlas) | `atlas.json` marker | `ATLAS` | `read_atlas` | no |
+| [Atlas](/docs/2.0.0-rc5/formats/atlas) | `data.atlas` file | `ATLAS` | `read_atlas` | yes |
 | [GeoTIFF / COG](/docs/2.0.0-rc5/formats/geotiff) | `.tif`, `.tiff` | `TIFF` | `read_tiff` | no |
 | [BBF](/docs/2.0.0-rc5/formats/bbf) | `.bbf` | `BBF` | `read_bbf` | no |
 | [Delta Lake](/docs/2.0.0-rc5/formats/delta-lake) | `_delta_log/` directory | `DELTA` | `read_delta` | no |

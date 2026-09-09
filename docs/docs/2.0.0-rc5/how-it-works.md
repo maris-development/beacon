@@ -45,8 +45,9 @@ moves filters and column selections as close to the data as possible:
   variables reads about 3 columns of bytes.
 - **Predicate pushdown**: Beacon turns filters into file, row group and chunk pruning. A time range
   filter on a [Zarr](/docs/2.0.0-rc5/formats/zarr) store fetches only the
-  chunks in that range. On [Atlas](/docs/2.0.0-rc5/formats/atlas), Beacon uses
-  the stored statistics. It can drop whole datasets before it reads any array data.
+  chunks in that range. On [Atlas](/docs/2.0.0-rc5/formats/atlas), every array records its own
+  range in the collection's footer, so Beacon judges every dataset in one pass and never opens
+  the ones that cannot match.
 - **Federated pushdown**: Beacon sends filters, projections, limits and whole aggregates to
   [SQL databases](/docs/2.0.0-rc5/data-sources/sql-databases) and to
   [remote Beacons](/docs/2.0.0-rc5/data-sources/remote-tables). Only the reduced result

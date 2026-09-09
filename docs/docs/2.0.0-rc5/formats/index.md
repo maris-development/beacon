@@ -33,7 +33,7 @@ S3-compatible bucket, chosen at startup. See
 | [NetCDF](/docs/2.0.0-rc5/formats/netcdf) | `read_netcdf` | `NC` | `.nc` |
 | [HDF5](/docs/2.0.0-rc5/formats/hdf5) | `read_hdf5` | `HDF5`, `H5` | `.h5`, `.hdf5` |
 | [Zarr](/docs/2.0.0-rc5/formats/zarr) | `read_zarr` | `ZARR` | `zarr.json` marker |
-| [Atlas](/docs/2.0.0-rc5/formats/atlas) | `read_atlas` | `ATLAS` | `atlas.json` marker |
+| [Atlas](/docs/2.0.0-rc5/formats/atlas) | `read_atlas` | `ATLAS` | `data.atlas` file |
 | [GeoTIFF / COG](/docs/2.0.0-rc5/formats/geotiff) | `read_tiff` | `TIFF` | `.tif`, `.tiff` |
 | [BBF](/docs/2.0.0-rc5/formats/bbf) | `read_bbf` | `BBF` | `.bbf` |
 | [Delta Lake](/docs/2.0.0-rc5/formats/delta-lake) | `read_delta` | `DELTA` | `_delta_log/` directory |
@@ -58,7 +58,7 @@ The table above says how to read each format. This one says what you get.
 | NetCDF | **Anonymous only**, or full with the Rust reader | Projection + dimension selection | Yes | `read_netcdf_schema` | Yes |
 | HDF5 | **Anonymous only**, or full with the Rust reader | Projection + dimension selection | Yes | `read_hdf5_schema` | Yes |
 | Zarr | Full | Projection + dimension selection, chunk pruning | No | `read_zarr_schema` | Yes |
-| Atlas | Full | Predicate + projection, **file-level pruning** | Yes | `read_atlas_schema` | Yes |
+| Atlas | Full | Predicate + projection, **dataset-level pruning** | Yes | `read_atlas_schema` | Yes |
 | GeoTIFF / COG | Full | Projection, range requests | No | `read_tiff_schema` | Yes |
 | BBF | Full | Predicate + projection | No | `read_bbf_schema` | No |
 | Delta Lake | Full | Predicate + projection, file skipping | No, but see below | `read_delta_schema` | No |
@@ -77,8 +77,8 @@ Reading the columns:
   query — paths in SQL are relative either way.
 - **Pushdown** — how much of a query reaches storage instead of running after the read. *Predicate*
   means a `WHERE` clause prunes data. *Projection* means a narrow `SELECT` reads fewer columns.
-  [Atlas](/docs/2.0.0-rc5/formats/atlas) is the strongest: its collection statistics drop whole
-  files before any array is opened.
+  [Atlas](/docs/2.0.0-rc5/formats/atlas) is the strongest: the statistics in a collection's footer
+  drop whole datasets before any array is opened.
 - **Query output** — whether a query result can be written back in that format, with `COPY TO` or
   an `output.format` on the API. Writing rows into an existing table is a different capability:
   **Delta Lake** external tables accept `INSERT INTO`, and
@@ -120,9 +120,9 @@ WHERE depth < 100
 GROUP BY platform;
 ```
 
-Array formats such as [Zarr](/docs/2.0.0-rc5/formats/zarr) and
-[Atlas](/docs/2.0.0-rc5/formats/atlas) use a marker file. Point at `zarr.json`
-or `atlas.json`, not at the chunk files.
+[Zarr](/docs/2.0.0-rc5/formats/zarr) is a directory behind a marker file: point at `zarr.json`,
+not at the chunk files. An [Atlas](/docs/2.0.0-rc5/formats/atlas) collection is a single file:
+point at `data.atlas`.
 
 Some files share a schema but have different columns. Combine those files with
 [`UNION BY NAME`](/docs/2.0.0-rc5/sql/union-by-name).

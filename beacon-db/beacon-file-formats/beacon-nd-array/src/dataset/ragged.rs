@@ -1,5 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
+use arrow::record_batch::RecordBatch;
+use beacon_datafusion_ext::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
 use indexmap::IndexMap;
 use tokio::sync::OnceCell;
 
@@ -8,7 +14,10 @@ use num_traits::ToPrimitive;
 use crate::{
     NdArray, NdArrayD,
     array::subset::ArraySubset,
-    dataset::Dataset,
+    arrow::batch::{
+        generate_chunk_subsets, ragged_batch_to_record_batch, ragged_record_batch_schema,
+    },
+    dataset::{Dataset, source::DatasetSource},
     datatypes::{NdArrayDataType, NdArrayType},
 };
 
@@ -364,7 +373,9 @@ impl RaggedDataset {
                 }
                 RaggedArray::ObservationVariable(array) => {
                     let obs_dim = array.dimensions().first().cloned().ok_or_else(|| {
-                        anyhow::anyhow!("observation variable {name} must have at least one dimension")
+                        anyhow::anyhow!(
+                            "observation variable {name} must have at least one dimension"
+                        )
                     })?;
                     let cum = &offsets[&obs_dim];
                     let obs_start = cum[index];
@@ -445,7 +456,9 @@ impl RaggedDataset {
                 }
                 RaggedArray::ObservationVariable(array) => {
                     let obs_dim = array.dimensions().first().cloned().ok_or_else(|| {
-                        anyhow::anyhow!("observation variable {name} must have at least one dimension")
+                        anyhow::anyhow!(
+                            "observation variable {name} must have at least one dimension"
+                        )
                     })?;
                     let cum = &offsets[&obs_dim];
                     let obs_start = cum[start];
@@ -497,6 +510,89 @@ impl RaggedDataset {
     pub async fn cumulative_offsets(&self) -> anyhow::Result<&HashMap<String, Vec<usize>>> {
         self.offsets().await
     }
+}
+
+impl RaggedDataset {
+    /// The chunk size the file stores the instance dimension in.
+    ///
+    /// The smallest chunk any instance variable or row-size variable reports
+    /// on that axis, so a chunk of casts lies inside one stored chunk of each
+    /// of them. An array with no chunk layout reports its whole axis, so a
+    /// file with no chunking at all is one chunk of every cast.
+    fn instance_chunk(&self) -> usize {
+        let instance_arrays = self.variables.values().filter_map(|var| match var {
+            RaggedArray::InstanceVariable(array) => Some(array),
+            _ => None,
+        });
+        instance_arrays
+            .chain(self.row_size_arrays.values())
+            .filter_map(|array| array.chunk_shape().first().copied())
+            .filter(|&chunk| chunk > 0)
+            .min()
+            .unwrap_or(self.n_instances)
+            .max(1)
+    }
+}
+
+#[async_trait::async_trait]
+impl DatasetSource for RaggedDataset {
+    /// Every chunk of the instance dimension, in order, as an [`ArraySubset`]
+    /// over that one axis.
+    ///
+    /// The cut follows the stored chunking of the instance dimension, see
+    /// [`RaggedDataset::instance_chunk`]. A boundary chunk shrinks to fit.
+    /// The observation rows of a chunk follow from the offsets when it is
+    /// read. A dataset with no casts has no chunks.
+    fn chunks(&self) -> Vec<Arc<dyn Any + Send + Sync>> {
+        generate_chunk_subsets(&[self.n_instances], &[self.instance_chunk()])
+            .into_iter()
+            .map(|subset| Arc::new(subset) as Arc<dyn Any + Send + Sync>)
+            .collect()
+    }
+
+    /// Read one chunk of casts into an [`NdRecordBatch`].
+    ///
+    /// `chunk` is one of [`DatasetSource::chunks`]. The casts are read in one
+    /// pass per array, and their rows come out flat: an instance value repeats
+    /// for every observation row of its cast, and an attribute for every row.
+    /// The batch then sits on one synthetic `row` axis, on which every column
+    /// is full rank, the layout the flat nd encoding gives a ragged batch.
+    async fn poll_next(
+        &self,
+        chunk: Arc<dyn Any + Send + Sync>,
+    ) -> anyhow::Result<Option<NdRecordBatch>> {
+        let subset = chunk
+            .downcast_ref::<ArraySubset>()
+            .ok_or_else(|| anyhow::anyhow!("chunk is not an ArraySubset"))?;
+        let (Some(&start), Some(&len)) = (subset.start.first(), subset.shape.first()) else {
+            anyhow::bail!("a ragged chunk spans the instance dimension; this one spans no axis");
+        };
+        let range = start..start + len;
+
+        let casts = self.get_casts_range(range.start, range.end).await?;
+        let schema = ragged_record_batch_schema(self);
+        let obs_dims: HashSet<String> = self.observation_dimensions().map(String::from).collect();
+        let offsets = self.cumulative_offsets().await?;
+        let flat =
+            ragged_batch_to_record_batch(&casts, &schema, &obs_dims, offsets, &range).await?;
+        Ok(Some(flat_batch_to_nd(&flat)?))
+    }
+}
+
+/// A flat batch as an nd batch on one synthetic `row` axis.
+///
+/// Every column is full rank on that axis, so the broadcast above the scan is
+/// the identity. This is the layout `encode_flat_batch_as_nd` gives a ragged
+/// batch, built here without the encoding.
+fn flat_batch_to_nd(batch: &RecordBatch) -> anyhow::Result<NdRecordBatch> {
+    let rows = batch.num_rows();
+    let row_dim = || Dimensions::try_new(vec![Dimension::new("row", rows)]);
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| NdArrowArray::try_new(column.clone(), row_dim()?))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(NdRecordBatch::try_new(batch.schema(), columns, row_dim()?)?)
 }
 
 /// Iterator over cast indices, yielding `(index, &RaggedDataset)`.
@@ -551,5 +647,170 @@ impl Clone for RaggedDataset {
             offsets: cell,
             variables: self.variables.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::array::backend::{ArrayBackend, mem::InMemoryArrayBackend};
+    use arrow::array::{Array, Float64Array, StringArray};
+    use ndarray::ArrayD;
+
+    /// An in-memory array that reports the chunk shape a test hands it.
+    #[derive(Debug)]
+    struct Chunked {
+        inner: InMemoryArrayBackend<i32>,
+        chunk_shape: Vec<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ArrayBackend<i32> for Chunked {
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+        fn shape(&self) -> Vec<usize> {
+            self.inner.shape()
+        }
+        fn chunk_shape(&self) -> Vec<usize> {
+            self.chunk_shape.clone()
+        }
+        fn dimensions(&self) -> Vec<String> {
+            self.inner.dimensions()
+        }
+        async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayD<i32>> {
+            self.inner.read_subset(subset).await
+        }
+    }
+
+    fn f64s(values: Vec<f64>, dim: &str) -> Arc<dyn NdArrayD> {
+        let len = values.len();
+        Arc::new(
+            NdArray::<f64>::try_new_from_vec_in_mem(values, vec![len], vec![dim.to_string()], None)
+                .unwrap(),
+        )
+    }
+
+    fn text(value: &str) -> Arc<dyn NdArrayD> {
+        Arc::new(
+            NdArray::<String>::try_new_from_vec_in_mem(
+                vec![value.to_string()],
+                vec![],
+                vec![] as Vec<String>,
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Three casts of two, one and three observations, the row-size variable
+    /// stored in chunks of `chunk` casts.
+    async fn ragged(chunk: usize) -> RaggedDataset {
+        let sizes = vec![2, 1, 3];
+        let inner = InMemoryArrayBackend::new(
+            ArrayD::from_shape_vec(vec![3], sizes).unwrap(),
+            vec![3],
+            vec!["casts".to_string()],
+            None,
+        );
+        let row_size: Arc<dyn NdArrayD> = Arc::new(
+            NdArray::new_with_backend(Chunked {
+                inner,
+                chunk_shape: vec![chunk],
+            })
+            .unwrap(),
+        );
+
+        let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
+        arrays.insert("row_size".to_string(), row_size);
+        arrays.insert("row_size.sample_dimension".to_string(), text("obs"));
+        arrays.insert(
+            "station".to_string(),
+            f64s(vec![100.0, 200.0, 300.0], "casts"),
+        );
+        arrays.insert(
+            "depth".to_string(),
+            f64s(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0], "obs"),
+        );
+        arrays.insert(".title".to_string(), text("casts"));
+
+        let dataset = Dataset::new("ragged".to_string(), arrays).await;
+        RaggedDataset::try_new(&dataset).await.unwrap()
+    }
+
+    fn subsets(ragged: &RaggedDataset) -> Vec<(usize, usize)> {
+        ragged
+            .chunks()
+            .iter()
+            .map(|chunk| {
+                let subset = chunk.downcast_ref::<ArraySubset>().unwrap();
+                (subset.start[0], subset.shape[0])
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn chunks_follow_the_stored_chunking_of_the_instance_dimension() {
+        assert_eq!(subsets(&ragged(2).await), vec![(0, 2), (2, 1)]);
+        assert_eq!(subsets(&ragged(1).await), vec![(0, 1), (1, 1), (2, 1)]);
+        assert_eq!(
+            subsets(&ragged(3).await),
+            vec![(0, 3)],
+            "no chunking is one chunk of every cast"
+        );
+    }
+
+    /// Each chunk comes out flat on a `row` axis, and the chunks together are
+    /// every observation row once, in cast order.
+    #[tokio::test]
+    async fn polling_every_chunk_reads_every_row_once() {
+        let ragged = ragged(2).await;
+        let mut station = Vec::new();
+        let mut depth = Vec::new();
+        let mut rows = Vec::new();
+        for chunk in ragged.chunks() {
+            let nd = ragged.poll_next(chunk).await.unwrap().unwrap();
+            assert_eq!(nd.target().rank(), 1, "one synthetic row axis");
+            assert!(
+                nd.columns().iter().all(|column| column.dims().rank() == 1),
+                "every column is full rank on it"
+            );
+            rows.push(nd.num_rows());
+
+            let batch = nd.materialize().unwrap();
+            let get = |name: &str| batch.column_by_name(name).unwrap().clone();
+            station.extend(
+                get("station")
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied(),
+            );
+            depth.extend(
+                get("depth")
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied(),
+            );
+            let title = get(".title");
+            let title = title.as_any().downcast_ref::<StringArray>().unwrap();
+            assert!((0..title.len()).all(|row| title.value(row) == "casts"));
+        }
+
+        assert_eq!(rows, vec![3, 3], "casts 0 and 1, then cast 2");
+        assert_eq!(station, vec![100.0, 100.0, 200.0, 300.0, 300.0, 300.0]);
+        assert_eq!(depth, vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+    }
+
+    #[tokio::test]
+    async fn a_chunk_of_another_type_is_an_error() {
+        let ragged = ragged(3).await;
+        let err = ragged.poll_next(Arc::new(42usize)).await.unwrap_err();
+        assert!(err.to_string().contains("not an ArraySubset"), "{err}");
     }
 }

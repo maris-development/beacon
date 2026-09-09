@@ -38,6 +38,7 @@ async fn schema_functions_are_registered_for_each_reader() {
         "read_parquet_schema",
         "read_csv_schema",
         "read_netcdf_schema",
+        "read_atlas_schema",
         "read_arrow_schema",
         "read_delta_schema",
         "read_iceberg_schema",

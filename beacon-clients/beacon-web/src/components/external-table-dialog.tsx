@@ -55,7 +55,7 @@ const TYPE_HINTS: Record<string, string> = {
   NC: "Datasets-store path or glob to netCDF files, e.g. argo/**/*.nc.",
   HDF5: "Datasets-store path or glob, e.g. data/**/*.h5. NetCDF-4 files are HDF5.",
   ZARR: "Datasets-store path to a Zarr v3 store (the zarr.json marker).",
-  ATLAS: "Datasets-store path to an Atlas store (the atlas.json marker).",
+  ATLAS: "Datasets-store path to an Atlas collection (the data.atlas file).",
   TIFF: "Datasets-store path or glob to GeoTIFF/COG files.",
   BBF: "Datasets-store path or glob to Beacon Binary Format files.",
   ODV: "Datasets-store path or glob to ODV files.",

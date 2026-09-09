@@ -331,13 +331,6 @@ small stores, where even a rank-1 read per store adds up.
 `valid_min` and `valid_max` are never used as a range. They state which values are *valid*, not
 which values a store holds, so a store may hold values outside them.
 
-### Atlas
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `BEACON_ATLAS_USE_READER_CACHE` | `true` | Cache opened Atlas store readers in memory, avoiding re-opening the same `atlas.json` across queries. |
-| `BEACON_ATLAS_READER_CACHE_SIZE` | `32` | Max Atlas reader entries to keep cached. |
-
 ### Beacon Binary Format (BBF)
 
 | Variable | Default | Description |

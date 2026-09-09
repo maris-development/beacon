@@ -28,8 +28,17 @@
 //! - A type no cast reaches reads as null for the whole file. A list beside a
 //!   number is one such pair.
 //!
-//! Every other cast stays strict, and a value it cannot hold is an error. The
-//! merged schema carries the mark, so no scan reads the setting itself.
+//! The merged schema carries the mark, so no scan reads the setting itself.
+//!
+//! # An nd column
+//!
+//! An nd column reads leniently too, whether or not the merge marked it. Its
+//! cast lands on the `values` list inside the `beacon.nd` struct, and one
+//! collection of a million datasets may store an array as text where another
+//! stores numbers. One cell that does not parse would otherwise fail the whole
+//! scan, and no single dataset is worth a collection.
+//!
+//! Every other cast stays strict, and a value it cannot hold is an error.
 //!
 //! [`TypeConflict::KeepFirst`]: crate::type_widening::TypeConflict::KeepFirst
 
@@ -52,7 +61,23 @@ use datafusion::physical_expr_adapter::{
 };
 use futures::StreamExt;
 
+use crate::nd::is_nd_encoded;
 use crate::type_widening::is_type_conflict;
+
+/// Whether a cast onto `field` may read a value the type cannot hold as null.
+///
+/// Two cases qualify.
+///
+/// A column the merge could not join, marked by the widening rule. The sources
+/// state two families, so no value of the other family is a value of this one.
+///
+/// An nd column. Its cast lands on the `values` list inside the `beacon.nd`
+/// struct, and a collection of a million datasets may store one array as text
+/// where another stores numbers. One cell that does not parse must not fail the
+/// whole scan, because no single dataset is worth the collection.
+fn casts_leniently(field: &arrow::datatypes::Field) -> bool {
+    is_type_conflict(field) || is_nd_encoded(field)
+}
 
 /// Where one column of the target schema comes from.
 #[derive(Debug, Clone)]
@@ -114,7 +139,7 @@ impl BatchAdapter {
                 // A column the merge could not join reads null where the cast
                 // cannot answer, and null for the whole file where no cast
                 // reaches its type.
-                Ok(at) if is_type_conflict(field) => {
+                Ok(at) if casts_leniently(field) => {
                     let data_type = field.data_type().clone();
                     Ok(
                         if can_cast_types(source.field(at).data_type(), &data_type) {
@@ -286,7 +311,7 @@ impl LenientCastAdapter {
     fn conflicted(&self, column: &Column) -> Option<&arrow::datatypes::Field> {
         let at = self.logical_file_schema.index_of(column.name()).ok()?;
         let field = self.logical_file_schema.field(at);
-        is_type_conflict(field).then_some(field)
+        casts_leniently(field).then_some(field)
     }
 }
 
@@ -323,7 +348,7 @@ impl PhysicalExprAdapter for LenientCastAdapter {
                 let Some(cast) = expr.as_any().downcast_ref::<CastColumnExpr>() else {
                     return Ok(Transformed::no(expr));
                 };
-                if !is_type_conflict(cast.target_field()) {
+                if !casts_leniently(cast.target_field()) {
                     return Ok(Transformed::no(expr));
                 }
                 Ok(Transformed::yes(Arc::new(CastColumnExpr::new(

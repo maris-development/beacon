@@ -171,10 +171,20 @@ FROM read_netcdf('argo/**/*.nc')
 LIMIT 0;
 ```
 
-## Zarr and Atlas
+## Zarr
 
-Zarr and Atlas go through the same decoding path as NetCDF. The attribute names and the rules above
-apply unchanged.
+Zarr goes through the same decoding path as NetCDF. The attribute names and the rules above apply
+unchanged.
+
+## Atlas
+
+Atlas decodes nothing, and needs to. Its own types include a nanosecond timestamp, and the ingest
+path applies the conventions before the write: `atlas create` reads each NetCDF file with xarray,
+which applies `scale_factor`, `add_offset` and the CF time units. A collection therefore holds
+decoded values already, and Beacon reads its arrays exactly as they are stored.
+
+A `units` or `scale_factor` attribute may still sit on an array, kept from the source file. It is
+a column like any other attribute — `"temperature.units"` — and it changes no value.
 
 ## Next
 

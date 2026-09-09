@@ -15,6 +15,7 @@ pytest formats/test_netcdf.py -v     # one
 | `test_parquet.py` | `pyarrow` | row groups, zstd and snappy, statistics on and off, nulls, a struct column, a directory |
 | `test_csv.py` | text | the delimiter argument, quoting, nulls, type inference, gzip, a glob |
 | `test_zarr.py` | `zarr` | v3, consolidated metadata, the zstd codec, a rank-3 grid, an unwritten chunk |
+| `test_atlas.py` | `atlas-python` | many datasets in one file, attributes, dataset pruning, a glob, `OPTIONS` |
 | `test_hdf5.py` | `h5py` | plain HDF5, dimension scales, a nested group, a compound dataset, strings |
 | `test_arrow.py` | `pyarrow` | one batch and many, a dictionary column, nulls, every Arrow type |
 | `test_geoparquet.py` | `geopandas` | WKB and GeoArrow, a line, a polygon, a covering bbox, `ST_X`/`ST_Y` |

@@ -65,7 +65,7 @@ them *before it reads any array data*. It then reads only the arrays that you se
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas
 STORED AS ATLAS
-LOCATION 'collections/*/atlas.json';
+LOCATION 'collections/*/data.atlas';
 ```
 
 ## 6. Compute once, query many times

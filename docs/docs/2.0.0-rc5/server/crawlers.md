@@ -189,17 +189,22 @@ endpoints:
 
 The crawler finds **one file per dataset** formats. The file extension must equal the format
 identifier exactly. The identifiers are `parquet`, `geoparquet`, `csv`, `nc` for NetCDF, `bbf`,
-`arrow` and `tiff`. The crawler does **not** read an alias extension. A file must use the canonical
+`arrow`, `tiff` and `atlas`. The crawler does **not** read an alias extension. A file must use the canonical
 extension. The crawler therefore skips `.tsv` (CSV), `.feather` (Arrow) and `.tif` (TIFF). The
 readers open those files directly. Register such a file with a table function or with
 `CREATE EXTERNAL TABLE`.
 
-The crawler **skips** a store with a directory and a marker file. **Zarr** (`*.zarr/zarr.json`) and
-**Atlas** (`atlas.json`) are such stores. The listing path does not register them as external
-tables. Read a Zarr store with
+The crawler **skips** a store with a directory and a marker file. **Zarr** (`*.zarr/zarr.json`) is
+such a store. The listing path does not register it as an external table. Read a Zarr store with
 [`read_zarr`](/docs/2.0.0-rc5/sql/table-functions#read-zarr). A crawl ignores these stores
 and continues with the other datasets. Register them with a table function or with
 `CREATE EXTERNAL TABLE`.
+
+An **Atlas** collection *is* crawled. A collection is one file, `data.atlas`, so its extension is
+its format and the rule above admits it. Each collection lives in its own directory and tables
+group by directory, so a crawl of several collections registers one table each. Use
+`CREATE EXTERNAL TABLE ... LOCATION 'collections/*/data.atlas'` to put them in one table
+instead.
 
 The crawler matches a GeoParquet file by the `.geoparquet` extension. It creates a GeoParquet table
 with GeoArrow geometry decoding. The crawler reads a plain `.parquet` file as an ordinary Parquet
