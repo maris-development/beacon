@@ -27,51 +27,38 @@
 
 use std::any::Any;
 use std::sync::Arc;
-use std::time::Instant;
 
-use arrow::datatypes::SchemaRef;
-use atlas::{Atlas, DatasetView};
-use beacon_nd_array::arrow::{
-    file_read::FileRead, metrics::ReadMetrics, partition::FilePartitions,
-};
 use datafusion::{
     config::ConfigOptions,
     datasource::{
-        listing::PartitionedFile,
-        physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
+        physical_plan::{FileOpener, FileScanConfig, FileSource},
         table_schema::TableSchema,
     },
-    error::{DataFusionError, Result},
-    physical_expr::{
-        PhysicalExpr, conjunction,
-        projection::ProjectionExprs,
-        utils::{collect_columns, reassign_expr_columns},
-    },
+    error::Result,
+    physical_expr::{PhysicalExpr, conjunction, projection::ProjectionExprs},
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
     },
 };
-use futures::{FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 
 use beacon_datafusion_ext::nd::logical_schema;
 
-use crate::datafusion::{metrics::AtlasScanMetrics, pool::AtlasReaderPool};
-use crate::store::{AtlasReaderCache, get_or_open_atlas};
-use crate::{compat, datafusion::opener::AtlasOpener};
+use crate::datafusion::{metrics::AtlasScanMetrics, opener::AtlasOpener, pool::AtlasReaderPool};
+use crate::store::AtlasReaderCache;
 
 /// DataFusion [`FileSource`] for Atlas collections.
 #[derive(Debug, Clone)]
 pub struct AtlasSource {
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
-    batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     read_dimensions: Option<Vec<String>>,
     projection: Option<ProjectionExprs>,
-    /// The reader cache to consult, or `None` to open every collection afresh.
+    /// The reader cache every open goes through.
     cache: AtlasReaderCache,
+    /// The scan's pools, one per collection, shared by every partition.
     reader_pool: Arc<AtlasReaderPool>,
 }
 
@@ -84,19 +71,12 @@ impl AtlasSource {
         Self {
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
-            batch_size: usize::MAX,
             predicate: None,
             read_dimensions,
             projection: None,
             cache,
             reader_pool: Arc::new(AtlasReaderPool::new()),
         }
-    }
-
-    /// Consult `cache` for opened collections, or open them afresh.
-    pub fn with_cache(mut self, cache: AtlasReaderCache) -> Self {
-        self.cache = cache;
-        self
     }
 
     /// Carry a projection the scan pushed down.
@@ -125,9 +105,7 @@ impl FileSource for AtlasSource {
             logical_schema: logical_schema(&projected_schema)?,
             projected_schema,
             read_dimensions: self.read_dimensions.clone(),
-            batch_size: self.batch_size,
             predicate: self.predicate.clone(),
-            read_metrics: ReadMetrics::new(&self.execution_plan_metrics, partition),
             scan_metrics: AtlasScanMetrics::new(&self.execution_plan_metrics, partition),
             reader_pool: Arc::clone(&self.reader_pool),
         }))
@@ -141,11 +119,9 @@ impl FileSource for AtlasSource {
         &self.table_schema
     }
 
-    fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
-        Arc::new(Self {
-            batch_size,
-            ..self.clone()
-        })
+    /// A batch is one stored chunk, sized by the writer. The scan has no say.
+    fn with_batch_size(&self, _batch_size: usize) -> Arc<dyn FileSource> {
+        Arc::new(self.clone())
     }
 
     /// A container is one unit. A byte range of it names nothing a reader can

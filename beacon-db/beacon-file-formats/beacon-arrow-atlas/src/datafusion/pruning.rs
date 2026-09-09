@@ -4,17 +4,17 @@
 //!
 //! A collection can hold millions of datasets. Evaluating a predicate against
 //! each one in turn would cost millions of evaluations. Instead the opener
-//! builds one [`PruningIndex`] over the collection: one row per live dataset,
+//! builds one `PruningIndex` over the collection: one row per live dataset,
 //! and one column of typed Arrow statistics per column the predicate names.
 //! DataFusion's [`PruningPredicate`] then judges the whole collection in one
 //! vectorised pass, and the result is one bit per dataset.
 //!
-//! The inputs are the opener's own column views. A variable's segment records
+//! The inputs are the view's column views. A variable's segment records
 //! the statistics of every dataset that wrote it, and an attribute view holds
 //! every dataset's value. Both are in memory once the views exist, so the
 //! index costs no I/O. Reading the views rather than asking the collection
 //! again also keeps pruning on the columns the scan reads: a column resolves
-//! one way, in [`column_views`](super::opener::column_views).
+//! one way, in `column_views`.
 //!
 //! # A column the dataset lacks
 //!
@@ -48,7 +48,7 @@ use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::scalar::ScalarValue;
 use indexmap::IndexMap;
 
-use super::opener::AtlasColumnView;
+use super::view::AtlasColumnView;
 
 /// The datasets of `names` that `predicate` could still match, in order.
 ///
@@ -184,7 +184,7 @@ fn build_index(
                     pack_array_column(segment, names, target)
                 }
                 Some(AtlasColumnView::GlobalAttribute { map })
-                | Some(AtlasColumnView::VariableAttribute { map, .. }) => {
+                | Some(AtlasColumnView::VariableAttribute { map }) => {
                     pack_attribute_column(map, names, target)
                 }
             };
@@ -356,7 +356,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::datafusion::opener::column_views;
+    use crate::datafusion::view::column_views;
     use crate::test_support;
 
     fn schema(name: &str, data_type: DataType) -> SchemaRef {

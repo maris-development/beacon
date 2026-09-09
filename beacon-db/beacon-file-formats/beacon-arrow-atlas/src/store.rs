@@ -138,8 +138,7 @@ struct CacheKey {
 /// per-runtime state; there is no process-global cache.
 ///
 /// Each entry owns a 256 MiB block cache and a 64 MiB I/O cache of its own, so
-/// the capacity is a memory bound as much as a handle count. See
-/// [`AtlasConfig::reader_cache_size`](crate::AtlasConfig::reader_cache_size).
+/// the capacity is a memory bound as much as a handle count.
 #[derive(Clone)]
 pub struct AtlasReaderCache {
     cache: Cache<CacheKey, Arc<Atlas>>,
@@ -217,7 +216,9 @@ pub async fn get_or_open_atlas(
         .cache
         .try_get_with(key, async move { open_collection(store, &path).await })
         .await
-        .map_err(|e: Arc<anyhow::Error>| anyhow::anyhow!("{e}"))
+        // The cache shares one error between the readers that waited on the
+        // open, so it cannot be moved out. Its chain survives as text.
+        .map_err(|e: Arc<anyhow::Error>| anyhow::anyhow!("{e:#}"))
 }
 
 #[cfg(test)]

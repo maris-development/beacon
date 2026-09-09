@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use anyhow::Context as _;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::nd::encode_nd_record_batch;
@@ -21,19 +22,37 @@ use crossbeam::queue::ArrayQueue;
 use datafusion::physical_plan::PhysicalExpr;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt, TryStreamExt};
-use object_store::{ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore, path::Path};
 use parking_lot::RwLock;
 use tokio::sync::OnceCell;
 
 use crate::datafusion::metrics::AtlasScanMetrics;
-use crate::datafusion::opener::under_fields;
-use crate::datafusion::view::AtlasView;
+use crate::datafusion::view::{AtlasView, under_fields};
 use crate::store::AtlasReaderCache;
+
+/// One cell per collection. The cell fills on the first open and never again.
+type Pools = HashMap<Path, Arc<OnceCell<Arc<Level1Pool>>>>;
 
 /// The pools of one scan, one per collection, keyed by the container's path.
 #[derive(Default, Clone)]
 pub struct AtlasReaderPool {
-    pools: Arc<RwLock<HashMap<object_store::path::Path, Arc<OnceCell<Arc<Level1Pool>>>>>>,
+    pools: Arc<RwLock<Pools>>,
+}
+
+/// What one open of a collection needs, beyond the collection itself.
+///
+/// `logical_schema` is what the columns and the predicate are written
+/// against. `projected_schema` is the same schema nd-encoded, and every batch
+/// goes out under it.
+pub(crate) struct PoolOpen<'a> {
+    /// The reader cache to open through, or `None` to open afresh.
+    pub cache: Option<&'a AtlasReaderCache>,
+    pub logical_schema: SchemaRef,
+    pub projected_schema: SchemaRef,
+    /// The predicate to prune datasets with, if any.
+    pub predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// The partition's metrics. The datasets this consumer reads count here.
+    pub scan_metrics: AtlasScanMetrics,
 }
 
 impl Debug for AtlasReaderPool {
@@ -51,73 +70,53 @@ impl AtlasReaderPool {
 
     /// One consumer of the collection at `object_meta`.
     ///
-    /// The first call for a collection opens it, through `cache` when given,
-    /// prunes its datasets with `pruning_predicate`, and queues the survivors.
-    /// Every call gets a stream over that queue. The open and the prune are
-    /// timed on the first caller's `scan_metrics`, and each consumer counts
-    /// the datasets it reads on its own.
-    ///
-    /// `logical_schema` is what the columns and the predicate are written
-    /// against. `projected_schema` is the same schema nd-encoded, and every
-    /// batch goes out under it.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn try_open_into_pooled_stream(
+    /// The first call for a collection opens it, prunes its datasets, and
+    /// queues the survivors. Every call gets a stream over that queue. The
+    /// open and the prune are timed on the first caller's metrics, and each
+    /// consumer counts the datasets it reads on its own.
+    pub(crate) async fn open(
         &self,
-        cache: Option<&AtlasReaderCache>,
         store: Arc<dyn ObjectStore>,
         object_meta: ObjectMeta,
-        logical_schema: SchemaRef,
-        projected_schema: SchemaRef,
-        pruning_predicate: Option<Arc<dyn PhysicalExpr>>,
-        scan_metrics: AtlasScanMetrics,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<RecordBatch>>> {
-        let cell = if self.pools.read().contains_key(&object_meta.location) {
-            self.pools
-                .read()
-                .get(&object_meta.location)
-                .unwrap()
-                .clone()
-        } else {
-            let cell = Arc::new(OnceCell::new());
+        open: PoolOpen<'_>,
+    ) -> anyhow::Result<Level1PoolStream> {
+        let cell = Arc::clone(
             self.pools
                 .write()
-                .insert(object_meta.location.clone(), cell.clone());
-            cell
-        };
+                .entry(object_meta.location.clone())
+                .or_default(),
+        );
         let pool = cell
             .get_or_try_init(|| async {
-                let open_timer = scan_metrics.open_time.timer();
-                let atlas_view = AtlasView::new(
-                    cache,
-                    store.clone(),
-                    object_meta.clone(),
-                    logical_schema.clone(),
-                )
-                .await?;
+                let open_timer = open.scan_metrics.open_time.timer();
+                let atlas_view =
+                    AtlasView::new(open.cache, store, object_meta, open.logical_schema).await?;
                 drop(open_timer);
                 let datasets = atlas_view
-                    .list_datasets(pruning_predicate, scan_metrics.clone())
+                    .list_datasets(open.predicate, open.scan_metrics.clone())
                     .await?;
                 // A queue has at least one slot: `ArrayQueue::new(0)` panics.
                 // With no dataset to read the slot stays empty, the first
                 // `pop` finds nothing, and the stream ends at once.
                 let queue = ArrayQueue::new(datasets.len().max(1));
                 for dataset in datasets {
-                    queue.push(dataset).unwrap();
+                    queue
+                        .push(dataset)
+                        .map_err(|dataset| anyhow::anyhow!("no slot for dataset '{dataset}'"))?;
                 }
 
                 Ok::<Arc<Level1Pool>, anyhow::Error>(Arc::new(Level1Pool {
                     inner: Arc::new(InnerLevel1Pool {
                         atlas_view,
                         queue,
-                        projected_schema: projected_schema.clone(),
+                        projected_schema: open.projected_schema,
                     }),
                 }))
             })
             .await
             .cloned()?;
 
-        Ok(pool.as_ref().clone().into_stream(scan_metrics).boxed())
+        Ok(pool.as_ref().clone().into_stream(open.scan_metrics))
     }
 }
 
@@ -128,14 +127,14 @@ impl AtlasReaderPool {
 /// partitions that share a collection each hold a consumer, and the queue
 /// shares the work between them.
 #[derive(Clone)]
-pub struct Level1Pool {
+pub(crate) struct Level1Pool {
     inner: Arc<InnerLevel1Pool>,
 }
 
 impl Level1Pool {
     /// One consumer of the queue. It starts on no dataset, and counts the
     /// datasets it reads on `scan_metrics`.
-    pub fn into_stream(self, scan_metrics: AtlasScanMetrics) -> Level1PoolStream {
+    pub(crate) fn into_stream(self, scan_metrics: AtlasScanMetrics) -> Level1PoolStream {
         Level1PoolStream {
             inner: self.inner,
             scan_metrics,
@@ -158,7 +157,7 @@ struct InnerLevel1Pool {
 /// The dataset in hand is a boxed stream, which is `Send` and not `Sync`, so
 /// the consumer lives with the partition that polls it and never in the
 /// shared handle.
-pub struct Level1PoolStream {
+pub(crate) struct Level1PoolStream {
     inner: Arc<InnerLevel1Pool>,
     /// The partition's metrics. The datasets this consumer reads count here.
     scan_metrics: AtlasScanMetrics,
@@ -208,11 +207,7 @@ fn dataset_stream(
     dataset: String,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     futures::stream::once(async move {
-        let source = pool
-            .atlas_view
-            .dataset(&dataset)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("dataset '{dataset}' is not in the collection"))?;
+        let source = pool.atlas_view.dataset(&dataset).await?;
         scan_metrics.datasets_scanned.add(1);
         let chunks = source.chunks();
         let dataset = Arc::<str>::from(dataset);
@@ -221,9 +216,15 @@ fn dataset_stream(
             let source = Arc::clone(&source);
             let dataset = Arc::clone(&dataset);
             async move {
-                let nd = source.poll_next(chunk).await?.ok_or_else(|| {
-                    anyhow::anyhow!("dataset '{dataset}' read no batch for a chunk of its own grid")
-                })?;
+                let nd = source
+                    .poll_next(chunk)
+                    .await
+                    .with_context(|| format!("reading a chunk of dataset '{dataset}'"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "dataset '{dataset}' read no batch for a chunk of its own grid"
+                        )
+                    })?;
                 let nd = under_fields(&nd, pool.atlas_view.table_schema().fields())?;
                 let batch =
                     encode_nd_record_batch(&nd)?.with_schema(Arc::clone(&pool.projected_schema))?;
@@ -265,15 +266,18 @@ mod tests {
         dir: &Path,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: AtlasScanMetrics,
-    ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
+    ) -> Level1PoolStream {
         let (store, marker) = test_support::store_and_marker(dir);
         let logical = logical_schema(dir).await;
         let projected = Arc::new(encoded_schema(&logical));
-        pool.try_open_into_pooled_stream(
-            None, store, marker, logical, projected, predicate, metrics,
-        )
-        .await
-        .unwrap()
+        let open = PoolOpen {
+            cache: None,
+            logical_schema: logical,
+            projected_schema: projected,
+            predicate,
+            scan_metrics: metrics,
+        };
+        pool.open(store, marker, open).await.unwrap()
     }
 
     /// The scan holds the pool in a `FileSource`, which must be `Send + Sync`.

@@ -2,9 +2,8 @@
 
 /// Settings that change *what* a scan reads, as opposed to how fast it does so.
 ///
-/// The runtime settings live in [`AtlasConfig`](crate::AtlasConfig). These come
-/// from the query: `read_atlas(paths, dimensions)` sets them, and so does
-/// `CREATE EXTERNAL TABLE ... OPTIONS ('read_dimensions' '…')`.
+/// These come from the query: `read_atlas(paths, dimensions)` sets them, and
+/// so does `CREATE EXTERNAL TABLE ... OPTIONS ('read_dimensions' '…')`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AtlasOptions {
     /// The dimensions the table reads, or `None` to pick a broadcast-compatible

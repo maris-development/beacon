@@ -10,6 +10,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use arrow::datatypes::{Schema, SchemaRef};
 use beacon_datafusion_ext::format_ext::{
     DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
@@ -35,8 +36,10 @@ use datafusion::{
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::compat;
+use crate::datafusion::error::external;
 use crate::store::{ATLAS_MARKER, AtlasReaderCache, get_or_open_atlas, top_level_atlas_markers};
 
+pub(crate) mod error;
 pub mod metrics;
 pub mod opener;
 pub mod options;
@@ -65,8 +68,8 @@ impl AtlasFormatFactory {
         Self { options }
     }
 
-    /// A format with this table's effective settings, wired to the shared cache
-    /// when caching is on.
+    /// A format with this table's effective settings. Each format owns a
+    /// reader cache of its own.
     pub(crate) fn build(&self, options: AtlasOptions) -> AtlasFormat {
         AtlasFormat::new(options)
     }
@@ -248,16 +251,17 @@ impl FileFormat for AtlasFormat {
         for marker in &markers {
             let atlas = get_or_open_atlas(Some(&self.cache), Arc::clone(store), marker)
                 .await
-                .map_err(|e| exec_datafusion_err!("{e}"))?;
+                .map_err(external)?;
 
             let schema =
                 compat::collection_arrow_schema(&atlas.footer().collection_schema(), &widening)
-                    .map_err(|e| {
-                        exec_datafusion_err!(
-                            "Failed to read the schema of atlas collection '{}': {e}",
+                    .with_context(|| {
+                        format!(
+                            "reading the schema of atlas collection '{}'",
                             marker.location
                         )
-                    })?;
+                    })
+                    .map_err(external)?;
             schemas.push(LabeledSchema::new(
                 Arc::new(schema),
                 marker.location.as_ref(),
@@ -298,7 +302,7 @@ impl FileFormat for AtlasFormat {
     ///
     /// Nothing is opened here. The markers the listing found are deduped to the
     /// outermost collections, and every target partition gets all of them in
-    /// its own rotation, see [`deal_rotated`]. The partitions that open one
+    /// its own rotation, see `deal_rotated`. The partitions that open one
     /// collection share its datasets through the reader pool, so parallelism
     /// is bounded by the dataset count, not the collection count.
     async fn create_physical_plan(
