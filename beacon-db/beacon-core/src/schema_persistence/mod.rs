@@ -3,6 +3,8 @@
 //! Beacon's catalog is the source of truth for which tables exist. This module owns:
 //! - [`PersistentSchemaProvider`] — the `beacon.public` schema provider that persists
 //!   a table's definition on registration and removes it on deregistration;
+//! - [`DefaultTablePlaceholder`] — the empty stand-in that holds the configured
+//!   default-table name until a real table takes it;
 //! - [`SchemaPersistenceService`] — the durable `db://<name>/table.json` read/write path;
 //! - [`init_tables`] — startup recovery that rebuilds every provider from those files;
 //! - the private `loading`/`ordering` helpers `init_tables` drives.
@@ -12,11 +14,13 @@ use std::{collections::HashMap, sync::Arc};
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 
+pub mod default_table;
 mod loading;
 mod ordering;
 pub mod provider;
 pub mod service;
 
+pub use default_table::DefaultTablePlaceholder;
 pub use provider::PersistentSchemaProvider;
 pub use service::{definition_from_provider, SchemaPersistenceService};
 
@@ -27,7 +31,8 @@ pub use service::{definition_from_provider, SchemaPersistenceService};
 /// definitions, then views in dependency order), builds each provider against
 /// the live session — so a view's defining query resolves the tables already
 /// registered ahead of it — and inserts it into `schema` without re-persisting.
-/// Finishes by ensuring the empty `default` table exists.
+/// Finishes by registering the empty stand-in for the configured default table,
+/// but only when no loaded table already holds that name.
 ///
 /// `tables_store_url` is the store the persisted `<name>/table.json` definitions
 /// are read from (the caller supplies it — the runtime uses its tables store).
@@ -70,6 +75,7 @@ pub async fn init_tables(
         }
     }
 
-    schema.ensure_default_table();
+    let default_table = crate::settings::SqlSettings::from_session(session_ctx).default_table;
+    schema.ensure_default_table(&default_table);
     Ok(())
 }

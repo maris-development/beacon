@@ -83,6 +83,31 @@ rejects that `CREATE`. Beacon never writes plaintext.
 | `BEACON_TYPE_WIDENING_STRATEGY` | `default` | The rule a schema merge applies to a column that two files type in two ways. `default` widens inside one family: a wider integer, a finer timestamp, a longer string. It refuses a boolean beside a number and a number beside a string, and it reads every integer beside a `Float32` as `Float64`. `numpy` promotes as `numpy.result_type` does: a boolean joins the numbers, `Float16` joins the floats, a narrow integer beside a `Float32` stays a `Float32`, a number beside a string reads as text, and a date beside a timestamp is a timestamp. numpy resolves the set of types of a column at once, so the listing order does not change the result. `numpy` reads every schema in one pass, as `keep_first` does. An unknown value logs a warning and reads as `default`. See [a column has two types](/docs/2.0.0-rc5/troubleshooting#a-column-has-two-types-across-the-files). |
 | `BEACON_TYPE_WIDENING_ON_CONFLICT` | `fail` | What a schema merge does with a column that two files type in two families, such as a number and a timestamp. `fail` refuses the collection and names the column, both types and both files. `keep_first` keeps the type of the first file, casts every other file to it, and reads a value that type cannot hold as null. A pair the strategy widens, such as `Int32` beside `Float64`, widens either way. An unknown value logs a warning and reads as `fail`. See [a column has two types](/docs/2.0.0-rc5/troubleshooting#a-column-has-two-types-across-the-files). |
 
+### The default table
+
+Beacon fills the `BEACON_DEFAULT_TABLE` name only when the name is free. At startup
+it puts an empty stand-in table there. The stand-in keeps a JSON query without a
+`from` field from a missing-table error.
+
+To put your own table under that name, drop the stand-in first:
+
+```sql
+DROP TABLE "default";
+CREATE EXTERNAL TABLE "default" STORED AS PARQUET LOCATION 'obs/';
+```
+
+Beacon then leaves the name alone. Your table holds it after a restart, because
+startup adds a stand-in only for a free name. Drop your table and Beacon puts a
+stand-in back on the next start.
+
+A `CREATE` on a name that a table holds fails, the stand-in included. This covers
+`CREATE TABLE`, `CREATE EXTERNAL TABLE`, `CREATE VIEW` and
+`CREATE MATERIALIZED VIEW`. The error names the stand-in and tells you to drop it.
+
+Three forms take a name that a table holds. `CREATE EXTERNAL TABLE IF NOT EXISTS`
+keeps the table and reports success. `CREATE OR REPLACE EXTERNAL TABLE` and
+`CREATE OR REPLACE VIEW` overwrite it.
+
 ### SQL result-stream coalescing
 
 A query can produce small record batches. Beacon merges them into larger batches

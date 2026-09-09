@@ -44,7 +44,12 @@ pub(crate) async fn create_materialized_view(
     let table_ref = crate::table_name::table_reference(name);
 
     if session_ctx.table_exist(table_ref.clone())? {
-        return Err(anyhow::anyhow!("Materialized view '{name}' already exists"));
+        return Err(crate::schema_persistence::default_table::already_exists_error(
+            session_ctx,
+            table_ref.clone(),
+            "Materialized view",
+        )
+        .await);
     }
 
     // Execute the defining query and persist its result as a single Parquet file

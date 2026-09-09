@@ -317,6 +317,31 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **The default table takes the name you configured.** At startup Beacon registers an empty
+  stand-in table, so a JSON query without a `from` field reports no missing table. The stand-in
+  ignored `BEACON_DEFAULT_TABLE` and always took the literal name `default`. A server started with
+  `BEACON_DEFAULT_TABLE=observations` therefore held a table called `default`, left `observations`
+  missing, and answered a `from`-less query with a missing-table error. Startup now registers the
+  stand-in under the configured name. The rest of the rule is unchanged and now under test: Beacon
+  fills that name only when the name is free, so your own table under it survives a restart, and a
+  `CREATE` on a name a table holds still fails. That last error now names the stand-in and tells
+  you to run `DROP TABLE` first, because a table nobody made is a confusing thing to collide with.
+  See [Configuration](docs/docs/2.0.0-rc5/server/configuration.md#the-default-table).
+- **`CREATE EXTERNAL TABLE` and `CREATE VIEW` no longer discard the table under the name.** Both
+  registered straight over whatever held the name. `CREATE EXTERNAL TABLE obs STORED AS CSV
+  LOCATION 'other/'` therefore repointed an existing `obs` with no warning, and a second
+  `CREATE VIEW v` swapped the view a report depended on. Only `CREATE TABLE` and
+  `CREATE MATERIALIZED VIEW` checked first, so the same typo either failed or destroyed a table
+  depending on which statement carried it. The admin API said as much and did not do it: the
+  `if_not_exists` field of `POST /api/admin/external-tables` is documented as skipping "instead of
+  erroring", and nothing ever errored. Both statements now refuse a name that a table or a view
+  holds, as `CREATE TABLE` does. The two modifiers the SQL reference already documented now do the
+  work: `CREATE EXTERNAL TABLE IF NOT EXISTS` keeps the existing table and reports success, which
+  is what that field always promised, and `CREATE OR REPLACE EXTERNAL TABLE` overwrites it.
+  `CREATE OR REPLACE VIEW` swaps a view. Neither guard reaches the paths that replace a provider on
+  purpose: a materialized-view `REFRESH`, an `ALTER TABLE`, and a crawler that re-registers a table
+  it owns all register directly and are unchanged. A script that relied on a bare re-`CREATE` to
+  repoint a table needs `OR REPLACE` added, or a `DROP TABLE` in front of it.
 - **A long query no longer makes the API unreachable.** The HTTP API, Flight SQL and every query
   shared one Tokio runtime of `BEACON_WORKER_THREADS` threads. A scan holds a thread until a
   partition yields, and one query starts as many partitions as the machine has cores, so a long
