@@ -293,12 +293,14 @@ impl FileFormat for AtlasFormat {
         Ok(Statistics::new_unknown(&table_schema))
     }
 
-    /// Plan one entry per collection, then wrap the scan in the nd spine.
+    /// Plan every collection into every partition, then wrap the scan in the
+    /// nd spine.
     ///
     /// Nothing is opened here. The markers the listing found are deduped to the
-    /// outermost collections and dealt round-robin over the target partitions,
-    /// and each partition's opener lists, prunes and reads the collections it
-    /// holds. Parallelism is therefore bounded by the collection count.
+    /// outermost collections, and every target partition gets all of them in
+    /// its own rotation, see [`deal_rotated`]. The partitions that open one
+    /// collection share its datasets through the reader pool, so parallelism
+    /// is bounded by the dataset count, not the collection count.
     async fn create_physical_plan(
         &self,
         state: &dyn Session,
@@ -314,21 +316,10 @@ impl FileFormat for AtlasFormat {
             .collect();
         let markers = top_level_atlas_markers(&listed);
 
-        // One collection is one unit of work, and a container is never split,
-        // so the deal here is the whole distribution.
-        let partitions = state
-            .config()
-            .target_partitions()
-            .clamp(1, markers.len().max(1));
-        let mut dealt: Vec<Vec<PartitionedFile>> = vec![Vec::new(); partitions];
-        for (index, marker) in markers.iter().enumerate() {
-            dealt[index % partitions].push(PartitionedFile::from(marker.clone()));
-        }
-        let file_groups: Vec<FileGroup> = dealt
-            .into_iter()
-            .filter(|group| !group.is_empty())
-            .map(FileGroup::new)
-            .collect();
+        // A container is never split, and the reader pool shares one between
+        // the partitions that open it, so the deal here is the whole
+        // distribution.
+        let file_groups = deal_rotated(&markers, state.config().target_partitions());
         tracing::debug!(
             collections = markers.len(),
             partitions = file_groups.len(),
@@ -378,5 +369,180 @@ impl FileFormat for AtlasFormat {
             "an atlas collection is written once, by `atlas create`, and Beacon does not write one"
                 .to_string(),
         ))
+    }
+}
+
+/// Deal `markers` over `partitions` groups, every collection to every group.
+///
+/// The reader pool shares a collection between the partitions that open it,
+/// so a partition may hold every collection and still read nothing twice.
+/// Every partition then reads until every collection is drained, whatever
+/// the collections' sizes, and parallelism is bounded by the dataset count
+/// rather than the collection count.
+///
+/// Each group is the whole list, rotated. Group `p` starts `p * n / partitions`
+/// collections round the ring, so the start points spread evenly: with as many
+/// groups as collections each starts on its own, with fewer they start as far
+/// apart as they can, and with more they double up as evenly as they can. A
+/// partition therefore works alone on its collection until the partitions
+/// meet, and the shared queue takes over from there.
+pub(crate) fn deal_rotated(markers: &[ObjectMeta], partitions: usize) -> Vec<FileGroup> {
+    let n = markers.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let partitions = partitions.max(1);
+    (0..partitions)
+        .map(|p| {
+            let offset = p * n / partitions;
+            (0..n)
+                .map(|i| PartitionedFile::from(markers[(offset + i) % n].clone()))
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod deal_tests {
+    use super::*;
+
+    fn markers(n: usize) -> Vec<ObjectMeta> {
+        (0..n)
+            .map(|i| ObjectMeta {
+                location: object_store::path::Path::from(format!("c{i}/{ATLAS_MARKER}")),
+                last_modified: chrono::Utc::now(),
+                size: 0,
+                e_tag: None,
+                version: None,
+            })
+            .collect()
+    }
+
+    /// The collections of a group, by their directory.
+    fn dealt(group: &FileGroup) -> Vec<String> {
+        group
+            .files()
+            .iter()
+            .map(|file| {
+                file.object_meta
+                    .location
+                    .parts()
+                    .next()
+                    .unwrap()
+                    .as_ref()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The collection each group starts on.
+    fn starts(groups: &[FileGroup]) -> Vec<String> {
+        groups.iter().map(|group| dealt(group)[0].clone()).collect()
+    }
+
+    #[test]
+    fn every_partition_holds_every_collection_in_its_own_rotation() {
+        let groups = deal_rotated(&markers(4), 2);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(dealt(&groups[0]), ["c0", "c1", "c2", "c3"]);
+        assert_eq!(dealt(&groups[1]), ["c2", "c3", "c0", "c1"]);
+    }
+
+    #[test]
+    fn the_starts_spread_evenly_over_the_collections() {
+        assert_eq!(
+            starts(&deal_rotated(&markers(3), 3)),
+            ["c0", "c1", "c2"],
+            "one start per collection"
+        );
+        assert_eq!(
+            starts(&deal_rotated(&markers(4), 3)),
+            ["c0", "c1", "c2"],
+            "fewer partitions start as far apart as they can"
+        );
+        let groups = deal_rotated(&markers(2), 4);
+        assert_eq!(
+            starts(&groups),
+            ["c0", "c0", "c1", "c1"],
+            "more partitions double up evenly"
+        );
+        assert!(groups.iter().all(|group| group.len() == 2));
+    }
+
+    #[test]
+    fn no_collection_makes_no_group() {
+        assert!(deal_rotated(&markers(0), 4).is_empty());
+        assert_eq!(
+            deal_rotated(&markers(2), 0).len(),
+            1,
+            "no partition reads as one"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use crate::test_support;
+    use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    use std::path::Path;
+
+    /// The rows of every collection under `dir`, read in a session of
+    /// `partitions` target partitions, and the partition count of the plan.
+    async fn rows(dir: &Path, partitions: usize) -> (usize, usize) {
+        // The collections sit in subdirectories, which a listing skips by
+        // default.
+        let config = SessionConfig::new()
+            .with_target_partitions(partitions)
+            .set_bool(
+                "datafusion.execution.listing_table_ignore_subdirectory",
+                false,
+            );
+        let ctx = SessionContext::new_with_config(config);
+        let url = ListingTableUrl::parse(format!("{}/", dir.display())).unwrap();
+        let options = ListingOptions::new(Arc::new(AtlasFormat::default()))
+            .with_file_extension(ATLAS_MARKER)
+            .with_collect_stat(false);
+        let config = ListingTableConfig::new(url)
+            .with_listing_options(options)
+            .infer_schema(&ctx.state())
+            .await
+            .unwrap();
+        let table = Arc::new(ListingTable::try_new(config).unwrap());
+
+        let df = ctx.read_table(table).unwrap();
+        let plan = df.clone().create_physical_plan().await.unwrap();
+        let partition_count = plan.properties().output_partitioning().partition_count();
+        let batches = df.collect().await.unwrap();
+        (batches.iter().map(|b| b.num_rows()).sum(), partition_count)
+    }
+
+    /// Three collections, read by three partitions that each hold all of
+    /// them. Every row comes out once, and no row comes out twice.
+    #[tokio::test]
+    async fn every_partition_reads_through_the_pool_and_no_dataset_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c"] {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            test_support::ranged(&dir, 5).await;
+        }
+
+        let (alone, one) = rows(tmp.path(), 1).await;
+        let (shared, three) = rows(tmp.path(), 3).await;
+
+        assert_eq!(one, 1);
+        assert_eq!(three, 3, "every partition holds a group");
+        assert_eq!(
+            alone,
+            3 * 5 * 4,
+            "five datasets of four rows per collection"
+        );
+        assert_eq!(
+            shared, alone,
+            "a dataset is read by one partition and no other"
+        );
     }
 }

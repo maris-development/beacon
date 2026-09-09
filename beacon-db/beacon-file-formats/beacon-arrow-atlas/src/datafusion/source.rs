@@ -3,10 +3,11 @@
 //! # One collection is one unit of work
 //!
 //! A plan entry is a collection: its `data.atlas` container, as the listing
-//! found it. [`AtlasFormat`] dedupes the markers and deals them round-robin
-//! over the target partitions, and a partition reads each collection it holds
-//! from end to end. A container is never split by byte range, because a byte
-//! range of one means nothing.
+//! found it. [`AtlasFormat`] dedupes the markers and deals every one of them
+//! to every target partition, each partition in its own rotation. A container
+//! is never split by byte range, because a byte range of one means nothing.
+//! The partitions that open one collection share its datasets through the
+//! reader pool instead.
 //!
 //! # What an open does
 //!
@@ -148,7 +149,9 @@ impl FileSource for AtlasSource {
     }
 
     /// A container is one unit. A byte range of it names nothing a reader can
-    /// open, so the plan's groups stand as the format dealt them.
+    /// open. The format deals every collection to every partition itself, and
+    /// the reader pool shares the datasets, so the plan's groups stand as the
+    /// format dealt them.
     fn supports_repartitioning(&self) -> bool {
         false
     }
