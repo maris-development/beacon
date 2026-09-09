@@ -10,14 +10,17 @@
 //!
 //! # What an open does
 //!
-//! Opening a collection costs one footer read through the reader cache. The
-//! opener then lists the datasets, prunes them in one vectorised pass over the
-//! footer's statistics, and is left with the names it has to read. Those names
-//! feed one stream: each dataset is built in turn, planned as a [`FileRead`],
-//! and its batches are yielded before the next dataset is touched.
+//! An open goes through the [`AtlasReaderPool`] the source holds. The first
+//! partition to reach a collection opens it, at the cost of one footer read
+//! through the reader cache, prunes its datasets in one vectorised pass over
+//! the footer's statistics, and queues the names it has to read. Every
+//! partition that opens the collection then streams the datasets it pops off
+//! that queue: each dataset is built in turn, and its batches are yielded
+//! before the next dataset is touched.
 //!
-//! So a pruned dataset costs nothing at all, and a kept one costs its build and
-//! its read. Nothing is listed at plan time, and nothing is queued.
+//! So a pruned dataset costs nothing at all, a kept one costs its build and
+//! its read, and a dataset is read by one partition and by no other. Nothing
+//! is listed at plan time.
 //!
 //! [`AtlasFormat`]: super::AtlasFormat
 
@@ -53,7 +56,7 @@ use object_store::ObjectStore;
 
 use beacon_datafusion_ext::nd::logical_schema;
 
-use crate::datafusion::metrics::AtlasScanMetrics;
+use crate::datafusion::{metrics::AtlasScanMetrics, pool::AtlasReaderPool};
 use crate::store::{AtlasReaderCache, get_or_open_atlas};
 use crate::{compat, datafusion::opener::AtlasOpener};
 
@@ -68,6 +71,7 @@ pub struct AtlasSource {
     projection: Option<ProjectionExprs>,
     /// The reader cache to consult, or `None` to open every collection afresh.
     cache: AtlasReaderCache,
+    reader_pool: Arc<AtlasReaderPool>,
 }
 
 impl AtlasSource {
@@ -84,6 +88,7 @@ impl AtlasSource {
             read_dimensions,
             projection: None,
             cache,
+            reader_pool: Arc::new(AtlasReaderPool::new()),
         }
     }
 
@@ -123,6 +128,7 @@ impl FileSource for AtlasSource {
             predicate: self.predicate.clone(),
             read_metrics: ReadMetrics::new(&self.execution_plan_metrics, partition),
             scan_metrics: AtlasScanMetrics::new(&self.execution_plan_metrics, partition),
+            reader_pool: Arc::clone(&self.reader_pool),
         }))
     }
 

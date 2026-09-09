@@ -40,9 +40,11 @@ use crate::store::{ATLAS_MARKER, AtlasReaderCache, get_or_open_atlas, top_level_
 pub mod metrics;
 pub mod opener;
 pub mod options;
+pub mod pool;
 pub mod pruning;
 pub mod source;
 pub mod table_function;
+pub mod view;
 
 pub use options::AtlasOptions;
 pub use source::AtlasSource;

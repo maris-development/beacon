@@ -1,26 +1,23 @@
 //! One partition's opener: a collection in, nd batches out.
 //!
-//! A column view says where one column of the scan comes from, for every
-//! dataset at once: the variable's segment, or the attribute values keyed by
-//! dataset. One dataset is then a lazy [`Dataset`] over those views. It reads
-//! one stored chunk at a time as an [`NdRecordBatch`], each column on the axes
-//! the dataset stores it on.
+//! The opener reads through the [`AtlasReaderPool`]. The first partition to
+//! reach a collection opens it and queues its datasets, and every partition
+//! then streams the datasets it pops. What lives here is the column
+//! resolution the read and the pruning share: a column view says where one
+//! column of the scan comes from, for every dataset at once, and
+//! [`under_fields`] puts one chunk of a dataset under the scan's fields.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::{
-    array::{ArrayRef, RecordBatch, new_null_array},
+    array::{ArrayRef, new_null_array},
     compute::cast,
     datatypes::{Field, FieldRef, Schema, SchemaRef},
 };
 use atlas::{ArrayFile, Atlas, Attr};
-use beacon_datafusion_ext::nd::{Dimensions, NdArrowArray, NdRecordBatch, encode_nd_record_batch};
+use beacon_datafusion_ext::nd::{Dimensions, NdArrowArray, NdRecordBatch};
 use beacon_datafusion_ext::type_widening::is_type_conflict;
-use beacon_nd_array::{
-    NdArrayD,
-    arrow::metrics::ReadMetrics,
-    dataset::{default::Dataset, source::DatasetSource},
-};
+use beacon_nd_array::arrow::metrics::ReadMetrics;
 use datafusion::{
     datasource::{
         listing::PartitionedFile,
@@ -29,14 +26,13 @@ use datafusion::{
     error::{DataFusionError, Result},
     physical_plan::PhysicalExpr,
 };
-use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use indexmap::IndexMap;
 use object_store::ObjectStore;
 
 use crate::{
-    compat,
-    datafusion::{metrics::AtlasScanMetrics, pruning::prune_datasets},
-    store::{AtlasReaderCache, get_or_open_atlas},
+    datafusion::{metrics::AtlasScanMetrics, pool::AtlasReaderPool},
+    store::AtlasReaderCache,
 };
 
 /// One partition's opener: a collection in, its batches out.
@@ -58,15 +54,20 @@ pub struct AtlasOpener {
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
     pub read_metrics: ReadMetrics,
     pub scan_metrics: AtlasScanMetrics,
+    /// The scan's pools, one per collection, shared by every partition.
+    pub reader_pool: Arc<AtlasReaderPool>,
 }
 
 impl FileOpener for AtlasOpener {
     /// One collection in, one encoded batch per stored chunk of every dataset
     /// worth reading out.
     ///
-    /// The column views are built once per collection, and every dataset then
-    /// reads against them. A dataset the deletion mask hides is not read, and
-    /// neither is one the predicate rules out from the statistics in memory.
+    /// The collection is opened through the reader pool. The first partition
+    /// to reach it opens it, prunes its datasets in one pass over the footer's
+    /// statistics, and queues the survivors. A dataset the deletion mask hides
+    /// is not queued, and neither is one the predicate rules out. Every
+    /// partition then streams the datasets it pops off that queue, so the
+    /// partitions that share a collection share its work.
     fn open(&self, file: PartitionedFile) -> Result<FileOpenFuture> {
         let store = self.object_store.clone();
         let cache = self.cache.clone();
@@ -74,41 +75,29 @@ impl FileOpener for AtlasOpener {
         let logical_schema = self.logical_schema.clone();
         let predicate = self.predicate.clone();
         let scan_metrics = self.scan_metrics.clone();
+        let pool = Arc::clone(&self.reader_pool);
 
         let fut = async move {
-            let open_timer = scan_metrics.open_time.timer();
-            let atlas = get_or_open_atlas(Some(&cache), store, &file.object_meta)
+            let location = file.object_meta.location.clone();
+            let stream = pool
+                .try_open_into_pooled_stream(
+                    Some(&cache),
+                    store,
+                    file.object_meta,
+                    logical_schema,
+                    projected_schema,
+                    predicate,
+                    scan_metrics,
+                )
                 .await
                 .map_err(|e| {
                     DataFusionError::Execution(format!(
-                        "Failed to open atlas collection '{}': {e}",
-                        file.object_meta.location
+                        "Failed to open atlas collection '{location}': {e}"
                     ))
                 })?;
-            let views = Arc::new(column_views(&atlas, &logical_schema).await?);
-            drop(open_timer);
-
-            let mut datasets = atlas.list_datasets();
-            if let Some(predicate) = &predicate {
-                let prune_timer = scan_metrics.prune_time.timer();
-                let listed = datasets.len();
-                datasets = prune_datasets(&views, datasets, predicate, &logical_schema).await;
-                scan_metrics.datasets_pruned.add(listed - datasets.len());
-                drop(prune_timer);
-            }
-
-            let stream = futures::stream::iter(datasets)
-                .map(move |dataset| {
-                    dataset_stream(
-                        Arc::clone(&views),
-                        dataset,
-                        Arc::clone(&projected_schema),
-                        scan_metrics.clone(),
-                    )
-                })
-                .flatten()
-                .boxed();
-            Ok(stream)
+            Ok(stream
+                .map_err(|e| DataFusionError::External(e.into()))
+                .boxed())
         };
 
         Ok(fut.boxed())
@@ -156,122 +145,29 @@ pub(crate) async fn column_views(
     Ok(views)
 }
 
-/// One dataset's batches: one encoded nd batch per stored chunk, in C order.
+/// `nd` under `fields`: every field in order, on the same target grid.
 ///
-/// The dataset is built when the stream reaches it, and each chunk is read
-/// when the stream reaches that, so the next dataset is not touched before
-/// this one is drained.
-fn dataset_stream(
-    views: Arc<IndexMap<FieldRef, Option<AtlasColumnView>>>,
-    dataset: String,
-    schema: SchemaRef,
-    metrics: AtlasScanMetrics,
-) -> BoxStream<'static, Result<RecordBatch>> {
-    futures::stream::once(async move {
-        let read = Arc::new(DatasetRead::build(&views, &dataset)?);
-        metrics.datasets_scanned.add(1);
-        let chunks = read.dataset.chunks();
-        Ok::<_, DataFusionError>(futures::stream::iter(chunks).then(move |chunk| {
-            let read = Arc::clone(&read);
-            let schema = Arc::clone(&schema);
-            async move {
-                let nd = read.chunk(chunk).await?;
-                // The encoding names the columns and types the scan declared.
-                // The scan's schema carries each field's marks as well, so the
-                // batch takes that schema.
-                let batch = encode_nd_record_batch(&nd)?.with_schema(schema)?;
-                Ok::<_, DataFusionError>(batch)
-            }
-        }))
-    })
-    .try_flatten()
-    .boxed()
-}
-
-/// One dataset of the collection as a lazy nd dataset, under the scan's fields.
-///
-/// The dataset holds an array for every field it has: the variable's entry in
-/// its segment, read on demand through the atlas backend, or an attribute
-/// value on no axis. A field it lacks has no array, and reads as a rank-0
-/// null.
-struct DatasetRead {
-    /// The scan's fields, in order.
-    fields: Vec<FieldRef>,
-    /// The lazy dataset, its arrays keyed by field name.
-    dataset: Dataset,
-}
-
-impl DatasetRead {
-    /// No array data is read here. The dataset's layout comes from the
-    /// segments, and its chunk grid is the one the writer chose.
-    fn build(views: &IndexMap<FieldRef, Option<AtlasColumnView>>, dataset: &str) -> Result<Self> {
-        let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
-        for (field, view) in views {
-            let array = match view {
-                None => None,
-                Some(AtlasColumnView::Array { segment }) => match segment.array(dataset) {
-                    Some(info) => Some(
-                        compat::array_to_nd_array(Arc::clone(segment), dataset, &info.dtype)
-                            .map_err(execution)?,
-                    ),
-                    None => None,
-                },
-                Some(AtlasColumnView::GlobalAttribute { map })
-                | Some(AtlasColumnView::VariableAttribute { map, .. }) => {
-                    // A list has no rank-0 form, and the schema holds no list
-                    // column. A dataset that stores a list under a scalar
-                    // column's key reads as null.
-                    map.get(dataset)
-                        .and_then(|attr| compat::attribute_to_nd_array(attr).ok())
+/// A column comes out under the array's own type, and the table may declare a
+/// wider one: that is a cast. A field the dataset lacks is a rank-0 null,
+/// which broadcasts to an all-null column. The decoder makes the same of a
+/// null struct row, so the scan sees one thing either way.
+pub(crate) fn under_fields(nd: &NdRecordBatch, fields: &[FieldRef]) -> Result<NdRecordBatch> {
+    let mut columns = Vec::with_capacity(fields.len());
+    for field in fields {
+        let column = match nd.schema().column_with_name(field.name()) {
+            Some((index, _)) => {
+                let column = nd.column(index);
+                match as_field_type(Arc::clone(column.values()), field)? {
+                    Some(values) => NdArrowArray::try_new(values, column.dims().clone())?,
+                    None => null_scalar(field),
                 }
-            };
-            if let Some(array) = array {
-                arrays.insert(field.name().clone(), array);
             }
-        }
-        let dataset = Dataset::new(dataset.to_string(), arrays).map_err(execution)?;
-        Ok(Self {
-            fields: views.keys().cloned().collect(),
-            dataset,
-        })
+            None => null_scalar(field),
+        };
+        columns.push(column);
     }
-
-    /// One chunk of the dataset, under the scan's fields.
-    ///
-    /// A column comes out under the array's own type, and the table may
-    /// declare a wider one: that is a cast. A field the dataset lacks is a
-    /// rank-0 null, which broadcasts to an all-null column. The decoder makes
-    /// the same of a null struct row, so the scan sees one thing either way.
-    async fn chunk(&self, chunk: Arc<dyn Any + Send + Sync>) -> Result<NdRecordBatch> {
-        let nd = self
-            .dataset
-            .poll_next(chunk)
-            .await
-            .map_err(execution)?
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "dataset '{}' read no batch for a chunk of its own grid",
-                    self.dataset.name
-                ))
-            })?;
-
-        let mut columns = Vec::with_capacity(self.fields.len());
-        for field in &self.fields {
-            let column = match nd.schema().column_with_name(field.name()) {
-                Some((index, _)) => {
-                    let column = nd.column(index);
-                    match as_field_type(Arc::clone(column.values()), field)? {
-                        Some(values) => NdArrowArray::try_new(values, column.dims().clone())?,
-                        None => null_scalar(field),
-                    }
-                }
-                None => null_scalar(field),
-            };
-            columns.push(column);
-        }
-        let schema = Arc::new(Schema::new(self.fields.clone()));
-        NdRecordBatch::try_new(schema, columns, nd.target().clone())
-    }
+    let schema = Arc::new(Schema::new(fields.to_vec()));
+    NdRecordBatch::try_new(schema, columns, nd.target().clone())
 }
 
 /// A rank-0 null. It broadcasts to an all-null column of the target grid.
@@ -303,11 +199,6 @@ fn external(error: impl std::error::Error + Send + Sync + 'static) -> DataFusion
     DataFusionError::External(Box::new(error))
 }
 
-/// A read error, as the scan reports it.
-fn execution(error: impl std::fmt::Display) -> DataFusionError {
-    DataFusionError::Execution(error.to_string())
-}
-
 /// Where one column of the scan comes from, for every dataset of a collection.
 ///
 /// The scan reads through it, and pruning judges through it, so both see one
@@ -332,6 +223,7 @@ mod tests {
     use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
 
     use super::*;
+    use crate::datafusion::view::AtlasView;
     use crate::{compat, test_support};
     use std::path::Path;
 
@@ -342,28 +234,33 @@ mod tests {
     use datafusion::scalar::ScalarValue;
     use futures::TryStreamExt;
 
-    /// The column views of a fixture, over the schema `infer_schema` derives.
-    async fn views(dir: &std::path::Path) -> IndexMap<FieldRef, Option<AtlasColumnView>> {
+    /// The schema `infer_schema` derives for a fixture.
+    async fn schema(dir: &Path) -> SchemaRef {
         let atlas = test_support::open(dir).await;
-        let schema = compat::collection_arrow_schema(
-            &atlas.footer().collection_schema(),
-            &ArrowTypeWidening::default_extension(),
+        Arc::new(
+            compat::collection_arrow_schema(
+                &atlas.footer().collection_schema(),
+                &ArrowTypeWidening::default_extension(),
+            )
+            .unwrap(),
         )
-        .unwrap();
-        column_views(&atlas, &schema).await.unwrap()
     }
 
-    /// Every chunk of `dataset`, read as the opener reads it, and the rows of
-    /// all of them in chunk order.
-    async fn read(dir: &std::path::Path, dataset: &str) -> (Vec<NdRecordBatch>, RecordBatch) {
-        let views = views(dir).await;
-        let read = DatasetRead::build(&views, dataset).unwrap();
+    /// Every chunk of `dataset`, read as the scan reads it: through the view,
+    /// under the scan's fields. And the rows of all of them in chunk order.
+    async fn read(dir: &Path, dataset: &str) -> (Vec<NdRecordBatch>, RecordBatch) {
+        let schema = schema(dir).await;
+        let (store, marker) = test_support::store_and_marker(dir);
+        let view = AtlasView::new(None, store, marker, Arc::clone(&schema))
+            .await
+            .unwrap();
+        let source = view.dataset(dataset).await.unwrap().unwrap();
         let mut chunks = Vec::new();
-        for chunk in read.dataset.chunks() {
-            chunks.push(read.chunk(chunk).await.unwrap());
+        for chunk in source.chunks() {
+            let nd = source.poll_next(chunk).await.unwrap().unwrap();
+            chunks.push(under_fields(&nd, schema.fields()).unwrap());
         }
         let batches: Vec<RecordBatch> = chunks.iter().map(|nd| nd.materialize().unwrap()).collect();
-        let schema = Arc::new(Schema::new(views.keys().cloned().collect::<Vec<_>>()));
         let batch = arrow::compute::concat_batches(&schema, &batches).unwrap();
         (chunks, batch)
     }
@@ -537,6 +434,7 @@ mod tests {
             predicate: None,
             read_metrics: ReadMetrics::new(&metrics, 0),
             scan_metrics: AtlasScanMetrics::new(&metrics, 0),
+            reader_pool: Arc::new(AtlasReaderPool::new()),
         };
         (opener, PartitionedFile::from(marker))
     }

@@ -14,7 +14,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct Dataset {
+pub struct DefaultDataset {
     pub name: String,
     pub dimensions: Vec<String>,
     pub shape: Vec<usize>,
@@ -22,7 +22,7 @@ pub struct Dataset {
     pub arrays: IndexMap<String, Arc<dyn NdArrayD>>,
 }
 
-impl Dataset {
+impl DefaultDataset {
     pub fn new(name: String, arrays: IndexMap<String, Arc<dyn NdArrayD>>) -> anyhow::Result<Self> {
         let mut dimensions = Vec::new();
         let mut shape = Vec::new();
@@ -75,7 +75,7 @@ impl Dataset {
 }
 
 #[async_trait::async_trait]
-impl DatasetSource for Dataset {
+impl DatasetSource for DefaultDataset {
     /// Every chunk of the dataset grid, in C order, as an [`ArraySubset`].
     ///
     /// The cut comes from [`generate_chunk_subsets`], so a boundary chunk
@@ -158,8 +158,8 @@ mod tests {
         Arc::new(NdArray::new_with_backend(backend).unwrap())
     }
 
-    fn dataset(arrays: Vec<(&str, Arc<dyn NdArrayD>)>) -> anyhow::Result<Dataset> {
-        Dataset::new(
+    fn dataset(arrays: Vec<(&str, Arc<dyn NdArrayD>)>) -> anyhow::Result<DefaultDataset> {
+        DefaultDataset::new(
             "test".to_string(),
             arrays
                 .into_iter()
@@ -259,7 +259,7 @@ mod tests {
 
     /// A dataset with a coordinate per axis and one 2-D variable, cut on the
     /// variable's chunk shape.
-    fn gridded(chunk: &[usize]) -> Dataset {
+    fn gridded(chunk: &[usize]) -> DefaultDataset {
         let time = NdArray::<i64>::try_new_from_vec_in_mem(
             (0..4).map(|v| v * 100).collect(),
             vec![4],
@@ -292,7 +292,7 @@ mod tests {
         arrays.insert("time".to_string(), Arc::new(time));
         arrays.insert("lat".to_string(), Arc::new(lat));
         arrays.insert("sst".to_string(), Arc::new(sst));
-        Dataset {
+        DefaultDataset {
             name: "gridded".to_string(),
             dimensions: names(&["time", "lat"]),
             shape: vec![4, 3],
@@ -302,7 +302,7 @@ mod tests {
     }
 
     /// Poll every chunk, broadcast each, and stitch the rows back together.
-    async fn read_all(ds: &Dataset) -> arrow::record_batch::RecordBatch {
+    async fn read_all(ds: &DefaultDataset) -> arrow::record_batch::RecordBatch {
         let mut batches = Vec::new();
         for chunk in ds.chunks() {
             let nd = ds.poll_next(chunk).await.unwrap().unwrap();
