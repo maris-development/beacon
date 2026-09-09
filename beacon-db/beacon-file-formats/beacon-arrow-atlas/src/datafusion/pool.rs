@@ -98,7 +98,10 @@ impl AtlasReaderPool {
                 let datasets = atlas_view
                     .list_datasets(pruning_predicate, scan_metrics.clone())
                     .await?;
-                let queue = ArrayQueue::new(datasets.len());
+                // A queue has at least one slot: `ArrayQueue::new(0)` panics.
+                // With no dataset to read the slot stays empty, the first
+                // `pop` finds nothing, and the stream ends at once.
+                let queue = ArrayQueue::new(datasets.len().max(1));
                 for dataset in datasets {
                     queue.push(dataset).unwrap();
                 }
@@ -369,6 +372,32 @@ mod tests {
             "nor for the second"
         );
         assert_eq!(metrics.datasets_scanned.value(), 2);
+    }
+
+    /// A predicate that rules out every dataset leaves nothing to read. The
+    /// stream ends at once, and nothing panics on the empty queue.
+    #[tokio::test]
+    async fn a_collection_with_nothing_to_read_streams_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::ranged(tmp.path(), 10).await;
+        let set = ExecutionPlanMetricsSet::new();
+        let metrics = AtlasScanMetrics::new(&set, 0);
+        let pool = AtlasReaderPool::new();
+        let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::new(ColumnExpr::new("temperature", 0)),
+            Operator::Gt,
+            Arc::new(Literal::new(ScalarValue::Float32(Some(1.0e9)))),
+        ));
+
+        let batches: Vec<RecordBatch> = handle(&pool, tmp.path(), Some(predicate), metrics.clone())
+            .await
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert!(batches.is_empty());
+        assert_eq!(metrics.datasets_pruned.value(), 10);
+        assert_eq!(metrics.datasets_scanned.value(), 0);
     }
 
     /// A predicate the statistics can judge skips the datasets it rules out
