@@ -20,7 +20,8 @@ See [S3 object storage](#s3-object-storage).
 | --- | --- | --- |
 | `BEACON_HOST` | `0.0.0.0` | IP address the HTTP API listens on. |
 | `BEACON_PORT` | `5001` | Port the HTTP API listens on. |
-| `BEACON_WORKER_THREADS` | `8` | Number of worker threads for the async runtime. |
+| `BEACON_WORKER_THREADS` | `8` | Number of threads of the query runtime. This runtime plans and runs queries, and hosts the crawlers and the file statistics. |
+| `BEACON_API_THREADS` | `4` | Number of threads of the API runtime. This runtime serves HTTP and Flight SQL. A long query does not block it. |
 | `BEACON_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error`, or `off`. Case does not matter. The level applies to all Beacon crates. At `debug` and `trace`, loud dependencies such as DataFusion, Arrow, `object_store`, and hyper stay at `info`. An unknown value stops the server at startup. |
 | `RUST_LOG` | _(unset)_ | Full log filter, in [`tracing-subscriber` EnvFilter](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (e.g. `debug,datafusion=trace`). It replaces `BEACON_LOG_LEVEL`. Use it to see the dependency logs that `BEACON_LOG_LEVEL` holds back. An invalid value prints a warning, and Beacon uses `BEACON_LOG_LEVEL`. |
 | `BEACON_BASE_PATH` | _(empty)_ | Optional URL path prefix for the HTTP API, OpenAPI document, and Swagger UI (e.g. `/beacon`). Useful behind a reverse proxy. Normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character causes Beacon to exit at startup with a descriptive error. |
@@ -79,7 +80,33 @@ rejects that `CREATE`. Beacon never writes plaintext.
 | `BEACON_ENABLE_ND_PIPELINE` | `false` | Enable the N-dimensional pipeline optimizer for zarr/netcdf reads: sink element-wise projections below the grid broadcast so `lat * 2` and similar run on the coordinate axis instead of the full cross-product. The base nd pipeline always runs; this only enables the node-rewriting optimization. |
 | `BEACON_BATCH_SIZE` | `64000` | Batch size, in rows, for NetCDF reads (local and MPIO). |
 | `BEACON_STATS_CACHE_CAPACITY` | `10000` | Maximum number of per-file statistics entries cached for query pruning. Read once at startup. |
-| `BEACON_TYPE_WIDENING_ON_CONFLICT` | `fail` | What a schema merge does with a column that two files type in two families, such as a number and a string. `fail` refuses the collection and names the column, both types and both files. `keep_first` keeps the type of the first file, casts every other file to it, and reads a value that type cannot hold as null. A numeric pair widens either way. An unknown value logs a warning and reads as `fail`. See [a column has two types](/docs/2.0.0-rc5/troubleshooting#a-column-has-two-types-across-the-files). |
+| `BEACON_TYPE_WIDENING_STRATEGY` | `default` | The rule a schema merge applies to a column that two files type in two ways. `default` widens inside one family: a wider integer, a finer timestamp, a longer string. It refuses a boolean beside a number and a number beside a string, and it reads every integer beside a `Float32` as `Float64`. `numpy` promotes as `numpy.result_type` does: a boolean joins the numbers, `Float16` joins the floats, a narrow integer beside a `Float32` stays a `Float32`, a number beside a string reads as text, and a date beside a timestamp is a timestamp. numpy resolves the set of types of a column at once, so the listing order does not change the result. `numpy` reads every schema in one pass, as `keep_first` does. An unknown value logs a warning and reads as `default`. See [a column has two types](/docs/2.0.0-rc5/troubleshooting#a-column-has-two-types-across-the-files). |
+| `BEACON_TYPE_WIDENING_ON_CONFLICT` | `fail` | What a schema merge does with a column that two files type in two families, such as a number and a timestamp. `fail` refuses the collection and names the column, both types and both files. `keep_first` keeps the type of the first file, casts every other file to it, and reads a value that type cannot hold as null. A pair the strategy widens, such as `Int32` beside `Float64`, widens either way. An unknown value logs a warning and reads as `fail`. See [a column has two types](/docs/2.0.0-rc5/troubleshooting#a-column-has-two-types-across-the-files). |
+
+### The default table
+
+Beacon fills the `BEACON_DEFAULT_TABLE` name only when the name is free. At startup
+it puts an empty stand-in table there. The stand-in keeps a JSON query without a
+`from` field from a missing-table error.
+
+To put your own table under that name, drop the stand-in first:
+
+```sql
+DROP TABLE "default";
+CREATE EXTERNAL TABLE "default" STORED AS PARQUET LOCATION 'obs/';
+```
+
+Beacon then leaves the name alone. Your table holds it after a restart, because
+startup adds a stand-in only for a free name. Drop your table and Beacon puts a
+stand-in back on the next start.
+
+A `CREATE` on a name that a table holds fails, the stand-in included. This covers
+`CREATE TABLE`, `CREATE EXTERNAL TABLE`, `CREATE VIEW` and
+`CREATE MATERIALIZED VIEW`. The error names the stand-in and tells you to drop it.
+
+Three forms take a name that a table holds. `CREATE EXTERNAL TABLE IF NOT EXISTS`
+keeps the table and reports success. `CREATE OR REPLACE EXTERNAL TABLE` and
+`CREATE OR REPLACE VIEW` overwrite it.
 
 ### SQL result-stream coalescing
 

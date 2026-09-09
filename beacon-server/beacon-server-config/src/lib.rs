@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use envconfig::Envconfig;
 
@@ -16,7 +16,8 @@ pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::CrawlerConfig;
 pub use beacon_common::FileStatsConfig;
-pub use beacon_datafusion_ext::type_widening::TypeConflict;
+pub use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, TypeConflict};
+use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, NumpyArrowTypeWidening};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -80,7 +81,11 @@ pub struct OidcConfig {
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
+    /// Threads of the query runtime. From `BEACON_WORKER_THREADS`.
     pub worker_threads: usize,
+    /// Threads of the runtime that serves HTTP and Flight SQL. From
+    /// `BEACON_API_THREADS`. Its own runtime, so a long query does not block it.
+    pub api_threads: usize,
     /// URL prefix for all HTTP routes, e.g. `/base-path`. Empty string means serve at `/`.
     pub base_path: String,
     /// Directory holding the built admin web UI (Vite `dist/`). Served at
@@ -101,11 +106,11 @@ pub struct RuntimeConfig {
     pub vm_memory_size: usize,
     pub enable_sys_info: bool,
     pub batch_size: usize,
-    /// What a schema merge does with a column that no type holds, e.g. a number
-    /// in one file and a string in another. From
-    /// `BEACON_TYPE_WIDENING_ON_CONFLICT`. Defaults to [`TypeConflict::Fail`],
-    /// which refuses such a collection and names both files.
-    pub type_conflict: TypeConflict,
+    /// The rule for every schema merge, built from `BEACON_TYPE_WIDENING_STRATEGY`
+    /// and `BEACON_TYPE_WIDENING_ON_CONFLICT` by [`type_widening`]. `default`
+    /// widens inside one family and refuses the rest. `numpy` promotes as
+    /// `numpy.result_type` does.
+    pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +353,8 @@ struct RawConfig {
     sql_stream_coalesce_max_rows: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
     worker_threads: usize,
+    #[envconfig(from = "BEACON_API_THREADS", default = "4")]
+    api_threads: usize,
     #[envconfig(from = "BEACON_BASE_PATH", default = "")]
     base_path: String,
     /// Directory containing the built admin web UI. Defaults to `web` (resolved
@@ -421,6 +428,15 @@ struct RawConfig {
     /// reads the listing order, so it drops no repeat and starts no thread.
     #[envconfig(from = "BEACON_TYPE_WIDENING_ON_CONFLICT", default = "fail")]
     type_widening_on_conflict: String,
+
+    /// The rule a schema merge applies.
+    ///
+    /// `default` widens along the lattice of the type widening module and
+    /// refuses the rest. `numpy` promotes as `numpy.result_type` does: a boolean
+    /// joins the numbers, `Float16` joins the floats, a narrow integer beside a
+    /// `Float32` stays a `Float32`, and a number beside a string reads as text.
+    #[envconfig(from = "BEACON_TYPE_WIDENING_STRATEGY", default = "default")]
+    type_widening_strategy: String,
 
     /// Root directory for Beacon's local data (datasets, tables, tmp, etc.).
     #[envconfig(from = "BEACON_DATA_DIR", default = "./data")]
@@ -614,6 +630,7 @@ impl From<RawConfig> for Config {
                 port: raw.port,
                 host: raw.host,
                 worker_threads: raw.worker_threads,
+                api_threads: raw.api_threads,
                 base_path: raw.base_path,
                 web_ui_dir: raw.web_ui_dir,
                 max_upload_bytes: raw.max_upload_bytes,
@@ -623,16 +640,9 @@ impl From<RawConfig> for Config {
                 vm_memory_size: raw.vm_memory_size,
                 enable_sys_info: raw.enable_sys_info,
                 batch_size: raw.beacon_batch_size,
-                // An unknown name reads as `fail`, which is the rule a server
-                // ran before this setting existed. A server that cannot start
-                // over a typo is worse than one that names the column.
-                type_conflict: TypeConflict::parse(&raw.type_widening_on_conflict).unwrap_or_else(
-                    |value| {
-                        tracing::warn!(
-                            "BEACON_TYPE_WIDENING_ON_CONFLICT names no setting: '{value}'.                              The settings are 'fail' and 'keep_first'. Refusing a conflict."
-                        );
-                        TypeConflict::Fail
-                    },
+                type_widening: type_widening(
+                    &raw.type_widening_strategy,
+                    &raw.type_widening_on_conflict,
                 ),
             },
             sql: SqlConfig {
@@ -756,6 +766,24 @@ fn validate_storage(s3: &S3Config) -> Result<()> {
     Ok(())
 }
 
+/// Rejects a runtime with no threads.
+///
+/// Tokio panics on a zero thread count. A clean error at startup names the
+/// variable instead.
+fn validate_threads(server: &ServerConfig) -> Result<()> {
+    for (name, count) in [
+        ("BEACON_WORKER_THREADS", server.worker_threads),
+        ("BEACON_API_THREADS", server.api_threads),
+    ] {
+        if count == 0 {
+            return Err(ConfigError::InvalidThreads(format!(
+                "{name} must be at least 1"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Levels accepted by `BEACON_LOG_LEVEL`, in the spelling `tracing` expects.
 const LOG_LEVELS: [&str; 6] = ["trace", "debug", "info", "warn", "error", "off"];
 
@@ -841,6 +869,7 @@ impl Config {
         config.server.log_level =
             normalize_log_level(&config.server.log_level).map_err(ConfigError::InvalidLogLevel)?;
 
+        validate_threads(&config.server)?;
         validate_storage(&config.s3)?;
 
         // Create the configured data directories (idempotent). `db_file` is a file,
@@ -929,11 +958,38 @@ fn create_dir(path: &Path) -> Result<()> {
     })
 }
 
+/// The merge rule that `BEACON_TYPE_WIDENING_STRATEGY` and
+/// `BEACON_TYPE_WIDENING_ON_CONFLICT` name.
+///
+/// An unknown name reads as the rule a server ran before the variable existed:
+/// `default` for the strategy, and `fail` for the setting. A server that cannot
+/// start over a typo is worse than one that names the column.
+fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWideningStrategy> {
+    let on_conflict = TypeConflict::parse(on_conflict).unwrap_or_else(|value| {
+        tracing::warn!(
+            "BEACON_TYPE_WIDENING_ON_CONFLICT names no setting: '{value}'. \
+             The settings are 'fail' and 'keep_first'. Refusing a conflict."
+        );
+        TypeConflict::Fail
+    });
+    match strategy.trim().to_ascii_lowercase().as_str() {
+        "default" | "" => Arc::new(DefaultArrowTypeWidening { on_conflict }),
+        "numpy" => Arc::new(NumpyArrowTypeWidening { on_conflict }),
+        other => {
+            tracing::warn!(
+                "BEACON_TYPE_WIDENING_STRATEGY names no strategy: '{other}'. \
+                 The strategies are 'default' and 'numpy'. Taking 'default'."
+            );
+            Arc::new(DefaultArrowTypeWidening { on_conflict })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_master_key, normalize_base_path, normalize_log_level, validate_storage, Config,
-        Hdf5Convention, PathBuf, RawConfig,
+        decode_master_key, normalize_base_path, normalize_log_level, validate_storage,
+        validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -954,6 +1010,52 @@ mod tests {
     /// decoding, and creating the data directories.
     fn config(vars: &[(&str, &str)]) -> Config {
         Config::from(raw(vars).expect("config should parse"))
+    }
+
+    /// `BEACON_TYPE_WIDENING_STRATEGY` names the merge rule, and
+    /// `BEACON_TYPE_WIDENING_ON_CONFLICT` its setting. An unknown name reads as
+    /// the rule a server ran before the variable existed.
+    #[test]
+    fn type_widening_variables_build_the_rule_and_fall_back() {
+        let rule = |vars: &[(&str, &str)]| format!("{:?}", config(vars).runtime.type_widening);
+
+        assert_eq!(rule(&[]), "DefaultArrowTypeWidening { on_conflict: Fail }");
+        assert_eq!(
+            rule(&[
+                ("BEACON_TYPE_WIDENING_STRATEGY", "numpy"),
+                ("BEACON_TYPE_WIDENING_ON_CONFLICT", "keep_first"),
+            ]),
+            "NumpyArrowTypeWidening { on_conflict: KeepFirst }"
+        );
+        assert_eq!(
+            rule(&[
+                ("BEACON_TYPE_WIDENING_STRATEGY", "polars"),
+                ("BEACON_TYPE_WIDENING_ON_CONFLICT", "widen"),
+            ]),
+            "DefaultArrowTypeWidening { on_conflict: Fail }"
+        );
+    }
+
+    /// Both runtimes have a default size, and neither accepts zero threads:
+    /// Tokio would panic where the config can name the variable instead.
+    #[test]
+    fn thread_counts_default_and_reject_zero() {
+        let defaults = config(&[]);
+        assert_eq!(defaults.server.worker_threads, 8);
+        assert_eq!(defaults.server.api_threads, 4);
+        assert!(validate_threads(&defaults.server).is_ok());
+
+        let no_query_threads = config(&[("BEACON_WORKER_THREADS", "0")]);
+        let error = validate_threads(&no_query_threads.server)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("BEACON_WORKER_THREADS"), "{error}");
+
+        let no_api_threads = config(&[("BEACON_API_THREADS", "0")]);
+        let error = validate_threads(&no_api_threads.server)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("BEACON_API_THREADS"), "{error}");
     }
 
     /// Every data path derives from `BEACON_DATA_DIR`. This is a regression guard:

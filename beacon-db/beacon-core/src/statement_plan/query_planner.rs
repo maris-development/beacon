@@ -74,6 +74,7 @@ impl QueryPlanner for BeaconQueryPlanner {
                     view.name.clone(),
                     view.input.as_ref().clone(),
                     view.definition.clone(),
+                    view.or_replace,
                     session,
                 )))
             }

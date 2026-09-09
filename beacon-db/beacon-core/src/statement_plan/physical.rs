@@ -650,6 +650,7 @@ pub(crate) struct CreateViewExec {
     name: TableReference,
     input: LogicalPlan,
     definition: Option<String>,
+    or_replace: bool,
     session: SessionCell,
     cache: Arc<PlanProperties>,
 }
@@ -659,12 +660,14 @@ impl CreateViewExec {
         name: TableReference,
         input: LogicalPlan,
         definition: Option<String>,
+        or_replace: bool,
         session: SessionCell,
     ) -> Self {
         Self {
             name,
             input,
             definition,
+            or_replace,
             session,
             cache: Arc::new(side_effect_properties()),
         }
@@ -679,8 +682,11 @@ side_effect_exec!(CreateViewExec, "CreateViewExec", |exec: &CreateViewExec| {
     let name = exec.name.clone();
     let input = exec.input.clone();
     let definition = exec.definition.clone();
+    let or_replace = exec.or_replace;
     Ok(side_effect_stream(async move {
-        actions::create_view(&session, &name, &input, &definition).map_err(to_df_err)
+        actions::create_view(&session, &name, &input, &definition, or_replace)
+            .await
+            .map_err(to_df_err)
     }))
 });
 

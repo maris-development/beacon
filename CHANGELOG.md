@@ -42,6 +42,41 @@ tag. Releases before 2.0.0 are recorded in the
   `atlas_datasets_pruned` and `atlas_datasets_scanned`, with the time spent as `atlas_open_time`
   and `atlas_prune_time`.
 
+- **The server root is a home page instead of a jump to Swagger.** `http://localhost:5001/` sent
+  every visitor straight to the Swagger UI, which hid the admin panel, the API reference and the
+  documentation from anyone who did not know their paths. The root now answers with a small page
+  that links to all of them, plus the OpenAPI document and the health endpoint, and names the
+  running version. The documentation link is pinned to that version, so a server two releases old
+  no longer sends its operator to the newest manual. The admin card appears only when the admin UI
+  is mounted, and the MCP address only when MCP is enabled. Every link carries the configured
+  `BEACON_BASE_PATH`, and that root now answers in both forms: `/prefix/` redirects to `/prefix`,
+  where it used to be a `404`. The page carries the colors, the type and the card layout of the
+  documentation site, and it loads nothing from the network, so it also renders on a server with
+  no route out. Swagger keeps its own path, so a bookmark to `/swagger` is unaffected.
+- **`BEACON_TYPE_WIDENING_STRATEGY=numpy` merges schemas as numpy promotes types.** The schema
+  merge widens a column inside one family: a wider integer, a finer timestamp, a longer string. It
+  refuses every other pair, and it reads every integer beside a `Float32` as `Float64`, because a
+  lattice holds no other answer that is free of the listing order. A collection written by numpy or
+  xarray expects the rules of `numpy.result_type` instead. The new strategy applies them: a boolean
+  joins the numbers (`bool` + `int8` is `int8`), `Float16` joins the floats, a narrow integer beside
+  a `Float32` stays a `Float32`, a number or a boolean beside a string reads as text, and a date
+  beside a timestamp is a timestamp at the finer unit. numpy resolves a set of types at once, and
+  the answer differs from a chain of pairs: `int8` + `uint8` is `int16` and `int16` + `float16` is
+  `float32`, yet `result_type(int8, uint8, float16)` is `float16`. The strategy therefore gathers
+  the types of each column across every file and resolves the set once, so the listing order does
+  not change the result. The cost is one pass over every schema, as `keep_first` pays. Four numpy
+  rules stay behind, because Arrow has no cast for them: an integer beside a `timedelta64`, a
+  `timedelta64` beside a `datetime64`, and a number or a text string beside a byte string are
+  conflicts, and a time of day keeps the default chain. One limit is the CSV reader's: a text file
+  holds no types, so it parses each column as the merged type. A number beside a string reads as
+  the text of the file, and a boolean literal beside a number fails at read time, where every typed
+  format casts `true` to `1`. `BEACON_TYPE_WIDENING_ON_CONFLICT` applies under either strategy.
+  `default` keeps the merge every server ran before, and an unknown value logs a warning and reads
+  as `default`. The strategy is an `ArrowTypeWideningStrategy` like the default one, so an embedded
+  build passes `NumpyArrowTypeWidening` to `RuntimeBuilder::with_type_widening` or
+  `OpenOptions::with_type_widening`. See
+  [Configuration](docs/docs/2.0.0-rc5/server/configuration.md#query-engine) and
+  [Troubleshooting](docs/docs/2.0.0-rc5/troubleshooting.md#a-column-has-two-types-across-the-files).
 - **`BEACON_TYPE_WIDENING_ON_CONFLICT` settles a column that no type holds.** A collection can
   type one column as a number in one file and as a string in another. No type holds both, so the
   schema merge refused the whole table and the table answered no query: `Incompatible types for
@@ -312,6 +347,40 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **The default table takes the name you configured.** At startup Beacon registers an empty
+  stand-in table, so a JSON query without a `from` field reports no missing table. The stand-in
+  ignored `BEACON_DEFAULT_TABLE` and always took the literal name `default`. A server started with
+  `BEACON_DEFAULT_TABLE=observations` therefore held a table called `default`, left `observations`
+  missing, and answered a `from`-less query with a missing-table error. Startup now registers the
+  stand-in under the configured name. The rest of the rule is unchanged and now under test: Beacon
+  fills that name only when the name is free, so your own table under it survives a restart, and a
+  `CREATE` on a name a table holds still fails. That last error now names the stand-in and tells
+  you to run `DROP TABLE` first, because a table nobody made is a confusing thing to collide with.
+  See [Configuration](docs/docs/2.0.0-rc5/server/configuration.md#the-default-table).
+- **`CREATE EXTERNAL TABLE` and `CREATE VIEW` no longer discard the table under the name.** Both
+  registered straight over whatever held the name. `CREATE EXTERNAL TABLE obs STORED AS CSV
+  LOCATION 'other/'` therefore repointed an existing `obs` with no warning, and a second
+  `CREATE VIEW v` swapped the view a report depended on. Only `CREATE TABLE` and
+  `CREATE MATERIALIZED VIEW` checked first, so the same typo either failed or destroyed a table
+  depending on which statement carried it. The admin API said as much and did not do it: the
+  `if_not_exists` field of `POST /api/admin/external-tables` is documented as skipping "instead of
+  erroring", and nothing ever errored. Both statements now refuse a name that a table or a view
+  holds, as `CREATE TABLE` does. The two modifiers the SQL reference already documented now do the
+  work: `CREATE EXTERNAL TABLE IF NOT EXISTS` keeps the existing table and reports success, which
+  is what that field always promised, and `CREATE OR REPLACE EXTERNAL TABLE` overwrites it.
+  `CREATE OR REPLACE VIEW` swaps a view. Neither guard reaches the paths that replace a provider on
+  purpose: a materialized-view `REFRESH`, an `ALTER TABLE`, and a crawler that re-registers a table
+  it owns all register directly and are unchanged. A script that relied on a bare re-`CREATE` to
+  repoint a table needs `OR REPLACE` added, or a `DROP TABLE` in front of it.
+- **A long query no longer makes the API unreachable.** The HTTP API, Flight SQL and every query
+  shared one Tokio runtime of `BEACON_WORKER_THREADS` threads. A scan holds a thread until a
+  partition yields, and one query starts as many partitions as the machine has cores, so a long
+  query took every thread and a login, a health check or the admin UI waited for it to finish.
+  Queries now run on a runtime of their own. The API runs on a second runtime, sized by the new
+  `BEACON_API_THREADS` (default `4`), so it always has a thread to answer with. The result stream
+  crosses between the two over a bounded channel: a slow client holds at most a few batches ahead
+  of what it has read, and a client that disconnects cancels its query at once. A panic inside a
+  query reaches the client as an error instead of a result that ends early.
 - **A query could lose the rows of a file that changed after its analysis.** File statistics let a
   `WHERE` drop whole files before the scan opens them, on the column ranges a background pass
   recorded. That pass compares the size, the modification time and the etag of every listed file

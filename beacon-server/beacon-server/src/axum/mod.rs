@@ -3,6 +3,7 @@
 mod admin;
 mod auth;
 mod client;
+mod home;
 mod router;
 
 pub use router::setup_router;

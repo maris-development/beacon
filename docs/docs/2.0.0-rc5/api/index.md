@@ -10,9 +10,12 @@ URLs:
 
 | UI | URL |
 | -- | --- |
+| Home page | `/` |
 | Swagger UI | `/swagger` |
 | Scalar UI | `/scalar/` |
 | Raw spec (JSON) | `/openapi.json` |
+
+The home page links to each of these, to the admin UI and to this documentation.
 
 ## Base URL
 

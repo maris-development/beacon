@@ -61,7 +61,8 @@ pub async fn server_with(mut config: beacon_server_config::Config) -> TestServer
         std::fs::create_dir_all(dir).expect("create temp data dir");
     }
 
-    let server = Server::open(Arc::new(config))
+    // Tests run queries on the runtime they run on; only the binary has two.
+    let server = Server::open(Arc::new(config), tokio::runtime::Handle::current())
         .await
         .expect("server should open");
     TestServer {

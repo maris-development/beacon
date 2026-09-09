@@ -29,6 +29,10 @@ pub enum ConfigError {
     #[error("invalid BEACON_LOG_LEVEL: {0}")]
     InvalidLogLevel(String),
 
+    /// `BEACON_WORKER_THREADS` or `BEACON_API_THREADS` was set to zero.
+    #[error("invalid thread count: {0}")]
+    InvalidThreads(String),
+
     /// `BEACON_SECRETS_KEY` was set but is not a base64-encoded 32-byte key.
     #[error("invalid BEACON_SECRETS_KEY: {0}")]
     InvalidSecretsKey(String),

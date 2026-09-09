@@ -16,15 +16,25 @@ Every setting below is an environment variable. [configuration.md](configuration
 
 ### CPU and concurrency
 
+Beacon runs two Tokio runtimes. The API runtime serves HTTP and Flight SQL. The query runtime
+plans and runs queries. A long scan holds a query thread, but the API runtime keeps its own
+threads, so a login, a health check, or the admin UI answers at once.
+
 #### `BEACON_WORKER_THREADS`
 
-This value sizes the Tokio runtime of Beacon. That runtime runs the API requests and the query work.
+This value sizes the query runtime. The crawlers and the file statistics run there too.
 
 - On a dedicated machine, set `BEACON_WORKER_THREADS` to the number of physical cores.
 - On a shared host, set a lower value. Other services then keep enough CPU.
 
 More threads help an I/O-heavy workload, such as a read from object storage or a NetCDF read over
 HTTP. A CPU-heavy workload, such as an aggregate or a join, does not scale past the CPU count.
+
+#### `BEACON_API_THREADS`
+
+This value sizes the API runtime. The default of `4` is enough for most deployments. The API
+runtime encodes and compresses the result stream for each client. A deployment with many
+concurrent large downloads can raise the value.
 
 ### Memory and disk spilling
 

@@ -108,6 +108,19 @@
 //! [`Fail`]: TypeConflict::Fail
 //! [`KeepFirst`]: TypeConflict::KeepFirst
 //!
+//! # Two strategies
+//!
+//! [`DefaultArrowTypeWidening`] applies the rules above. [`NumpyArrowTypeWidening`]
+//! promotes as `numpy.result_type` does: a boolean joins the numbers, `Float16`
+//! joins the floats, a narrow integer beside a `Float32` stays a `Float32`, and a
+//! number beside a string reads as text. The [`numpy`](self::numpy) module holds
+//! its rule table and the pairs where it leaves numpy. The setting for a conflict
+//! applies under either strategy.
+//!
+//! A deployment picks one through [`RuntimeBuilder::with_type_widening`]. The
+//! server builds it from `BEACON_TYPE_WIDENING_STRATEGY`, which names `default`
+//! or `numpy`.
+//!
 //! # The source of a conflict
 //!
 //! A merge that refuses a column names the source of each type. A table over
@@ -158,6 +171,10 @@ use std::sync::{Arc, LazyLock};
 use arrow_schema::{ArrowError, DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit};
 use datafusion::catalog::Session;
 use object_store::ObjectMeta;
+
+pub mod numpy;
+
+pub use numpy::NumpyArrowTypeWidening;
 
 /// Below this count, one fold costs less than a split. A merge walks field
 /// names, so a thread must earn its start cost.
@@ -274,7 +291,9 @@ pub fn session_widening(session: &dyn Session) -> Arc<ArrowTypeWidening> {
         .unwrap_or_else(ArrowTypeWidening::default_extension)
 }
 
-pub trait ArrowTypeWideningStrategy: Send + Sync {
+/// The rule a merge applies. `Debug` lets a configuration that holds the rule
+/// print it.
+pub trait ArrowTypeWideningStrategy: std::fmt::Debug + Send + Sync {
     /// Merge these schemas into one, in the order given.
     ///
     /// Each schema names its source. Report both names for a column that two
@@ -290,7 +309,9 @@ pub trait ArrowTypeWideningStrategy: Send + Sync {
     /// [`DefaultArrowTypeWidening`] qualifies.
     ///
     /// Answer `false` for a rule that reads the order. One example keeps the first
-    /// type of a column. Such a merge gets one fold over every schema.
+    /// type of a column. Another resolves the set of types of a column at once,
+    /// which a chunk result would hide: see [`NumpyArrowTypeWidening`]. Such a
+    /// merge gets one fold over every schema.
     fn is_order_independent(&self) -> bool {
         true
     }
@@ -616,18 +637,28 @@ fn timestamp_super_type(
     right_unit: &TimeUnit,
     right_zone: &Option<Arc<str>>,
 ) -> Option<DataType> {
-    let zone = match (left_zone, right_zone) {
-        (None, None) => None,
-        (Some(zone), None) | (None, Some(zone)) => Some(Arc::clone(zone)),
-        (Some(left), Some(right)) if left == right => Some(Arc::clone(left)),
-        (Some(_), Some(_)) => Some(UTC.into()),
-    };
     let finer = if time_unit_rank(left_unit) >= time_unit_rank(right_unit) {
         left_unit
     } else {
         right_unit
     };
-    Some(DataType::Timestamp(finer.clone(), zone))
+    Some(DataType::Timestamp(
+        *finer,
+        zone_join(left_zone, right_zone),
+    ))
+}
+
+/// The zone that two timestamp columns read as. See [`timestamp_super_type`].
+///
+/// The rule is a lattice join: no zone sits below every zone, and [`UTC`] sits
+/// above every zone. The numpy strategy folds it over a set.
+fn zone_join(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> Option<Arc<str>> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(zone), None) | (None, Some(zone)) => Some(Arc::clone(zone)),
+        (Some(left), Some(right)) if left == right => Some(Arc::clone(left)),
+        (Some(_), Some(_)) => Some(UTC.into()),
+    }
 }
 
 /// The zone that two other zones read as. `"+00:00"` names the same zone, and it
@@ -1821,6 +1852,7 @@ mod tests {
     fn an_order_sensitive_strategy_sees_every_schema() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
+        #[derive(Debug)]
         struct CountingStrategy {
             calls: AtomicUsize,
             seen: AtomicUsize,
