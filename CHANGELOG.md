@@ -75,8 +75,8 @@ tag. Releases before 2.0.0 are recorded in the
   as `default`. The strategy is an `ArrowTypeWideningStrategy` like the default one, so an embedded
   build passes `NumpyArrowTypeWidening` to `RuntimeBuilder::with_type_widening` or
   `OpenOptions::with_type_widening`. See
-  [Configuration](docs/docs/2.0.0-rc5/server/configuration.md#query-engine) and
-  [Troubleshooting](docs/docs/2.0.0-rc5/troubleshooting.md#a-column-has-two-types-across-the-files).
+  [Configuration](docs/docs/2.0.0-rc6/server/configuration.md#query-engine) and
+  [Troubleshooting](docs/docs/2.0.0-rc6/troubleshooting.md#a-column-has-two-types-across-the-files).
 - **`BEACON_TYPE_WIDENING_ON_CONFLICT` settles a column that no type holds.** A collection can
   type one column as a number in one file and as a string in another. No type holds both, so the
   schema merge refused the whole table and the table answered no query: `Incompatible types for
@@ -91,8 +91,8 @@ tag. Releases before 2.0.0 are recorded in the
   `Float64`, widens as before under either setting. An unknown value logs a warning and
   reads as `fail`, because a server that cannot start over a typo is worse than one that names the
   column. An embedded build sets the same rule with `RuntimeBuilder::with_type_conflict`. See
-  [Configuration](docs/docs/2.0.0-rc5/server/configuration.md#query-engine) and
-  [Troubleshooting](docs/docs/2.0.0-rc5/troubleshooting.md#a-column-has-two-types-across-the-files).
+  [Configuration](docs/docs/2.0.0-rc6/server/configuration.md#query-engine) and
+  [Troubleshooting](docs/docs/2.0.0-rc6/troubleshooting.md#a-column-has-two-types-across-the-files).
 - **A gateway can sign you in to the admin UI.** A deployment that puts nginx or oauth2-proxy in
   front of Beacon holds the super-user credentials in the gateway, and the operator had to type
   them a second time in the login screen. The UI now calls `GET /admin/api/admin/check` with no
@@ -103,7 +103,7 @@ tag. Releases before 2.0.0 are recorded in the
   the detection for that browser tab, and a new tab starts a proxy session again. An injected
   header makes every caller behind the gateway a super-user, so put your own authentication in
   front of it. See
-  [the admin web UI](docs/docs/2.0.0-rc5/connect/web-admin-ui.md#a-gateway-can-sign-you-in).
+  [the admin web UI](docs/docs/2.0.0-rc6/connect/web-admin-ui.md#a-gateway-can-sign-you-in).
 - **`COMPACT TABLE` reclaims what a managed table's writes leave behind.** A Lance table never
   shrinks on its own: every `INSERT` commits its own fragments, a `DELETE` writes a deletion file
   and keeps the rows, an `UPDATE` rewrites fragments, and each superseded version still holds its
@@ -171,7 +171,7 @@ tag. Releases before 2.0.0 are recorded in the
   argument types and so gets no row there
   ([datafusion-spatial#1](https://github.com/robinskil/datafusion-spatial/issues/1)). Every
   function runs, listed or not. See
-  [the function reference](docs/docs/2.0.0-rc5/sql/function-reference.md#geospatial-functions),
+  [the function reference](docs/docs/2.0.0-rc6/sql/function-reference.md#geospatial-functions),
   which is the full list.
 - **`ST_Transform` reprojects a geometry**, and a standard build ships it. That makes 123 spatial
   functions. It links [PROJ](https://proj.org), so **a build from source now needs PROJ 9.6.2 or
@@ -200,7 +200,7 @@ tag. Releases before 2.0.0 are recorded in the
   column another writer commits shows on the next query without a restart. A `WHERE` clause is
   pushed into the Iceberg scan, which drops data files from the manifests' statistics. Reads only:
   no `INSERT`, `MERGE` or snapshot expiry, and no REST or Glue catalog yet. See
-  [Apache Iceberg](docs/docs/2.0.0-rc5/formats/iceberg.md).
+  [Apache Iceberg](docs/docs/2.0.0-rc6/formats/iceberg.md).
 - **Icechunk repositories read through the Zarr reader.** An Icechunk repository is a Zarr v3 store
   with commits, branches and snapshots. `read_icechunk('sst/repo')` and `CREATE EXTERNAL TABLE …
   STORED AS ICECHUNK` read one version of it: the tip of a branch by default, or a fixed `tag` /
@@ -215,11 +215,11 @@ tag. Releases before 2.0.0 are recorded in the
   handler as `POST /api/query`, and `/admin/api/admin/crawlers` the same as `/api/admin/crawlers`.
   The whole alias sits behind the admin Basic auth gate, the client endpoints included: `/api/info`
   answers any caller, `/admin/api/info` only the super-user. The
-  [admin web UI](docs/docs/2.0.0-rc5/connect/web-admin-ui.md) now calls the alias, so a deployment
+  [admin web UI](docs/docs/2.0.0-rc6/connect/web-admin-ui.md) now calls the alias, so a deployment
   that puts its own security in front of `/api/*` keeps a working admin panel. `@beacon/client`
   reaches the alias with the new `apiPrefix: ADMIN_API_PREFIX` client option. The alias stays out of
   `/openapi.json`: publishing it would list every operation twice and repeat each operation id. See
-  [the REST API reference](docs/docs/2.0.0-rc5/api/index.md#admin-path-alias).
+  [the REST API reference](docs/docs/2.0.0-rc6/api/index.md#admin-path-alias).
 
 ### Changed
 
@@ -238,7 +238,7 @@ tag. Releases before 2.0.0 are recorded in the
   over a large archive runs for minutes. The timer also starts its interval again when a pass ends,
   so a pass that outruns the interval no longer fires every missed tick back to back, each
   re-listing the store for a queue the pass just emptied. See
-  [File statistics](docs/docs/2.0.0-rc5/internals/file-statistics.md).
+  [File statistics](docs/docs/2.0.0-rc6/internals/file-statistics.md).
 - **The GeoJSON filter of the JSON query plans `ST_Within`.** A request carries
   `longitude_column`, `latitude_column` and `geometry`. It used to build
   `st_within_point(st_geojson_as_wkt('<geojson>'), lon, lat)`. That path turned the geometry into
@@ -356,7 +356,7 @@ tag. Releases before 2.0.0 are recorded in the
   fills that name only when the name is free, so your own table under it survives a restart, and a
   `CREATE` on a name a table holds still fails. That last error now names the stand-in and tells
   you to run `DROP TABLE` first, because a table nobody made is a confusing thing to collide with.
-  See [Configuration](docs/docs/2.0.0-rc5/server/configuration.md#the-default-table).
+  See [Configuration](docs/docs/2.0.0-rc6/server/configuration.md#the-default-table).
 - **`CREATE EXTERNAL TABLE` and `CREATE VIEW` no longer discard the table under the name.** Both
   registered straight over whatever held the name. `CREATE EXTERNAL TABLE obs STORED AS CSV
   LOCATION 'other/'` therefore repointed an existing `obs` with no warning, and a second
@@ -441,7 +441,7 @@ tag. Releases before 2.0.0 are recorded in the
   `CREATE MATERIALIZED VIEW MyView` was worse: it registered `myview` but persisted `MyView`, so a
   restart renamed the view and broke every query that used the old spelling. A new `table_name`
   module builds the reference and keeps the case, and every path uses it. A new
-  [identifiers page](docs/docs/2.0.0-rc5/sql/identifiers.md) states the rule and its limits.
+  [identifiers page](docs/docs/2.0.0-rc6/sql/identifiers.md) states the rule and its limits.
 - **`OPTIONS` on a NetCDF, HDF5, Zarr or BBF external table had no effect**
   ([#421](https://github.com/maris-development/beacon/issues/421)). DataFusion's SQL planner
   renames an `OPTIONS` key without a `.` to `format.<key>`. Those four factories read the bare key
@@ -453,7 +453,7 @@ tag. Releases before 2.0.0 are recorded in the
 - **`CREATE EXTERNAL TABLE` did not document `OPTIONS`**
   ([#421](https://github.com/maris-development/beacon/issues/421)). The syntax block omitted the
   clause, and no page listed the keys of a format, so a reader had to open the Rust source. The
-  [create external table page](docs/docs/2.0.0-rc5/sql/create-external-table.md#options) now holds the clause, the
+  [create external table page](docs/docs/2.0.0-rc6/sql/create-external-table.md#options) now holds the clause, the
   rules that apply to every key, and an index of the keys of each `STORED AS` value. Each format
   page holds a table of its own keys, with a type, a default and a description. The page for a
   format that reads no key says so. Two examples also spelled an option `OPTIONS`, which does not parse: an `OPTIONS` list takes a key and a value, with no `=`.

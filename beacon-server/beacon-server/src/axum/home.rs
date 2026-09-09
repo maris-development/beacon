@@ -52,7 +52,7 @@ fn docs_url(version: &str) -> String {
 /// Names the documentation directory of `version`.
 ///
 /// The directory of a pre-release drops the dot of its pre-release part: version
-/// `2.0.0-rc.5` publishes as `docs/2.0.0-rc5`. A release bump renames that
+/// `2.0.0-rc.6` publishes as `docs/2.0.0-rc6`. A release bump renames that
 /// directory, so the running binary and its documentation stay in step.
 fn docs_directory(version: &str) -> String {
     // Build metadata is not part of a directory name.
@@ -138,9 +138,9 @@ mod tests {
 
     #[test]
     fn the_docs_link_points_at_the_running_version() {
-        let page = render("Beacon", "2.0.0-rc.5", "", false, false);
+        let page = render("Beacon", "2.0.0-rc.6", "", false, false);
         assert!(page.contains(
-            "href=\"https://maris-development.github.io/beacon/docs/2.0.0-rc5/introduction\""
+            "href=\"https://maris-development.github.io/beacon/docs/2.0.0-rc6/introduction\""
         ));
 
         // A stable version publishes under its own number, dots intact.
@@ -149,7 +149,7 @@ mod tests {
             "https://maris-development.github.io/beacon/docs/1.8.0/introduction"
         );
         // Build metadata names no directory.
-        assert_eq!(docs_directory("2.0.0-rc.5+abc123"), "2.0.0-rc5");
+        assert_eq!(docs_directory("2.0.0-rc.6+abc123"), "2.0.0-rc6");
     }
 
     /// A release bump renames the docs directory. This test holds the two
