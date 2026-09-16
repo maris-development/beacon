@@ -11,7 +11,7 @@ license = "AGPL-3.0-only"
 # `default-features = false` so a `--no-default-features` build of `beacon-server` really drops
 # PROJ. Cargo unifies features across the graph, so one default-on path turns it back on.
 beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
-rmcp = { version = "=1.8.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "=2.0.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
