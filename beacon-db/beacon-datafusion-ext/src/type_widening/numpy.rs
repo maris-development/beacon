@@ -1,117 +1,39 @@
 //! The numpy strategy: the promotion rules of `numpy.result_type`.
 //!
-//! [`NumpyArrowTypeWidening`] merges the schemas of a table with the rules that
-//! numpy applies to arrays of two types. `RuntimeBuilder::with_type_widening`
-//! takes it, and `BEACON_TYPE_WIDENING_STRATEGY=numpy` selects it on the server.
-//! The [parent module](super) holds the default strategy and the merge contract.
-//! The field union, the first seen order, the nullability rule and the
-//! [`TypeConflict`] setting hold under both strategies.
+//! A boolean joins the numbers, `Float16` joins the floats, an integer beside
+//! a float gives the float whose mantissa holds it, and a number beside a
+//! string gives the string. A date beside a timestamp gives a timestamp at the
+//! finer unit. Two families are a conflict, and [`TypeConflict`] settles it.
+//! numpy resolves a set of types at once, so this strategy gathers the types
+//! of a column and resolves them once, and the listing order changes no result.
 //!
-//! # The rules
-//!
-//! numpy sorts its types into kinds, and a kind absorbs the kinds below it. Two
-//! files, one column name:
-//!
-//! | The files state | The table reports | numpy |
-//! | --- | --- | --- |
-//! | `Boolean` and a number | that number | `bool` + `int8` is `int8` |
-//! | two integers of one sign | the wider one | `int8` + `int16` is `int16` |
-//! | two integers of two signs | the signed type of the next width, which holds the unsigned one | `uint8` + `int8` is `int16`, `uint16` + `int32` is `int32` |
-//! | `UInt64` and a signed integer | `Float64`, because no integer holds both | `uint64` + `int8` is `float64` |
-//! | an integer and a float | the float whose mantissa holds the integer, or the wider of the two | `int8` + `float16` is `float16`, `int16` + `float16` is `float32`, `int32` + `float32` is `float64` |
-//! | two floats | the wider one | `float16` + `float32` is `float32` |
-//! | a number or a boolean, and a string | the string. The scan writes each number as text | `int32` + `str` is `str` |
-//! | two strings | the wider layout: `Utf8`, `Utf8View`, `LargeUtf8` | one `str` |
-//! | two timestamps, or a date and a timestamp | a timestamp at the finer unit | `datetime64[D]` + `datetime64[s]` is `datetime64[s]` |
-//! | `Date32` and `Date64` | `Date64` | `datetime64[D]` + `datetime64[ms]` is `datetime64[ms]` |
-//! | two durations | the finer unit | `timedelta64[s]` + `timedelta64[ms]` is `timedelta64[ms]` |
-//! | `Null` and any type | that type | no rule: a null column holds no value |
-//!
-//! Every other pair is a conflict, and [`TypeConflict`] settles it. A number
-//! beside a timestamp, a string beside a timestamp, and a string beside a
-//! duration are conflicts in numpy too.
-//!
-//! **`Float16` joins the float chain.** The default strategy has no rule for it.
-//!
-//! **A time zone follows the default strategy.** numpy has no zone. One zone wins
-//! over none, and two zones give `UTC`.
-//!
-//! # The set decides, not the pair
-//!
-//! numpy promotes a set of types at once, and the answer differs from a chain of
-//! pairs. `int8` + `uint8` is `int16`, and `int16` + `float16` is `float32`. Yet
-//! `numpy.result_type(int8, uint8, float16)` is `float16`, because a `float16`
-//! holds both `int8` and `uint8`. This strategy gathers the types of each column
-//! across every schema and resolves the set once. Its answer matches
-//! `numpy.result_type`, and the listing order does not change it.
-//!
-//! A chunk result hides the set behind one type. The strategy therefore answers
-//! `false` to [`is_order_independent`], and the entry point gives it one fold
-//! over every schema. The dedup and the threads of the default strategy do not
-//! apply. A collection of 100000 files takes one pass, as `keep_first` does.
-//!
-//! # A CSV file states no types
-//!
-//! The CSV reader parses each column as the merged type, because a text file
-//! holds no type of its own. A number beside a string therefore reads as the
-//! text of the file: `2`, not `2.0`. A boolean literal beside a number parses
-//! as no number, so two CSV files that hold `true` and `7` in one column fail at
-//! read time under this strategy. The default strategy refuses the same pair at
-//! plan time. Every typed format casts the value instead, and `true` reads as
-//! `1`.
-//!
-//! # Where this strategy leaves numpy
-//!
-//! The rules above follow numpy where Arrow has the type and the cast. Four
-//! rules stay behind:
-//!
-//! - numpy reads an integer or a boolean beside a `timedelta64` as a
-//!   `timedelta64` (a `uint64` aside), and a `timedelta64` beside a
-//!   `datetime64` as a `datetime64`. Arrow casts no such column, so both pairs
-//!   are conflicts here.
-//! - numpy writes a number as ASCII bytes beside a byte string (`S`), and reads
-//!   a byte string beside a text string as text. An Arrow binary column holds
-//!   any bytes, and Arrow casts no number to it. The binary family therefore
-//!   widens with itself alone, as in the default strategy.
-//! - numpy has no time of day. `Time32` and `Time64` keep the chain of the
-//!   default strategy.
-//! - numpy has no decimal, no list, no struct and no dictionary. Such a type
-//!   widens with itself alone.
-//!
-//! [`is_order_independent`]: super::ArrowTypeWideningStrategy::is_order_independent
+//! Arrow has no cast for four numpy rules, and each is a conflict here: an
+//! integer beside a duration, a duration beside a timestamp, and a number or a
+//! string beside a binary. A time of day keeps the rule of the default strategy.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use arrow_schema::{ArrowError, DataType, SchemaRef, TimeUnit};
 
-use arrow_schema::{ArrowError, DataType, FieldRef, Schema, SchemaRef, TimeUnit};
-
-use super::{
-    ArrowTypeWideningStrategy, Chain, LabeledSchema, TypeConflict, chain_member, chain_rank,
-    incompatible_types, mark_type_conflict, time_unit_rank, zone_join,
+use super::common::{
+    self, Resolved, StatedTypes, finer_unit, incompatible_types, integer_join, wider, zone_join,
 };
+use super::{ArrowTypeWideningStrategy, LabeledSchema, TypeConflict};
 
-/// Merge the schemas of a table with the promotion rules of numpy.
-///
-/// The [module docs](self) hold the rule table. The merge contract is the one of
-/// [`DefaultArrowTypeWidening`](super::DefaultArrowTypeWidening). The fields keep
-/// first seen order. A field keeps the metadata of the first source. A field is
-/// nullable unless every schema holds it and every schema requires it.
+/// Merges the schemas of a table with the rules of the [module docs](self).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NumpyArrowTypeWidening {
-    /// What the merge does with a column that two sources type in two families.
+    /// What the merge does with a column that no type holds.
     pub on_conflict: TypeConflict,
 }
 
 impl NumpyArrowTypeWidening {
-    /// The rule that refuses a column two sources type in two families.
+    /// The rule that refuses such a column.
     pub const fn new() -> Self {
         Self {
             on_conflict: TypeConflict::Fail,
         }
     }
 
-    /// The rule that keeps the first type of such a column. See
-    /// [`TypeConflict::KeepFirst`].
+    /// The rule that keeps its first type.
     pub const fn keeping_first_type() -> Self {
         Self {
             on_conflict: TypeConflict::KeepFirst,
@@ -119,104 +41,34 @@ impl NumpyArrowTypeWidening {
     }
 }
 
-/// One column, as the fold gathers it over every schema.
-struct Column {
-    /// The field of the first source that holds the column. The result keeps its
-    /// name and its metadata.
-    first: FieldRef,
-    /// Each distinct type the sources state, in first seen order, with the first
-    /// source that states it.
-    types: Vec<(DataType, Option<Arc<str>>)>,
-    /// How many schemas hold the column.
-    held_by: usize,
-    /// Whether one schema permits nulls.
-    nullable: bool,
-}
-
 impl ArrowTypeWideningStrategy for NumpyArrowTypeWidening {
     fn is_order_independent(&self) -> bool {
-        // The set of types decides, and a chunk result hides the set. See the
-        // module docs. `KeepFirst` reads the order as well.
+        // The set decides, and a chunk result hides the set.
         false
     }
 
     fn merge_schemas(&self, schemas: &[LabeledSchema]) -> Result<SchemaRef, ArrowError> {
-        if schemas.is_empty() {
-            return Err(ArrowError::SchemaError(
-                "No schemas provided for merging".to_string(),
-            ));
-        }
+        common::merge_schemas_with(schemas, |name, types| {
+            resolve(name, types, self.on_conflict)
+        })
+    }
 
-        let mut columns: Vec<Column> = Vec::new();
-        let mut positions: HashMap<String, usize> = HashMap::new();
-        for labeled in schemas {
-            for field in labeled.schema.fields() {
-                match positions.get(field.name()) {
-                    Some(&at) => {
-                        let column = &mut columns[at];
-                        column.held_by += 1;
-                        column.nullable |= field.is_nullable();
-                        if !column
-                            .types
-                            .iter()
-                            .any(|(data_type, _)| data_type == field.data_type())
-                        {
-                            column
-                                .types
-                                .push((field.data_type().clone(), labeled.label.clone()));
-                        }
-                    }
-                    None => {
-                        positions.insert(field.name().clone(), columns.len());
-                        columns.push(Column {
-                            first: Arc::clone(field),
-                            types: vec![(field.data_type().clone(), labeled.label.clone())],
-                            held_by: 1,
-                            nullable: field.is_nullable(),
-                        });
-                    }
-                }
-            }
-        }
+    fn on_conflict(&self) -> TypeConflict {
+        self.on_conflict
+    }
 
-        let mut fields = Vec::with_capacity(columns.len());
-        for column in columns {
-            let resolved = resolve(column.first.name(), &column.types, self.on_conflict)?;
-            let mut field = column.first.as_ref().clone();
-            if &resolved.data_type != column.first.data_type() {
-                field = field.with_data_type(resolved.data_type);
-            }
-            // One file that permits nulls makes the column nullable. So does a
-            // file that lacks the column, because the scan fills it with nulls.
-            if column.nullable || column.held_by < schemas.len() {
-                field = field.with_nullable(true);
-            }
-            if resolved.conflict {
-                field = mark_type_conflict(field);
-            }
-            fields.push(Arc::new(field));
-        }
-
-        Ok(Arc::new(Schema::new(fields)))
+    fn casts_leniently(&self, source: &DataType, target: &DataType) -> bool {
+        // Two families never promote, so only the setting put them in one column.
+        self.on_conflict == TypeConflict::KeepFirst && Family::of(source) != Family::of(target)
     }
 }
 
-/// The type of one column, and whether the setting settled it.
-struct Resolved {
-    data_type: DataType,
-    conflict: bool,
-}
-
-/// The type that holds every member of `types`, as `numpy.result_type` reports
-/// it.
-///
-/// `Null` holds no value, so it takes no part. The first stated type names the
-/// family. A type of another family is a conflict, and `on_conflict` settles it.
-/// `Fail` reports the type the family holds so far beside the offender.
-/// `KeepFirst` drops the offender and marks the column.
+/// The type that holds every stated type. The first stated type names the
+/// family, and a type of another family is a conflict that `on_conflict`
+/// settles.
 fn resolve(
     name: &str,
-    types: &[(DataType, Option<Arc<str>>)],
+    types: &StatedTypes,
     on_conflict: TypeConflict,
 ) -> Result<Resolved, ArrowError> {
     let mut stated = types
@@ -240,19 +92,18 @@ fn resolve(
         match on_conflict {
             TypeConflict::Fail => {
                 let so_far = family.result(&members);
-                // The source that states the type the family holds so far. A
-                // result that no source states has none.
+                // The source that states the type the family holds so far.
                 let so_far_source = types
                     .iter()
                     .find(|(stated, _)| stated == &so_far)
                     .and_then(|(_, source)| source.as_deref());
-                return Err(ArrowError::SchemaError(incompatible_types(
+                return Err(incompatible_types(
                     name,
                     &so_far,
                     so_far_source,
                     data_type,
                     source.as_deref(),
-                )));
+                ));
             }
             TypeConflict::KeepFirst => conflict = true,
         }
@@ -264,19 +115,15 @@ fn resolve(
     })
 }
 
-/// The kinds that promote with one another. Two families never promote.
+/// The kinds that promote with one another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Family {
-    /// A boolean, an integer, a float or a string. numpy writes a number as
-    /// text beside a string, so the four kinds share one family.
+    /// numpy writes a number as text beside a string, so the four kinds share
+    /// one family.
     NumberOrText,
-    /// A date or a timestamp: a `datetime64` at one unit.
     Datetime,
-    /// A `timedelta64` at one unit.
     Duration,
-    /// A time of day. numpy has none, so the chain of the default strategy holds.
     Time,
-    /// A byte string. The module docs state why no number joins it.
     Binary,
     /// A type numpy has no rule for. It promotes with itself alone.
     Other(DataType),
@@ -284,205 +131,114 @@ enum Family {
 
 impl Family {
     fn of(data_type: &DataType) -> Self {
-        if let Some((_, chain)) = chain_rank(data_type) {
-            return match chain {
-                Chain::String => Self::NumberOrText,
-                Chain::Binary => Self::Binary,
-                Chain::Date => Self::Datetime,
-                Chain::Time => Self::Time,
-            };
-        }
+        use DataType::*;
         match data_type {
-            DataType::Boolean
-            | DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-            | DataType::Float16
-            | DataType::Float32
-            | DataType::Float64 => Self::NumberOrText,
-            DataType::Timestamp(_, _) => Self::Datetime,
-            DataType::Duration(_) => Self::Duration,
+            Boolean | Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float16
+            | Float32 | Float64 | Utf8 | Utf8View | LargeUtf8 => Self::NumberOrText,
+            Date32 | Date64 | Timestamp(_, _) => Self::Datetime,
+            Duration(_) => Self::Duration,
+            Time32(_) | Time64(_) => Self::Time,
+            Binary | BinaryView | LargeBinary => Self::Binary,
             other => Self::Other(other.clone()),
         }
     }
 
-    /// The type that holds every member. Each member belongs to this family.
+    /// The type that holds every member of this family.
     fn result(&self, members: &[&DataType]) -> DataType {
         match self {
             Self::NumberOrText => number_or_text(members),
-            Self::Datetime => datetime(members),
-            Self::Duration => {
-                let finest = members
-                    .iter()
-                    .filter_map(|member| match member {
-                        DataType::Duration(unit) => Some(time_unit_rank(unit)),
-                        _ => None,
-                    })
-                    .max()
-                    .unwrap_or(0);
-                DataType::Duration(unit_at(finest))
-            }
-            Self::Time | Self::Binary => members
+            Self::Datetime => members
                 .iter()
-                .filter_map(|member| chain_rank(member))
-                .max_by_key(|(rank, _)| *rank)
-                .map(|(rank, chain)| chain_member(chain, rank))
-                .unwrap_or_else(|| members[0].clone()),
+                .skip(1)
+                .fold(members[0].clone(), |so_far, member| {
+                    datetime_join(&so_far, member)
+                }),
+            Self::Duration | Self::Time | Self::Binary => {
+                let mut widest = members[0];
+                for member in members {
+                    widest = wider(widest, member);
+                }
+                widest.clone()
+            }
             Self::Other(data_type) => data_type.clone(),
         }
     }
 }
 
-/// `numpy.result_type` over booleans, integers, floats and strings.
-///
-/// A string absorbs every number, and the scan writes the number as text. A
-/// float absorbs every integer, at the width whose mantissa holds it: 11 bits
-/// hold an 8-bit integer, 24 bits hold a 16-bit one, and 53 bits hold the rest.
-/// Two signs meet in the signed type of the next width, and in `Float64` above
-/// `UInt64`. A boolean adds nothing.
+/// `numpy.result_type` over booleans, integers, floats and strings. Each kind
+/// keeps its widest member, and the widest members meet once.
 fn number_or_text(members: &[&DataType]) -> DataType {
-    let mut text: Option<u8> = None;
-    let mut float_bits = 0u8;
-    let mut signed_bits = 0u8;
-    let mut unsigned_bits = 0u8;
-    for member in members {
-        match member {
-            DataType::Boolean => {}
-            DataType::Int8 => signed_bits = signed_bits.max(8),
-            DataType::Int16 => signed_bits = signed_bits.max(16),
-            DataType::Int32 => signed_bits = signed_bits.max(32),
-            DataType::Int64 => signed_bits = signed_bits.max(64),
-            DataType::UInt8 => unsigned_bits = unsigned_bits.max(8),
-            DataType::UInt16 => unsigned_bits = unsigned_bits.max(16),
-            DataType::UInt32 => unsigned_bits = unsigned_bits.max(32),
-            DataType::UInt64 => unsigned_bits = unsigned_bits.max(64),
-            DataType::Float16 => float_bits = float_bits.max(16),
-            DataType::Float32 => float_bits = float_bits.max(32),
-            DataType::Float64 => float_bits = float_bits.max(64),
-            other => {
-                if let Some((rank, Chain::String)) = chain_rank(other) {
-                    text = Some(text.map_or(rank, |widest| widest.max(rank)));
-                }
-            }
-        }
-    }
-
-    if let Some(rank) = text {
-        return chain_member(Chain::String, rank);
-    }
-    if float_bits > 0 {
-        // The float whose mantissa holds an integer of this width.
-        let holds = |int_bits: u8| match int_bits {
-            0 => 0,
-            1..=8 => 16,
-            9..=16 => 32,
-            _ => 64,
+    use DataType::*;
+    let (mut text, mut signed, mut unsigned, mut float) = (None, None, None, None);
+    for &member in members {
+        let widest: &mut Option<&DataType> = match member {
+            Utf8 | Utf8View | LargeUtf8 => &mut text,
+            Int8 | Int16 | Int32 | Int64 => &mut signed,
+            UInt8 | UInt16 | UInt32 | UInt64 => &mut unsigned,
+            Float16 | Float32 | Float64 => &mut float,
+            _ => continue,
         };
-        return float_of(float_bits.max(holds(signed_bits)).max(holds(unsigned_bits)));
+        *widest = Some(widest.map_or(member, |held| wider(held, member)));
     }
-    match (signed_bits, unsigned_bits) {
-        (0, 0) => DataType::Boolean,
-        (signed, 0) => signed_of(signed),
-        (0, unsigned) => unsigned_of(unsigned),
-        // No signed integer holds a `UInt64`.
-        (_, 64) => DataType::Float64,
-        (signed, unsigned) => signed_of(signed.max(unsigned * 2)),
+
+    match (text, signed, unsigned, float) {
+        (Some(text), _, _, _) => text.clone(),
+        (None, None, None, None) => Boolean,
+        (None, signed, unsigned, Some(float)) => [signed, unsigned]
+            .into_iter()
+            .flatten()
+            .map(|int| float_that_holds(float, int))
+            .fold(float.clone(), |so_far, holds| {
+                wider(&so_far, &holds).clone()
+            }),
+        (None, Some(signed), Some(unsigned), None) => integer_join(signed, unsigned),
+        (None, Some(int), None, None) | (None, None, Some(int), None) => int.clone(),
     }
 }
 
-fn signed_of(bits: u8) -> DataType {
-    match bits {
-        8 => DataType::Int8,
-        16 => DataType::Int16,
-        32 => DataType::Int32,
-        _ => DataType::Int64,
+/// The float whose mantissa holds `int`, or `float` when it is wider.
+fn float_that_holds(float: &DataType, int: &DataType) -> DataType {
+    use DataType::*;
+    match (float, int) {
+        (Float64, _) | (_, Int32 | UInt32 | Int64 | UInt64) => Float64,
+        (Float32, _) | (_, Int16 | UInt16) => Float32,
+        _ => Float16,
     }
 }
 
-fn unsigned_of(bits: u8) -> DataType {
-    match bits {
-        8 => DataType::UInt8,
-        16 => DataType::UInt16,
-        32 => DataType::UInt32,
-        _ => DataType::UInt64,
-    }
-}
-
-fn float_of(bits: u8) -> DataType {
-    match bits {
-        16 => DataType::Float16,
-        32 => DataType::Float32,
-        _ => DataType::Float64,
-    }
-}
-
-/// `numpy.result_type` over dates and timestamps: the finer unit holds both.
-///
-/// `Date32` counts days and `Date64` counts milliseconds, so a date is a
-/// `datetime64[D]` or a `datetime64[ms]`. One timestamp makes the result a
-/// timestamp. Its unit is the finest of the members, and `Second` at least,
-/// because a timestamp counts no days. The zone follows the default strategy.
-fn datetime(members: &[&DataType]) -> DataType {
-    // Days sit below every timestamp unit. A timestamp unit sits one above its
-    // `time_unit_rank`, and `Date64` shares the rank of `Millisecond`.
-    const DAY: u8 = 0;
-    let mut timestamp = false;
-    let mut rank = DAY;
-    let mut zone: Option<Option<Arc<str>>> = None;
-    for member in members {
-        match member {
-            DataType::Date32 => {}
-            DataType::Date64 => rank = rank.max(time_unit_rank(&TimeUnit::Millisecond) + 1),
-            DataType::Timestamp(unit, member_zone) => {
-                timestamp = true;
-                rank = rank.max(time_unit_rank(unit) + 1);
-                zone = Some(match zone {
-                    None => member_zone.clone(),
-                    Some(so_far) => zone_join(&so_far, member_zone),
-                });
-            }
-            _ => {}
+/// `numpy.result_type` over two dates or timestamps. `Date32` counts days and
+/// `Date64` milliseconds, so a timestamp beside a `Date64` is at least
+/// milliseconds.
+fn datetime_join(left: &DataType, right: &DataType) -> DataType {
+    use DataType::*;
+    match (left, right) {
+        (Date32, Date64) | (Date64, Date32) => Date64,
+        (Date32, stamp @ Timestamp(_, _)) | (stamp @ Timestamp(_, _), Date32) => stamp.clone(),
+        (Date64, Timestamp(unit, zone)) | (Timestamp(unit, zone), Date64) => {
+            Timestamp(finer_unit(*unit, TimeUnit::Millisecond), zone.clone())
         }
-    }
-
-    if timestamp {
-        DataType::Timestamp(unit_at(rank.max(1) - 1), zone.unwrap_or(None))
-    } else if rank == DAY {
-        DataType::Date32
-    } else {
-        DataType::Date64
-    }
-}
-
-/// The unit at `rank`. The inverse of [`time_unit_rank`].
-fn unit_at(rank: u8) -> TimeUnit {
-    match rank {
-        0 => TimeUnit::Second,
-        1 => TimeUnit::Millisecond,
-        2 => TimeUnit::Microsecond,
-        _ => TimeUnit::Nanosecond,
+        (Timestamp(left_unit, left_zone), Timestamp(right_unit, right_zone)) => Timestamp(
+            finer_unit(*left_unit, *right_unit),
+            zone_join(left_zone, right_zone),
+        ),
+        (left, _) => left.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use arrow::compute::can_cast_types;
-    use arrow_schema::{Field, Fields, IntervalUnit};
+    use std::sync::Arc;
 
-    use super::super::{ArrowTypeWidening, is_type_conflict};
+    use arrow::compute::can_cast_types;
+    use arrow_schema::{Field, FieldRef, Fields, IntervalUnit, Schema};
+
+    use super::super::ArrowTypeWidening;
     use super::*;
 
-    /// A schema without a source name.
     fn schema(fields: &[(&str, DataType)]) -> LabeledSchema {
         LabeledSchema::unlabeled(schema_ref(fields))
     }
 
-    /// A schema with the name of the file it came from.
     fn from_file(label: &str, fields: &[(&str, DataType)]) -> LabeledSchema {
         LabeledSchema::new(schema_ref(fields), label)
     }
@@ -504,7 +260,6 @@ mod tests {
         ArrowTypeWidening::new(Arc::new(NumpyArrowTypeWidening::keeping_first_type()))
     }
 
-    /// The column of a merge, by name.
     fn field_of<'a>(schema: &'a Schema, name: &str) -> &'a FieldRef {
         schema
             .fields()
@@ -513,7 +268,6 @@ mod tests {
             .unwrap_or_else(|| panic!("the merge holds '{name}'"))
     }
 
-    /// The type the strategy reports for column `a` over one schema per type.
     fn promote(types: &[DataType]) -> Result<DataType, ArrowError> {
         let schemas: Vec<LabeledSchema> = types
             .iter()
@@ -530,8 +284,6 @@ mod tests {
             other => panic!("expected SchemaError, got {other:?}"),
         }
     }
-
-    // ── the oracle ─────────────────────────────────────────────────────
 
     /// `numpy.promote_types` for every pair of [`NUMPY_TYPES`], row by row.
     /// Generated with numpy 2.5.2. `ERR` marks a `TypeError`.
@@ -679,7 +431,6 @@ mod tests {
         ],
     ];
 
-    /// What numpy reports for a pair, by numpy name.
     fn numpy_promote_types(left: &str, right: &str) -> &'static str {
         let at = |name: &str| {
             NUMPY_TYPES
@@ -690,9 +441,8 @@ mod tests {
         NUMPY_PROMOTE_TYPES[at(left)][at(right)]
     }
 
-    /// The numpy name of an Arrow type. Two Arrow types can share one name:
-    /// `Date64` and `Timestamp(Millisecond)` are both `M8[ms]`, and every string
-    /// layout is `U`.
+    /// The numpy name of an Arrow type. `Date64` and `Timestamp(Millisecond)`
+    /// are both `M8[ms]`, and every string layout is `U`.
     fn as_numpy(data_type: &DataType) -> String {
         let unit = |unit: &TimeUnit| match unit {
             TimeUnit::Second => "s",
@@ -723,7 +473,6 @@ mod tests {
         }
     }
 
-    /// Every Arrow type that has a numpy name.
     fn arrow_types() -> Vec<DataType> {
         let mut types = vec![
             DataType::Boolean,
@@ -759,28 +508,21 @@ mod tests {
         types
     }
 
-    /// The pairs numpy promotes and this strategy refuses. The module docs state
-    /// each reason.
+    /// The pairs numpy promotes and this strategy refuses.
     fn leaves_numpy(left: &str, right: &str) -> bool {
         let kind = |name: &str| name.chars().next().unwrap();
-        // numpy reads a boolean or an integer as a count of time units. A
-        // `uint64` and a float are no such count.
+        // A boolean or an integer counts time units in numpy. A `uint64` and a float do not.
         let counts = |name: &str| matches!(kind(name), 'b' | 'i' | 'u') && name != "uint64";
-        // numpy writes a boolean, a number or a text string as ASCII bytes.
+        // A boolean, a number or a text string spells as ASCII bytes.
         let spells = |name: &str| matches!(kind(name), 'b' | 'i' | 'u' | 'f' | 'U');
-        // An integer or a boolean beside a duration.
         (counts(left) && kind(right) == 'm')
             || (kind(left) == 'm' && counts(right))
-            // A duration beside a datetime.
             || (kind(left) == 'm' && kind(right) == 'M')
             || (kind(left) == 'M' && kind(right) == 'm')
-            // A byte string beside a text string or a number.
             || (kind(left) == 'S' && spells(right))
             || (kind(right) == 'S' && spells(left))
     }
 
-    /// Every pair of two Arrow types promotes as `numpy.promote_types` does, or
-    /// sits in the list the module docs give.
     #[test]
     fn every_pair_matches_the_oracle() {
         for left in arrow_types() {
@@ -800,8 +542,6 @@ mod tests {
         }
     }
 
-    /// The oracle is symmetric, and so is the strategy. Each pair reads the same
-    /// in both orders, and one type beside itself stays as it is.
     #[test]
     fn a_pair_reads_the_same_in_both_orders() {
         for left in arrow_types() {
@@ -816,9 +556,6 @@ mod tests {
         }
     }
 
-    /// Every type the strategy reports is a cast Arrow performs on both operands.
-    /// A merge that reports a type the scan cannot reach fails on the first
-    /// batch instead of at plan time.
     #[test]
     fn every_promotion_is_a_cast_arrow_performs() {
         for left in arrow_types() {
@@ -836,11 +573,7 @@ mod tests {
         }
     }
 
-    // ── the set decides ────────────────────────────────────────────────
-
-    /// The results `numpy.result_type` gives for these sets, checked with numpy
-    /// 2.5.2 over every permutation. A chain of pairs gives a wider type for
-    /// the first three.
+    /// Checked with numpy 2.5.2 over every permutation of each set.
     #[test]
     fn a_set_promotes_as_numpy_result_type_does() {
         for (set, expected) in [
@@ -900,8 +633,6 @@ mod tests {
         }
     }
 
-    /// A chain of pairs gives what it gives. The set gives the numpy answer, so
-    /// the listing order does not change the result.
     #[test]
     fn the_listing_order_does_not_change_the_result() {
         let a = schema(&[("v", DataType::Int8), ("w", DataType::Utf8)]);
@@ -915,7 +646,6 @@ mod tests {
         }
     }
 
-    /// A repeated schema adds no type, so it changes no result.
     #[test]
     fn a_repeated_schema_changes_nothing() {
         let a = schema(&[("v", DataType::Int8)]);
@@ -927,7 +657,6 @@ mod tests {
         assert_eq!(once, thrice);
     }
 
-    /// Every order of `items`.
     fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
         if items.len() <= 1 {
             return vec![items.to_vec()];
@@ -944,11 +673,6 @@ mod tests {
         all
     }
 
-    // ── the rules the default strategy lacks ─────────────────────────────
-
-    /// The pairs both strategies promote, and to two types. The default strategy
-    /// takes `Float64` for every integer beside a `Float32`, because a lattice
-    /// holds no other answer. numpy keeps the `Float32` that holds the integer.
     #[test]
     fn numpy_answers_where_the_default_answers_otherwise() {
         for (left, right, numpy_type, default_type) in [
@@ -984,7 +708,6 @@ mod tests {
         }
     }
 
-    /// The pairs the default strategy refuses and numpy promotes.
     #[test]
     fn numpy_promotes_what_the_default_refuses() {
         for (left, right, expected) in [
@@ -1028,7 +751,6 @@ mod tests {
         }
     }
 
-    /// The rules both strategies share.
     #[test]
     fn numpy_keeps_the_rules_of_the_default() {
         for (left, right, expected) in [
@@ -1063,7 +785,6 @@ mod tests {
         }
     }
 
-    /// A `Null` column holds no value, so it takes the type of the other file.
     #[test]
     fn a_null_column_takes_the_other_type() {
         for other in [DataType::Int32, DataType::Utf8, DataType::Date32] {
@@ -1079,7 +800,6 @@ mod tests {
         );
     }
 
-    /// A type numpy has no rule for merges with itself alone.
     #[test]
     fn a_type_without_a_rule_merges_with_itself() {
         for data_type in [
@@ -1114,10 +834,7 @@ mod tests {
         }
     }
 
-    // ── the setting for a column that no type holds ────────────────────
-
-    /// A refused column names both files, with the type the family holds so far
-    /// on the left.
+    /// The type the family holds so far stands on the left.
     #[test]
     fn a_refused_column_names_both_files() {
         let narrow = from_file("a.nc", &[("depth", DataType::Int32)]);
@@ -1147,10 +864,8 @@ mod tests {
         );
     }
 
-    /// `KeepFirst` keeps the family of the first file, marks the column, and
-    /// still promotes the later files of that family.
     #[test]
-    fn keep_first_keeps_the_first_family_and_marks_the_column() {
+    fn keep_first_keeps_the_first_family() {
         let schemas = [
             from_file("a.nc", &[("v", DataType::Int64)]),
             from_file("b.nc", &[("v", DataType::Date32)]),
@@ -1161,33 +876,46 @@ mod tests {
         let merged = keeping_first().merge_schemas(&schemas).unwrap();
         let field = field_of(&merged, "v");
         assert_eq!(field.data_type(), &DataType::Float64);
-        assert!(is_type_conflict(field), "the `Date32` file casts to null");
-        assert!(field.is_nullable());
+        assert!(field.is_nullable(), "the `Date32` file reads null");
+        let strategy = NumpyArrowTypeWidening::keeping_first_type();
+        assert!(strategy.casts_leniently(&DataType::Date32, &DataType::Float64));
+        assert!(!strategy.casts_leniently(&DataType::Int64, &DataType::Float64));
 
         // The other order keeps the date.
         let merged = keeping_first()
             .merge_schemas(&[schemas[1].clone(), schemas[0].clone(), schemas[2].clone()])
             .unwrap();
         assert_eq!(field_of(&merged, "v").data_type(), &DataType::Date32);
-        assert!(is_type_conflict(field_of(&merged, "v")));
+        assert!(strategy.casts_leniently(&DataType::Int64, &DataType::Date32));
     }
 
-    /// A column that promotes carries no mark under either setting.
     #[test]
-    fn a_promoted_column_carries_no_mark() {
+    fn a_promoted_column_casts_strictly() {
         let schemas = [
             schema(&[("v", DataType::Int32)]),
             schema(&[("v", DataType::Utf8)]),
         ];
         for widening in [numpy(), keeping_first()] {
             let merged = widening.merge_schemas(&schemas).unwrap();
-            let field = field_of(&merged, "v");
-            assert_eq!(field.data_type(), &DataType::Utf8);
-            assert!(!is_type_conflict(field));
+            assert_eq!(field_of(&merged, "v").data_type(), &DataType::Utf8);
+            assert!(
+                !widening
+                    .strategy
+                    .casts_leniently(&DataType::Int32, &DataType::Utf8)
+            );
         }
+        assert!(
+            !NumpyArrowTypeWidening::new().casts_leniently(&DataType::Date32, &DataType::Int64)
+        );
+        assert_eq!(
+            NumpyArrowTypeWidening::new().on_conflict(),
+            TypeConflict::Fail
+        );
+        assert_eq!(
+            NumpyArrowTypeWidening::keeping_first_type().on_conflict(),
+            TypeConflict::KeepFirst
+        );
     }
-
-    // ── the merge contract ─────────────────────────────────────────────
 
     #[test]
     fn merging_no_schemas_is_an_error() {
@@ -1197,8 +925,6 @@ mod tests {
         ));
     }
 
-    /// The fields keep first seen order, and a field keeps the metadata of the
-    /// first file.
     #[test]
     fn fields_keep_first_seen_order_and_first_metadata() {
         let first = LabeledSchema::unlabeled(Arc::new(Schema::new(vec![
@@ -1218,14 +944,11 @@ mod tests {
         let b = field_of(&merged, "b");
         assert_eq!(b.data_type(), &DataType::Utf8);
         assert_eq!(b.metadata().get("k").map(String::as_str), Some("first"));
-        // Every file holds `b` and requires it.
         assert!(!b.is_nullable());
-        // One file lacks `a` and `c`.
         assert!(field_of(&merged, "a").is_nullable());
         assert!(field_of(&merged, "c").is_nullable());
     }
 
-    /// One file that permits nulls makes the column nullable, in either order.
     #[test]
     fn one_nullable_file_makes_the_column_nullable() {
         let required = LabeledSchema::unlabeled(Arc::new(Schema::new(vec![Field::new(
@@ -1249,7 +972,6 @@ mod tests {
         assert!(!field_of(&alone, "v").is_nullable());
     }
 
-    /// The set decides, so the entry point may not split the schemas.
     #[test]
     fn the_method_reads_every_schema_in_one_fold() {
         assert!(!NumpyArrowTypeWidening::new().is_order_independent());

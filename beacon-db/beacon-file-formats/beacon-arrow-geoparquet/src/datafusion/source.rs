@@ -19,6 +19,8 @@ use datafusion::{
 use datafusion_datasource::projection::{ProjectionOpener, SplitProjection};
 use object_store::ObjectStore;
 
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
+
 use crate::datafusion::{
     bbox::{self, QueryBox},
     opener::GeoParquetOpener,
@@ -45,6 +47,9 @@ pub struct GeoParquetSource {
     /// the predicate is kept: the box test is necessary and never sufficient, so
     /// the filter itself stays above the scan and decides every surviving row.
     query_box: Option<QueryBox>,
+    /// The rule that merged the table schema. It decides which casts read
+    /// null. The format sets it from the session when it plans.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl GeoParquetSource {
@@ -56,7 +61,14 @@ impl GeoParquetSource {
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             batch_size: 128 * 1024,
             query_box: None,
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
+    }
+
+    /// The same source, with the merge rule of the session.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = strategy;
+        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -89,6 +101,7 @@ impl FileSource for GeoParquetSource {
             self.batch_size,
             self.query_box.clone(),
             &self.execution_plan_metrics,
+            Arc::clone(&self.type_widening),
         )) as Arc<dyn FileOpener>;
 
         ProjectionOpener::try_new(self.projection.clone(), opener, file_schema)

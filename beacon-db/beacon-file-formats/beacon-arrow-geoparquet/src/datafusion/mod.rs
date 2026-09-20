@@ -209,7 +209,7 @@ impl FileFormat for GeoParquetFormat {
 
     async fn create_physical_plan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let table_schema = TableSchema::new(
@@ -219,7 +219,9 @@ impl FileFormat for GeoParquetFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = GeoParquetSource::new(table_schema).with_projection(projection);
+        let source = GeoParquetSource::new(table_schema)
+            .with_projection(projection)
+            .with_type_widening(Arc::clone(&session_widening(state).strategy));
 
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -378,6 +380,7 @@ mod tests {
     use arrow::array::{ArrayRef, AsArray, Int32Array};
     use arrow::datatypes::{DataType, Field, Float64Type, Int32Type, Schema};
     use arrow::record_batch::RecordBatch;
+    use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
     use datafusion::datasource::listing::PartitionedFile;
     use datafusion::datasource::physical_plan::{FileOpener, FileScanConfigBuilder};
     use datafusion::execution::object_store::ObjectStoreUrl;
@@ -571,6 +574,7 @@ mod tests {
             128 * 1024,
             None,
             &Default::default(),
+            Arc::new(DefaultArrowTypeWidening::new()),
         );
         let stream = opener
             .open(PartitionedFile::from(object))
@@ -849,6 +853,7 @@ mod tests {
             128 * 1024,
             None,
             &Default::default(),
+            Arc::new(DefaultArrowTypeWidening::new()),
         );
         let stream = opener
             .open(PartitionedFile::from(object))

@@ -223,6 +223,19 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **The scan asks the merge rule which casts read null, and the merged schema carries no mark.**
+  `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first` used to mark a column that two files type in two
+  families with `beacon.type_conflict` in the field metadata, and every reader looked for that mark
+  to read the file of the other family as null. The mark is gone. The merge rule of the session now
+  answers per file column: a file type the rule does not widen into the table type can only have
+  reached the scan through `keep_first`, so that cast reads a value the type cannot hold as null,
+  and every other cast stays strict. Two things change for `keep_first` alone. A CSV collection
+  parses every column as text and casts it afterwards, because a CSV file states no types, so a
+  value beyond the sampled rows that the type cannot hold reads as `NULL` where it failed the query
+  before. And a table that declares a column narrower than a file, such as an `INT` over an `Int64`
+  file, reads an overflow as `NULL` under `keep_first`; `fail` still reports it. A schema saved
+  before this change loses nothing, because the scan alone read the mark.
+
 - **A file statistics pass drains the queue, and one pass runs at a time.** A pass used to stop
   after one batch of `BEACON_FILE_STATS_BATCH_FILES` files, 10 000 by default. A fresh archive of
   a million files therefore needed 100 ticks, which is over 24 hours at the default interval of 900

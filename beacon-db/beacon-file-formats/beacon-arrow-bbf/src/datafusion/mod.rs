@@ -207,7 +207,7 @@ impl FileFormat for BBFFormat {
     /// according to this file format.
     async fn create_physical_plan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
@@ -219,7 +219,8 @@ impl FileFormat for BBFFormat {
         let projection = conf.file_source().projection().cloned();
         let source = BBFSource::new(table_schema)
             .with_split_streams_slice(self.split_streams_slice)
-            .with_projection(projection);
+            .with_projection(projection)
+            .with_type_widening(Arc::clone(&session_widening(state).strategy));
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();

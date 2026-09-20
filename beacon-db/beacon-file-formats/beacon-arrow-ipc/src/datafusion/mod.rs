@@ -214,7 +214,9 @@ impl FileFormat for ArrowFormat {
         // format built. Carry it over, or the scan reads every column.
         let pushed_down = conf.file_source.projection().cloned();
         let source = Arc::new(
-            BeaconArrowSource::new(container, table_schema).with_projection(pushed_down.as_ref()),
+            BeaconArrowSource::new(container, table_schema)
+                .with_projection(pushed_down.as_ref())
+                .with_type_widening(Arc::clone(&session_widening(state).strategy)),
         );
 
         let config = FileScanConfigBuilder::from(conf)

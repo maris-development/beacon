@@ -404,7 +404,7 @@ mod tests {
 
     use crate::test_support;
     use arrow::datatypes::TimeUnit;
-    use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, is_type_conflict};
+    use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
 
     fn widening() -> Arc<ArrowTypeWidening> {
         ArrowTypeWidening::default_extension()
@@ -509,9 +509,9 @@ mod tests {
 
     /// A deployment that reads such a collection anyway sets `keep_first`. The
     /// column then takes the type the footer states first, which is the type
-    /// of the dataset written first, and carries the mark the scan reads.
+    /// of the dataset written first, and the other dataset reads null.
     #[tokio::test]
-    async fn keep_first_settles_a_conflict_with_the_first_type_and_marks_it() {
+    async fn keep_first_settles_a_conflict_with_the_first_type() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::incompatible(tmp.path()).await;
         let atlas = test_support::open(tmp.path()).await;
@@ -523,7 +523,13 @@ mod tests {
         let value = schema.field_with_name("value").unwrap();
 
         assert_eq!(value.data_type(), &DataType::Utf8, "dataset `a` came first");
-        assert!(is_type_conflict(value), "the scan must cast `b` to null");
+        assert!(value.is_nullable(), "dataset `b` reads null");
+        assert!(
+            keep_first
+                .strategy
+                .casts_leniently(&DataType::Int64, &DataType::Utf8),
+            "the scan casts `b` to null"
+        );
         assert_eq!(
             schema.field_with_name("only_a").unwrap().data_type(),
             &DataType::Int32

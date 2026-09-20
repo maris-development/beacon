@@ -1,5 +1,6 @@
 use std::{any::Any, collections::HashMap, sync::Arc};
 
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use datafusion::{
     config::ConfigOptions,
     datasource::{
@@ -42,6 +43,9 @@ pub struct BBFSource {
     global_metrics: BBFGlobalMetrics,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
+    /// The rule that merged the table schema. It decides which casts read
+    /// null. The format sets it from the session when it plans.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl BBFSource {
@@ -59,7 +63,14 @@ impl BBFSource {
             stream_partition_shares: Arc::new(Mutex::new(HashMap::new())),
             global_metrics,
             projection: None,
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
+    }
+
+    /// The same source, with the merge rule of the session.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = strategy;
+        self
     }
 
     /// Returns a copy of this source that splits each record batch into
@@ -108,6 +119,7 @@ impl FileSource for BBFSource {
             self.global_metrics.clone(),
             self.split_streams_slice,
             self.batch_size,
+            Arc::clone(&self.type_widening),
         )))
     }
 

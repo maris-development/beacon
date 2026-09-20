@@ -44,6 +44,7 @@ use datafusion::{
 use object_store::ObjectStore;
 
 use beacon_datafusion_ext::nd::logical_schema;
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 
 use crate::datafusion::{metrics::AtlasScanMetrics, opener::AtlasOpener, pool::AtlasReaderPool};
 use crate::store::AtlasReaderCache;
@@ -60,6 +61,9 @@ pub struct AtlasSource {
     cache: AtlasReaderCache,
     /// The scan's pools, one per collection, shared by every partition.
     reader_pool: Arc<AtlasReaderPool>,
+    /// The rule that merged the table schema. It decides which casts read
+    /// null. The format sets it from the session when it plans.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl AtlasSource {
@@ -76,7 +80,14 @@ impl AtlasSource {
             projection: None,
             cache,
             reader_pool: Arc::new(AtlasReaderPool::new()),
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
+    }
+
+    /// The same source, with the merge rule of the session.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = strategy;
+        self
     }
 
     /// Carry a projection the scan pushed down.
@@ -108,6 +119,7 @@ impl FileSource for AtlasSource {
             predicate: self.predicate.clone(),
             scan_metrics: AtlasScanMetrics::new(&self.execution_plan_metrics, partition),
             reader_pool: Arc::clone(&self.reader_pool),
+            type_widening: Arc::clone(&self.type_widening),
         }))
     }
 

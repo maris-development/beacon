@@ -345,7 +345,8 @@ impl FileFormat for AtlasFormat {
             table_schema,
             self.cache.clone(),
         )
-        .with_projection(projection);
+        .with_projection(projection)
+        .with_type_widening(Arc::clone(&session_widening(state).strategy));
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))

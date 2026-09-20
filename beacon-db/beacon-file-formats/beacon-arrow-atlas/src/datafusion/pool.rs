@@ -19,6 +19,7 @@ use anyhow::Context as _;
 use arrow::array::{RecordBatch, RecordBatchOptions};
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::nd::{NdRecordBatch, encode_nd_record_batch};
+use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use beacon_nd_array::dataset::source::DatasetSource;
 use crossbeam::queue::ArrayQueue;
 use datafusion::physical_plan::PhysicalExpr;
@@ -55,6 +56,8 @@ pub(crate) struct PoolOpen<'a> {
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
     /// The partition's metrics. The datasets this consumer reads count here.
     pub scan_metrics: AtlasScanMetrics,
+    /// The rule that merged `logical_schema`. It decides which casts read null.
+    pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl Debug for AtlasReaderPool {
@@ -91,8 +94,14 @@ impl AtlasReaderPool {
         let pool = cell
             .get_or_try_init(|| async {
                 let open_timer = open.scan_metrics.open_time.timer();
-                let atlas_view =
-                    AtlasView::new(open.cache, store, object_meta, open.logical_schema).await?;
+                let atlas_view = AtlasView::new(
+                    open.cache,
+                    store,
+                    object_meta,
+                    open.logical_schema,
+                    open.type_widening,
+                )
+                .await?;
                 drop(open_timer);
                 let datasets = atlas_view
                     .list_datasets(open.predicate, open.scan_metrics.clone())
@@ -228,7 +237,11 @@ fn dataset_stream(
                     return count_batch(Arc::clone(&pool.projected_schema), rows);
                 }
                 let nd = read_chunk(&source, chunk, &dataset).await?;
-                let nd = under_fields(&nd, pool.atlas_view.table_schema().fields())?;
+                let nd = under_fields(
+                    &nd,
+                    pool.atlas_view.table_schema().fields(),
+                    pool.atlas_view.type_widening().as_ref(),
+                )?;
                 let batch =
                     encode_nd_record_batch(&nd)?.with_schema(Arc::clone(&pool.projected_schema))?;
                 Ok(batch)
@@ -270,7 +283,7 @@ mod tests {
     use super::*;
     use crate::{compat, test_support};
     use beacon_datafusion_ext::nd::{decode_nd_record_batch, encoded_schema};
-    use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
+    use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as ColumnExpr, Literal};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -305,6 +318,7 @@ mod tests {
             projected_schema: projected,
             predicate,
             scan_metrics: metrics,
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         };
         pool.open(store, marker, open).await.unwrap()
     }

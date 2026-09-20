@@ -13,6 +13,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use datafusion::datasource::physical_plan::{
     ArrowOpener, FileGroupPartitioner, FileOpener, FileScanConfig, FileSource,
 };
@@ -50,17 +51,28 @@ pub struct BeaconArrowSource {
     /// computed expressions, partition columns — to [`ProjectionOpener`].
     projection: SplitProjection,
     metrics: ExecutionPlanMetricsSet,
+    /// The rule that merged the table schema. It decides which casts read
+    /// null. The format sets it from the session when it plans.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl BeaconArrowSource {
-    /// A source over `table_schema` for `container`.
+    /// A source over `table_schema` for `container`, with the strict default
+    /// merge rule.
     pub fn new(container: IpcContainer, table_schema: TableSchema) -> Self {
         Self {
             container,
             projection: SplitProjection::unprojected(&table_schema),
             table_schema,
             metrics: ExecutionPlanMetricsSet::new(),
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
+    }
+
+    /// The same source, with the merge rule of the session.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = strategy;
+        self
     }
 
     /// The container this source reads.
@@ -110,7 +122,7 @@ impl FileSource for BeaconArrowSource {
             }
         };
 
-        let adapting = AdaptingOpener::wrap(inner, read_schema);
+        let adapting = AdaptingOpener::wrap(inner, read_schema, Arc::clone(&self.type_widening));
         ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
     }
 

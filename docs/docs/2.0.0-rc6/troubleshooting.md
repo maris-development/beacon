@@ -141,7 +141,8 @@ BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first
 The table then reports the type of the first file. Every other file casts to it, and a value that
 type cannot hold reads as `NULL`. The first file is the first in listing order, so a store that
 lists in two orders reports two types. A numeric pair, such as `Int32` beside `Float64`, widens
-either way.
+either way. A CSV collection parses every column as text under this setting and casts it afterwards,
+because a CSV file states no types.
 
 A number beside a string is no conflict in numpy: the number reads as text. Take the numpy
 strategy to apply that rule, and the rest of the promotion table of `numpy.result_type`:

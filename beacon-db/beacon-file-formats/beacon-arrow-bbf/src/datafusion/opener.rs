@@ -15,6 +15,7 @@ use beacon_binary_format::{
     reader::async_reader::{AsyncBBFReader, AsyncPruningIndexReader},
 };
 use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
+use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use datafusion::{
     common::pruning::PruningStatistics,
     datasource::{
@@ -44,6 +45,8 @@ pub struct BBFOpener {
     /// Row count per slice when `split_streams_slice` is set (the session batch
     /// size, propagated from the source).
     split_batch_size: usize,
+    /// The rule that merged the table schema. It decides which casts read null.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl FileOpener for BBFOpener {
@@ -51,6 +54,8 @@ impl FileOpener for BBFOpener {
         let async_reader =
             ArrowBBFObjectReader::new(file.object_meta.location.clone(), self.object_store.clone());
         let projected_schema = self.projected_schema.clone();
+        let type_widening = Arc::clone(&self.type_widening);
+        let fut_type_widening = Arc::clone(&self.type_widening);
         let pruning_predicate = self.pruning_predicate.clone();
         let table_schema = self.table_schema.clone();
         let file_tracer = self.file_tracer.clone();
@@ -91,7 +96,7 @@ impl FileOpener for BBFOpener {
                         .collect();
                     let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
                     let schema_mapper = Arc::new(
-                        batch_adapter_factory(fut_projected_schema.clone())
+                        batch_adapter_factory(fut_projected_schema.clone(), fut_type_widening)
                             .make_adapter(&source_schema)?,
                     );
                     let mut selection: Option<BooleanArray> = None;
@@ -150,8 +155,11 @@ impl FileOpener for BBFOpener {
                         });
                         let batch_schema = arrow_batch.schema();
                         // Map the batch schema to the table schema.
-                        let schema_mapper = batch_adapter_factory(projected_schema.clone())
-                            .make_adapter(&batch_schema)?;
+                        let schema_mapper = batch_adapter_factory(
+                            projected_schema.clone(),
+                            Arc::clone(&type_widening),
+                        )
+                        .make_adapter(&batch_schema)?;
                         let mapped_batch = schema_mapper
                             .adapt_batch(&arrow_batch)
                             .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
@@ -351,6 +359,7 @@ impl BBFOpener {
         metrics: BBFGlobalMetrics,
         split_streams_slice: bool,
         split_batch_size: usize,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> Self {
         Self {
             projected_schema,
@@ -362,6 +371,7 @@ impl BBFOpener {
             metrics,
             split_streams_slice,
             split_batch_size,
+            type_widening,
         }
     }
 
