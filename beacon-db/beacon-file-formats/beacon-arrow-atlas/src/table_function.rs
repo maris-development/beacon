@@ -120,9 +120,7 @@ impl TableFunctionImpl for ReadAtlasFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        // Build the format from the factory registered on the session, so the
-        // function shares the runtime's settings and its reader cache. The
-        // per-call dimensions ride along as a table option.
+        // Builds the format from the session's factory, so settings and cache are shared.
         let mut format_options: HashMap<String, String> = HashMap::new();
         if !dimensions.is_empty() {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));

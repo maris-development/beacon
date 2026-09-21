@@ -1,11 +1,7 @@
 //! The mapping between an Atlas collection and Beacon's ND array model: column
 //! names, element types, and the Arrow schema of a whole collection.
 //!
-//! One mapping, in one place. The Arrow type of a column follows from its
-//! [`NdArrayDataType`] through `beacon-nd-array`'s own conversion, so a schema
-//! derived here and a batch produced by a scan can never disagree. The lazy
-//! arrays a scan reads through take their types from the same tables, see
-//! [`dataset`](crate::dataset).
+//! One mapping, in one place, so a schema and a scanned batch never disagree.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,8 +21,7 @@ pub fn array_attr_column(array: &str, attr: &str) -> String {
 
 /// The column a dataset-level attribute is surfaced under: `.{attr}`.
 ///
-/// The leading dot is what netCDF and Zarr use, and it keeps a dataset
-/// attribute from colliding with an array of the same name.
+/// The leading dot follows netCDF and Zarr, and avoids colliding with an array name.
 pub fn global_attr_column(attr: &str) -> String {
     format!(".{attr}")
 }
@@ -55,12 +50,9 @@ fn scalar_dtype_to_nd(dtype: &DType) -> Option<NdArrayDataType> {
     })
 }
 
-/// The ND type of an atlas **array** dtype, or `None` for one Beacon cannot
-/// read as a column.
+/// The ND type of an atlas **array** dtype, or `None` for one Beacon cannot read as a column.
 ///
-/// `Bool` is excluded, unlike an attribute: `array-format` implements no
-/// element type for `bool`, so no reader can produce the values. Every list
-/// dtype is excluded too.
+/// Excludes `Bool`: `array-format` has no element type for it, so no reader can produce values.
 pub fn array_dtype_to_nd(dtype: &DType) -> Option<NdArrayDataType> {
     match dtype {
         DType::Bool => None,
@@ -95,19 +87,7 @@ pub(crate) fn dtype_tag(dtype: &DType) -> String {
 
 /// The Arrow schema of one collection, from its footer alone.
 ///
-/// One nullable field per array, under the array's own name. A dataset
-/// attribute becomes `.{attr}`, and an array attribute `{array}.{attr}`. A
-/// name that two datasets type differently takes the type `widening` gives
-/// the set, with the conflict mark it applies. A dtype Beacon cannot read is
-/// dropped with a `debug` log.
-///
-/// Every dataset in the container counts, deleted ones too. A column only a
-/// deleted dataset declares reads as null. `read_dimensions` does not narrow
-/// this schema: the footer holds no dimension name.
-///
-/// The fields are sorted by name. Atlas permits an array named `.season` or
-/// `temperature.units`, so one column name can come from two maps. Their types
-/// then merge as one column.
+/// One nullable field per array and attribute, typed per `widening`. Includes deleted datasets.
 pub fn collection_arrow_schema(
     schema: &CollectionSchema<'_>,
     widening: &ArrowTypeWidening,
@@ -142,8 +122,7 @@ pub fn collection_arrow_schema(
 
 /// The Arrow types of `dtypes` that Beacon can read as column `column`.
 ///
-/// A dtype `to_arrow` refuses is logged at `debug` and dropped. A collection
-/// can hold a million datasets, so a `warn` per skip would be a flood.
+/// Logs a refused dtype at `debug` and drops it, to avoid a flood of warnings.
 fn readable_types(
     column: &str,
     dtypes: &[&DType],
@@ -163,10 +142,7 @@ fn readable_types(
 
 /// The field column `name` takes when its sources state `types`.
 ///
-/// One nullable single-field schema per type, merged under the session rule.
-/// That is [`ArrowTypeWidening::merge_schemas`] for one column: the same
-/// widening, the same conflict setting, and the same conflict mark, which the
-/// scan reads to cast a source the type cannot hold as null.
+/// Merges the types via [`ArrowTypeWidening::merge_schemas`], same conflict rule as the scan.
 fn merge_types(
     widening: &ArrowTypeWidening,
     name: &str,

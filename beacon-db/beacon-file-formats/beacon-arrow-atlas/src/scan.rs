@@ -1,13 +1,7 @@
-//! The scan: what it reads, the datasets of each collection left to read, and
-//! the batches they become.
+//! The scan: what it reads, and the batches it yields.
 //!
-//! [`ScanSpec`] is decided once per partition and shared by every stage. A
-//! collection's `CollectionQueue` is built once, on the first open, and every
-//! later open of the same collection gets a `DatasetStream` over it. The
-//! stream pops the next dataset off the shared queue, reads it one stored
-//! chunk at a time, and yields each chunk as one nd-encoded batch under the
-//! scan's fields. Two streams that poll at once drain different datasets, so a
-//! dataset is read by one partition and by no other.
+//! `ScanSpec` is shared by every stage. Each `DatasetStream` pops datasets
+//! from a shared `CollectionQueue`, so one partition reads each dataset.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -40,19 +34,14 @@ use crate::metrics::AtlasScanMetrics;
 use crate::open::AtlasReaderCache;
 use crate::view::AtlasView;
 
-/// What one scan reads.
-///
-/// The source builds one per partition, and the opener, the queue and the
-/// view of every collection the partition opens read through the same handle.
-/// Nothing here changes after planning.
+/// What one scan reads. Shared by every stage through one handle.
 #[derive(Debug)]
 pub struct ScanSpec {
-    /// The scan's output schema, nd-encoded. Every batch goes out under it. Its
-    /// field *names* are the columns to keep, and the encoding leaves names
-    /// alone.
+    /// The scan's output schema, nd-encoded. Field names are the columns to
+    /// keep.
     pub projected_schema: SchemaRef,
-    /// The same schema with the encoding unwrapped. The columns, the predicate
-    /// and the pruning engine are written against it.
+    /// The same schema with encoding unwrapped. Columns, predicates and
+    /// pruning are written against it.
     pub logical_schema: SchemaRef,
     /// The dimensions the scan reads, or `None` for each dataset's default.
     pub read_dimensions: Option<Vec<String>>,
@@ -60,8 +49,7 @@ pub struct ScanSpec {
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
     /// The rule that merged the table schema. It decides which casts read null.
     pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
-    /// The query's token. When it fires, every stage stops with an error: an
-    /// open in progress, the pruning pivot, and a stream between two chunks.
+    /// The query's token. When it fires, every stage stops with an error.
     pub cancel: CancellationToken,
 }
 
@@ -90,19 +78,14 @@ impl ScanSpec {
 
 /// The error a stage reports when the query's token fires.
 ///
-/// An error, not an end: a stream that ended early would hand back a short
-/// answer as if it were whole.
+/// An error, not an end: a short stream must not look whole.
 pub(crate) fn cancelled() -> anyhow::Error {
     anyhow::anyhow!("the query was cancelled")
 }
 
-/// Refuse a scan that projects no column.
-///
-/// A dataset's row count follows the dimensions of the columns it reads. With
-/// no column there is no dimension set, so the count of a dataset that holds
-/// arrays on different grids has no one answer. The scan refuses rather than
-/// pick one. `COUNT(*)` reaches here; `COUNT(column)` projects a column and
-/// does not.
+/// Refuse a scan that projects no column. A dataset's row count follows the
+/// dimensions of its columns, so `COUNT(*)` fails here and `COUNT(column)`
+/// succeeds.
 pub(crate) fn require_projection(projected_schema: &Schema) -> Result<()> {
     if projected_schema.fields().is_empty() {
         return plan_err!(
@@ -118,8 +101,7 @@ pub(crate) fn require_projection(projected_schema: &Schema) -> Result<()> {
 type Cells = HashMap<Path, Arc<OnceCell<Arc<CollectionQueue>>>>;
 
 /// The queues of one scan, one per collection, keyed by the container's path.
-///
-/// Shared by every partition of the scan through the source.
+/// Shared by every partition through the source.
 #[derive(Default, Clone)]
 pub struct CollectionQueues {
     cells: Arc<RwLock<Cells>>,
@@ -137,11 +119,8 @@ impl CollectionQueues {
     }
 
     /// One stream over the collection at `object_meta`.
-    ///
-    /// The first call for a collection opens it, through `cache` when given,
-    /// prunes its datasets, and queues the survivors. Every call gets a stream
-    /// over that queue. The open and the prune are timed on the first caller's
-    /// metrics, and each stream counts the datasets it reads on its own.
+    /// The first call opens it and queues its datasets; every call gets a
+    /// stream over the shared queue.
     pub(crate) async fn open(
         &self,
         cache: Option<&AtlasReaderCache>,
@@ -166,10 +145,8 @@ impl CollectionQueues {
     }
 }
 
-/// One collection's view, and the datasets of it left to read.
-///
-/// The queue holds no read state, so the partitions that share a collection
-/// share it freely. [`CollectionQueue::stream`] makes one consumer of it.
+/// One collection's view, and the datasets left to read. Holds no read
+/// state, so partitions share it freely.
 pub(crate) struct CollectionQueue {
     view: AtlasView,
     /// The datasets left to read, in listing order.
@@ -179,8 +156,7 @@ pub(crate) struct CollectionQueue {
 impl CollectionQueue {
     /// Open the collection, prune its datasets, and queue the survivors.
     ///
-    /// A cancelled query stops the open where it stands, footer read or
-    /// pivot, and reports the cancellation.
+    /// A cancelled query stops the open where it stands and reports the error.
     async fn open(
         cache: Option<&AtlasReaderCache>,
         store: Arc<dyn ObjectStore>,
@@ -195,9 +171,7 @@ impl CollectionQueue {
             drop(open_timer);
             let datasets = view.list_datasets(scan_metrics).await?;
 
-            // A queue has at least one slot: `ArrayQueue::new(0)` panics. With
-            // no dataset to read the slot stays empty, the first `pop` finds
-            // nothing, and the stream ends at once.
+            // At least one slot: ArrayQueue::new(0) would panic.
             let queue = ArrayQueue::new(datasets.len().max(1));
             for dataset in datasets {
                 queue
@@ -224,12 +198,8 @@ impl CollectionQueue {
     }
 }
 
-/// One consumer of a collection's shared queue.
-///
-/// It streams the datasets it pops, one nd-encoded batch per stored chunk.
-/// The dataset in hand is a boxed stream, which is `Send` and not `Sync`, so
-/// the consumer lives with the partition that polls it and never in the
-/// shared queue.
+/// One consumer of a collection's shared queue. Streams one nd-encoded
+/// batch per stored chunk of each dataset it pops.
 pub(crate) struct DatasetStream {
     queue: Arc<CollectionQueue>,
     /// The partition's metrics. The datasets this consumer reads count here.
@@ -274,10 +244,7 @@ impl Stream for DatasetStream {
 
 /// One dataset's batches: one encoded nd batch per stored chunk, in C order.
 ///
-/// The dataset is built when the stream is first polled, and each chunk is
-/// read when the stream reaches it. A chunk goes out under the table's
-/// fields, cast to the types the table declares, and under the encoded table
-/// schema, so every batch of the queue has the one schema the scan expects.
+/// Each chunk is cast to the table's fields and encoded under the table schema.
 fn dataset_batches(
     queue: Arc<CollectionQueue>,
     scan_metrics: AtlasScanMetrics,
@@ -328,13 +295,9 @@ async fn read_chunk(
         })
 }
 
-/// `nd` under `fields`: every field in order, on the same target grid.
-///
-/// A column comes out under the array's own type, and the table may declare a
-/// wider one: that is a cast. A field the dataset lacks is a rank-0 null,
-/// which broadcasts to an all-null column. The decoder makes the same of a
-/// null struct row, so the scan sees one thing either way. `type_widening` is
-/// the rule that merged the table schema, and it decides which casts read null.
+/// `nd` under `fields`: every field in order, on the same target grid. A
+/// missing field reads as a rank-0 null. `type_widening` decides which casts
+/// read null instead of erroring.
 pub(crate) fn under_fields(
     nd: &NdRecordBatch,
     fields: &[FieldRef],
@@ -368,13 +331,9 @@ fn null_scalar(field: &Field) -> NdArrowArray {
         .expect("one element on no axis")
 }
 
-/// `values` in the type the table declares for `field`, or `None` for values
-/// the table cannot hold.
-///
-/// A dataset may store a column narrower than the merged type, and the merge
-/// widened it: that is a cast. A dataset of another family than the table
-/// column reached the scan through `TypeConflict::KeepFirst` alone, and the
-/// rule that merged the schema says so. Such a dataset reads as null.
+/// `values` in the type `field` declares, or `None` for values the table
+/// cannot hold. A narrower stored column is cast up. A column of another type
+/// reads null.
 fn as_field_type(
     values: ArrayRef,
     field: &Field,

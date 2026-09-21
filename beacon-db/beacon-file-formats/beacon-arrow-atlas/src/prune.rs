@@ -1,38 +1,7 @@
-//! Dropping the datasets a predicate cannot match, from what is in memory.
+//! Drops the datasets a predicate cannot match, from what is in memory.
 //!
-//! # One index, not a decision per dataset
-//!
-//! A collection can hold millions of datasets. Evaluating a predicate against
-//! each one in turn would cost millions of evaluations. Instead the opener
-//! builds one `PruningIndex` over the collection: one row per live dataset,
-//! and one column of typed Arrow statistics per column the predicate names.
-//! DataFusion's [`PruningPredicate`] then judges the whole collection in one
-//! vectorised pass, and the result is one bit per dataset.
-//!
-//! The inputs are the view's column views. A variable's segment records
-//! the statistics of every dataset that wrote it, and an attribute view holds
-//! every dataset's value. Both are in memory once the views exist, so the
-//! index costs no I/O. Reading the views rather than asking the collection
-//! again also keeps pruning on the columns the scan reads: a column resolves
-//! one way, in `column_views`.
-//!
-//! # A column the dataset lacks
-//!
-//! The scan reads such a column as nulls, so the index says so:
-//! `null_count == row_count`. DataFusion then drops the dataset for `x > 5`
-//! and for `x IS NOT NULL`, and keeps it for `x IS NULL`.
-//!
-//! The writer counts a cell nobody wrote as null too. With a fill value that is
-//! what the scan reads, and the counts hold. Without one the scan reads zeros,
-//! so an entry with unwritten cells and no fill value says nothing about its
-//! values. Its counts stay unknown, and its dataset stays in.
-//!
-//! # Pruning is only ever an optimization
-//!
-//! Every path here fails open: an error, a predicate the engine cannot use, or
-//! a bound that will not cast all leave the datasets in. A dataset that
-//! survives is still filtered row by row above the scan, so a hiccup here
-//! costs time and never a row.
+//! Builds one `PruningIndex` over the view's column views and lets
+//! DataFusion prune in one pass. Every path fails open on error or doubt.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,13 +22,7 @@ use crate::view::AtlasColumnView;
 
 /// The datasets of `names` that `predicate` could still match, in order.
 ///
-/// `logical_schema` must type every column the predicate names, which the
-/// scan's own projected schema does: a filter that stays above the scan forces
-/// its columns into the projection. `views` must resolve those columns the way
-/// the scan reads them.
-///
-/// Fails open to `names` on anything it cannot prove, a cancelled query
-/// included: the caller reports the cancellation, and reads nothing.
+/// Fails open to `names` on anything it cannot prove, including cancellation.
 pub(crate) async fn prune_datasets(
     views: &Arc<IndexMap<FieldRef, Option<AtlasColumnView>>>,
     names: Vec<String>,
@@ -92,10 +55,7 @@ pub(crate) async fn prune_datasets(
         return names;
     }
 
-    // The pivot is pure CPU over what is in memory, and a million rows is
-    // real work, so it does not run on the async runtime. Tokio cannot abort
-    // a blocking task, so the pivot watches a token of its own: the query's
-    // token fires it, and so does the guard when this future is dropped.
+    // Runs off the async runtime; a token of its own lets it abort early.
     let pivot = cancel.child_token();
     let _guard = pivot.clone().drop_guard();
     let names: Arc<[String]> = names.into();
@@ -212,10 +172,7 @@ fn stop_at(row: usize, cancel: &CancellationToken) -> bool {
 
 /// One array column, from the segment that holds the variable.
 ///
-/// A dataset the segment has no entry for does not declare the array. The scan
-/// reads it as nulls, and `null_count == row_count` says so. An entry without
-/// statistics, or one whose unwritten cells read as zeros rather than as the
-/// nulls the writer counted, says nothing, and that dataset stays in.
+/// A dataset with no entry reads as null. One with no usable stats stays in.
 fn pack_array_column(
     segment: &ArrayFile,
     names: &[String],
@@ -242,9 +199,7 @@ fn pack_array_column(
             continue;
         };
         if info.fill_value.is_none() && stats.null_count > 0 {
-            // The nulls the writer counted are cells nobody wrote. Without a
-            // fill value the scan reads them as zeros, which the bounds do
-            // not cover either.
+            // Without a fill value, unwritten cells read as zeros, not nulls.
             continue;
         }
         mins[row] = stat_to_scalar(stats.min.as_ref(), target, &null);
@@ -263,10 +218,7 @@ fn pack_array_column(
 
 /// One attribute column.
 ///
-/// An attribute's value is exact, so it is both the minimum and the maximum of
-/// its dataset, on the one cell the scan reads. That prunes an equality on a
-/// dataset-level attribute, the platform a file came from, say. A dataset
-/// without the key reads as null, and the counts say so.
+/// An attribute's value is exact, so it is both its dataset's min and max.
 fn pack_attribute_column(
     values: &IndexMap<String, Attr>,
     names: &[String],
@@ -669,10 +621,8 @@ mod tests {
         );
     }
 
-    /// `d` declares `value` with no fill value and never writes it. The writer
-    /// counted both cells as null, yet the scan reads them as zeros, so the
-    /// index must not trust the count. `d` stays in. `w` wrote [5, 6], and
-    /// its statistics rule it out.
+    /// `d` has no fill value and no writes; the writer's null count must not
+    /// be trusted, so `d` stays in. `w` wrote real values and is ruled out.
     #[tokio::test]
     async fn a_declared_array_nobody_wrote_is_never_pruned() {
         let tmp = tempfile::tempdir().unwrap();
@@ -746,10 +696,8 @@ mod tests {
         );
     }
 
-    /// The index is built by hand here. Writing that many real datasets would
-    /// take minutes and prove nothing extra. What this pins is that the
-    /// evaluation is one pass over Arrow arrays rather than a decision per
-    /// dataset.
+    /// Built by hand: writing this many real datasets would prove nothing
+    /// extra. This pins that evaluation is one pass, not one per dataset.
     #[test]
     fn a_large_index_is_judged_in_one_pass() {
         use arrow::array::Float64Array;
@@ -757,8 +705,7 @@ mod tests {
         const ROWS: usize = 200_000;
         const THRESHOLD: f64 = 199_000.0;
 
-        // Row i covers [i, i + 1], so exactly the rows above the threshold
-        // survive.
+        // Row i covers [i, i + 1]; rows above the threshold survive.
         let mins: Float64Array = (0..ROWS).map(|row| Some(row as f64)).collect();
         let maxes: Float64Array = (0..ROWS).map(|row| Some(row as f64 + 1.0)).collect();
         let counts: UInt64Array = (0..ROWS).map(|_| Some(0u64)).collect();
@@ -789,8 +736,7 @@ mod tests {
 
         let kept = pruning.prune(&index).expect("one pass over the index");
         assert_eq!(kept.len(), ROWS);
-        // Row i survives when its maximum, i + 1, exceeds the threshold, so the
-        // survivors are the rows from the threshold onward.
+        // Row i survives when its max, i + 1, exceeds the threshold.
         let expected = ROWS - THRESHOLD as usize;
         assert_eq!(kept.iter().filter(|keep| **keep).count(), expected);
     }

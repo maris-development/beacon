@@ -1,10 +1,7 @@
 //! The lazy arrays one dataset reads through.
 //!
-//! [`AtlasArrayBackend`] reads one dataset's entry of a variable's segment on
-//! demand. [`AttributeBackend`] holds one attribute value as a rank-0 array.
-//! [`array_to_nd_array`] and [`attribute_to_nd_array`] wrap each as the
-//! [`NdArrayD`] the nd engine reads, typed by the tables in
-//! [`schema`](crate::schema).
+//! [`AtlasArrayBackend`] reads one dataset's entry of a segment on demand.
+//! [`AttributeBackend`] holds one attribute value as a rank-0 array.
 
 use std::sync::Arc;
 
@@ -19,12 +16,7 @@ use ndarray::ArrayD;
 use crate::schema::dtype_tag;
 
 /// A Beacon element type that can be read out of an atlas array.
-///
-/// Atlas reads through [`atlas::ArrayElement`], and Beacon's ND model through
-/// [`NdArrayType`]. The two agree on the numeric types, `String` and
-/// `Vec<u8>`, but Beacon's [`TimestampNanosecond`] is its own newtype over
-/// `i64` and needs a conversion. This trait hides that difference behind one
-/// entry point, so [`AtlasArrayBackend`] stays generic.
+/// Converts atlas's element types to Beacon's, including the `TimestampNanosecond` newtype.
 #[async_trait::async_trait]
 pub trait AtlasElement: NdArrayType {
     /// Read `shape` elements of `dataset`'s entry in `segment` from `start`.
@@ -37,9 +29,7 @@ pub trait AtlasElement: NdArrayType {
 
     /// This type's form of an array's fill value.
     ///
-    /// The engine nulls every element equal to it, so it has to be the value
-    /// the read actually returns for a cell nobody wrote. Deferring to
-    /// `array-format`'s own conversion is what guarantees that.
+    /// The engine nulls elements equal to it; must match what a read returns for an unwritten cell.
     fn fill_element(fill: Option<&FillValue>) -> Self;
 }
 
@@ -84,10 +74,8 @@ passthrough!(f64);
 passthrough!(String);
 passthrough!(Vec<u8>);
 
-/// Both types are `#[repr(transparent)]` over `i64`, so the conversion is a
-/// rename. It is still done element by element, because the two are distinct
-/// types and a transmute of a whole array would rest on layout rather than on
-/// the type system.
+/// Both types are `#[repr(transparent)]` over `i64`, so this converts by renaming.
+/// Done element by element; a whole-array transmute would rely on layout, not types.
 #[async_trait::async_trait]
 impl AtlasElement for TimestampNanosecond {
     async fn read(
@@ -113,12 +101,7 @@ impl AtlasElement for TimestampNanosecond {
 }
 
 /// Reads one dataset's entry of an atlas segment lazily, one region at a time.
-///
-/// The backend holds the segment itself, not a
-/// [`DatasetView`](atlas::DatasetView). A segment holds one variable for every
-/// dataset in the collection, keyed by dataset name, so a read is one call on
-/// it. A view would resolve the segment through the footer and re-check the
-/// element type on every read.
+/// Holds the segment itself, not a [`DatasetView`](atlas::DatasetView), to avoid re-resolving it per read.
 pub struct AtlasArrayBackend<T: NdArrayType> {
     segment: Arc<ArrayFile>,
     dataset: String,
@@ -142,9 +125,7 @@ impl<T: NdArrayType> std::fmt::Debug for AtlasArrayBackend<T> {
 impl<T: NdArrayType + AtlasElement> AtlasArrayBackend<T> {
     /// The backend for `dataset`'s entry in `segment`.
     ///
-    /// The layout comes from the segment, which records the shape, chunking,
-    /// dimension names and fill value of every entry. The lookup costs no I/O.
-    /// A dataset the segment does not hold is refused by name.
+    /// Reads the layout from the segment at no I/O cost. Refuses an unknown dataset by name.
     pub fn try_new(segment: Arc<ArrayFile>, dataset: String) -> anyhow::Result<Self> {
         let info = segment.array(&dataset).ok_or_else(|| {
             anyhow::anyhow!("dataset '{dataset}' has no entry in this atlas segment")
@@ -183,8 +164,7 @@ impl<T: NdArrayType + AtlasElement> ArrayBackend<T> for AtlasArrayBackend<T> {
 
     /// The chunk shape the writer chose.
     ///
-    /// The scan cuts a dataset on this grid, so one unit of work is one stored
-    /// chunk and a read fetches no block it does not need.
+    /// The scan cuts a dataset on this grid, so a read fetches only the chunks it needs.
     fn chunk_shape(&self) -> Vec<usize> {
         self.chunk_shape.clone()
     }
@@ -199,9 +179,7 @@ impl<T: NdArrayType + AtlasElement> ArrayBackend<T> for AtlasArrayBackend<T> {
 }
 
 /// Holds one attribute value as a rank-0 array.
-///
-/// The value came from the collection footer, which the open already read, so
-/// nothing here touches the store.
+/// The value comes from the footer the open already read; nothing here touches the store.
 #[derive(Debug)]
 pub struct AttributeBackend<T: NdArrayType> {
     value: T,
@@ -240,13 +218,7 @@ impl<T: NdArrayType> ArrayBackend<T> for AttributeBackend<T> {
 
 /// Wrap one dataset's entry of an atlas segment as a lazy [`NdArrayD`].
 ///
-/// No array data is read here. `dtype` comes from the collection footer, and
-/// the layout from `segment`, which one open serves for the whole collection.
-/// The values themselves arrive when the engine asks the backend for a subset.
-///
-/// The chunk shape is the one the writer chose. It is what lets the scan cut a
-/// dataset on the grid the file actually stores, so one unit of work is one
-/// stored chunk.
+/// No data is read here; values arrive when the engine asks for a subset.
 pub fn array_to_nd_array(
     segment: Arc<ArrayFile>,
     dataset: &str,
@@ -287,9 +259,7 @@ pub fn array_to_nd_array(
 
 /// Wrap one scalar attribute value as a rank-0 [`NdArrayD`].
 ///
-/// A rank-0 array broadcasts onto whatever grid the dataset's own arrays
-/// define, so the value repeats across every row the dataset contributes.
-/// A list-valued attribute has no such analogue and is refused.
+/// Broadcasts across every row the dataset contributes. Refuses a list-valued attribute.
 pub fn attribute_to_nd_array(attr: &Attr) -> anyhow::Result<Arc<dyn NdArrayD>> {
     macro_rules! scalar {
         ($value:expr) => {
@@ -419,8 +389,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ArrayBackend::<f64>::chunk_shape(&backend), vec![2, 3]);
-        // Rows 1..3, columns 2..4 of a 4x6 grid whose value is row * 6 + col.
-        // That window straddles all four chunk columns and both chunk rows.
+        // Window spans all four chunk columns and both chunk rows.
         let values = backend
             .read_subset(ArraySubset::new(vec![1, 2], vec![2, 2]))
             .await

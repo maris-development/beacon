@@ -1,10 +1,7 @@
 use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder, Time};
 
-/// Per-partition timings and counts for one Atlas scan partition.
-///
-/// Every field is an `Arc`-backed handle into the shared
-/// [`ExecutionPlanMetricsSet`], so a clone is cheap and every clone accumulates
-/// into the same metric.
+/// Per-partition timings and counts for one Atlas scan partition. Each
+/// field is a cheap handle shared with [`ExecutionPlanMetricsSet`].
 #[derive(Debug, Clone)]
 pub struct AtlasScanMetrics {
     /// Wall time opening collections, or hitting the reader cache for them.

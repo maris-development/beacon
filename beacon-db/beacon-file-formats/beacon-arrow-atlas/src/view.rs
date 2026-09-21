@@ -1,16 +1,7 @@
 //! One collection, resolved against the table's schema.
 //!
 //! A column view says where one column of the scan comes from, for every
-//! dataset at once: the variable's segment, or the attribute values keyed by
-//! dataset. One segment open per array and one attribute sweep per key cost
-//! the same however many datasets the collection holds, so a view pays them
-//! once, and every dataset reads against the result. Pruning judges through
-//! the same views, so the scan and the pruning see one resolution of a name.
-//!
-//! One dataset is then a lazy [`DatasetSource`] over those views. It reads one
-//! stored chunk at a time as an `NdRecordBatch`, each column on the axes the
-//! dataset stores it on, and `under_fields` puts that chunk under the scan's
-//! fields.
+//! dataset at once. Pruning and the scan read through the same views.
 
 use std::sync::Arc;
 
@@ -36,9 +27,7 @@ use crate::{
 };
 
 /// An open collection and the resolution of every column of the scan.
-///
-/// The scan projects at least one column, see [`ScanSpec::new`]. A dataset's
-/// grid is therefore always the grid of the columns it reads.
+/// A dataset's grid is the grid of the columns it reads.
 #[derive(Clone)]
 pub struct AtlasView {
     atlas: Arc<Atlas>,
@@ -76,8 +65,7 @@ impl AtlasView {
 
     /// The datasets worth reading, in the collection's order.
     ///
-    /// A dataset the deletion mask hides is not listed. With a predicate, one
-    /// the statistics rule out is dropped too, and counted on `scan_metrics`.
+    /// A dataset the deletion mask hides is skipped; a predicate may drop more.
     pub async fn list_datasets(
         &self,
         scan_metrics: &AtlasScanMetrics,
@@ -103,19 +91,7 @@ impl AtlasView {
     }
 
     /// One dataset of the collection as a lazy nd dataset, under the table's
-    /// fields.
-    ///
-    /// The dataset holds an array for every field it has: the variable's
-    /// entry in its segment, read on demand through the atlas backend, or an
-    /// attribute value on no axis. A field it lacks has no array, and reads
-    /// as a rank-0 null. No array data is read here. The dataset's layout
-    /// comes from the segments, and its chunk grid is the one the writer
-    /// chose.
-    ///
-    /// The arrays are then narrowed to the dimensions the scan reads, by the
-    /// rule every nd format shares: an explicit list wins, and without one the
-    /// dataset's broadcast-compatible default is taken. An array on any other
-    /// axis is dropped, and its column reads as null on the grid that is kept.
+    /// fields. Arrays are narrowed to the read dimensions. Others read as null.
     pub async fn dataset(&self, dataset_name: &str) -> anyhow::Result<Arc<dyn DatasetSource>> {
         let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
         for (field, view) in &*self.column_views {
@@ -135,9 +111,7 @@ impl AtlasView {
                 },
                 Some(AtlasColumnView::GlobalAttribute { map })
                 | Some(AtlasColumnView::VariableAttribute { map }) => {
-                    // A list has no rank-0 form, and the schema holds no list
-                    // column. A dataset that stores a list under a scalar
-                    // column's key reads as null.
+                    // A list has no rank-0 form, so it reads as null here.
                     map.get(dataset_name)
                         .and_then(|attr| dataset::attribute_to_nd_array(attr).ok())
                 }
@@ -154,12 +128,9 @@ impl AtlasView {
     }
 }
 
-/// `arrays` narrowed to the dimensions the scan reads.
-///
-/// `read_dimensions` names them, or `None` leaves the choice to the dataset's
-/// broadcast-compatible default, see [`resolve_read_dimensions`]. An array
-/// survives when every one of its axes is in the set, so an attribute on no
-/// axis always does. With no set to apply, every array survives.
+/// `arrays` narrowed to the dimensions the scan reads. `read_dimensions` names
+/// them, or `None` takes the dataset's default via [`resolve_read_dimensions`].
+/// An array survives if all its axes are kept.
 async fn on_read_dimensions(
     dataset_name: &str,
     arrays: IndexMap<String, Arc<dyn NdArrayD>>,
@@ -181,9 +152,7 @@ async fn on_read_dimensions(
 }
 
 /// Where one column of the scan comes from, for every dataset of a collection.
-///
-/// The scan reads through it, and pruning judges through it, so both see one
-/// resolution of a column name.
+/// The scan and pruning both read through it.
 pub(crate) enum AtlasColumnView {
     /// The variable's segment. It holds the array for every dataset that
     /// declares it, keyed by dataset name.

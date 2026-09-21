@@ -1,9 +1,7 @@
 //! Opening an Atlas collection, and caching the handle.
 //!
-//! A collection is opened from its marker, the `data.atlas` container object
-//! a listing found, see [`discover`](crate::discover). The reader cache keys
-//! on the marker and on the deletion mask beside it, so a rewritten collection
-//! or a fresh delete reopens and an unchanged one does not.
+//! The reader cache keys on the marker and the deletion mask, so a rewritten
+//! collection or a fresh delete reopens, and an unchanged one does not.
 
 use std::sync::Arc;
 
@@ -16,8 +14,7 @@ use crate::discover::{ATLAS_MARKER, ATLAS_MASK, collection_prefix};
 
 /// Open the collection whose container object is `marker`, over `store`.
 ///
-/// One `HEAD`, one tail read, and one `GET` of the deletion mask when it
-/// exists. Nothing else, whatever the collection holds.
+/// One `HEAD`, one tail read, and one `GET` of the mask if it exists.
 pub async fn open_collection(
     store: Arc<dyn ObjectStore>,
     marker: &OsPath,
@@ -34,11 +31,7 @@ pub async fn open_collection(
 }
 
 /// What a cached handle describes, beyond the container itself.
-///
-/// The container never changes after a write, so its size and modification time
-/// pin its contents completely. The mask is the one part of a finished
-/// collection that can change, and it decides which datasets a handle reports,
-/// so it belongs in the key.
+/// The mask can change after a write and decides which datasets a handle reports.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MaskStamp {
     last_modified: DateTime<Utc>,
@@ -56,13 +49,7 @@ struct CacheKey {
 }
 
 /// A cache of opened collections, sized at construction.
-///
-/// Cloning shares the underlying [`moka`] cache, so the formats, sources and
-/// openers a runtime hands a clone to all draw from one store. This is
-/// per-runtime state; there is no process-global cache.
-///
-/// Each entry owns a 256 MiB block cache and a 64 MiB I/O cache of its own, so
-/// the capacity is a memory bound as much as a handle count.
+/// Cloning shares the underlying [`moka`] cache; this is per-runtime state, not global.
 #[derive(Clone)]
 pub struct AtlasReaderCache {
     cache: Cache<CacheKey, Arc<Atlas>>,
@@ -86,10 +73,7 @@ impl std::fmt::Debug for AtlasReaderCache {
 
 /// The identity of a collection's deletion mask, or `None` when it has none.
 ///
-/// One `HEAD`. An error other than "not found" also reads as `None`: the mask
-/// only ever *hides* datasets, so the worst a stale handle can do is report a
-/// dataset a concurrent delete just hid, and the alternative is failing a query
-/// over a transient head request.
+/// One `HEAD`. Any other error also reads as `None`, so a transient failure never fails a query.
 async fn mask_stamp(store: &dyn ObjectStore, prefix: &OsPath) -> Option<MaskStamp> {
     let path = prefix.clone().join(ATLAS_MASK);
     match store.head(&path).await {
@@ -108,11 +92,7 @@ async fn mask_stamp(store: &dyn ObjectStore, prefix: &OsPath) -> Option<MaskStam
 
 /// A cached handle for `marker`, opening it from `store` on a miss.
 ///
-/// With `cache` set to `None` the collection is opened directly, with no
-/// caching. Otherwise the key carries the marker's identity and the mask's, so
-/// a rewritten collection or a fresh delete produces a new key and a re-open.
-/// Concurrent first readers of one key coalesce inside
-/// [`moka::future::Cache::try_get_with`].
+/// With `cache` as `None`, opens directly. Otherwise keys on the marker and mask, so a change reopens.
 pub async fn get_or_open_atlas(
     cache: Option<&AtlasReaderCache>,
     store: Arc<dyn ObjectStore>,
@@ -140,8 +120,7 @@ pub async fn get_or_open_atlas(
         .cache
         .try_get_with(key, async move { open_collection(store, &path).await })
         .await
-        // The cache shares one error between the readers that waited on the
-        // open, so it cannot be moved out. Its chain survives as text.
+        // The cache shares one error among waiters, so it can't be moved out; keep its chain as text.
         .map_err(|e: Arc<anyhow::Error>| anyhow::anyhow!("{e:#}"))
 }
 
