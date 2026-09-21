@@ -15,7 +15,7 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-use crate::datafusion::ATLAS_FORMAT;
+use crate::format::ATLAS_FORMAT;
 
 /// Reads the Atlas collections that match one or more glob patterns.
 pub struct ReadAtlasFunc {

@@ -1,12 +1,13 @@
-//! The datasets of one collection left to read, shared by the partitions that
-//! open it.
+//! The scan: what it reads, the datasets of each collection left to read, and
+//! the batches they become.
 //!
-//! A collection's queue is built once, on the first open, and every later
-//! open of the same collection gets a stream over it. The stream pops the next
-//! dataset off the shared queue, reads it one stored chunk at a time, and
-//! yields each chunk as one nd-encoded batch. Two streams that poll at once
-//! drain different datasets, so a dataset is read by one partition and by no
-//! other.
+//! [`ScanSpec`] is decided once per partition and shared by every stage. A
+//! collection's `CollectionQueue` is built once, on the first open, and every
+//! later open of the same collection gets a `DatasetStream` over it. The
+//! stream pops the next dataset off the shared queue, reads it one stored
+//! chunk at a time, and yields each chunk as one nd-encoded batch under the
+//! scan's fields. Two streams that poll at once drain different datasets, so a
+//! dataset is read by one partition and by no other.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -16,20 +17,88 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::Context as _;
-use arrow::array::RecordBatch;
-use beacon_datafusion_ext::nd::{NdRecordBatch, encode_nd_record_batch};
+use arrow::{
+    array::{ArrayRef, RecordBatch, new_null_array},
+    compute::cast,
+    datatypes::{Field, FieldRef, Schema, SchemaRef},
+};
+use beacon_datafusion_ext::nd::{
+    Dimensions, NdArrowArray, NdRecordBatch, encode_nd_record_batch, logical_schema,
+};
+use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use beacon_nd_array::dataset::source::DatasetSource;
 use crossbeam::queue::ArrayQueue;
+use datafusion::{common::plan_err, error::Result, physical_plan::PhysicalExpr};
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore, path::Path};
 use parking_lot::RwLock;
 use tokio::sync::OnceCell;
 
-use crate::datafusion::metrics::AtlasScanMetrics;
-use crate::datafusion::spec::ScanSpec;
-use crate::datafusion::view::{AtlasView, under_fields};
-use crate::store::AtlasReaderCache;
+use crate::metrics::AtlasScanMetrics;
+use crate::open::AtlasReaderCache;
+use crate::view::AtlasView;
+
+/// What one scan reads.
+///
+/// The source builds one per partition, and the opener, the queue and the
+/// view of every collection the partition opens read through the same handle.
+/// Nothing here changes after planning.
+#[derive(Debug)]
+pub struct ScanSpec {
+    /// The scan's output schema, nd-encoded. Every batch goes out under it. Its
+    /// field *names* are the columns to keep, and the encoding leaves names
+    /// alone.
+    pub projected_schema: SchemaRef,
+    /// The same schema with the encoding unwrapped. The columns, the predicate
+    /// and the pruning engine are written against it.
+    pub logical_schema: SchemaRef,
+    /// The dimensions the scan reads, or `None` for each dataset's default.
+    pub read_dimensions: Option<Vec<String>>,
+    /// The predicate to prune datasets with, if any.
+    pub predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// The rule that merged the table schema. It decides which casts read null.
+    pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+}
+
+impl ScanSpec {
+    /// A scan of `projected_schema`. The logical schema is derived from it.
+    ///
+    /// Refuses a schema of no column, see `require_projection`.
+    pub fn new(
+        projected_schema: SchemaRef,
+        read_dimensions: Option<Vec<String>>,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    ) -> Result<Self> {
+        require_projection(&projected_schema)?;
+        Ok(Self {
+            logical_schema: logical_schema(&projected_schema)?,
+            projected_schema,
+            read_dimensions,
+            predicate,
+            type_widening,
+        })
+    }
+}
+
+/// Refuse a scan that projects no column.
+///
+/// A dataset's row count follows the dimensions of the columns it reads. With
+/// no column there is no dimension set, so the count of a dataset that holds
+/// arrays on different grids has no one answer. The scan refuses rather than
+/// pick one. `COUNT(*)` reaches here; `COUNT(column)` projects a column and
+/// does not.
+pub(crate) fn require_projection(projected_schema: &Schema) -> Result<()> {
+    if projected_schema.fields().is_empty() {
+        return plan_err!(
+            "an atlas scan must project at least one column: a dataset's row count \
+             follows the dimensions of the columns it reads, and no column names none. \
+             Use COUNT(column) instead of COUNT(*)"
+        );
+    }
+    Ok(())
+}
 
 /// One cell per collection. The cell fills on the first open and never again.
 type Cells = HashMap<Path, Arc<OnceCell<Arc<CollectionQueue>>>>;
@@ -228,10 +297,73 @@ async fn read_chunk(
         })
 }
 
+/// `nd` under `fields`: every field in order, on the same target grid.
+///
+/// A column comes out under the array's own type, and the table may declare a
+/// wider one: that is a cast. A field the dataset lacks is a rank-0 null,
+/// which broadcasts to an all-null column. The decoder makes the same of a
+/// null struct row, so the scan sees one thing either way. `type_widening` is
+/// the rule that merged the table schema, and it decides which casts read null.
+pub(crate) fn under_fields(
+    nd: &NdRecordBatch,
+    fields: &[FieldRef],
+    type_widening: &dyn ArrowTypeWideningStrategy,
+) -> anyhow::Result<NdRecordBatch> {
+    let mut columns = Vec::with_capacity(fields.len());
+    for field in fields {
+        let column = match nd.schema().column_with_name(field.name()) {
+            Some((index, _)) => {
+                let column = nd.column(index);
+                match as_field_type(Arc::clone(column.values()), field, type_widening)? {
+                    Some(values) => NdArrowArray::try_new(values, column.dims().clone())?,
+                    None => null_scalar(field),
+                }
+            }
+            None => null_scalar(field),
+        };
+        columns.push(column);
+    }
+    let schema = Arc::new(Schema::new(fields.to_vec()));
+    Ok(NdRecordBatch::try_new(
+        schema,
+        columns,
+        nd.target().clone(),
+    )?)
+}
+
+/// A rank-0 null. It broadcasts to an all-null column of the target grid.
+fn null_scalar(field: &Field) -> NdArrowArray {
+    NdArrowArray::try_new(new_null_array(field.data_type(), 1), Dimensions::scalar())
+        .expect("one element on no axis")
+}
+
+/// `values` in the type the table declares for `field`, or `None` for values
+/// the table cannot hold.
+///
+/// A dataset may store a column narrower than the merged type, and the merge
+/// widened it: that is a cast. A dataset of another family than the table
+/// column reached the scan through `TypeConflict::KeepFirst` alone, and the
+/// rule that merged the schema says so. Such a dataset reads as null.
+fn as_field_type(
+    values: ArrayRef,
+    field: &Field,
+    type_widening: &dyn ArrowTypeWideningStrategy,
+) -> anyhow::Result<Option<ArrayRef>> {
+    if values.data_type() == field.data_type() {
+        return Ok(Some(values));
+    }
+    match cast(&values, field.data_type()) {
+        Ok(values) => Ok(Some(values)),
+        Err(_) if type_widening.casts_leniently(values.data_type(), field.data_type()) => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("casting column '{}' to {}", field.name(), field.data_type())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{compat, test_support};
+    use crate::{schema, test_support};
     use arrow::datatypes::SchemaRef;
     use beacon_datafusion_ext::nd::{decode_nd_record_batch, encoded_schema};
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
@@ -246,7 +378,7 @@ mod tests {
     async fn logical_schema(dir: &Path) -> SchemaRef {
         let atlas = test_support::open(dir).await;
         Arc::new(
-            compat::collection_arrow_schema(
+            schema::collection_arrow_schema(
                 &atlas.footer().collection_schema(),
                 &ArrowTypeWidening::default_extension(),
             )

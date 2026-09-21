@@ -24,7 +24,7 @@ pub const DAY_NANOS: i64 = 86_400_000_000_000;
 /// is what the reader cache keys on.
 pub fn store_and_marker(dir: &Path) -> (Arc<dyn ObjectStore>, ObjectMeta) {
     let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(dir).unwrap());
-    let container = dir.join(crate::store::ATLAS_MARKER);
+    let container = dir.join(crate::discover::ATLAS_MARKER);
     let (size, last_modified) = match std::fs::metadata(&container) {
         Ok(meta) => (
             meta.len(),
@@ -37,7 +37,7 @@ pub fn store_and_marker(dir: &Path) -> (Arc<dyn ObjectStore>, ObjectMeta) {
         Err(_) => (0, DateTime::UNIX_EPOCH),
     };
     let marker = ObjectMeta {
-        location: OsPath::from(crate::store::ATLAS_MARKER),
+        location: OsPath::from(crate::discover::ATLAS_MARKER),
         last_modified,
         size,
         e_tag: None,

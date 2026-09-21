@@ -8,21 +8,15 @@
 //! the same views, so the scan and the pruning see one resolution of a name.
 //!
 //! One dataset is then a lazy [`DatasetSource`] over those views. It reads one
-//! stored chunk at a time as an [`NdRecordBatch`], each column on the axes the
+//! stored chunk at a time as an `NdRecordBatch`, each column on the axes the
 //! dataset stores it on, and `under_fields` puts that chunk under the scan's
 //! fields.
 
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use arrow::{
-    array::{ArrayRef, new_null_array},
-    compute::cast,
-    datatypes::{Field, FieldRef, Schema},
-};
+use arrow::datatypes::{FieldRef, Schema};
 use atlas::{ArrayFile, Atlas, Attr};
-use beacon_datafusion_ext::nd::{Dimensions, NdArrowArray, NdRecordBatch};
-use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use beacon_nd_array::{
     NdArrayD,
     dataset::{
@@ -34,9 +28,11 @@ use indexmap::IndexMap;
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::{
-    compat,
-    datafusion::{metrics::AtlasScanMetrics, pruning::prune_datasets, spec::ScanSpec},
-    store::{AtlasReaderCache, get_or_open_atlas},
+    dataset,
+    metrics::AtlasScanMetrics,
+    open::{AtlasReaderCache, get_or_open_atlas},
+    prune::prune_datasets,
+    scan::ScanSpec,
 };
 
 /// An open collection and the resolution of every column of the scan.
@@ -126,13 +122,13 @@ impl AtlasView {
                 None => None,
                 Some(AtlasColumnView::Array { segment }) => match segment.array(dataset_name) {
                     Some(info) => Some(
-                        compat::array_to_nd_array(Arc::clone(segment), dataset_name, &info.dtype)
+                        dataset::array_to_nd_array(Arc::clone(segment), dataset_name, &info.dtype)
                             .with_context(|| {
-                            format!(
-                                "reading array '{}' of dataset '{dataset_name}'",
-                                field.name()
-                            )
-                        })?,
+                                format!(
+                                    "reading array '{}' of dataset '{dataset_name}'",
+                                    field.name()
+                                )
+                            })?,
                     ),
                     None => None,
                 },
@@ -142,7 +138,7 @@ impl AtlasView {
                     // column. A dataset that stores a list under a scalar
                     // column's key reads as null.
                     map.get(dataset_name)
-                        .and_then(|attr| compat::attribute_to_nd_array(attr).ok())
+                        .and_then(|attr| dataset::attribute_to_nd_array(attr).ok())
                 }
             };
             if let Some(array) = array {
@@ -233,79 +229,19 @@ pub(crate) async fn column_views(
     Ok(views)
 }
 
-/// `nd` under `fields`: every field in order, on the same target grid.
-///
-/// A column comes out under the array's own type, and the table may declare a
-/// wider one: that is a cast. A field the dataset lacks is a rank-0 null,
-/// which broadcasts to an all-null column. The decoder makes the same of a
-/// null struct row, so the scan sees one thing either way. `type_widening` is
-/// the rule that merged the table schema, and it decides which casts read null.
-pub(crate) fn under_fields(
-    nd: &NdRecordBatch,
-    fields: &[FieldRef],
-    type_widening: &dyn ArrowTypeWideningStrategy,
-) -> anyhow::Result<NdRecordBatch> {
-    let mut columns = Vec::with_capacity(fields.len());
-    for field in fields {
-        let column = match nd.schema().column_with_name(field.name()) {
-            Some((index, _)) => {
-                let column = nd.column(index);
-                match as_field_type(Arc::clone(column.values()), field, type_widening)? {
-                    Some(values) => NdArrowArray::try_new(values, column.dims().clone())?,
-                    None => null_scalar(field),
-                }
-            }
-            None => null_scalar(field),
-        };
-        columns.push(column);
-    }
-    let schema = Arc::new(Schema::new(fields.to_vec()));
-    Ok(NdRecordBatch::try_new(
-        schema,
-        columns,
-        nd.target().clone(),
-    )?)
-}
-
-/// A rank-0 null. It broadcasts to an all-null column of the target grid.
-fn null_scalar(field: &Field) -> NdArrowArray {
-    NdArrowArray::try_new(new_null_array(field.data_type(), 1), Dimensions::scalar())
-        .expect("one element on no axis")
-}
-
-/// `values` in the type the table declares for `field`, or `None` for values
-/// the table cannot hold.
-///
-/// A dataset may store a column narrower than the merged type, and the merge
-/// widened it: that is a cast. A dataset of another family than the table
-/// column reached the scan through `TypeConflict::KeepFirst` alone, and the
-/// rule that merged the schema says so. Such a dataset reads as null.
-fn as_field_type(
-    values: ArrayRef,
-    field: &Field,
-    type_widening: &dyn ArrowTypeWideningStrategy,
-) -> anyhow::Result<Option<ArrayRef>> {
-    if values.data_type() == field.data_type() {
-        return Ok(Some(values));
-    }
-    match cast(&values, field.data_type()) {
-        Ok(values) => Ok(Some(values)),
-        Err(_) if type_widening.casts_leniently(values.data_type(), field.data_type()) => Ok(None),
-        Err(error) => Err(error)
-            .with_context(|| format!("casting column '{}' to {}", field.name(), field.data_type())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Array, AsArray, RecordBatch};
+    use arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
     use arrow::datatypes::{Float32Type, Float64Type, Int32Type, Int64Type, SchemaRef};
     use beacon_datafusion_ext::nd::encoded_schema;
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use std::path::Path;
 
     use super::*;
-    use crate::{compat, test_support};
+    use crate::scan::under_fields;
+    use crate::{schema, test_support};
+    use beacon_datafusion_ext::nd::NdRecordBatch;
+    use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 
     /// The strict default merge rule.
     fn strict() -> Arc<dyn ArrowTypeWideningStrategy> {
@@ -316,7 +252,7 @@ mod tests {
     async fn schema(dir: &Path) -> SchemaRef {
         let atlas = test_support::open(dir).await;
         Arc::new(
-            compat::collection_arrow_schema(
+            schema::collection_arrow_schema(
                 &atlas.footer().collection_schema(),
                 &ArrowTypeWidening::default_extension(),
             )

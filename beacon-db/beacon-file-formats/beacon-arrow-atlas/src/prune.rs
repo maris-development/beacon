@@ -48,7 +48,7 @@ use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::scalar::ScalarValue;
 use indexmap::IndexMap;
 
-use super::view::AtlasColumnView;
+use crate::view::AtlasColumnView;
 
 /// The datasets of `names` that `predicate` could still match, in order.
 ///
@@ -344,8 +344,8 @@ mod tests {
     };
 
     use super::*;
-    use crate::datafusion::view::column_views;
     use crate::test_support;
+    use crate::view::column_views;
 
     fn schema(name: &str, data_type: DataType) -> SchemaRef {
         Arc::new(Schema::new(vec![Field::new(name, data_type, true)]))

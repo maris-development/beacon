@@ -1,11 +1,9 @@
-//! Finding an Atlas collection in a listing, opening it, and caching the
-//! handle.
+//! Opening an Atlas collection, and caching the handle.
 //!
-//! A collection is a store prefix holding one required object, `data.atlas`,
-//! and one optional sidecar, `deleted.mask`. The container object is the
-//! *marker*: it is what a listing matches, what a plan entry carries, and what
-//! the reader cache keys on. Its parent directory is the prefix
-//! [`atlas::Atlas::open`] takes.
+//! A collection is opened from its marker, the `data.atlas` container object
+//! a listing found, see [`discover`](crate::discover). The reader cache keys
+//! on the marker and on the deletion mask beside it, so a rewritten collection
+//! or a fresh delete reopens and an unchanged one does not.
 
 use std::sync::Arc;
 
@@ -14,81 +12,7 @@ use chrono::{DateTime, Utc};
 use moka::future::Cache;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, path::Path as OsPath};
 
-/// The container object at the root of a collection.
-pub const ATLAS_MARKER: &str = "data.atlas";
-
-/// The deletion-mask sidecar beside it. Absent means nothing is deleted.
-pub const ATLAS_MASK: &str = "deleted.mask";
-
-/// `data.atlas` as it appears at the end of a nested path.
-const MARKER_SUFFIX: &str = "/data.atlas";
-
-/// Whether `path` names a collection's container object.
-///
-/// The name is fixed. [`atlas::Atlas::open`] resolves `data.atlas` under the
-/// prefix it is given, so a collection renamed to `sensor.atlas` cannot be
-/// opened at all and is not a marker.
-pub fn is_marker_path(path: &OsPath) -> bool {
-    let path = path.as_ref();
-    path == ATLAS_MARKER || path.ends_with(MARKER_SUFFIX)
-}
-
-/// Whether `obj` is a collection's container object.
-pub fn is_atlas_marker(obj: &ObjectMeta) -> bool {
-    is_marker_path(&obj.location)
-}
-
-/// The prefix a collection is opened under: the marker's parent directory.
-///
-/// An empty path means the marker sits at the store root, which is what a
-/// store rooted on the collection's own directory reports.
-pub fn collection_prefix(marker: &OsPath) -> Option<OsPath> {
-    let path = marker.as_ref();
-    if path == ATLAS_MARKER {
-        return Some(OsPath::default());
-    }
-    path.strip_suffix(MARKER_SUFFIX).map(OsPath::from)
-}
-
-/// The directory of a marker, as a string. `""` for one at the root.
-fn marker_directory(marker: &OsPath) -> Option<String> {
-    let path = marker.as_ref();
-    if path == ATLAS_MARKER {
-        return Some(String::new());
-    }
-    path.strip_suffix(MARKER_SUFFIX).map(str::to_string)
-}
-
-/// Reduce `objects` to the unique outermost collection markers.
-///
-/// Two markers at two depths of one tree keep only the ancestor: a collection
-/// is one file and never contains another, so a deeper marker is a collection
-/// that happens to sit inside another's directory and would be read twice.
-pub fn top_level_atlas_markers(objects: &[ObjectMeta]) -> Vec<ObjectMeta> {
-    // By directory, not by path. A path sort would put "a/b/data.atlas" before
-    // "a/data.atlas", because 'b' sorts under 'd', and the nested collection
-    // would then be the one kept.
-    let mut markers: Vec<(String, &ObjectMeta)> = objects
-        .iter()
-        .filter_map(|object| {
-            marker_directory(&object.location).map(|directory| (directory, object))
-        })
-        .collect();
-    markers.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-    let mut kept: Vec<(String, ObjectMeta)> = Vec::new();
-    'outer: for (directory, marker) in markers {
-        for (held, _) in &kept {
-            // A marker at the root sits above every path, but the collection
-            // beside it is its own, so an empty directory excludes nothing.
-            if !held.is_empty() && directory.starts_with(&format!("{held}/")) {
-                continue 'outer;
-            }
-        }
-        kept.push((directory, marker.clone()));
-    }
-    kept.into_iter().map(|(_, marker)| marker).collect()
-}
+use crate::discover::{ATLAS_MARKER, ATLAS_MASK, collection_prefix};
 
 /// Open the collection whose container object is `marker`, over `store`.
 ///
@@ -225,78 +149,6 @@ pub async fn get_or_open_atlas(
 mod tests {
     use super::*;
     use crate::test_support;
-
-    fn object(path: &str) -> ObjectMeta {
-        ObjectMeta {
-            location: OsPath::from(path),
-            last_modified: DateTime::UNIX_EPOCH,
-            size: 0,
-            e_tag: None,
-            version: None,
-        }
-    }
-
-    // ── markers ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn the_container_object_is_the_marker() {
-        assert!(is_atlas_marker(&object("data.atlas")));
-        assert!(is_atlas_marker(&object("store/data.atlas")));
-        assert!(is_atlas_marker(&object("a/b/c/data.atlas")));
-    }
-
-    #[test]
-    fn nothing_else_is_a_marker() {
-        // The mask sits beside the container and must never be read as one.
-        // Neither must the registry of a pre-0.16 collection: this build reads
-        // only the single-file format, so an old collection left on disk is
-        // passed over rather than misread.
-        for path in [
-            "deleted.mask",
-            "store/deleted.mask",
-            "store/data.atlas.tmp",
-            "store/mydata.atlas",
-            "data.atlas/inner",
-            "store/atlas.json",
-        ] {
-            assert!(!is_atlas_marker(&object(path)), "{path}");
-        }
-    }
-
-    #[test]
-    fn the_prefix_is_the_marker_directory() {
-        assert_eq!(
-            collection_prefix(&OsPath::from("a/b/data.atlas")),
-            Some(OsPath::from("a/b"))
-        );
-        assert_eq!(
-            collection_prefix(&OsPath::from("data.atlas")),
-            Some(OsPath::default())
-        );
-        assert_eq!(collection_prefix(&OsPath::from("a/b/other.txt")), None);
-    }
-
-    #[test]
-    fn top_level_markers_drop_a_nested_collection() {
-        let objects = vec![
-            object("a/data.atlas"),
-            object("a/b/data.atlas"),
-            object("c/data.atlas"),
-            object("c/deleted.mask"),
-        ];
-        let kept: Vec<String> = top_level_atlas_markers(&objects)
-            .iter()
-            .map(|m| m.location.to_string())
-            .collect();
-        assert_eq!(kept, vec!["a/data.atlas", "c/data.atlas"]);
-    }
-
-    #[test]
-    fn a_sibling_directory_is_not_nested() {
-        // "argo2" starts with "argo", but it is not under it.
-        let objects = vec![object("argo/data.atlas"), object("argo2/data.atlas")];
-        assert_eq!(top_level_atlas_markers(&objects).len(), 2);
-    }
 
     // ── opening ─────────────────────────────────────────────────────────
 

@@ -26,12 +26,18 @@
 //! for the whole collection, so reading `temperature` across a million datasets
 //! opens one segment. Array data then arrives block by block, on demand.
 //!
-//! # What this crate does with it
+//! # One module per stage of a read
 //!
-//! [`store`] finds a collection's marker and opens it, through a reader cache.
-//! [`compat`] holds the column-name and type mapping, and derives the Arrow
-//! schema of a whole collection from its footer. [`backend`] holds the lazy
-//! [`NdArrayD`](beacon_nd_array::NdArrayD) values a scan reads through.
+//! | Module | Stage |
+//! |---|---|
+//! | [`discover`] | find the collections in a listing, deal them to partitions |
+//! | [`open`] | open a collection, through the reader cache |
+//! | [`schema`] | the column-name and type mapping, and a collection's Arrow schema |
+//! | [`view`] | resolve the scan's columns against one open collection |
+//! | [`prune`] | drop the datasets a predicate cannot match |
+//! | [`dataset`] | the lazy arrays one dataset reads through |
+//! | [`scan`] | what a scan reads, the shared queue per collection, and the batches |
+//! | [`format`](mod@format), [`source`] | the DataFusion traits over all of the above |
 //!
 //! # One collection is one unit of work
 //!
@@ -41,7 +47,7 @@
 //! survivors in a shared queue. Every partition that opens the collection then
 //! streams the datasets it pops off that queue. A pruned dataset therefore
 //! costs nothing, a dataset is read once, and parallelism is bounded by the
-//! dataset count. See [`datafusion::source`].
+//! dataset count. See [`source`].
 //!
 //! # Columns
 //!
@@ -83,12 +89,24 @@
 
 pub use atlas;
 
-pub mod backend;
-pub mod compat;
-pub mod datafusion;
-pub mod store;
+pub mod dataset;
+pub mod discover;
+pub(crate) mod error;
+pub mod format;
+pub mod metrics;
+pub mod open;
+pub mod options;
+pub mod prune;
+pub mod scan;
+pub mod schema;
+pub mod source;
+pub mod table_function;
+pub mod view;
 
-pub use datafusion::{AtlasFormat, AtlasFormatFactory, AtlasOptions, ReadAtlasFunc};
+pub use format::{ATLAS_FORMAT, AtlasFormat, AtlasFormatFactory, nd_scan_plan};
+pub use options::AtlasOptions;
+pub use source::AtlasSource;
+pub use table_function::ReadAtlasFunc;
 
 #[cfg(test)]
 pub(crate) mod test_support;

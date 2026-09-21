@@ -1,10 +1,10 @@
-//! The DataFusion integration: discovering Atlas collections, typing them, and
-//! planning a scan over their datasets.
+//! The DataFusion file format: typing the collections of a table and planning
+//! a scan over them.
 //!
 //! [`AtlasFormatFactory`] recognizes a collection in a listing and builds an
 //! [`AtlasFormat`] per table. The format infers the collection's schema, then
-//! plans a scan whose entries are *datasets* rather than files — see
-//! [`source`] for what the openers then do with them.
+//! plans a scan whose entries are *collections* rather than files — see
+//! [`source`](crate::source) for what the openers then do with them.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -23,10 +23,8 @@ use datafusion::{
     common::{GetExt, Statistics, exec_datafusion_err},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
-        listing::{ListingTableUrl, PartitionedFile},
-        physical_plan::{
-            FileGroup, FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource,
-        },
+        listing::ListingTableUrl,
+        physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
         table_schema::TableSchema,
     },
     error::{DataFusionError, Result},
@@ -35,24 +33,13 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::compat;
-use crate::datafusion::error::external;
-use crate::store::{ATLAS_MARKER, AtlasReaderCache, get_or_open_atlas, top_level_atlas_markers};
-
-pub(crate) mod error;
-pub mod metrics;
-pub mod opener;
-pub mod options;
-pub mod pruning;
-pub mod queue;
-pub mod source;
-pub mod spec;
-pub mod table_function;
-pub mod view;
-
-pub use options::AtlasOptions;
-pub use source::AtlasSource;
-pub use table_function::ReadAtlasFunc;
+use crate::discover::{ATLAS_MARKER, deal_rotated, top_level_atlas_markers};
+use crate::error::external;
+use crate::open::{AtlasReaderCache, get_or_open_atlas};
+use crate::options::AtlasOptions;
+use crate::scan::require_projection;
+use crate::schema;
+pub use crate::source::AtlasSource;
 
 /// The name this format answers to: `STORED AS ATLAS`, `read_atlas`.
 pub const ATLAS_FORMAT: &str = "atlas";
@@ -259,7 +246,7 @@ impl FileFormat for AtlasFormat {
                 .map_err(external)?;
 
             let schema =
-                compat::collection_arrow_schema(&atlas.footer().collection_schema(), &widening)
+                schema::collection_arrow_schema(&atlas.footer().collection_schema(), &widening)
                     .with_context(|| {
                         format!(
                             "reading the schema of atlas collection '{}'",
@@ -291,7 +278,7 @@ impl FileFormat for AtlasFormat {
     /// collections before a scan opens them, so a range that is too narrow
     /// deletes matching rows from an answer. The scan prunes from the footer
     /// itself instead, per dataset, where the numbers are exact and cost no
-    /// array read. See [`pruning`].
+    /// array read. See [`prune`](crate::prune).
     async fn infer_stats(
         &self,
         _state: &dyn Session,
@@ -318,7 +305,7 @@ impl FileFormat for AtlasFormat {
         beacon_nd_array::arrow::morsel::reject_partition_columns("Atlas", &conf)?;
         // Refuse a scan of no column here, before any collection opens. The
         // opener checks again, for a projection pushed down after planning.
-        spec::require_projection(conf.projected_schema()?.as_ref())?;
+        require_projection(conf.projected_schema()?.as_ref())?;
 
         let listed: Vec<ObjectMeta> = conf
             .file_groups
@@ -375,115 +362,6 @@ impl FileFormat for AtlasFormat {
             "an atlas collection is written once, by `atlas create`, and Beacon does not write one"
                 .to_string(),
         ))
-    }
-}
-
-/// Deal `markers` over `partitions` groups, every collection to every group.
-///
-/// A collection's queue shares it between the partitions that open it,
-/// so a partition may hold every collection and still read nothing twice.
-/// Every partition then reads until every collection is drained, whatever
-/// the collections' sizes, and parallelism is bounded by the dataset count
-/// rather than the collection count.
-///
-/// Each group is the whole list, rotated. Group `p` starts `p * n / partitions`
-/// collections round the ring, so the start points spread evenly: with as many
-/// groups as collections each starts on its own, with fewer they start as far
-/// apart as they can, and with more they double up as evenly as they can. A
-/// partition therefore works alone on its collection until the partitions
-/// meet, and the shared queue takes over from there.
-pub(crate) fn deal_rotated(markers: &[ObjectMeta], partitions: usize) -> Vec<FileGroup> {
-    let n = markers.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let partitions = partitions.max(1);
-    (0..partitions)
-        .map(|p| {
-            let offset = p * n / partitions;
-            (0..n)
-                .map(|i| PartitionedFile::from(markers[(offset + i) % n].clone()))
-                .collect()
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod deal_tests {
-    use super::*;
-
-    fn markers(n: usize) -> Vec<ObjectMeta> {
-        (0..n)
-            .map(|i| ObjectMeta {
-                location: object_store::path::Path::from(format!("c{i}/{ATLAS_MARKER}")),
-                last_modified: chrono::Utc::now(),
-                size: 0,
-                e_tag: None,
-                version: None,
-            })
-            .collect()
-    }
-
-    /// The collections of a group, by their directory.
-    fn dealt(group: &FileGroup) -> Vec<String> {
-        group
-            .files()
-            .iter()
-            .map(|file| {
-                file.object_meta
-                    .location
-                    .parts()
-                    .next()
-                    .unwrap()
-                    .as_ref()
-                    .to_string()
-            })
-            .collect()
-    }
-
-    /// The collection each group starts on.
-    fn starts(groups: &[FileGroup]) -> Vec<String> {
-        groups.iter().map(|group| dealt(group)[0].clone()).collect()
-    }
-
-    #[test]
-    fn every_partition_holds_every_collection_in_its_own_rotation() {
-        let groups = deal_rotated(&markers(4), 2);
-
-        assert_eq!(groups.len(), 2);
-        assert_eq!(dealt(&groups[0]), ["c0", "c1", "c2", "c3"]);
-        assert_eq!(dealt(&groups[1]), ["c2", "c3", "c0", "c1"]);
-    }
-
-    #[test]
-    fn the_starts_spread_evenly_over_the_collections() {
-        assert_eq!(
-            starts(&deal_rotated(&markers(3), 3)),
-            ["c0", "c1", "c2"],
-            "one start per collection"
-        );
-        assert_eq!(
-            starts(&deal_rotated(&markers(4), 3)),
-            ["c0", "c1", "c2"],
-            "fewer partitions start as far apart as they can"
-        );
-        let groups = deal_rotated(&markers(2), 4);
-        assert_eq!(
-            starts(&groups),
-            ["c0", "c0", "c1", "c1"],
-            "more partitions double up evenly"
-        );
-        assert!(groups.iter().all(|group| group.len() == 2));
-    }
-
-    #[test]
-    fn no_collection_makes_no_group() {
-        assert!(deal_rotated(&markers(0), 4).is_empty());
-        assert_eq!(
-            deal_rotated(&markers(2), 0).len(),
-            1,
-            "no partition reads as one"
-        );
     }
 }
 

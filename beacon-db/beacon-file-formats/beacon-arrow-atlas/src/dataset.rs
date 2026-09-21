@@ -1,16 +1,22 @@
-//! The lazy array backends the Atlas reader hands to `beacon-nd-array`.
+//! The lazy arrays one dataset reads through.
 //!
 //! [`AtlasArrayBackend`] reads one dataset's entry of a variable's segment on
 //! demand. [`AttributeBackend`] holds one attribute value as a rank-0 array.
+//! [`array_to_nd_array`] and [`attribute_to_nd_array`] wrap each as the
+//! [`NdArrayD`] the nd engine reads, typed by the tables in
+//! [`schema`](crate::schema).
 
 use std::sync::Arc;
 
-use atlas::{ArrayFile, FillValue};
+use atlas::{ArrayFile, Attr, DType, FillValue};
 use beacon_nd_array::{
+    NdArray, NdArrayD,
     array::{backend::ArrayBackend, subset::ArraySubset},
     datatypes::{NdArrayType, TimestampNanosecond},
 };
 use ndarray::ArrayD;
+
+use crate::schema::dtype_tag;
 
 /// A Beacon element type that can be read out of an atlas array.
 ///
@@ -230,10 +236,96 @@ impl<T: NdArrayType> ArrayBackend<T> for AttributeBackend<T> {
     }
 }
 
+// ─── Lazy arrays ─────────────────────────────────────────────────────────────
+
+/// Wrap one dataset's entry of an atlas segment as a lazy [`NdArrayD`].
+///
+/// No array data is read here. `dtype` comes from the collection footer, and
+/// the layout from `segment`, which one open serves for the whole collection.
+/// The values themselves arrive when the engine asks the backend for a subset.
+///
+/// The chunk shape is the one the writer chose. It is what lets the scan cut a
+/// dataset on the grid the file actually stores, so one unit of work is one
+/// stored chunk.
+pub fn array_to_nd_array(
+    segment: Arc<ArrayFile>,
+    dataset: &str,
+    dtype: &DType,
+) -> anyhow::Result<Arc<dyn NdArrayD>> {
+    macro_rules! lazy {
+        ($ty:ty) => {{
+            let backend = AtlasArrayBackend::<$ty>::try_new(segment, dataset.to_string())?;
+            Ok(Arc::new(NdArray::new_with_backend(backend)?) as Arc<dyn NdArrayD>)
+        }};
+    }
+
+    match dtype {
+        DType::Int8 => lazy!(i8),
+        DType::Int16 => lazy!(i16),
+        DType::Int32 => lazy!(i32),
+        DType::Int64 => lazy!(i64),
+        DType::UInt8 => lazy!(u8),
+        DType::UInt16 => lazy!(u16),
+        DType::UInt32 => lazy!(u32),
+        DType::UInt64 => lazy!(u64),
+        DType::Float32 => lazy!(f32),
+        DType::Float64 => lazy!(f64),
+        DType::String => lazy!(String),
+        DType::Binary => lazy!(Vec<u8>),
+        DType::TimestampNs => lazy!(TimestampNanosecond),
+        DType::Bool => Err(anyhow::anyhow!(
+            "dataset '{dataset}' holds a Bool array, which atlas stores no elements of"
+        )),
+        DType::FixedSizeList { .. } => Err(anyhow::anyhow!(
+            "dataset '{dataset}' holds a FixedSizeList array, which Beacon does not model"
+        )),
+        DType::List { .. } => Err(anyhow::anyhow!(
+            "dataset '{dataset}' holds a List array, which Beacon does not model"
+        )),
+    }
+}
+
+/// Wrap one scalar attribute value as a rank-0 [`NdArrayD`].
+///
+/// A rank-0 array broadcasts onto whatever grid the dataset's own arrays
+/// define, so the value repeats across every row the dataset contributes.
+/// A list-valued attribute has no such analogue and is refused.
+pub fn attribute_to_nd_array(attr: &Attr) -> anyhow::Result<Arc<dyn NdArrayD>> {
+    macro_rules! scalar {
+        ($value:expr) => {
+            Ok(
+                Arc::new(NdArray::new_with_backend(AttributeBackend::new($value))?)
+                    as Arc<dyn NdArrayD>,
+            )
+        };
+    }
+
+    match attr {
+        Attr::Bool(v) => scalar!(*v),
+        Attr::Int8(v) => scalar!(*v),
+        Attr::Int16(v) => scalar!(*v),
+        Attr::Int32(v) => scalar!(*v),
+        Attr::Int64(v) => scalar!(*v),
+        Attr::UInt8(v) => scalar!(*v),
+        Attr::UInt16(v) => scalar!(*v),
+        Attr::UInt32(v) => scalar!(*v),
+        Attr::UInt64(v) => scalar!(*v),
+        Attr::Float32(v) => scalar!(*v),
+        Attr::Float64(v) => scalar!(*v),
+        Attr::String(v) => scalar!(v.clone()),
+        Attr::Binary(v) => scalar!(v.clone()),
+        other => Err(anyhow::anyhow!(
+            "attribute is a {} list, which has no rank-0 form in Beacon",
+            dtype_tag(&other.dtype())
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support;
+    use beacon_nd_array::datatypes::NdArrayDataType;
 
     /// The segment of one variable of a fixture collection.
     async fn segment(dir: &std::path::Path, array: &str) -> Arc<ArrayFile> {
@@ -438,5 +530,30 @@ mod tests {
             values.into_raw_vec_and_offset().0,
             vec!["winter".to_string()]
         );
+    }
+
+    // ── attribute values ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_scalar_attribute_is_a_rank_zero_column() {
+        let nd = attribute_to_nd_array(&Attr::Int64(2024)).unwrap();
+        assert_eq!(nd.datatype(), NdArrayDataType::I64);
+        assert!(nd.shape().is_empty(), "an attribute has no axis");
+        let typed = nd.as_any().downcast_ref::<NdArray<i64>>().unwrap();
+        assert_eq!(typed.clone_into_raw_vec().await, vec![2024]);
+    }
+
+    #[tokio::test]
+    async fn a_bool_attribute_is_a_column() {
+        let nd = attribute_to_nd_array(&Attr::Bool(true)).unwrap();
+        assert_eq!(nd.datatype(), NdArrayDataType::Bool);
+    }
+
+    #[test]
+    fn a_list_attribute_is_refused_by_name() {
+        let error = attribute_to_nd_array(&Attr::Int32List(vec![1, 2, 3]))
+            .expect_err("a list has no rank-0 form")
+            .to_string();
+        assert!(error.contains("list"), "{error}");
     }
 }
