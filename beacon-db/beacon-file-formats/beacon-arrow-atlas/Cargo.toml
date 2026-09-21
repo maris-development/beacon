@@ -12,6 +12,7 @@ atlas-rust = { workspace = true }
 
 object_store = { workspace = true }
 datafusion = { workspace = true }
+datafusion-datasource = { workspace = true }
 arrow = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }

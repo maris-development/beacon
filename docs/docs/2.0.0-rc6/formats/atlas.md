@@ -123,7 +123,8 @@ attribute. Each is dropped from the schema rather than failing the query.
 
 Atlas reconciles nothing: two datasets may declare one array name with two types, and it stores
 each as declared. Beacon merges them the way it merges the files of any other format. Two numeric types widen to one that holds
-both. Two different families — a number and a string — refuse the table by name:
+both, and a dataset stored in the narrower type is cast up as it is read. A value the merged type
+cannot hold reads as null. Two different families — a number and a string — refuse the table by name:
 
 ```text
 Incompatible types for field 'value': Utf8 in 'obs/data.atlas#a' vs Int64 in 'obs/data.atlas#b'

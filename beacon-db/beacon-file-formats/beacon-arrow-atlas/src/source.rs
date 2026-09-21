@@ -20,10 +20,12 @@ use datafusion::{
         metrics::ExecutionPlanMetricsSet,
     },
 };
+use datafusion_datasource::projection::{ProjectionOpener, SplitProjection};
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use tokio_util::sync::CancellationToken;
 
+use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 
 use crate::{
@@ -40,7 +42,9 @@ pub struct AtlasSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     read_dimensions: Option<Vec<String>>,
-    projection: Option<ProjectionExprs>,
+    /// The projection the scan pushed down, split into the columns to read
+    /// and the rest, which `ProjectionOpener` applies above the adapter.
+    projection: SplitProjection,
     /// The reader cache every open goes through.
     cache: AtlasReaderCache,
     /// The scan's queues, one per collection, shared by every partition.
@@ -60,11 +64,11 @@ impl AtlasSource {
         cache: AtlasReaderCache,
     ) -> Self {
         Self {
+            projection: SplitProjection::unprojected(&table_schema),
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             predicate: None,
             read_dimensions,
-            projection: None,
             cache,
             queues: Arc::new(CollectionQueues::new()),
             type_widening: Arc::new(DefaultArrowTypeWidening::new()),
@@ -90,34 +94,43 @@ impl AtlasSource {
     ///
     /// Needed because the format rebuilds the source in `create_physical_plan`.
     pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
-        self.projection = projection;
+        self.projection = match projection {
+            Some(projection) => SplitProjection::new(self.table_schema.file_schema(), &projection),
+            None => SplitProjection::unprojected(&self.table_schema),
+        };
         self
     }
 }
 
 impl FileSource for AtlasSource {
-    /// The opener of one partition. It refuses a scan of no column, see
-    /// [`ScanSpec::new`].
+    /// The opener of one partition: the atlas opener, wrapped so every batch
+    /// is mapped onto the scan's schema, then projected. It refuses a scan of
+    /// no column, see [`ScanSpec::new`].
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
-        base_config: &FileScanConfig,
+        _base_config: &FileScanConfig,
         partition: usize,
     ) -> Result<Arc<dyn FileOpener>> {
+        let file_schema = self.table_schema.file_schema();
+        // The columns the scan reads, in table order. `ProjectionOpener`
+        // derives its input schema the same way, so the two agree.
+        let read_schema = Arc::new(file_schema.project(&self.projection.file_indices)?);
         let spec = ScanSpec::new(
-            base_config.projected_schema()?,
+            Arc::clone(&read_schema),
             self.read_dimensions.clone(),
             self.predicate.clone(),
-            Arc::clone(&self.type_widening),
             self.cancel.clone(),
         )?;
-        Ok(Arc::new(AtlasOpener {
+        let raw: Arc<dyn FileOpener> = Arc::new(AtlasOpener {
             object_store,
             cache: self.cache.clone(),
             spec: Arc::new(spec),
             scan_metrics: AtlasScanMetrics::new(&self.execution_plan_metrics, partition),
             queues: Arc::clone(&self.queues),
-        }))
+        });
+        let adapting = AdaptingOpener::wrap(raw, read_schema, Arc::clone(&self.type_widening));
+        ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -149,19 +162,16 @@ impl FileSource for AtlasSource {
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {
-        self.projection.as_ref()
+        Some(&self.projection.source)
     }
 
     fn try_pushdown_projection(
         &self,
         projection: &ProjectionExprs,
     ) -> Result<Option<Arc<dyn FileSource>>> {
-        let merged = match &self.projection {
-            Some(existing) => existing.try_merge(projection)?,
-            None => projection.clone(),
-        };
+        let merged = self.projection.source.try_merge(projection)?;
         Ok(Some(Arc::new(Self {
-            projection: Some(merged),
+            projection: SplitProjection::new(self.table_schema.file_schema(), &merged),
             ..self.clone()
         })))
     }
@@ -192,8 +202,9 @@ impl FileSource for AtlasSource {
     }
 }
 
-/// One partition's opener: a collection in, its batches out. Every field is
-/// a handle, cheap to clone into the stream it returns.
+/// One partition's opener: a collection in, its batches out, each under its
+/// dataset's own columns. Every field is a handle, cheap to clone into the
+/// stream it returns.
 #[derive(Clone)]
 pub struct AtlasOpener {
     pub object_store: Arc<dyn ObjectStore>,
@@ -233,6 +244,7 @@ impl FileOpener for AtlasOpener {
 #[cfg(test)]
 mod tests {
     use arrow::array::{Array, ArrayRef, RecordBatch};
+    use arrow::datatypes::SchemaRef;
     use beacon_datafusion_ext::nd::{decode_nd_record_batch, encoded_schema};
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use datafusion::logical_expr::Operator;
@@ -252,40 +264,58 @@ mod tests {
             .unwrap_or_else(|| panic!("no column {name}"))
     }
 
-    /// An opener over a fixture, built the way `AtlasSource` builds one.
-    async fn opener(
-        dir: &Path,
-        predicate: Option<Arc<dyn PhysicalExpr>>,
-    ) -> (AtlasOpener, PartitionedFile) {
+    /// A wrapped opener over a fixture, with the schema its batches carry
+    /// and the metrics its reads count on.
+    struct Fixture {
+        opener: Arc<dyn FileOpener>,
+        file: PartitionedFile,
+        schema: SchemaRef,
+        metrics: AtlasScanMetrics,
+    }
+
+    /// An opener over a fixture, built the way `AtlasSource` builds one: the
+    /// atlas opener under the adapting opener.
+    async fn opener(dir: &Path, predicate: Option<Arc<dyn PhysicalExpr>>) -> Fixture {
         let atlas = test_support::open(dir).await;
         let logical_schema = schema::collection_arrow_schema(
             &atlas.footer().collection_schema(),
             &ArrowTypeWidening::default_extension(),
         )
         .unwrap();
+        let schema = Arc::new(encoded_schema(&logical_schema));
         let spec = ScanSpec::new(
-            Arc::new(encoded_schema(&logical_schema)),
+            Arc::clone(&schema),
             None,
             predicate,
-            Arc::new(DefaultArrowTypeWidening::new()),
             CancellationToken::new(),
         )
         .unwrap();
         let (store, marker) = test_support::store_and_marker(dir);
-        let metrics = ExecutionPlanMetricsSet::new();
-        let opener = AtlasOpener {
+        let metrics = AtlasScanMetrics::new(&ExecutionPlanMetricsSet::new(), 0);
+        let raw: Arc<dyn FileOpener> = Arc::new(AtlasOpener {
             object_store: store,
             cache: AtlasReaderCache::new(4),
             spec: Arc::new(spec),
-            scan_metrics: AtlasScanMetrics::new(&metrics, 0),
+            scan_metrics: metrics.clone(),
             queues: Arc::new(CollectionQueues::new()),
-        };
-        (opener, PartitionedFile::from(marker))
+        });
+        let opener = AdaptingOpener::wrap(
+            raw,
+            Arc::clone(&schema),
+            Arc::new(DefaultArrowTypeWidening::new()),
+        );
+        Fixture {
+            opener,
+            file: PartitionedFile::from(marker),
+            schema,
+            metrics,
+        }
     }
 
-    async fn stream(opener: &AtlasOpener, file: PartitionedFile) -> Vec<RecordBatch> {
-        opener
-            .open(file)
+    async fn stream(fixture: &Fixture) -> Vec<RecordBatch> {
+        fixture
+            .opener
+            .open(fixture.file.clone())
             .unwrap()
             .await
             .unwrap()
@@ -300,24 +330,20 @@ mod tests {
     async fn the_opener_streams_one_encoded_batch_per_dataset() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
-        let (opener, file) = opener(tmp.path(), None).await;
+        let fixture = opener(tmp.path(), None).await;
 
-        let batches = stream(&opener, file).await;
+        let batches = stream(&fixture).await;
 
         assert_eq!(batches.len(), 2);
         for batch in &batches {
-            assert_eq!(
-                batch.schema(),
-                opener.spec.projected_schema,
-                "the scan's schema, marks and all"
-            );
+            assert_eq!(batch.schema(), fixture.schema, "the scan's schema");
         }
         let rows: Vec<usize> = batches
             .iter()
             .map(|batch| decode_nd_record_batch(batch).unwrap().num_rows())
             .collect();
         assert_eq!(rows, vec![4, 3], "winter, then summer");
-        assert_eq!(opener.scan_metrics.datasets_scanned.value(), 2);
+        assert_eq!(fixture.metrics.datasets_scanned.value(), 2);
     }
 
     /// The deletion mask hides a dataset from the scan, though not from the
@@ -331,9 +357,9 @@ mod tests {
             .delete_dataset("winter")
             .await
             .unwrap();
-        let (opener, file) = opener(tmp.path(), None).await;
+        let fixture = opener(tmp.path(), None).await;
 
-        let batches = stream(&opener, file).await;
+        let batches = stream(&fixture).await;
 
         assert_eq!(batches.len(), 1);
         let summer = decode_nd_record_batch(&batches[0])
@@ -359,12 +385,12 @@ mod tests {
             Operator::Gt,
             Arc::new(Literal::new(ScalarValue::Float32(Some(45.0)))),
         ));
-        let (opener, file) = opener(tmp.path(), Some(predicate)).await;
+        let fixture = opener(tmp.path(), Some(predicate)).await;
 
-        let batches = stream(&opener, file).await;
+        let batches = stream(&fixture).await;
 
         assert_eq!(batches.len(), 5, "d5 to d9 reach past 45");
-        assert_eq!(opener.scan_metrics.datasets_pruned.value(), 5);
-        assert_eq!(opener.scan_metrics.datasets_scanned.value(), 5);
+        assert_eq!(fixture.metrics.datasets_pruned.value(), 5);
+        assert_eq!(fixture.metrics.datasets_scanned.value(), 5);
     }
 }

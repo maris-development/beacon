@@ -203,12 +203,14 @@ pub(crate) async fn column_views(
 mod tests {
     use arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
     use arrow::datatypes::{Float32Type, Float64Type, Int32Type, Int64Type, SchemaRef};
-    use beacon_datafusion_ext::nd::encoded_schema;
+    use beacon_datafusion_ext::nd::{
+        decode_nd_record_batch, encode_nd_record_batch, encoded_schema,
+    };
+    use beacon_datafusion_ext::scan_adapt::BatchAdapter;
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use std::path::Path;
 
     use super::*;
-    use crate::scan::under_fields;
     use crate::{schema, test_support};
     use beacon_datafusion_ext::nd::NdRecordBatch;
     use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
@@ -232,7 +234,8 @@ mod tests {
     }
 
     /// Every chunk of `dataset`, read as the scan reads it: through the view,
-    /// under the scan's fields. And the rows of all of them in chunk order.
+    /// encoded, and adapted onto the scan's schema. And the rows of all of
+    /// them in chunk order.
     async fn read(dir: &Path, dataset: &str) -> (Vec<NdRecordBatch>, RecordBatch) {
         read_on(dir, dataset, None).await
     }
@@ -244,12 +247,12 @@ mod tests {
         read_dimensions: Option<Vec<String>>,
     ) -> (Vec<NdRecordBatch>, RecordBatch) {
         let schema = schema(dir).await;
+        let target = Arc::new(encoded_schema(&schema));
         let (store, marker) = test_support::store_and_marker(dir);
         let spec = ScanSpec::new(
-            Arc::new(encoded_schema(&schema)),
+            Arc::clone(&target),
             read_dimensions,
             None,
-            strict(),
             CancellationToken::new(),
         )
         .unwrap();
@@ -260,7 +263,12 @@ mod tests {
         let mut chunks = Vec::new();
         for chunk in source.chunks() {
             let nd = source.poll_next(chunk).await.unwrap().unwrap();
-            chunks.push(under_fields(&nd, schema.fields(), strict().as_ref()).unwrap());
+            let encoded = encode_nd_record_batch(&nd).unwrap();
+            let adapted = BatchAdapter::try_new(Arc::clone(&target), &encoded.schema(), &*strict())
+                .unwrap()
+                .adapt(&encoded)
+                .unwrap();
+            chunks.push(decode_nd_record_batch(&adapted).unwrap());
         }
         let batches: Vec<RecordBatch> = chunks.iter().map(|nd| nd.materialize().unwrap()).collect();
         let batch = arrow::compute::concat_batches(&schema, &batches).unwrap();

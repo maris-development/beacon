@@ -11,15 +11,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::Context as _;
-use arrow::{
-    array::{ArrayRef, RecordBatch, new_null_array},
-    compute::cast,
-    datatypes::{Field, FieldRef, Schema, SchemaRef},
-};
-use beacon_datafusion_ext::nd::{
-    Dimensions, NdArrowArray, NdRecordBatch, encode_nd_record_batch, logical_schema,
-};
-use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
+use arrow::array::RecordBatch;
+use arrow::datatypes::{Schema, SchemaRef};
+use beacon_datafusion_ext::nd::{NdRecordBatch, encode_nd_record_batch, logical_schema};
 use beacon_nd_array::dataset::source::DatasetSource;
 use crossbeam::queue::ArrayQueue;
 use datafusion::{common::plan_err, error::Result, physical_plan::PhysicalExpr};
@@ -37,18 +31,13 @@ use crate::view::AtlasView;
 /// What one scan reads. Shared by every stage through one handle.
 #[derive(Debug)]
 pub struct ScanSpec {
-    /// The scan's output schema, nd-encoded. Field names are the columns to
-    /// keep.
-    pub projected_schema: SchemaRef,
-    /// The same schema with encoding unwrapped. Columns, predicates and
-    /// pruning are written against it.
+    /// The scan's columns, with the nd encoding unwrapped. Columns, predicates
+    /// and pruning are written against it.
     pub logical_schema: SchemaRef,
     /// The dimensions the scan reads, or `None` for each dataset's default.
     pub read_dimensions: Option<Vec<String>>,
     /// The predicate to prune datasets with, if any.
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
-    /// The rule that merged the table schema. It decides which casts read null.
-    pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     /// The query's token. When it fires, every stage stops with an error.
     pub cancel: CancellationToken,
 }
@@ -61,16 +50,13 @@ impl ScanSpec {
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
         cancel: CancellationToken,
     ) -> Result<Self> {
         require_projection(&projected_schema)?;
         Ok(Self {
             logical_schema: logical_schema(&projected_schema)?,
-            projected_schema,
             read_dimensions,
             predicate,
-            type_widening,
             cancel,
         })
     }
@@ -260,19 +246,13 @@ fn dataset_batches(
             let source = Arc::clone(&source);
             let dataset = Arc::clone(&dataset);
             async move {
-                let spec = queue.view.spec();
-                if spec.cancel.is_cancelled() {
+                if queue.view.spec().cancel.is_cancelled() {
                     return Err(cancelled());
                 }
+                // The batch carries the dataset's own columns and types. The
+                // adapting opener above maps it onto the scan's schema.
                 let nd = read_chunk(&source, chunk, &dataset).await?;
-                let nd = under_fields(
-                    &nd,
-                    spec.logical_schema.fields(),
-                    spec.type_widening.as_ref(),
-                )?;
-                let batch =
-                    encode_nd_record_batch(&nd)?.with_schema(Arc::clone(&spec.projected_schema))?;
-                Ok(batch)
+                Ok(encode_nd_record_batch(&nd)?)
             }
         }))
     })
@@ -295,68 +275,13 @@ async fn read_chunk(
         })
 }
 
-/// `nd` under `fields`: every field in order, on the same target grid. A
-/// missing field reads as a rank-0 null. `type_widening` decides which casts
-/// read null instead of erroring.
-pub(crate) fn under_fields(
-    nd: &NdRecordBatch,
-    fields: &[FieldRef],
-    type_widening: &dyn ArrowTypeWideningStrategy,
-) -> anyhow::Result<NdRecordBatch> {
-    let mut columns = Vec::with_capacity(fields.len());
-    for field in fields {
-        let column = match nd.schema().column_with_name(field.name()) {
-            Some((index, _)) => {
-                let column = nd.column(index);
-                match as_field_type(Arc::clone(column.values()), field, type_widening)? {
-                    Some(values) => NdArrowArray::try_new(values, column.dims().clone())?,
-                    None => null_scalar(field),
-                }
-            }
-            None => null_scalar(field),
-        };
-        columns.push(column);
-    }
-    let schema = Arc::new(Schema::new(fields.to_vec()));
-    Ok(NdRecordBatch::try_new(
-        schema,
-        columns,
-        nd.target().clone(),
-    )?)
-}
-
-/// A rank-0 null. It broadcasts to an all-null column of the target grid.
-fn null_scalar(field: &Field) -> NdArrowArray {
-    NdArrowArray::try_new(new_null_array(field.data_type(), 1), Dimensions::scalar())
-        .expect("one element on no axis")
-}
-
-/// `values` in the type `field` declares, or `None` for values the table
-/// cannot hold. A narrower stored column is cast up. A column of another type
-/// reads null.
-fn as_field_type(
-    values: ArrayRef,
-    field: &Field,
-    type_widening: &dyn ArrowTypeWideningStrategy,
-) -> anyhow::Result<Option<ArrayRef>> {
-    if values.data_type() == field.data_type() {
-        return Ok(Some(values));
-    }
-    match cast(&values, field.data_type()) {
-        Ok(values) => Ok(Some(values)),
-        Err(_) if type_widening.casts_leniently(values.data_type(), field.data_type()) => Ok(None),
-        Err(error) => Err(error)
-            .with_context(|| format!("casting column '{}' to {}", field.name(), field.data_type())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{schema, test_support};
     use arrow::datatypes::SchemaRef;
     use beacon_datafusion_ext::nd::{decode_nd_record_batch, encoded_schema};
-    use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
+    use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as ColumnExpr, Literal};
     use datafusion::physical_plan::PhysicalExpr;
@@ -398,14 +323,7 @@ mod tests {
     ) -> anyhow::Result<DatasetStream> {
         let (store, marker) = test_support::store_and_marker(dir);
         let projected = Arc::new(encoded_schema(logical_schema(dir).await.as_ref()));
-        let spec = ScanSpec::new(
-            projected,
-            None,
-            predicate,
-            Arc::new(DefaultArrowTypeWidening::new()),
-            cancel,
-        )
-        .unwrap();
+        let spec = ScanSpec::new(projected, None, predicate, cancel).unwrap();
         queues
             .open(None, store, marker, Arc::new(spec), metrics)
             .await
@@ -488,8 +406,9 @@ mod tests {
             .collect()
     }
 
-    /// One encoded batch per dataset, in listing order, each on the encoded
-    /// table schema.
+    /// One encoded batch per dataset, in listing order, each under the
+    /// dataset's own columns. `summer` declares no `cycle`, so its batch has
+    /// none; the adapting opener above the queue fills it.
     #[tokio::test]
     async fn the_queue_streams_one_encoded_batch_per_dataset() {
         let tmp = tempfile::tempdir().unwrap();
@@ -504,37 +423,11 @@ mod tests {
             .await
             .unwrap();
 
-        let encoded = Arc::new(encoded_schema(logical_schema(tmp.path()).await.as_ref()));
         assert_eq!(batches.len(), 2);
-        for batch in &batches {
-            assert_eq!(batch.schema(), encoded, "the table schema, encoded");
-        }
         assert_eq!(rows(&batches), vec![4, 3], "winter, then summer");
+        assert!(batches[0].schema().column_with_name("cycle").is_some());
+        assert!(batches[1].schema().column_with_name("cycle").is_none());
         assert_eq!(metrics.datasets_scanned.value(), 2);
-    }
-
-    /// A column the dataset lacks reads as a null column, so every batch fits
-    /// the one schema. `summer` declares no `cycle`.
-    #[tokio::test]
-    async fn a_column_the_dataset_lacks_is_all_null() {
-        let tmp = tempfile::tempdir().unwrap();
-        test_support::two_datasets(tmp.path()).await;
-        let set = ExecutionPlanMetricsSet::new();
-        let queues = CollectionQueues::new();
-
-        let batches: Vec<RecordBatch> =
-            stream(&queues, tmp.path(), None, AtlasScanMetrics::new(&set, 0))
-                .await
-                .try_collect()
-                .await
-                .unwrap();
-
-        let summer = decode_nd_record_batch(&batches[1])
-            .unwrap()
-            .materialize()
-            .unwrap();
-        assert_eq!(summer.num_rows(), 3);
-        assert_eq!(summer.column_by_name("cycle").unwrap().null_count(), 3);
     }
 
     /// Two streams over one collection share one queue. A dataset one stream
