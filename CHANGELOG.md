@@ -360,6 +360,12 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **Beacon starts on a host with one vCPU.** Since rc5 the server never reached `listening on` on
+  a single-vCPU host. It created the Lance system tables and then every thread slept, while the
+  container stayed `Up`. Beacon handed Lance the CPU count as its I/O parallelism, and Lance uses
+  that number as the capacity of its I/O queue. A capacity of 1 blocked the queue on the first
+  table write. Beacon now passes the Lance local default of 8, on every host. `LANCE_IO_THREADS`
+  still overrides it. See [#508](https://github.com/maris-development/beacon/issues/508).
 - **The default table takes the name you configured.** At startup Beacon registers an empty
   stand-in table, so a JSON query without a `from` field reports no missing table. The stand-in
   ignored `BEACON_DEFAULT_TABLE` and always took the literal name `default`. A server started with
