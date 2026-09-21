@@ -1,9 +1,7 @@
-use std::{
-    any::Any,
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
+use arrow::datatypes::SchemaRef;
+use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use datafusion::{
     common::plan_err,
@@ -21,6 +19,7 @@ use datafusion::{
         metrics::ExecutionPlanMetricsSet,
     },
 };
+use datafusion_datasource::projection::{ProjectionOpener, SplitProjection};
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -49,8 +48,9 @@ pub struct BBFSource {
     stream_partition_shares: Arc<Mutex<HashMap<object_store::path::Path, Arc<StreamShare>>>>,
     /// Global Metrics
     global_metrics: BBFGlobalMetrics,
-    /// Projection pushed down by the scan, applied on top of the table schema.
-    projection: Option<ProjectionExprs>,
+    /// The projection the scan pushed down, split into the file columns to
+    /// read and the expressions `ProjectionOpener` applies on top of them.
+    projection: Option<SplitProjection>,
     /// The rule that merged the table schema. It decides which casts read
     /// null. The format sets it from the session when it plans.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
@@ -93,7 +93,8 @@ impl BBFSource {
     /// preserve a pushed-down projection when the format rebuilds the source
     /// in `create_physical_plan`.
     pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
-        self.projection = projection;
+        self.projection = projection
+            .map(|projection| SplitProjection::new(self.table_schema.file_schema(), &projection));
         self
     }
 
@@ -128,9 +129,9 @@ impl BBFSource {
         let Some(projection) = &self.projection else {
             return plan_err!("{PROJECTION_REQUIRED}");
         };
-        let selected: HashSet<usize> = projection.column_indices().into_iter().collect();
-        if selected.is_empty() || selected.len() >= self.table_schema.table_schema().fields().len()
-        {
+        // `file_indices` holds each file column once, in table order.
+        let selected = projection.file_indices.len();
+        if selected == 0 || selected >= self.table_schema.file_schema().fields().len() {
             return plan_err!("{PROJECTION_REQUIRED}");
         }
         Ok(())
@@ -145,30 +146,37 @@ impl FileSource for BBFSource {
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
-        base_config: &FileScanConfig,
+        _base_config: &FileScanConfig,
         _partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
         self.require_projection()?;
-        let table_schema = self.table_schema.file_schema().clone();
-        let projected_schema = base_config.projected_schema()?;
+        let projection = self
+            .projection
+            .clone()
+            .expect("require_projection passed, so the projection is set");
+        let file_schema = self.table_schema.file_schema().clone();
+        // The file columns the scan reads, in table order. `ProjectionOpener`
+        // derives its input schema the same way, so the two always agree.
+        let read_schema: SchemaRef = Arc::new(file_schema.project(&projection.file_indices)?);
         let pruning_predicate = self
             .predicate
             .clone()
-            .map(|p| PruningPredicate::try_new(p, table_schema.clone()))
+            .map(|p| PruningPredicate::try_new(p, file_schema.clone()))
             .transpose()?;
-        Ok(Arc::new(BBFOpener::new(
-            projected_schema,
+        let inner: Arc<dyn FileOpener> = Arc::new(BBFOpener::new(
+            Arc::clone(&read_schema),
             pruning_predicate,
             object_store,
-            table_schema,
+            Arc::clone(&file_schema),
             self.file_tracer.lock().clone(),
             self.stream_partition_shares.clone(),
             self.global_metrics.clone(),
             self.split_streams_slice,
             self.batch_size,
-            Arc::clone(&self.type_widening),
             self.cancellation_token(),
-        )))
+        ));
+        let adapting = AdaptingOpener::wrap(inner, read_schema, Arc::clone(&self.type_widening));
+        ProjectionOpener::try_new(projection, adapting, &file_schema)
     }
 
     /// Any
@@ -197,7 +205,9 @@ impl FileSource for BBFSource {
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {
-        self.projection.as_ref()
+        self.projection
+            .as_ref()
+            .map(|projection| &projection.source)
     }
 
     fn try_pushdown_projection(
@@ -205,14 +215,10 @@ impl FileSource for BBFSource {
         projection: &ProjectionExprs,
     ) -> datafusion::error::Result<Option<Arc<dyn FileSource>>> {
         let merged = match &self.projection {
-            Some(existing) => existing.try_merge(projection)?,
+            Some(existing) => existing.source.try_merge(projection)?,
             None => projection.clone(),
         };
-        let source = BBFSource {
-            projection: Some(merged),
-            ..self.clone()
-        };
-        Ok(Some(Arc::new(source)))
+        Ok(Some(Arc::new(self.clone().with_projection(Some(merged)))))
     }
 
     fn with_schema_adapter_factory(

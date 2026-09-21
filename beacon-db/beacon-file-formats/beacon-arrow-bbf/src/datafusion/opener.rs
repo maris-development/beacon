@@ -6,7 +6,6 @@ use std::{
 use arrow::{
     array::{BooleanArray, RecordBatch, new_null_array},
     datatypes::{Schema, SchemaRef},
-    error::ArrowError,
 };
 use beacon_binary_format::{
     array::util::ZeroAccessor,
@@ -14,8 +13,6 @@ use beacon_binary_format::{
     object_store::ArrowBBFObjectReader,
     reader::async_reader::{AsyncBBFReader, AsyncPruningIndexReader},
 };
-use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
-use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use datafusion::{
     common::pruning::PruningStatistics,
     datasource::{
@@ -33,7 +30,9 @@ use tokio_util::sync::CancellationToken;
 use crate::datafusion::{metrics::BBFGlobalMetrics, stream_share::StreamShare};
 
 pub struct BBFOpener {
-    projected_schema: SchemaRef,
+    /// The file columns the scan reads, in table order. The adapter above
+    /// this opener maps the columns of a file onto it by name.
+    read_schema: SchemaRef,
     pruning_predicate: Option<PruningPredicate>,
     object_store: Arc<dyn ObjectStore>,
     table_schema: Arc<Schema>,
@@ -46,8 +45,6 @@ pub struct BBFOpener {
     /// Row count per slice when `split_streams_slice` is set (the session batch
     /// size, propagated from the source).
     split_batch_size: usize,
-    /// The rule that merged the table schema. It decides which casts read null.
-    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     /// Stops the open and ends the stream when it fires.
     cancellation_token: CancellationToken,
 }
@@ -56,9 +53,7 @@ impl FileOpener for BBFOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let async_reader =
             ArrowBBFObjectReader::new(file.object_meta.location.clone(), self.object_store.clone());
-        let projected_schema = self.projected_schema.clone();
-        let type_widening = Arc::clone(&self.type_widening);
-        let fut_type_widening = Arc::clone(&self.type_widening);
+        let read_schema = self.read_schema.clone();
         let pruning_predicate = self.pruning_predicate.clone();
         let table_schema = self.table_schema.clone();
         let file_tracer = self.file_tracer.clone();
@@ -72,13 +67,12 @@ impl FileOpener for BBFOpener {
                 .clone()
         };
         let metrics = self.metrics.clone();
-        let fut_projected_schema = projected_schema.clone();
         let split_streams_slice = self.split_streams_slice;
         let split_batch_size = self.split_batch_size;
         let cancellation_token = self.cancellation_token.clone();
 
         let fut = async move {
-            let (stream, schema_mapper, file_schema) = stream_partition_share
+            let producer = stream_partition_share
                 .get_or_try_init(|| async move {
                     tracing::debug!("Opening file: {:?}", file.object_meta.location);
 
@@ -88,21 +82,15 @@ impl FileOpener for BBFOpener {
 
                     let file_schema = reader.arrow_schema();
 
-                    // Columns of this file that the query needs, in file order —
-                    // used both to prune the read and as the source schema for
-                    // the batch adapter.
+                    // Columns of this file that the query needs, in file order.
+                    // A column the file lacks is left to the adapter above.
                     let projection: Vec<usize> = file_schema
                         .fields()
                         .iter()
                         .enumerate()
-                        .filter(|(_, f)| fut_projected_schema.index_of(f.name()).is_ok())
+                        .filter(|(_, f)| read_schema.index_of(f.name()).is_ok())
                         .map(|(i, _)| i)
                         .collect();
-                    let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
-                    let schema_mapper = Arc::new(
-                        batch_adapter_factory(fut_projected_schema.clone(), fut_type_widening)
-                            .make_adapter(&source_schema)?,
-                    );
                     let mut selection: Option<BooleanArray> = None;
                     if let Some(pruning_predicate) = pruning_predicate {
                         selection =
@@ -127,50 +115,27 @@ impl FileOpener for BBFOpener {
                         file_tracer.lock().extend(entries_used);
                     }
 
-                    let stream_producer = reader
+                    reader
                         .read(Some(projection), selection)
                         .await
-                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-
-                    Ok::<_, datafusion::error::DataFusionError>((
-                        stream_producer,
-                        schema_mapper,
-                        Arc::new(file_schema),
-                    ))
+                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))
                 })
                 .await?
                 .clone();
-            let producer = stream.stream().await;
 
+            // Each batch keeps the names and types of the file. The adapter
+            // above this opener maps them onto the schema the scan reports.
             let stream_proxy = producer
+                .stream()
+                .await
                 .into_stream()
-                .map(
-                    move |nd_batch| -> Result<
-                        arrow::array::RecordBatch,
-                        datafusion::error::DataFusionError,
-                    > {
-                        // let schema_mapper = schema_mapper.clone();
-                        let arrow_batch = nd_batch.to_arrow_record_batch().unwrap_or_else(|e| {
-                            tracing::error!(
-                                "Error converting NdRecordBatch to Arrow RecordBatch: {:?}",
-                                e
-                            );
-                            RecordBatch::new_empty(file_schema.clone())
-                        });
-                        let batch_schema = arrow_batch.schema();
-                        // Map the batch schema to the table schema.
-                        let schema_mapper = batch_adapter_factory(
-                            projected_schema.clone(),
-                            Arc::clone(&type_widening),
-                        )
-                        .make_adapter(&batch_schema)?;
-                        let mapped_batch = schema_mapper
-                            .adapt_batch(&arrow_batch)
-                            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-                        metrics.add_rows(mapped_batch.num_rows());
-                        Ok(mapped_batch)
-                    },
-                )
+                .map(move |nd_batch| {
+                    let batch = nd_batch
+                        .to_arrow_record_batch()
+                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                    metrics.add_rows(batch.num_rows());
+                    Ok(batch)
+                })
                 .boxed();
 
             // When configured (per-runtime default or per-table option), split
@@ -387,6 +352,135 @@ mod opener_tests {
             "exactly one error item, got {rest:?}"
         );
     }
+
+    /// Collects every batch the opener yields for `source` over `meta`.
+    async fn collect_with(
+        source: BBFSource,
+        object_store: Arc<dyn ObjectStore>,
+        meta: object_store::ObjectMeta,
+    ) -> Vec<datafusion::error::Result<arrow::array::RecordBatch>> {
+        let conf = FileScanConfigBuilder::new(
+            ObjectStoreUrl::parse("file://").expect("url"),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .build();
+        let opener = source
+            .create_file_opener(object_store, &conf, 0)
+            .expect("file opener");
+        opener
+            .open(PartitionedFile::from(meta))
+            .expect("open")
+            .await
+            .expect("stream")
+            .collect()
+            .await
+    }
+
+    /// A source that accepts a projection must apply it in full. An expression
+    /// the optimizer pushes down comes back computed, not as a null column.
+    #[tokio::test]
+    async fn opener_applies_a_pushed_down_expression() {
+        use datafusion::logical_expr::Operator;
+        use datafusion::physical_expr::expressions::{BinaryExpr, col, lit};
+        use datafusion::physical_expr::projection::ProjectionExpr;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, meta) = write_bbf_fixture(dir.path(), "expr.bbf").await;
+        let object_store: Arc<dyn ObjectStore> = store;
+        let ctx = SessionContext::new();
+        let table_schema = crate::datafusion::BBFFormat::default()
+            .infer_schema(&ctx.state(), &object_store, std::slice::from_ref(&meta))
+            .await
+            .expect("schema");
+
+        let plus_one = BinaryExpr::new(
+            col("ints", &table_schema).expect("ints"),
+            Operator::Plus,
+            lit(1i32),
+        );
+        let projection = ProjectionExprs::new([ProjectionExpr::new(Arc::new(plus_one), "x")]);
+        let source = BBFSource::new(TableSchema::from_file_schema(table_schema))
+            .with_projection(Some(projection));
+
+        let batches: Vec<_> = collect_with(source, object_store, meta)
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .expect("all batches ok");
+        let mut values: Vec<i32> = batches
+            .iter()
+            .flat_map(|batch| {
+                assert_eq!(batch.schema().field(0).name(), "x");
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int32Array>()
+                    .expect("x is Int32")
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, vec![2, 3, 4, 11, 21]);
+    }
+
+    /// An entry whose columns disagree on a dimension cannot flatten. The
+    /// stream reports that as an error instead of dropping the rows.
+    #[tokio::test]
+    async fn opener_reports_a_failed_flatten_as_an_error() {
+        use arrow::array::{ArrayRef, Int32Array};
+        use beacon_binary_format::array::dimensions::Dimensions;
+        use beacon_binary_format::entry::{ArrayCollection, Column, Entry};
+        use beacon_binary_format::writer::BBFWriter;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("ragged.bbf");
+        {
+            let mut writer =
+                BBFWriter::new(&file_path, 1024 * 1024, None, true).expect("bbf writer");
+            let three: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+            let two: ArrayRef = Arc::new(Int32Array::from(vec![4, 5]));
+            let collection = ArrayCollection::new(
+                "ragged",
+                Box::new(
+                    vec![
+                        Column::new("a", three, Dimensions::Multi(vec![("dim1", 3).into()])),
+                        Column::new("b", two, Dimensions::Multi(vec![("dim1", 2).into()])),
+                    ]
+                    .into_iter(),
+                ),
+            );
+            writer.append(Entry::new(collection), "entry");
+            writer.finish().expect("finish bbf file");
+        }
+        let store = Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(dir.path()).expect("store"),
+        );
+        let meta = {
+            use object_store::ObjectStoreExt;
+            store
+                .head(&object_store::path::Path::from("ragged.bbf"))
+                .await
+                .expect("head")
+        };
+        let object_store: Arc<dyn ObjectStore> = store;
+
+        let ctx = SessionContext::new();
+        let table_schema = crate::datafusion::BBFFormat::default()
+            .infer_schema(&ctx.state(), &object_store, std::slice::from_ref(&meta))
+            .await
+            .expect("schema");
+        let a = table_schema.index_of("a").expect("a");
+        let b = table_schema.index_of("b").expect("b");
+        let source = BBFSource::new(TableSchema::from_file_schema(table_schema.clone()))
+            .with_projection(Some(ProjectionExprs::from_indices(&[a, b], &table_schema)));
+
+        let items = collect_with(source, object_store, meta).await;
+        assert!(
+            items.iter().any(|item| item.is_err()),
+            "a failed flatten must surface as an error, got {items:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -462,7 +556,7 @@ mod split_tests {
 impl BBFOpener {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        projected_schema: SchemaRef,
+        read_schema: SchemaRef,
         pruning_predicate: Option<PruningPredicate>,
         object_store: Arc<dyn ObjectStore>,
         table_schema: Arc<Schema>,
@@ -471,11 +565,10 @@ impl BBFOpener {
         metrics: BBFGlobalMetrics,
         split_streams_slice: bool,
         split_batch_size: usize,
-        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
-            projected_schema,
+            read_schema,
             object_store,
             pruning_predicate,
             table_schema,
@@ -484,7 +577,6 @@ impl BBFOpener {
             metrics,
             split_streams_slice,
             split_batch_size,
-            type_widening,
             cancellation_token,
         }
     }

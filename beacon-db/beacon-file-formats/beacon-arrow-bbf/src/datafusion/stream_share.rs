@@ -1,17 +1,12 @@
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 
-use arrow::datatypes::SchemaRef;
 use beacon_binary_format::reader::async_reader::stream::AsyncStreamProducer;
-use datafusion::physical_expr_adapter::BatchAdapter;
 use nd_arrow_array::batch::NdRecordBatch;
 
+/// One reader stream per file, shared by every partition that opens the file.
 #[derive(Debug)]
 pub struct StreamShare {
-    inner: tokio::sync::OnceCell<(
-        AsyncStreamProducer<NdRecordBatch>,
-        Arc<BatchAdapter>,
-        SchemaRef,
-    )>,
+    inner: tokio::sync::OnceCell<AsyncStreamProducer<NdRecordBatch>>,
 }
 
 impl StreamShare {
@@ -25,26 +20,12 @@ impl StreamShare {
         &self,
         f: F,
     ) -> impl Future<
-        Output = Result<
-            &(
-                AsyncStreamProducer<NdRecordBatch>,
-                Arc<BatchAdapter>,
-                SchemaRef,
-            ),
-            datafusion::error::DataFusionError,
-        >,
+        Output = Result<&AsyncStreamProducer<NdRecordBatch>, datafusion::error::DataFusionError>,
     >
     where
         F: FnOnce() -> Fut,
         Fut: Future<
-            Output = Result<
-                (
-                    AsyncStreamProducer<NdRecordBatch>,
-                    Arc<BatchAdapter>,
-                    SchemaRef,
-                ),
-                datafusion::error::DataFusionError,
-            >,
+            Output = Result<AsyncStreamProducer<NdRecordBatch>, datafusion::error::DataFusionError>,
         >,
     {
         self.inner.get_or_try_init(f)

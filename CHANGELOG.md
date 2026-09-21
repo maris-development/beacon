@@ -231,7 +231,10 @@ tag. Releases before 2.0.0 are recorded in the
   `read_bbf_schema` to see the columns of a file. The BBF source also takes a
   cancellation token: `BBFSource::set_cancellation_token` stops the open and ends every stream of
   that source with one error item, so a consumer never takes a partial result for a complete one.
-  Read tasks the reader already started finish in the background.
+  Read tasks the reader already started finish in the background. The BBF scan now maps its
+  batches through the shared adapting opener, like IPC and CSV: one adapter per file instead of
+  one per batch, an expression the optimizer pushes down comes back computed, and an entry that
+  does not flatten is an error instead of rows that vanish.
 
 - **The scan asks the merge rule which casts read null, and the merged schema carries no mark.**
   `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first` used to mark a column that two files type in two
