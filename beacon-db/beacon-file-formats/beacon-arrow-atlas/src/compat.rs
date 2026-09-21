@@ -33,16 +33,6 @@ pub fn global_attr_column(attr: &str) -> String {
     format!(".{attr}")
 }
 
-/// Whether `column` could name a per-array attribute of `array`.
-///
-/// Used to skip building an attribute map for an array whose attributes the
-/// query does not project.
-pub fn is_attr_column_of(column: &str, array: &str) -> bool {
-    column.len() > array.len() + 1
-        && column.starts_with(array)
-        && column.as_bytes()[array.len()] == b'.'
-}
-
 // ─── Element types ───────────────────────────────────────────────────────────
 
 /// The ND type of a scalar atlas dtype, or `None` for the list dtypes, which
@@ -294,20 +284,6 @@ mod tests {
     fn an_attribute_takes_its_owners_name() {
         assert_eq!(array_attr_column("sst", "units"), "sst.units");
         assert_eq!(global_attr_column("Conventions"), ".Conventions");
-    }
-
-    #[test]
-    fn an_attribute_column_is_recognized_by_its_array() {
-        assert!(is_attr_column_of("sst.units", "sst"));
-        assert!(
-            !is_attr_column_of("sst", "sst"),
-            "the array itself is not one"
-        );
-        assert!(
-            !is_attr_column_of("sst_flag.units", "sst"),
-            "a prefix is not a name"
-        );
-        assert!(!is_attr_column_of("sst.", "sst"), "an empty key is no key");
     }
 
     // ── element types ───────────────────────────────────────────────────

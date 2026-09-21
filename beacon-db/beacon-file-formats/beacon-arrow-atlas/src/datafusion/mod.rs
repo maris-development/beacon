@@ -67,12 +67,6 @@ impl AtlasFormatFactory {
     pub fn new(options: AtlasOptions) -> Self {
         Self { options }
     }
-
-    /// A format with this table's effective settings. Each format owns a
-    /// reader cache of its own.
-    pub(crate) fn build(&self, options: AtlasOptions) -> AtlasFormat {
-        AtlasFormat::new(options)
-    }
 }
 
 impl FileFormatFactory for AtlasFormatFactory {
@@ -92,11 +86,12 @@ impl FileFormatFactory for AtlasFormatFactory {
                     .collect(),
             );
         }
-        Ok(Arc::new(self.build(options)))
+        Ok(Arc::new(AtlasFormat::new(options)))
     }
 
+    /// Each format owns a reader cache of its own.
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(self.build(self.options.clone()))
+        Arc::new(AtlasFormat::new(self.options.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -180,6 +175,15 @@ impl AtlasFormat {
             options,
             cache: AtlasReaderCache::new(512),
         }
+    }
+
+    /// A source over `table_schema`, on this table's settings and reader cache.
+    fn source(&self, table_schema: TableSchema) -> AtlasSource {
+        AtlasSource::new(
+            self.options.read_dimensions.clone(),
+            table_schema,
+            self.cache.clone(),
+        )
     }
 }
 
@@ -311,6 +315,9 @@ impl FileFormat for AtlasFormat {
         conf: FileScanConfig,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         beacon_nd_array::arrow::morsel::reject_partition_columns("Atlas", &conf)?;
+        // Refuse a scan of no column here, before any collection opens. The
+        // opener checks again, for a projection pushed down after planning.
+        source::require_projection(conf.projected_schema()?.as_ref())?;
 
         let listed: Vec<ObjectMeta> = conf
             .file_groups
@@ -340,13 +347,10 @@ impl FileFormat for AtlasFormat {
         // rebuilding it below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
 
-        let source = AtlasSource::new(
-            self.options.read_dimensions.clone(),
-            table_schema,
-            self.cache.clone(),
-        )
-        .with_projection(projection)
-        .with_type_widening(Arc::clone(&session_widening(state).strategy));
+        let source = self
+            .source(table_schema)
+            .with_projection(projection)
+            .with_type_widening(Arc::clone(&session_widening(state).strategy));
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
@@ -356,11 +360,7 @@ impl FileFormat for AtlasFormat {
     }
 
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
-        Arc::new(AtlasSource::new(
-            self.options.read_dimensions.clone(),
-            table_schema,
-            self.cache.clone(),
-        ))
+        Arc::new(self.source(table_schema))
     }
 
     async fn create_writer_physical_plan(
@@ -563,17 +563,40 @@ mod scan_tests {
         );
     }
 
-    /// A count projects no column. It still counts every row of every
-    /// dataset, once, across the partitions, and reads no cell to do so.
+    /// `COUNT(*)` projects no column, and a dataset has no row count without
+    /// one. The query is refused before any collection opens, and the error
+    /// says what to write instead.
     #[tokio::test]
-    async fn a_count_reads_no_column_and_counts_every_row() {
+    async fn a_count_of_no_column_is_refused_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        three_collections(tmp.path()).await;
+        let (ctx, table) = table(tmp.path(), 3).await;
+        ctx.register_table("obs", table).unwrap();
+
+        let error = ctx
+            .sql("SELECT count(*) FROM obs")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect_err("no column, no row count")
+            .to_string();
+
+        assert!(error.contains("at least one column"), "{error}");
+        assert!(error.contains("COUNT(column)"), "{error}");
+    }
+
+    /// A count of a column projects that column, and counts every row of
+    /// every dataset once across the partitions.
+    #[tokio::test]
+    async fn a_count_of_a_column_counts_every_row() {
         let tmp = tempfile::tempdir().unwrap();
         three_collections(tmp.path()).await;
         let (ctx, table) = table(tmp.path(), 3).await;
         ctx.register_table("obs", table).unwrap();
 
         let batches = ctx
-            .sql("SELECT count(*) FROM obs")
+            .sql("SELECT count(temperature) FROM obs")
             .await
             .unwrap()
             .collect()

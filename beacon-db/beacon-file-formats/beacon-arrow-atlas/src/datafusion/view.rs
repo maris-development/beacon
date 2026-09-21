@@ -25,7 +25,10 @@ use beacon_datafusion_ext::nd::{Dimensions, NdArrowArray, NdRecordBatch};
 use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use beacon_nd_array::{
     NdArrayD,
-    dataset::{default::DefaultDataset, source::DatasetSource},
+    dataset::{
+        AnyDataset, Dataset, default::DefaultDataset, resolve_read_dimensions,
+        source::DatasetSource,
+    },
 };
 use datafusion::physical_plan::PhysicalExpr;
 use indexmap::IndexMap;
@@ -37,23 +40,19 @@ use crate::{
     store::{AtlasReaderCache, get_or_open_atlas},
 };
 
-/// The segment of every array of a collection, by name.
-type DrivingSegments = Arc<[(String, Arc<ArrayFile>)]>;
-
 /// An open collection and the resolution of every column of the table.
+///
+/// The table projects at least one column: the scan refuses one that does
+/// not, see `require_projection`. A dataset's grid is therefore always the
+/// grid of the columns it reads.
 #[derive(Clone)]
 pub struct AtlasView {
     atlas: Arc<Atlas>,
     table_schema: SchemaRef,
     column_views: Arc<IndexMap<FieldRef, Option<AtlasColumnView>>>,
-    /// The segment of every array, by name, for a read that projects no
-    /// column.
-    ///
-    /// Such a read counts rows. With no array read, every dataset would sit
-    /// on a rank-0 grid of one row. The read is driven by the widest array of
-    /// each dataset instead, so the count is the dataset's full grid. `None`
-    /// when the table projects a column.
-    driving: Option<DrivingSegments>,
+    /// The dimensions the scan reads, or `None` to pick a broadcast-compatible
+    /// default per dataset. See [`AtlasView::dataset`].
+    read_dimensions: Option<Vec<String>>,
     /// The rule that merged the table schema. It decides which casts read null.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
@@ -61,32 +60,26 @@ pub struct AtlasView {
 impl AtlasView {
     /// Open the collection at `object_meta`, through `cache` when given, and
     /// resolve every column of `table_schema` against it. `type_widening` is
-    /// the rule that merged that schema.
+    /// the rule that merged that schema, and `read_dimensions` the axes the
+    /// scan reads on.
     pub async fn new(
         cache: Option<&AtlasReaderCache>,
         store: Arc<dyn ObjectStore>,
         object_meta: ObjectMeta,
         table_schema: SchemaRef,
+        read_dimensions: Option<Vec<String>>,
         type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> anyhow::Result<Self> {
         let atlas = get_or_open_atlas(cache, store, &object_meta).await?;
         let views = column_views(&atlas, &table_schema)
             .await
             .with_context(|| format!("resolving the columns of '{}'", object_meta.location))?;
-        let driving = if table_schema.fields().is_empty() {
-            let segments = driving_segments(&atlas)
-                .await
-                .with_context(|| format!("resolving the arrays of '{}'", object_meta.location))?;
-            Some(segments)
-        } else {
-            None
-        };
 
         Ok(Self {
             atlas,
             table_schema,
             column_views: Arc::new(views),
-            driving,
+            read_dimensions,
             type_widening,
         })
     }
@@ -133,6 +126,11 @@ impl AtlasView {
     /// as a rank-0 null. No array data is read here. The dataset's layout
     /// comes from the segments, and its chunk grid is the one the writer
     /// chose.
+    ///
+    /// The arrays are then narrowed to the dimensions the scan reads, by the
+    /// rule every nd format shares: an explicit list wins, and without one the
+    /// dataset's broadcast-compatible default is taken. An array on any other
+    /// axis is dropped, and its column reads as null on the grid that is kept.
     pub async fn dataset(&self, dataset_name: &str) -> anyhow::Result<Arc<dyn DatasetSource>> {
         let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
         for (field, view) in &*self.column_views {
@@ -163,15 +161,37 @@ impl AtlasView {
                 arrays.insert(field.name().clone(), array);
             }
         }
-        if let Some(segments) = &self.driving
-            && let Some((name, array)) = widest_array(segments, dataset_name)
-        {
-            arrays.insert(name, array);
-        }
+        let arrays = on_read_dimensions(dataset_name, arrays, self.read_dimensions.clone()).await;
         let dataset = DefaultDataset::new(dataset_name.to_string(), arrays)
             .with_context(|| format!("laying out dataset '{dataset_name}'"))?;
         Ok(Arc::new(dataset))
     }
+}
+
+/// `arrays` narrowed to the dimensions the scan reads.
+///
+/// `read_dimensions` names them, or `None` leaves the choice to the dataset's
+/// broadcast-compatible default, see [`resolve_read_dimensions`]. An array
+/// survives when every one of its axes is in the set, so an attribute on no
+/// axis always does. With no set to apply, every array survives.
+async fn on_read_dimensions(
+    dataset_name: &str,
+    arrays: IndexMap<String, Arc<dyn NdArrayD>>,
+    read_dimensions: Option<Vec<String>>,
+) -> IndexMap<String, Arc<dyn NdArrayD>> {
+    let dataset = AnyDataset::Regular(Dataset::new(dataset_name.to_string(), arrays).await);
+    let dims = resolve_read_dimensions(&dataset, read_dimensions, None);
+    let AnyDataset::Regular(dataset) = dataset else {
+        unreachable!("built as a regular dataset above");
+    };
+    let Some(dims) = dims else {
+        return dataset.arrays;
+    };
+    dataset
+        .arrays
+        .into_iter()
+        .filter(|(_, array)| array.dimensions().iter().all(|dim| dims.contains(dim)))
+        .collect()
 }
 
 /// Where one column of the scan comes from, for every dataset of a collection.
@@ -222,50 +242,6 @@ pub(crate) async fn column_views(
         views.insert(Arc::clone(field), view);
     }
     Ok(views)
-}
-
-/// The segment of every array of the collection, by name.
-async fn driving_segments(atlas: &Atlas) -> anyhow::Result<DrivingSegments> {
-    let names: Vec<String> = atlas
-        .footer()
-        .collection_schema()
-        .arrays
-        .keys()
-        .map(|name| name.to_string())
-        .collect();
-    let mut segments = Vec::with_capacity(names.len());
-    for name in names {
-        let segment = atlas
-            .try_segment(&name)
-            .await
-            .with_context(|| format!("opening the segment of array '{name}'"))?;
-        if let Some(segment) = segment {
-            segments.push((name, Arc::clone(segment)));
-        }
-    }
-    Ok(segments.into())
-}
-
-/// The array of `dataset` with the most cells, out of `segments`, with its
-/// name. An array Beacon cannot read is passed over: it drives nothing.
-fn widest_array(
-    segments: &[(String, Arc<ArrayFile>)],
-    dataset: &str,
-) -> Option<(String, Arc<dyn NdArrayD>)> {
-    let mut widest: Option<(usize, String, Arc<dyn NdArrayD>)> = None;
-    for (name, segment) in segments {
-        let Some(info) = segment.array(dataset) else {
-            continue;
-        };
-        let Ok(array) = compat::array_to_nd_array(Arc::clone(segment), dataset, &info.dtype) else {
-            continue;
-        };
-        let cells: usize = array.shape().iter().product();
-        if widest.as_ref().is_none_or(|(most, _, _)| cells > *most) {
-            widest = Some((cells, name.clone(), array));
-        }
-    }
-    widest.map(|(_, name, array)| (name, array))
 }
 
 /// `nd` under `fields`: every field in order, on the same target grid.
@@ -361,11 +337,27 @@ mod tests {
     /// Every chunk of `dataset`, read as the scan reads it: through the view,
     /// under the scan's fields. And the rows of all of them in chunk order.
     async fn read(dir: &Path, dataset: &str) -> (Vec<NdRecordBatch>, RecordBatch) {
+        read_on(dir, dataset, None).await
+    }
+
+    /// [`read`], on the dimensions `read_dimensions` names.
+    async fn read_on(
+        dir: &Path,
+        dataset: &str,
+        read_dimensions: Option<Vec<String>>,
+    ) -> (Vec<NdRecordBatch>, RecordBatch) {
         let schema = schema(dir).await;
         let (store, marker) = test_support::store_and_marker(dir);
-        let view = AtlasView::new(None, store, marker, Arc::clone(&schema), strict())
-            .await
-            .unwrap();
+        let view = AtlasView::new(
+            None,
+            store,
+            marker,
+            Arc::clone(&schema),
+            read_dimensions,
+            strict(),
+        )
+        .await
+        .unwrap();
         let source = view.dataset(dataset).await.unwrap();
         let mut chunks = Vec::new();
         for chunk in source.chunks() {
@@ -429,28 +421,6 @@ mod tests {
         );
     }
 
-    /// A read of no column is driven by each dataset's widest array, so a
-    /// count sees the dataset's full grid without reading a cell.
-    #[tokio::test]
-    async fn a_read_of_no_column_counts_the_full_grid() {
-        let tmp = tempfile::tempdir().unwrap();
-        test_support::two_datasets(tmp.path()).await;
-        let (store, marker) = test_support::store_and_marker(tmp.path());
-        let view = AtlasView::new(None, store, marker, Arc::new(Schema::empty()), strict())
-            .await
-            .unwrap();
-
-        for (dataset, rows) in [("winter", 4), ("summer", 3)] {
-            let source = view.dataset(dataset).await.unwrap();
-            let counted: usize = source
-                .chunks()
-                .iter()
-                .map(|chunk| source.chunk_rows(chunk).unwrap())
-                .sum();
-            assert_eq!(counted, rows, "{dataset}");
-        }
-    }
-
     /// `summer` declares neither `cycle` nor `time`, sets no `year`, and has no
     /// `units` on `temperature`. Each is a column of nulls on summer's grid.
     #[tokio::test]
@@ -507,6 +477,57 @@ mod tests {
             "the first chunk lies in the written rows"
         );
         assert!(sparse.is_null(23), "the last chunk lies outside them");
+    }
+
+    /// `mixed` holds `temperature` on `obs` and `grid` on `lat` and `lon`. No
+    /// one grid holds both, so the dimension list decides which is read, and
+    /// the other reads as null on the grid that is kept.
+    #[tokio::test]
+    async fn the_dimension_list_drops_the_arrays_on_other_axes() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_grids(tmp.path()).await;
+        let dims = |names: &[&str]| Some(names.iter().map(|d| d.to_string()).collect());
+
+        let (_, on_obs) = read_on(tmp.path(), "mixed", dims(&["obs"])).await;
+        assert_eq!(on_obs.num_rows(), 4, "the `obs` axis");
+        assert_eq!(
+            column(&on_obs, "temperature")
+                .as_primitive::<Float32Type>()
+                .values()
+                .to_vec(),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(column(&on_obs, "grid").null_count(), 4, "dropped, so null");
+
+        let (_, on_grid) = read_on(tmp.path(), "mixed", dims(&["lat", "lon"])).await;
+        assert_eq!(on_grid.num_rows(), 6, "the `lat` by `lon` grid");
+        assert_eq!(column(&on_grid, "temperature").null_count(), 6);
+        assert_eq!(
+            column(&on_grid, "grid")
+                .as_primitive::<Float64Type>()
+                .values()
+                .to_vec(),
+            (0..6).map(f64::from).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            column(&on_grid, ".season").as_string::<i32>().value(5),
+            "spring",
+            "an attribute has no axis, so it survives any list"
+        );
+    }
+
+    /// Without a list the dataset's broadcast-compatible default decides. The
+    /// two grids tie on arrays kept, so the one with more cells wins.
+    #[tokio::test]
+    async fn without_a_list_the_default_grid_is_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_grids(tmp.path()).await;
+
+        let (_, batch) = read(tmp.path(), "mixed").await;
+
+        assert_eq!(batch.num_rows(), 6, "six cells beat four");
+        assert_eq!(column(&batch, "temperature").null_count(), 6);
+        assert_eq!(column(&batch, "grid").null_count(), 0);
     }
 
     /// `a` stores `value` as `Int16` and `b` as `Float32`. The table declares

@@ -43,6 +43,7 @@ pub struct AtlasOpener {
     /// The same schema with the encoding unwrapped, which is what a predicate
     /// and the pruning engine are written against.
     pub logical_schema: SchemaRef,
+    /// The dimensions the scan reads, or `None` for each dataset's default.
     pub read_dimensions: Option<Vec<String>>,
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
     pub scan_metrics: AtlasScanMetrics,
@@ -67,6 +68,7 @@ impl FileOpener for AtlasOpener {
         let cache = self.cache.clone();
         let projected_schema = self.projected_schema.clone();
         let logical_schema = self.logical_schema.clone();
+        let read_dimensions = self.read_dimensions.clone();
         let predicate = self.predicate.clone();
         let scan_metrics = self.scan_metrics.clone();
         let pool = Arc::clone(&self.reader_pool);
@@ -77,6 +79,7 @@ impl FileOpener for AtlasOpener {
                 cache: Some(&cache),
                 logical_schema,
                 projected_schema,
+                read_dimensions,
                 predicate,
                 scan_metrics,
                 type_widening,

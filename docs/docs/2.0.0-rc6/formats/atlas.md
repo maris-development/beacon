@@ -74,6 +74,9 @@ What Beacon does with that:
   small datasets and one of four large ones both divide evenly.
 - **Column projection.** Only the arrays a query names get read, and only their attributes are
   fetched.
+- **A query names a column.** A dataset's row count follows the dimensions of the columns it
+  reads. A query that reads no column names no dimension set, so `SELECT count(*)` is refused with
+  a planning error. Write `count(temperature)`, or count any other column, instead.
 - **Object storage.** A collection reads from local disk, S3, GCS, Azure and HTTP alike.
 
 ### Columns

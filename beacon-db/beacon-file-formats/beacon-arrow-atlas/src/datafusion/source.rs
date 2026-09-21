@@ -28,7 +28,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use arrow::datatypes::Schema;
 use datafusion::{
+    common::plan_err,
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileOpener, FileScanConfig, FileSource},
@@ -100,6 +102,24 @@ impl AtlasSource {
     }
 }
 
+/// Refuse a scan that projects no column.
+///
+/// A dataset's row count follows the dimensions of the columns it reads. With
+/// no column there is no dimension set, so the count of a dataset that holds
+/// arrays on different grids has no one answer. The scan refuses rather than
+/// pick one. `COUNT(*)` reaches here; `COUNT(column)` projects a column and
+/// does not.
+pub(crate) fn require_projection(projected_schema: &Schema) -> Result<()> {
+    if projected_schema.fields().is_empty() {
+        return plan_err!(
+            "an atlas scan must project at least one column: a dataset's row count \
+             follows the dimensions of the columns it reads, and no column names none. \
+             Use COUNT(column) instead of COUNT(*)"
+        );
+    }
+    Ok(())
+}
+
 impl FileSource for AtlasSource {
     fn create_file_opener(
         &self,
@@ -108,6 +128,7 @@ impl FileSource for AtlasSource {
         partition: usize,
     ) -> Result<Arc<dyn FileOpener>> {
         let projected_schema = base_config.projected_schema()?;
+        require_projection(&projected_schema)?;
         Ok(Arc::new(AtlasOpener {
             object_store,
             cache: self.cache.clone(),
@@ -172,11 +193,10 @@ impl FileSource for AtlasSource {
 
     /// Take the filters as a hint, and leave them above the scan.
     ///
-    /// The scan uses a predicate twice: to skip a whole dataset whose recorded
-    /// statistics cannot hold a matching row, and to skip a chunk whose
-    /// coordinates cannot. Neither is exact — both work in whole datasets and
-    /// whole chunks — so the filter above the scan still decides each row, and
-    /// `PushedDown::No` is what says so.
+    /// The scan uses a predicate once: to skip a whole dataset whose recorded
+    /// statistics cannot hold a matching row. That works in whole datasets, so
+    /// the filter above the scan still decides each row, and `PushedDown::No`
+    /// is what says so.
     fn try_pushdown_filters(
         &self,
         filters: Vec<Arc<dyn PhysicalExpr>>,

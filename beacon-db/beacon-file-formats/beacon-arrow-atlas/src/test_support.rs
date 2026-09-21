@@ -186,6 +186,52 @@ pub async fn chunked_grid(dir: &Path) {
     writer.finish().await.expect("finish the collection");
 }
 
+/// One dataset, `mixed`, whose arrays sit on two dimension sets.
+///
+/// - `temperature: Float32[4]` on `obs`, holding `[1, 2, 3, 4]`.
+/// - `grid: Float64[2, 3]` on `lat` and `lon`, holding `0` to `5` in C order.
+/// - The attribute `season`, `spring`, on no axis.
+///
+/// No one grid holds both arrays, so a read has to choose.
+pub async fn two_grids(dir: &Path) {
+    let writer = AtlasWriter::create_path(dir, WriterConfig::default())
+        .await
+        .expect("create the collection");
+
+    let mut mixed = writer.add_dataset("mixed").await.expect("add mixed");
+    mixed
+        .define_array::<f32>("temperature", vec!["obs".into()], vec![4], None, None)
+        .await
+        .expect("define temperature");
+    mixed
+        .write_array(
+            "temperature",
+            vec![0],
+            arr1(&[1.0f32, 2.0, 3.0, 4.0]).into_dyn().view(),
+        )
+        .await
+        .expect("write temperature");
+    mixed
+        .define_array::<f64>(
+            "grid",
+            vec!["lat".into(), "lon".into()],
+            vec![2, 3],
+            None,
+            None,
+        )
+        .await
+        .expect("define grid");
+    let cells = ArrayD::from_shape_fn(IxDyn(&[2, 3]), |i| (i[0] * 3 + i[1]) as f64);
+    mixed
+        .write_array("grid", vec![0, 0], cells.view())
+        .await
+        .expect("write grid");
+    mixed.set_attribute("season", Attr::String("spring".into()));
+    mixed.finish().await.expect("finish mixed");
+
+    writer.finish().await.expect("finish the collection");
+}
+
 /// Two datasets whose shared array has two numeric types.
 ///
 /// - `a`: `value: Int16[2] = [1, 2]`, `flag: Int32[2] = [7, 8]`.

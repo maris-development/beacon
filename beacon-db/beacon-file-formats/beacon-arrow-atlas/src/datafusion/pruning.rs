@@ -112,8 +112,6 @@ pub(crate) async fn prune_datasets(
     }
 }
 
-// ─── The index ───────────────────────────────────────────────────────────────
-
 /// One column's statistics, one row per dataset.
 struct StatColumn {
     min: ArrayRef,
@@ -158,14 +156,9 @@ impl PruningStatistics for PruningIndex {
         _column: &Column,
         _values: &std::collections::HashSet<ScalarValue>,
     ) -> Option<arrow::array::BooleanArray> {
-        // An attribute's value is exact, so an `IN` list could prune on one.
-        // Not yet: every column here reports a range, and a range says nothing
-        // about membership.
         None
     }
 }
-
-// ─── Building it ─────────────────────────────────────────────────────────────
 
 /// Pivot the views into one [`StatColumn`] per wanted column.
 fn build_index(
@@ -246,8 +239,7 @@ fn pack_array_column(segment: &ArrayFile, names: &[String], target: &DataType) -
 /// An attribute's value is exact, so it is both the minimum and the maximum of
 /// its dataset, on the one cell the scan reads. That prunes an equality on a
 /// dataset-level attribute, the platform a file came from, say. A dataset
-/// without the key reads as null, and the counts say so. A list, a `NaN`, or a
-/// value that will not cast bounds nothing, and that dataset stays in.
+/// without the key reads as null, and the counts say so.
 fn pack_attribute_column(
     values: &IndexMap<String, Attr>,
     names: &[String],
@@ -304,10 +296,6 @@ fn scalars_to_array(values: Vec<ScalarValue>, rows: usize, target: &DataType) ->
 }
 
 /// An atlas statistic as a scalar of the table's own type.
-///
-/// A value that will not cast, and a `NaN` bound, both read as null. `NaN`
-/// sorts last under `total_cmp`, so a `NaN` maximum says nothing about the
-/// values below it, and claiming it as a bound would drop rows.
 fn stat_to_scalar(value: Option<&StatValue>, target: &DataType, null: &ScalarValue) -> ScalarValue {
     let canonical = match value {
         Some(StatValue::Int(v)) => ScalarValue::Int64(Some(*v)),

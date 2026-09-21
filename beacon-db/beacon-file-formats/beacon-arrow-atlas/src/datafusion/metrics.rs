@@ -11,7 +11,6 @@ pub struct AtlasScanMetrics {
     pub open_time: Time,
     /// Wall time deciding which datasets a predicate can rule out.
     pub prune_time: Time,
-    pub dataset_build_time: Time,
     /// Datasets this partition opened and read.
     pub datasets_scanned: Count,
     /// Datasets it skipped because the collection's statistics ruled them out.
@@ -23,8 +22,6 @@ impl AtlasScanMetrics {
         Self {
             open_time: MetricBuilder::new(metrics).subset_time("atlas_open_time", partition),
             prune_time: MetricBuilder::new(metrics).subset_time("atlas_prune_time", partition),
-            dataset_build_time: MetricBuilder::new(metrics)
-                .subset_time("atlas_dataset_build_time", partition),
             datasets_scanned: MetricBuilder::new(metrics)
                 .counter("atlas_datasets_scanned", partition),
             datasets_pruned: MetricBuilder::new(metrics)

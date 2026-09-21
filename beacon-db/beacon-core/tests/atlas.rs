@@ -124,7 +124,7 @@ async fn an_external_table_reads_a_collection() {
     rt.sql("CREATE EXTERNAL TABLE obs STORED AS ATLAS LOCATION 'obs/data.atlas'")
         .await;
 
-    assert_eq!(scalar_i64(&rt.sql("SELECT count(*) FROM obs").await), 20);
+    assert_eq!(scalar_i64(&rt.sql("SELECT count(temperature) FROM obs").await), 20);
 }
 
 /// A table in a Beacon-native format has to rebuild at startup. Its definition
@@ -137,11 +137,11 @@ async fn an_external_table_survives_a_restart() {
 
     rt.sql("CREATE EXTERNAL TABLE obs STORED AS ATLAS LOCATION 'obs/data.atlas'")
         .await;
-    assert_eq!(scalar_i64(&rt.sql("SELECT count(*) FROM obs").await), 16);
+    assert_eq!(scalar_i64(&rt.sql("SELECT count(temperature) FROM obs").await), 16);
 
     let rt = rt.restart().await;
     assert_eq!(
-        scalar_i64(&rt.sql("SELECT count(*) FROM obs").await),
+        scalar_i64(&rt.sql("SELECT count(temperature) FROM obs").await),
         16,
         "the table must come back after a restart"
     );

@@ -50,6 +50,14 @@
 //! That is the convention netCDF and Zarr use, so a query reads the same
 //! whichever format holds the data.
 //!
+//! # A scan names a column
+//!
+//! A dataset's row count follows the dimensions of the columns it reads. A
+//! scan of no column names no dimension set, so a dataset that holds arrays
+//! on different grids has no one count. The scan refuses such a query with a
+//! planning error. `COUNT(*)` is one; `COUNT(column)` projects a column and
+//! reads as any other query.
+//!
 //! # What is not read
 //!
 //! - A `Bool` array, and a `List` or `FixedSizeList` array. `array-format`
