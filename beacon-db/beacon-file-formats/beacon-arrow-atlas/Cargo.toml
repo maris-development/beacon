@@ -24,7 +24,6 @@ tokio-util = { workspace = true }
 ndarray = { workspace = true }
 chrono = { workspace = true }
 moka = { workspace = true }
-crossbeam = { workspace = true }
 parking_lot = { workspace = true }
 
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }

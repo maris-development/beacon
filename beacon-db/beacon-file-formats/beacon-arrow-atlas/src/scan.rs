@@ -4,7 +4,7 @@
 //! from a shared `CollectionQueue`, so one partition reads each dataset.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,12 +15,11 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
 use beacon_datafusion_ext::nd::{NdRecordBatch, encode_nd_record_batch, logical_schema};
 use beacon_nd_array::dataset::source::DatasetSource;
-use crossbeam::queue::ArrayQueue;
 use datafusion::{common::plan_err, error::Result, physical_plan::PhysicalExpr};
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore, path::Path};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
@@ -131,12 +130,19 @@ impl CollectionQueues {
     }
 }
 
-/// One collection's view, and the datasets left to read. Holds no read
-/// state, so partitions share it freely.
+/// One collection's datasets left to read, and the view they read through.
+/// Holds no read state, so partitions share it freely.
 pub(crate) struct CollectionQueue {
-    view: AtlasView,
+    spec: Arc<ScanSpec>,
+    pending: Mutex<Pending>,
+}
+
+/// What a queue still holds. The view goes with the last dataset, so a
+/// drained collection is released before the scan ends.
+struct Pending {
+    view: Option<AtlasView>,
     /// The datasets left to read, in listing order.
-    queue: ArrayQueue<String>,
+    datasets: VecDeque<String>,
 }
 
 impl CollectionQueue {
@@ -153,24 +159,38 @@ impl CollectionQueue {
         let cancel = spec.cancel.clone();
         let opening = async move {
             let open_timer = scan_metrics.open_time.timer();
-            let view = AtlasView::new(cache, store, object_meta, spec).await?;
+            let view = AtlasView::new(cache, store, object_meta, Arc::clone(&spec)).await?;
             drop(open_timer);
-            let datasets = view.list_datasets(scan_metrics).await?;
-
-            // At least one slot: ArrayQueue::new(0) would panic.
-            let queue = ArrayQueue::new(datasets.len().max(1));
-            for dataset in datasets {
-                queue
-                    .push(dataset)
-                    .map_err(|dataset| anyhow::anyhow!("no slot for dataset '{dataset}'"))?;
-            }
-            Ok(Arc::new(Self { view, queue }))
+            let datasets = view.list_datasets(scan_metrics).await?.into();
+            let pending = Pending {
+                view: Some(view),
+                datasets,
+            };
+            Ok(Arc::new(Self {
+                spec,
+                pending: Mutex::new(pending),
+            }))
         };
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(cancelled()),
             opened = opening => opened,
         }
+    }
+
+    /// The next dataset and the view to read it through, or `None` once the
+    /// queue is drained. The pop that finds it drained releases the view.
+    fn next_dataset(&self) -> Option<(String, AtlasView)> {
+        let mut pending = self.pending.lock();
+        let Some(dataset) = pending.datasets.pop_front() else {
+            pending.view = None;
+            return None;
+        };
+        let view = pending
+            .view
+            .clone()
+            .expect("the view lives until the last dataset is popped");
+        Some((dataset, view))
     }
 
     /// One consumer of the queue. It starts on no dataset, and counts the
@@ -211,13 +231,14 @@ impl Stream for DatasetStream {
                     Poll::Pending => return Poll::Pending,
                 }
             }
-            if this.queue.view.spec().cancel.is_cancelled() {
+            if this.queue.spec.cancel.is_cancelled() {
                 return Poll::Ready(Some(Err(cancelled())));
             }
-            match this.queue.queue.pop() {
-                Some(dataset) => {
+            match this.queue.next_dataset() {
+                Some((dataset, view)) => {
                     this.current = Some(dataset_batches(
-                        Arc::clone(&this.queue),
+                        view,
+                        Arc::clone(&this.queue.spec),
                         this.scan_metrics.clone(),
                         dataset,
                     ));
@@ -229,24 +250,26 @@ impl Stream for DatasetStream {
 }
 
 /// One dataset's batches: one encoded nd batch per stored chunk, in C order.
-///
-/// Each chunk is cast to the table's fields and encoded under the table schema.
+/// Each chunk carries the dataset's own columns; the adapting opener maps it
+/// onto the scan's schema. The view is dropped once the dataset is built.
 fn dataset_batches(
-    queue: Arc<CollectionQueue>,
+    view: AtlasView,
+    spec: Arc<ScanSpec>,
     scan_metrics: AtlasScanMetrics,
     dataset: String,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     futures::stream::once(async move {
-        let source = queue.view.dataset(&dataset).await?;
+        let source = view.dataset(&dataset).await?;
+        drop(view);
         scan_metrics.datasets_scanned.add(1);
         let chunks = source.chunks();
         let dataset = Arc::<str>::from(dataset);
         Ok::<_, anyhow::Error>(futures::stream::iter(chunks).then(move |chunk| {
-            let queue = Arc::clone(&queue);
+            let spec = Arc::clone(&spec);
             let source = Arc::clone(&source);
             let dataset = Arc::clone(&dataset);
             async move {
-                if queue.view.spec().cancel.is_cancelled() {
+                if spec.cancel.is_cancelled() {
                     return Err(cancelled());
                 }
                 // The batch carries the dataset's own columns and types. The
@@ -458,6 +481,15 @@ mod tests {
             "nor for the second"
         );
         assert_eq!(metrics.datasets_scanned.value(), 2);
+
+        // The drained queue released its collection. A late stream finds
+        // nothing to read and reopens nothing.
+        let (_, marker) = test_support::store_and_marker(tmp.path());
+        let cell = Arc::clone(queues.cells.read().get(&marker.location).unwrap());
+        assert!(cell.get().unwrap().pending.lock().view.is_none());
+        let mut third = stream(&queues, tmp.path(), None, metrics.clone()).await;
+        assert!(third.try_next().await.unwrap().is_none());
+        assert_eq!(metrics.datasets_scanned.value(), 2, "nothing was reread");
     }
 
     /// A predicate that rules out every dataset leaves nothing to read. The

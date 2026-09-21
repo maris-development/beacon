@@ -1452,7 +1452,6 @@ dependencies = [
  "beacon-datafusion-ext",
  "beacon-nd-array",
  "chrono",
- "crossbeam",
  "datafusion 53.1.0",
  "datafusion-datasource 53.1.0",
  "futures",
