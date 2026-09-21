@@ -19,6 +19,7 @@ futures = { workspace = true }
 indexmap = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 ndarray = { workspace = true }
 chrono = { workspace = true }
 moka = { workspace = true }

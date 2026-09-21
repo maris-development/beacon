@@ -64,6 +64,15 @@
 //! planning error. `COUNT(*)` is one; `COUNT(column)` projects a column and
 //! reads as any other query.
 //!
+//! # Cancellation
+//!
+//! Dropping the result stream stops a scan at its next `await`. The scan also
+//! reads through the query's cancellation token, see
+//! [`beacon_datafusion_ext::cancel`]. When the token fires, an open in
+//! progress, the pruning pivot and every stream stop with an error. The pivot
+//! runs on a blocking thread Tokio cannot abort, so it watches a child token
+//! that a dropped pruning future fires too.
+//!
 //! # What is not read
 //!
 //! - A `Bool` array, and a `List` or `FixedSizeList` array. `array-format`

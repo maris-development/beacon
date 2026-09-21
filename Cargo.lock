@@ -1462,6 +1462,7 @@ dependencies = [
  "parking_lot",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1878,6 +1879,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tonic",
  "tracing",
  "typetag",

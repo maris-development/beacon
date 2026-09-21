@@ -34,6 +34,7 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore, path::Path};
 use parking_lot::RwLock;
 use tokio::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 
 use crate::metrics::AtlasScanMetrics;
 use crate::open::AtlasReaderCache;
@@ -59,6 +60,9 @@ pub struct ScanSpec {
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
     /// The rule that merged the table schema. It decides which casts read null.
     pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    /// The query's token. When it fires, every stage stops with an error: an
+    /// open in progress, the pruning pivot, and a stream between two chunks.
+    pub cancel: CancellationToken,
 }
 
 impl ScanSpec {
@@ -70,6 +74,7 @@ impl ScanSpec {
         read_dimensions: Option<Vec<String>>,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+        cancel: CancellationToken,
     ) -> Result<Self> {
         require_projection(&projected_schema)?;
         Ok(Self {
@@ -78,8 +83,17 @@ impl ScanSpec {
             read_dimensions,
             predicate,
             type_widening,
+            cancel,
         })
     }
+}
+
+/// The error a stage reports when the query's token fires.
+///
+/// An error, not an end: a stream that ended early would hand back a short
+/// answer as if it were whole.
+pub(crate) fn cancelled() -> anyhow::Error {
+    anyhow::anyhow!("the query was cancelled")
 }
 
 /// Refuse a scan that projects no column.
@@ -164,6 +178,9 @@ pub(crate) struct CollectionQueue {
 
 impl CollectionQueue {
     /// Open the collection, prune its datasets, and queue the survivors.
+    ///
+    /// A cancelled query stops the open where it stands, footer read or
+    /// pivot, and reports the cancellation.
     async fn open(
         cache: Option<&AtlasReaderCache>,
         store: Arc<dyn ObjectStore>,
@@ -171,21 +188,29 @@ impl CollectionQueue {
         spec: Arc<ScanSpec>,
         scan_metrics: &AtlasScanMetrics,
     ) -> anyhow::Result<Arc<Self>> {
-        let open_timer = scan_metrics.open_time.timer();
-        let view = AtlasView::new(cache, store, object_meta, spec).await?;
-        drop(open_timer);
-        let datasets = view.list_datasets(scan_metrics).await?;
+        let cancel = spec.cancel.clone();
+        let opening = async move {
+            let open_timer = scan_metrics.open_time.timer();
+            let view = AtlasView::new(cache, store, object_meta, spec).await?;
+            drop(open_timer);
+            let datasets = view.list_datasets(scan_metrics).await?;
 
-        // A queue has at least one slot: `ArrayQueue::new(0)` panics. With no
-        // dataset to read the slot stays empty, the first `pop` finds nothing,
-        // and the stream ends at once.
-        let queue = ArrayQueue::new(datasets.len().max(1));
-        for dataset in datasets {
-            queue
-                .push(dataset)
-                .map_err(|dataset| anyhow::anyhow!("no slot for dataset '{dataset}'"))?;
+            // A queue has at least one slot: `ArrayQueue::new(0)` panics. With
+            // no dataset to read the slot stays empty, the first `pop` finds
+            // nothing, and the stream ends at once.
+            let queue = ArrayQueue::new(datasets.len().max(1));
+            for dataset in datasets {
+                queue
+                    .push(dataset)
+                    .map_err(|dataset| anyhow::anyhow!("no slot for dataset '{dataset}'"))?;
+            }
+            Ok(Arc::new(Self { view, queue }))
+        };
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(cancelled()),
+            opened = opening => opened,
         }
-        Ok(Arc::new(Self { view, queue }))
     }
 
     /// One consumer of the queue. It starts on no dataset, and counts the
@@ -219,7 +244,7 @@ impl Stream for DatasetStream {
 
     /// The next batch of the dataset in hand, or the first batch of the next
     /// dataset on the queue. The stream ends when the queue is empty and the
-    /// dataset in hand is drained.
+    /// dataset in hand is drained, and errors when the query is cancelled.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
@@ -229,6 +254,9 @@ impl Stream for DatasetStream {
                     Poll::Ready(None) => this.current = None,
                     Poll::Pending => return Poll::Pending,
                 }
+            }
+            if this.queue.view.spec().cancel.is_cancelled() {
+                return Poll::Ready(Some(Err(cancelled())));
             }
             match this.queue.queue.pop() {
                 Some(dataset) => {
@@ -266,6 +294,9 @@ fn dataset_batches(
             let dataset = Arc::clone(&dataset);
             async move {
                 let spec = queue.view.spec();
+                if spec.cancel.is_cancelled() {
+                    return Err(cancelled());
+                }
                 let nd = read_chunk(&source, chunk, &dataset).await?;
                 let nd = under_fields(
                     &nd,
@@ -393,6 +424,19 @@ mod tests {
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: AtlasScanMetrics,
     ) -> DatasetStream {
+        open_with(queues, dir, predicate, metrics, CancellationToken::new())
+            .await
+            .unwrap()
+    }
+
+    /// [`stream`], on a query `cancel` stops, and without the unwrap.
+    async fn open_with(
+        queues: &CollectionQueues,
+        dir: &Path,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
+        metrics: AtlasScanMetrics,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<DatasetStream> {
         let (store, marker) = test_support::store_and_marker(dir);
         let projected = Arc::new(encoded_schema(logical_schema(dir).await.as_ref()));
         let spec = ScanSpec::new(
@@ -400,12 +444,73 @@ mod tests {
             None,
             predicate,
             Arc::new(DefaultArrowTypeWidening::new()),
+            cancel,
         )
         .unwrap();
         queues
             .open(None, store, marker, Arc::new(spec), metrics)
             .await
-            .unwrap()
+    }
+
+    // ── cancellation ────────────────────────────────────────────────────
+
+    /// A token that fires between two datasets ends the stream with an error,
+    /// not with an end: a short answer must never look whole.
+    #[tokio::test]
+    async fn a_cancelled_stream_errors_instead_of_ending() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+        let set = ExecutionPlanMetricsSet::new();
+        let queues = CollectionQueues::new();
+        let cancel = CancellationToken::new();
+        let mut stream = open_with(
+            &queues,
+            tmp.path(),
+            None,
+            AtlasScanMetrics::new(&set, 0),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+
+        let winter = stream.try_next().await.unwrap().unwrap();
+        assert_eq!(rows(&[winter]), vec![4], "the first dataset reads whole");
+        cancel.cancel();
+        let error = stream
+            .try_next()
+            .await
+            .expect_err("the second dataset is never read")
+            .to_string();
+
+        assert!(error.contains("cancelled"), "{error}");
+    }
+
+    /// A token that has fired refuses the open itself, before the footer is
+    /// read.
+    #[tokio::test]
+    async fn a_cancelled_query_does_not_open_the_collection() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+        let set = ExecutionPlanMetricsSet::new();
+        let metrics = AtlasScanMetrics::new(&set, 0);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let opened = open_with(
+            &CollectionQueues::new(),
+            tmp.path(),
+            None,
+            metrics.clone(),
+            cancel,
+        )
+        .await;
+
+        let error = match opened {
+            Ok(_) => panic!("nothing opens for a cancelled query"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("cancelled"), "{error}");
+        assert_eq!(metrics.datasets_scanned.value(), 0);
     }
 
     /// The scan holds the queues in a `FileSource`, which must be `Send + Sync`.

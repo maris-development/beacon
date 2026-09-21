@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use arrow::datatypes::{Schema, SchemaRef};
+use beacon_datafusion_ext::cancel::query_cancellation;
 use beacon_datafusion_ext::format_ext::{
     DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
 };
@@ -338,7 +339,8 @@ impl FileFormat for AtlasFormat {
         let source = self
             .source(table_schema)
             .with_projection(projection)
-            .with_type_widening(Arc::clone(&session_widening(state).strategy));
+            .with_type_widening(Arc::clone(&session_widening(state).strategy))
+            .with_cancellation(query_cancellation(state));
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))

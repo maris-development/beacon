@@ -44,6 +44,7 @@ use datafusion::{
 };
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
+use tokio_util::sync::CancellationToken;
 
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 
@@ -69,6 +70,9 @@ pub struct AtlasSource {
     /// The rule that merged the table schema. It decides which casts read
     /// null. The format sets it from the session when it plans.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    /// The query's token. The format sets it from the session when it plans;
+    /// until then it is one that never fires.
+    cancel: CancellationToken,
 }
 
 impl AtlasSource {
@@ -86,12 +90,22 @@ impl AtlasSource {
             cache,
             queues: Arc::new(CollectionQueues::new()),
             type_widening: Arc::new(DefaultArrowTypeWidening::new()),
+            cancel: CancellationToken::new(),
         }
     }
 
     /// The same source, with the merge rule of the session.
     pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
         self.type_widening = strategy;
+        self
+    }
+
+    /// The same source, stopped by `cancel`.
+    ///
+    /// Every partition's scan reads through the token. When it fires, an open
+    /// in progress, the pruning pivot and every stream stop with an error.
+    pub fn with_cancellation(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
         self
     }
 
@@ -119,6 +133,7 @@ impl FileSource for AtlasSource {
             self.read_dimensions.clone(),
             self.predicate.clone(),
             Arc::clone(&self.type_widening),
+            self.cancel.clone(),
         )?;
         Ok(Arc::new(AtlasOpener {
             object_store,
@@ -289,6 +304,7 @@ mod tests {
             None,
             predicate,
             Arc::new(DefaultArrowTypeWidening::new()),
+            CancellationToken::new(),
         )
         .unwrap();
         let (store, marker) = test_support::store_and_marker(dir);

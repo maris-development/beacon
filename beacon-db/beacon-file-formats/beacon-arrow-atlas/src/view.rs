@@ -92,6 +92,7 @@ impl AtlasView {
                 datasets,
                 predicate,
                 &self.spec.logical_schema,
+                &self.spec.cancel,
             )
             .await;
             scan_metrics.datasets_pruned.add(listed - datasets.len());
@@ -242,6 +243,7 @@ mod tests {
     use crate::{schema, test_support};
     use beacon_datafusion_ext::nd::NdRecordBatch;
     use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
+    use tokio_util::sync::CancellationToken;
 
     /// The strict default merge rule.
     fn strict() -> Arc<dyn ArrowTypeWideningStrategy> {
@@ -279,6 +281,7 @@ mod tests {
             read_dimensions,
             None,
             strict(),
+            CancellationToken::new(),
         )
         .unwrap();
         let view = AtlasView::new(None, store, marker, Arc::new(spec))

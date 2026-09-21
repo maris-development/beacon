@@ -47,6 +47,7 @@ use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::scalar::ScalarValue;
 use indexmap::IndexMap;
+use tokio_util::sync::CancellationToken;
 
 use crate::view::AtlasColumnView;
 
@@ -57,12 +58,14 @@ use crate::view::AtlasColumnView;
 /// its columns into the projection. `views` must resolve those columns the way
 /// the scan reads them.
 ///
-/// Fails open to `names` on anything it cannot prove.
+/// Fails open to `names` on anything it cannot prove, a cancelled query
+/// included: the caller reports the cancellation, and reads nothing.
 pub(crate) async fn prune_datasets(
     views: &Arc<IndexMap<FieldRef, Option<AtlasColumnView>>>,
     names: Vec<String>,
     predicate: &Arc<dyn PhysicalExpr>,
     logical_schema: &SchemaRef,
+    cancel: &CancellationToken,
 ) -> Vec<String> {
     let Ok(pruning) = PruningPredicate::try_new(Arc::clone(predicate), Arc::clone(logical_schema))
     else {
@@ -90,11 +93,16 @@ pub(crate) async fn prune_datasets(
     }
 
     // The pivot is pure CPU over what is in memory, and a million rows is
-    // real work, so it does not run on the async runtime.
+    // real work, so it does not run on the async runtime. Tokio cannot abort
+    // a blocking task, so the pivot watches a token of its own: the query's
+    // token fires it, and so does the guard when this future is dropped.
+    let pivot = cancel.child_token();
+    let _guard = pivot.clone().drop_guard();
     let names: Arc<[String]> = names.into();
     let (views, rows) = (Arc::clone(views), Arc::clone(&names));
-    let built = tokio::task::spawn_blocking(move || build_index(&views, &rows, &wanted)).await;
-    let Ok(index) = built else {
+    let built =
+        tokio::task::spawn_blocking(move || build_index(&views, &rows, &wanted, &pivot)).await;
+    let Ok(Some(index)) = built else {
         return names.to_vec();
     };
 
@@ -160,35 +168,46 @@ impl PruningStatistics for PruningIndex {
     }
 }
 
-/// Pivot the views into one [`StatColumn`] per wanted column.
+/// How many rows a pack loop handles between two looks at the token.
+const CANCEL_CHECK_ROWS: usize = 4096;
+
+/// Pivot the views into one [`StatColumn`] per wanted column, or `None` when
+/// `cancel` fires first.
 fn build_index(
     views: &IndexMap<FieldRef, Option<AtlasColumnView>>,
     names: &[String],
     wanted: &[(String, DataType)],
-) -> PruningIndex {
-    let columns = wanted
-        .iter()
-        .filter_map(|(column, target)| {
-            let (_, view) = views.iter().find(|(field, _)| field.name() == column)?;
-            let packed = match view {
-                // No dataset declares the column. The scan reads nulls.
-                None => all_null_column(names.len(), target),
-                Some(AtlasColumnView::Array { segment }) => {
-                    pack_array_column(segment, names, target)
-                }
-                Some(AtlasColumnView::GlobalAttribute { map })
-                | Some(AtlasColumnView::VariableAttribute { map }) => {
-                    pack_attribute_column(map, names, target)
-                }
-            };
-            Some((column.clone(), packed))
-        })
-        .collect();
+    cancel: &CancellationToken,
+) -> Option<PruningIndex> {
+    let mut columns = HashMap::with_capacity(wanted.len());
+    for (column, target) in wanted {
+        let Some((_, view)) = views.iter().find(|(field, _)| field.name() == column) else {
+            continue;
+        };
+        let packed = match view {
+            // No dataset declares the column. The scan reads nulls.
+            None => all_null_column(names.len(), target),
+            Some(AtlasColumnView::Array { segment }) => {
+                pack_array_column(segment, names, target, cancel)?
+            }
+            Some(AtlasColumnView::GlobalAttribute { map })
+            | Some(AtlasColumnView::VariableAttribute { map }) => {
+                pack_attribute_column(map, names, target, cancel)?
+            }
+        };
+        columns.insert(column.clone(), packed);
+    }
 
-    PruningIndex {
+    Some(PruningIndex {
         rows: names.len(),
         columns,
-    }
+    })
+}
+
+/// Whether the pivot should stop at `row`. Looked at every
+/// [`CANCEL_CHECK_ROWS`] rows, so a million rows cost a few hundred looks.
+fn stop_at(row: usize, cancel: &CancellationToken) -> bool {
+    row.is_multiple_of(CANCEL_CHECK_ROWS) && cancel.is_cancelled()
 }
 
 /// One array column, from the segment that holds the variable.
@@ -197,7 +216,12 @@ fn build_index(
 /// reads it as nulls, and `null_count == row_count` says so. An entry without
 /// statistics, or one whose unwritten cells read as zeros rather than as the
 /// nulls the writer counted, says nothing, and that dataset stays in.
-fn pack_array_column(segment: &ArrayFile, names: &[String], target: &DataType) -> StatColumn {
+fn pack_array_column(
+    segment: &ArrayFile,
+    names: &[String],
+    target: &DataType,
+    cancel: &CancellationToken,
+) -> Option<StatColumn> {
     let rows = names.len();
     let null = null_of(target);
     let mut mins = vec![null.clone(); rows];
@@ -206,6 +230,9 @@ fn pack_array_column(segment: &ArrayFile, names: &[String], target: &DataType) -
     let mut row_counts: Vec<Option<u64>> = vec![None; rows];
 
     for (row, name) in names.iter().enumerate() {
+        if stop_at(row, cancel) {
+            return None;
+        }
         let Some(info) = segment.array(name) else {
             null_counts[row] = Some(1);
             row_counts[row] = Some(1);
@@ -226,12 +253,12 @@ fn pack_array_column(segment: &ArrayFile, names: &[String], target: &DataType) -
         row_counts[row] = Some(stats.row_count);
     }
 
-    StatColumn {
+    Some(StatColumn {
         min: scalars_to_array(mins, rows, target),
         max: scalars_to_array(maxes, rows, target),
         null_count: Arc::new(UInt64Array::from(null_counts)),
         row_count: Arc::new(UInt64Array::from(row_counts)),
-    }
+    })
 }
 
 /// One attribute column.
@@ -244,7 +271,8 @@ fn pack_attribute_column(
     values: &IndexMap<String, Attr>,
     names: &[String],
     target: &DataType,
-) -> StatColumn {
+    cancel: &CancellationToken,
+) -> Option<StatColumn> {
     let rows = names.len();
     let null = null_of(target);
     let mut bounds = vec![null.clone(); rows];
@@ -252,6 +280,9 @@ fn pack_attribute_column(
     let mut row_counts: Vec<Option<u64>> = vec![None; rows];
 
     for (row, name) in names.iter().enumerate() {
+        if stop_at(row, cancel) {
+            return None;
+        }
         let Some(attr) = values.get(name) else {
             null_counts[row] = Some(1);
             row_counts[row] = Some(1);
@@ -266,12 +297,12 @@ fn pack_attribute_column(
         row_counts[row] = Some(1);
     }
 
-    StatColumn {
+    Some(StatColumn {
         min: scalars_to_array(bounds.clone(), rows, target),
         max: scalars_to_array(bounds, rows, target),
         null_count: Arc::new(UInt64Array::from(null_counts)),
         row_count: Arc::new(UInt64Array::from(row_counts)),
-    }
+    })
 }
 
 /// A column every dataset reads as null.
@@ -371,7 +402,48 @@ mod tests {
         schema: SchemaRef,
     ) -> Vec<String> {
         let views = Arc::new(column_views(atlas, &schema).await.unwrap());
-        prune_datasets(&views, atlas.list_datasets(), &predicate, &schema).await
+        prune_datasets(
+            &views,
+            atlas.list_datasets(),
+            &predicate,
+            &schema,
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    // ── cancellation ────────────────────────────────────────────────────
+
+    /// A pivot whose token has fired builds nothing, and the prune fails
+    /// open. The caller sees the cancellation and reads no dataset.
+    #[tokio::test]
+    async fn a_cancelled_pivot_stops_and_fails_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::ranged(tmp.path(), 6).await;
+        let atlas = test_support::open(tmp.path()).await;
+        let schema = schema("temperature", DataType::Float32);
+        let views = Arc::new(column_views(&atlas, &schema).await.unwrap());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let wanted = [("temperature".to_string(), DataType::Float32)];
+        assert!(
+            build_index(&views, &atlas.list_datasets(), &wanted, &cancel).is_none(),
+            "the pivot stops at its first look"
+        );
+
+        let predicate = binary(
+            "temperature",
+            Operator::Gt,
+            ScalarValue::Float32(Some(10_000.0)),
+        );
+        let survivors =
+            prune_datasets(&views, atlas.list_datasets(), &predicate, &schema, &cancel).await;
+        assert_eq!(
+            survivors,
+            atlas.list_datasets(),
+            "nothing is judged, so nothing is dropped"
+        );
     }
 
     // ── the index over array statistics ─────────────────────────────────
