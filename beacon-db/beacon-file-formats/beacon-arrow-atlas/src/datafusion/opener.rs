@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use datafusion::{
     datasource::{
         listing::PartitionedFile,
@@ -47,6 +48,8 @@ pub struct AtlasOpener {
     pub scan_metrics: AtlasScanMetrics,
     /// The scan's pools, one per collection, shared by every partition.
     pub reader_pool: Arc<AtlasReaderPool>,
+    /// The rule that merged the table schema. It decides which casts read null.
+    pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl FileOpener for AtlasOpener {
@@ -67,6 +70,7 @@ impl FileOpener for AtlasOpener {
         let predicate = self.predicate.clone();
         let scan_metrics = self.scan_metrics.clone();
         let pool = Arc::clone(&self.reader_pool);
+        let type_widening = Arc::clone(&self.type_widening);
 
         let fut = async move {
             let open = PoolOpen {
@@ -75,6 +79,7 @@ impl FileOpener for AtlasOpener {
                 projected_schema,
                 predicate,
                 scan_metrics,
+                type_widening,
             };
             let stream = pool
                 .open(store, file.object_meta, open)
@@ -91,7 +96,7 @@ impl FileOpener for AtlasOpener {
 mod tests {
     use arrow::array::{Array, ArrayRef, RecordBatch};
     use beacon_datafusion_ext::nd::{decode_nd_record_batch, encoded_schema};
-    use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
+    use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as ColumnExpr, Literal};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -132,6 +137,7 @@ mod tests {
             predicate: None,
             scan_metrics: AtlasScanMetrics::new(&metrics, 0),
             reader_pool: Arc::new(AtlasReaderPool::new()),
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         };
         (opener, PartitionedFile::from(marker))
     }

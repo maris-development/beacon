@@ -220,7 +220,7 @@ impl FileFormat for OdvFormat {
 
     async fn create_physical_plan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
@@ -230,7 +230,9 @@ impl FileFormat for OdvFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = OdvSource::new(table_schema).with_projection(projection);
+        let source = OdvSource::new(table_schema)
+            .with_projection(projection)
+            .with_type_widening(Arc::clone(&session_widening(state).strategy));
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();

@@ -74,11 +74,8 @@ pub fn nd_encoded_field(name: &str, value_type: &DataType) -> Field {
 /// `field`, with its values carried as a `beacon.nd` struct.
 ///
 /// The field's own metadata travels with it, and the extension keys go on top.
-/// That matters because a scan's target schema is the *encoded* one: a column
-/// the merge marked with
-/// [`TYPE_CONFLICT_KEY`](crate::type_widening::TYPE_CONFLICT_KEY) has to stay
-/// marked. Without the mark `scan_adapt` casts strictly, and a value the merged
-/// type cannot hold fails the scan instead of reading as null.
+/// A scan's target schema is the *encoded* one, and the GeoArrow keys of a
+/// geometry column live in that metadata.
 pub fn nd_encoded_field_of(field: &Field) -> Field {
     let mut metadata = field.metadata().clone();
     metadata.insert("ARROW:extension:name".to_string(), ND_EXTENSION_NAME.to_string());

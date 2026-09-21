@@ -22,7 +22,7 @@ use arrow::{
 };
 use atlas::{ArrayFile, Atlas, Attr};
 use beacon_datafusion_ext::nd::{Dimensions, NdArrowArray, NdRecordBatch};
-use beacon_datafusion_ext::type_widening::is_type_conflict;
+use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use beacon_nd_array::{
     NdArrayD,
     dataset::{default::DefaultDataset, source::DatasetSource},
@@ -54,16 +54,20 @@ pub struct AtlasView {
     /// each dataset instead, so the count is the dataset's full grid. `None`
     /// when the table projects a column.
     driving: Option<DrivingSegments>,
+    /// The rule that merged the table schema. It decides which casts read null.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl AtlasView {
     /// Open the collection at `object_meta`, through `cache` when given, and
-    /// resolve every column of `table_schema` against it.
+    /// resolve every column of `table_schema` against it. `type_widening` is
+    /// the rule that merged that schema.
     pub async fn new(
         cache: Option<&AtlasReaderCache>,
         store: Arc<dyn ObjectStore>,
         object_meta: ObjectMeta,
         table_schema: SchemaRef,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> anyhow::Result<Self> {
         let atlas = get_or_open_atlas(cache, store, &object_meta).await?;
         let views = column_views(&atlas, &table_schema)
@@ -83,12 +87,18 @@ impl AtlasView {
             table_schema,
             column_views: Arc::new(views),
             driving,
+            type_widening,
         })
     }
 
     /// The table schema the view resolves columns for, in field order.
     pub fn table_schema(&self) -> &SchemaRef {
         &self.table_schema
+    }
+
+    /// The rule that merged the table schema.
+    pub fn type_widening(&self) -> &Arc<dyn ArrowTypeWideningStrategy> {
+        &self.type_widening
     }
 
     /// The datasets worth reading, in the collection's order.
@@ -263,17 +273,19 @@ fn widest_array(
 /// A column comes out under the array's own type, and the table may declare a
 /// wider one: that is a cast. A field the dataset lacks is a rank-0 null,
 /// which broadcasts to an all-null column. The decoder makes the same of a
-/// null struct row, so the scan sees one thing either way.
+/// null struct row, so the scan sees one thing either way. `type_widening` is
+/// the rule that merged the table schema, and it decides which casts read null.
 pub(crate) fn under_fields(
     nd: &NdRecordBatch,
     fields: &[FieldRef],
+    type_widening: &dyn ArrowTypeWideningStrategy,
 ) -> anyhow::Result<NdRecordBatch> {
     let mut columns = Vec::with_capacity(fields.len());
     for field in fields {
         let column = match nd.schema().column_with_name(field.name()) {
             Some((index, _)) => {
                 let column = nd.column(index);
-                match as_field_type(Arc::clone(column.values()), field)? {
+                match as_field_type(Arc::clone(column.values()), field, type_widening)? {
                     Some(values) => NdArrowArray::try_new(values, column.dims().clone())?,
                     None => null_scalar(field),
                 }
@@ -300,16 +312,20 @@ fn null_scalar(field: &Field) -> NdArrowArray {
 /// the table cannot hold.
 ///
 /// A dataset may store a column narrower than the merged type, and the merge
-/// widened it: that is a cast. A column the merge could not join is marked,
-/// and a dataset of the other family then reads as null. That is what the mark
-/// promises the scan.
-fn as_field_type(values: ArrayRef, field: &Field) -> anyhow::Result<Option<ArrayRef>> {
+/// widened it: that is a cast. A dataset of another family than the table
+/// column reached the scan through `TypeConflict::KeepFirst` alone, and the
+/// rule that merged the schema says so. Such a dataset reads as null.
+fn as_field_type(
+    values: ArrayRef,
+    field: &Field,
+    type_widening: &dyn ArrowTypeWideningStrategy,
+) -> anyhow::Result<Option<ArrayRef>> {
     if values.data_type() == field.data_type() {
         return Ok(Some(values));
     }
     match cast(&values, field.data_type()) {
         Ok(values) => Ok(Some(values)),
-        Err(_) if is_type_conflict(field) => Ok(None),
+        Err(_) if type_widening.casts_leniently(values.data_type(), field.data_type()) => Ok(None),
         Err(error) => Err(error)
             .with_context(|| format!("casting column '{}' to {}", field.name(), field.data_type())),
     }
@@ -319,11 +335,16 @@ fn as_field_type(values: ArrayRef, field: &Field) -> anyhow::Result<Option<Array
 mod tests {
     use arrow::array::{Array, AsArray, RecordBatch};
     use arrow::datatypes::{Float32Type, Float64Type, Int32Type, Int64Type};
-    use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
+    use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use std::path::Path;
 
     use super::*;
     use crate::{compat, test_support};
+
+    /// The strict default merge rule.
+    fn strict() -> Arc<dyn ArrowTypeWideningStrategy> {
+        Arc::new(DefaultArrowTypeWidening::new())
+    }
 
     /// The schema `infer_schema` derives for a fixture.
     async fn schema(dir: &Path) -> SchemaRef {
@@ -342,14 +363,14 @@ mod tests {
     async fn read(dir: &Path, dataset: &str) -> (Vec<NdRecordBatch>, RecordBatch) {
         let schema = schema(dir).await;
         let (store, marker) = test_support::store_and_marker(dir);
-        let view = AtlasView::new(None, store, marker, Arc::clone(&schema))
+        let view = AtlasView::new(None, store, marker, Arc::clone(&schema), strict())
             .await
             .unwrap();
         let source = view.dataset(dataset).await.unwrap();
         let mut chunks = Vec::new();
         for chunk in source.chunks() {
             let nd = source.poll_next(chunk).await.unwrap().unwrap();
-            chunks.push(under_fields(&nd, schema.fields()).unwrap());
+            chunks.push(under_fields(&nd, schema.fields(), strict().as_ref()).unwrap());
         }
         let batches: Vec<RecordBatch> = chunks.iter().map(|nd| nd.materialize().unwrap()).collect();
         let batch = arrow::compute::concat_batches(&schema, &batches).unwrap();
@@ -415,7 +436,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
         let (store, marker) = test_support::store_and_marker(tmp.path());
-        let view = AtlasView::new(None, store, marker, Arc::new(Schema::empty()))
+        let view = AtlasView::new(None, store, marker, Arc::new(Schema::empty()), strict())
             .await
             .unwrap();
 

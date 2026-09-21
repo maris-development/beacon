@@ -6,6 +6,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
+use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use datafusion::{
     datasource::{
         listing::{FileRange, PartitionedFile},
@@ -60,6 +61,8 @@ pub struct GeoParquetOpener {
     /// The box a pushed-down spatial predicate. If present, the opener drops row groups whose own box misses it.
     query_box: Option<QueryBox>,
     bbox_metrics: BboxMetrics,
+    /// The rule that merged the table schema. It decides which casts read null.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl GeoParquetOpener {
@@ -69,6 +72,7 @@ impl GeoParquetOpener {
         batch_size: usize,
         query_box: Option<QueryBox>,
         metrics: &ExecutionPlanMetricsSet,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> Self {
         Self {
             object_store,
@@ -76,9 +80,11 @@ impl GeoParquetOpener {
             batch_size,
             query_box,
             bbox_metrics: BboxMetrics::new(metrics),
+            type_widening,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn read_task(
         object: ObjectMeta,
         object_store: Arc<dyn ObjectStore>,
@@ -87,6 +93,7 @@ impl GeoParquetOpener {
         batch_size: usize,
         query_box: Option<QueryBox>,
         bbox_metrics: BboxMetrics,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> Result<BoxStream<'static, Result<RecordBatch>>> {
         let mut builder = reader::stream_builder(object_store, &object).await?;
         // Full GeoArrow schema of this file (geometry decoded to native types),
@@ -177,7 +184,8 @@ impl GeoParquetOpener {
         // Adapt the file's own fields onto the table's: cast a column whose type
         // this file states differently, and null-fill one it does not hold. The
         // column *selection* is already done, above and in the reader.
-        let adapter = batch_adapter_factory(read_schema).make_adapter(&read_file_schema)?;
+        let adapter =
+            batch_adapter_factory(read_schema, type_widening).make_adapter(&read_file_schema)?;
 
         let stream = batches
             .map(move |batch| {
@@ -201,6 +209,7 @@ impl FileOpener for GeoParquetOpener {
             self.batch_size,
             self.query_box.clone(),
             self.bbox_metrics.clone(),
+            Arc::clone(&self.type_widening),
         )
         .boxed();
 

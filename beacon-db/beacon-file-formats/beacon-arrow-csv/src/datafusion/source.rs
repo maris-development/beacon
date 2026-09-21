@@ -21,9 +21,11 @@
 //! The parser reads each column straight into the type the table reports, so a
 //! type the value does not hold fails the parse itself. A column that
 //! `TypeConflict::KeepFirst` settled holds one family in one file and another
-//! family in the next, so no such type exists. This source reads that column as
-//! text and leaves the type to `AdaptingOpener`, which reads a value the type
-//! cannot hold as null. See
+//! family in the next, so no such type exists. A file states no types, so this
+//! source cannot tell which columns the setting settled. Under that setting it
+//! reads every column as text and leaves the types to `AdaptingOpener`, which
+//! casts the text and reads a value the type cannot hold as null. The cost is
+//! one string per cell, for a collection under that setting alone. See
 //! [`scan_adapt`](beacon_datafusion_ext::scan_adapt).
 
 use std::any::Any;
@@ -32,7 +34,9 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
-use beacon_datafusion_ext::type_widening::is_type_conflict;
+use beacon_datafusion_ext::type_widening::{
+    ArrowTypeWideningStrategy, DefaultArrowTypeWidening, TypeConflict,
+};
 use datafusion::common::config::CsvOptions;
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::listing::PartitionedFile;
@@ -72,10 +76,15 @@ pub struct BeaconCsvSource {
     /// computed expressions, partition columns — to [`ProjectionOpener`].
     projection: SplitProjection,
     metrics: ExecutionPlanMetricsSet,
+    /// The rule that merged the table schema. It decides which casts read
+    /// null, and whether the parser reads every column as text. The format
+    /// sets it from the session when it plans. See the [module docs](self).
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl BeaconCsvSource {
-    /// A source over `table_schema`, reading with `options`.
+    /// A source over `table_schema`, reading with `options` and the strict
+    /// default merge rule.
     pub fn new(table_schema: TableSchema, options: CsvOptions) -> Self {
         Self {
             options,
@@ -83,7 +92,14 @@ impl BeaconCsvSource {
             projection: SplitProjection::unprojected(&table_schema),
             table_schema,
             metrics: ExecutionPlanMetricsSet::new(),
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
+    }
+
+    /// The same source, with the merge rule of the session.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = strategy;
+        self
     }
 
     /// The same source, reading with `options`.
@@ -124,9 +140,10 @@ impl FileSource for BeaconCsvSource {
             batch_size: self.batch_size.unwrap_or(8192),
             compression: base_config.file_compression_type,
             file_schema: Arc::clone(file_schema),
+            type_widening: Arc::clone(&self.type_widening),
         }) as Arc<dyn FileOpener>;
 
-        let adapting = AdaptingOpener::wrap(raw, read_schema);
+        let adapting = AdaptingOpener::wrap(raw, read_schema, Arc::clone(&self.type_widening));
         ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
     }
 
@@ -201,6 +218,8 @@ struct BeaconCsvOpener {
     compression: FileCompressionType,
     /// The merged file schema. It types the columns the header names.
     file_schema: SchemaRef,
+    /// The rule that merged it. See [`BeaconCsvSource`].
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl FileOpener for BeaconCsvOpener {
@@ -210,6 +229,10 @@ impl FileOpener for BeaconCsvOpener {
         let batch_size = self.batch_size;
         let compression = self.compression;
         let file_schema = Arc::clone(&self.file_schema);
+        // The setting may have settled a column with a type no file of the
+        // other family parses into. The file states no types, so every column
+        // reads as text and the adapter casts it. See the module docs.
+        let as_text = self.type_widening.on_conflict() == TypeConflict::KeepFirst;
 
         Ok(Box::pin(async move {
             let schema = file_read_schema(
@@ -218,6 +241,7 @@ impl FileOpener for BeaconCsvOpener {
                 &options,
                 compression,
                 &file_schema,
+                as_text,
             )
             .await?;
 
@@ -252,66 +276,59 @@ impl FileOpener for BeaconCsvOpener {
 /// The header names the columns of the file, in the order the records hold
 /// them. Each name takes its type from the merged schema, so a column parses
 /// straight into the type the table reports. A name the table does not hold
-/// parses as text and is dropped afterwards.
+/// parses as text and is dropped afterwards. `as_text` reads every column as
+/// text instead, and the adapter above casts it. See the [module docs](self).
 ///
 /// The merged schema itself is the answer where the header cannot serve: a file
 /// with no header, an empty file, or a header that shares no name with the
-/// table. See the [module docs](self).
+/// table.
 async fn file_read_schema(
     store: &Arc<dyn ObjectStore>,
     file: &PartitionedFile,
     options: &CsvOptions,
     compression: FileCompressionType,
     file_schema: &SchemaRef,
+    as_text: bool,
 ) -> Result<SchemaRef> {
     if !options.has_header.unwrap_or(true) {
-        return Ok(positional_schema(file_schema));
+        return Ok(positional_schema(file_schema, as_text));
     }
 
     let Some(names) = header_names(store, file, options, compression).await? else {
-        return Ok(positional_schema(file_schema));
+        return Ok(positional_schema(file_schema, as_text));
     };
     if !names
         .iter()
         .any(|name| file_schema.field_with_name(name).is_ok())
     {
-        return Ok(positional_schema(file_schema));
+        return Ok(positional_schema(file_schema, as_text));
     }
 
     let fields: Vec<Field> = names
         .iter()
         .map(|name| match file_schema.field_with_name(name) {
-            // A column the merge could not join reads as text. No type parses
-            // every file of it, and the adapter above casts the text.
-            Ok(field) if is_type_conflict(field) => Field::new(name, DataType::Utf8, true),
             // Every column is read as nullable. A file states no null count
             // before it is read, and the merge already widened the type.
-            Ok(field) => Field::new(name, field.data_type().clone(), true),
-            Err(_) => Field::new(name, DataType::Utf8, true),
+            Ok(field) if !as_text => Field::new(name, field.data_type().clone(), true),
+            Ok(_) | Err(_) => Field::new(name, DataType::Utf8, true),
         })
         .collect();
     Ok(Arc::new(Schema::new(fields)))
 }
 
-/// The merged schema, with text for every column the merge could not join.
+/// The merged schema, or text for every column when `as_text` holds.
 ///
 /// The positional reading takes this where no header can be matched. The parser
 /// would otherwise read a column into a type that no file of it holds. See the
 /// [module docs](self).
-fn positional_schema(file_schema: &SchemaRef) -> SchemaRef {
-    if !file_schema.fields().iter().any(|f| is_type_conflict(f)) {
+fn positional_schema(file_schema: &SchemaRef, as_text: bool) -> SchemaRef {
+    if !as_text {
         return Arc::clone(file_schema);
     }
     let fields: Vec<Field> = file_schema
         .fields()
         .iter()
-        .map(|field| {
-            if is_type_conflict(field) {
-                Field::new(field.name(), DataType::Utf8, true)
-            } else {
-                field.as_ref().clone()
-            }
-        })
+        .map(|field| Field::new(field.name(), DataType::Utf8, true))
         .collect();
     Arc::new(Schema::new(fields))
 }

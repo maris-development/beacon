@@ -7,6 +7,7 @@ use crossbeam::queue::ArrayQueue;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_expr::PhysicalExpr;
 use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
+use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
 use datafusion::physical_expr_adapter::BatchAdapter;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
@@ -479,8 +480,12 @@ impl FileRead {
             let source_schema: SchemaRef = Arc::new(Schema::new(source_fields));
 
             let partition_columns = partitions.scalar_columns(&projected_schema)?;
+            // Every column here is nd-encoded, and an nd column casts leniently
+            // under every merge rule. The strict rule stands in for the one the
+            // session holds, because the adapter never asks it.
             let adapter =
-                batch_adapter_factory(projected_schema).make_adapter(&source_schema)?;
+                batch_adapter_factory(projected_schema, Arc::new(DefaultArrowTypeWidening::new()))
+                    .make_adapter(&source_schema)?;
             (
                 Output::Columns {
                     adapter: Arc::new(adapter),

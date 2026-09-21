@@ -237,10 +237,19 @@ impl FileFormat for CsvFormat {
         );
         // The listing table built the source, so it already carries any
         // projection the optimizer pushed down. Keep it and restate the options.
+        // The merge rule of the session decides which casts read null.
+        let type_widening = Arc::clone(&session_widening(state).strategy);
         let source: Arc<dyn FileSource> =
             match conf.file_source.as_any().downcast_ref::<BeaconCsvSource>() {
-                Some(source) => Arc::new(source.clone().with_csv_options(options)),
-                None => Arc::new(BeaconCsvSource::new(table_schema, options)),
+                Some(source) => Arc::new(
+                    source
+                        .clone()
+                        .with_csv_options(options)
+                        .with_type_widening(type_widening),
+                ),
+                None => Arc::new(
+                    BeaconCsvSource::new(table_schema, options).with_type_widening(type_widening),
+                ),
             };
 
         let config = FileScanConfigBuilder::from(conf)
