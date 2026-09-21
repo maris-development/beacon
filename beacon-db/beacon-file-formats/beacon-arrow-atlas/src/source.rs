@@ -1,29 +1,7 @@
 //! The DataFusion [`FileSource`] and [`FileOpener`] for Atlas collections.
 //!
-//! # One collection is one unit of work
-//!
-//! A plan entry is a collection: its `data.atlas` container, as the listing
-//! found it. [`AtlasFormat`] dedupes the markers and deals every one of them
-//! to every target partition, each partition in its own rotation. A container
-//! is never split by byte range, because a byte range of one means nothing.
-//! The partitions that open one collection share its datasets through the
-//! collection's queue instead.
-//!
-//! # What an open does
-//!
-//! An open goes through the [`CollectionQueues`] the source holds. The first
-//! partition to reach a collection opens it, at the cost of one footer read
-//! through the reader cache, prunes its datasets in one vectorised pass over
-//! the footer's statistics, and queues the names it has to read. Every
-//! partition that opens the collection then streams the datasets it pops off
-//! that queue: each dataset is built in turn, and its batches are yielded
-//! before the next dataset is touched.
-//!
-//! So a pruned dataset costs nothing at all, a kept one costs its build and
-//! its read, and a dataset is read by one partition and by no other. Nothing
-//! is listed at plan time.
-//!
-//! [`AtlasFormat`]: crate::format::AtlasFormat
+//! A plan entry is one collection; partitions share its datasets through
+//! [`CollectionQueues`] instead of splitting it by byte range.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -102,8 +80,7 @@ impl AtlasSource {
 
     /// The same source, stopped by `cancel`.
     ///
-    /// Every partition's scan reads through the token. When it fires, an open
-    /// in progress, the pruning pivot and every stream stop with an error.
+    /// Every stage reads through the token and stops with an error when it fires.
     pub fn with_cancellation(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
         self
@@ -111,8 +88,7 @@ impl AtlasSource {
 
     /// Carry a projection the scan pushed down.
     ///
-    /// The format rebuilds the source in `create_physical_plan`, and without
-    /// this the projection pushed into the old one would be lost.
+    /// Needed because the format rebuilds the source in `create_physical_plan`.
     pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
         self.projection = projection;
         self
@@ -157,10 +133,9 @@ impl FileSource for AtlasSource {
         Arc::new(self.clone())
     }
 
-    /// A container is one unit. A byte range of it names nothing a reader can
-    /// open. The format deals every collection to every partition itself, and
-    /// the collection's queue shares the datasets, so the plan's groups stand
-    /// as the format dealt them.
+    /// A container is one unit; a byte range of it names nothing a reader can
+    /// open. The format deals collections to partitions itself, and the plan's
+    /// groups stand as dealt.
     fn supports_repartitioning(&self) -> bool {
         false
     }
@@ -191,12 +166,9 @@ impl FileSource for AtlasSource {
         })))
     }
 
-    /// Take the filters as a hint, and leave them above the scan.
-    ///
-    /// The scan uses a predicate once: to skip a whole dataset whose recorded
-    /// statistics cannot hold a matching row. That works in whole datasets, so
-    /// the filter above the scan still decides each row, and `PushedDown::No`
-    /// is what says so.
+    /// Take the filters as a hint, and leave them above the scan. The scan
+    /// only skips whole datasets with them, so `PushedDown::No` says the
+    /// filter above still decides each row.
     fn try_pushdown_filters(
         &self,
         filters: Vec<Arc<dyn PhysicalExpr>>,
@@ -220,10 +192,8 @@ impl FileSource for AtlasSource {
     }
 }
 
-/// One partition's opener: a collection in, its batches out.
-///
-/// Every field is a handle, so the opener itself is cloned into the stream it
-/// returns and outlives the call that made it.
+/// One partition's opener: a collection in, its batches out. Every field is
+/// a handle, cheap to clone into the stream it returns.
 #[derive(Clone)]
 pub struct AtlasOpener {
     pub object_store: Arc<dyn ObjectStore>,
@@ -237,15 +207,9 @@ pub struct AtlasOpener {
 }
 
 impl FileOpener for AtlasOpener {
-    /// One collection in, one encoded batch per stored chunk of every dataset
-    /// worth reading out.
+    /// One collection in, one batch per stored chunk out.
     ///
-    /// The collection is opened through the scan's queues. The first partition
-    /// to reach it opens it, prunes its datasets in one pass over the footer's
-    /// statistics, and queues the survivors. A dataset the deletion mask hides
-    /// is not queued, and neither is one the predicate rules out. Every
-    /// partition then streams the datasets it pops off that queue, so the
-    /// partitions that share a collection share its work.
+    /// The first partition to open it prunes and queues its datasets.
     fn open(&self, file: PartitionedFile) -> Result<FileOpenFuture> {
         let opener = self.clone();
         let fut = async move {

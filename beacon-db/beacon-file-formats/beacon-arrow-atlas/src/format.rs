@@ -1,10 +1,8 @@
-//! The DataFusion file format: typing the collections of a table and planning
-//! a scan over them.
+//! The DataFusion file format: typing the collections of a table and
+//! planning a scan over them.
 //!
-//! [`AtlasFormatFactory`] recognizes a collection in a listing and builds an
-//! [`AtlasFormat`] per table. The format infers the collection's schema, then
-//! plans a scan whose entries are *collections* rather than files — see
-//! [`source`](crate::source) for what the openers then do with them.
+//! [`AtlasFormatFactory`] recognizes a collection and builds an
+//! [`AtlasFormat`] per table; scan entries are collections, not files.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -34,7 +32,7 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::discover::{ATLAS_MARKER, deal_rotated, top_level_atlas_markers};
+use crate::discover::{ATLAS_MARKER, atlas_markers, deal_rotated};
 use crate::error::external;
 use crate::open::{AtlasReaderCache, get_or_open_atlas};
 use crate::options::AtlasOptions;
@@ -97,11 +95,10 @@ impl GetExt for AtlasFormatFactory {
 impl FileFormatFactoryExt for AtlasFormatFactory {
     /// One dataset entry per collection, named by its container object.
     ///
-    /// A collection's datasets are enumerated at plan time, not here: a listing
-    /// of a data lake would otherwise open every collection it found.
+    /// Datasets are enumerated at plan time; a listing must not open collections.
     fn discover_datasets(&self, objects: &[ObjectMeta]) -> Result<Vec<DatasetMetadata>> {
         let format = self.get_ext();
-        Ok(top_level_atlas_markers(objects)
+        Ok(atlas_markers(objects)
             .into_iter()
             .map(|marker| DatasetMetadata::new(marker.location.to_string(), format.clone()))
             .collect())
@@ -113,15 +110,12 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
 
     /// One schema per collection, not per object.
     fn schema_units(&self, objects: &[ObjectMeta]) -> Vec<SchemaUnit> {
-        units_over_stores(objects, &top_level_atlas_markers(objects))
+        units_over_stores(objects, &atlas_markers(objects))
     }
 
     /// Atlas opts into the schema cache for a collection read whole.
     ///
-    /// TODO(#367): cache a dimension-projected read too. `read_dimensions`
-    /// decides which arrays survive, so one collection has one schema per
-    /// dimension set and the key would have to carry the set in order. Left out
-    /// of this pass to keep the four nd formats saying the same thing.
+    /// TODO(#367): also cache a dimension-projected read.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
         let format = format.as_any().downcast_ref::<AtlasFormat>()?;
         if format.options.read_dimensions.is_some() {
@@ -132,8 +126,7 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
 
     /// The plain format. Atlas measures no column.
     ///
-    /// The analyzer asks a format to measure a collection, and this one reports
-    /// unknown for every column. See [`AtlasFormat::infer_stats`].
+    /// See [`AtlasFormat::infer_stats`].
     fn create_for_analysis(
         &self,
         _state: &dyn Session,
@@ -176,12 +169,8 @@ impl AtlasFormat {
     }
 }
 
-/// Wrap a scan in the nd spine: `NdBroadcastExec` over `NdSourceExec` over the
-/// scan.
-///
-/// The scan carries its columns `beacon.nd`-encoded, one chunk per row, so
-/// `NdSourceExec` decodes them and `NdBroadcastExec` broadcasts them back onto
-/// the logical table schema above.
+/// Wrap a scan in the nd spine: `NdBroadcastExec` over `NdSourceExec` over
+/// the scan, decoding and broadcasting its `beacon.nd`-encoded columns.
 pub fn nd_scan_plan(conf: FileScanConfig) -> Result<Arc<dyn ExecutionPlan>> {
     let scan: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
     let nd_source = Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(
@@ -214,16 +203,9 @@ impl FileFormat for AtlasFormat {
         Ok(ATLAS_MARKER.to_string())
     }
 
-    /// The schema of every collection in the listing, merged.
-    ///
-    /// Each collection costs one open — a footer read — and the datasets behind
-    /// it cost no I/O at all. Never enumerate a collection's datasets any other
-    /// way here: at a million datasets that would turn planning into a scan.
-    ///
-    /// The footer counts every dataset, deleted ones too, so a column only a
-    /// deleted dataset declares is in the schema and reads as null.
-    /// `read_dimensions` does not narrow the schema: the footer holds no
-    /// dimension name. The scan fills an array it drops with nulls.
+    /// The schema of every collection in the listing, merged. Each collection
+    /// costs one footer read. Never enumerate its datasets here, or planning
+    /// becomes a scan.
     async fn infer_schema(
         &self,
         state: &dyn Session,
@@ -231,13 +213,12 @@ impl FileFormat for AtlasFormat {
         objects: &[ObjectMeta],
     ) -> Result<SchemaRef> {
         let started = std::time::Instant::now();
-        let markers = top_level_atlas_markers(objects);
+        let markers = atlas_markers(objects);
         if markers.is_empty() {
             return Ok(Arc::new(Schema::empty()));
         }
 
-        // One rule for both merges: the datasets inside a collection, and the
-        // collections of this table.
+        // One rule for both merges: datasets inside a collection, and collections of this table.
         let widening = session_widening(state);
 
         let mut schemas = Vec::with_capacity(markers.len());
@@ -273,13 +254,8 @@ impl FileFormat for AtlasFormat {
         Ok(schema)
     }
 
-    /// Unknown for every column.
-    ///
-    /// Atlas measures nothing for the analyzer. A recorded range prunes whole
-    /// collections before a scan opens them, so a range that is too narrow
-    /// deletes matching rows from an answer. The scan prunes from the footer
-    /// itself instead, per dataset, where the numbers are exact and cost no
-    /// array read. See [`prune`](crate::prune).
+    /// Unknown for every column. The scan prunes per dataset from the footer
+    /// instead, where the numbers are exact. See [`prune`](crate::prune).
     async fn infer_stats(
         &self,
         _state: &dyn Session,
@@ -291,21 +267,14 @@ impl FileFormat for AtlasFormat {
     }
 
     /// Plan every collection into every partition, then wrap the scan in the
-    /// nd spine.
-    ///
-    /// Nothing is opened here. The markers the listing found are deduped to the
-    /// outermost collections, and every target partition gets all of them in
-    /// its own rotation, see `deal_rotated`. The partitions that open one
-    /// collection share its datasets through its queue, so parallelism
-    /// is bounded by the dataset count, not the collection count.
+    /// nd spine. Nothing opens here; see `deal_rotated`.
     async fn create_physical_plan(
         &self,
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         beacon_nd_array::arrow::morsel::reject_partition_columns("Atlas", &conf)?;
-        // Refuse a scan of no column here, before any collection opens. The
-        // opener checks again, for a projection pushed down after planning.
+        // Refuse a scan of no column here; the opener checks again after pushdown.
         require_projection(conf.projected_schema()?.as_ref())?;
 
         let listed: Vec<ObjectMeta> = conf
@@ -314,11 +283,9 @@ impl FileFormat for AtlasFormat {
             .flat_map(|group| group.files())
             .map(|file| file.object_meta.clone())
             .collect();
-        let markers = top_level_atlas_markers(&listed);
+        let markers = atlas_markers(&listed);
 
-        // A container is never split, and its queue shares one between
-        // the partitions that open it, so the deal here is the whole
-        // distribution.
+        // A container is never split; its queue shares work among partitions.
         let file_groups = deal_rotated(&markers, state.config().target_partitions());
         tracing::debug!(
             collections = markers.len(),
@@ -326,14 +293,12 @@ impl FileFormat for AtlasFormat {
             "atlas create_physical_plan",
         );
 
-        // The scan carries nd columns, so the source's schema is the encoded
-        // form of the logical table schema.
+        // The source's schema is the nd-encoded form of the logical table schema.
         let encoded = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
             conf.file_schema(),
         ));
         let table_schema = TableSchema::new(encoded, conf.table_partition_cols().clone());
-        // Preserve a projection already pushed into the incoming source;
-        // rebuilding it below would otherwise drop it.
+        // Preserve a projection already pushed into the incoming source.
         let projection = conf.file_source().projection().cloned();
 
         let source = self
@@ -380,8 +345,7 @@ mod scan_tests {
     /// A table over every collection under `dir`, in a session of
     /// `partitions` target partitions.
     async fn table(dir: &Path, partitions: usize) -> (SessionContext, Arc<ListingTable>) {
-        // The collections sit in subdirectories, which a listing skips by
-        // default.
+        // The collections sit in subdirectories, which a listing skips by default.
         let config = SessionConfig::new()
             .with_target_partitions(partitions)
             .set_bool(

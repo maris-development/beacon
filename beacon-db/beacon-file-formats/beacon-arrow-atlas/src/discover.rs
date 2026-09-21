@@ -1,10 +1,7 @@
-//! Finding Atlas collections in a listing, and dealing them to partitions.
+//! Finds Atlas collections in a listing, and deals them to partitions.
 //!
-//! A collection is a store prefix holding one required object, `data.atlas`,
-//! and one optional sidecar, `deleted.mask`. The container object is the
-//! *marker*: it is what a listing matches, what a plan entry carries, and what
-//! the reader cache keys on. Its parent directory is the prefix
-//! [`atlas::Atlas::open`] takes. The open itself lives in [`open`](crate::open).
+//! A collection is a directory with one marker object, `data.atlas`, and an
+//! optional `deleted.mask` sidecar. Every marker is its own collection.
 
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::FileGroup;
@@ -21,23 +18,26 @@ const MARKER_SUFFIX: &str = "/data.atlas";
 
 /// Whether `path` names a collection's container object.
 ///
-/// The name is fixed. [`atlas::Atlas::open`] resolves `data.atlas` under the
-/// prefix it is given, so a collection renamed to `sensor.atlas` cannot be
-/// opened at all and is not a marker.
+/// The name is fixed: `data.atlas`, resolved by [`atlas::Atlas::open`].
 pub fn is_marker_path(path: &OsPath) -> bool {
     let path = path.as_ref();
     path == ATLAS_MARKER || path.ends_with(MARKER_SUFFIX)
 }
 
-/// Whether `obj` is a collection's container object.
-pub fn is_atlas_marker(obj: &ObjectMeta) -> bool {
-    is_marker_path(&obj.location)
+/// The collection markers among `objects`, in listing order.
+///
+/// One marker is one collection, even nested under another marker's directory.
+pub fn atlas_markers(objects: &[ObjectMeta]) -> Vec<ObjectMeta> {
+    objects
+        .iter()
+        .filter(|object| is_marker_path(&object.location))
+        .cloned()
+        .collect()
 }
 
 /// The prefix a collection is opened under: the marker's parent directory.
 ///
-/// An empty path means the marker sits at the store root, which is what a
-/// store rooted on the collection's own directory reports.
+/// An empty path means the marker sits at the store root.
 pub fn collection_prefix(marker: &OsPath) -> Option<OsPath> {
     let path = marker.as_ref();
     if path == ATLAS_MARKER {
@@ -46,60 +46,9 @@ pub fn collection_prefix(marker: &OsPath) -> Option<OsPath> {
     path.strip_suffix(MARKER_SUFFIX).map(OsPath::from)
 }
 
-/// The directory of a marker, as a string. `""` for one at the root.
-fn marker_directory(marker: &OsPath) -> Option<String> {
-    let path = marker.as_ref();
-    if path == ATLAS_MARKER {
-        return Some(String::new());
-    }
-    path.strip_suffix(MARKER_SUFFIX).map(str::to_string)
-}
-
-/// Reduce `objects` to the unique outermost collection markers.
-///
-/// Two markers at two depths of one tree keep only the ancestor: a collection
-/// is one file and never contains another, so a deeper marker is a collection
-/// that happens to sit inside another's directory and would be read twice.
-pub fn top_level_atlas_markers(objects: &[ObjectMeta]) -> Vec<ObjectMeta> {
-    // By directory, not by path. A path sort would put "a/b/data.atlas" before
-    // "a/data.atlas", because 'b' sorts under 'd', and the nested collection
-    // would then be the one kept.
-    let mut markers: Vec<(String, &ObjectMeta)> = objects
-        .iter()
-        .filter_map(|object| {
-            marker_directory(&object.location).map(|directory| (directory, object))
-        })
-        .collect();
-    markers.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-    let mut kept: Vec<(String, ObjectMeta)> = Vec::new();
-    'outer: for (directory, marker) in markers {
-        for (held, _) in &kept {
-            // A marker at the root sits above every path, but the collection
-            // beside it is its own, so an empty directory excludes nothing.
-            if !held.is_empty() && directory.starts_with(&format!("{held}/")) {
-                continue 'outer;
-            }
-        }
-        kept.push((directory, marker.clone()));
-    }
-    kept.into_iter().map(|(_, marker)| marker).collect()
-}
-
 /// Deal `markers` over `partitions` groups, every collection to every group.
 ///
-/// A collection's queue shares it between the partitions that open it,
-/// so a partition may hold every collection and still read nothing twice.
-/// Every partition then reads until every collection is drained, whatever
-/// the collections' sizes, and parallelism is bounded by the dataset count
-/// rather than the collection count.
-///
-/// Each group is the whole list, rotated. Group `p` starts `p * n / partitions`
-/// collections round the ring, so the start points spread evenly: with as many
-/// groups as collections each starts on its own, with fewer they start as far
-/// apart as they can, and with more they double up as evenly as they can. A
-/// partition therefore works alone on its collection until the partitions
-/// meet, and the shared queue takes over from there.
+/// Each group is the whole list, rotated so start points spread evenly.
 pub(crate) fn deal_rotated(markers: &[ObjectMeta], partitions: usize) -> Vec<FileGroup> {
     let n = markers.len();
     if n == 0 {
@@ -135,17 +84,14 @@ mod tests {
 
     #[test]
     fn the_container_object_is_the_marker() {
-        assert!(is_atlas_marker(&object("data.atlas")));
-        assert!(is_atlas_marker(&object("store/data.atlas")));
-        assert!(is_atlas_marker(&object("a/b/c/data.atlas")));
+        assert!(is_marker_path(&OsPath::from("data.atlas")));
+        assert!(is_marker_path(&OsPath::from("store/data.atlas")));
+        assert!(is_marker_path(&OsPath::from("a/b/c/data.atlas")));
     }
 
     #[test]
     fn nothing_else_is_a_marker() {
-        // The mask sits beside the container and must never be read as one.
-        // Neither must the registry of a pre-0.16 collection: this build reads
-        // only the single-file format, so an old collection left on disk is
-        // passed over rather than misread.
+        // Neither the mask nor an old pre-0.16 registry format is a marker.
         for path in [
             "deleted.mask",
             "store/deleted.mask",
@@ -154,7 +100,7 @@ mod tests {
             "data.atlas/inner",
             "store/atlas.json",
         ] {
-            assert!(!is_atlas_marker(&object(path)), "{path}");
+            assert!(!is_marker_path(&OsPath::from(path)), "{path}");
         }
     }
 
@@ -171,26 +117,21 @@ mod tests {
         assert_eq!(collection_prefix(&OsPath::from("a/b/other.txt")), None);
     }
 
+    /// Every `data.atlas` is a collection, one under another's directory too.
+    /// The mask beside a marker is not one.
     #[test]
-    fn top_level_markers_drop_a_nested_collection() {
+    fn every_marker_is_its_own_collection() {
         let objects = vec![
             object("a/data.atlas"),
             object("a/b/data.atlas"),
             object("c/data.atlas"),
             object("c/deleted.mask"),
         ];
-        let kept: Vec<String> = top_level_atlas_markers(&objects)
+        let kept: Vec<String> = atlas_markers(&objects)
             .iter()
             .map(|m| m.location.to_string())
             .collect();
-        assert_eq!(kept, vec!["a/data.atlas", "c/data.atlas"]);
-    }
-
-    #[test]
-    fn a_sibling_directory_is_not_nested() {
-        // "argo2" starts with "argo", but it is not under it.
-        let objects = vec![object("argo/data.atlas"), object("argo2/data.atlas")];
-        assert_eq!(top_level_atlas_markers(&objects).len(), 2);
+        assert_eq!(kept, vec!["a/data.atlas", "a/b/data.atlas", "c/data.atlas"]);
     }
 }
 
