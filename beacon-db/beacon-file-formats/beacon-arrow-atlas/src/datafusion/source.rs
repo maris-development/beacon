@@ -7,11 +7,11 @@
 //! to every target partition, each partition in its own rotation. A container
 //! is never split by byte range, because a byte range of one means nothing.
 //! The partitions that open one collection share its datasets through the
-//! reader pool instead.
+//! collection's queue instead.
 //!
 //! # What an open does
 //!
-//! An open goes through the [`AtlasReaderPool`] the source holds. The first
+//! An open goes through the [`CollectionQueues`] the source holds. The first
 //! partition to reach a collection opens it, at the cost of one footer read
 //! through the reader cache, prunes its datasets in one vectorised pass over
 //! the footer's statistics, and queues the names it has to read. Every
@@ -28,9 +28,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::datatypes::Schema;
 use datafusion::{
-    common::plan_err,
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileOpener, FileScanConfig, FileSource},
@@ -45,10 +43,11 @@ use datafusion::{
 };
 use object_store::ObjectStore;
 
-use beacon_datafusion_ext::nd::logical_schema;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 
-use crate::datafusion::{metrics::AtlasScanMetrics, opener::AtlasOpener, pool::AtlasReaderPool};
+use crate::datafusion::{
+    metrics::AtlasScanMetrics, opener::AtlasOpener, queue::CollectionQueues, spec::ScanSpec,
+};
 use crate::store::AtlasReaderCache;
 
 /// DataFusion [`FileSource`] for Atlas collections.
@@ -61,8 +60,8 @@ pub struct AtlasSource {
     projection: Option<ProjectionExprs>,
     /// The reader cache every open goes through.
     cache: AtlasReaderCache,
-    /// The scan's pools, one per collection, shared by every partition.
-    reader_pool: Arc<AtlasReaderPool>,
+    /// The scan's queues, one per collection, shared by every partition.
+    queues: Arc<CollectionQueues>,
     /// The rule that merged the table schema. It decides which casts read
     /// null. The format sets it from the session when it plans.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
@@ -81,7 +80,7 @@ impl AtlasSource {
             read_dimensions,
             projection: None,
             cache,
-            reader_pool: Arc::new(AtlasReaderPool::new()),
+            queues: Arc::new(CollectionQueues::new()),
             type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
     }
@@ -102,45 +101,27 @@ impl AtlasSource {
     }
 }
 
-/// Refuse a scan that projects no column.
-///
-/// A dataset's row count follows the dimensions of the columns it reads. With
-/// no column there is no dimension set, so the count of a dataset that holds
-/// arrays on different grids has no one answer. The scan refuses rather than
-/// pick one. `COUNT(*)` reaches here; `COUNT(column)` projects a column and
-/// does not.
-pub(crate) fn require_projection(projected_schema: &Schema) -> Result<()> {
-    if projected_schema.fields().is_empty() {
-        return plan_err!(
-            "an atlas scan must project at least one column: a dataset's row count \
-             follows the dimensions of the columns it reads, and no column names none. \
-             Use COUNT(column) instead of COUNT(*)"
-        );
-    }
-    Ok(())
-}
-
 impl FileSource for AtlasSource {
+    /// The opener of one partition. It refuses a scan of no column, see
+    /// [`ScanSpec::new`].
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
         base_config: &FileScanConfig,
         partition: usize,
     ) -> Result<Arc<dyn FileOpener>> {
-        let projected_schema = base_config.projected_schema()?;
-        require_projection(&projected_schema)?;
+        let spec = ScanSpec::new(
+            base_config.projected_schema()?,
+            self.read_dimensions.clone(),
+            self.predicate.clone(),
+            Arc::clone(&self.type_widening),
+        )?;
         Ok(Arc::new(AtlasOpener {
             object_store,
             cache: self.cache.clone(),
-            // A predicate is written against the values, not the encoding the
-            // scan carries them in.
-            logical_schema: logical_schema(&projected_schema)?,
-            projected_schema,
-            read_dimensions: self.read_dimensions.clone(),
-            predicate: self.predicate.clone(),
+            spec: Arc::new(spec),
             scan_metrics: AtlasScanMetrics::new(&self.execution_plan_metrics, partition),
-            reader_pool: Arc::clone(&self.reader_pool),
-            type_widening: Arc::clone(&self.type_widening),
+            queues: Arc::clone(&self.queues),
         }))
     }
 
@@ -159,8 +140,8 @@ impl FileSource for AtlasSource {
 
     /// A container is one unit. A byte range of it names nothing a reader can
     /// open. The format deals every collection to every partition itself, and
-    /// the reader pool shares the datasets, so the plan's groups stand as the
-    /// format dealt them.
+    /// the collection's queue shares the datasets, so the plan's groups stand
+    /// as the format dealt them.
     fn supports_repartitioning(&self) -> bool {
         false
     }

@@ -1,96 +1,71 @@
 //! One partition's opener: a collection in, nd batches out.
 //!
-//! The opener reads through the [`AtlasReaderPool`]. The first partition to
-//! reach a collection opens it and queues its datasets, and every partition
-//! then streams the datasets it pops. How a column resolves, and how a chunk
-//! comes out under the scan's fields, lives in [`view`](super::view).
+//! The opener reads through the scan's [`CollectionQueues`]. The first
+//! partition to reach a collection opens it and queues its datasets, and every
+//! partition then streams the datasets it pops. How a column resolves, and how
+//! a chunk comes out under the scan's fields, lives in [`view`](super::view).
 
 use std::sync::Arc;
 
-use arrow::datatypes::SchemaRef;
-use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use datafusion::{
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener},
     },
     error::Result,
-    physical_plan::PhysicalExpr,
 };
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 
 use crate::{
     datafusion::{
-        error::external,
-        metrics::AtlasScanMetrics,
-        pool::{AtlasReaderPool, PoolOpen},
+        error::external, metrics::AtlasScanMetrics, queue::CollectionQueues, spec::ScanSpec,
     },
     store::AtlasReaderCache,
 };
 
 /// One partition's opener: a collection in, its batches out.
 ///
-/// Every field is a handle or a clone, so the opener itself is cloned into the
-/// stream it returns and outlives the call that made it.
+/// Every field is a handle, so the opener itself is cloned into the stream it
+/// returns and outlives the call that made it.
 #[derive(Clone)]
 pub struct AtlasOpener {
     pub object_store: Arc<dyn ObjectStore>,
+    /// The reader cache every open goes through.
     pub cache: AtlasReaderCache,
-    /// The scan's output schema, nd-encoded. Its field *names* are the columns
-    /// to keep, and the encoding leaves names alone.
-    pub projected_schema: SchemaRef,
-    /// The same schema with the encoding unwrapped, which is what a predicate
-    /// and the pruning engine are written against.
-    pub logical_schema: SchemaRef,
-    /// The dimensions the scan reads, or `None` for each dataset's default.
-    pub read_dimensions: Option<Vec<String>>,
-    pub predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// What the scan reads.
+    pub spec: Arc<ScanSpec>,
     pub scan_metrics: AtlasScanMetrics,
-    /// The scan's pools, one per collection, shared by every partition.
-    pub reader_pool: Arc<AtlasReaderPool>,
-    /// The rule that merged the table schema. It decides which casts read null.
-    pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    /// The scan's queues, one per collection, shared by every partition.
+    pub queues: Arc<CollectionQueues>,
 }
 
 impl FileOpener for AtlasOpener {
     /// One collection in, one encoded batch per stored chunk of every dataset
     /// worth reading out.
     ///
-    /// The collection is opened through the reader pool. The first partition
+    /// The collection is opened through the scan's queues. The first partition
     /// to reach it opens it, prunes its datasets in one pass over the footer's
     /// statistics, and queues the survivors. A dataset the deletion mask hides
     /// is not queued, and neither is one the predicate rules out. Every
     /// partition then streams the datasets it pops off that queue, so the
     /// partitions that share a collection share its work.
     fn open(&self, file: PartitionedFile) -> Result<FileOpenFuture> {
-        let store = self.object_store.clone();
-        let cache = self.cache.clone();
-        let projected_schema = self.projected_schema.clone();
-        let logical_schema = self.logical_schema.clone();
-        let read_dimensions = self.read_dimensions.clone();
-        let predicate = self.predicate.clone();
-        let scan_metrics = self.scan_metrics.clone();
-        let pool = Arc::clone(&self.reader_pool);
-        let type_widening = Arc::clone(&self.type_widening);
-
+        let opener = self.clone();
         let fut = async move {
-            let open = PoolOpen {
-                cache: Some(&cache),
-                logical_schema,
-                projected_schema,
-                read_dimensions,
-                predicate,
-                scan_metrics,
-                type_widening,
-            };
-            let stream = pool
-                .open(store, file.object_meta, open)
+            let stream = opener
+                .queues
+                .open(
+                    Some(&opener.cache),
+                    opener.object_store,
+                    file.object_meta,
+                    opener.spec,
+                    opener.scan_metrics,
+                )
                 .await
                 .map_err(external)?;
             Ok(stream.map_err(external).boxed())
         };
-
         Ok(fut.boxed())
     }
 }
@@ -102,6 +77,7 @@ mod tests {
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as ColumnExpr, Literal};
+    use datafusion::physical_plan::PhysicalExpr;
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion::scalar::ScalarValue;
     use futures::TryStreamExt;
@@ -116,31 +92,32 @@ mod tests {
             .unwrap_or_else(|| panic!("no column {name}"))
     }
 
-    // ── the opener ──────────────────────────────────────────────────────
-
     /// An opener over a fixture, built the way `AtlasSource` builds one.
-    async fn opener(dir: &Path) -> (AtlasOpener, PartitionedFile) {
+    async fn opener(
+        dir: &Path,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
+    ) -> (AtlasOpener, PartitionedFile) {
         let atlas = test_support::open(dir).await;
-        let logical_schema = Arc::new(
-            compat::collection_arrow_schema(
-                &atlas.footer().collection_schema(),
-                &ArrowTypeWidening::default_extension(),
-            )
-            .unwrap(),
-        );
-        let projected_schema = Arc::new(encoded_schema(&logical_schema));
+        let logical_schema = compat::collection_arrow_schema(
+            &atlas.footer().collection_schema(),
+            &ArrowTypeWidening::default_extension(),
+        )
+        .unwrap();
+        let spec = ScanSpec::new(
+            Arc::new(encoded_schema(&logical_schema)),
+            None,
+            predicate,
+            Arc::new(DefaultArrowTypeWidening::new()),
+        )
+        .unwrap();
         let (store, marker) = test_support::store_and_marker(dir);
         let metrics = ExecutionPlanMetricsSet::new();
         let opener = AtlasOpener {
             object_store: store,
             cache: AtlasReaderCache::new(4),
-            projected_schema,
-            logical_schema,
-            read_dimensions: None,
-            predicate: None,
+            spec: Arc::new(spec),
             scan_metrics: AtlasScanMetrics::new(&metrics, 0),
-            reader_pool: Arc::new(AtlasReaderPool::new()),
-            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
+            queues: Arc::new(CollectionQueues::new()),
         };
         (opener, PartitionedFile::from(marker))
     }
@@ -162,7 +139,7 @@ mod tests {
     async fn the_opener_streams_one_encoded_batch_per_dataset() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
-        let (opener, file) = opener(tmp.path()).await;
+        let (opener, file) = opener(tmp.path(), None).await;
 
         let batches = stream(&opener, file).await;
 
@@ -170,7 +147,7 @@ mod tests {
         for batch in &batches {
             assert_eq!(
                 batch.schema(),
-                opener.projected_schema,
+                opener.spec.projected_schema,
                 "the scan's schema, marks and all"
             );
         }
@@ -193,7 +170,7 @@ mod tests {
             .delete_dataset("winter")
             .await
             .unwrap();
-        let (opener, file) = opener(tmp.path()).await;
+        let (opener, file) = opener(tmp.path(), None).await;
 
         let batches = stream(&opener, file).await;
 
@@ -216,12 +193,12 @@ mod tests {
     async fn a_predicate_prunes_datasets_before_the_read() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::ranged(tmp.path(), 10).await;
-        let (mut opener, file) = opener(tmp.path()).await;
-        opener.predicate = Some(Arc::new(BinaryExpr::new(
+        let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
             Arc::new(ColumnExpr::new("temperature", 0)),
             Operator::Gt,
             Arc::new(Literal::new(ScalarValue::Float32(Some(45.0)))),
-        )));
+        ));
+        let (opener, file) = opener(tmp.path(), Some(predicate)).await;
 
         let batches = stream(&opener, file).await;
 

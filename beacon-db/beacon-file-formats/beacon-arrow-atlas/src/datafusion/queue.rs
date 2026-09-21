@@ -1,12 +1,12 @@
-//! A shared reader over one collection: the datasets left to read, and the
-//! view every partition reads them through.
+//! The datasets of one collection left to read, shared by the partitions that
+//! open it.
 //!
-//! The pool for a collection is built once, on the first open, and every
-//! later open of the same collection gets a handle to it. A handle is a
-//! stream. It pops the next dataset off the shared queue, reads it one stored
-//! chunk at a time, and yields each chunk as one nd-encoded batch. Two handles
-//! that poll at once drain different datasets, so a dataset is read by one
-//! partition and by no other.
+//! A collection's queue is built once, on the first open, and every later
+//! open of the same collection gets a stream over it. The stream pops the next
+//! dataset off the shared queue, reads it one stored chunk at a time, and
+//! yields each chunk as one nd-encoded batch. Two streams that poll at once
+//! drain different datasets, so a dataset is read by one partition and by no
+//! other.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -17,12 +17,9 @@ use std::task::{Context, Poll};
 
 use anyhow::Context as _;
 use arrow::array::RecordBatch;
-use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::nd::{NdRecordBatch, encode_nd_record_batch};
-use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use beacon_nd_array::dataset::source::DatasetSource;
 use crossbeam::queue::ArrayQueue;
-use datafusion::physical_plan::PhysicalExpr;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore, path::Path};
@@ -30,139 +27,107 @@ use parking_lot::RwLock;
 use tokio::sync::OnceCell;
 
 use crate::datafusion::metrics::AtlasScanMetrics;
+use crate::datafusion::spec::ScanSpec;
 use crate::datafusion::view::{AtlasView, under_fields};
 use crate::store::AtlasReaderCache;
 
 /// One cell per collection. The cell fills on the first open and never again.
-type Pools = HashMap<Path, Arc<OnceCell<Arc<Level1Pool>>>>;
+type Cells = HashMap<Path, Arc<OnceCell<Arc<CollectionQueue>>>>;
 
-/// The pools of one scan, one per collection, keyed by the container's path.
-#[derive(Default, Clone)]
-pub struct AtlasReaderPool {
-    pools: Arc<RwLock<Pools>>,
-}
-
-/// What one open of a collection needs, beyond the collection itself.
+/// The queues of one scan, one per collection, keyed by the container's path.
 ///
-/// `logical_schema` is what the columns and the predicate are written
-/// against. `projected_schema` is the same schema nd-encoded, and every batch
-/// goes out under it.
-pub(crate) struct PoolOpen<'a> {
-    /// The reader cache to open through, or `None` to open afresh.
-    pub cache: Option<&'a AtlasReaderCache>,
-    pub logical_schema: SchemaRef,
-    pub projected_schema: SchemaRef,
-    /// The dimensions the scan reads, or `None` for each dataset's default.
-    pub read_dimensions: Option<Vec<String>>,
-    /// The predicate to prune datasets with, if any.
-    pub predicate: Option<Arc<dyn PhysicalExpr>>,
-    /// The partition's metrics. The datasets this consumer reads count here.
-    pub scan_metrics: AtlasScanMetrics,
-    /// The rule that merged `logical_schema`. It decides which casts read null.
-    pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+/// Shared by every partition of the scan through the source.
+#[derive(Default, Clone)]
+pub struct CollectionQueues {
+    cells: Arc<RwLock<Cells>>,
 }
 
-impl Debug for AtlasReaderPool {
+impl Debug for CollectionQueues {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AtlasReaderPool").finish()
+        f.debug_struct("CollectionQueues").finish()
     }
 }
 
-impl AtlasReaderPool {
+impl CollectionQueues {
     pub fn new() -> Self {
-        Self {
-            pools: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self::default()
     }
 
-    /// One consumer of the collection at `object_meta`.
+    /// One stream over the collection at `object_meta`.
     ///
-    /// The first call for a collection opens it, prunes its datasets, and
-    /// queues the survivors. Every call gets a stream over that queue. The
-    /// open and the prune are timed on the first caller's metrics, and each
-    /// consumer counts the datasets it reads on its own.
+    /// The first call for a collection opens it, through `cache` when given,
+    /// prunes its datasets, and queues the survivors. Every call gets a stream
+    /// over that queue. The open and the prune are timed on the first caller's
+    /// metrics, and each stream counts the datasets it reads on its own.
     pub(crate) async fn open(
         &self,
+        cache: Option<&AtlasReaderCache>,
         store: Arc<dyn ObjectStore>,
         object_meta: ObjectMeta,
-        open: PoolOpen<'_>,
-    ) -> anyhow::Result<Level1PoolStream> {
+        spec: Arc<ScanSpec>,
+        scan_metrics: AtlasScanMetrics,
+    ) -> anyhow::Result<DatasetStream> {
         let cell = Arc::clone(
-            self.pools
+            self.cells
                 .write()
                 .entry(object_meta.location.clone())
                 .or_default(),
         );
-        let pool = cell
-            .get_or_try_init(|| async {
-                let open_timer = open.scan_metrics.open_time.timer();
-                let atlas_view = AtlasView::new(
-                    open.cache,
-                    store,
-                    object_meta,
-                    open.logical_schema,
-                    open.read_dimensions,
-                    open.type_widening,
-                )
-                .await?;
-                drop(open_timer);
-                let datasets = atlas_view
-                    .list_datasets(open.predicate, open.scan_metrics.clone())
-                    .await?;
-                // A queue has at least one slot: `ArrayQueue::new(0)` panics.
-                // With no dataset to read the slot stays empty, the first
-                // `pop` finds nothing, and the stream ends at once.
-                let queue = ArrayQueue::new(datasets.len().max(1));
-                for dataset in datasets {
-                    queue
-                        .push(dataset)
-                        .map_err(|dataset| anyhow::anyhow!("no slot for dataset '{dataset}'"))?;
-                }
-
-                Ok::<Arc<Level1Pool>, anyhow::Error>(Arc::new(Level1Pool {
-                    inner: Arc::new(InnerLevel1Pool {
-                        atlas_view,
-                        queue,
-                        projected_schema: open.projected_schema,
-                    }),
-                }))
+        let queue = cell
+            .get_or_try_init(|| {
+                CollectionQueue::open(cache, store, object_meta, spec, &scan_metrics)
             })
             .await
             .cloned()?;
-
-        Ok(pool.as_ref().clone().into_stream(open.scan_metrics))
+        Ok(queue.stream(scan_metrics))
     }
 }
 
-/// A handle on a collection's shared queue.
+/// One collection's view, and the datasets of it left to read.
 ///
-/// The handle holds no read state, so it is shared between threads freely.
-/// [`Level1Pool::into_stream`] makes one consumer of the queue. The
-/// partitions that share a collection each hold a consumer, and the queue
-/// shares the work between them.
-#[derive(Clone)]
-pub(crate) struct Level1Pool {
-    inner: Arc<InnerLevel1Pool>,
+/// The queue holds no read state, so the partitions that share a collection
+/// share it freely. [`CollectionQueue::stream`] makes one consumer of it.
+pub(crate) struct CollectionQueue {
+    view: AtlasView,
+    /// The datasets left to read, in listing order.
+    queue: ArrayQueue<String>,
 }
 
-impl Level1Pool {
+impl CollectionQueue {
+    /// Open the collection, prune its datasets, and queue the survivors.
+    async fn open(
+        cache: Option<&AtlasReaderCache>,
+        store: Arc<dyn ObjectStore>,
+        object_meta: ObjectMeta,
+        spec: Arc<ScanSpec>,
+        scan_metrics: &AtlasScanMetrics,
+    ) -> anyhow::Result<Arc<Self>> {
+        let open_timer = scan_metrics.open_time.timer();
+        let view = AtlasView::new(cache, store, object_meta, spec).await?;
+        drop(open_timer);
+        let datasets = view.list_datasets(scan_metrics).await?;
+
+        // A queue has at least one slot: `ArrayQueue::new(0)` panics. With no
+        // dataset to read the slot stays empty, the first `pop` finds nothing,
+        // and the stream ends at once.
+        let queue = ArrayQueue::new(datasets.len().max(1));
+        for dataset in datasets {
+            queue
+                .push(dataset)
+                .map_err(|dataset| anyhow::anyhow!("no slot for dataset '{dataset}'"))?;
+        }
+        Ok(Arc::new(Self { view, queue }))
+    }
+
     /// One consumer of the queue. It starts on no dataset, and counts the
     /// datasets it reads on `scan_metrics`.
-    pub(crate) fn into_stream(self, scan_metrics: AtlasScanMetrics) -> Level1PoolStream {
-        Level1PoolStream {
-            inner: self.inner,
+    fn stream(self: Arc<Self>, scan_metrics: AtlasScanMetrics) -> DatasetStream {
+        DatasetStream {
+            queue: self,
             scan_metrics,
             current: None,
         }
     }
-}
-
-struct InnerLevel1Pool {
-    atlas_view: AtlasView,
-    /// The datasets left to read, in listing order.
-    queue: ArrayQueue<String>,
-    /// The scan's output schema, nd-encoded. Every batch goes out under it.
-    projected_schema: SchemaRef,
 }
 
 /// One consumer of a collection's shared queue.
@@ -170,17 +135,18 @@ struct InnerLevel1Pool {
 /// It streams the datasets it pops, one nd-encoded batch per stored chunk.
 /// The dataset in hand is a boxed stream, which is `Send` and not `Sync`, so
 /// the consumer lives with the partition that polls it and never in the
-/// shared handle.
-pub(crate) struct Level1PoolStream {
-    inner: Arc<InnerLevel1Pool>,
+/// shared queue.
+pub(crate) struct DatasetStream {
+    queue: Arc<CollectionQueue>,
     /// The partition's metrics. The datasets this consumer reads count here.
     scan_metrics: AtlasScanMetrics,
     /// The dataset this consumer is draining, if any.
     current: Option<BoxStream<'static, anyhow::Result<RecordBatch>>>,
 }
 
-impl Stream for Level1PoolStream {
-    type Item = anyhow::Result<RecordBatch>; // Record Batches using nd encoding
+impl Stream for DatasetStream {
+    /// One nd-encoded batch.
+    type Item = anyhow::Result<RecordBatch>;
 
     /// The next batch of the dataset in hand, or the first batch of the next
     /// dataset on the queue. The stream ends when the queue is empty and the
@@ -195,10 +161,10 @@ impl Stream for Level1PoolStream {
                     Poll::Pending => return Poll::Pending,
                 }
             }
-            match this.inner.queue.pop() {
+            match this.queue.queue.pop() {
                 Some(dataset) => {
-                    this.current = Some(dataset_stream(
-                        Arc::clone(&this.inner),
+                    this.current = Some(dataset_batches(
+                        Arc::clone(&this.queue),
                         this.scan_metrics.clone(),
                         dataset,
                     ));
@@ -214,30 +180,31 @@ impl Stream for Level1PoolStream {
 /// The dataset is built when the stream is first polled, and each chunk is
 /// read when the stream reaches it. A chunk goes out under the table's
 /// fields, cast to the types the table declares, and under the encoded table
-/// schema, so every batch of the pool has the one schema the scan expects.
-fn dataset_stream(
-    pool: Arc<InnerLevel1Pool>,
+/// schema, so every batch of the queue has the one schema the scan expects.
+fn dataset_batches(
+    queue: Arc<CollectionQueue>,
     scan_metrics: AtlasScanMetrics,
     dataset: String,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     futures::stream::once(async move {
-        let source = pool.atlas_view.dataset(&dataset).await?;
+        let source = queue.view.dataset(&dataset).await?;
         scan_metrics.datasets_scanned.add(1);
         let chunks = source.chunks();
         let dataset = Arc::<str>::from(dataset);
         Ok::<_, anyhow::Error>(futures::stream::iter(chunks).then(move |chunk| {
-            let pool = Arc::clone(&pool);
+            let queue = Arc::clone(&queue);
             let source = Arc::clone(&source);
             let dataset = Arc::clone(&dataset);
             async move {
+                let spec = queue.view.spec();
                 let nd = read_chunk(&source, chunk, &dataset).await?;
                 let nd = under_fields(
                     &nd,
-                    pool.atlas_view.table_schema().fields(),
-                    pool.atlas_view.type_widening().as_ref(),
+                    spec.logical_schema.fields(),
+                    spec.type_widening.as_ref(),
                 )?;
                 let batch =
-                    encode_nd_record_batch(&nd)?.with_schema(Arc::clone(&pool.projected_schema))?;
+                    encode_nd_record_batch(&nd)?.with_schema(Arc::clone(&spec.projected_schema))?;
                 Ok(batch)
             }
         }))
@@ -265,15 +232,17 @@ async fn read_chunk(
 mod tests {
     use super::*;
     use crate::{compat, test_support};
+    use arrow::datatypes::SchemaRef;
     use beacon_datafusion_ext::nd::{decode_nd_record_batch, encoded_schema};
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as ColumnExpr, Literal};
+    use datafusion::physical_plan::PhysicalExpr;
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion::scalar::ScalarValue;
     use std::path::Path;
 
-    /// The logical schema of a fixture, the one a scan hands the pool.
+    /// The logical schema of a fixture, the one a scan is built on.
     async fn logical_schema(dir: &Path) -> SchemaRef {
         let atlas = test_support::open(dir).await;
         Arc::new(
@@ -285,35 +254,35 @@ mod tests {
         )
     }
 
-    /// One handle on the pool of a fixture.
-    async fn handle(
-        pool: &AtlasReaderPool,
+    /// One stream over the queue of a fixture.
+    async fn stream(
+        queues: &CollectionQueues,
         dir: &Path,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: AtlasScanMetrics,
-    ) -> Level1PoolStream {
+    ) -> DatasetStream {
         let (store, marker) = test_support::store_and_marker(dir);
-        let logical = logical_schema(dir).await;
-        let projected = Arc::new(encoded_schema(&logical));
-        let open = PoolOpen {
-            cache: None,
-            logical_schema: logical,
-            projected_schema: projected,
-            read_dimensions: None,
+        let projected = Arc::new(encoded_schema(logical_schema(dir).await.as_ref()));
+        let spec = ScanSpec::new(
+            projected,
+            None,
             predicate,
-            scan_metrics: metrics,
-            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
-        };
-        pool.open(store, marker, open).await.unwrap()
+            Arc::new(DefaultArrowTypeWidening::new()),
+        )
+        .unwrap();
+        queues
+            .open(None, store, marker, Arc::new(spec), metrics)
+            .await
+            .unwrap()
     }
 
-    /// The scan holds the pool in a `FileSource`, which must be `Send + Sync`.
-    /// A consumer is not `Sync`, so it must never sit in the shared handle.
+    /// The scan holds the queues in a `FileSource`, which must be `Send + Sync`.
+    /// A stream is not `Sync`, so it must never sit in the shared queue.
     #[test]
-    fn the_pool_is_send_and_sync() {
+    fn the_queues_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<AtlasReaderPool>();
-        assert_send_sync::<Level1Pool>();
+        assert_send_sync::<CollectionQueues>();
+        assert_send_sync::<CollectionQueue>();
     }
 
     fn rows(batches: &[RecordBatch]) -> Vec<usize> {
@@ -326,21 +295,20 @@ mod tests {
     /// One encoded batch per dataset, in listing order, each on the encoded
     /// table schema.
     #[tokio::test]
-    async fn the_pool_streams_one_encoded_batch_per_dataset() {
+    async fn the_queue_streams_one_encoded_batch_per_dataset() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
         let set = ExecutionPlanMetricsSet::new();
         let metrics = AtlasScanMetrics::new(&set, 0);
-        let pool = AtlasReaderPool::new();
+        let queues = CollectionQueues::new();
 
-        let batches: Vec<RecordBatch> = handle(&pool, tmp.path(), None, metrics.clone())
+        let batches: Vec<RecordBatch> = stream(&queues, tmp.path(), None, metrics.clone())
             .await
             .try_collect()
             .await
             .unwrap();
 
-        let logical = logical_schema(tmp.path()).await;
-        let encoded = Arc::new(encoded_schema(&logical));
+        let encoded = Arc::new(encoded_schema(logical_schema(tmp.path()).await.as_ref()));
         assert_eq!(batches.len(), 2);
         for batch in &batches {
             assert_eq!(batch.schema(), encoded, "the table schema, encoded");
@@ -356,10 +324,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
         let set = ExecutionPlanMetricsSet::new();
-        let pool = AtlasReaderPool::new();
+        let queues = CollectionQueues::new();
 
         let batches: Vec<RecordBatch> =
-            handle(&pool, tmp.path(), None, AtlasScanMetrics::new(&set, 0))
+            stream(&queues, tmp.path(), None, AtlasScanMetrics::new(&set, 0))
                 .await
                 .try_collect()
                 .await
@@ -373,18 +341,18 @@ mod tests {
         assert_eq!(summer.column_by_name("cycle").unwrap().null_count(), 3);
     }
 
-    /// Two handles on one collection share one queue. A dataset one handle
+    /// Two streams over one collection share one queue. A dataset one stream
     /// reads is not read again by the other.
     #[tokio::test]
-    async fn two_handles_share_one_queue() {
+    async fn two_streams_share_one_queue() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_datasets(tmp.path()).await;
         let set = ExecutionPlanMetricsSet::new();
         let metrics = AtlasScanMetrics::new(&set, 0);
-        let pool = AtlasReaderPool::new();
+        let queues = CollectionQueues::new();
 
-        let mut first = handle(&pool, tmp.path(), None, metrics.clone()).await;
-        let mut second = handle(&pool, tmp.path(), None, metrics.clone()).await;
+        let mut first = stream(&queues, tmp.path(), None, metrics.clone()).await;
+        let mut second = stream(&queues, tmp.path(), None, metrics.clone()).await;
 
         let winter = first.try_next().await.unwrap().unwrap();
         assert_eq!(rows(&[winter]), vec![4]);
@@ -392,7 +360,7 @@ mod tests {
         assert_eq!(
             rows(&[summer]),
             vec![3],
-            "the second handle got the next dataset"
+            "the second stream got the next dataset"
         );
         assert!(
             first.try_next().await.unwrap().is_none(),
@@ -413,18 +381,19 @@ mod tests {
         test_support::ranged(tmp.path(), 10).await;
         let set = ExecutionPlanMetricsSet::new();
         let metrics = AtlasScanMetrics::new(&set, 0);
-        let pool = AtlasReaderPool::new();
+        let queues = CollectionQueues::new();
         let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
             Arc::new(ColumnExpr::new("temperature", 0)),
             Operator::Gt,
             Arc::new(Literal::new(ScalarValue::Float32(Some(1.0e9)))),
         ));
 
-        let batches: Vec<RecordBatch> = handle(&pool, tmp.path(), Some(predicate), metrics.clone())
-            .await
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> =
+            stream(&queues, tmp.path(), Some(predicate), metrics.clone())
+                .await
+                .try_collect()
+                .await
+                .unwrap();
 
         assert!(batches.is_empty());
         assert_eq!(metrics.datasets_pruned.value(), 10);
@@ -439,18 +408,19 @@ mod tests {
         test_support::ranged(tmp.path(), 10).await;
         let set = ExecutionPlanMetricsSet::new();
         let metrics = AtlasScanMetrics::new(&set, 0);
-        let pool = AtlasReaderPool::new();
+        let queues = CollectionQueues::new();
         let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
             Arc::new(ColumnExpr::new("temperature", 0)),
             Operator::Gt,
             Arc::new(Literal::new(ScalarValue::Float32(Some(45.0)))),
         ));
 
-        let batches: Vec<RecordBatch> = handle(&pool, tmp.path(), Some(predicate), metrics.clone())
-            .await
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> =
+            stream(&queues, tmp.path(), Some(predicate), metrics.clone())
+                .await
+                .try_collect()
+                .await
+                .unwrap();
 
         assert_eq!(batches.len(), 5, "d5 to d9 reach past 45");
         assert_eq!(metrics.datasets_pruned.value(), 5);

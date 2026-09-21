@@ -18,7 +18,7 @@ use anyhow::Context as _;
 use arrow::{
     array::{ArrayRef, new_null_array},
     compute::cast,
-    datatypes::{Field, FieldRef, Schema, SchemaRef},
+    datatypes::{Field, FieldRef, Schema},
 };
 use atlas::{ArrayFile, Atlas, Attr};
 use beacon_datafusion_ext::nd::{Dimensions, NdArrowArray, NdRecordBatch};
@@ -30,68 +30,52 @@ use beacon_nd_array::{
         source::DatasetSource,
     },
 };
-use datafusion::physical_plan::PhysicalExpr;
 use indexmap::IndexMap;
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::{
     compat,
-    datafusion::{metrics::AtlasScanMetrics, pruning::prune_datasets},
+    datafusion::{metrics::AtlasScanMetrics, pruning::prune_datasets, spec::ScanSpec},
     store::{AtlasReaderCache, get_or_open_atlas},
 };
 
-/// An open collection and the resolution of every column of the table.
+/// An open collection and the resolution of every column of the scan.
 ///
-/// The table projects at least one column: the scan refuses one that does
-/// not, see `require_projection`. A dataset's grid is therefore always the
-/// grid of the columns it reads.
+/// The scan projects at least one column, see [`ScanSpec::new`]. A dataset's
+/// grid is therefore always the grid of the columns it reads.
 #[derive(Clone)]
 pub struct AtlasView {
     atlas: Arc<Atlas>,
-    table_schema: SchemaRef,
+    /// What the scan reads. The columns are resolved against its logical
+    /// schema.
+    spec: Arc<ScanSpec>,
     column_views: Arc<IndexMap<FieldRef, Option<AtlasColumnView>>>,
-    /// The dimensions the scan reads, or `None` to pick a broadcast-compatible
-    /// default per dataset. See [`AtlasView::dataset`].
-    read_dimensions: Option<Vec<String>>,
-    /// The rule that merged the table schema. It decides which casts read null.
-    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl AtlasView {
     /// Open the collection at `object_meta`, through `cache` when given, and
-    /// resolve every column of `table_schema` against it. `type_widening` is
-    /// the rule that merged that schema, and `read_dimensions` the axes the
-    /// scan reads on.
+    /// resolve every column of `spec` against it.
     pub async fn new(
         cache: Option<&AtlasReaderCache>,
         store: Arc<dyn ObjectStore>,
         object_meta: ObjectMeta,
-        table_schema: SchemaRef,
-        read_dimensions: Option<Vec<String>>,
-        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+        spec: Arc<ScanSpec>,
     ) -> anyhow::Result<Self> {
         let atlas = get_or_open_atlas(cache, store, &object_meta).await?;
-        let views = column_views(&atlas, &table_schema)
+        let views = column_views(&atlas, &spec.logical_schema)
             .await
             .with_context(|| format!("resolving the columns of '{}'", object_meta.location))?;
 
         Ok(Self {
             atlas,
-            table_schema,
+            spec,
             column_views: Arc::new(views),
-            read_dimensions,
-            type_widening,
         })
     }
 
-    /// The table schema the view resolves columns for, in field order.
-    pub fn table_schema(&self) -> &SchemaRef {
-        &self.table_schema
-    }
-
-    /// The rule that merged the table schema.
-    pub fn type_widening(&self) -> &Arc<dyn ArrowTypeWideningStrategy> {
-        &self.type_widening
+    /// What the scan reads.
+    pub fn spec(&self) -> &Arc<ScanSpec> {
+        &self.spec
     }
 
     /// The datasets worth reading, in the collection's order.
@@ -100,16 +84,20 @@ impl AtlasView {
     /// the statistics rule out is dropped too, and counted on `scan_metrics`.
     pub async fn list_datasets(
         &self,
-        pruning_predicate: Option<Arc<dyn PhysicalExpr>>,
-        scan_metrics: AtlasScanMetrics,
+        scan_metrics: &AtlasScanMetrics,
     ) -> anyhow::Result<Vec<String>> {
         let mut datasets = self.atlas.list_datasets();
 
-        if let Some(predicate) = &pruning_predicate {
+        if let Some(predicate) = &self.spec.predicate {
             let prune_timer = scan_metrics.prune_time.timer();
             let listed = datasets.len();
-            datasets =
-                prune_datasets(&self.column_views, datasets, predicate, &self.table_schema).await;
+            datasets = prune_datasets(
+                &self.column_views,
+                datasets,
+                predicate,
+                &self.spec.logical_schema,
+            )
+            .await;
             scan_metrics.datasets_pruned.add(listed - datasets.len());
             drop(prune_timer);
         }
@@ -161,7 +149,8 @@ impl AtlasView {
                 arrays.insert(field.name().clone(), array);
             }
         }
-        let arrays = on_read_dimensions(dataset_name, arrays, self.read_dimensions.clone()).await;
+        let arrays =
+            on_read_dimensions(dataset_name, arrays, self.spec.read_dimensions.clone()).await;
         let dataset = DefaultDataset::new(dataset_name.to_string(), arrays)
             .with_context(|| format!("laying out dataset '{dataset_name}'"))?;
         Ok(Arc::new(dataset))
@@ -310,7 +299,8 @@ fn as_field_type(
 #[cfg(test)]
 mod tests {
     use arrow::array::{Array, AsArray, RecordBatch};
-    use arrow::datatypes::{Float32Type, Float64Type, Int32Type, Int64Type};
+    use arrow::datatypes::{Float32Type, Float64Type, Int32Type, Int64Type, SchemaRef};
+    use beacon_datafusion_ext::nd::encoded_schema;
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use std::path::Path;
 
@@ -348,16 +338,16 @@ mod tests {
     ) -> (Vec<NdRecordBatch>, RecordBatch) {
         let schema = schema(dir).await;
         let (store, marker) = test_support::store_and_marker(dir);
-        let view = AtlasView::new(
-            None,
-            store,
-            marker,
-            Arc::clone(&schema),
+        let spec = ScanSpec::new(
+            Arc::new(encoded_schema(&schema)),
             read_dimensions,
+            None,
             strict(),
         )
-        .await
         .unwrap();
+        let view = AtlasView::new(None, store, marker, Arc::new(spec))
+            .await
+            .unwrap();
         let source = view.dataset(dataset).await.unwrap();
         let mut chunks = Vec::new();
         for chunk in source.chunks() {

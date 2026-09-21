@@ -43,9 +43,10 @@ pub(crate) mod error;
 pub mod metrics;
 pub mod opener;
 pub mod options;
-pub mod pool;
 pub mod pruning;
+pub mod queue;
 pub mod source;
+pub mod spec;
 pub mod table_function;
 pub mod view;
 
@@ -307,7 +308,7 @@ impl FileFormat for AtlasFormat {
     /// Nothing is opened here. The markers the listing found are deduped to the
     /// outermost collections, and every target partition gets all of them in
     /// its own rotation, see `deal_rotated`. The partitions that open one
-    /// collection share its datasets through the reader pool, so parallelism
+    /// collection share its datasets through its queue, so parallelism
     /// is bounded by the dataset count, not the collection count.
     async fn create_physical_plan(
         &self,
@@ -317,7 +318,7 @@ impl FileFormat for AtlasFormat {
         beacon_nd_array::arrow::morsel::reject_partition_columns("Atlas", &conf)?;
         // Refuse a scan of no column here, before any collection opens. The
         // opener checks again, for a projection pushed down after planning.
-        source::require_projection(conf.projected_schema()?.as_ref())?;
+        spec::require_projection(conf.projected_schema()?.as_ref())?;
 
         let listed: Vec<ObjectMeta> = conf
             .file_groups
@@ -327,7 +328,7 @@ impl FileFormat for AtlasFormat {
             .collect();
         let markers = top_level_atlas_markers(&listed);
 
-        // A container is never split, and the reader pool shares one between
+        // A container is never split, and its queue shares one between
         // the partitions that open it, so the deal here is the whole
         // distribution.
         let file_groups = deal_rotated(&markers, state.config().target_partitions());
@@ -379,7 +380,7 @@ impl FileFormat for AtlasFormat {
 
 /// Deal `markers` over `partitions` groups, every collection to every group.
 ///
-/// The reader pool shares a collection between the partitions that open it,
+/// A collection's queue shares it between the partitions that open it,
 /// so a partition may hold every collection and still read nothing twice.
 /// Every partition then reads until every collection is drained, whatever
 /// the collections' sizes, and parallelism is bounded by the dataset count

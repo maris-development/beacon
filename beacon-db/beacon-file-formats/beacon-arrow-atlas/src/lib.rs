@@ -38,7 +38,7 @@
 //! The scan plans one entry per collection and deals every entry to every
 //! partition, each in its own rotation. The first partition to open a
 //! collection prunes every dataset in one pass over the footer and queues the
-//! survivors in a reader pool. Every partition that opens the collection then
+//! survivors in a shared queue. Every partition that opens the collection then
 //! streams the datasets it pops off that queue. A pruned dataset therefore
 //! costs nothing, a dataset is read once, and parallelism is bounded by the
 //! dataset count. See [`datafusion::source`].
