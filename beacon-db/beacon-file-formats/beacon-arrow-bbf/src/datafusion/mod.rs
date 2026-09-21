@@ -221,6 +221,12 @@ impl FileFormat for BBFFormat {
             .with_split_streams_slice(self.split_streams_slice)
             .with_projection(projection)
             .with_type_widening(Arc::clone(&session_widening(state).strategy));
+        // Keep the token a caller set on the incoming source.
+        if let Some(incoming) = conf.file_source().as_any().downcast_ref::<BBFSource>() {
+            source.set_cancellation_token(incoming.cancellation_token());
+        }
+        // Fail at plan time, so the user sees the error before the scan runs.
+        source.require_projection()?;
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -485,5 +491,190 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    async fn plan_with_projection(
+        indices: Vec<usize>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let schema: SchemaRef = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int32, true),
+            arrow::datatypes::Field::new("b", arrow::datatypes::DataType::Int32, true),
+        ]));
+        let format = BBFFormat::default();
+        let source = format.file_source(TableSchema::from_file_schema(schema));
+        let conf = FileScanConfigBuilder::new(ObjectStoreUrl::parse("file://")?, source)
+            .with_projection_indices(Some(indices))?
+            .build();
+        format
+            .create_physical_plan(&SessionContext::new().state(), conf)
+            .await
+    }
+
+    /// `SELECT *` must fail when the query is planned, not when it runs.
+    #[tokio::test]
+    async fn create_physical_plan_refuses_a_projection_of_every_column() {
+        let err = plan_with_projection(vec![0, 1])
+            .await
+            .expect_err("plan must fail");
+        assert!(
+            matches!(err, datafusion::error::DataFusionError::Plan(_)),
+            "{err}"
+        );
+        assert!(err.to_string().contains("SELECT *"), "{err}");
+    }
+
+    /// A column list that leaves out a column plans.
+    #[tokio::test]
+    async fn create_physical_plan_accepts_a_projection_of_some_columns() {
+        plan_with_projection(vec![1])
+            .await
+            .expect("subset projection plans");
+    }
+
+    /// The format rebuilds the source when it plans. The token set on the
+    /// incoming source must reach the source in the plan.
+    #[tokio::test]
+    async fn create_physical_plan_keeps_the_cancellation_token() {
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        use tokio_util::sync::CancellationToken;
+
+        let schema: SchemaRef = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int32, true),
+            arrow::datatypes::Field::new("b", arrow::datatypes::DataType::Int32, true),
+        ]));
+        let format = BBFFormat::default();
+        let source = format.file_source(TableSchema::from_file_schema(schema));
+        let token = CancellationToken::new();
+        source
+            .as_any()
+            .downcast_ref::<BBFSource>()
+            .expect("bbf source")
+            .set_cancellation_token(token.clone());
+        let conf = FileScanConfigBuilder::new(ObjectStoreUrl::parse("file://").unwrap(), source)
+            .with_projection_indices(Some(vec![1]))
+            .unwrap()
+            .build();
+        let plan = format
+            .create_physical_plan(&SessionContext::new().state(), conf)
+            .await
+            .expect("plan");
+
+        let planned = plan
+            .as_any()
+            .downcast_ref::<DataSourceExec>()
+            .expect("data source exec")
+            .data_source()
+            .as_any()
+            .downcast_ref::<FileScanConfig>()
+            .expect("file scan config")
+            .file_source()
+            .as_any()
+            .downcast_ref::<BBFSource>()
+            .expect("bbf source")
+            .cancellation_token();
+        token.cancel();
+        assert!(
+            planned.is_cancelled(),
+            "the plan must share the caller's token"
+        );
+    }
+
+    /// Registers the fixture as table `t` on a fresh session, so a test can run
+    /// SQL through the planner the way a user does.
+    async fn session_with_fixture(dir: &std::path::Path) -> SessionContext {
+        use datafusion::datasource::listing::{
+            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+        };
+
+        super::test_util::write_bbf_fixture(dir, "sql.bbf").await;
+        let ctx = SessionContext::new();
+        let url = ListingTableUrl::parse(dir.join("sql.bbf").to_str().expect("utf8 path"))
+            .expect("listing url");
+        let options = ListingOptions::new(Arc::new(BBFFormat::default()));
+        let config = ListingTableConfig::new(url)
+            .with_listing_options(options)
+            .infer_schema(&ctx.state())
+            .await
+            .expect("infer schema");
+        let table = ListingTable::try_new(config).expect("listing table");
+        ctx.register_table("t", Arc::new(table)).expect("register");
+        ctx
+    }
+
+    /// The planner pushes every column as the projection of `SELECT *`, and the
+    /// scan refuses it with the message that tells the user what to do.
+    #[tokio::test]
+    async fn sql_select_star_fails_at_plan_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = session_with_fixture(dir.path()).await;
+
+        let err = ctx
+            .sql("SELECT * FROM t")
+            .await
+            .expect("parse")
+            .create_physical_plan()
+            .await
+            .expect_err("SELECT * must not plan");
+        assert!(err.to_string().contains("column list"), "{err}");
+    }
+
+    /// A column list reads the rows of every entry.
+    #[tokio::test]
+    async fn sql_column_list_reads_the_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = session_with_fixture(dir.path()).await;
+
+        let batches = ctx
+            .sql("SELECT ints FROM t")
+            .await
+            .expect("plan")
+            .collect()
+            .await
+            .expect("collect");
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 5, "3 rows from entry_a + 2 rows from entry_b");
+    }
+
+    /// A count over a named column selects that column, so it passes the rule
+    /// and counts the rows of every entry.
+    #[tokio::test]
+    async fn sql_count_of_a_column_counts_the_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = session_with_fixture(dir.path()).await;
+
+        let batches = ctx
+            .sql("SELECT count(ints) FROM t")
+            .await
+            .expect("plan")
+            .collect()
+            .await
+            .expect("collect");
+        let count = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("count is Int64")
+            .value(0);
+        assert_eq!(count, 5, "3 rows from entry_a + 2 rows from entry_b");
+    }
+
+    /// `count(*)` selects no column. The scan refuses it like `SELECT *`.
+    #[tokio::test]
+    async fn sql_count_star_fails_at_plan_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = session_with_fixture(dir.path()).await;
+
+        let err = ctx
+            .sql("SELECT count(*) FROM t")
+            .await
+            .expect("parse")
+            .create_physical_plan()
+            .await
+            .expect_err("count(*) must not plan");
+        assert!(err.to_string().contains("count(*)"), "{err}");
     }
 }

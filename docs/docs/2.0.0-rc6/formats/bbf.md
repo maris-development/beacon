@@ -13,15 +13,20 @@ read_bbf(glob_paths)
 Beacon reads Beacon Binary Format files.
 
 ```sql
-SELECT * FROM read_bbf('bbf/**/*.bbf')
+SELECT time, depth, temperature FROM read_bbf('bbf/**/*.bbf')
 ```
+
+A BBF query must name its columns. `SELECT *` and `SELECT count(*)` fail at plan time. The reader
+flattens each n-dimensional column on the dimensions of the selected columns. A scan of every
+column flattens on every dimension, and a scan of no column has no dimensions, so Beacon refuses
+both. Count over a named column: `SELECT count(time) FROM read_bbf('bbf/**/*.bbf')`.
 
 ## Inspect the schema
 
 Check the columns and the types before you write a query:
 
 ```sql
-SELECT * FROM read_bbf('data/*.bbf') LIMIT 0;
+SELECT * FROM read_bbf_schema('data/*.bbf');
 ```
 
 [Inspect a schema](/docs/2.0.0-rc6/formats/inspect-a-schema) compares the `_schema` functions,

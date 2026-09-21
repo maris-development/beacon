@@ -1,7 +1,12 @@
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use datafusion::{
+    common::plan_err,
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileOpener, FileScanConfig, FileSource},
@@ -18,6 +23,7 @@ use datafusion::{
 };
 use object_store::ObjectStore;
 use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::datafusion::{metrics::BBFGlobalMetrics, opener::BBFOpener, stream_share::StreamShare};
 
@@ -37,6 +43,8 @@ pub struct BBFSource {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// File Tracer
     file_tracer: Arc<Mutex<Arc<Mutex<Vec<String>>>>>,
+    /// The token that stops every stream this source opens.
+    cancellation_token: Arc<Mutex<CancellationToken>>,
     /// Stream Partition Share
     stream_partition_shares: Arc<Mutex<HashMap<object_store::path::Path, Arc<StreamShare>>>>,
     /// Global Metrics
@@ -60,6 +68,7 @@ impl BBFSource {
             split_streams_slice: false,
             predicate: None,
             file_tracer: Arc::new(Mutex::new(Arc::new(Mutex::new(vec![])))),
+            cancellation_token: Arc::new(Mutex::new(CancellationToken::new())),
             stream_partition_shares: Arc::new(Mutex::new(HashMap::new())),
             global_metrics,
             projection: None,
@@ -92,7 +101,44 @@ impl BBFSource {
         let mut file_tracer = self.file_tracer.lock();
         *file_tracer = tracer;
     }
+
+    /// Sets the token that stops every stream this source opens.
+    ///
+    /// A cancel ends each open stream with one error item. Read tasks that
+    /// the BBF reader already spawned finish in the background.
+    pub fn set_cancellation_token(&self, token: CancellationToken) {
+        *self.cancellation_token.lock() = token;
+    }
+
+    /// The token that stops every stream this source opens.
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation_token.lock().clone()
+    }
+
+    /// Refuses a scan that does not select a subset of the table columns.
+    ///
+    /// The reader flattens each nd column on the dimensions of the selected
+    /// columns. A scan of every column flattens on every dimension.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plan error when the source has no projection, when the
+    /// projection names no column, or when it names every column of the table.
+    pub fn require_projection(&self) -> datafusion::error::Result<()> {
+        let Some(projection) = &self.projection else {
+            return plan_err!("{PROJECTION_REQUIRED}");
+        };
+        let selected: HashSet<usize> = projection.column_indices().into_iter().collect();
+        if selected.is_empty() || selected.len() >= self.table_schema.table_schema().fields().len()
+        {
+            return plan_err!("{PROJECTION_REQUIRED}");
+        }
+        Ok(())
+    }
 }
+
+const PROJECTION_REQUIRED: &str = "BBF scan needs a column list. SELECT * and count(*) are not \
+    allowed. The reader flattens n-dimensional columns on the dimensions of the selected columns.";
 
 impl FileSource for BBFSource {
     /// Creates a `dyn FileOpener` based on given parameters
@@ -102,6 +148,7 @@ impl FileSource for BBFSource {
         base_config: &FileScanConfig,
         _partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
+        self.require_projection()?;
         let table_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
         let pruning_predicate = self
@@ -120,6 +167,7 @@ impl FileSource for BBFSource {
             self.split_streams_slice,
             self.batch_size,
             Arc::clone(&self.type_widening),
+            self.cancellation_token(),
         )))
     }
 
@@ -387,5 +435,63 @@ mod tests {
         assert_eq!(source.file_tracer.lock().lock().as_slice(), ["seed"]);
         tracer.lock().push("more".to_string());
         assert_eq!(source.file_tracer.lock().lock().len(), 2);
+    }
+
+    fn open_with(source: BBFSource) -> datafusion::error::Result<()> {
+        use datafusion::datasource::physical_plan::FileScanConfigBuilder;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        let conf = FileScanConfigBuilder::new(
+            ObjectStoreUrl::parse("file://").expect("url"),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .build();
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        source.create_file_opener(store, &conf, 0).map(|_| ())
+    }
+
+    /// The reader flattens nd columns on the dimensions of the selected columns,
+    /// so a scan must name its columns. No projection at all is refused.
+    #[test]
+    fn create_file_opener_refuses_a_scan_without_projection() {
+        let err = open_with(source()).expect_err("no projection must fail");
+        assert!(
+            matches!(err, datafusion::error::DataFusionError::Plan(_)),
+            "{err}"
+        );
+        assert!(err.to_string().contains("column list"), "{err}");
+    }
+
+    /// `SELECT *` arrives as a projection over every table column. It is refused
+    /// for the same reason as a missing projection.
+    #[test]
+    fn create_file_opener_refuses_a_projection_of_every_column() {
+        let all = ProjectionExprs::from_indices(&[0, 1, 2], &schema());
+        let err =
+            open_with(source().with_projection(Some(all))).expect_err("full projection must fail");
+        assert!(
+            matches!(err, datafusion::error::DataFusionError::Plan(_)),
+            "{err}"
+        );
+        assert!(err.to_string().contains("SELECT *"), "{err}");
+    }
+
+    /// `count(*)` arrives as a projection of no column. It is refused too.
+    #[test]
+    fn create_file_opener_refuses_a_projection_of_no_column() {
+        let none = ProjectionExprs::from_indices(&[], &schema());
+        let err = open_with(source().with_projection(Some(none)))
+            .expect_err("empty projection must fail");
+        assert!(
+            matches!(err, datafusion::error::DataFusionError::Plan(_)),
+            "{err}"
+        );
+        assert!(err.to_string().contains("count(*)"), "{err}");
+    }
+
+    /// A projection that leaves out at least one column passes.
+    #[test]
+    fn create_file_opener_accepts_a_projection_of_some_columns() {
+        let some = ProjectionExprs::from_indices(&[2, 0], &schema());
+        open_with(source().with_projection(Some(some))).expect("subset projection is fine");
     }
 }

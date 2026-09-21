@@ -223,6 +223,16 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **A BBF query must name its columns.** The BBF reader flattens each n-dimensional column on the
+  dimensions of the columns the query selects. A scan of every column flattens on every dimension,
+  so `SELECT * FROM read_bbf(...)` and a scan with no projection now fail at plan time with a
+  message that says to list the columns. A scan that selects no column, such as
+  `SELECT count(*)`, fails the same way: count over a named column instead. Use
+  `read_bbf_schema` to see the columns of a file. The BBF source also takes a
+  cancellation token: `BBFSource::set_cancellation_token` stops the open and ends every stream of
+  that source with one error item, so a consumer never takes a partial result for a complete one.
+  Read tasks the reader already started finish in the background.
+
 - **The scan asks the merge rule which casts read null, and the merged schema carries no mark.**
   `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first` used to mark a column that two files type in two
   families with `beacon.type_conflict` in the field metadata, and every reader looked for that mark

@@ -25,9 +25,10 @@ use datafusion::{
     physical_optimizer::pruning::PruningPredicate,
     prelude::Column,
 };
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt, stream::BoxStream};
 use object_store::ObjectStore;
 use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::datafusion::{metrics::BBFGlobalMetrics, stream_share::StreamShare};
 
@@ -47,6 +48,8 @@ pub struct BBFOpener {
     split_batch_size: usize,
     /// The rule that merged the table schema. It decides which casts read null.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    /// Stops the open and ends the stream when it fires.
+    cancellation_token: CancellationToken,
 }
 
 impl FileOpener for BBFOpener {
@@ -72,6 +75,7 @@ impl FileOpener for BBFOpener {
         let fut_projected_schema = projected_schema.clone();
         let split_streams_slice = self.split_streams_slice;
         let split_batch_size = self.split_batch_size;
+        let cancellation_token = self.cancellation_token.clone();
 
         let fut = async move {
             let (stream, schema_mapper, file_schema) = stream_partition_share
@@ -189,11 +193,35 @@ impl FileOpener for BBFOpener {
                 stream_proxy
             };
 
-            Ok(stream_proxy)
+            Ok::<BatchStream, datafusion::error::DataFusionError>(stream_proxy)
+        };
+
+        let fut = async move {
+            let stream = cancellation_token
+                .run_until_cancelled(fut)
+                .await
+                .ok_or_else(cancelled_error)??;
+            Ok(end_on_cancel(stream, cancellation_token))
         };
 
         Ok(fut.boxed())
     }
+}
+
+type BatchStream = BoxStream<'static, datafusion::error::Result<RecordBatch>>;
+
+fn cancelled_error() -> datafusion::error::DataFusionError {
+    datafusion::error::DataFusionError::Execution("BBF scan cancelled".to_string())
+}
+
+/// Ends `stream` when `token` fires, then yields one error item. The error
+/// tells the consumer that the result is partial.
+fn end_on_cancel(stream: BatchStream, token: CancellationToken) -> BatchStream {
+    let cancelled = token.clone().cancelled_owned();
+    let trailer =
+        futures::stream::once(async move { token.is_cancelled().then(|| Err(cancelled_error())) })
+            .filter_map(futures::future::ready);
+    stream.take_until(cancelled).chain(trailer).boxed()
 }
 
 fn split_record_batch(batch: RecordBatch, chunk_size: usize) -> Vec<RecordBatch> {
@@ -215,13 +243,15 @@ mod opener_tests {
     use crate::datafusion::test_util::write_bbf_fixture;
     use datafusion::datasource::file_format::FileFormat;
     use datafusion::datasource::listing::PartitionedFile;
-    use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
+    use datafusion::datasource::physical_plan::{FileOpener, FileScanConfigBuilder, FileSource};
     use datafusion::datasource::table_schema::TableSchema;
     use datafusion::execution::object_store::ObjectStoreUrl;
+    use datafusion::physical_expr::projection::ProjectionExprs;
     use datafusion::prelude::SessionContext;
     use futures::StreamExt;
     use object_store::ObjectStore;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     /// End-to-end read of a real BBF file through the source/opener pair: every
     /// entry's rows must arrive, mapped onto the inferred table schema (so columns
@@ -239,7 +269,12 @@ mod opener_tests {
             .await
             .expect("schema");
 
-        let source = BBFSource::new(TableSchema::from_file_schema(table_schema.clone()));
+        // The scan must name its columns, so read only `ints`.
+        let ints = table_schema.index_of("ints").expect("ints column");
+        let projection = ProjectionExprs::from_indices(&[ints], &table_schema);
+        let expected_schema = Arc::new(table_schema.project(&[ints]).expect("project"));
+        let source = BBFSource::new(TableSchema::from_file_schema(table_schema.clone()))
+            .with_projection(Some(projection));
         let tracer = Arc::new(parking_lot::Mutex::new(Vec::new()));
         source.set_file_tracer(tracer.clone());
 
@@ -266,13 +301,90 @@ mod opener_tests {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 5, "3 rows from entry_a + 2 rows from entry_b");
         for batch in &batches {
-            assert_eq!(batch.schema(), table_schema, "batches must match the table");
+            assert_eq!(
+                batch.schema(),
+                expected_schema,
+                "batches must match the projection"
+            );
         }
 
         let traced = tracer.lock().clone();
         assert!(
             traced.contains(&"entry_a".to_string()) && traced.contains(&"entry_b".to_string()),
             "file tracer should list both entries, got {traced:?}"
+        );
+    }
+
+    /// Opens the fixture through a source that carries `token`. Returns the
+    /// opener and the file to open.
+    async fn opener_with_token(
+        dir: &std::path::Path,
+        token: CancellationToken,
+    ) -> (Arc<dyn FileOpener>, PartitionedFile) {
+        let (store, meta) = write_bbf_fixture(dir, "cancel.bbf").await;
+        let object_store: Arc<dyn ObjectStore> = store;
+
+        let ctx = SessionContext::new();
+        let table_schema = crate::datafusion::BBFFormat::default()
+            .infer_schema(&ctx.state(), &object_store, std::slice::from_ref(&meta))
+            .await
+            .expect("schema");
+        let ints = table_schema.index_of("ints").expect("ints column");
+        let projection = ProjectionExprs::from_indices(&[ints], &table_schema);
+        let source = BBFSource::new(TableSchema::from_file_schema(table_schema))
+            .with_projection(Some(projection));
+        source.set_cancellation_token(token);
+
+        let conf = FileScanConfigBuilder::new(
+            ObjectStoreUrl::parse("file://").expect("url"),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .build();
+        let opener = source
+            .create_file_opener(object_store, &conf, 0)
+            .expect("file opener");
+        (opener, PartitionedFile::from(meta))
+    }
+
+    /// A token that is already cancelled stops the open before any read.
+    #[tokio::test]
+    async fn open_fails_when_the_token_is_already_cancelled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        token.cancel();
+        let (opener, file) = opener_with_token(dir.path(), token).await;
+
+        let Err(err) = opener.open(file).expect("open").await else {
+            panic!("a cancelled open must fail");
+        };
+        assert!(err.to_string().contains("cancelled"), "{err}");
+    }
+
+    /// A cancel while the stream runs ends the stream with one error item, so a
+    /// consumer cannot take the partial result for a complete one.
+    #[tokio::test]
+    async fn stream_ends_with_an_error_after_cancel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let (opener, file) = opener_with_token(dir.path(), token.clone()).await;
+
+        let mut stream = opener.open(file).expect("open").await.expect("stream");
+        stream
+            .next()
+            .await
+            .expect("first batch")
+            .expect("first batch is ok");
+
+        token.cancel();
+        let rest: Vec<_> = stream.collect().await;
+        let last = rest.last().expect("the cancel error ends the stream");
+        let err = last
+            .as_ref()
+            .expect_err("last item must be the cancel error");
+        assert!(err.to_string().contains("cancelled"), "{err}");
+        assert!(
+            rest.iter().filter(|item| item.is_err()).count() == 1,
+            "exactly one error item, got {rest:?}"
         );
     }
 }
@@ -360,6 +472,7 @@ impl BBFOpener {
         split_streams_slice: bool,
         split_batch_size: usize,
         type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+        cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             projected_schema,
@@ -372,6 +485,7 @@ impl BBFOpener {
             split_streams_slice,
             split_batch_size,
             type_widening,
+            cancellation_token,
         }
     }
 

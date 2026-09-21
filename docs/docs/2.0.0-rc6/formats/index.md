@@ -60,7 +60,7 @@ The table above says how to read each format. This one says what you get.
 | Zarr | Full | Projection + dimension selection, chunk pruning | No | `read_zarr_schema` | Yes |
 | Atlas | Full | Predicate + projection, **dataset-level pruning** | Yes | `read_atlas_schema` | Yes |
 | GeoTIFF / COG | Full | Projection, range requests | No | `read_tiff_schema` | Yes |
-| BBF | Full | Predicate + projection | No | `read_bbf_schema` | No |
+| BBF | Full | Predicate + projection, **column list required** | No | `read_bbf_schema` | No |
 | Delta Lake | Full | Predicate + projection, file skipping | No, but see below | `read_delta_schema` | No |
 | Apache Iceberg | Full | Predicate + projection, file skipping | No | `read_iceberg_schema` | No |
 | Icechunk | Full, see [Icechunk](/docs/2.0.0-rc6/formats/icechunk) | Projection + dimension selection, chunk pruning | No | `read_icechunk_schema` | Yes |
