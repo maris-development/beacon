@@ -5,5 +5,6 @@ mod auth;
 mod client;
 mod home;
 mod router;
+mod security;
 
 pub use router::setup_router;

@@ -32,7 +32,7 @@ fn rules(row: &serde_json::Value, column: &str) -> Vec<AuthRuleView> {
         (status = 200, description = "Users with their roles", body = Vec<AuthUserView>),
         (status = 400, description = "Failed to enumerate users")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn list_users(
     State(state): State<Arc<Server>>,
@@ -87,7 +87,7 @@ pub(crate) async fn list_users(
     get,
     path = "/api/admin/auth/roles",
     responses((status = 200, description = "Roles with their rules", body = Vec<AuthRoleView>)),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn list_roles(
     State(state): State<Arc<Server>>,

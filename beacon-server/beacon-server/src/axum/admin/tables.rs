@@ -30,7 +30,7 @@ pub struct ListTableConfigQuery {
     responses(
         (status = 200, description = "A notice that this endpoint is no longer supported", body = DeprecationNotice),
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 // utoipa reads the `#[deprecated]` below and marks the operation deprecated in
 // the OpenAPI document.

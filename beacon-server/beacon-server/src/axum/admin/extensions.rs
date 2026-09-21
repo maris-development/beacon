@@ -59,7 +59,7 @@ async fn apply_extensions(
         (status = 200, description = "Extensions updated"),
         (status = 400, description = "Invalid request, validation failed, or table not found")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn set_table_extensions(
     State(state): State<Arc<Server>>,
@@ -83,7 +83,7 @@ pub(crate) async fn set_table_extensions(
         (status = 200, description = "Extensions removed"),
         (status = 400, description = "Table not found or removal failed")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn delete_table_extensions(
     State(state): State<Arc<Server>>,
