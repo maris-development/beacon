@@ -233,8 +233,18 @@ tag. Releases before 2.0.0 are recorded in the
   that source with one error item, so a consumer never takes a partial result for a complete one.
   Read tasks the reader already started finish in the background. The BBF scan now maps its
   batches through the shared adapting opener, like IPC and CSV: one adapter per file instead of
-  one per batch, an expression the optimizer pushes down comes back computed, and an entry that
-  does not flatten is an error instead of rows that vanish.
+  one per batch, and an entry that does not flatten is an error instead of rows that vanish.
+
+- **BBF reads through the nd pipeline.** A BBF entry is one dataset with its own dimension
+  sizes, and the scan now carries it as one `beacon.nd`-encoded row, the way Atlas, NetCDF and
+  Zarr do. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it, so a `WHERE` on a
+  coordinate column runs before the broadcast and the filtered-out cross-product never exists in
+  memory, and an element-wise projection sinks below the broadcast. Two things change with it.
+  The `split_streams_slice` option and `BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE` are gone: the
+  broadcast emits one batch per entry, so there is nothing left to slice. A table created with
+  the key keeps working, because Beacon ignores a key a format does not read. And a partitioned
+  BBF table (`PARTITIONED BY`) is refused at plan time, as for every nd format, because the nd
+  pipeline cannot carry a partition column.
 
 - **The scan asks the merge rule which casts read null, and the merged schema carries no mark.**
   `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first` used to mark a column that two files type in two

@@ -6,10 +6,10 @@ use beacon_binary_format::{
 };
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
-use beacon_datafusion_ext::format_options::format_option;
+use beacon_datafusion_ext::nd::{encoded_schema, exec::nd_scan_plan};
 use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
 use datafusion::{
-    catalog::{Session, memory::DataSourceExec},
+    catalog::Session,
     common::{GetExt, Statistics},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
@@ -29,35 +29,10 @@ pub mod stream_share;
 
 pub const BBF_FORMAT_NAME: &str = "bbf";
 
-/// Runtime configuration for the BBF format.
+/// Builds the BBF format. The format has no options: a file carries its own
+/// schema, and the nd pipeline decides the shape of a batch.
 #[derive(Clone, Debug, Default)]
-pub struct BbfConfig {
-    /// Whether to split each record batch into `batch_size`-row slices to bound
-    /// peak memory for wide tables. Defaults to `false` for backward compatibility.
-    pub split_streams_slice: bool,
-}
-
-/// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
-fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Ok(true),
-        "false" | "0" | "no" | "off" => Ok(false),
-        other => Err(datafusion::error::DataFusionError::Execution(format!(
-            "invalid boolean for BBF option '{key}': '{other}'"
-        ))),
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct BBFFormatFactory {
-    pub config: BbfConfig,
-}
-
-impl BBFFormatFactory {
-    pub fn new(config: BbfConfig) -> Self {
-        Self { config }
-    }
-}
+pub struct BBFFormatFactory;
 
 impl GetExt for BBFFormatFactory {
     fn get_ext(&self) -> String {
@@ -69,17 +44,9 @@ impl FileFormatFactory for BBFFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        format_options: &HashMap<String, String>,
+        _format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        // Per-table override from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
-        // defaulting to the runtime config.
-        let mut split_streams_slice = self.config.split_streams_slice;
-        if let Some(value) = format_option(format_options, "split_streams_slice") {
-            split_streams_slice = parse_bool_option("split_streams_slice", value)?;
-        }
-        Ok(Arc::new(BBFFormat {
-            split_streams_slice,
-        }))
+        Ok(Arc::new(BBFFormat))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -87,16 +54,13 @@ impl FileFormatFactory for BBFFormatFactory {
     }
 
     fn default(&self) -> std::sync::Arc<dyn FileFormat> {
-        std::sync::Arc::new(BBFFormat {
-            split_streams_slice: self.config.split_streams_slice,
-        })
+        std::sync::Arc::new(BBFFormat)
     }
 }
 
 impl FileFormatFactoryExt for BBFFormatFactory {
     /// BBF opts into the schema cache on its name alone. A file carries its own
-    /// schema, and `split_streams_slice` only decides how many rows a batch
-    /// holds.
+    /// schema, and the format has no options.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
         format.as_any().downcast_ref::<BBFFormat>()?;
         Some(SchemaOptions::new("bbf").finish())
@@ -125,10 +89,7 @@ impl FileFormatFactoryExt for BBFFormatFactory {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct BBFFormat {
-    /// Whether to split each record batch into `batch_size`-row slices.
-    pub split_streams_slice: bool,
-}
+pub struct BBFFormat;
 
 #[async_trait::async_trait]
 impl FileFormat for BBFFormat {
@@ -210,15 +171,19 @@ impl FileFormat for BBFFormat {
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        beacon_nd_array::arrow::morsel::reject_partition_columns("BBF", &conf)?;
+
+        // The scan carries each entry as one `beacon.nd`-encoded row. The nd
+        // spine above decodes and broadcasts it onto the logical schema.
+        let encoded = Arc::new(encoded_schema(conf.file_schema()));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
-            conf.file_schema().clone(),
+            encoded,
             conf.table_partition_cols().clone(),
         );
         // Preserve a projection that the scan pushed down into the incoming
         // source. Rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = BBFSource::new(table_schema)
-            .with_split_streams_slice(self.split_streams_slice)
             .with_projection(projection)
             .with_type_widening(Arc::clone(&session_widening(state).strategy));
         // Keep the token a caller set on the incoming source.
@@ -230,14 +195,14 @@ impl FileFormat for BBFFormat {
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
-        Ok(DataSourceExec::from_data_source(conf))
+        nd_scan_plan(conf)
     }
 
     fn file_source(
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(BBFSource::new(table_schema).with_split_streams_slice(self.split_streams_slice))
+        Arc::new(BBFSource::new(table_schema))
     }
 }
 
@@ -308,6 +273,26 @@ pub(crate) mod test_util {
         };
         (store, meta)
     }
+
+    /// Writes a one-entry BBF file whose `ints` column is `Int64`, beside a
+    /// fixture whose `ints` is `Int32`, so a scan must widen the column.
+    pub(crate) fn write_bbf_int64_file(dir: &std::path::Path, file_name: &str) {
+        use arrow::array::Int64Array;
+
+        let mut writer =
+            BBFWriter::new(dir.join(file_name), 1024 * 1024, None, true).expect("bbf writer");
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![100, 200]));
+        let collection = ArrayCollection::new(
+            "wide",
+            Box::new(std::iter::once(Column::new(
+                "ints",
+                ints,
+                Dimensions::Multi(vec![("dim1", 2).into()]),
+            ))),
+        );
+        writer.append(Entry::new(collection), "entry_c");
+        writer.finish().expect("finish bbf file");
+    }
 }
 
 #[cfg(test)]
@@ -318,92 +303,16 @@ mod tests {
     use object_store::path::Path;
     use object_store::{ObjectStoreExt, PutPayload};
 
-    /// Every spelling accepted by `CREATE EXTERNAL TABLE ... OPTIONS` must map to
-    /// the same boolean, including odd casing and surrounding whitespace, because
-    /// SQL option values arrive verbatim from the parser.
+    /// The format has no options. A key a user writes is ignored, so an old
+    /// `CREATE EXTERNAL TABLE` that names one keeps working.
     #[test]
-    fn parse_bool_option_accepts_all_documented_spellings() {
-        for truthy in ["true", "TRUE", " True ", "1", "yes", "YES", "on"] {
-            assert!(
-                parse_bool_option("split_streams_slice", truthy).unwrap(),
-                "{truthy:?} should parse as true"
-            );
-        }
-        for falsy in ["false", "FALSE", " off ", "0", "no", "OFF"] {
-            assert!(
-                !parse_bool_option("split_streams_slice", falsy).unwrap(),
-                "{falsy:?} should parse as false"
-            );
-        }
-    }
-
-    /// A typo in an option must fail loudly (naming the offending option) instead of
-    /// silently falling back to the default.
-    #[test]
-    fn parse_bool_option_rejects_unknown_values() {
-        let err = parse_bool_option("split_streams_slice", "maybe").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("split_streams_slice"), "message was: {msg}");
-        assert!(msg.contains("maybe"), "message was: {msg}");
-        assert!(parse_bool_option("split_streams_slice", "").is_err());
-    }
-
-    /// `create()` must layer the per-table option on top of the runtime default:
-    /// absent option keeps the runtime value, present option overrides it.
-    #[test]
-    fn create_layers_table_option_over_runtime_config() {
-        let ctx = SessionContext::new();
-        let state = ctx.state();
-
-        let on_by_default = BBFFormatFactory::new(BbfConfig {
-            split_streams_slice: true,
-        });
-        let format = on_by_default.create(&state, &HashMap::new()).unwrap();
-        assert!(downcast(&format).split_streams_slice);
-
-        let opts = HashMap::from([("split_streams_slice".to_string(), "false".to_string())]);
-        let format = on_by_default.create(&state, &opts).unwrap();
-        assert!(!downcast(&format).split_streams_slice);
-
-        let off_by_default = <BBFFormatFactory as Default>::default();
-        let opts = HashMap::from([("split_streams_slice".to_string(), "on".to_string())]);
-        let format = off_by_default.create(&state, &opts).unwrap();
-        assert!(downcast(&format).split_streams_slice);
-    }
-
-    /// An invalid option must abort table creation rather than be ignored.
-    #[test]
-    fn create_propagates_invalid_option_error() {
+    fn create_ignores_options() {
         let ctx = SessionContext::new();
         let opts = HashMap::from([("split_streams_slice".to_string(), "nope".to_string())]);
-        assert!(
-            <BBFFormatFactory as Default>::default()
-                .create(&ctx.state(), &opts)
-                .is_err()
-        );
-    }
-
-    /// `default()` has no options to consult, so it must still carry the runtime
-    /// configuration through to the format.
-    #[test]
-    fn default_format_carries_runtime_config() {
-        let factory = BBFFormatFactory::new(BbfConfig {
-            split_streams_slice: true,
-        });
-        assert!(downcast(&FileFormatFactory::default(&factory)).split_streams_slice);
-        assert!(
-            !downcast(&FileFormatFactory::default(
-                &<BBFFormatFactory as Default>::default()
-            ))
-            .split_streams_slice
-        );
-    }
-
-    fn downcast(format: &Arc<dyn FileFormat>) -> &BBFFormat {
-        format
-            .as_any()
-            .downcast_ref::<BBFFormat>()
-            .expect("factory should produce a BBFFormat")
+        let format = BBFFormatFactory
+            .create(&ctx.state(), &opts)
+            .expect("an unknown option must not fail");
+        assert!(format.as_any().downcast_ref::<BBFFormat>().is_some());
     }
 
     /// Only `.bbf` objects are BBF datasets; anything else in the listing must be
@@ -420,14 +329,14 @@ mod tests {
                 .expect("put");
             objects.push(store.head(&path).await.expect("head"));
         }
-        let datasets = <BBFFormatFactory as Default>::default()
+        let datasets = BBFFormatFactory
             .discover_datasets(&objects)
             .unwrap();
         let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
         assert_eq!(paths, vec!["x/a.bbf"]);
         assert_eq!(datasets[0].format, "bbf");
         assert_eq!(
-            <BBFFormatFactory as Default>::default().file_extensions(),
+            BBFFormatFactory.file_extensions(),
             vec!["bbf"]
         );
     }
@@ -436,7 +345,7 @@ mod tests {
     /// always `bbf` no matter what compression the caller asks about.
     #[test]
     fn extension_is_always_bbf() {
-        let format = BBFFormat::default();
+        let format = BBFFormat;
         assert_eq!(format.get_ext(), "bbf");
         assert_eq!(format.compression_type(), None);
         assert_eq!(
@@ -457,7 +366,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = store;
 
         let ctx = SessionContext::new();
-        let schema = BBFFormat::default()
+        let schema = BBFFormat
             .infer_schema(&ctx.state(), &object_store, &[meta])
             .await
             .expect("real BBF file should infer");
@@ -486,7 +395,7 @@ mod tests {
 
         let ctx = SessionContext::new();
         assert!(
-            BBFFormat::default()
+            BBFFormat
                 .infer_schema(&ctx.state(), &object_store, &[meta])
                 .await
                 .is_err()
@@ -503,7 +412,7 @@ mod tests {
             arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int32, true),
             arrow::datatypes::Field::new("b", arrow::datatypes::DataType::Int32, true),
         ]));
-        let format = BBFFormat::default();
+        let format = BBFFormat;
         let source = format.file_source(TableSchema::from_file_schema(schema));
         let conf = FileScanConfigBuilder::new(ObjectStoreUrl::parse("file://")?, source)
             .with_projection_indices(Some(indices))?
@@ -546,7 +455,7 @@ mod tests {
             arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int32, true),
             arrow::datatypes::Field::new("b", arrow::datatypes::DataType::Int32, true),
         ]));
-        let format = BBFFormat::default();
+        let format = BBFFormat;
         let source = format.file_source(TableSchema::from_file_schema(schema));
         let token = CancellationToken::new();
         source
@@ -563,9 +472,11 @@ mod tests {
             .await
             .expect("plan");
 
-        let planned = plan
+        // NdBroadcastExec over NdSourceExec over the scan.
+        let scan = plan.children()[0].children()[0];
+        let planned = scan
             .as_any()
-            .downcast_ref::<DataSourceExec>()
+            .downcast_ref::<datafusion::datasource::source::DataSourceExec>()
             .expect("data source exec")
             .data_source()
             .as_any()
@@ -592,9 +503,10 @@ mod tests {
 
         super::test_util::write_bbf_fixture(dir, "sql.bbf").await;
         let ctx = SessionContext::new();
-        let url = ListingTableUrl::parse(dir.join("sql.bbf").to_str().expect("utf8 path"))
-            .expect("listing url");
-        let options = ListingOptions::new(Arc::new(BBFFormat::default()));
+        // The whole directory, so a test can add a second file beside the fixture.
+        let url = ListingTableUrl::parse(dir.to_str().expect("utf8 path")).expect("listing url");
+        let options =
+            ListingOptions::new(Arc::new(BBFFormat)).with_file_extension("bbf");
         let config = ListingTableConfig::new(url)
             .with_listing_options(options)
             .infer_schema(&ctx.state())
@@ -660,6 +572,106 @@ mod tests {
             .expect("count is Int64")
             .value(0);
         assert_eq!(count, 5, "3 rows from entry_a + 2 rows from entry_b");
+    }
+
+    /// The scan sits under the nd spine, so the broadcast happens in the plan
+    /// and not in the opener.
+    #[tokio::test]
+    async fn create_physical_plan_wraps_the_scan_in_the_nd_spine() {
+        let plan = plan_with_projection(vec![1]).await.expect("plan");
+        let shown = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(false)
+            .to_string();
+        assert!(shown.contains("NdBroadcastExec"), "{shown}");
+        assert!(shown.contains("NdSourceExec"), "{shown}");
+        assert!(shown.contains("DataSourceExec"), "{shown}");
+    }
+
+    /// The nd spine cannot carry a partition column, so a partitioned BBF table
+    /// is refused at plan time with the format named.
+    #[tokio::test]
+    async fn create_physical_plan_rejects_partition_columns() {
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let schema: SchemaRef = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int32, true),
+            arrow::datatypes::Field::new("b", arrow::datatypes::DataType::Int32, true),
+        ]));
+        let partition = Arc::new(arrow::datatypes::Field::new(
+            "p",
+            arrow::datatypes::DataType::Utf8,
+            false,
+        ));
+        let format = BBFFormat;
+        let source = format.file_source(TableSchema::new(schema, vec![partition]));
+        let conf = FileScanConfigBuilder::new(ObjectStoreUrl::parse("file://").unwrap(), source)
+            .with_projection_indices(Some(vec![1]))
+            .unwrap()
+            .build();
+        let err = format
+            .create_physical_plan(&SessionContext::new().state(), conf)
+            .await
+            .expect_err("a partitioned table must be refused");
+        assert!(err.to_string().contains("BBF"), "{err}");
+        assert!(err.to_string().contains("PARTITIONED BY"), "{err}");
+    }
+
+    /// An expression over a column stays above the broadcast and computes.
+    #[tokio::test]
+    async fn sql_expression_over_a_column_computes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = session_with_fixture(dir.path()).await;
+
+        let batches = ctx
+            .sql("SELECT ints + 1 AS x FROM t ORDER BY x")
+            .await
+            .expect("plan")
+            .collect()
+            .await
+            .expect("collect");
+        // The literal `1` is Int64, so DataFusion widens `ints` to Int64.
+        let values: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .expect("x is Int64")
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(values, vec![2, 3, 4, 11, 21]);
+    }
+
+    /// Two files type `ints` differently. The scan widens the column of the
+    /// narrow file onto the merged type, and every row arrives.
+    #[tokio::test]
+    async fn sql_widens_a_column_across_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        super::test_util::write_bbf_int64_file(dir.path(), "wide.bbf");
+        let ctx = session_with_fixture(dir.path()).await;
+
+        let batches = ctx
+            .sql("SELECT ints FROM t ORDER BY ints")
+            .await
+            .expect("plan")
+            .collect()
+            .await
+            .expect("collect");
+        let values: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .expect("ints widens to Int64")
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(values, vec![1, 2, 3, 10, 20, 100, 200]);
     }
 
     /// `count(*)` selects no column. The scan refuses it like `SELECT *`.

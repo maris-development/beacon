@@ -56,19 +56,14 @@ LOCATION 'path/to/files';
 See [Create External Tables](/docs/2.0.0-rc6/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc6/data-sources/) for the
 full read model.
 
+BBF reads through the nd pipeline, like NetCDF, Zarr and Atlas. Each entry of a file is one
+dataset. A `WHERE` on a coordinate column runs before Beacon broadcasts the entry, so the rows
+it drops never exist in memory. A BBF table does not support `PARTITIONED BY`.
+
 ### `OPTIONS`
 
-`STORED AS BBF` reads one key:
-
-| Option | Type | Default | Description |
-| --- | --- | --- | --- |
-| `split_streams_slice` | Boolean | `false` (`BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE`) | Cut each batch into 16k-row slices. This bounds the peak memory of a wide table and it raises parallelism. It changes no result. |
-
-```sql
-CREATE EXTERNAL TABLE my_table
-STORED AS BBF
-LOCATION 'path/to/files'
-OPTIONS ('split_streams_slice' 'true')
-```
+`STORED AS BBF` reads no keys. A file carries its own schema, and the nd pipeline decides the
+shape of a batch. Beacon ignores a key you write, so a table created with the old
+`split_streams_slice` key keeps working.
 
 See [`OPTIONS`](/docs/2.0.0-rc6/sql/create-external-table#options) for the rules that hold for every key.

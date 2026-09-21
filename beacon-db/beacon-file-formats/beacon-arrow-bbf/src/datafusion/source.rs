@@ -1,14 +1,15 @@
 use std::{any::Any, collections::HashMap, sync::Arc};
 
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Field, Schema, SchemaRef};
+use beacon_datafusion_ext::nd::{encoding::nd_value_type, is_nd_encoded};
 use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
+use datafusion::physical_expr::expressions::Column;
 use datafusion::{
     common::plan_err,
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     physical_expr::{conjunction, projection::ProjectionExprs},
@@ -19,7 +20,7 @@ use datafusion::{
         metrics::ExecutionPlanMetricsSet,
     },
 };
-use datafusion_datasource::projection::{ProjectionOpener, SplitProjection};
+use datafusion_datasource::projection::SplitProjection;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -28,16 +29,10 @@ use crate::datafusion::{metrics::BBFGlobalMetrics, opener::BBFOpener, stream_sha
 
 #[derive(Clone, Debug)]
 pub struct BBFSource {
-    /// Optional schema adapter factory.
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>, //ToDo: Remove this once we have removed the deprecated schema adapter factory.
     /// The table schema (file schema + partition columns).
     table_schema: TableSchema,
     /// Execution plan metrics.
     execution_plan_metrics: ExecutionPlanMetricsSet,
-    /// Batch Size.
-    batch_size: usize,
-    /// Whether to split each record batch into `batch_size`-row slices.
-    split_streams_slice: bool,
     /// Pruning Predicate
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// File Tracer
@@ -61,11 +56,8 @@ impl BBFSource {
         let base_metrics = ExecutionPlanMetricsSet::new();
         let global_metrics = BBFGlobalMetrics::new(base_metrics.clone());
         Self {
-            schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: base_metrics,
-            batch_size: 32 * 1024,
-            split_streams_slice: false,
             predicate: None,
             file_tracer: Arc::new(Mutex::new(Arc::new(Mutex::new(vec![])))),
             cancellation_token: Arc::new(Mutex::new(CancellationToken::new())),
@@ -79,13 +71,6 @@ impl BBFSource {
     /// The same source, with the merge rule of the session.
     pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
         self.type_widening = strategy;
-        self
-    }
-
-    /// Returns a copy of this source that splits each record batch into
-    /// `batch_size`-row slices when `split` is set.
-    pub fn with_split_streams_slice(mut self, split: bool) -> Self {
-        self.split_streams_slice = split;
         self
     }
 
@@ -141,6 +126,29 @@ impl BBFSource {
 const PROJECTION_REQUIRED: &str = "BBF scan needs a column list. SELECT * and count(*) are not \
     allowed. The reader flattens n-dimensional columns on the dimensions of the selected columns.";
 
+/// `schema` with every `beacon.nd` field unwrapped to its value type.
+///
+/// The format plans over the encoded schema. A source built without the
+/// format, as the unit tests do, holds value types already, and passes through.
+fn value_schema(schema: &Schema) -> datafusion::error::Result<Schema> {
+    let fields = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            if is_nd_encoded(field) {
+                Ok(Field::new(
+                    field.name(),
+                    nd_value_type(field.data_type())?,
+                    field.is_nullable(),
+                ))
+            } else {
+                Ok(field.as_ref().clone())
+            }
+        })
+        .collect::<datafusion::error::Result<Vec<_>>>()?;
+    Ok(Schema::new_with_metadata(fields, schema.metadata().clone()))
+}
+
 impl FileSource for BBFSource {
     /// Creates a `dyn FileOpener` based on given parameters
     fn create_file_opener(
@@ -154,29 +162,33 @@ impl FileSource for BBFSource {
             .projection
             .clone()
             .expect("require_projection passed, so the projection is set");
-        let file_schema = self.table_schema.file_schema().clone();
-        // The file columns the scan reads, in table order. `ProjectionOpener`
-        // derives its input schema the same way, so the two always agree.
-        let read_schema: SchemaRef = Arc::new(file_schema.project(&projection.file_indices)?);
+        let file_schema = self.table_schema.file_schema();
+        // The scan schema, in projection order. The projection holds columns
+        // only, so this is what the scan reports and what the adapter targets.
+        let read_schema: SchemaRef = Arc::new(projection.source.project_schema(file_schema)?);
+        // The predicate and the pruning index speak the value types, not the
+        // encoded structs the scan carries.
+        let value_schema = Arc::new(value_schema(file_schema)?);
         let pruning_predicate = self
             .predicate
             .clone()
-            .map(|p| PruningPredicate::try_new(p, file_schema.clone()))
+            .map(|p| PruningPredicate::try_new(p, Arc::clone(&value_schema)))
             .transpose()?;
         let inner: Arc<dyn FileOpener> = Arc::new(BBFOpener::new(
             Arc::clone(&read_schema),
             pruning_predicate,
             object_store,
-            Arc::clone(&file_schema),
+            value_schema,
             self.file_tracer.lock().clone(),
             self.stream_partition_shares.clone(),
             self.global_metrics.clone(),
-            self.split_streams_slice,
-            self.batch_size,
             self.cancellation_token(),
         ));
-        let adapting = AdaptingOpener::wrap(inner, read_schema, Arc::clone(&self.type_widening));
-        ProjectionOpener::try_new(projection, adapting, &file_schema)
+        Ok(AdaptingOpener::wrap(
+            inner,
+            read_schema,
+            Arc::clone(&self.type_widening),
+        ))
     }
 
     /// Any
@@ -188,20 +200,14 @@ impl FileSource for BBFSource {
         &self.table_schema
     }
 
-    /// Initialize new type with batch size configuration
-    fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
-        Arc::new(BBFSource {
-            batch_size,
-            ..self.clone()
-        })
+    /// The scan emits one encoded row per entry, so the batch size has no
+    /// hold on it.
+    fn with_batch_size(&self, _batch_size: usize) -> Arc<dyn FileSource> {
+        Arc::new(self.clone())
     }
     /// Return execution plan metrics
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
-    }
-
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {
@@ -214,21 +220,20 @@ impl FileSource for BBFSource {
         &self,
         projection: &ProjectionExprs,
     ) -> datafusion::error::Result<Option<Arc<dyn FileSource>>> {
+        // The scan carries encoded nd columns, so only a column can be read
+        // off it. An expression stays above the broadcast, where the nd
+        // optimizer can sink it below the materialization.
+        let columns_only = projection
+            .iter()
+            .all(|expr| expr.expr.as_any().downcast_ref::<Column>().is_some());
+        if !columns_only {
+            return Ok(None);
+        }
         let merged = match &self.projection {
             Some(existing) => existing.source.try_merge(projection)?,
             None => projection.clone(),
         };
         Ok(Some(Arc::new(self.clone().with_projection(Some(merged)))))
-    }
-
-    fn with_schema_adapter_factory(
-        &self,
-        _factory: Arc<dyn SchemaAdapterFactory>,
-    ) -> datafusion::error::Result<Arc<dyn FileSource>> {
-        Ok(Arc::new(BBFSource {
-            schema_adapter_factory: Some(_factory),
-            ..self.clone()
-        }))
     }
 
     fn try_pushdown_filters(
@@ -262,10 +267,7 @@ impl FileSource for BBFSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datafusion::BBFFormat;
-    use arrow::datatypes::SchemaRef;
     use arrow::datatypes::{DataType, Field, Schema};
-    use datafusion::datasource::file_format::FileFormat;
     use datafusion::physical_expr::expressions::{col, lit};
     use datafusion::physical_expr::projection::ProjectionExprs;
 
@@ -288,41 +290,22 @@ mod tests {
             .expect("should still be a BBFSource")
     }
 
-    /// A fresh source must not prune, project or slice anything; those only appear
+    /// A fresh source must not prune or project anything; those only appear
     /// once the optimizer pushes them down.
     #[test]
     fn new_source_starts_without_predicate_or_projection() {
         let source = source();
         assert!(source.predicate.is_none());
         assert!(source.projection().is_none());
-        assert!(!source.split_streams_slice);
         assert_eq!(source.file_type(), "bbf");
     }
 
     /// `with_batch_size` is called by the execution layer after the format built
-    /// the source, so it must not reset the slicing configuration or the schema.
+    /// the source, so it must keep the schema.
     #[test]
-    fn with_batch_size_preserves_other_settings() {
-        let source = source().with_split_streams_slice(true);
-        let resized = source.with_batch_size(64);
-        let resized = downcast(&resized);
-        assert_eq!(resized.batch_size, 64);
-        assert!(resized.split_streams_slice);
-        assert_eq!(resized.table_schema().file_schema(), &schema());
-    }
-
-    /// The format must propagate its configured slicing default into the source it
-    /// builds, otherwise `split_streams_slice = true` would have no effect.
-    #[test]
-    fn file_source_built_by_format_inherits_split_setting() {
-        let format = BBFFormat {
-            split_streams_slice: true,
-        };
-        let source = format.file_source(TableSchema::from_file_schema(schema()));
-        assert!(downcast(&source).split_streams_slice);
-
-        let source = BBFFormat::default().file_source(TableSchema::from_file_schema(schema()));
-        assert!(!downcast(&source).split_streams_slice);
+    fn with_batch_size_keeps_the_schema() {
+        let resized = source().with_batch_size(64);
+        assert_eq!(downcast(&resized).table_schema().file_schema(), &schema());
     }
 
     /// The first projection pushdown is adopted verbatim; the source must report it
@@ -479,6 +462,27 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("SELECT *"), "{err}");
+    }
+
+    /// The scan reads encoded nd columns, so an expression cannot run in the
+    /// opener. The source declines it and DataFusion keeps the `ProjectionExec`
+    /// above the broadcast.
+    #[test]
+    fn try_pushdown_projection_declines_an_expression() {
+        use datafusion::physical_expr::expressions::BinaryExpr;
+        use datafusion::physical_expr::projection::ProjectionExpr;
+
+        let schema = schema();
+        let plus_one = BinaryExpr::new(
+            col("a", &schema).unwrap(),
+            datafusion::logical_expr::Operator::Plus,
+            lit(1i32),
+        );
+        let projection = ProjectionExprs::new([ProjectionExpr::new(Arc::new(plus_one), "x")]);
+        let pushed = source()
+            .try_pushdown_projection(&projection)
+            .expect("pushdown must not fail");
+        assert!(pushed.is_none(), "an expression must stay above the scan");
     }
 
     /// `count(*)` arrives as a projection of no column. It is refused too.
