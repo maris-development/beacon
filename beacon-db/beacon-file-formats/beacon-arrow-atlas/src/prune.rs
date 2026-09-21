@@ -364,8 +364,6 @@ mod tests {
         .await
     }
 
-    // ── cancellation ────────────────────────────────────────────────────
-
     /// A pivot whose token has fired builds nothing, and the prune fails
     /// open. The caller sees the cancellation and reads no dataset.
     #[tokio::test]
@@ -397,8 +395,6 @@ mod tests {
             "nothing is judged, so nothing is dropped"
         );
     }
-
-    // ── the index over array statistics ─────────────────────────────────
 
     /// The ranged fixture gives dataset `d{i}` the values `[10i, 10i+3]`, so a
     /// threshold has an answer that can be written down.
@@ -481,8 +477,6 @@ mod tests {
         assert_eq!(survivors, vec!["d1", "d2", "d3", "d4", "d5"]);
     }
 
-    // ── mixed and awkward types ─────────────────────────────────────────
-
     /// Two datasets that type one array differently still prune: every bound is
     /// cast to the column's table type before it is compared.
     #[tokio::test]
@@ -543,8 +537,6 @@ mod tests {
         .await;
         assert_eq!(survivors, vec!["d3"]);
     }
-
-    // ── a column the dataset lacks ──────────────────────────────────────
 
     /// `summer` never set `year`. The scan reads the column as null for it, so
     /// an equality drops it and an `IS NULL` keeps it alone.
@@ -638,8 +630,6 @@ mod tests {
         assert_eq!(survivors, vec!["d"]);
     }
 
-    // ── failing open ────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn a_collection_with_no_datasets_prunes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -654,8 +644,6 @@ mod tests {
         .await;
         assert!(survivors.is_empty(), "nothing in, nothing out");
     }
-
-    // ── the pieces ──────────────────────────────────────────────────────
 
     #[test]
     fn a_nan_bound_is_no_bound() {

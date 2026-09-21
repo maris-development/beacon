@@ -80,8 +80,6 @@ mod tests {
         }
     }
 
-    // ── markers ─────────────────────────────────────────────────────────
-
     #[test]
     fn the_container_object_is_the_marker() {
         assert!(is_marker_path(&OsPath::from("data.atlas")));

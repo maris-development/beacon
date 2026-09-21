@@ -329,8 +329,6 @@ mod tests {
             .await
     }
 
-    // ── cancellation ────────────────────────────────────────────────────
-
     /// A token that fires between two datasets ends the stream with an error,
     /// not with an end: a short answer must never look whole.
     #[tokio::test]

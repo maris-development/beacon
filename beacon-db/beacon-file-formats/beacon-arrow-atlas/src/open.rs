@@ -129,8 +129,6 @@ mod tests {
     use super::*;
     use crate::test_support;
 
-    // ── opening ─────────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn a_collection_opens_from_its_marker() {
         let tmp = tempfile::tempdir().unwrap();
@@ -157,8 +155,6 @@ mod tests {
             .to_string();
         assert!(error.contains("data.atlas"), "{error}");
     }
-
-    // ── the reader cache ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn one_marker_opens_once() {

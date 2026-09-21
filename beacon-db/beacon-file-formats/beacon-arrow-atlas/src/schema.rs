@@ -12,8 +12,6 @@ use atlas::{CollectionSchema, DType};
 use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema};
 use beacon_nd_array::datatypes::NdArrayDataType;
 
-// ─── Column names ────────────────────────────────────────────────────────────
-
 /// The column a per-array attribute is surfaced under: `{array}.{attr}`.
 pub fn array_attr_column(array: &str, attr: &str) -> String {
     format!("{array}.{attr}")
@@ -25,8 +23,6 @@ pub fn array_attr_column(array: &str, attr: &str) -> String {
 pub fn global_attr_column(attr: &str) -> String {
     format!(".{attr}")
 }
-
-// ─── Element types ───────────────────────────────────────────────────────────
 
 /// The ND type of a scalar atlas dtype, or `None` for the list dtypes, which
 /// have no rank-0 or column analogue in Beacon.
@@ -82,8 +78,6 @@ pub fn attr_dtype_to_arrow(dtype: &DType) -> Option<DataType> {
 pub(crate) fn dtype_tag(dtype: &DType) -> String {
     format!("{dtype:?}")
 }
-
-// ─── Collection schema ───────────────────────────────────────────────────────
 
 /// The Arrow schema of one collection, from its footer alone.
 ///
@@ -166,15 +160,11 @@ fn merge_types(
 mod tests {
     use super::*;
 
-    // ── column names ────────────────────────────────────────────────────
-
     #[test]
     fn an_attribute_takes_its_owners_name() {
         assert_eq!(array_attr_column("sst", "units"), "sst.units");
         assert_eq!(global_attr_column("Conventions"), ".Conventions");
     }
-
-    // ── element types ───────────────────────────────────────────────────
 
     #[test]
     fn every_readable_array_dtype_maps() {
@@ -238,8 +228,6 @@ mod tests {
         );
         assert_eq!(array_dtype_to_arrow(&DType::Bool), None);
     }
-
-    // ── the collection schema ───────────────────────────────────────────
 
     use crate::test_support;
     use arrow::datatypes::TimeUnit;

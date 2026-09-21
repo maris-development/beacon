@@ -214,8 +214,6 @@ impl<T: NdArrayType> ArrayBackend<T> for AttributeBackend<T> {
     }
 }
 
-// ─── Lazy arrays ─────────────────────────────────────────────────────────────
-
 /// Wrap one dataset's entry of an atlas segment as a lazy [`NdArrayD`].
 ///
 /// No data is read here; values arrive when the engine asks for a subset.
@@ -302,8 +300,6 @@ mod tests {
         let atlas = test_support::open(dir).await;
         Arc::clone(atlas.segment(array).await.expect("segment"))
     }
-
-    // ── AtlasArrayBackend ───────────────────────────────────────────────
 
     /// Shape, dimensions, chunking and fill all come from the segment.
     #[tokio::test]
@@ -463,8 +459,6 @@ mod tests {
         );
     }
 
-    // ── fill values ─────────────────────────────────────────────────────
-
     #[test]
     fn a_fill_takes_the_form_array_format_returns() {
         assert_eq!(
@@ -480,8 +474,6 @@ mod tests {
             TimestampNanosecond(i64::MIN)
         );
     }
-
-    // ── AttributeBackend ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn an_attribute_is_one_value_on_no_axis() {
@@ -500,8 +492,6 @@ mod tests {
             vec!["winter".to_string()]
         );
     }
-
-    // ── attribute values ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn a_scalar_attribute_is_a_rank_zero_column() {
