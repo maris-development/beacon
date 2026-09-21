@@ -21,6 +21,7 @@ use lance::session::Session;
 use lance_core::Result as LanceResult;
 use lance_io::object_store::{
     ObjectStore, ObjectStoreParams, ObjectStoreProvider, ObjectStoreRegistry,
+    DEFAULT_LOCAL_IO_PARALLELISM,
 };
 use object_store::DynObjectStore;
 use parking_lot::Mutex;
@@ -60,9 +61,8 @@ impl ObjectStoreProvider for BeaconTablesProvider {
         base_path: Url,
         _params: &ObjectStoreParams,
     ) -> LanceResult<ObjectStore> {
-        let parallelism = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(8);
+        // Lance sizes its I/O queue from this value; a capacity of 1 deadlocks it.
+        // The store is local, so the Lance local default applies, not the CPU count.
         Ok(ObjectStore::new(
             self.inner.clone(),
             base_path,
@@ -70,7 +70,7 @@ impl ObjectStoreProvider for BeaconTablesProvider {
             None,  // wrapper
             false, // use_constant_size_upload_parts
             false, // list_is_lexically_ordered (local FS isn't; let Lance sort)
-            parallelism,
+            DEFAULT_LOCAL_IO_PARALLELISM,
             3, // download_retry_count
             None,
         ))
@@ -233,6 +233,26 @@ mod tests {
         assert_eq!(
             LanceWarehouse::object_path(uri).as_ref(),
             "lance/beacon/orders.lance"
+        );
+    }
+
+    /// Lance sizes its I/O queue from this value. A capacity of 1 blocks the
+    /// queue on the first table write, so a host with one CPU never started.
+    /// The value is the Lance local default and never the CPU count.
+    #[tokio::test]
+    async fn store_io_parallelism_is_the_lance_local_default() {
+        let provider = BeaconTablesProvider {
+            inner: Arc::new(InMemory::new()),
+        };
+        let params = ObjectStoreParams::default();
+        let store = provider
+            .new_store(Url::parse("db:///lance").expect("valid url"), &params)
+            .await
+            .expect("store should build");
+        assert_eq!(store.io_parallelism(), DEFAULT_LOCAL_IO_PARALLELISM);
+        assert!(
+            store.io_parallelism() >= 2,
+            "an I/O capacity of 1 deadlocks the Lance scheduler"
         );
     }
 
