@@ -13,15 +13,20 @@ mod info;
 mod query;
 mod tables;
 
+use crate::axum::security::SecurityAddon;
+
 /// OpenAPI document marker for the client surface.
 #[derive(utoipa::OpenApi)]
-#[openapi(tags(
-    (name = "query", description = "Execute and validate queries."),
-    (name = "datasets", description = "Discover dataset files in the datasets store and inspect their schemas."),
-    (name = "tables", description = "List registered tables and inspect their schemas."),
-    (name = "functions", description = "Browse the scalar, aggregate, and window functions available in queries."),
-    (name = "system", description = "Beacon runtime version and host information.")
-))]
+#[openapi(
+    modifiers(&SecurityAddon),
+    tags(
+        (name = "query", description = "Execute and validate queries."),
+        (name = "datasets", description = "Discover dataset files in the datasets store and inspect their schemas."),
+        (name = "tables", description = "List registered tables and inspect their schemas."),
+        (name = "functions", description = "Browse the scalar, aggregate, and window functions available in queries."),
+        (name = "system", description = "Beacon runtime version and host information.")
+    )
+)]
 pub struct ClientApiDoc;
 
 /// Builds the client router and returns the generated OpenAPI document alongside it.

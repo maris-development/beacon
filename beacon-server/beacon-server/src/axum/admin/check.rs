@@ -9,7 +9,7 @@ use ::axum::Json;
     get,
     path = "/api/admin/check",
     responses((status = 200, description = "Admin API is reachable", body = CheckResponse)),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub async fn check() -> Json<CheckResponse> {
     let check = CheckResponse { is_admin: true };

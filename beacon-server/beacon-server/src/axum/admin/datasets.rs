@@ -64,7 +64,7 @@ pub(crate) struct PathParams {
         (status = 409, description = "A file already exists at the destination"),
         (status = 413, description = "File exceeds the maximum upload size")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn upload_dataset(
     State(state): State<Arc<Server>>,
@@ -91,7 +91,7 @@ pub(crate) async fn upload_dataset(
         (status = 400, description = "Invalid path"),
         (status = 404, description = "Dataset not found")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn download_dataset(
     State(state): State<Arc<Server>>,
@@ -129,7 +129,7 @@ pub(crate) async fn download_dataset(
     get,
     path = "/api/admin/datasets/storage",
     responses((status = 200, description = "Disk space of the datasets store", body = DatasetStorageInfo)),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn dataset_storage(State(state): State<Arc<Server>>) -> Json<DatasetStorageInfo> {
     Json(state.dataset_storage().await)
@@ -178,7 +178,7 @@ pub(crate) struct InitiateResult {
         (status = 400, description = "Invalid path or unsupported extension"),
         (status = 409, description = "A file already exists at the destination")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn initiate_upload(
     State(state): State<Arc<Server>>,
@@ -213,7 +213,7 @@ pub(crate) async fn initiate_upload(
         (status = 409, description = "Part out of order"),
         (status = 413, description = "Part or cumulative size exceeds the limit")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn upload_part(
     State(state): State<Arc<Server>>,
@@ -245,7 +245,7 @@ pub(crate) async fn upload_part(
         (status = 200, description = "Upload completed", body = UploadResult),
         (status = 404, description = "Unknown or expired upload session")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn complete_upload(
     State(state): State<Arc<Server>>,
@@ -267,7 +267,7 @@ pub(crate) async fn complete_upload(
         (status = 204, description = "Upload aborted"),
         (status = 404, description = "Unknown or expired upload session")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn abort_upload(
     State(state): State<Arc<Server>>,
@@ -297,7 +297,7 @@ fn parse_upload_id(raw: &str) -> Result<uuid::Uuid, (StatusCode, String)> {
         (status = 404, description = "Dataset not found"),
         (status = 409, description = "Dataset is in use by one or more tables")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn delete_dataset(
     State(state): State<Arc<Server>>,
