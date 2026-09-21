@@ -16,7 +16,7 @@ use beacon_datafusion_ext::format_ext::{
 };
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_datafusion_ext::type_widening::{LabeledSchema, session_widening};
+use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema, session_widening};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -30,6 +30,7 @@ use datafusion::{
     physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,
 };
+use futures::{StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::discover::{ATLAS_MARKER, atlas_markers, deal_rotated};
@@ -44,17 +45,33 @@ pub use crate::source::AtlasSource;
 pub const ATLAS_FORMAT: &str = "atlas";
 
 /// Builds an [`AtlasFormat`] per table, over one runtime's settings and one
-/// shared reader cache.
+/// reader cache shared by every table and query of the runtime.
 #[derive(Debug, Clone)]
 pub struct AtlasFormatFactory {
     pub options: AtlasOptions,
+    cache: AtlasReaderCache,
 }
 
 impl AtlasFormatFactory {
     pub fn new(options: AtlasOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            cache: AtlasReaderCache::new(READER_CACHE_CAPACITY),
+        }
+    }
+
+    /// A format on `options`, over the shared cache.
+    fn format(&self, options: AtlasOptions) -> Arc<dyn FileFormat> {
+        Arc::new(AtlasFormat::with_cache(options, self.cache.clone()))
     }
 }
+
+/// How many opened collections the runtime keeps. Each holds its own block
+/// and I/O caches, so this bounds memory as well as handles.
+const READER_CACHE_CAPACITY: u64 = 512;
+
+/// How many footers schema inference reads at once.
+const SCHEMA_OPENS_IN_FLIGHT: usize = 16;
 
 impl FileFormatFactory for AtlasFormatFactory {
     fn create(
@@ -73,12 +90,11 @@ impl FileFormatFactory for AtlasFormatFactory {
                     .collect(),
             );
         }
-        Ok(Arc::new(AtlasFormat::new(options)))
+        Ok(self.format(options))
     }
 
-    /// Each format owns a reader cache of its own.
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(AtlasFormat::new(self.options.clone()))
+        self.format(self.options.clone())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -134,7 +150,7 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
         _url: &ListingTableUrl,
         _listing: &ListingFactory,
     ) -> Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(AtlasFormat::default()))
+        Ok(self.format(AtlasOptions::default()))
     }
 }
 
@@ -152,11 +168,40 @@ impl Default for AtlasFormat {
 }
 
 impl AtlasFormat {
+    /// A format with a reader cache of its own. The factory shares one
+    /// instead, see [`AtlasFormat::with_cache`].
     pub fn new(options: AtlasOptions) -> Self {
-        Self {
-            options,
-            cache: AtlasReaderCache::new(512),
-        }
+        Self::with_cache(options, AtlasReaderCache::new(READER_CACHE_CAPACITY))
+    }
+
+    /// A format that opens its collections through `cache`.
+    pub fn with_cache(options: AtlasOptions, cache: AtlasReaderCache) -> Self {
+        Self { options, cache }
+    }
+
+    /// The Arrow schema of the collection at `marker`, labeled by its path.
+    /// One footer read through the cache.
+    async fn collection_schema(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        marker: &ObjectMeta,
+        widening: &ArrowTypeWidening,
+    ) -> Result<LabeledSchema> {
+        let atlas = get_or_open_atlas(Some(&self.cache), Arc::clone(store), marker)
+            .await
+            .map_err(external)?;
+        let schema = schema::collection_arrow_schema(&atlas.footer().collection_schema(), widening)
+            .with_context(|| {
+                format!(
+                    "reading the schema of atlas collection '{}'",
+                    marker.location
+                )
+            })
+            .map_err(external)?;
+        Ok(LabeledSchema::new(
+            Arc::new(schema),
+            marker.location.as_ref(),
+        ))
     }
 
     /// A source over `table_schema`, on this table's settings and reader cache.
@@ -204,8 +249,8 @@ impl FileFormat for AtlasFormat {
     }
 
     /// The schema of every collection in the listing, merged. Each collection
-    /// costs one footer read. Never enumerate its datasets here, or planning
-    /// becomes a scan.
+    /// costs one footer read, a few at a time. Never enumerate its datasets
+    /// here, or planning becomes a scan.
     async fn infer_schema(
         &self,
         state: &dyn Session,
@@ -221,26 +266,16 @@ impl FileFormat for AtlasFormat {
         // One rule for both merges: datasets inside a collection, and collections of this table.
         let widening = session_widening(state);
 
-        let mut schemas = Vec::with_capacity(markers.len());
-        for marker in &markers {
-            let atlas = get_or_open_atlas(Some(&self.cache), Arc::clone(store), marker)
-                .await
-                .map_err(external)?;
-
-            let schema =
-                schema::collection_arrow_schema(&atlas.footer().collection_schema(), &widening)
-                    .with_context(|| {
-                        format!(
-                            "reading the schema of atlas collection '{}'",
-                            marker.location
-                        )
-                    })
-                    .map_err(external)?;
-            schemas.push(LabeledSchema::new(
-                Arc::new(schema),
-                marker.location.as_ref(),
-            ));
-        }
+        // `buffered` keeps the listing order, so the merge names the same
+        // collection first however the opens complete.
+        let opens: Vec<_> = markers
+            .iter()
+            .map(|marker| self.collection_schema(store, marker, &widening))
+            .collect();
+        let schemas: Vec<LabeledSchema> = futures::stream::iter(opens)
+            .buffered(SCHEMA_OPENS_IN_FLIGHT)
+            .try_collect()
+            .await?;
 
         let schema = widening.merge_schemas(&schemas).map_err(|e| {
             exec_datafusion_err!("Failed to merge the schemas of the atlas collections: {e}")
@@ -450,5 +485,29 @@ mod scan_tests {
 
         let count = batches[0].column(0).as_primitive::<Int64Type>().value(0);
         assert_eq!(count, 60, "three collections of five datasets of four rows");
+    }
+
+    /// Every format a factory builds opens through the factory's one cache,
+    /// so a collection one query opened is a hit for the next.
+    #[tokio::test]
+    async fn the_factory_shares_one_cache_between_its_formats() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_datasets(tmp.path()).await;
+        let (store, marker) = test_support::store_and_marker(tmp.path());
+        let factory = AtlasFormatFactory::new(AtlasOptions::default());
+        let ctx = SessionContext::new();
+
+        let created = factory.create(&ctx.state(), &HashMap::new()).unwrap();
+        let default = factory.default();
+        let created = created.as_any().downcast_ref::<AtlasFormat>().unwrap();
+        let default = default.as_any().downcast_ref::<AtlasFormat>().unwrap();
+        let first = get_or_open_atlas(Some(&created.cache), Arc::clone(&store), &marker)
+            .await
+            .unwrap();
+        let second = get_or_open_atlas(Some(&default.cache), store, &marker)
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second), "the second open must hit");
     }
 }
