@@ -24,7 +24,7 @@ See [S3 object storage](#s3-object-storage).
 | `BEACON_API_THREADS` | `4` | Number of threads of the API runtime. This runtime serves HTTP and Flight SQL. A long query does not block it. |
 | `BEACON_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error`, or `off`. Case does not matter. The level applies to all Beacon crates. At `debug` and `trace`, loud dependencies such as DataFusion, Arrow, `object_store`, and hyper stay at `info`. An unknown value stops the server at startup. |
 | `RUST_LOG` | _(unset)_ | Full log filter, in [`tracing-subscriber` EnvFilter](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (e.g. `debug,datafusion=trace`). It replaces `BEACON_LOG_LEVEL`. Use it to see the dependency logs that `BEACON_LOG_LEVEL` holds back. An invalid value prints a warning, and Beacon uses `BEACON_LOG_LEVEL`. |
-| `BEACON_BASE_PATH` | _(empty)_ | Optional URL path prefix for the HTTP API, OpenAPI document, and Swagger UI (e.g. `/beacon`). Useful behind a reverse proxy. Normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character causes Beacon to exit at startup with a descriptive error. |
+| `BEACON_BASE_PATH` | _(empty)_ | Optional URL path prefix for the home page, the HTTP API, the OpenAPI document and the Swagger UI (e.g. `/beacon`). Useful behind a reverse proxy. Normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character causes Beacon to exit at startup with a descriptive error. |
 | `BEACON_WEB_UI_DIR` | `web` | Directory holding the built admin web UI. Served at `{BEACON_BASE_PATH}/admin` when the directory exists, and skipped otherwise. Resolved relative to the working directory (`/beacon/web` in the Docker image). |
 
 ## Admin
@@ -187,13 +187,13 @@ docker run -d \
     --name beacon \
     -p 5001:5001 \
     -v ./logs:/beacon/logs \
-    ghcr.io/maris-development/beacon:latest
+    ghcr.io/maris-development/beacon:v2.0.0-rc6
 ```
 
 ```yaml [docker-compose.yml]
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:latest
+        image: ghcr.io/maris-development/beacon:v2.0.0-rc6
         container_name: beacon
         ports:
             - "5001:5001"
@@ -345,7 +345,7 @@ nothing. Every setting is optional. The title and the description have defaults.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_API_TITLE` | `Beacon Rest API` | API document title. |
+| `BEACON_API_TITLE` | `Beacon Rest API` | API document title. The home page shows it as its heading. |
 | `BEACON_API_DESCRIPTION` | _(built-in summary)_ | API document description. |
 | `BEACON_API_TERMS_OF_SERVICE` | _(none)_ | Terms-of-service URL. |
 | `BEACON_API_CONTACT_NAME` | _(none)_ | Contact name. |

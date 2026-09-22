@@ -57,7 +57,7 @@ docker run -d --name beacon -p 5001:5001 \
   -e AWS_REGION=eu-west-1 \
   -e AWS_ACCESS_KEY_ID=your-access-key \
   -e AWS_SECRET_ACCESS_KEY=your-secret-key \
-  ghcr.io/maris-development/beacon:latest
+  ghcr.io/maris-development/beacon:v2.0.0-rc6
 ```
 
 Beacon then finds every file in that bucket automatically, exactly as it does in a local directory.
