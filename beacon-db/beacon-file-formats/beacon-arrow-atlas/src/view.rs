@@ -10,10 +10,7 @@ use arrow::datatypes::{FieldRef, Schema};
 use atlas::{ArrayFile, Atlas, Attr};
 use beacon_nd_array::{
     NdArrayD,
-    dataset::{
-        AnyDataset, Dataset, default::DefaultDataset, resolve_read_dimensions,
-        source::DatasetSource,
-    },
+    dataset::{Dataset, default::DefaultDataset, source::DatasetSource},
 };
 use indexmap::IndexMap;
 use object_store::{ObjectMeta, ObjectStore};
@@ -121,34 +118,37 @@ impl AtlasView {
             }
         }
         let arrays =
-            on_read_dimensions(dataset_name, arrays, self.spec.read_dimensions.clone()).await;
+            on_read_dimensions(dataset_name, arrays, self.spec.read_dimensions.clone()).await?;
         let dataset = DefaultDataset::new(dataset_name.to_string(), arrays)
             .with_context(|| format!("laying out dataset '{dataset_name}'"))?;
         Ok(Arc::new(dataset))
     }
 }
 
-/// `arrays` narrowed to the dimensions the scan reads. `read_dimensions` names
-/// them, or `None` takes the dataset's default via [`resolve_read_dimensions`].
-/// An array survives if all its axes are kept.
+/// `arrays` narrowed to the dimensions `read_dimensions` names. An array
+/// survives if all its axes are kept. Without a list, arrays on more than one
+/// grid are refused: the query has to say which grid it flattens onto.
 async fn on_read_dimensions(
     dataset_name: &str,
     arrays: IndexMap<String, Arc<dyn NdArrayD>>,
     read_dimensions: Option<Vec<String>>,
-) -> IndexMap<String, Arc<dyn NdArrayD>> {
-    let dataset = AnyDataset::Regular(Dataset::new(dataset_name.to_string(), arrays).await);
-    let dims = resolve_read_dimensions(&dataset, read_dimensions, None);
-    let AnyDataset::Regular(dataset) = dataset else {
-        unreachable!("built as a regular dataset above");
+) -> anyhow::Result<IndexMap<String, Arc<dyn NdArrayD>>> {
+    let dataset = Dataset::new(dataset_name.to_string(), arrays).await;
+    let Some(dims) = read_dimensions else {
+        if let Some(default) = dataset.default_broadcast_dimensions() {
+            anyhow::bail!(
+                "dataset '{dataset_name}' holds the columns read on more than one grid, and \
+                 no one grid fits them all. Name fewer columns, or pass a dimension list: \
+                 read_atlas(paths, dimensions), for example {default:?}"
+            );
+        }
+        return Ok(dataset.arrays);
     };
-    let Some(dims) = dims else {
-        return dataset.arrays;
-    };
-    dataset
+    Ok(dataset
         .arrays
         .into_iter()
         .filter(|(_, array)| array.dimensions().iter().all(|dim| dims.contains(dim)))
-        .collect()
+        .collect())
 }
 
 /// Where one column of the scan comes from, for every dataset of a collection.
@@ -422,18 +422,33 @@ mod tests {
         );
     }
 
-    /// Without a list the dataset's broadcast-compatible default decides. The
-    /// two grids tie on arrays kept, so the one with more cells wins.
+    /// Without a list, two grids in one dataset are refused: the query has
+    /// to say which grid it flattens onto. The error names a list that works.
     #[tokio::test]
-    async fn without_a_list_the_default_grid_is_read() {
+    async fn without_a_list_two_grids_are_refused() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_grids(tmp.path()).await;
+        let schema = schema(tmp.path()).await;
+        let (store, marker) = test_support::store_and_marker(tmp.path());
+        let spec = ScanSpec::new(
+            Arc::new(encoded_schema(&schema)),
+            None,
+            None,
+            CancellationToken::new(),
+        )
+        .unwrap();
+        let view = AtlasView::new(None, store, marker, Arc::new(spec))
+            .await
+            .unwrap();
 
-        let (_, batch) = read(tmp.path(), "mixed").await;
+        let error = view
+            .dataset("mixed")
+            .await
+            .expect_err("two grids, no list")
+            .to_string();
 
-        assert_eq!(batch.num_rows(), 6, "six cells beat four");
-        assert_eq!(column(&batch, "temperature").null_count(), 6);
-        assert_eq!(column(&batch, "grid").null_count(), 0);
+        assert!(error.contains("more than one grid"), "{error}");
+        assert!(error.contains("dimension list"), "{error}");
     }
 
     /// `a` stores `value` as `Int16` and `b` as `Float32`. The table declares

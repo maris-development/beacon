@@ -33,10 +33,12 @@
 //! One column per array, under its own name. A per-array attribute becomes
 //! `{array}.{attr}`; a dataset-level attribute becomes `.{attr}`.
 //!
-//! # A scan names a column
+//! # A scan names its columns
 //!
-//! A dataset's row count follows the dimensions of its columns, so a scan of
-//! no column is refused. `COUNT(*)` is one; `COUNT(column)` is not.
+//! A dataset's grid follows the dimensions of the columns it reads. A scan of
+//! no column is refused, so `COUNT(*)` fails and `COUNT(column)` passes. A
+//! dataset whose columns read sit on more than one grid is refused too, so
+//! `SELECT *` fails there unless `read_atlas(paths, dimensions)` names the grid.
 //!
 //! # Cancellation
 //!

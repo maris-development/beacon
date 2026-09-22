@@ -380,6 +380,15 @@ mod scan_tests {
     /// A table over every collection under `dir`, in a session of
     /// `partitions` target partitions.
     async fn table(dir: &Path, partitions: usize) -> (SessionContext, Arc<ListingTable>) {
+        table_with(dir, partitions, AtlasOptions::default()).await
+    }
+
+    /// [`table`], on a format with `options`.
+    async fn table_with(
+        dir: &Path,
+        partitions: usize,
+        options: AtlasOptions,
+    ) -> (SessionContext, Arc<ListingTable>) {
         // The collections sit in subdirectories, which a listing skips by default.
         let config = SessionConfig::new()
             .with_target_partitions(partitions)
@@ -389,7 +398,7 @@ mod scan_tests {
             );
         let ctx = SessionContext::new_with_config(config);
         let url = ListingTableUrl::parse(format!("{}/", dir.display())).unwrap();
-        let options = ListingOptions::new(Arc::new(AtlasFormat::default()))
+        let options = ListingOptions::new(Arc::new(AtlasFormat::new(options)))
             .with_file_extension(ATLAS_MARKER)
             .with_collect_stat(false);
         let config = ListingTableConfig::new(url)
@@ -409,11 +418,15 @@ mod scan_tests {
         }
     }
 
-    /// The rows of every collection under `dir`, read in a session of
-    /// `partitions` target partitions, and the partition count of the plan.
+    /// The rows of `temperature` over every collection under `dir`, read in a
+    /// session of `partitions` target partitions, and the plan's partition count.
     async fn rows(dir: &Path, partitions: usize) -> (usize, usize) {
         let (ctx, table) = table(dir, partitions).await;
-        let df = ctx.read_table(table).unwrap();
+        let df = ctx
+            .read_table(table)
+            .unwrap()
+            .select_columns(&["temperature"])
+            .unwrap();
         let plan = df.clone().create_physical_plan().await.unwrap();
         let partition_count = plan.properties().output_partitioning().partition_count();
         let batches = df.collect().await.unwrap();
@@ -485,6 +498,61 @@ mod scan_tests {
 
         let count = batches[0].column(0).as_primitive::<Int64Type>().value(0);
         assert_eq!(count, 60, "three collections of five datasets of four rows");
+    }
+
+    /// `SELECT *` over a dataset with arrays on two grids names no grid to
+    /// flatten onto, so the scan refuses it. One column, or a dimension
+    /// list, reads.
+    #[tokio::test]
+    async fn select_star_over_two_grids_is_refused_without_a_dimension_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_grids(tmp.path()).await;
+        let (ctx, table) = table(tmp.path(), 1).await;
+        ctx.register_table("mixed", table).unwrap();
+
+        let error = ctx
+            .sql("SELECT * FROM mixed")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect_err("two grids, no list")
+            .to_string();
+        assert!(error.contains("more than one grid"), "{error}");
+
+        let batches = ctx
+            .sql("SELECT temperature FROM mixed")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 4, "one column names one grid");
+    }
+
+    /// With a dimension list the grid is chosen, so `SELECT *` reads every
+    /// column on it and the rest as null.
+    #[tokio::test]
+    async fn select_star_reads_with_a_dimension_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_grids(tmp.path()).await;
+        let options = AtlasOptions {
+            read_dimensions: Some(vec!["lat".to_string(), "lon".to_string()]),
+        };
+        let (ctx, table) = table_with(tmp.path(), 1, options).await;
+        ctx.register_table("mixed", table).unwrap();
+
+        let batches = ctx
+            .sql("SELECT * FROM mixed")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 6, "the lat by lon grid");
     }
 
     /// Every format a factory builds opens through the factory's one cache,

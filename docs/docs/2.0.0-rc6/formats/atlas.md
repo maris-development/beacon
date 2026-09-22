@@ -19,7 +19,7 @@ The optional `dimensions` argument keeps the arrays whose dimensions are all in 
 drop the wide grids of a collection and keep its coordinates.
 
 ```sql
-SELECT * FROM read_atlas('collections/sensor/data.atlas')
+SELECT time, temperature FROM read_atlas('collections/sensor/data.atlas')
 
 -- Combine every collection under a prefix, keeping a subset of dimensions
 SELECT time, temperature
@@ -27,12 +27,15 @@ FROM read_atlas(['collections/**/data.atlas'], ['time', 'latitude', 'longitude']
 WHERE time >= '2024-01-01'
 ```
 
+A query names the grid it reads. `SELECT *` over a dataset whose arrays sit on more than one grid
+is refused unless you pass the `dimensions` argument, see [Format details](#format-details).
+
 ## Inspect the schema
 
 Check the columns and the types before you write a query:
 
 ```sql
-SELECT * FROM read_atlas('collections/sensor/data.atlas') LIMIT 0;
+SELECT * FROM read_atlas_schema('collections/sensor/data.atlas');
 ```
 
 [Inspect a schema](/docs/2.0.0-rc6/formats/inspect-a-schema) compares the `_schema` functions,
@@ -74,9 +77,13 @@ What Beacon does with that:
   small datasets and one of four large ones both divide evenly.
 - **Column projection.** Only the arrays a query names get read, and only their attributes are
   fetched.
-- **A query names a column.** A dataset's row count follows the dimensions of the columns it
-  reads. A query that reads no column names no dimension set, so `SELECT count(*)` is refused with
-  a planning error. Write `count(temperature)`, or count any other column, instead.
+- **A query names its columns.** A dataset's grid follows the dimensions of the columns it reads.
+  A query that reads no column names no grid, so `SELECT count(*)` is refused with a planning
+  error. Write `count(temperature)`, or count any other column, instead. A query whose columns sit
+  on more than one grid in a dataset names no grid to flatten onto, so it is refused too, and
+  `SELECT *` is the common case. Name fewer columns, or pass the `dimensions` argument:
+  `read_atlas(paths, ['time', 'latitude', 'longitude'])` reads every column on that grid and the
+  rest as null.
 - **Object storage.** A collection reads from local disk, S3, GCS, Azure and HTTP alike.
 
 ### Columns
