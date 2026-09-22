@@ -15,7 +15,9 @@ URLs:
 | Scalar UI | `/scalar/` |
 | Raw spec (JSON) | `/openapi.json` |
 
-The home page links to each of these, to the admin UI and to this documentation.
+The home page links to each of these, to the admin UI, to the health check and to this
+documentation. It shows the version of the server. The documentation link opens the manual of that
+version. The admin UI link appears only when the server serves the UI.
 
 ## Base URL
 

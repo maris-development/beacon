@@ -308,3 +308,5 @@ are always current:
 - Swagger UI: `/swagger`
 - Scalar UI: `/scalar/`
 - OpenAPI document: `/openapi.json`
+
+The home page at `/` links to each of these.

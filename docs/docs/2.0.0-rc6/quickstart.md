@@ -19,13 +19,18 @@ docker run -d --name beacon -p 5001:5001 \
   -e BEACON_ADMIN_USERNAME=admin \
   -e BEACON_ADMIN_PASSWORD=securepassword \
   -v ./datasets:/beacon/data/datasets \
-  ghcr.io/maris-development/beacon:latest
+  ghcr.io/maris-development/beacon:v2.0.0-rc6
 ```
+
+The tag `v2.0.0-rc6` is the release that this documentation describes.
 
 Copy supported files into `./datasets`. Supported files include `.parquet`, `.nc`, `.zarr` and
 `.csv`. Beacon finds them automatically. You register nothing first.
 
-Then open the admin UI at [http://localhost:5001/admin](http://localhost:5001/admin) and log in with
+Beacon now serves on [http://localhost:5001](http://localhost:5001). That page is the home page. It
+links to the admin UI, the API docs and this documentation.
+
+Open the admin UI at [http://localhost:5001/admin](http://localhost:5001/admin) and log in with
 the credentials above. It lists the datasets it found and gives you a query editor.
 
 ::: info Paths are relative to the datasets root

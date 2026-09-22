@@ -32,7 +32,7 @@ docker run -d --name beacon -p 5001:5001 \
   -e AWS_ACCESS_KEY_ID=… \
   -e AWS_SECRET_ACCESS_KEY=… \
   -e AWS_REGION=eu-west-1 \
-  ghcr.io/maris-development/beacon:latest
+  ghcr.io/maris-development/beacon:v2.0.0-rc6
 ```
 
 For a public bucket, drop the keys and set `AWS_SKIP_SIGNATURE=true`.

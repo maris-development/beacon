@@ -12,6 +12,9 @@ deploy nothing extra. The server serves the UI at **`/admin`**.
 http://localhost:5001/admin
 ```
 
+The [home page](/docs/2.0.0-rc6/api/#openapi-reference) of the server links to the UI. The link
+appears only when the server serves the UI.
+
 The UI is a React single-page application. It uses Vite, Tailwind CSS and
 shadcn/ui. It reaches Beacon through the
 [`@beacon/client`](/docs/2.0.0-rc6/connect/typescript) TypeScript SDK
