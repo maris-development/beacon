@@ -204,10 +204,11 @@ SELECT * FROM read_odv_ascii('odv/**/*.txt')
 read_bbf(glob_paths)
 ```
 
-Beacon reads Beacon Binary Format files.
+Beacon reads Beacon Binary Format files. A BBF query must name its columns. `SELECT *` and
+`SELECT count(*)` fail at plan time. See [BBF](/docs/2.0.0-rc6/formats/bbf) for the reason.
 
 ```sql
-SELECT * FROM read_bbf('bbf/**/*.bbf')
+SELECT time, depth, temperature FROM read_bbf('bbf/**/*.bbf')
 ```
 
 ## `read_tiff`

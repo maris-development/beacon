@@ -18,7 +18,7 @@ use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema, session_widening};
 use datafusion::{
-    catalog::{Session, memory::DataSourceExec},
+    catalog::Session,
     common::{GetExt, Statistics, exec_datafusion_err},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
@@ -214,17 +214,7 @@ impl AtlasFormat {
     }
 }
 
-/// Wrap a scan in the nd spine: `NdBroadcastExec` over `NdSourceExec` over
-/// the scan, decoding and broadcasting its `beacon.nd`-encoded columns.
-pub fn nd_scan_plan(conf: FileScanConfig) -> Result<Arc<dyn ExecutionPlan>> {
-    let scan: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
-    let nd_source = Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(
-        scan,
-    )?);
-    Ok(Arc::new(
-        beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?,
-    ))
-}
+pub use beacon_datafusion_ext::nd::exec::nd_scan_plan;
 
 #[async_trait::async_trait]
 impl FileFormat for AtlasFormat {

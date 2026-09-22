@@ -91,7 +91,7 @@ With Docker Compose, publish port `32011` next to the HTTP API:
 ```yaml
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:latest
+        image: ghcr.io/maris-development/beacon:v2.0.0-rc6
         ports:
             - "5001:5001"   # HTTP API
             - "32011:32011" # Arrow Flight SQL  # [!code ++]

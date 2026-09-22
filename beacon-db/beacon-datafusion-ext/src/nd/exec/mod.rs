@@ -137,6 +137,21 @@ pub fn materialize_nd_stream(
     Box::pin(RecordBatchStreamAdapter::new(schema, batches))
 }
 
+/// Wrap a scan in the nd spine: `NdBroadcastExec` over `NdSourceExec` over the
+/// scan.
+///
+/// The scan carries its columns `beacon.nd`-encoded, so `NdSourceExec` decodes
+/// them and `NdBroadcastExec` broadcasts them onto the logical schema above.
+/// Every nd format plans its scan through this function.
+pub fn nd_scan_plan(
+    conf: datafusion::datasource::physical_plan::FileScanConfig,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let scan: Arc<dyn ExecutionPlan> =
+        datafusion::datasource::source::DataSourceExec::from_data_source(conf);
+    let nd_source = Arc::new(NdSourceExec::try_new(scan)?);
+    Ok(Arc::new(NdBroadcastExec::try_new(nd_source)?))
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::array::Int32Array;

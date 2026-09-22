@@ -798,7 +798,7 @@ fn register_file_formats(
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory::new(builder.zarr.clone())),
         Arc::new(AtlasFormatFactory::new(AtlasOptions::default())),
-        Arc::new(BBFFormatFactory::new(Default::default())),
+        Arc::new(BBFFormatFactory),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
             listing_factory.clone(),
