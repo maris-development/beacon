@@ -223,6 +223,20 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **An Atlas query must name its columns.** The Atlas reader flattens each dataset on the
+  dimensions of the columns the query selects, so `SELECT * FROM read_atlas(...)` and
+  `SELECT count(*)` now fail at plan time with a message that says to list the columns, as BBF
+  does. Count over a named column instead, and use `read_atlas_schema` to see the columns of a
+  collection. A query whose columns sit on more than one grid in a dataset fails at the open;
+  pass the `dimensions` argument of `read_atlas` to choose the grid, and an array on another grid
+  reads as null. Two more behaviour changes come with the reader's refactor. Every `data.atlas` a
+  listing finds is one collection, a nested one too. And a value the merged column type cannot
+  hold reads as null instead of failing the scan, the rule every nd format follows in the shared
+  adapting opener. The reader also shares one cache of open collections between every table and
+  query of a runtime, reads footers in parallel when it infers a schema, releases a collection
+  once its datasets are read, and stops through the query's cancellation token, including inside
+  the statistics pivot that runs off the async runtime.
+
 - **A BBF query must name its columns.** The BBF reader flattens each n-dimensional column on the
   dimensions of the columns the query selects. A scan of every column flattens on every dimension,
   so `SELECT * FROM read_bbf(...)` and a scan with no projection now fail at plan time with a

@@ -19,7 +19,7 @@ The optional `dimensions` argument keeps the arrays whose dimensions are all in 
 drop the wide grids of a collection and keep its coordinates.
 
 ```sql
-SELECT * FROM read_atlas('collections/sensor/data.atlas')
+SELECT time, temperature FROM read_atlas('collections/sensor/data.atlas')
 
 -- Combine every collection under a prefix, keeping a subset of dimensions
 SELECT time, temperature
@@ -27,12 +27,17 @@ FROM read_atlas(['collections/**/data.atlas'], ['time', 'latitude', 'longitude']
 WHERE time >= '2024-01-01'
 ```
 
+An Atlas query must name its columns. `SELECT *` and `SELECT count(*)` fail at plan time. The
+reader flattens each dataset on the dimensions of the selected columns. A scan of every column
+flattens on every dimension, and a scan of no column has no dimensions, so Beacon refuses both.
+Count over a named column: `SELECT count(time) FROM read_atlas('collections/sensor/data.atlas')`.
+
 ## Inspect the schema
 
 Check the columns and the types before you write a query:
 
 ```sql
-SELECT * FROM read_atlas('collections/sensor/data.atlas') LIMIT 0;
+SELECT * FROM read_atlas_schema('collections/sensor/data.atlas');
 ```
 
 [Inspect a schema](/docs/2.0.0-rc6/formats/inspect-a-schema) compares the `_schema` functions,
@@ -74,6 +79,12 @@ What Beacon does with that:
   small datasets and one of four large ones both divide evenly.
 - **Column projection.** Only the arrays a query names get read, and only their attributes are
   fetched.
+- **A query names its columns.** A dataset flattens on the dimensions of the columns it reads. A
+  query must select a subset of the columns, so `SELECT *` and `SELECT count(*)` fail at plan
+  time. A query whose columns sit on more than one grid in a dataset names no grid to flatten
+  onto, so it fails at the open. Name fewer columns, or pass the `dimensions` argument:
+  `read_atlas(paths, ['time', 'latitude', 'longitude'])` reads the selected columns on that grid
+  and the rest as null.
 - **Object storage.** A collection reads from local disk, S3, GCS, Azure and HTTP alike.
 
 ### Columns
@@ -120,7 +131,8 @@ attribute. Each is dropped from the schema rather than failing the query.
 
 Atlas reconciles nothing: two datasets may declare one array name with two types, and it stores
 each as declared. Beacon merges them the way it merges the files of any other format. Two numeric types widen to one that holds
-both. Two different families — a number and a string — refuse the table by name:
+both, and a dataset stored in the narrower type is cast up as it is read. A value the merged type
+cannot hold reads as null. Two different families — a number and a string — refuse the table by name:
 
 ```text
 Incompatible types for field 'value': Utf8 in 'obs/data.atlas#a' vs Int64 in 'obs/data.atlas#b'
