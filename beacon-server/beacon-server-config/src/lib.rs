@@ -10,7 +10,6 @@ use error::Result;
 
 // Per-format and storage config types are owned by their crates; beacon-config
 // composes them here and fills them from the environment.
-pub use beacon_arrow_bbf::datafusion::BbfConfig;
 pub use beacon_arrow_hdf5::{Hdf5Config, Hdf5Convention};
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
@@ -32,7 +31,6 @@ pub struct Config {
     pub netcdf: NetcdfConfig,
     pub hdf5: Hdf5Config,
     pub zarr: ZarrConfig,
-    pub bbf: BbfConfig,
     pub crawler: CrawlerConfig,
     pub file_stats: FileStatsConfig,
     pub api_docs: ApiDocsConfig,
@@ -513,10 +511,6 @@ struct RawConfig {
     #[envconfig(from = "BEACON_BATCH_SIZE", default = "64000")]
     beacon_batch_size: usize,
 
-    /// Whether to split streams into 16k row slices for better memory management and parallelism.
-    #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
-    bbf_split_streams_slice: bool,
-
     // Base64-encoded 32-byte master key for encrypting persisted secrets
     // (external-database credentials). Optional; validated in `Config::load`.
     #[envconfig(from = "BEACON_SECRETS_KEY")]
@@ -694,9 +688,6 @@ impl From<RawConfig> for Config {
             },
             zarr: ZarrConfig {
                 enable_statistics: raw.zarr_enable_statistics,
-            },
-            bbf: BbfConfig {
-                split_streams_slice: raw.bbf_split_streams_slice,
             },
             file_stats: FileStatsConfig {
                 enable: raw.file_stats_enable,

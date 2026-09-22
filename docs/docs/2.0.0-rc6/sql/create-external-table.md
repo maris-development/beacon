@@ -167,13 +167,12 @@ validates it and then reads the server setting alone. See the format page of eac
 | `ZARR` | `read_dimensions`, `enable_statistics` | [Zarr](/docs/2.0.0-rc6/formats/zarr#options) |
 | `ATLAS` | `read_dimensions` | [Atlas](/docs/2.0.0-rc6/formats/atlas#options) |
 | `CSV` | `delimiter`, `infer_records` | [CSV](/docs/2.0.0-rc6/formats/csv#options) |
-| `BBF` | `split_streams_slice` | [BBF](/docs/2.0.0-rc6/formats/bbf#options) |
 | `DELTA` | `version`, `timestamp` | [Delta Lake](/docs/2.0.0-rc6/formats/delta-lake#options) |
 | `ICEBERG` | `snapshot_id` | [Apache Iceberg](/docs/2.0.0-rc6/formats/iceberg#options) |
 | `ICECHUNK` | `branch`, `tag`, `snapshot`, `read_dimensions` | [Icechunk](/docs/2.0.0-rc6/formats/icechunk#options) |
 | `POSTGRES`, `MYSQL` | `host`, `port`, `user`, `password`, `database`, `sslmode` | [SQL Databases](/docs/2.0.0-rc6/data-sources/sql-databases#options) |
 | `REMOTE` | `tls` | [Remote Tables](/docs/2.0.0-rc6/data-sources/remote-tables#options) |
-| `PARQUET`, `GEOPARQUET`, `ARROW`, `TIFF` | None | |
+| `PARQUET`, `GEOPARQUET`, `ARROW`, `TIFF`, `BBF` | None | |
 
 ## `DROP TABLE`
 

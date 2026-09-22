@@ -331,12 +331,6 @@ small stores, where even a rank-1 read per store adds up.
 `valid_min` and `valid_max` are never used as a range. They state which values are *valid*, not
 which values a store holds, so a store may hold values outside them.
 
-### Beacon Binary Format (BBF)
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE` | `false` | Split large batches into smaller slices for better memory use and parallelism on BBF queries. |
-
 ## API documentation metadata
 
 These settings change the metadata of the OpenAPI document and of the Swagger and

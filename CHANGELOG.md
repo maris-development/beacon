@@ -239,6 +239,30 @@ tag. Releases before 2.0.0 are recorded in the
   sorted result. And a listing error is an error: a timeout part-way through the walk used to end
   the listing quietly and report the rows so far as the whole answer. See
   [`list_datasets`](docs/docs/2.0.0-rc6/sql/table-functions-utility.md#list_datasets).
+
+- **A BBF query must name its columns.** The BBF reader flattens each n-dimensional column on the
+  dimensions of the columns the query selects. A scan of every column flattens on every dimension,
+  so `SELECT * FROM read_bbf(...)` and a scan with no projection now fail at plan time with a
+  message that says to list the columns. A scan that selects no column, such as
+  `SELECT count(*)`, fails the same way: count over a named column instead. Use
+  `read_bbf_schema` to see the columns of a file. The BBF source also takes a
+  cancellation token: `BBFSource::set_cancellation_token` stops the open and ends every stream of
+  that source with one error item, so a consumer never takes a partial result for a complete one.
+  Read tasks the reader already started finish in the background. The BBF scan now maps its
+  batches through the shared adapting opener, like IPC and CSV: one adapter per file instead of
+  one per batch, and an entry that does not flatten is an error instead of rows that vanish.
+
+- **BBF reads through the nd pipeline.** A BBF entry is one dataset with its own dimension
+  sizes, and the scan now carries it as one `beacon.nd`-encoded row, the way Atlas, NetCDF and
+  Zarr do. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it, so a `WHERE` on a
+  coordinate column runs before the broadcast and the filtered-out cross-product never exists in
+  memory, and an element-wise projection sinks below the broadcast. Two things change with it.
+  The `split_streams_slice` option and `BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE` are gone: the
+  broadcast emits one batch per entry, so there is nothing left to slice. A table created with
+  the key keeps working, because Beacon ignores a key a format does not read. And a partitioned
+  BBF table (`PARTITIONED BY`) is refused at plan time, as for every nd format, because the nd
+  pipeline cannot carry a partition column.
+
 - **The scan asks the merge rule which casts read null, and the merged schema carries no mark.**
   `BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first` used to mark a column that two files type in two
   families with `beacon.type_conflict` in the field metadata, and every reader looked for that mark
