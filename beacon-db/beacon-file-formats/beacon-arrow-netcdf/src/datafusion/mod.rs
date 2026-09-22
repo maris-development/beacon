@@ -699,7 +699,12 @@ mod reader_backend_tests {
 
     /// A single-partition session, so a scan yields rows in a stable order.
     fn session() -> SessionContext {
-        let state = SessionStateBuilder::new()
+        SessionContext::new_with_state(session_state().build())
+    }
+
+    /// The state behind [`session`], open for more rules.
+    fn session_state() -> SessionStateBuilder {
+        SessionStateBuilder::new()
             .with_config(
                 SessionConfig::new()
                     .with_target_partitions(1)
@@ -711,6 +716,16 @@ mod reader_backend_tests {
                     ),
             )
             .with_default_features()
+    }
+
+    /// [`session`] with the two nd rules that `RuntimeBuilder` installs, so a
+    /// `WHERE` and a narrow select list sink below the broadcast.
+    fn nd_session() -> SessionContext {
+        use beacon_datafusion_ext::nd::optimizer::{NdFilterPushdown, NdProjectionPushdown};
+
+        let state = session_state()
+            .with_physical_optimizer_rule(Arc::new(NdFilterPushdown::new()))
+            .with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()))
             .build();
         SessionContext::new_with_state(state)
     }
@@ -2268,6 +2283,66 @@ mod reader_backend_tests {
         let rust = count("rust").await;
         assert!(rust > 0, "the predicate must keep some rows");
         assert_eq!(rust, count("netcdf_c").await);
+    }
+
+    /// A select list narrower than the predicate gives the `FilterExec` above
+    /// the broadcast a projection, and `count(*)` gives it an empty one. The nd
+    /// filter rule sinks both, so the broadcast never materializes the dropped
+    /// columns or the dropped cells. The rows agree with a session without the
+    /// nd rules, and a `LIMIT` still caps them. See issue #397.
+    #[tokio::test]
+    async fn a_narrowing_select_list_sinks_below_the_broadcast() {
+        use arrow::compute::concat_batches;
+        use datafusion::physical_plan::displayable;
+
+        let plain = session();
+        register(&plain, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+        let nd = nd_session();
+        register(&nd, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        let rows = async |ctx: &SessionContext, sql: &str| {
+            let df = ctx.sql(sql).await.unwrap();
+            let schema = Arc::new(df.schema().as_arrow().clone());
+            concat_batches(&schema, &df.collect().await.unwrap()).unwrap()
+        };
+
+        for sql in [
+            "SELECT lon FROM gridded WHERE lat > 44",
+            "SELECT count(*) FROM gridded WHERE lat > 44",
+        ] {
+            let plan = nd
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            let rendered = displayable(plan.as_ref()).indent(true).to_string();
+            assert!(
+                !rendered
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("FilterExec:")),
+                "{sql}: the whole filter must sink below the broadcast:\n{rendered}"
+            );
+            let broadcast = rendered.find("NdBroadcastExec");
+            let projection = rendered.find("NdProjectionExec");
+            let filter = rendered.find("NdFilterExec");
+            assert!(
+                broadcast.is_some() && broadcast < projection && projection < filter,
+                "{sql}: expected NdBroadcastExec → NdProjectionExec → NdFilterExec:\n{rendered}"
+            );
+
+            let expected = rows(&plain, sql).await;
+            assert!(
+                expected.num_rows() > 0,
+                "{sql}: the predicate must keep some rows"
+            );
+            assert_eq!(rows(&nd, sql).await, expected, "{sql}");
+        }
+
+        // The nd filter holds no row cap, so a capped filter stays above.
+        let capped = rows(&nd, "SELECT lon FROM gridded WHERE lat > 44 LIMIT 5").await;
+        assert_eq!(capped.num_rows(), 5);
     }
 
     /// A gridded scan must respect the batch size. `gridded-example.nc` has the

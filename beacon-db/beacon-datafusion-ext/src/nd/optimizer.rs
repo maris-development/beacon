@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::Schema;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::error::Result;
@@ -163,9 +163,7 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
             let Some(broadcast) = filter.input().as_any().downcast_ref::<NdBroadcastExec>() else {
                 return Ok(Transformed::no(node));
             };
-            // A `fetch` caps the rows that the filter returns. The nd filter
-            // records a grid selection and holds no cap. A rewrite that drops
-            // the `FilterExec` drops the cap too. So keep such a filter here.
+            // The nd filter has no row cap, so a filter with a `fetch` stays.
             if filter.fetch().is_some() {
                 return Ok(Transformed::no(node));
             }
@@ -189,23 +187,19 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
                 Arc::new(NdFilterExec::try_new(broadcast.input().clone(), push)?);
 
             let rewritten: Arc<dyn ExecutionPlan> = if keep.is_empty() {
-                // The full predicate sinks, so the projection sinks too. It is
-                // a plain column list. The nd projection keeps the grid
-                // selection of the nd filter below it.
-                let below = match filter.projection().as_deref() {
+                // The whole predicate sinks, so the column-list projection sinks too.
+                let below: Arc<dyn ExecutionPlan> = match filter.projection() {
                     Some(indices) => Arc::new(NdProjectionExec::try_new_with_schema(
                         nd_filter,
                         projected_columns(&filter.input().schema(), indices),
                         Some(filter.schema()),
-                    )?) as Arc<dyn ExecutionPlan>,
+                    )?),
                     None => nd_filter,
                 };
                 Arc::new(NdBroadcastExec::try_new(below)?)
             } else {
-                // A residual conjunct reads the columns that the projection
-                // drops. So the projection stays with the residual filter. Build
-                // the new filter from the original one. This keeps the
-                // projection, the batch size and the selectivity.
+                // A residual conjunct may read a column that the projection drops,
+                // so the projection stays on the residual filter.
                 Arc::new(
                     FilterExecBuilder::from(filter)
                         .with_predicate(conjunction(keep))
@@ -227,17 +221,9 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
     }
 }
 
-/// Converts the `indices` of a filter projection into `(column, alias)` pairs.
-/// `schema` is the input schema of the filter. [`NdProjectionExec`] takes this
-/// form.
-///
-/// A filter projection is always a plain column list. So each output is a
-/// [`Column`] that names the field it selects. `FilterExec` validates the indices
-/// against the same schema.
-fn projected_columns(
-    schema: &SchemaRef,
-    indices: &[usize],
-) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
+/// Converts a filter projection into the `(column, alias)` pairs that
+/// [`NdProjectionExec`] takes. `indices` index the input `schema` of the filter.
+fn projected_columns(schema: &Schema, indices: &[usize]) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
     indices
         .iter()
         .map(|&index| {
