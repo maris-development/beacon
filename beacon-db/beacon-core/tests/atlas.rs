@@ -48,6 +48,8 @@ async fn write_collection(dir: &Path, n: usize) {
             .await
             .expect("write temperature");
         dataset.set_attribute("platform", Attr::String(format!("p{i}")));
+        // A third column, so a query on the two above is not a scan of every column.
+        dataset.set_attribute("source", Attr::String("argo".into()));
         dataset.finish().await.expect("finish a dataset");
     }
 
@@ -111,7 +113,7 @@ async fn read_atlas_schema_reports_the_columns() {
             .await,
         0,
     );
-    assert_eq!(columns, vec![".platform", "temperature"]);
+    assert_eq!(columns, vec![".platform", ".source", "temperature"]);
 }
 
 // ── the external table ──────────────────────────────────────────────────
@@ -124,7 +126,10 @@ async fn an_external_table_reads_a_collection() {
     rt.sql("CREATE EXTERNAL TABLE obs STORED AS ATLAS LOCATION 'obs/data.atlas'")
         .await;
 
-    assert_eq!(scalar_i64(&rt.sql("SELECT count(temperature) FROM obs").await), 20);
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(temperature) FROM obs").await),
+        20
+    );
 }
 
 /// A table in a Beacon-native format has to rebuild at startup. Its definition
@@ -137,7 +142,10 @@ async fn an_external_table_survives_a_restart() {
 
     rt.sql("CREATE EXTERNAL TABLE obs STORED AS ATLAS LOCATION 'obs/data.atlas'")
         .await;
-    assert_eq!(scalar_i64(&rt.sql("SELECT count(temperature) FROM obs").await), 16);
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(temperature) FROM obs").await),
+        16
+    );
 
     let rt = rt.restart().await;
     assert_eq!(

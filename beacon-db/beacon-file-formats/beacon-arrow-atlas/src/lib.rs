@@ -35,10 +35,11 @@
 //!
 //! # A scan names its columns
 //!
-//! A dataset's grid follows the dimensions of the columns it reads. A scan of
-//! no column is refused, so `COUNT(*)` fails and `COUNT(column)` passes. A
-//! dataset whose columns read sit on more than one grid is refused too, so
-//! `SELECT *` fails there unless `read_atlas(paths, dimensions)` names the grid.
+//! A dataset flattens on the dimensions of the columns it reads. A scan must
+//! select a subset of the table's columns, as BBF does: `SELECT *` and
+//! `COUNT(*)` fail at plan time. A dataset whose columns read sit on more
+//! than one grid fails at the open, unless `read_atlas(paths, dimensions)`
+//! names the grid.
 //!
 //! # Cancellation
 //!

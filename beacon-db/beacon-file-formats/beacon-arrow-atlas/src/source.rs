@@ -7,6 +7,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use datafusion::{
+    common::plan_err,
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
@@ -100,18 +101,33 @@ impl AtlasSource {
         };
         self
     }
+
+    /// Refuse a scan that does not select a subset of the table's columns, as
+    /// BBF does. A dataset flattens on the dimensions of the columns read, so
+    /// every column and no column both name no grid.
+    pub fn require_projection(&self) -> Result<()> {
+        let selected = self.projection.file_indices.len();
+        if selected == 0 || selected >= self.table_schema.file_schema().fields().len() {
+            return plan_err!("{PROJECTION_REQUIRED}");
+        }
+        Ok(())
+    }
 }
+
+const PROJECTION_REQUIRED: &str = "Atlas scan needs a column list. SELECT * and count(*) are not \
+    allowed. The reader flattens n-dimensional columns on the dimensions of the selected columns.";
 
 impl FileSource for AtlasSource {
     /// The opener of one partition: the atlas opener, wrapped so every batch
-    /// is mapped onto the scan's schema, then projected. It refuses a scan of
-    /// no column, see [`ScanSpec::new`].
+    /// is mapped onto the scan's schema, then projected. It checks the column
+    /// list again, for a projection pushed down after planning.
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
         _base_config: &FileScanConfig,
         partition: usize,
     ) -> Result<Arc<dyn FileOpener>> {
+        self.require_projection()?;
         let file_schema = self.table_schema.file_schema();
         // The columns the scan reads, in table order. `ProjectionOpener`
         // derives its input schema the same way, so the two agree.

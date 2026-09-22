@@ -37,7 +37,6 @@ use crate::discover::{ATLAS_MARKER, atlas_markers, deal_rotated};
 use crate::error::external;
 use crate::open::{AtlasReaderCache, get_or_open_atlas};
 use crate::options::AtlasOptions;
-use crate::scan::require_projection;
 use crate::schema;
 pub use crate::source::AtlasSource;
 
@@ -299,8 +298,6 @@ impl FileFormat for AtlasFormat {
         conf: FileScanConfig,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         beacon_nd_array::arrow::morsel::reject_partition_columns("Atlas", &conf)?;
-        // Refuse a scan of no column here; the opener checks again after pushdown.
-        require_projection(conf.projected_schema()?.as_ref())?;
 
         let listed: Vec<ObjectMeta> = conf
             .file_groups
@@ -331,6 +328,8 @@ impl FileFormat for AtlasFormat {
             .with_projection(projection)
             .with_type_widening(Arc::clone(&session_widening(state).strategy))
             .with_cancellation(query_cancellation(state));
+        // Fail at plan time, so the user sees the error before the scan runs.
+        source.require_projection()?;
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
@@ -465,8 +464,8 @@ mod scan_tests {
             .expect_err("no column, no row count")
             .to_string();
 
-        assert!(error.contains("at least one column"), "{error}");
-        assert!(error.contains("COUNT(column)"), "{error}");
+        assert!(error.contains("column list"), "{error}");
+        assert!(error.contains("count(*)"), "{error}");
     }
 
     /// A count of a column projects that column, and counts every row of
@@ -490,11 +489,10 @@ mod scan_tests {
         assert_eq!(count, 60, "three collections of five datasets of four rows");
     }
 
-    /// `SELECT *` over a dataset with arrays on two grids names no grid to
-    /// flatten onto, so the scan refuses it. One column, or a dimension
-    /// list, reads.
+    /// `SELECT *` fails when the query is planned, not when it runs, with the
+    /// message that says what to do. A column list reads.
     #[tokio::test]
-    async fn select_star_over_two_grids_is_refused_without_a_dimension_list() {
+    async fn select_star_fails_at_plan_time() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_grids(tmp.path()).await;
         let (ctx, table) = table(tmp.path(), 1).await;
@@ -504,11 +502,14 @@ mod scan_tests {
             .sql("SELECT * FROM mixed")
             .await
             .unwrap()
-            .collect()
+            .create_physical_plan()
             .await
-            .expect_err("two grids, no list")
-            .to_string();
-        assert!(error.contains("more than one grid"), "{error}");
+            .expect_err("SELECT * must not plan");
+        assert!(
+            matches!(error, DataFusionError::Plan(_)),
+            "a plan error: {error}"
+        );
+        assert!(error.to_string().contains("column list"), "{error}");
 
         let batches = ctx
             .sql("SELECT temperature FROM mixed")
@@ -521,28 +522,39 @@ mod scan_tests {
         assert_eq!(rows, 4, "one column names one grid");
     }
 
-    /// With a dimension list the grid is chosen, so `SELECT *` reads every
-    /// column on it and the rest as null.
+    /// Two named columns on two grids pass the column-list rule and fail at
+    /// the open, where the grids are known. A dimension list chooses one.
     #[tokio::test]
-    async fn select_star_reads_with_a_dimension_list() {
+    async fn two_grids_need_a_dimension_list() {
         let tmp = tempfile::tempdir().unwrap();
         test_support::two_grids(tmp.path()).await;
+        let (ctx, table) = table(tmp.path(), 1).await;
+        ctx.register_table("mixed", table).unwrap();
+
+        let error = ctx
+            .sql("SELECT temperature, grid FROM mixed")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect_err("two grids, no list")
+            .to_string();
+        assert!(error.contains("more than one grid"), "{error}");
+
         let options = AtlasOptions {
             read_dimensions: Some(vec!["lat".to_string(), "lon".to_string()]),
         };
         let (ctx, table) = table_with(tmp.path(), 1, options).await;
         ctx.register_table("mixed", table).unwrap();
-
         let batches = ctx
-            .sql("SELECT * FROM mixed")
+            .sql("SELECT temperature, grid FROM mixed")
             .await
             .unwrap()
             .collect()
             .await
             .unwrap();
-
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(rows, 6, "the lat by lon grid");
+        assert_eq!(rows, 6, "the lat by lon grid; temperature reads null");
     }
 
     /// Every format a factory builds opens through the factory's one cache,

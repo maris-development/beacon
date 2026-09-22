@@ -12,10 +12,10 @@ use std::task::{Context, Poll};
 
 use anyhow::Context as _;
 use arrow::array::RecordBatch;
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::nd::{NdRecordBatch, encode_nd_record_batch, logical_schema};
 use beacon_nd_array::dataset::source::DatasetSource;
-use datafusion::{common::plan_err, error::Result, physical_plan::PhysicalExpr};
+use datafusion::{error::Result, physical_plan::PhysicalExpr};
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore, path::Path};
@@ -43,15 +43,12 @@ pub struct ScanSpec {
 
 impl ScanSpec {
     /// A scan of `projected_schema`. The logical schema is derived from it.
-    ///
-    /// Refuses a schema of no column, see `require_projection`.
     pub fn new(
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         cancel: CancellationToken,
     ) -> Result<Self> {
-        require_projection(&projected_schema)?;
         Ok(Self {
             logical_schema: logical_schema(&projected_schema)?,
             read_dimensions,
@@ -66,20 +63,6 @@ impl ScanSpec {
 /// An error, not an end: a short stream must not look whole.
 pub(crate) fn cancelled() -> anyhow::Error {
     anyhow::anyhow!("the query was cancelled")
-}
-
-/// Refuse a scan that projects no column. A dataset's row count follows the
-/// dimensions of its columns, so `COUNT(*)` fails here and `COUNT(column)`
-/// succeeds.
-pub(crate) fn require_projection(projected_schema: &Schema) -> Result<()> {
-    if projected_schema.fields().is_empty() {
-        return plan_err!(
-            "an atlas scan must project at least one column: a dataset's row count \
-             follows the dimensions of the columns it reads, and no column names none. \
-             Use COUNT(column) instead of COUNT(*)"
-        );
-    }
-    Ok(())
 }
 
 /// One cell per collection. The cell fills on the first open and never again.

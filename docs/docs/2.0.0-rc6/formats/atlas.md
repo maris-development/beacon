@@ -27,8 +27,10 @@ FROM read_atlas(['collections/**/data.atlas'], ['time', 'latitude', 'longitude']
 WHERE time >= '2024-01-01'
 ```
 
-A query names the grid it reads. `SELECT *` over a dataset whose arrays sit on more than one grid
-is refused unless you pass the `dimensions` argument, see [Format details](#format-details).
+An Atlas query must name its columns. `SELECT *` and `SELECT count(*)` fail at plan time. The
+reader flattens each dataset on the dimensions of the selected columns. A scan of every column
+flattens on every dimension, and a scan of no column has no dimensions, so Beacon refuses both.
+Count over a named column: `SELECT count(time) FROM read_atlas('collections/sensor/data.atlas')`.
 
 ## Inspect the schema
 
@@ -77,13 +79,12 @@ What Beacon does with that:
   small datasets and one of four large ones both divide evenly.
 - **Column projection.** Only the arrays a query names get read, and only their attributes are
   fetched.
-- **A query names its columns.** A dataset's grid follows the dimensions of the columns it reads.
-  A query that reads no column names no grid, so `SELECT count(*)` is refused with a planning
-  error. Write `count(temperature)`, or count any other column, instead. A query whose columns sit
-  on more than one grid in a dataset names no grid to flatten onto, so it is refused too, and
-  `SELECT *` is the common case. Name fewer columns, or pass the `dimensions` argument:
-  `read_atlas(paths, ['time', 'latitude', 'longitude'])` reads every column on that grid and the
-  rest as null.
+- **A query names its columns.** A dataset flattens on the dimensions of the columns it reads. A
+  query must select a subset of the columns, so `SELECT *` and `SELECT count(*)` fail at plan
+  time. A query whose columns sit on more than one grid in a dataset names no grid to flatten
+  onto, so it fails at the open. Name fewer columns, or pass the `dimensions` argument:
+  `read_atlas(paths, ['time', 'latitude', 'longitude'])` reads the selected columns on that grid
+  and the rest as null.
 - **Object storage.** A collection reads from local disk, S3, GCS, Azure and HTTP alike.
 
 ### Columns
