@@ -1,24 +1,22 @@
-//! The lazy array backends the Atlas reader hands to `beacon-nd-array`.
+//! The lazy arrays one dataset reads through.
 //!
-//! [`AtlasArrayBackend`] reads one dataset's entry of a variable's segment on
-//! demand. [`AttributeBackend`] holds one attribute value as a rank-0 array.
+//! [`AtlasArrayBackend`] reads one dataset's entry of a segment on demand.
+//! [`AttributeBackend`] holds one attribute value as a rank-0 array.
 
 use std::sync::Arc;
 
-use atlas::{ArrayFile, FillValue};
+use atlas::{ArrayFile, Attr, DType, FillValue};
 use beacon_nd_array::{
+    NdArray, NdArrayD,
     array::{backend::ArrayBackend, subset::ArraySubset},
     datatypes::{NdArrayType, TimestampNanosecond},
 };
 use ndarray::ArrayD;
 
+use crate::schema::dtype_tag;
+
 /// A Beacon element type that can be read out of an atlas array.
-///
-/// Atlas reads through [`atlas::ArrayElement`], and Beacon's ND model through
-/// [`NdArrayType`]. The two agree on the numeric types, `String` and
-/// `Vec<u8>`, but Beacon's [`TimestampNanosecond`] is its own newtype over
-/// `i64` and needs a conversion. This trait hides that difference behind one
-/// entry point, so [`AtlasArrayBackend`] stays generic.
+/// Converts atlas's element types to Beacon's, including the `TimestampNanosecond` newtype.
 #[async_trait::async_trait]
 pub trait AtlasElement: NdArrayType {
     /// Read `shape` elements of `dataset`'s entry in `segment` from `start`.
@@ -31,9 +29,7 @@ pub trait AtlasElement: NdArrayType {
 
     /// This type's form of an array's fill value.
     ///
-    /// The engine nulls every element equal to it, so it has to be the value
-    /// the read actually returns for a cell nobody wrote. Deferring to
-    /// `array-format`'s own conversion is what guarantees that.
+    /// The engine nulls elements equal to it; must match what a read returns for an unwritten cell.
     fn fill_element(fill: Option<&FillValue>) -> Self;
 }
 
@@ -78,10 +74,8 @@ passthrough!(f64);
 passthrough!(String);
 passthrough!(Vec<u8>);
 
-/// Both types are `#[repr(transparent)]` over `i64`, so the conversion is a
-/// rename. It is still done element by element, because the two are distinct
-/// types and a transmute of a whole array would rest on layout rather than on
-/// the type system.
+/// Both types are `#[repr(transparent)]` over `i64`, so this converts by renaming.
+/// Done element by element; a whole-array transmute would rely on layout, not types.
 #[async_trait::async_trait]
 impl AtlasElement for TimestampNanosecond {
     async fn read(
@@ -107,12 +101,7 @@ impl AtlasElement for TimestampNanosecond {
 }
 
 /// Reads one dataset's entry of an atlas segment lazily, one region at a time.
-///
-/// The backend holds the segment itself, not a
-/// [`DatasetView`](atlas::DatasetView). A segment holds one variable for every
-/// dataset in the collection, keyed by dataset name, so a read is one call on
-/// it. A view would resolve the segment through the footer and re-check the
-/// element type on every read.
+/// Holds the segment itself, not a [`DatasetView`](atlas::DatasetView), to avoid re-resolving it per read.
 pub struct AtlasArrayBackend<T: NdArrayType> {
     segment: Arc<ArrayFile>,
     dataset: String,
@@ -136,9 +125,7 @@ impl<T: NdArrayType> std::fmt::Debug for AtlasArrayBackend<T> {
 impl<T: NdArrayType + AtlasElement> AtlasArrayBackend<T> {
     /// The backend for `dataset`'s entry in `segment`.
     ///
-    /// The layout comes from the segment, which records the shape, chunking,
-    /// dimension names and fill value of every entry. The lookup costs no I/O.
-    /// A dataset the segment does not hold is refused by name.
+    /// Reads the layout from the segment at no I/O cost. Refuses an unknown dataset by name.
     pub fn try_new(segment: Arc<ArrayFile>, dataset: String) -> anyhow::Result<Self> {
         let info = segment.array(&dataset).ok_or_else(|| {
             anyhow::anyhow!("dataset '{dataset}' has no entry in this atlas segment")
@@ -177,8 +164,7 @@ impl<T: NdArrayType + AtlasElement> ArrayBackend<T> for AtlasArrayBackend<T> {
 
     /// The chunk shape the writer chose.
     ///
-    /// The scan cuts a dataset on this grid, so one unit of work is one stored
-    /// chunk and a read fetches no block it does not need.
+    /// The scan cuts a dataset on this grid, so a read fetches only the chunks it needs.
     fn chunk_shape(&self) -> Vec<usize> {
         self.chunk_shape.clone()
     }
@@ -193,9 +179,7 @@ impl<T: NdArrayType + AtlasElement> ArrayBackend<T> for AtlasArrayBackend<T> {
 }
 
 /// Holds one attribute value as a rank-0 array.
-///
-/// The value came from the collection footer, which the open already read, so
-/// nothing here touches the store.
+/// The value comes from the footer the open already read; nothing here touches the store.
 #[derive(Debug)]
 pub struct AttributeBackend<T: NdArrayType> {
     value: T,
@@ -230,18 +214,92 @@ impl<T: NdArrayType> ArrayBackend<T> for AttributeBackend<T> {
     }
 }
 
+/// Wrap one dataset's entry of an atlas segment as a lazy [`NdArrayD`].
+///
+/// No data is read here; values arrive when the engine asks for a subset.
+pub fn array_to_nd_array(
+    segment: Arc<ArrayFile>,
+    dataset: &str,
+    dtype: &DType,
+) -> anyhow::Result<Arc<dyn NdArrayD>> {
+    macro_rules! lazy {
+        ($ty:ty) => {{
+            let backend = AtlasArrayBackend::<$ty>::try_new(segment, dataset.to_string())?;
+            Ok(Arc::new(NdArray::new_with_backend(backend)?) as Arc<dyn NdArrayD>)
+        }};
+    }
+
+    match dtype {
+        DType::Int8 => lazy!(i8),
+        DType::Int16 => lazy!(i16),
+        DType::Int32 => lazy!(i32),
+        DType::Int64 => lazy!(i64),
+        DType::UInt8 => lazy!(u8),
+        DType::UInt16 => lazy!(u16),
+        DType::UInt32 => lazy!(u32),
+        DType::UInt64 => lazy!(u64),
+        DType::Float32 => lazy!(f32),
+        DType::Float64 => lazy!(f64),
+        DType::String => lazy!(String),
+        DType::Binary => lazy!(Vec<u8>),
+        DType::TimestampNs => lazy!(TimestampNanosecond),
+        DType::Bool => Err(anyhow::anyhow!(
+            "dataset '{dataset}' holds a Bool array, which atlas stores no elements of"
+        )),
+        DType::FixedSizeList { .. } => Err(anyhow::anyhow!(
+            "dataset '{dataset}' holds a FixedSizeList array, which Beacon does not model"
+        )),
+        DType::List { .. } => Err(anyhow::anyhow!(
+            "dataset '{dataset}' holds a List array, which Beacon does not model"
+        )),
+    }
+}
+
+/// Wrap one scalar attribute value as a rank-0 [`NdArrayD`].
+///
+/// Broadcasts across every row the dataset contributes. Refuses a list-valued attribute.
+pub fn attribute_to_nd_array(attr: &Attr) -> anyhow::Result<Arc<dyn NdArrayD>> {
+    macro_rules! scalar {
+        ($value:expr) => {
+            Ok(
+                Arc::new(NdArray::new_with_backend(AttributeBackend::new($value))?)
+                    as Arc<dyn NdArrayD>,
+            )
+        };
+    }
+
+    match attr {
+        Attr::Bool(v) => scalar!(*v),
+        Attr::Int8(v) => scalar!(*v),
+        Attr::Int16(v) => scalar!(*v),
+        Attr::Int32(v) => scalar!(*v),
+        Attr::Int64(v) => scalar!(*v),
+        Attr::UInt8(v) => scalar!(*v),
+        Attr::UInt16(v) => scalar!(*v),
+        Attr::UInt32(v) => scalar!(*v),
+        Attr::UInt64(v) => scalar!(*v),
+        Attr::Float32(v) => scalar!(*v),
+        Attr::Float64(v) => scalar!(*v),
+        Attr::String(v) => scalar!(v.clone()),
+        Attr::Binary(v) => scalar!(v.clone()),
+        other => Err(anyhow::anyhow!(
+            "attribute is a {} list, which has no rank-0 form in Beacon",
+            dtype_tag(&other.dtype())
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support;
+    use beacon_nd_array::datatypes::NdArrayDataType;
 
     /// The segment of one variable of a fixture collection.
     async fn segment(dir: &std::path::Path, array: &str) -> Arc<ArrayFile> {
         let atlas = test_support::open(dir).await;
         Arc::clone(atlas.segment(array).await.expect("segment"))
     }
-
-    // ── AtlasArrayBackend ───────────────────────────────────────────────
 
     /// Shape, dimensions, chunking and fill all come from the segment.
     #[tokio::test]
@@ -327,8 +385,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ArrayBackend::<f64>::chunk_shape(&backend), vec![2, 3]);
-        // Rows 1..3, columns 2..4 of a 4x6 grid whose value is row * 6 + col.
-        // That window straddles all four chunk columns and both chunk rows.
+        // Window spans all four chunk columns and both chunk rows.
         let values = backend
             .read_subset(ArraySubset::new(vec![1, 2], vec![2, 2]))
             .await
@@ -402,8 +459,6 @@ mod tests {
         );
     }
 
-    // ── fill values ─────────────────────────────────────────────────────
-
     #[test]
     fn a_fill_takes_the_form_array_format_returns() {
         assert_eq!(
@@ -419,8 +474,6 @@ mod tests {
             TimestampNanosecond(i64::MIN)
         );
     }
-
-    // ── AttributeBackend ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn an_attribute_is_one_value_on_no_axis() {
@@ -438,5 +491,28 @@ mod tests {
             values.into_raw_vec_and_offset().0,
             vec!["winter".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn a_scalar_attribute_is_a_rank_zero_column() {
+        let nd = attribute_to_nd_array(&Attr::Int64(2024)).unwrap();
+        assert_eq!(nd.datatype(), NdArrayDataType::I64);
+        assert!(nd.shape().is_empty(), "an attribute has no axis");
+        let typed = nd.as_any().downcast_ref::<NdArray<i64>>().unwrap();
+        assert_eq!(typed.clone_into_raw_vec().await, vec![2024]);
+    }
+
+    #[tokio::test]
+    async fn a_bool_attribute_is_a_column() {
+        let nd = attribute_to_nd_array(&Attr::Bool(true)).unwrap();
+        assert_eq!(nd.datatype(), NdArrayDataType::Bool);
+    }
+
+    #[test]
+    fn a_list_attribute_is_refused_by_name() {
+        let error = attribute_to_nd_array(&Attr::Int32List(vec![1, 2, 3]))
+            .expect_err("a list has no rank-0 form")
+            .to_string();
+        assert!(error.contains("list"), "{error}");
     }
 }

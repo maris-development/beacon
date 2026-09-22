@@ -1,8 +1,6 @@
 //! Collections the tests of this crate read.
 //!
-//! Every fixture is written with the real [`AtlasWriter`], so what the tests
-//! read is a real container: a footer, its segments, and the statistics the
-//! writer recorded while it staged them.
+//! Every fixture is written with the real [`AtlasWriter`], so tests read a real container.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,11 +18,10 @@ pub const DAY_NANOS: i64 = 86_400_000_000_000;
 
 /// A store rooted on `dir`, and the marker of the collection in it.
 ///
-/// The marker carries the container's real size and modification time, which
-/// is what the reader cache keys on.
+/// The marker carries the container's real size and modification time, for the reader cache key.
 pub fn store_and_marker(dir: &Path) -> (Arc<dyn ObjectStore>, ObjectMeta) {
     let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(dir).unwrap());
-    let container = dir.join(crate::store::ATLAS_MARKER);
+    let container = dir.join(crate::discover::ATLAS_MARKER);
     let (size, last_modified) = match std::fs::metadata(&container) {
         Ok(meta) => (
             meta.len(),
@@ -32,12 +29,11 @@ pub fn store_and_marker(dir: &Path) -> (Arc<dyn ObjectStore>, ObjectMeta) {
                 .map(DateTime::<Utc>::from)
                 .unwrap_or(DateTime::UNIX_EPOCH),
         ),
-        // A test that has not written a collection still needs a marker to
-        // hand to the code that will refuse it.
+        // Gives a marker even to code that will refuse an unwritten collection.
         Err(_) => (0, DateTime::UNIX_EPOCH),
     };
     let marker = ObjectMeta {
-        location: OsPath::from(crate::store::ATLAS_MARKER),
+        location: OsPath::from(crate::discover::ATLAS_MARKER),
         last_modified,
         size,
         e_tag: None,
@@ -52,14 +48,8 @@ pub async fn open(dir: &Path) -> Arc<Atlas> {
 }
 
 /// Two datasets that do not share a schema.
-///
-/// - `winter`: `temperature: Float32[4]`, `cycle: Int32[4]` with a fill of
-///   `-1`, and `time: TimestampNs[4]`. Dataset attributes `season` and `year`;
-///   `temperature` carries `units`.
-/// - `summer`: `temperature: Float32[3]` alone, and the attribute `season`.
-///
-/// The differing lengths make the two datasets separable in a result, and the
-/// fill on `cycle` carries an unwritten cell through to a null.
+/// `winter`: temperature/cycle(fill -1)/time, attrs season/year, temperature.units.
+/// `summer`: temperature only, attr season.
 pub async fn two_datasets(dir: &Path) {
     let writer = AtlasWriter::create_path(dir, WriterConfig::default())
         .await
@@ -140,12 +130,8 @@ pub async fn two_datasets(dir: &Path) {
 }
 
 /// One dataset, `grid`, holding two chunked 2-D arrays on `lat` and `lon`.
-///
-/// - `temperature: Float64[4, 6]`, chunked `[2, 3]`, written whole. Cell
-///   `(row, col)` holds `row * 6 + col`, so a window states its own position.
-/// - `sparse: Float64[4, 6]`, the same shape and chunking, with a fill of
-///   `-999`. Only the first two rows are written, so the rest is a hole that
-///   costs no bytes.
+/// `temperature: Float64[4,6]` chunked [2,3], value = row*6+col, fully written.
+/// `sparse`: same shape and chunking, fill -999, only first two rows written.
 pub async fn chunked_grid(dir: &Path) {
     let writer = AtlasWriter::create_path(dir, WriterConfig::default())
         .await
@@ -186,13 +172,51 @@ pub async fn chunked_grid(dir: &Path) {
     writer.finish().await.expect("finish the collection");
 }
 
+/// One dataset, `mixed`, whose arrays sit on two dimension sets.
+/// `temperature: Float32[4]` on `obs` = [1,2,3,4]. `grid: Float64[2,3]` on lat/lon = 0..5.
+/// Attribute `season` = spring, on no axis.
+pub async fn two_grids(dir: &Path) {
+    let writer = AtlasWriter::create_path(dir, WriterConfig::default())
+        .await
+        .expect("create the collection");
+
+    let mut mixed = writer.add_dataset("mixed").await.expect("add mixed");
+    mixed
+        .define_array::<f32>("temperature", vec!["obs".into()], vec![4], None, None)
+        .await
+        .expect("define temperature");
+    mixed
+        .write_array(
+            "temperature",
+            vec![0],
+            arr1(&[1.0f32, 2.0, 3.0, 4.0]).into_dyn().view(),
+        )
+        .await
+        .expect("write temperature");
+    mixed
+        .define_array::<f64>(
+            "grid",
+            vec!["lat".into(), "lon".into()],
+            vec![2, 3],
+            None,
+            None,
+        )
+        .await
+        .expect("define grid");
+    let cells = ArrayD::from_shape_fn(IxDyn(&[2, 3]), |i| (i[0] * 3 + i[1]) as f64);
+    mixed
+        .write_array("grid", vec![0, 0], cells.view())
+        .await
+        .expect("write grid");
+    mixed.set_attribute("season", Attr::String("spring".into()));
+    mixed.finish().await.expect("finish mixed");
+
+    writer.finish().await.expect("finish the collection");
+}
+
 /// Two datasets whose shared array has two numeric types.
-///
-/// - `a`: `value: Int16[2] = [1, 2]`, `flag: Int32[2] = [7, 8]`.
-/// - `b`: `value: Float32[2] = [3.5, 4.5]`.
-///
-/// The merged `value` widens past either dataset's own type, and `flag` is a
-/// column only one dataset declares.
+/// `a`: value: Int16[2]=[1,2], flag: Int32[2]=[7,8].
+/// `b`: value: Float32[2]=[3.5,4.5]. Merged `value` widens; `flag` stays a-only.
 pub async fn widening(dir: &Path) {
     let writer = AtlasWriter::create_path(dir, WriterConfig::default())
         .await
@@ -230,12 +254,8 @@ pub async fn widening(dir: &Path) {
 }
 
 /// Two datasets whose shared array has no common numeric type.
-///
-/// - `a`: `value: String[2] = ["x", "y"]`, `only_a: Int32[2] = [7, 8]`.
-/// - `b`: `value: Int64[2] = [1, 2]`.
-///
-/// There is no numeric super-type here, so this pins what the merge resolves
-/// to and whether both datasets stay readable.
+/// `a`: value: String[2]=["x","y"], only_a: Int32[2]=[7,8].
+/// `b`: value: Int64[2]=[1,2]. No numeric super-type covers both.
 pub async fn incompatible(dir: &Path) {
     let writer = AtlasWriter::create_path(dir, WriterConfig::default())
         .await
@@ -276,11 +296,9 @@ pub async fn incompatible(dir: &Path) {
     writer.finish().await.expect("finish the collection");
 }
 
-/// `n` datasets named `d0..d{n-1}`, each holding `temperature: Float32[4]`
-/// over the disjoint range `[10i, 10i + 3]`.
-///
-/// A predicate such as `temperature > 45` then has a known answer: the
-/// datasets whose range reaches past it, and no others.
+/// `n` datasets named `d0..d{n-1}`, each with `temperature: Float32[4]` over
+/// the disjoint range `[10i, 10i + 3]`. A predicate like `temperature > 45`
+/// then has a known answer.
 pub async fn ranged(dir: &Path, n: usize) {
     let writer = AtlasWriter::create_path(dir, WriterConfig::default())
         .await
@@ -312,13 +330,8 @@ pub async fn ranged(dir: &Path, n: usize) {
 }
 
 /// One dataset carrying values Beacon cannot surface as columns.
-///
-/// `value: Float64[2]` is readable. The list attribute `range` has no rank-0
-/// form and is dropped; the string attribute `units` beside it is kept, so a
-/// test can tell "dropped" from "dropped everything".
-///
-/// A `Bool` or list *array* cannot appear here: `array-format` implements no
-/// element type for either, so no writer can produce one.
+/// `value: Float64[2]`; attrs `units`(kept), `range`(list, dropped),
+/// `tags`(list, dropped), `title`(kept).
 pub async fn skips(dir: &Path) {
     let writer = AtlasWriter::create_path(dir, WriterConfig::default())
         .await
@@ -353,12 +366,8 @@ pub async fn empty(dir: &Path) {
 }
 
 /// One dataset declares an array and never writes it, beside one that does.
-///
-/// - `d`: `value: Int32[2]`, defined with no fill and never written. It reads
-///   as zeros, while its statistics count both cells as null.
-/// - `w`: `value: Int32[2] = [5, 6]`.
-///
-/// A predicate on `value` can rule `w` out and must leave `d` in.
+/// `d`: value: Int32[2], no fill, never written; reads as zeros, stats mark it null.
+/// `w`: value: Int32[2]=[5,6].
 pub async fn declared_unwritten(dir: &Path) {
     let writer = AtlasWriter::create_path(dir, WriterConfig::default())
         .await

@@ -12,6 +12,7 @@ atlas-rust = { workspace = true }
 
 object_store = { workspace = true }
 datafusion = { workspace = true }
+datafusion-datasource = { workspace = true }
 arrow = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
@@ -19,10 +20,10 @@ futures = { workspace = true }
 indexmap = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 ndarray = { workspace = true }
 chrono = { workspace = true }
 moka = { workspace = true }
-crossbeam = { workspace = true }
 parking_lot = { workspace = true }
 
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }

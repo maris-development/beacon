@@ -1452,8 +1452,8 @@ dependencies = [
  "beacon-datafusion-ext",
  "beacon-nd-array",
  "chrono",
- "crossbeam",
  "datafusion 53.1.0",
+ "datafusion-datasource 53.1.0",
  "futures",
  "indexmap 2.14.0",
  "moka",
@@ -1462,6 +1462,7 @@ dependencies = [
  "parking_lot",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1881,6 +1882,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tonic",
  "tracing",
  "typetag",

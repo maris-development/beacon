@@ -1,24 +1,16 @@
 //! The mapping between an Atlas collection and Beacon's ND array model: column
-//! names, element types, and the lazy arrays themselves.
+//! names, element types, and the Arrow schema of a whole collection.
 //!
-//! One mapping, in one place. The Arrow type of a column follows from its
-//! [`NdArrayDataType`] through `beacon-nd-array`'s own conversion, so a schema
-//! derived here and a batch produced by a scan can never disagree.
+//! One mapping, in one place, so a schema and a scanned batch never disagree.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
-use atlas::{ArrayFile, Attr, CollectionSchema, DType};
+use atlas::{CollectionSchema, DType};
 use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema};
-use beacon_nd_array::{
-    NdArray, NdArrayD, datatypes::NdArrayDataType, datatypes::TimestampNanosecond,
-};
-
-use crate::backend::{AtlasArrayBackend, AttributeBackend};
-
-// ─── Column names ────────────────────────────────────────────────────────────
+use beacon_nd_array::datatypes::NdArrayDataType;
 
 /// The column a per-array attribute is surfaced under: `{array}.{attr}`.
 pub fn array_attr_column(array: &str, attr: &str) -> String {
@@ -27,23 +19,10 @@ pub fn array_attr_column(array: &str, attr: &str) -> String {
 
 /// The column a dataset-level attribute is surfaced under: `.{attr}`.
 ///
-/// The leading dot is what netCDF and Zarr use, and it keeps a dataset
-/// attribute from colliding with an array of the same name.
+/// The leading dot follows netCDF and Zarr, and avoids colliding with an array name.
 pub fn global_attr_column(attr: &str) -> String {
     format!(".{attr}")
 }
-
-/// Whether `column` could name a per-array attribute of `array`.
-///
-/// Used to skip building an attribute map for an array whose attributes the
-/// query does not project.
-pub fn is_attr_column_of(column: &str, array: &str) -> bool {
-    column.len() > array.len() + 1
-        && column.starts_with(array)
-        && column.as_bytes()[array.len()] == b'.'
-}
-
-// ─── Element types ───────────────────────────────────────────────────────────
 
 /// The ND type of a scalar atlas dtype, or `None` for the list dtypes, which
 /// have no rank-0 or column analogue in Beacon.
@@ -67,12 +46,9 @@ fn scalar_dtype_to_nd(dtype: &DType) -> Option<NdArrayDataType> {
     })
 }
 
-/// The ND type of an atlas **array** dtype, or `None` for one Beacon cannot
-/// read as a column.
+/// The ND type of an atlas **array** dtype, or `None` for one Beacon cannot read as a column.
 ///
-/// `Bool` is excluded, unlike an attribute: `array-format` implements no
-/// element type for `bool`, so no reader can produce the values. Every list
-/// dtype is excluded too.
+/// Excludes `Bool`: `array-format` has no element type for it, so no reader can produce values.
 pub fn array_dtype_to_nd(dtype: &DType) -> Option<NdArrayDataType> {
     match dtype {
         DType::Bool => None,
@@ -103,23 +79,9 @@ pub(crate) fn dtype_tag(dtype: &DType) -> String {
     format!("{dtype:?}")
 }
 
-// ─── Collection schema ───────────────────────────────────────────────────────
-
 /// The Arrow schema of one collection, from its footer alone.
 ///
-/// One nullable field per array, under the array's own name. A dataset
-/// attribute becomes `.{attr}`, and an array attribute `{array}.{attr}`. A
-/// name that two datasets type differently takes the type `widening` gives
-/// the set, with the conflict mark it applies. A dtype Beacon cannot read is
-/// dropped with a `debug` log.
-///
-/// Every dataset in the container counts, deleted ones too. A column only a
-/// deleted dataset declares reads as null. `read_dimensions` does not narrow
-/// this schema: the footer holds no dimension name.
-///
-/// The fields are sorted by name. Atlas permits an array named `.season` or
-/// `temperature.units`, so one column name can come from two maps. Their types
-/// then merge as one column.
+/// One nullable field per array and attribute, typed per `widening`. Includes deleted datasets.
 pub fn collection_arrow_schema(
     schema: &CollectionSchema<'_>,
     widening: &ArrowTypeWidening,
@@ -154,8 +116,7 @@ pub fn collection_arrow_schema(
 
 /// The Arrow types of `dtypes` that Beacon can read as column `column`.
 ///
-/// A dtype `to_arrow` refuses is logged at `debug` and dropped. A collection
-/// can hold a million datasets, so a `warn` per skip would be a flood.
+/// Logs a refused dtype at `debug` and drops it, to avoid a flood of warnings.
 fn readable_types(
     column: &str,
     dtypes: &[&DType],
@@ -175,10 +136,7 @@ fn readable_types(
 
 /// The field column `name` takes when its sources state `types`.
 ///
-/// One nullable single-field schema per type, merged under the session rule.
-/// That is [`ArrowTypeWidening::merge_schemas`] for one column: the same
-/// widening, the same conflict setting, and the same conflict mark, which the
-/// scan reads to cast a source the type cannot hold as null.
+/// Merges the types via [`ArrowTypeWidening::merge_schemas`], same conflict rule as the scan.
 fn merge_types(
     widening: &ArrowTypeWidening,
     name: &str,
@@ -198,119 +156,15 @@ fn merge_types(
     Ok(merged.field(0).clone())
 }
 
-// ─── Lazy arrays ─────────────────────────────────────────────────────────────
-
-/// Wrap one dataset's entry of an atlas segment as a lazy [`NdArrayD`].
-///
-/// No array data is read here. `dtype` comes from the collection footer, and
-/// the layout from `segment`, which one open serves for the whole collection.
-/// The values themselves arrive when the engine asks the backend for a subset.
-///
-/// The chunk shape is the one the writer chose. It is what lets the scan cut a
-/// dataset on the grid the file actually stores, so one unit of work is one
-/// stored chunk.
-pub fn array_to_nd_array(
-    segment: Arc<ArrayFile>,
-    dataset: &str,
-    dtype: &DType,
-) -> anyhow::Result<Arc<dyn NdArrayD>> {
-    macro_rules! lazy {
-        ($ty:ty) => {{
-            let backend = AtlasArrayBackend::<$ty>::try_new(segment, dataset.to_string())?;
-            Ok(Arc::new(NdArray::new_with_backend(backend)?) as Arc<dyn NdArrayD>)
-        }};
-    }
-
-    match dtype {
-        DType::Int8 => lazy!(i8),
-        DType::Int16 => lazy!(i16),
-        DType::Int32 => lazy!(i32),
-        DType::Int64 => lazy!(i64),
-        DType::UInt8 => lazy!(u8),
-        DType::UInt16 => lazy!(u16),
-        DType::UInt32 => lazy!(u32),
-        DType::UInt64 => lazy!(u64),
-        DType::Float32 => lazy!(f32),
-        DType::Float64 => lazy!(f64),
-        DType::String => lazy!(String),
-        DType::Binary => lazy!(Vec<u8>),
-        DType::TimestampNs => lazy!(TimestampNanosecond),
-        DType::Bool => Err(anyhow::anyhow!(
-            "dataset '{dataset}' holds a Bool array, which atlas stores no elements of"
-        )),
-        DType::FixedSizeList { .. } => Err(anyhow::anyhow!(
-            "dataset '{dataset}' holds a FixedSizeList array, which Beacon does not model"
-        )),
-        DType::List { .. } => Err(anyhow::anyhow!(
-            "dataset '{dataset}' holds a List array, which Beacon does not model"
-        )),
-    }
-}
-
-/// Wrap one scalar attribute value as a rank-0 [`NdArrayD`].
-///
-/// A rank-0 array broadcasts onto whatever grid the dataset's own arrays
-/// define, so the value repeats across every row the dataset contributes.
-/// A list-valued attribute has no such analogue and is refused.
-pub fn attribute_to_nd_array(attr: &Attr) -> anyhow::Result<Arc<dyn NdArrayD>> {
-    macro_rules! scalar {
-        ($value:expr) => {
-            Ok(
-                Arc::new(NdArray::new_with_backend(AttributeBackend::new($value))?)
-                    as Arc<dyn NdArrayD>,
-            )
-        };
-    }
-
-    match attr {
-        Attr::Bool(v) => scalar!(*v),
-        Attr::Int8(v) => scalar!(*v),
-        Attr::Int16(v) => scalar!(*v),
-        Attr::Int32(v) => scalar!(*v),
-        Attr::Int64(v) => scalar!(*v),
-        Attr::UInt8(v) => scalar!(*v),
-        Attr::UInt16(v) => scalar!(*v),
-        Attr::UInt32(v) => scalar!(*v),
-        Attr::UInt64(v) => scalar!(*v),
-        Attr::Float32(v) => scalar!(*v),
-        Attr::Float64(v) => scalar!(*v),
-        Attr::String(v) => scalar!(v.clone()),
-        Attr::Binary(v) => scalar!(v.clone()),
-        other => Err(anyhow::anyhow!(
-            "attribute is a {} list, which has no rank-0 form in Beacon",
-            dtype_tag(&other.dtype())
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beacon_nd_array::NdArray;
-
-    // ── column names ────────────────────────────────────────────────────
 
     #[test]
     fn an_attribute_takes_its_owners_name() {
         assert_eq!(array_attr_column("sst", "units"), "sst.units");
         assert_eq!(global_attr_column("Conventions"), ".Conventions");
     }
-
-    #[test]
-    fn an_attribute_column_is_recognized_by_its_array() {
-        assert!(is_attr_column_of("sst.units", "sst"));
-        assert!(
-            !is_attr_column_of("sst", "sst"),
-            "the array itself is not one"
-        );
-        assert!(
-            !is_attr_column_of("sst_flag.units", "sst"),
-            "a prefix is not a name"
-        );
-        assert!(!is_attr_column_of("sst.", "sst"), "an empty key is no key");
-    }
-
-    // ── element types ───────────────────────────────────────────────────
 
     #[test]
     fn every_readable_array_dtype_maps() {
@@ -374,33 +228,6 @@ mod tests {
         );
         assert_eq!(array_dtype_to_arrow(&DType::Bool), None);
     }
-
-    // ── attribute values ────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn a_scalar_attribute_is_a_rank_zero_column() {
-        let nd = attribute_to_nd_array(&Attr::Int64(2024)).unwrap();
-        assert_eq!(nd.datatype(), NdArrayDataType::I64);
-        assert!(nd.shape().is_empty(), "an attribute has no axis");
-        let typed = nd.as_any().downcast_ref::<NdArray<i64>>().unwrap();
-        assert_eq!(typed.clone_into_raw_vec().await, vec![2024]);
-    }
-
-    #[tokio::test]
-    async fn a_bool_attribute_is_a_column() {
-        let nd = attribute_to_nd_array(&Attr::Bool(true)).unwrap();
-        assert_eq!(nd.datatype(), NdArrayDataType::Bool);
-    }
-
-    #[test]
-    fn a_list_attribute_is_refused_by_name() {
-        let error = attribute_to_nd_array(&Attr::Int32List(vec![1, 2, 3]))
-            .expect_err("a list has no rank-0 form")
-            .to_string();
-        assert!(error.contains("list"), "{error}");
-    }
-
-    // ── the collection schema ───────────────────────────────────────────
 
     use crate::test_support;
     use arrow::datatypes::TimeUnit;

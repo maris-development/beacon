@@ -229,8 +229,8 @@ tag. Releases before 2.0.0 are recorded in the
   table with its own plan node, `DatasetsExec`, which emits rows as listing pages arrive. A
   `LIMIT` stops the walk, so `LIMIT 50` over a bucket of millions reads one page. Memory is bounded
   by one batch of rows instead of by the store. A format that judges each file alone answers as
-  the file passes; Zarr and Atlas, which pick the outermost marker among many, hold only their
-  markers and answer when the walk ends, so the datasets a listing reports do not change. An S3
+  the file passes; Zarr, which picks the outermost marker among many, holds only its markers and
+  answers when the walk ends, so the datasets a listing reports do not change. An S3
   store now asks for 5000 keys per page instead of the server default of 1000, and a recursive
   walk splits into one page chain per sub-directory, three levels down, 16 in flight. A recursive
   listing of a SeaweedFS bucket of 2 853 217 objects took 79.9 s and takes 19.4 s. Both the
@@ -239,6 +239,20 @@ tag. Releases before 2.0.0 are recorded in the
   sorted result. And a listing error is an error: a timeout part-way through the walk used to end
   the listing quietly and report the rows so far as the whole answer. See
   [`list_datasets`](docs/docs/2.0.0-rc6/sql/table-functions-utility.md#list_datasets).
+
+- **An Atlas query must name its columns.** The Atlas reader flattens each dataset on the
+  dimensions of the columns the query selects, so `SELECT * FROM read_atlas(...)` and
+  `SELECT count(*)` now fail at plan time with a message that says to list the columns, as BBF
+  does. Count over a named column instead, and use `read_atlas_schema` to see the columns of a
+  collection. A query whose columns sit on more than one grid in a dataset fails at the open;
+  pass the `dimensions` argument of `read_atlas` to choose the grid, and an array on another grid
+  reads as null. Two more behaviour changes come with the reader's refactor. Every `data.atlas` a
+  listing finds is one collection, a nested one too. And a value the merged column type cannot
+  hold reads as null instead of failing the scan, the rule every nd format follows in the shared
+  adapting opener. The reader also shares one cache of open collections between every table and
+  query of a runtime, reads footers in parallel when it infers a schema, releases a collection
+  once its datasets are read, and stops through the query's cancellation token, including inside
+  the statistics pivot that runs off the async runtime.
 
 - **A BBF query must name its columns.** The BBF reader flattens each n-dimensional column on the
   dimensions of the columns the query selects. A scan of every column flattens on every dimension,

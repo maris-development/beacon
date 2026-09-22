@@ -3,84 +3,82 @@
 //!
 //! # The format
 //!
-//! An Atlas collection (<https://github.com/maris-development/atlas>) is one
-//! immutable file, `data.atlas`, with an optional `deleted.mask` beside it:
+//! An Atlas collection is one immutable `data.atlas` file, with an optional
+//! `deleted.mask` beside it. One segment holds one variable across every
+//! dataset. A footer records dataset names, byte ranges, and declared
+//! arrays and attributes, so listing datasets costs no I/O. Array layout,
+//! statistics and attribute values come from the variable's own segment,
+//! read once per variable; array data then arrives block by block.
 //!
-//! ```text
-//! my_collection/
-//! ├── data.atlas      ATLS │ temperature │ salinity │ … │ footer │ trailer
-//! └── deleted.mask    optional: ordinals of deleted datasets
-//! ```
+//! # One module per stage of a read
 //!
-//! **One segment is one variable, not one dataset.** A segment holds one array
-//! name across the whole collection, and each dataset's copy sits inside it
-//! under the dataset's own name. A footer at the end records every dataset
-//! name, every variable's byte range, and the arrays and attribute keys each
-//! dataset declares — with their element types, and nothing more.
-//!
-//! Opening a collection reads that footer, so listing the datasets and asking
-//! what one declares cost no further I/O, whatever the dataset count. Three
-//! things are *not* in the footer, and each comes from the variable's own
-//! segment: an array's layout (shape, chunking, dimension names, fill value),
-//! its statistics, and every attribute value. One open answers each of those
-//! for the whole collection, so reading `temperature` across a million datasets
-//! opens one segment. Array data then arrives block by block, on demand.
-//!
-//! # What this crate does with it
-//!
-//! [`store`] finds a collection's marker and opens it, through a reader cache.
-//! [`compat`] holds the column-name and type mapping, and derives the Arrow
-//! schema of a whole collection from its footer. [`backend`] holds the lazy
-//! [`NdArrayD`](beacon_nd_array::NdArrayD) values a scan reads through.
+//! | Module | Stage |
+//! |---|---|
+//! | [`discover`] | find the collections in a listing, deal them to partitions |
+//! | [`open`] | open a collection, through the reader cache |
+//! | [`schema`] | the column-name and type mapping, and a collection's Arrow schema |
+//! | [`view`] | resolve the scan's columns against one open collection |
+//! | [`prune`] | drop the datasets a predicate cannot match |
+//! | [`dataset`] | the lazy arrays one dataset reads through |
+//! | [`scan`] | what a scan reads, the shared queue per collection, and the batches |
+//! | [`format`](mod@format), [`source`] | the DataFusion traits over all of the above |
 //!
 //! # One collection is one unit of work
 //!
-//! The scan plans one entry per collection and deals every entry to every
-//! partition, each in its own rotation. The first partition to open a
-//! collection prunes every dataset in one pass over the footer and queues the
-//! survivors in a reader pool. Every partition that opens the collection then
-//! streams the datasets it pops off that queue. A pruned dataset therefore
-//! costs nothing, a dataset is read once, and parallelism is bounded by the
-//! dataset count. See [`datafusion::source`].
+//! Each partition shares a collection's queue: the first prunes and queues
+//! its datasets, and parallelism is bounded by the dataset count. See [`source`].
 //!
 //! # Columns
 //!
-//! One column per array, under the array's own name. A per-array attribute
-//! becomes `{array}.{attr}`, and a dataset-level attribute becomes `.{attr}`.
-//! That is the convention netCDF and Zarr use, so a query reads the same
-//! whichever format holds the data.
+//! One column per array, under its own name. A per-array attribute becomes
+//! `{array}.{attr}`; a dataset-level attribute becomes `.{attr}`.
+//!
+//! # A scan names its columns
+//!
+//! A dataset flattens on the dimensions of the columns it reads. A scan must
+//! select a subset of the table's columns, as BBF does: `SELECT *` and
+//! `COUNT(*)` fail at plan time. A dataset whose columns read sit on more
+//! than one grid fails at the open, unless `read_atlas(paths, dimensions)`
+//! names the grid.
+//!
+//! # Cancellation
+//!
+//! The scan reads through the query's cancellation token, see
+//! [`beacon_datafusion_ext::cancel`]. The pruning pivot runs on a blocking
+//! thread Tokio cannot abort, so it watches a child token instead.
 //!
 //! # What is not read
 //!
-//! - A `Bool` array, and a `List` or `FixedSizeList` array. `array-format`
-//!   stores no element of those types, so no such array can exist in a
-//!   collection a Rust writer produced. The mapping refuses them all the same.
-//! - A list-valued *attribute*. Beacon's ND model has no rank-0 list.
-//!
-//! A timestamp *attribute* does not arise: atlas stores none, because an
-//! attribute would have to go to disk as a plain `i64` and could not come back
-//! as a timestamp. An array element type still has its own timestamp.
-//!
-//! Each is dropped from the dataset with a `debug` log rather than failing the
-//! scan. A collection can hold a million datasets, so a `warn` per skip would
-//! be a flood.
+//! Bool, List and FixedSizeList arrays, and list-valued attributes, are
+//! dropped with a debug log rather than failing the scan. A timestamp
+//! attribute never arises: atlas stores none.
 //!
 //! # No CF decoding
 //!
-//! Atlas has a native timestamp type, and the ingest path (`atlas create`)
-//! applies `scale_factor`, `add_offset` and the CF time units *before* the
-//! write. An atlas array is therefore read exactly as it is stored, unlike
-//! netCDF and Zarr. A collection written by hand with packed integers and a CF
-//! `units` attribute reads back as those integers.
+//! `atlas create` applies `scale_factor`, `add_offset` and CF time units
+//! before the write, so an atlas array reads exactly as stored, unlike
+//! netCDF and Zarr.
 
 pub use atlas;
 
-pub mod backend;
-pub mod compat;
-pub mod datafusion;
-pub mod store;
+pub mod dataset;
+pub mod discover;
+pub(crate) mod error;
+pub mod format;
+pub mod metrics;
+pub mod open;
+pub mod options;
+pub mod prune;
+pub mod scan;
+pub mod schema;
+pub mod source;
+pub mod table_function;
+pub mod view;
 
-pub use datafusion::{AtlasFormat, AtlasFormatFactory, AtlasOptions, ReadAtlasFunc};
+pub use format::{ATLAS_FORMAT, AtlasFormat, AtlasFormatFactory, nd_scan_plan};
+pub use options::AtlasOptions;
+pub use source::AtlasSource;
+pub use table_function::ReadAtlasFunc;
 
 #[cfg(test)]
 pub(crate) mod test_support;
