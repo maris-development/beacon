@@ -65,7 +65,7 @@ fn create_external_table_sql(req: &CreateExternalTableRequest) -> String {
         (status = 200, description = "External table created"),
         (status = 400, description = "Invalid request or registration failed")
     ),
-    security(("basic-auth" = []))
+    security(("basic-auth" = []), ("bearer" = []))
 )]
 pub(crate) async fn create_external_table(
     State(state): State<Arc<Server>>,

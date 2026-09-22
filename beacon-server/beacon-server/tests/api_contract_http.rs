@@ -339,6 +339,61 @@ async fn the_admin_alias_stays_out_of_the_openapi_document() {
     );
 }
 
+/// Swagger UI offers a scheme in its Authorize dialog only when the document
+/// registers it under `components.securitySchemes`. Both header forms the auth
+/// middleware parses are registered, and every scheme an operation names is one
+/// of them: a dangling reference is silently dropped by Swagger UI.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_referenced_security_scheme_is_registered() {
+    let (router, _lake) = app().await;
+    let spec = openapi(&router).await;
+    let schemes = spec
+        .pointer("/components/securitySchemes")
+        .and_then(Value::as_object)
+        .expect("the OpenAPI document should have `components.securitySchemes`");
+
+    assert_eq!(
+        schemes
+            .get("basic-auth")
+            .and_then(|s| s.get("scheme"))
+            .and_then(Value::as_str),
+        Some("basic"),
+        "`basic-auth` should be an HTTP Basic scheme"
+    );
+    assert_eq!(
+        schemes
+            .get("bearer")
+            .and_then(|s| s.get("scheme"))
+            .and_then(Value::as_str),
+        Some("bearer"),
+        "`bearer` should be an HTTP Bearer scheme"
+    );
+
+    let paths = spec
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("the OpenAPI document should have a `paths` object");
+    for (path, operations) in paths {
+        let operations = operations.as_object().expect("path item object");
+        for (method, operation) in operations {
+            let Some(security) = operation.get("security").and_then(Value::as_array) else {
+                continue;
+            };
+            for requirement in security {
+                let requirement = requirement
+                    .as_object()
+                    .expect("security requirement object");
+                for scheme in requirement.keys() {
+                    assert!(
+                        schemes.contains_key(scheme),
+                        "{method} {path} names the unregistered security scheme `{scheme}`"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// `/api/health` is a plain axum route rather than a documented one, so it is
 /// checked by calling it instead of via the OpenAPI document.
 #[tokio::test(flavor = "multi_thread")]
