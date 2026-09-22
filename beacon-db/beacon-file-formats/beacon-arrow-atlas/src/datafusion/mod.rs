@@ -116,9 +116,7 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
     ///
     /// A collection's datasets are enumerated at plan time, not here: a listing
     /// of a data lake would otherwise open every collection it found.
-    /// `discover_datasets` keeps the outermost of nested markers, which needs
-    /// them side by side. A listing holds the markers for it and judges them
-    /// together at the end.
+    /// Only a comparison across the markers finds the outermost collection.
     fn discovery(&self) -> Discovery {
         Discovery::Deferred {
             candidate: crate::store::is_atlas_marker,
@@ -500,8 +498,6 @@ mod deal_tests {
 mod discovery_tests {
     use super::*;
 
-    /// A collection is the outermost of several markers, so Atlas must see its
-    /// markers together. It defers, and it holds the markers and nothing else.
     #[test]
     fn discovery_is_deferred_to_the_markers() {
         use beacon_datafusion_ext::format_ext::Discovery;
@@ -515,7 +511,7 @@ mod discovery_tests {
         };
         let factory = AtlasFormatFactory::new(AtlasOptions::default());
         let Discovery::Deferred { candidate } = factory.discovery() else {
-            panic!("Atlas cannot judge a marker alone, so it must defer");
+            panic!("Atlas must defer");
         };
         assert!(candidate(&meta("obs/data.atlas")));
         assert!(!candidate(&meta("obs/data.atlas.mask")), "the mask is not held");

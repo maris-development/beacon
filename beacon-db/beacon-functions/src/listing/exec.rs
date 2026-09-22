@@ -1,20 +1,8 @@
-//! [`DatasetsExec`]: the plan node that turns a listing stream into result rows.
+//! [`DatasetsExec`]: the plan node that streams listing rows as record batches.
 //!
-//! # Why not a `MemTable`
-//!
-//! A `MemTable` over the finished listing forced the whole walk to finish, and
-//! every row to exist at once, before the plan could start. On a store of
-//! 2 853 217 objects that is a two-figure number of seconds before the first
-//! row and about a gigabyte held while it happens.
-//!
-//! This node emits a batch as soon as it has [`BATCH_ROWS`] of them. The first
-//! rows arrive in the time of the first listing page, and memory is bounded by
-//! one batch rather than by the store.
-//!
-//! # Limit
-//!
-//! `limit` stops the node. The source is a lazy stream, so stopping the node
-//! stops the walk. A `LIMIT 50` over a bucket of millions reads one page.
+//! A batch leaves once [`BATCH_ROWS`] rows exist, so memory is bounded by one
+//! batch. `limit` is applied to the row stream, so reaching it drops the
+//! stream and stops the walk behind it.
 
 use std::any::Any;
 use std::fmt;
@@ -39,13 +27,10 @@ use datafusion::{
 use futures::stream::{BoxStream, StreamExt};
 
 /// Rows gathered before a batch is emitted.
-///
-/// Small enough that the first rows reach the caller promptly, large enough
-/// that per-batch overhead stays out of the way.
 pub const BATCH_ROWS: usize = 8192;
 
-/// Builds the listing stream. Called once per execution, so nothing touches
-/// the store until the plan runs, and the plan can run more than once.
+/// Builds the listing stream. Called once per execution, so the plan can run
+/// more than once.
 pub type RowStreamFactory =
     Arc<dyn Fn() -> Result<BoxStream<'static, Result<DatasetMetadata>>> + Send + Sync>;
 
@@ -54,9 +39,7 @@ pub type RowStreamFactory =
 pub struct DatasetsExec {
     schema: SchemaRef,
     rows: RowStreamFactory,
-    /// Rows to skip before emitting.
     offset: usize,
-    /// Rows to emit at most. `None` reads the listing out.
     limit: Option<usize>,
     /// How the plan prints itself, for `EXPLAIN`.
     label: String,
@@ -73,8 +56,7 @@ impl DatasetsExec {
     ) -> Self {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
-            // One partition: a listing is one walk. The store wrapper splits
-            // the walk itself where that pays.
+            // One partition: the store wrapper parallelises the walk itself.
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -152,10 +134,7 @@ impl ExecutionPlan for DatasetsExec {
     }
 }
 
-/// Gather rows into batches, applying `offset` and `limit` as they pass.
-///
-/// The limit is applied before batching, so the stream behind it is dropped as
-/// soon as enough rows exist. That is what stops the walk.
+/// Gather rows into batches, applying `offset` and `limit` to the rows first.
 pub(super) fn batch_rows(
     rows: BoxStream<'static, Result<DatasetMetadata>>,
     schema: SchemaRef,
@@ -235,15 +214,12 @@ mod tests {
             .expect("batching succeeds")
     }
 
-    /// A batch fills to [`BATCH_ROWS`] and no further, and the tail is its own
-    /// batch.
     #[tokio::test]
     async fn batches_fill_to_the_cap_and_the_tail_follows() {
         let sizes = batched(rows(2 * BATCH_ROWS + 5), 0, None).await;
         assert_eq!(sizes, vec![BATCH_ROWS, BATCH_ROWS, 5]);
     }
 
-    /// Offset and limit act on rows before any batch is built.
     #[tokio::test]
     async fn offset_and_limit_apply_to_the_rows() {
         let batches: Vec<_> = batch_rows(rows(10), list_datasets_schema(), 3, Some(4))
@@ -260,15 +236,12 @@ mod tests {
         assert_eq!(names, vec!["f3.csv", "f4.csv", "f5.csv", "f6.csv"]);
     }
 
-    /// A listing that matched nothing produces no batch. The stream adapter
-    /// above still carries the schema.
     #[tokio::test]
     async fn an_empty_listing_yields_no_batch() {
         assert!(batched(rows(0), 0, None).await.is_empty());
     }
 
-    /// The limit stops the walk. An endless listing ends after `limit` rows,
-    /// and it is polled for only a few more than that.
+    /// An endless listing ends after `limit` rows and is polled little beyond it.
     #[tokio::test]
     async fn the_limit_stops_the_walk() {
         let polled = Arc::new(AtomicUsize::new(0));

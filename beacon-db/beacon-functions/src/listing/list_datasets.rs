@@ -15,10 +15,8 @@ use super::provider::DatasetsTable;
 use crate::file_formats::BeaconTableFunctionImpl;
 
 /// Discover the datasets matching `pattern` (default `**/*`) under the datasets
-/// object store, asking each registered file format which objects it owns.
-///
-/// The whole listing, as a `Vec`. The crawler wants every dataset at once. A
-/// query goes through [`ListDatasetsFunc`] instead, which streams.
+/// object store, as a `Vec`. A query goes through [`ListDatasetsFunc`], which
+/// streams.
 pub async fn list_datasets(
     session_ctx: &SessionContext,
     file_formats: &[Arc<dyn FileFormatFactoryExt>],
@@ -36,8 +34,6 @@ pub async fn list_datasets(
             )
         })?;
 
-    // Discovery + object-metadata enrichment lives on the listing factory; this
-    // function only adds pagination on top.
     let datasets = listing_factory
         .list_datasets(
             &state,
@@ -46,8 +42,7 @@ pub async fn list_datasets(
         )
         .await?;
 
-    // `saturating_sub`: an offset past the end must yield an empty page, not an
-    // underflow panic (`end` is clamped to `datasets.len()`, so it can be < start).
+    // `saturating_sub`: an offset past the end yields an empty page.
     let start = offset.unwrap_or(0);
     let end = limit.map(|l| start + l).unwrap_or(datasets.len());
     let datasets = datasets
@@ -117,11 +112,8 @@ fn usize_arg(args: &[Expr], index: usize) -> Option<usize> {
 }
 
 impl TableFunctionImpl for ListDatasetsFunc {
-    /// `list_datasets([pattern[, offset[, limit]]])`.
-    ///
-    /// All three are optional and positional. Omitting them lists everything,
-    /// which is the historical behaviour. No I/O happens here: the arguments
-    /// are read and handed to a [`DatasetsTable`], which lists when scanned.
+    /// `list_datasets([pattern[, offset[, limit]]])`. No I/O happens here; the
+    /// [`DatasetsTable`] lists when scanned.
     fn call(&self, args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
         let pattern = string_arg(args, 0).unwrap_or_else(|| "**/*".to_string());
         let offset = usize_arg(args, 1).unwrap_or(0);

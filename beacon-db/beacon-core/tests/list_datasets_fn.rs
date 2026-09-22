@@ -166,8 +166,6 @@ async fn listing_composes_with_sql() {
 
 // ---- the streaming plan ----------------------------------------------------
 
-/// The listing is its own plan node, not a materialised table. `EXPLAIN` names
-/// it, and names what it will list.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_listing_plans_as_its_own_node() {
     let rt = seeded_runtime("plan_node").await;
@@ -180,8 +178,7 @@ async fn a_listing_plans_as_its_own_node() {
     assert!(plan.contains("glob=**/*.csv"), "plan was:\n{plan}");
 }
 
-/// A `LIMIT` reaches the node. That is what lets it stop the walk rather than
-/// list everything and discard the tail.
+/// A `LIMIT` reaches the node, so the node can stop the walk.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_limit_reaches_the_listing_node() {
     let rt = seeded_runtime("plan_limit").await;
@@ -196,8 +193,6 @@ async fn a_limit_reaches_the_listing_node() {
     assert_eq!(total_rows(&rows), 2);
 }
 
-/// Rows survive the trip through the stream unchanged: the same four datasets,
-/// with their sizes and timestamps still attached.
 #[tokio::test(flavor = "multi_thread")]
 async fn streamed_rows_keep_their_object_metadata() {
     let rt = seeded_runtime("stream_meta").await;
@@ -207,7 +202,6 @@ async fn streamed_rows_keep_their_object_metadata() {
     assert_eq!(total_rows(&sized), 4, "every dataset carries its object metadata");
 }
 
-/// A projection above the node works: the query reads two of the six columns.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_projection_reads_a_subset_of_the_columns() {
     let rt = seeded_runtime("stream_projection").await;
@@ -234,9 +228,8 @@ fn copy_dir_all(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// A Zarr v3 store has a `zarr.json` at its root and one inside every array.
-/// Only the root is a dataset. The stream must give Zarr its markers together,
-/// or every array becomes a dataset of its own.
+/// A Zarr v3 store has a `zarr.json` at its root and inside every array. Only
+/// the root is a dataset.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_zarr_store_is_one_dataset_not_one_per_array() {
     let rt = seeded_runtime("stream_zarr").await;

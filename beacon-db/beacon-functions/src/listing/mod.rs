@@ -1,7 +1,4 @@
-//! Listing the datasets store.
-//!
-//! `list_datasets` is a table over a store walk. The walk streams, the rows
-//! stream behind it, and nothing runs until the plan executes.
+//! `list_datasets`: a table over a streaming walk of the datasets store.
 
 pub mod classify;
 pub mod exec;

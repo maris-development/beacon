@@ -13,21 +13,14 @@ use datafusion::{
 
 use crate::listing_factory::ListingFactory;
 
-/// How a format judges a listing.
-///
-/// A listing streams. A format that judges each object alone lets the rows
-/// leave as pages arrive. A format that must compare objects, such as one that
-/// keeps the shallowest of several markers, cannot. It names the objects it
-/// needs and gets them together when the listing ends.
+/// How a format judges a streaming listing.
 #[derive(Clone, Copy)]
 pub enum Discovery {
-    /// Each object is judged alone. [`FileFormatFactoryExt::classify_object`]
-    /// answers, as the object arrives.
+    /// [`FileFormatFactoryExt::classify_object`] judges each object as it arrives.
     PerObject,
     /// Objects that pass `candidate` are held, and
-    /// [`FileFormatFactoryExt::discover_datasets`] judges them together when the
-    /// listing ends. Every other object is dropped on sight, so the format
-    /// holds its markers and not the store.
+    /// [`FileFormatFactoryExt::discover_datasets`] judges them together when
+    /// the listing ends. Every other object is dropped on sight.
     Deferred { candidate: fn(&ObjectMeta) -> bool },
 }
 
@@ -46,19 +39,16 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>>;
 
-    /// How this format judges a listing. Most formats read an extension, so
-    /// the default is per object. See [`Discovery`].
+    /// How this format judges a streaming listing. See [`Discovery`].
     fn discovery(&self) -> Discovery {
         Discovery::PerObject
     }
 
     /// Whether this format claims `object`, judged from that object alone.
     ///
-    /// The default asks [`Self::discover_datasets`] about a listing of one, so a
-    /// per-object format needs no override. The size and timestamp come from
-    /// `object` here, where the whole-listing path fills them in afterwards.
-    ///
-    /// A [`Discovery::Deferred`] format is never asked this.
+    /// The default asks [`Self::discover_datasets`] about a listing of one and
+    /// attaches the object's size and timestamp. A [`Discovery::Deferred`]
+    /// format is never asked this.
     fn classify_object(&self, object: &ObjectMeta) -> Option<DatasetMetadata> {
         let mut found = self
             .discover_datasets(std::slice::from_ref(object))
@@ -448,8 +438,7 @@ mod discovery_tests {
 
     use super::*;
 
-    /// A format that claims every `.foo` object and decides per object, which
-    /// is what the trait defaults assume.
+    /// Claims every `.foo` object, per object.
     #[derive(Debug)]
     struct FooFactory;
 
@@ -504,14 +493,11 @@ mod discovery_tests {
         }
     }
 
-    /// A format that does not say otherwise judges each object alone.
     #[test]
     fn discovery_defaults_to_per_object() {
         assert!(matches!(FooFactory.discovery(), Discovery::PerObject));
     }
 
-    /// The default `classify_object` asks `discover_datasets` about a listing of
-    /// one, and attaches that object's size and timestamp to the answer.
     #[test]
     fn a_per_object_format_classifies_one_object_with_its_metadata() {
         let found = FooFactory
@@ -526,7 +512,6 @@ mod discovery_tests {
         );
     }
 
-    /// An object the format does not claim is not a dataset, and not an error.
     #[test]
     fn a_per_object_format_declines_an_object_it_does_not_claim() {
         assert!(FooFactory.classify_object(&object("a/b.bar", 1, 0)).is_none());

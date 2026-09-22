@@ -192,10 +192,7 @@ impl ListingFactory {
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
         use futures::TryStreamExt;
 
-        // Enumerate every object the glob matches once, up front, so each format
-        // classifies against the same listing. A listing error propagates: a
-        // timeout part-way through the walk must not look like a short but
-        // complete result.
+        // A listing error propagates rather than truncating the result.
         let objects: Vec<ObjectMeta> = self.listing(session, glob_path)?.stream().try_collect().await?;
 
         // Ask each file format which objects it owns and how to interpret them.
@@ -209,11 +206,8 @@ impl ListingFactory {
         Ok(datasets)
     }
 
-    /// Resolve `glob_path` into the listing it names.
-    ///
-    /// This is the only half of a listing that needs a session. The returned
-    /// [`ObjectListing`] holds what the walk needs and reads as many times as a
-    /// caller wants, so a plan resolves once here and reads at execute time.
+    /// Resolve `glob_path` into the listing it names. The result holds no
+    /// session and reads as many times as a caller wants.
     pub fn listing(
         &self,
         session: &dyn Session,
@@ -234,11 +228,6 @@ impl ListingFactory {
 }
 
 /// A resolved listing: a store, and the URL that selects objects within it.
-///
-/// Holds no session, so it is `'static` and readable more than once. Path
-/// resolution happened when [`ListingFactory::listing`] built it, so every
-/// reader inherits the same rules: the configured default store, a schemed
-/// path, a local directory, and the glob.
 #[derive(Debug, Clone)]
 pub struct ObjectListing {
     store: Arc<dyn object_store::ObjectStore>,
@@ -252,18 +241,13 @@ impl ObjectListing {
     }
 
     /// The directory this listing addresses, relative to the store root. For a
-    /// glob that is the literal head, the part before the first wildcard.
+    /// glob, the literal head before the first wildcard.
     pub fn prefix(&self) -> &object_store::path::Path {
         self.url.prefix()
     }
 
-    /// Every object the URL matches, as pages arrive.
-    ///
-    /// Yields each object as its page arrives and holds none of them. Objects,
-    /// not datasets: walking a store and deciding what a file is are different
-    /// jobs, and only the second needs to know about formats.
-    ///
-    /// Dropping the stream stops the walk.
+    /// Every object the URL matches, as pages arrive. Dropping the stream
+    /// stops the walk.
     pub fn stream(&self) -> BoxStream<'static, datafusion::error::Result<ObjectMeta>> {
         use object_store::ObjectStoreExt;
 
@@ -271,11 +255,8 @@ impl ObjectListing {
         let url = self.url.clone();
         futures::stream::once(async move {
             let prefix = url.prefix().clone();
-            // A URL with no glob and no trailing slash names one object, not a
-            // directory. A store lists a prefix at segment boundaries, so listing
-            // `obs/a.parquet` looks for a directory of that name and finds
-            // nothing. Ask for the object itself, and fall back to listing when
-            // it turns out to be a directory after all.
+            // A URL without glob or trailing slash names one object. A store lists
+            // at segment boundaries, so ask for the object and fall back to listing.
             if !url.is_collection() {
                 match store.head(&prefix).await {
                     Ok(meta) => return futures::stream::iter([Ok(meta)]).boxed(),
@@ -296,8 +277,7 @@ impl ObjectListing {
                         "listing `{failed_at}` failed part-way: {e}"
                     ))
                 })
-                // The prefix is only the literal head of the glob, so the rest of
-                // the pattern is applied here, as a listing table does.
+                // The prefix is only the literal head of the glob; the rest applies here.
                 .try_filter(move |object| {
                     futures::future::ready(url.contains(&object.location, false))
                 })
@@ -372,9 +352,7 @@ mod tests {
     /// Paths the listing yields, relative to `root`, sorted.
     async fn streamed(listing: &ObjectListing, root: &std::path::Path) -> Vec<String> {
         use futures::stream::TryStreamExt;
-        // Anchor on the temp directory name rather than the whole root:
-        // `canonicalize` yields a verbatim prefix on Windows that the object
-        // path does not carry.
+        // `canonicalize` yields a verbatim prefix on Windows that the object path lacks.
         let anchor = format!("{}/", root.file_name().unwrap().to_string_lossy());
         let mut paths: Vec<String> = listing
             .stream()
@@ -392,7 +370,6 @@ mod tests {
         paths
     }
 
-    /// A directory streams everything under it.
     #[tokio::test]
     async fn a_directory_streams_its_subtree() {
         let (dir, ctx, factory) =
@@ -408,9 +385,8 @@ mod tests {
         );
     }
 
-    /// A glob narrows the stream by extension, and crosses directories while it
-    /// does. DataFusion matches listing globs with the default `MatchOptions`,
-    /// where `require_literal_separator` is false, so `*` does not stop at `/`.
+    /// DataFusion matches globs with `require_literal_separator` off, so `*`
+    /// crosses `/`.
     #[tokio::test]
     async fn a_glob_narrows_the_stream_across_directories() {
         let (dir, ctx, factory) =
@@ -423,9 +399,6 @@ mod tests {
         assert_eq!(streamed(&listing, &root).await, vec!["a.csv", "sub/b.csv"]);
     }
 
-    /// A path naming one file yields that file. A store lists a prefix at
-    /// segment boundaries, so listing `a.csv` would look for a directory of that
-    /// name and find nothing.
     #[tokio::test]
     async fn a_single_file_yields_itself() {
         let (dir, ctx, factory) = local_listing(&[("a.csv", "x"), ("b.csv", "y")]);
@@ -437,7 +410,6 @@ mod tests {
         assert_eq!(streamed(&listing, &root).await, vec!["a.csv"]);
     }
 
-    /// A path that matches nothing is empty, not an error.
     #[tokio::test]
     async fn a_missing_path_streams_nothing() {
         let (dir, ctx, factory) = local_listing(&[("a.csv", "x")]);
@@ -449,8 +421,6 @@ mod tests {
         assert!(streamed(&listing, &root).await.is_empty());
     }
 
-    /// The same listing reads more than once: a plan resolves it during `scan`
-    /// and reads it again for every execution.
     #[tokio::test]
     async fn a_listing_reads_more_than_once() {
         let (dir, ctx, factory) = local_listing(&[("a.csv", "x"), ("b.csv", "y")]);

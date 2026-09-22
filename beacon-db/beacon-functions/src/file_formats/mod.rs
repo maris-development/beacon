@@ -95,8 +95,6 @@ pub fn register_table_functions(
 
     let mut functions = readers;
     functions.extend(schema_funcs);
-    // No runtime handle: the listing runs when its plan executes, on the
-    // query's own runtime, not inside the synchronous table-function call.
     functions.push(Arc::new(crate::listing::ListDatasetsFunc::new(file_formats)));
     functions
 }

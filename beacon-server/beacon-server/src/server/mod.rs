@@ -244,10 +244,7 @@ fn build_datasets_store(config: &Config) -> anyhow::Result<(Arc<dyn ObjectStore>
     let store = builder
         .build()
         .with_context(|| format!("failed to open the S3 datasets store for bucket '{bucket}'"))?;
-    // Shard the recursive listing and size its pages. This store is registered
-    // verbatim under `datasets://`, so it never passes through the registry that
-    // builds ad-hoc `s3://` stores. The wrapping has to happen here, or the
-    // datasets store keeps the one-request-per-1000-objects walk.
+    // This store bypasses the lazy `s3://` registry, so it is wrapped here.
     let store = beacon_datafusion_ext::big_page_list::BigPageList::new(store);
 
     let base = s3

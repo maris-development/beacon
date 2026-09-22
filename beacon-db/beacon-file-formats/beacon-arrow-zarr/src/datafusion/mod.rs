@@ -158,10 +158,8 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
         units_over_stores(objects, &crate::util::top_level_zarr_meta_v3(objects))
     }
 
-    /// Zarr v3 gives every group and every array a `zarr.json`, so a marker
-    /// alone does not say whether it is a store root. `discover_datasets`
-    /// compares the markers and keeps the shallowest, so a listing holds the
-    /// markers for it and judges them together at the end.
+    /// Every group and array has a `zarr.json`; only a comparison across the
+    /// markers finds the store root.
     fn discovery(&self) -> Discovery {
         Discovery::Deferred {
             candidate: is_zarr_v3_metadata,
@@ -547,8 +545,6 @@ mod tests {
 
     use super::{ZarrFormat, ZarrFormatFactory, ZarrSource, parse_bool_option};
 
-    /// A store root is the shallowest of several markers, so Zarr must see its
-    /// markers together. It defers, and it holds the markers and nothing else.
     #[test]
     fn discovery_is_deferred_to_the_markers() {
         use beacon_datafusion_ext::format_ext::{Discovery, FileFormatFactoryExt};
@@ -562,7 +558,7 @@ mod tests {
         };
         let factory = ZarrFormatFactory::new(Default::default());
         let Discovery::Deferred { candidate } = factory.discovery() else {
-            panic!("Zarr cannot judge a marker alone, so it must defer");
+            panic!("Zarr must defer");
         };
         assert!(candidate(&meta("cube/zarr.json")));
         assert!(candidate(&meta("cube/lat/zarr.json")));

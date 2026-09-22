@@ -1,10 +1,4 @@
-//! From objects to datasets, as the listing streams.
-//!
-//! A format judges a listing in one of two ways. See
-//! [`Discovery`]. A per-object format answers as each object passes. A deferred
-//! format names the objects it needs, the stream holds those and only those,
-//! and the format judges them together when the walk ends. So the stream holds
-//! a store's markers, never the store.
+//! From objects to datasets, as the listing streams. See [`Discovery`].
 
 use std::sync::{Arc, Mutex};
 
@@ -21,14 +15,12 @@ struct Held {
     objects: Vec<ObjectMeta>,
 }
 
-/// Turn a walk into dataset rows, each format judging its own way.
+/// Turn a walk into dataset rows.
 ///
-/// Every format is asked about every object, as [`ListingFactory::list_datasets`]
-/// does over a finished listing, so two formats that claim one object produce
-/// two rows there and here alike. An error in the walk is an error row, and the
-/// walk is not resumed after it.
-///
-/// [`ListingFactory::list_datasets`]: beacon_datafusion_ext::listing_factory::ListingFactory::list_datasets
+/// Every format is asked about every object, so two formats that claim one
+/// object produce two rows. A per-object format answers as the object passes.
+/// A deferred format gets its candidates together after the walk. An error in
+/// the walk is an error row.
 pub fn classify(
     formats: Vec<Arc<dyn FileFormatFactoryExt>>,
     objects: BoxStream<'static, Result<ObjectMeta>>,
@@ -45,8 +37,7 @@ pub fn classify(
             }),
         }
     }
-    // Shared between the walk and the tail. The lock is never held across an
-    // await, and the tail runs only after the walk has ended.
+    // Shared with the tail, which runs only after the walk has ended.
     let held = Arc::new(Mutex::new(held));
     let held_for_tail = Arc::clone(&held);
 
@@ -182,8 +173,7 @@ mod tests {
     /// The paths each `discover_datasets` call was handed.
     type Seen = Arc<Mutex<Vec<Vec<String>>>>;
 
-    /// Claims the outermost `marker` of each tree, which needs every marker at
-    /// once. Records what each call was handed.
+    /// Claims the outermost `marker` of each tree. Records what each call was handed.
     #[derive(Debug)]
     struct MarkerFactory {
         seen: Seen,
@@ -252,8 +242,6 @@ mod tests {
         )
     }
 
-    /// A per-object format answers as each object passes, with that object's
-    /// size and timestamp on the row.
     #[tokio::test]
     async fn per_object_rows_leave_with_their_metadata() {
         let got = rows(
@@ -267,7 +255,6 @@ mod tests {
         assert!(got[0].last_modified.is_some());
     }
 
-    /// A deferred format sees its candidates together, once, and nothing else.
     #[tokio::test]
     async fn a_deferred_format_judges_its_candidates_together() {
         let (factory, seen) = marker_factory();
@@ -292,8 +279,6 @@ mod tests {
         );
     }
 
-    /// A deferred row still names its object, so it carries that object's size
-    /// and timestamp like a per-object row does.
     #[tokio::test]
     async fn a_deferred_row_carries_its_object_metadata() {
         let (factory, _) = marker_factory();
@@ -302,8 +287,6 @@ mod tests {
         assert!(got[0].last_modified.is_some());
     }
 
-    /// Deferred rows follow the walk. A per-object row that arrives after the
-    /// marker still leaves first.
     #[tokio::test]
     async fn deferred_rows_come_after_the_walk() {
         let (factory, _) = marker_factory();
@@ -315,8 +298,6 @@ mod tests {
         assert_eq!(paths(&got), vec!["a.foo", "x/marker"]);
     }
 
-    /// A failure in the walk is a failure of the listing. It must not end the
-    /// rows quietly.
     #[tokio::test]
     async fn a_listing_error_reaches_the_rows() {
         let walk = futures::stream::iter(vec![

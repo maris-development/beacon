@@ -121,10 +121,7 @@ pub(crate) fn build_object_store(
                     }
                 }
             }
-            // Large listing pages, walked in parallel shards. `ObjectStore::list`
-            // sends no `max-keys`, so a server falls back to 1000 per page and a
-            // recursive walk becomes a long chain of sequential requests. See
-            // `big_page_list`.
+            // Sized pages, walked in parallel shards. See `big_page_list`.
             Arc::new(crate::big_page_list::BigPageList::new(
                 builder
                     .build()

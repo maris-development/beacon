@@ -1,13 +1,7 @@
 //! [`DatasetsTable`]: the table `list_datasets` returns.
 //!
-//! # Nothing happens until it is scanned
-//!
-//! The listing used to run inside `TableFunctionImpl::call`, a synchronous
-//! trait method. It reached the store through `block_in_place` + `block_on`
-//! and held a worker thread for the whole walk, during logical planning, before
-//! anything decided to read it. [`TableProvider::scan`] is async, so the walk
-//! belongs there. Even there it only builds the plan. The walk itself starts
-//! when the plan executes. See [`super::exec`].
+//! `scan` resolves the path and builds the plan. The walk itself runs when
+//! the plan executes. See [`super::exec`].
 
 use std::sync::Arc;
 
@@ -26,8 +20,7 @@ use datafusion::{
 use super::classify::classify;
 use super::exec::{DatasetsExec, RowStreamFactory};
 
-/// The full `DatasetMetadata` shape, so a caller gets everything discovery
-/// computed rather than just the name and format.
+/// The full `DatasetMetadata` shape.
 pub fn list_datasets_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("file_name", DataType::Utf8, false),
@@ -89,11 +82,6 @@ impl TableProvider for DatasetsTable {
         TableType::Base
     }
 
-    /// Builds the plan. The walk itself runs when the plan executes.
-    ///
-    /// `limit` is the planner push-down. Here it bounds the walk as well as the
-    /// rows: the listing is a lazy stream, so the node stopping stops the pages
-    /// behind it.
     async fn scan(
         &self,
         state: &dyn Session,
@@ -112,8 +100,7 @@ impl TableProvider for DatasetsTable {
                 )
             })?;
 
-        // The path is resolved here, against this session. The listing holds no
-        // session, so each execute rebuilds the walk from it.
+        // The listing holds no session, so each execute rebuilds the walk from it.
         let listing = factory.listing(state, &self.pattern)?;
         let formats = self.file_formats.clone();
         let rows: RowStreamFactory =
