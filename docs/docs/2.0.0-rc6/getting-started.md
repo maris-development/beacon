@@ -40,10 +40,14 @@ docker run -d \
   -e BEACON_ADMIN_PASSWORD=securepassword \
   -v ./datasets:/beacon/data/datasets \
   -v ./tables:/beacon/data/tables \
-  ghcr.io/maris-development/beacon:latest
+  ghcr.io/maris-development/beacon:v2.0.0-rc6
 ```
 
-Beacon now serves on <http://localhost:5001>.
+The tag `v2.0.0-rc6` is the release that this documentation describes.
+
+Beacon now serves on <http://localhost:5001>. That page is the home page. It shows the server
+version. It links to the admin UI, the Swagger UI, the API reference, the OpenAPI document, the
+health check and this documentation.
 
 ### 2. Add data
 
@@ -95,13 +99,13 @@ docker run -d \
     -v ./datasets:/beacon/data/datasets \
     -v ./tables:/beacon/data/tables \
     -v ./logs:/beacon/logs \
-    ghcr.io/maris-development/beacon:latest
+    ghcr.io/maris-development/beacon:v2.0.0-rc6
 ```
 
 ```yaml [docker-compose.yml]
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:latest
+        image: ghcr.io/maris-development/beacon:v2.0.0-rc6
         container_name: beacon
         restart: unless-stopped
         ports:
@@ -118,7 +122,8 @@ services:
 
 :::
 
-For Compose, run `docker compose up -d`. Beacon now runs. Open the
+For Compose, run `docker compose up -d`. Beacon now runs. Open `http://localhost:5001` for the home
+page. It links to the admin UI and the API docs. Open the
 [admin UI](/docs/2.0.0-rc6/connect/web-admin-ui) at `http://localhost:5001/admin` to explore and
 query. Open `http://localhost:5001/swagger` for the API docs. You can query any file in `./datasets`
 at once.
@@ -130,9 +135,9 @@ example `beacon.log.2026-08-19`. Without the volume the files stay in the contai
 :::
 
 ::: tip Two ways to connect
-Beacon exposes two endpoints. The **HTTP API** on port `5001` serves SQL and JSON queries, the admin
-UI and the OpenAPI docs. The **Arrow Flight SQL** server on port `32011` uses a columnar protocol
-with high throughput. Clients such as
+Beacon exposes two endpoints. The **HTTP API** on port `5001` serves the home page, SQL and JSON
+queries, the admin UI and the OpenAPI docs. The **Arrow Flight SQL** server on port `32011` uses a
+columnar protocol with high throughput. Clients such as
 [JetBrains DataGrip](/docs/2.0.0-rc6/connect/datagrip) and the
 [Python ADBC driver](/docs/2.0.0-rc6/connect/python-adbc) use it. Flight SQL authenticates with a
 bearer token. Tune it or switch it off with the `BEACON_FLIGHT_SQL_*`
@@ -166,13 +171,13 @@ docker run -d \
     -e BEACON_S3_DATASETS=true \
     -v ./tables:/beacon/data/tables \
     -v ./logs:/beacon/logs \
-    ghcr.io/maris-development/beacon:latest
+    ghcr.io/maris-development/beacon:v2.0.0-rc6
 ```
 
 ```yaml [docker-compose.yml]
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:latest
+        image: ghcr.io/maris-development/beacon:v2.0.0-rc6
         container_name: beacon
         restart: unless-stopped
         ports:
