@@ -4,7 +4,6 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::datatypes::SchemaRef;
 use datafusion::common::config::ConfigOptions;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
@@ -34,8 +33,6 @@ use super::{NdBroadcastExec, NdExecutionPlan, SendableNdBatchStream};
 pub struct NdSourceExec {
     /// Child plan producing nd-encoded `RecordBatch`es.
     input: Arc<dyn ExecutionPlan>,
-    /// Decoded (logical) output schema.
-    logical_schema: SchemaRef,
     properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
 }
@@ -55,7 +52,6 @@ impl NdSourceExec {
         );
         Ok(Self {
             input,
-            logical_schema,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
         })

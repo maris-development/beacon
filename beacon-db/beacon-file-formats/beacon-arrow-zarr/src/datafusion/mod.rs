@@ -14,7 +14,7 @@ use beacon_datafusion_ext::format_ext::{
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::type_widening::{LabeledSchema, session_widening};
 use datafusion::{
-    catalog::{Session, memory::DataSourceExec},
+    catalog::Session,
     common::{GetExt, Statistics},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
@@ -287,15 +287,7 @@ impl ZarrFormat {
 /// The scan carries nd data as `beacon.nd`-encoded struct columns, so
 /// `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it back to the
 /// logical table schema above the scan.
-pub fn nd_scan_plan(conf: FileScanConfig) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-    let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
-    let nd_source = Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(
-        data_source,
-    )?);
-    Ok(Arc::new(
-        beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?,
-    ))
-}
+pub use beacon_datafusion_ext::nd::exec::nd_scan_plan;
 
 #[async_trait::async_trait]
 impl FileFormat for ZarrFormat {

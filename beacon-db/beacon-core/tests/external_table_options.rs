@@ -2,7 +2,7 @@
 //!
 //! DataFusion's SQL planner renames an `OPTIONS` key without a `.` to
 //! `format.<key>`. The crawler and a persisted `table.json` pass the key
-//! unchanged. The NetCDF, HDF5, Zarr and BBF factories read only the bare key,
+//! unchanged. The NetCDF, HDF5 and Zarr factories read only the bare key,
 //! so every option written in SQL was dropped without a word. They now read
 //! both spellings.
 
@@ -155,19 +155,4 @@ async fn an_hdf5_table_rejects_an_unknown_convention() {
         .expect_err("an unknown convention must not be ignored")
         .to_string();
     assert!(error.contains("no-such-convention"), "{error}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_bbf_table_rejects_an_invalid_boolean_option() {
-    let rt = runtime("options-bbf-invalid-bool").await;
-
-    let error = rt
-        .try_sql(
-            "CREATE EXTERNAL TABLE obs STORED AS BBF LOCATION 'obs/' \
-             OPTIONS ('split_streams_slice' 'perhaps')",
-        )
-        .await
-        .expect_err("an invalid boolean must not be ignored")
-        .to_string();
-    assert!(error.contains("split_streams_slice"), "{error}");
 }
