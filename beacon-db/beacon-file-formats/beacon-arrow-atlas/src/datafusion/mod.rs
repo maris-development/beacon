@@ -13,7 +13,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use arrow::datatypes::{Schema, SchemaRef};
 use beacon_datafusion_ext::format_ext::{
-    DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
+    DatasetMetadata, Discovery, FileFormatFactoryExt, SchemaOptions, SchemaUnit,
+    units_over_stores,
 };
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
@@ -115,6 +116,15 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
     ///
     /// A collection's datasets are enumerated at plan time, not here: a listing
     /// of a data lake would otherwise open every collection it found.
+    /// `discover_datasets` keeps the outermost of nested markers, which needs
+    /// them side by side. A listing holds the markers for it and judges them
+    /// together at the end.
+    fn discovery(&self) -> Discovery {
+        Discovery::Deferred {
+            candidate: crate::store::is_atlas_marker,
+        }
+    }
+
     fn discover_datasets(&self, objects: &[ObjectMeta]) -> Result<Vec<DatasetMetadata>> {
         let format = self.get_ext();
         Ok(top_level_atlas_markers(objects)
@@ -483,6 +493,33 @@ mod deal_tests {
             1,
             "no partition reads as one"
         );
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    /// A collection is the outermost of several markers, so Atlas must see its
+    /// markers together. It defers, and it holds the markers and nothing else.
+    #[test]
+    fn discovery_is_deferred_to_the_markers() {
+        use beacon_datafusion_ext::format_ext::Discovery;
+
+        let meta = |path: &str| ObjectMeta {
+            location: object_store::path::Path::from(path),
+            last_modified: Default::default(),
+            size: 1,
+            e_tag: None,
+            version: None,
+        };
+        let factory = AtlasFormatFactory::new(AtlasOptions::default());
+        let Discovery::Deferred { candidate } = factory.discovery() else {
+            panic!("Atlas cannot judge a marker alone, so it must defer");
+        };
+        assert!(candidate(&meta("obs/data.atlas")));
+        assert!(!candidate(&meta("obs/data.atlas.mask")), "the mask is not held");
+        assert!(!candidate(&meta("obs/a.parquet")));
     }
 }
 

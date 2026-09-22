@@ -9,7 +9,8 @@ use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{
-    DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
+    DatasetMetadata, Discovery, FileFormatFactoryExt, SchemaOptions, SchemaUnit,
+    units_over_stores,
 };
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::type_widening::{LabeledSchema, session_widening};
@@ -155,6 +156,16 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
     /// while leaving the marker where it was.
     fn schema_units(&self, objects: &[ObjectMeta]) -> Vec<SchemaUnit> {
         units_over_stores(objects, &crate::util::top_level_zarr_meta_v3(objects))
+    }
+
+    /// Zarr v3 gives every group and every array a `zarr.json`, so a marker
+    /// alone does not say whether it is a store root. `discover_datasets`
+    /// compares the markers and keeps the shallowest, so a listing holds the
+    /// markers for it and judges them together at the end.
+    fn discovery(&self) -> Discovery {
+        Discovery::Deferred {
+            candidate: is_zarr_v3_metadata,
+        }
     }
 
     fn discover_datasets(
@@ -535,6 +546,28 @@ mod tests {
     use datafusion::prelude::SessionContext;
 
     use super::{ZarrFormat, ZarrFormatFactory, ZarrSource, parse_bool_option};
+
+    /// A store root is the shallowest of several markers, so Zarr must see its
+    /// markers together. It defers, and it holds the markers and nothing else.
+    #[test]
+    fn discovery_is_deferred_to_the_markers() {
+        use beacon_datafusion_ext::format_ext::{Discovery, FileFormatFactoryExt};
+
+        let meta = |path: &str| object_store::ObjectMeta {
+            location: object_store::path::Path::from(path),
+            last_modified: Default::default(),
+            size: 1,
+            e_tag: None,
+            version: None,
+        };
+        let factory = ZarrFormatFactory::new(Default::default());
+        let Discovery::Deferred { candidate } = factory.discovery() else {
+            panic!("Zarr cannot judge a marker alone, so it must defer");
+        };
+        assert!(candidate(&meta("cube/zarr.json")));
+        assert!(candidate(&meta("cube/lat/zarr.json")));
+        assert!(!candidate(&meta("cube/lat/c/0/0")), "a chunk is not held");
+    }
 
     /// Register the bundled `gridded-example.zarr` store as a DataFusion table
     /// backed by [`ZarrFormat`] + [`ListingTable`].

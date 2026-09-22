@@ -1,8 +1,11 @@
 use std::{path::PathBuf, sync::Arc};
 
 use datafusion::{
-    catalog::Session, datasource::listing::ListingTableUrl, execution::object_store::ObjectStoreUrl,
+    catalog::Session, datasource::listing::ListingTableUrl, error::DataFusionError,
+    execution::object_store::ObjectStoreUrl,
 };
+use futures::stream::{BoxStream, StreamExt, TryStreamExt};
+use object_store::ObjectMeta;
 use url::Url;
 
 use crate::format_ext::{DatasetMetadata, FileFormatFactoryExt};
@@ -187,29 +190,13 @@ impl ListingFactory {
         file_formats: &[Arc<dyn FileFormatFactoryExt>],
         glob_path: &str,
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-        use datafusion::error::DataFusionError;
-        use futures::StreamExt;
-
-        let listing_url = self.parse_listing_table_url(session, glob_path)?;
-        let store_url = listing_url.object_store();
-        let store = session
-            .runtime_env()
-            .object_store(store_url.clone())
-            .map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "list_datasets: failed to get object store for {store_url}: {e}"
-                ))
-            })?;
+        use futures::TryStreamExt;
 
         // Enumerate every object the glob matches once, up front, so each format
-        // classifies against the same listing.
-        let mut objects = Vec::new();
-        let mut entry_stream = listing_url.list_all_files(session, &store, "").await?;
-        while let Some(entry) = entry_stream.next().await {
-            if let Ok(entry) = entry {
-                objects.push(entry);
-            }
-        }
+        // classifies against the same listing. A listing error propagates: a
+        // timeout part-way through the walk must not look like a short but
+        // complete result.
+        let objects: Vec<ObjectMeta> = self.listing(session, glob_path)?.stream().try_collect().await?;
 
         // Ask each file format which objects it owns and how to interpret them.
         let mut datasets = vec![];
@@ -221,6 +208,104 @@ impl ListingFactory {
 
         Ok(datasets)
     }
+
+    /// Resolve `glob_path` into the listing it names.
+    ///
+    /// This is the only half of a listing that needs a session. The returned
+    /// [`ObjectListing`] holds what the walk needs and reads as many times as a
+    /// caller wants, so a plan resolves once here and reads at execute time.
+    pub fn listing(
+        &self,
+        session: &dyn Session,
+        glob_path: &str,
+    ) -> datafusion::error::Result<ObjectListing> {
+        let url = self.parse_listing_table_url(session, glob_path)?;
+        let store_url = url.object_store();
+        let store = session
+            .runtime_env()
+            .object_store(store_url.clone())
+            .map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "listing: failed to get object store for {store_url}: {e}"
+                ))
+            })?;
+        Ok(ObjectListing { store, url })
+    }
+}
+
+/// A resolved listing: a store, and the URL that selects objects within it.
+///
+/// Holds no session, so it is `'static` and readable more than once. Path
+/// resolution happened when [`ListingFactory::listing`] built it, so every
+/// reader inherits the same rules: the configured default store, a schemed
+/// path, a local directory, and the glob.
+#[derive(Debug, Clone)]
+pub struct ObjectListing {
+    store: Arc<dyn object_store::ObjectStore>,
+    url: ListingTableUrl,
+}
+
+impl ObjectListing {
+    /// The store the objects live in.
+    pub fn store(&self) -> &Arc<dyn object_store::ObjectStore> {
+        &self.store
+    }
+
+    /// The directory this listing addresses, relative to the store root. For a
+    /// glob that is the literal head, the part before the first wildcard.
+    pub fn prefix(&self) -> &object_store::path::Path {
+        self.url.prefix()
+    }
+
+    /// Every object the URL matches, as pages arrive.
+    ///
+    /// Yields each object as its page arrives and holds none of them. Objects,
+    /// not datasets: walking a store and deciding what a file is are different
+    /// jobs, and only the second needs to know about formats.
+    ///
+    /// Dropping the stream stops the walk.
+    pub fn stream(&self) -> BoxStream<'static, datafusion::error::Result<ObjectMeta>> {
+        use object_store::ObjectStoreExt;
+
+        let store = Arc::clone(&self.store);
+        let url = self.url.clone();
+        futures::stream::once(async move {
+            let prefix = url.prefix().clone();
+            // A URL with no glob and no trailing slash names one object, not a
+            // directory. A store lists a prefix at segment boundaries, so listing
+            // `obs/a.parquet` looks for a directory of that name and finds
+            // nothing. Ask for the object itself, and fall back to listing when
+            // it turns out to be a directory after all.
+            if !url.is_collection() {
+                match store.head(&prefix).await {
+                    Ok(meta) => return futures::stream::iter([Ok(meta)]).boxed(),
+                    Err(object_store::Error::NotFound { .. }) => {}
+                    Err(e) => {
+                        return futures::stream::iter([Err(DataFusionError::Execution(
+                            format!("listing `{prefix}` failed: {e}"),
+                        ))])
+                        .boxed();
+                    }
+                }
+            }
+            let failed_at = prefix.clone();
+            store
+                .list(Some(&prefix))
+                .map_err(move |e| {
+                    DataFusionError::Execution(format!(
+                        "listing `{failed_at}` failed part-way: {e}"
+                    ))
+                })
+                // The prefix is only the literal head of the glob, so the rest of
+                // the pattern is applied here, as a listing table does.
+                .try_filter(move |object| {
+                    futures::future::ready(url.contains(&object.location, false))
+                })
+                .boxed()
+        })
+        .flatten()
+        .boxed()
+    }
 }
 
 /// Fill each dataset's `size` + `last_modified` from the object listing.
@@ -228,7 +313,7 @@ impl ListingFactory {
 /// A single-file dataset matches an object exactly; a directory-shaped dataset
 /// (e.g. Zarr) aggregates every object under its prefix (sum of sizes, newest
 /// mtime). Datasets with no matching object keep `None`.
-fn enrich_with_object_metadata(
+pub fn enrich_with_object_metadata(
     datasets: &mut [DatasetMetadata],
     objects: &[object_store::ObjectMeta],
 ) {
@@ -267,6 +352,118 @@ mod tests {
     use object_store::path::Path as ObjectPath;
 
     use super::*;
+
+    // ---- ObjectListing ----------------------------------------------------
+
+    /// A session over a local directory holding `files`, and the dynamic factory
+    /// that resolves paths against it.
+    fn local_listing(
+        files: &[(&str, &str)],
+    ) -> (tempfile::TempDir, SessionContext, ListingFactory) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for (path, body) in files {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        (dir, SessionContext::new(), ListingFactory::dynamic())
+    }
+
+    /// Paths the listing yields, relative to `root`, sorted.
+    async fn streamed(listing: &ObjectListing, root: &std::path::Path) -> Vec<String> {
+        use futures::stream::TryStreamExt;
+        // Anchor on the temp directory name rather than the whole root:
+        // `canonicalize` yields a verbatim prefix on Windows that the object
+        // path does not carry.
+        let anchor = format!("{}/", root.file_name().unwrap().to_string_lossy());
+        let mut paths: Vec<String> = listing
+            .stream()
+            .map_ok(|meta| {
+                let full = meta.location.as_ref().to_string();
+                match full.split_once(&anchor) {
+                    Some((_, rest)) => rest.to_string(),
+                    None => full,
+                }
+            })
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the walk succeeds");
+        paths.sort();
+        paths
+    }
+
+    /// A directory streams everything under it.
+    #[tokio::test]
+    async fn a_directory_streams_its_subtree() {
+        let (dir, ctx, factory) =
+            local_listing(&[("a.csv", "x"), ("sub/b.csv", "y"), ("sub/deep/c.csv", "z")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/", root.display()))
+            .expect("the directory resolves");
+
+        assert_eq!(
+            streamed(&listing, &root).await,
+            vec!["a.csv", "sub/b.csv", "sub/deep/c.csv"]
+        );
+    }
+
+    /// A glob narrows the stream by extension, and crosses directories while it
+    /// does. DataFusion matches listing globs with the default `MatchOptions`,
+    /// where `require_literal_separator` is false, so `*` does not stop at `/`.
+    #[tokio::test]
+    async fn a_glob_narrows_the_stream_across_directories() {
+        let (dir, ctx, factory) =
+            local_listing(&[("a.csv", "x"), ("a.txt", "y"), ("sub/b.csv", "z")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/*.csv", root.display()))
+            .expect("the glob resolves");
+
+        assert_eq!(streamed(&listing, &root).await, vec!["a.csv", "sub/b.csv"]);
+    }
+
+    /// A path naming one file yields that file. A store lists a prefix at
+    /// segment boundaries, so listing `a.csv` would look for a directory of that
+    /// name and find nothing.
+    #[tokio::test]
+    async fn a_single_file_yields_itself() {
+        let (dir, ctx, factory) = local_listing(&[("a.csv", "x"), ("b.csv", "y")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/a.csv", root.display()))
+            .expect("the file resolves");
+
+        assert_eq!(streamed(&listing, &root).await, vec!["a.csv"]);
+    }
+
+    /// A path that matches nothing is empty, not an error.
+    #[tokio::test]
+    async fn a_missing_path_streams_nothing() {
+        let (dir, ctx, factory) = local_listing(&[("a.csv", "x")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/nope.csv", root.display()))
+            .expect("the path resolves");
+
+        assert!(streamed(&listing, &root).await.is_empty());
+    }
+
+    /// The same listing reads more than once: a plan resolves it during `scan`
+    /// and reads it again for every execution.
+    #[tokio::test]
+    async fn a_listing_reads_more_than_once() {
+        let (dir, ctx, factory) = local_listing(&[("a.csv", "x"), ("b.csv", "y")]);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let listing = factory
+            .listing(&ctx.state(), &format!("{}/", root.display()))
+            .expect("the directory resolves");
+
+        let first = streamed(&listing, &root).await;
+        let second = streamed(&listing, &root).await;
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+    }
 
     /// A configured factory whose default store maps to `root`. The store URL is
     /// irrelevant to the path-resolution these tests exercise (that reads only the

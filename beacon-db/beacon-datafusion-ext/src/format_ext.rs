@@ -13,11 +13,65 @@ use datafusion::{
 
 use crate::listing_factory::ListingFactory;
 
+/// How a format judges a listing.
+///
+/// A listing streams. A format that judges each object alone lets the rows
+/// leave as pages arrive. A format that must compare objects, such as one that
+/// keeps the shallowest of several markers, cannot. It names the objects it
+/// needs and gets them together when the listing ends.
+#[derive(Clone, Copy)]
+pub enum Discovery {
+    /// Each object is judged alone. [`FileFormatFactoryExt::classify_object`]
+    /// answers, as the object arrives.
+    PerObject,
+    /// Objects that pass `candidate` are held, and
+    /// [`FileFormatFactoryExt::discover_datasets`] judges them together when the
+    /// listing ends. Every other object is dropped on sight, so the format
+    /// holds its markers and not the store.
+    Deferred { candidate: fn(&ObjectMeta) -> bool },
+}
+
+impl std::fmt::Debug for Discovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Discovery::PerObject => write!(f, "PerObject"),
+            Discovery::Deferred { .. } => write!(f, "Deferred"),
+        }
+    }
+}
+
 pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>>;
+
+    /// How this format judges a listing. Most formats read an extension, so
+    /// the default is per object. See [`Discovery`].
+    fn discovery(&self) -> Discovery {
+        Discovery::PerObject
+    }
+
+    /// Whether this format claims `object`, judged from that object alone.
+    ///
+    /// The default asks [`Self::discover_datasets`] about a listing of one, so a
+    /// per-object format needs no override. The size and timestamp come from
+    /// `object` here, where the whole-listing path fills them in afterwards.
+    ///
+    /// A [`Discovery::Deferred`] format is never asked this.
+    fn classify_object(&self, object: &ObjectMeta) -> Option<DatasetMetadata> {
+        let mut found = self
+            .discover_datasets(std::slice::from_ref(object))
+            .ok()?
+            .into_iter()
+            .next()?;
+        if found.file_path == object.location.as_ref() {
+            found.size = Some(object.size);
+            found.last_modified = Some(object.last_modified);
+        }
+        Some(found)
+    }
+
     fn file_format_name(&self) -> String;
     fn list_with_file_extension(&self) -> bool {
         true
@@ -382,6 +436,100 @@ impl DatasetMetadata {
             size: None,
             last_modified: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use std::any::Any;
+
+    use datafusion::common::GetExt;
+    use object_store::path::Path;
+
+    use super::*;
+
+    /// A format that claims every `.foo` object and decides per object, which
+    /// is what the trait defaults assume.
+    #[derive(Debug)]
+    struct FooFactory;
+
+    impl GetExt for FooFactory {
+        fn get_ext(&self) -> String {
+            "foo".to_string()
+        }
+    }
+
+    impl FileFormatFactory for FooFactory {
+        fn create(
+            &self,
+            _state: &dyn Session,
+            _options: &HashMap<String, String>,
+        ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+            unimplemented!("discovery never creates a format")
+        }
+
+        fn default(&self) -> Arc<dyn FileFormat> {
+            unimplemented!("discovery never creates a format")
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    impl FileFormatFactoryExt for FooFactory {
+        fn discover_datasets(
+            &self,
+            objects: &[ObjectMeta],
+        ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
+            Ok(objects
+                .iter()
+                .filter(|o| o.location.extension() == Some("foo"))
+                .map(|o| DatasetMetadata::new(o.location.to_string(), "foo".to_string()))
+                .collect())
+        }
+
+        fn file_format_name(&self) -> String {
+            "foo".to_string()
+        }
+    }
+
+    fn object(path: &str, size: u64, ts: i64) -> ObjectMeta {
+        ObjectMeta {
+            location: Path::from(path),
+            last_modified: chrono::DateTime::from_timestamp(ts, 0).unwrap(),
+            size,
+            e_tag: None,
+            version: None,
+        }
+    }
+
+    /// A format that does not say otherwise judges each object alone.
+    #[test]
+    fn discovery_defaults_to_per_object() {
+        assert!(matches!(FooFactory.discovery(), Discovery::PerObject));
+    }
+
+    /// The default `classify_object` asks `discover_datasets` about a listing of
+    /// one, and attaches that object's size and timestamp to the answer.
+    #[test]
+    fn a_per_object_format_classifies_one_object_with_its_metadata() {
+        let found = FooFactory
+            .classify_object(&object("a/b.foo", 42, 1_700_000_000))
+            .expect("a .foo object is a dataset");
+        assert_eq!(found.file_path, "a/b.foo");
+        assert_eq!(found.format, "foo");
+        assert_eq!(found.size, Some(42));
+        assert_eq!(
+            found.last_modified,
+            Some(chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap())
+        );
+    }
+
+    /// An object the format does not claim is not a dataset, and not an error.
+    #[test]
+    fn a_per_object_format_declines_an_object_it_does_not_claim() {
+        assert!(FooFactory.classify_object(&object("a/b.bar", 1, 0)).is_none());
     }
 }
 
