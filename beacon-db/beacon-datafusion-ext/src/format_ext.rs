@@ -33,6 +33,15 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
         vec![self.get_ext()]
     }
 
+    /// The filename extensions the crawler builds a table on.
+    ///
+    /// A crawled table reads with default options. An alias that needs other
+    /// options (CSV reads `tsv` only with a tab delimiter) must stay out of
+    /// this list. Defaults to the canonical extension.
+    fn crawlable_extensions(&self) -> Vec<String> {
+        vec![self.get_ext()]
+    }
+
     /// Create a [`FileFormat`] for files located at `url`.
     ///
     /// A format read *natively* — opened by local path or http(s) URL by an

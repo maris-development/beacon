@@ -32,6 +32,11 @@ use crate::datafusion::{
 
 pub const NETCDF_EXTENSION: &str = "nc";
 
+/// Every filename extension that a netCDF file uses, canonical first.
+///
+/// `cdf` is not here: it is also the NASA Common Data Format, which this reader cannot open.
+pub const NETCDF_EXTENSIONS: [&str; 4] = [NETCDF_EXTENSION, "nc3", "nc4", "netcdf"];
+
 pub mod object_meta_resolver;
 pub mod options;
 #[cfg(test)]
@@ -295,10 +300,11 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         let datasets = objects
             .iter()
             .filter(|obj| {
-                obj.location
-                    .extension()
-                    .map(|ext| ext == NETCDF_EXTENSION)
-                    .unwrap_or(false)
+                obj.location.extension().is_some_and(|ext| {
+                    NETCDF_EXTENSIONS
+                        .iter()
+                        .any(|known| ext.eq_ignore_ascii_case(known))
+                })
             })
             .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
             .collect();
@@ -307,6 +313,15 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
 
     fn file_format_name(&self) -> String {
         self.get_ext()
+    }
+
+    fn file_extensions(&self) -> Vec<String> {
+        NETCDF_EXTENSIONS.map(String::from).to_vec()
+    }
+
+    /// Every spelling reads the same way, so the crawler can build a table on each.
+    fn crawlable_extensions(&self) -> Vec<String> {
+        self.file_extensions()
     }
 
     /// netCDF opts into the schema cache on its reader backend alone.
@@ -746,6 +761,37 @@ mod reader_backend_tests {
                 .await
                 .unwrap_or_else(|e| panic!("register {} on {backend:?}: {e}", path.display()));
         ctx.register_table(table, Arc::new(listing)).unwrap();
+    }
+
+    /// Both readers open a file by its content, so an alias extension reads the same rows.
+    #[tokio::test]
+    async fn a_file_with_an_alias_extension_reads_on_both_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let alias = dir.path().join("wod.nc4");
+        std::fs::copy(test_file(WOD_FILE), &alias).unwrap();
+
+        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
+            let ctx = session();
+            register(&ctx, "canonical", backend, WOD_FILE).await;
+            register_path(&ctx, "alias", backend, &alias).await;
+
+            let count = |table: &'static str| {
+                let ctx = ctx.clone();
+                async move {
+                    let batches = ctx
+                        .sql(&format!("SELECT COUNT(*) FROM {table}"))
+                        .await
+                        .unwrap()
+                        .collect()
+                        .await
+                        .unwrap();
+                    arrow::util::pretty::pretty_format_batches(&batches)
+                        .unwrap()
+                        .to_string()
+                }
+            };
+            assert_eq!(count("alias").await, count("canonical").await, "{backend:?}");
+        }
     }
 
     // ── statistics follow the reader ───────────────────────────────────
@@ -2403,5 +2449,60 @@ mod reader_backend_tests {
                 );
             }
         }
+    }
+}
+
+/// The filename extensions that netCDF files use.
+#[cfg(test)]
+mod extension_tests {
+    use object_store::path::Path;
+
+    use super::*;
+
+    fn factory() -> NetCDFFormatFactory {
+        NetCDFFormatFactory::new(
+            Arc::new(ListingFactory::dynamic()),
+            std::env::temp_dir(),
+            NetcdfOptions::default(),
+            NetcdfConfig::default(),
+        )
+    }
+
+    fn object_meta(path: &str) -> ObjectMeta {
+        ObjectMeta {
+            location: Path::from(path),
+            last_modified: Default::default(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        }
+    }
+
+    /// The registry keys a format by these, so each spelling resolves to netCDF.
+    #[test]
+    fn factory_advertises_every_netcdf_extension() {
+        let factory = factory();
+        assert_eq!(factory.get_ext(), "nc");
+        assert_eq!(
+            factory.file_extensions(),
+            vec!["nc", "nc3", "nc4", "netcdf"]
+        );
+    }
+
+    /// Discovery keeps every spelling, in any case, and labels it `nc`.
+    #[test]
+    fn discovery_keeps_every_netcdf_extension() {
+        let objects: Vec<ObjectMeta> = [
+            "a.nc", "b.nc3", "c.nc4", "d.netcdf", "e.cdf", "f.NC4", "g.h5", "h.ncml", "i.parquet",
+        ]
+        .into_iter()
+        .map(object_meta)
+        .collect();
+
+        let datasets = factory().discover_datasets(&objects).unwrap();
+
+        let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+        assert_eq!(paths, ["a.nc", "b.nc3", "c.nc4", "d.netcdf", "f.NC4"]);
+        assert!(datasets.iter().all(|d| d.format == "nc"));
     }
 }
