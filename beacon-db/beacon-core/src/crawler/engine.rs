@@ -24,7 +24,7 @@ use beacon_functions::listing::list_datasets;
 use crate::statement_plan::{upgrade_session, SessionCell};
 
 use super::definition::{CrawlerDefinition, CRAWLER_OWNER_OPTION};
-use super::discovery::{assign_table_names, group_into_tables};
+use super::discovery::{assign_table_names, group_into_tables, FormatExtensions};
 
 /// Outcome of a single crawl, suitable for logging or returning over the API.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -86,7 +86,17 @@ impl CrawlEngine {
         .map_err(|e| anyhow::anyhow!("crawler '{}' scan failed: {e}", def.name))?;
 
         // 2. Group into candidate tables + detect partitions (pure logic).
-        let (candidates, skipped_files) = group_into_tables(&datasets, def);
+        let extensions: FormatExtensions = self
+            .file_formats
+            .iter()
+            .map(|format| {
+                (
+                    format.file_format_name().to_lowercase(),
+                    format.crawlable_extensions(),
+                )
+            })
+            .collect();
+        let (candidates, skipped_files) = group_into_tables(&datasets, def, &extensions);
         let names = assign_table_names(&candidates, def);
         report.discovered = candidates.len();
         report.skipped_files = skipped_files.len();

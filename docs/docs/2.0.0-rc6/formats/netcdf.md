@@ -14,6 +14,9 @@ read_netcdf(glob_paths, dimensions, skip_unbroadcastable)
 
 Beacon reads the NetCDF files that match one or more glob patterns.
 
+Beacon recognizes `.nc`, `.nc3`, `.nc4` and `.netcdf`, in upper or lower case. It finds them in the
+dataset store automatically. A crawler makes one table for each extension in a folder.
+
 The optional `dimensions` argument selects the variables. Beacon returns a variable only if the list
 holds all of its dimensions. Use the argument to drop variables with many dimensions. Also use it
 when the files hold variables with different dimensions.

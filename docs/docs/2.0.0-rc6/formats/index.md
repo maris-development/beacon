@@ -30,7 +30,7 @@ S3-compatible bucket, chosen at startup. See
 | [GeoParquet](/docs/2.0.0-rc6/formats/geoparquet) | `read_geoparquet` | `GEOPARQUET` | `.geoparquet` |
 | [CSV / TSV](/docs/2.0.0-rc6/formats/csv) | `read_csv` | `CSV` | `.csv`, `.tsv` |
 | [Arrow IPC](/docs/2.0.0-rc6/formats/arrow) | `read_arrow` | `ARROW` | `.arrow`, `.feather` |
-| [NetCDF](/docs/2.0.0-rc6/formats/netcdf) | `read_netcdf` | `NC` | `.nc` |
+| [NetCDF](/docs/2.0.0-rc6/formats/netcdf) | `read_netcdf` | `NC` | `.nc`, `.nc3`, `.nc4`, `.netcdf` |
 | [HDF5](/docs/2.0.0-rc6/formats/hdf5) | `read_hdf5` | `HDF5`, `H5` | `.h5`, `.hdf5` |
 | [Zarr](/docs/2.0.0-rc6/formats/zarr) | `read_zarr` | `ZARR` | `zarr.json` marker |
 | [Atlas](/docs/2.0.0-rc6/formats/atlas) | `read_atlas` | `ATLAS` | `data.atlas` file |
