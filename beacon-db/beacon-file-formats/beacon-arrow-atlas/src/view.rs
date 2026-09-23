@@ -10,7 +10,9 @@ use arrow::datatypes::{FieldRef, Schema};
 use atlas::{ArrayFile, Atlas, Attr};
 use beacon_nd_array::{
     NdArrayD,
-    dataset::{Dataset, default::DefaultDataset, source::DatasetSource},
+    dataset::{
+        Dataset, UnbroadcastableDataset, default::DefaultDataset, source::DatasetSource,
+    },
 };
 use indexmap::IndexMap;
 use object_store::{ObjectMeta, ObjectStore};
@@ -120,6 +122,7 @@ impl AtlasView {
         let arrays =
             on_read_dimensions(dataset_name, arrays, self.spec.read_dimensions.clone()).await?;
         let dataset = DefaultDataset::new(dataset_name.to_string(), arrays)
+            .map_err(|source| UnbroadcastableDataset::new(dataset_name, source))
             .with_context(|| format!("laying out dataset '{dataset_name}'"))?;
         Ok(Arc::new(dataset))
     }
@@ -136,11 +139,12 @@ async fn on_read_dimensions(
     let dataset = Dataset::new(dataset_name.to_string(), arrays).await;
     let Some(dims) = read_dimensions else {
         if let Some(default) = dataset.default_broadcast_dimensions() {
-            anyhow::bail!(
-                "dataset '{dataset_name}' holds the columns read on more than one grid, and \
-                 no one grid fits them all. Name fewer columns, or pass a dimension list: \
-                 read_atlas(paths, dimensions), for example {default:?}"
+            let reason = anyhow::anyhow!(
+                "the columns read sit on more than one grid, and no one grid fits them all. \
+                 Name fewer columns, or pass a dimension list: read_atlas(paths, dimensions), \
+                 for example {default:?}"
             );
+            return Err(UnbroadcastableDataset::new(dataset_name, reason).into());
         }
         return Ok(dataset.arrays);
     };

@@ -50,6 +50,8 @@ pub struct IcechunkTable {
     /// the variables already present is, because every scan re-reads the ref.
     schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
+    /// Skip a group that does not fit `read_dimensions`, instead of failing.
+    skip_unbroadcastable: bool,
 }
 
 impl std::fmt::Debug for IcechunkTable {
@@ -69,6 +71,7 @@ impl IcechunkTable {
     ) -> anyhow::Result<Self> {
         let version = IcechunkVersion::from_options(&definition.options)?;
         let read_dimensions = read_dimensions_option(&definition);
+        let skip_unbroadcastable = skip_unbroadcastable_option(&definition)?;
 
         let ResolvedLocation {
             backend,
@@ -81,6 +84,7 @@ impl IcechunkTable {
             storage.inner(),
             ROOT_GROUP,
             read_dimensions.clone(),
+            skip_unbroadcastable,
             Some("read_icechunk"),
             &beacon_datafusion_ext::type_widening::session_widening(session),
         )
@@ -99,6 +103,7 @@ impl IcechunkTable {
             object_store_url,
             schema,
             read_dimensions,
+            skip_unbroadcastable,
         })
     }
 
@@ -147,6 +152,22 @@ fn read_dimensions_option(definition: &IcechunkTableDefinition) -> Option<Vec<St
     (!dimensions.is_empty()).then_some(dimensions)
 }
 
+/// Read the `skip_unbroadcastable` option: skip a group that does not fit
+/// the dimension list, instead of failing the table.
+fn skip_unbroadcastable_option(definition: &IcechunkTableDefinition) -> anyhow::Result<bool> {
+    let Some(raw) = definition
+        .options
+        .get("skip_unbroadcastable")
+        .or_else(|| definition.options.get("format.skip_unbroadcastable"))
+    else {
+        return Ok(false);
+    };
+    Ok(beacon_datafusion_ext::format_options::parse_bool_option(
+        "skip_unbroadcastable",
+        raw,
+    )?)
+}
+
 #[async_trait::async_trait]
 impl TableProvider for IcechunkTable {
     fn as_any(&self) -> &dyn Any {
@@ -189,6 +210,7 @@ impl TableProvider for IcechunkTable {
         );
         let source = ZarrSource::new(table_schema)
             .with_read_dimensions(self.read_dimensions.clone())
+            .with_skip_unbroadcastable(self.skip_unbroadcastable)
             .with_storage(storage);
 
         let conf = FileScanConfigBuilder::new(self.object_store_url.clone(), Arc::new(source))
@@ -240,6 +262,26 @@ mod tests {
             read_dimensions_option(&definition),
             Some(vec!["time".to_string()])
         );
+    }
+
+    #[test]
+    fn skip_unbroadcastable_option_reads_both_spellings() {
+        let bare = definition(HashMap::from([(
+            "skip_unbroadcastable".to_string(),
+            "true".to_string(),
+        )]));
+        assert!(skip_unbroadcastable_option(&bare).unwrap());
+        let prefixed = definition(HashMap::from([(
+            "format.skip_unbroadcastable".to_string(),
+            "yes".to_string(),
+        )]));
+        assert!(skip_unbroadcastable_option(&prefixed).unwrap());
+        assert!(!skip_unbroadcastable_option(&definition(HashMap::new())).unwrap());
+        let bad = definition(HashMap::from([(
+            "skip_unbroadcastable".to_string(),
+            "maybe".to_string(),
+        )]));
+        assert!(skip_unbroadcastable_option(&bad).is_err());
     }
 
     #[test]

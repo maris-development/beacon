@@ -19,6 +19,10 @@ pub struct NetcdfOptions {
     /// columns in the resulting Arrow schema.
     #[serde(default)]
     pub read_dimensions: Option<Vec<String>>,
+    /// Skip a file that does not fit `read_dimensions`, with a warning,
+    /// instead of failing the query.
+    #[serde(default)]
+    pub skip_unbroadcastable: bool,
     /// Columns to use as NetCDF dimensions when **writing**.
     ///
     /// * `None` / empty → flat output via [`NetCDFSink`](super::sink::NetCDFSink)

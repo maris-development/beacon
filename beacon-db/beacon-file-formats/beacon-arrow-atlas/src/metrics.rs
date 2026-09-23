@@ -12,6 +12,8 @@ pub struct AtlasScanMetrics {
     pub datasets_scanned: Count,
     /// Datasets it skipped because the collection's statistics ruled them out.
     pub datasets_pruned: Count,
+    /// Datasets it skipped because their columns fit no one grid.
+    pub datasets_skipped: Count,
 }
 
 impl AtlasScanMetrics {
@@ -23,6 +25,8 @@ impl AtlasScanMetrics {
                 .counter("atlas_datasets_scanned", partition),
             datasets_pruned: MetricBuilder::new(metrics)
                 .counter("atlas_datasets_pruned", partition),
+            datasets_skipped: MetricBuilder::new(metrics)
+                .counter("atlas_datasets_skipped", partition),
         }
     }
 }

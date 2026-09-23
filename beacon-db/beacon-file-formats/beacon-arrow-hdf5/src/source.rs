@@ -23,7 +23,6 @@ use beacon_nd_array::{
         morsel::{morsel_scan, MorselSource, OpenFile},
         partition::FilePartitions,
     },
-    projection::DatasetProjection,
 };
 use datafusion::{
     config::ConfigOptions,
@@ -50,6 +49,8 @@ pub struct Hdf5Source {
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     read_dimensions: Option<Vec<String>>,
+    /// Skip a file that does not fit `read_dimensions`, instead of failing.
+    skip_unbroadcastable: bool,
     /// How this table reads one file: the naming of the invented dimensions,
     /// and the layout convention. See [`crate::ReadOptions`].
     read_options: ReadOptions,
@@ -73,12 +74,19 @@ impl Hdf5Source {
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             read_dimensions,
+            skip_unbroadcastable: false,
             read_options,
             batch_size: usize::MAX,
             predicate: None,
             projection: None,
             morsel: None,
         }
+    }
+
+    /// The same source, skipping the files that cannot broadcast when `skip`.
+    pub fn with_skip_unbroadcastable(mut self, skip: bool) -> Self {
+        self.skip_unbroadcastable = skip;
+        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -102,6 +110,7 @@ impl FileSource for Hdf5Source {
         Ok(Arc::new(Hdf5Opener::new(
             projected_schema,
             self.read_dimensions.clone(),
+            self.skip_unbroadcastable,
             self.read_options,
             self.batch_size,
             self.predicate.clone(),
@@ -252,6 +261,8 @@ impl FileSource for Hdf5Source {
 struct Hdf5Opener {
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
+    /// Skip a file that does not fit `read_dimensions`, instead of failing.
+    skip_unbroadcastable: bool,
     read_options: ReadOptions,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
@@ -278,6 +289,7 @@ struct Hdf5Files {
     object_store: Arc<dyn ObjectStore>,
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
+    skip_unbroadcastable: bool,
     read_options: ReadOptions,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
@@ -295,13 +307,18 @@ impl std::fmt::Debug for Hdf5Files {
 #[async_trait::async_trait]
 impl OpenFile for Hdf5Files {
     async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<FileRead>> {
-        let dataset = Hdf5Opener::open_dataset(
+        let Some(dataset) = Hdf5Opener::open_dataset(
             self.object_store.clone(),
             file.object_meta.clone(),
             self.read_dimensions.clone(),
+            self.skip_unbroadcastable,
             self.read_options,
         )
-        .await?;
+        .await?
+        else {
+            self.metrics.files_skipped.add(1);
+            return Ok(FileRead::skipped());
+        };
 
         FileRead::plan(
             dataset,
@@ -317,9 +334,11 @@ impl OpenFile for Hdf5Files {
 
 impl Hdf5Opener {
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
+        skip_unbroadcastable: bool,
         read_options: ReadOptions,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
@@ -334,6 +353,7 @@ impl Hdf5Opener {
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
             read_dimensions: read_dimensions.clone(),
+            skip_unbroadcastable,
             read_options,
             batch_size,
             predicate: predicate.clone(),
@@ -346,6 +366,7 @@ impl Hdf5Opener {
             files,
             projected_schema,
             read_dimensions,
+            skip_unbroadcastable,
             read_options,
             batch_size,
             predicate,
@@ -373,6 +394,7 @@ impl Hdf5Opener {
         object: ObjectMeta,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
+        skip_unbroadcastable: bool,
         read_options: ReadOptions,
         batch_size: usize,
         metrics: ReadMetrics,
@@ -381,7 +403,18 @@ impl Hdf5Opener {
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
-            let dataset = Self::open_dataset(store, object, read_dimensions, read_options).await?;
+            let Some(dataset) = Self::open_dataset(
+                store,
+                object,
+                read_dimensions,
+                skip_unbroadcastable,
+                read_options,
+            )
+            .await?
+            else {
+                planning.files_skipped.add(1);
+                return Ok(FileRead::skipped());
+            };
             FileRead::plan(
                 dataset,
                 projected_schema,
@@ -403,12 +436,16 @@ impl Hdf5Opener {
     }
 
     /// Open the file and narrow it to the dimensions this scan reads on.
+    ///
+    /// `None` when the file does not fit the dimension list and
+    /// `skip_unbroadcastable` says to read past it.
     async fn open_dataset(
         store: Arc<dyn ObjectStore>,
         object: ObjectMeta,
         read_dimensions: Option<Vec<String>>,
+        skip_unbroadcastable: bool,
         read_options: ReadOptions,
-    ) -> datafusion::error::Result<beacon_nd_array::dataset::AnyDataset> {
+    ) -> datafusion::error::Result<Option<beacon_nd_array::dataset::AnyDataset>> {
         let dataset = crate::open::open_dataset(&store, &object, read_options)
             .await
             .map_err(|e| {
@@ -422,21 +459,13 @@ impl Hdf5Opener {
         // explicit dimensions were requested, fall back to the dataset's
         // auto-selected default (matching `fetch_schema`). No log label here:
         // this runs per file/partition, so logging would spam.
-        let read_dimensions =
-            beacon_nd_array::dataset::resolve_read_dimensions(&dataset, read_dimensions, None);
-        let Some(dims) = read_dimensions else {
-            return Ok(dataset);
-        };
-        dataset
-            .project(&DatasetProjection {
-                dimension_projection: Some(dims),
-                index_projection: None,
-            })
-            .map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to project HDF5 dataset with dimensions: {e}"
-                ))
-            })
+        beacon_nd_array::dataset::project_read_dimensions_or_skip(
+            dataset,
+            read_dimensions,
+            skip_unbroadcastable,
+            None,
+        )
+        .map_err(|e| DataFusionError::Execution(e.to_string()))
     }
 }
 
@@ -466,6 +495,7 @@ impl FileOpener for Hdf5Opener {
             file.object_meta,
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
+            self.skip_unbroadcastable,
             self.read_options,
             self.batch_size,
             metrics,

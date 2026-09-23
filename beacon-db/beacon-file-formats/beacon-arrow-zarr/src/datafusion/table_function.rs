@@ -7,12 +7,7 @@ use crate::datafusion::ZarrFormat;
 use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use datafusion::{
-    catalog::TableFunctionImpl,
-    common::plan_err,
-    prelude::{Expr, SessionContext},
-    scalar::ScalarValue,
-};
+use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
@@ -43,7 +38,12 @@ impl BeaconTableFunctionImpl for ReadZarrFunc {
     }
 
     fn description(&self) -> Option<String> {
-        Some("Reads Zarr files from specified glob paths.".to_string())
+        Some(
+            "Reads Zarr stores from specified glob paths. The optional second argument lists the \
+             dimensions to read. The optional third argument, a boolean, skips a group that \
+             does not fit that list instead of failing the query."
+                .to_string(),
+        )
     }
 
     fn name(&self) -> String {
@@ -51,11 +51,19 @@ impl BeaconTableFunctionImpl for ReadZarrFunc {
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
-        Some(vec![Field::new(
-            "glob_paths",
-            DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
-            false,
-        )])
+        Some(vec![
+            Field::new(
+                "glob_paths",
+                DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
+                false,
+            ),
+            Field::new(
+                "dimensions",
+                DataType::List(Arc::new(Field::new("dimension", DataType::Utf8, false))),
+                true,
+            ),
+            Field::new("skip_unbroadcastable", DataType::Boolean, true),
+        ])
     }
 }
 
@@ -79,28 +87,8 @@ impl TableFunctionImpl for ReadZarrFunc {
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_zarr")?;
 
         // Optional second argument: an explicit list of dimensions to read.
-        let mut dimensions: Vec<String> = vec![];
-        if let Some(dimensions_arg) = args.get(1)
-            && let Expr::Literal(ScalarValue::List(values), _) = dimensions_arg
-        {
-            let string_array = values.as_ref().values();
-            match string_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-            {
-                Some(str_arr) => {
-                    dimensions = str_arr
-                        .iter()
-                        .filter_map(|opt_str| opt_str.map(|s| s.to_string()))
-                        .collect();
-                }
-                None => {
-                    return plan_err!(
-                        "read_zarr second argument must be a List<Utf8> of dimension names"
-                    );
-                }
-            }
-        }
+        let dimensions =
+            beacon_common::table_function::parse_dimensions_arg(args, 1, "read_zarr", "second")?;
 
         tracing::debug!("read_zarr glob paths: {:?}", glob_paths);
 
@@ -110,10 +98,21 @@ impl TableFunctionImpl for ReadZarrFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
+        // Optional third argument: skip a group that does not fit the list.
+        let skip_unbroadcastable = beacon_common::table_function::parse_bool_arg(
+            args,
+            2,
+            "read_zarr",
+            "third",
+            "skip the groups that cannot broadcast",
+        )?
+        .unwrap_or(false);
+
         // Predicate pushdown is handled automatically by the shared engine, so
         // no manual statistics/column selection is needed.
         let read_dimensions = (!dimensions.is_empty()).then_some(dimensions);
-        let file_format = ZarrFormat::new(read_dimensions);
+        let file_format =
+            ZarrFormat::new(read_dimensions).with_skip_unbroadcastable(skip_unbroadcastable);
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

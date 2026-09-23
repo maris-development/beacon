@@ -34,12 +34,15 @@ pub struct ReadMetrics {
     pub chunks_pruned: Count,
     /// Rows those chunks held.
     pub rows_pruned: Count,
+    /// Files `skip_unbroadcastable` skipped because they did not fit the
+    /// dimension list. Recorded by the partition that opened the file.
+    pub files_skipped: Count,
 }
 
 impl ReadMetrics {
     /// Register this partition's counters.
     ///
-    /// Once per partition, not once per file. Every call here takes four
+    /// Once per partition, not once per file. Every call here takes five
     /// `MetricBuilder`s, and each one ends in `register`, which locks the scan's
     /// one `ExecutionPlanMetricsSet` and pushes onto a `Vec` that is never
     /// pruned. Calling it per file made 24 partitions contend on that lock tens
@@ -51,6 +54,7 @@ impl ReadMetrics {
             rows_read: MetricBuilder::new(metrics).counter("rows_read", partition),
             chunks_pruned: MetricBuilder::new(metrics).counter("chunks_pruned", partition),
             rows_pruned: MetricBuilder::new(metrics).counter("rows_pruned", partition),
+            files_skipped: MetricBuilder::new(metrics).counter("files_skipped", partition),
         }
     }
 }

@@ -80,6 +80,7 @@ async fn a_nan_time_does_not_kill_a_schema_read() {
         storage.inner(),
         "/",
         None,
+        false,
         None,
         &beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
     )

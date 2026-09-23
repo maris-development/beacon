@@ -9,6 +9,7 @@ description: Read NetCDF files with read_netcdf(). Beacon streams chunks, shows 
 ```text
 read_netcdf(glob_paths)
 read_netcdf(glob_paths, dimensions)
+read_netcdf(glob_paths, dimensions, skip_unbroadcastable)
 ```
 
 Beacon reads the NetCDF files that match one or more glob patterns.
@@ -16,6 +17,8 @@ Beacon reads the NetCDF files that match one or more glob patterns.
 The optional `dimensions` argument selects the variables. Beacon returns a variable only if the list
 holds all of its dimensions. Use the argument to drop variables with many dimensions. Also use it
 when the files hold variables with different dimensions.
+
+The optional `skip_unbroadcastable` argument sets what Beacon does with a file that does not fit the list. Beacon fails the query by default. Set it to true to skip the file instead. Beacon writes a warning and reads the next file.
 
 ```sql
 SELECT time, latitude, longitude, temperature
@@ -92,11 +95,12 @@ full read model.
 
 ### `OPTIONS`
 
-`STORED AS NC` reads three keys:
+`STORED AS NC` reads four keys:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `read_dimensions` | List of dimension names | The default grid of each file | The dimensions the table reads. Beacon returns a variable only if the list holds every dimension of that variable. |
+| `skip_unbroadcastable` | Boolean | `false` | Skip a file that does not fit `read_dimensions`. Beacon writes a warning and reads the next file. Without it the query fails. |
 | `use_rust_reader` | Boolean | `true` (`BEACON_NETCDF_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library needs anonymous access to a bucket. |
 | `enable_statistics` | Boolean | `true` (`BEACON_NETCDF_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_NETCDF_ENABLE_STATISTICS` to turn the column ranges off. |
 

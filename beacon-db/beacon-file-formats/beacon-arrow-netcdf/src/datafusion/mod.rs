@@ -184,6 +184,9 @@ impl FileFormatFactory for NetCDFFormatFactory {
                     .collect(),
             );
         }
+        if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
+            options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
+        }
         // Parsed here only so a bad value is an error at `CREATE EXTERNAL
         // TABLE` rather than at the first analysis pass. The value itself is
         // read by `create_for_analysis`; a format built for a query computes no
@@ -438,7 +441,13 @@ impl FileFormat for NetcdfFormat {
             .meta_fetch_concurrency
             .max(1);
         let schemas: Vec<SchemaRef> = futures::stream::iter(inputs)
-            .map(|input| reader::fetch_schema(input, self.options.read_dimensions.clone()))
+            .map(|input| {
+                reader::fetch_schema(
+                    input,
+                    self.options.read_dimensions.clone(),
+                    self.options.skip_unbroadcastable,
+                )
+            })
             .buffered(width)
             .try_collect()
             .await?;
@@ -543,6 +552,7 @@ impl FileFormat for NetcdfFormat {
             self.options.read_dimensions.clone(),
             table_schema,
         )
+        .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
         .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -618,11 +628,14 @@ impl FileFormat for NetcdfFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(NetCDFSource::new(
-            self.access.clone(),
-            self.options.read_dimensions.clone(),
-            table_schema,
-        ))
+        Arc::new(
+            NetCDFSource::new(
+                self.access.clone(),
+                self.options.read_dimensions.clone(),
+                table_schema,
+            )
+            .with_skip_unbroadcastable(self.options.skip_unbroadcastable),
+        )
     }
 }
 
@@ -1329,6 +1342,77 @@ mod reader_backend_tests {
 
         ctx.register_table(table, Arc::new(ListingTable::try_new(config).unwrap()))
             .unwrap();
+    }
+
+    /// A table on the Rust reader over `path`, built from `options`.
+    async fn table_with_options(
+        ctx: &SessionContext,
+        options: NetcdfOptions,
+        path: &std::path::Path,
+    ) -> datafusion::error::Result<Arc<FastObjectTable>> {
+        let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
+        let format = NetcdfFormat::new(Arc::new(ListingFactory::dynamic()), options)
+            .with_access(FileAccess::Oxcdf);
+        FastObjectTable::try_new(&ctx.state(), Arc::new(format), vec![url])
+            .await
+            .map(Arc::new)
+    }
+
+    /// `WOD_FILE` is ragged, so no dimension list fits it. Without
+    /// `skip_unbroadcastable` it fails the table. With it, the file is skipped
+    /// and the gridded file next to it is read whole.
+    #[tokio::test]
+    async fn the_skip_option_reads_past_a_file_the_dimension_list_does_not_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in [GRIDDED_FILE, WOD_FILE] {
+            std::fs::copy(test_file(file), dir.path().join(file)).unwrap();
+        }
+        let dims = Some(vec!["time".to_string(), "lat".to_string(), "lon".to_string()]);
+        let ctx = session();
+
+        let strict = NetcdfOptions {
+            read_dimensions: dims.clone(),
+            ..NetcdfOptions::default()
+        };
+        let error = table_with_options(&ctx, strict, dir.path())
+            .await
+            .expect_err("the ragged file fits no list")
+            .to_string();
+        assert!(error.contains("ragged"), "{error}");
+
+        let lenient = NetcdfOptions {
+            read_dimensions: dims,
+            skip_unbroadcastable: true,
+            ..NetcdfOptions::default()
+        };
+        let table = table_with_options(&ctx, lenient, dir.path()).await.unwrap();
+        ctx.register_table("mixed", table).unwrap();
+        let batches = ctx
+            .sql("SELECT lat FROM mixed")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let read: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+
+        assert_eq!(read, rows_in_one_file(&ctx, "lat").await, "the gridded file alone");
+    }
+
+    /// `OPTIONS ('skip_unbroadcastable' 'true')` reaches the format.
+    #[tokio::test]
+    async fn the_factory_reads_the_skip_option() {
+        let factory = factory();
+        let ctx = SessionContext::new();
+        let options = HashMap::from([("skip_unbroadcastable".to_string(), "true".to_string())]);
+
+        let format = factory.create(&ctx.state(), &options).unwrap();
+        let format = format.as_any().downcast_ref::<NetcdfFormat>().unwrap();
+        assert!(format.options.skip_unbroadcastable);
+
+        let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
+        let default = default.as_any().downcast_ref::<NetcdfFormat>().unwrap();
+        assert!(!default.options.skip_unbroadcastable);
     }
 
     /// The rows one copy of `GRIDDED_FILE` contributes to `column`.

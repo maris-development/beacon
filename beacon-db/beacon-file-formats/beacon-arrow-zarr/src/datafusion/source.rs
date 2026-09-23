@@ -36,7 +36,7 @@ use object_store::ObjectStore;
 use zarrs::group::Group;
 
 use crate::{
-    reader::{dataset_from_group, project_read_dimensions},
+    reader::{dataset_from_group, project_read_dimensions_or_skip},
     util::{ZarrPath, ZarrStorage},
 };
 
@@ -63,6 +63,8 @@ pub struct ZarrSource {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// Explicit dimensions to read, or `None` to auto-select a default.
     read_dimensions: Option<Vec<String>>,
+    /// Skip a group that does not fit `read_dimensions`, instead of failing.
+    skip_unbroadcastable: bool,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
     /// Storage to open groups over, replacing the session's object store.
@@ -82,10 +84,17 @@ impl ZarrSource {
             batch_size: usize::MAX,
             predicate: None,
             read_dimensions: None,
+            skip_unbroadcastable: false,
             projection: None,
             storage: None,
             morsel: None,
         }
+    }
+
+    /// The same source, skipping the groups that cannot broadcast when `skip`.
+    pub fn with_skip_unbroadcastable(mut self, skip: bool) -> Self {
+        self.skip_unbroadcastable = skip;
+        self
     }
 
     /// Returns a copy of this source that opens groups over `storage` instead of
@@ -137,6 +146,7 @@ impl FileSource for ZarrSource {
                 storage: storage.clone(),
                 projected_schema: projected_schema.clone(),
                 read_dimensions: self.read_dimensions.clone(),
+                skip_unbroadcastable: self.skip_unbroadcastable,
                 batch_size: self.batch_size,
                 predicate: self.predicate.clone(),
                 metrics: read_metrics.clone(),
@@ -147,6 +157,7 @@ impl FileSource for ZarrSource {
             predicate: self.predicate.clone(),
             batch_size: self.batch_size,
             read_dimensions: self.read_dimensions.clone(),
+            skip_unbroadcastable: self.skip_unbroadcastable,
             read_metrics,
             partition,
         }))
@@ -292,6 +303,8 @@ struct ZarrOpener {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     batch_size: usize,
     read_dimensions: Option<Vec<String>>,
+    /// Skip a group that does not fit `read_dimensions`, instead of failing.
+    skip_unbroadcastable: bool,
     /// This partition's counters, registered once. See [`ReadMetrics::new`].
     read_metrics: ReadMetrics,
     partition: usize,
@@ -310,6 +323,7 @@ struct ZarrGroups {
     storage: ZarrStorage,
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
+    skip_unbroadcastable: bool,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
@@ -330,12 +344,17 @@ impl OpenFile for ZarrGroups {
             ))
         })?;
 
-        let dataset = ZarrOpener::open_dataset(
+        let Some(dataset) = ZarrOpener::open_dataset(
             self.storage.clone(),
             zarr_path,
             self.read_dimensions.clone(),
+            self.skip_unbroadcastable,
         )
-        .await?;
+        .await?
+        else {
+            self.metrics.files_skipped.add(1);
+            return Ok(FileRead::skipped());
+        };
 
         // Zarr refuses a partitioned table before a scan is built — see
         // `reject_partition_columns` — so a group never carries values.
@@ -353,11 +372,15 @@ impl OpenFile for ZarrGroups {
 
 impl ZarrOpener {
     /// Open one group and narrow it to the dimensions this scan reads on.
+    ///
+    /// `None` when the group does not fit the dimension list and
+    /// `skip_unbroadcastable` says to read past it.
     async fn open_dataset(
         storage: ZarrStorage,
         zarr_path: ZarrPath,
         read_dimensions: Option<Vec<String>>,
-    ) -> datafusion::error::Result<beacon_nd_array::dataset::AnyDataset> {
+        skip_unbroadcastable: bool,
+    ) -> datafusion::error::Result<Option<beacon_nd_array::dataset::AnyDataset>> {
         let group = Group::async_open(storage.inner(), &zarr_path.as_zarr_path())
             .await
             .map_err(|e| {
@@ -375,7 +398,7 @@ impl ZarrOpener {
         // so `SELECT *` cannot fail when variables live on incompatible
         // dimension sets. No log label: this runs per group/partition (logging
         // happens in schema inference).
-        project_read_dimensions(dataset, read_dimensions, None)
+        project_read_dimensions_or_skip(dataset, read_dimensions, skip_unbroadcastable, None)
             .map_err(|e| DataFusionError::Execution(e.to_string()))
     }
 
@@ -385,18 +408,26 @@ impl ZarrOpener {
     /// groups — where `FileStream` walks the real group list. Every other scan
     /// goes through [`MorselSource`] and never reaches here.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     async fn read(
         storage: ZarrStorage,
         zarr_path: ZarrPath,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
+        skip_unbroadcastable: bool,
         batch_size: usize,
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
-            let dataset = Self::open_dataset(storage, zarr_path, read_dimensions).await?;
+            let Some(dataset) =
+                Self::open_dataset(storage, zarr_path, read_dimensions, skip_unbroadcastable)
+                    .await?
+            else {
+                planning.files_skipped.add(1);
+                return Ok(FileRead::skipped());
+            };
             FileRead::plan(
                 dataset,
                 projected_schema,
@@ -444,6 +475,7 @@ impl FileOpener for ZarrOpener {
             zarr_path,
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
+            self.skip_unbroadcastable,
             self.batch_size,
             metrics,
             self.predicate.clone(),

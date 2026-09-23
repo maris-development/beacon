@@ -34,10 +34,14 @@ pub async fn open_dataset(
 /// When it is absent, a broadcast-compatible default dimension set is
 /// auto-selected (see [`beacon_nd_array::dataset::resolve_read_dimensions`]) so
 /// the schema matches what `SELECT *` can actually return.
+///
+/// With `skip_unbroadcastable`, a file the list does not fit gets an empty
+/// schema, the same way the scan reads no row from it.
 pub async fn fetch_schema(
     store: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     read_dimensions: Option<Vec<String>>,
+    skip_unbroadcastable: bool,
     options: ReadOptions,
 ) -> datafusion::error::Result<SchemaRef> {
     let dataset = open_dataset(store, object, options).await.map_err(|e| {
@@ -47,22 +51,16 @@ pub async fn fetch_schema(
         ))
     })?;
 
-    let dataset = if let Some(dims) = beacon_nd_array::dataset::resolve_read_dimensions(
-        &dataset,
+    // A skipped file gives the table no column.
+    let Some(dataset) = beacon_nd_array::dataset::project_read_dimensions_or_skip(
+        dataset,
         read_dimensions,
+        skip_unbroadcastable,
         Some("read_hdf5"),
-    ) {
-        let proj = beacon_nd_array::projection::DatasetProjection {
-            dimension_projection: Some(dims),
-            index_projection: None,
-        };
-        dataset.project(&proj).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to project HDF5 dataset with dimensions: {e}"
-            ))
-        })?
-    } else {
-        dataset
+    )
+    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?
+    else {
+        return Ok(Arc::new(arrow::datatypes::Schema::empty()));
     };
 
     let schema =
