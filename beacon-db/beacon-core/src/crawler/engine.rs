@@ -1,7 +1,7 @@
 //! The crawl engine: turn a [`CrawlerDefinition`] into registered external tables.
 //!
 //! Reuses Beacon's existing primitives end-to-end:
-//! - [`beacon_functions::file_formats::list_datasets::list_datasets`] for scan +
+//! - [`beacon_functions::listing::list_datasets`] for scan +
 //!   per-format classification,
 //! - [`ExternalTableDefinition::build_provider`] for schema inference + partition
 //!   validation (the same code path used when loading persisted tables),
@@ -19,7 +19,7 @@ use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, T
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
-use beacon_functions::file_formats::list_datasets::list_datasets;
+use beacon_functions::listing::list_datasets;
 
 use crate::statement_plan::{upgrade_session, SessionCell};
 
@@ -81,14 +81,8 @@ impl CrawlEngine {
         // 1. Scan + classify (reuses list_datasets + per-format discover_datasets).
         // Crawlers run periodically, so the cache-backed registered store is fine.
         let pattern = scan_pattern(&def.target_prefix);
-        let datasets = list_datasets(
-            &session_ctx,
-            &self.file_formats,
-            None,
-            None,
-            Some(pattern),
-        )
-        .await
+        let datasets = list_datasets(&session_ctx, &self.file_formats, &pattern)
+            .await
         .map_err(|e| anyhow::anyhow!("crawler '{}' scan failed: {e}", def.name))?;
 
         // 2. Group into candidate tables + detect partitions (pure logic).

@@ -163,33 +163,25 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
         units_over_stores(objects, &crate::util::top_level_zarr_meta_v3(objects))
     }
 
+    /// Every group and array has a `zarr.json`; the store root is the top-level one.
+    fn holds(&self, object: &ObjectMeta) -> bool {
+        is_zarr_v3_metadata(object)
+    }
+
+    /// One dataset per store, named by its top-level `zarr.json`.
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-        let datasets: Vec<ObjectMeta> = objects
+        let markers: Vec<ObjectMeta> = objects
             .iter()
             .filter(|obj| is_zarr_v3_metadata(obj))
             .cloned()
             .collect();
-
-        let top_level_datasets = top_level_zarr_meta_v3(&datasets);
-        let zarr_paths: Vec<ZarrPath> = top_level_datasets
+        Ok(top_level_zarr_meta_v3(&markers)
             .into_iter()
-            .filter_map(|path| match ZarrPath::new_from_object_meta(path) {
-                Ok(zarr_path) => Some(zarr_path),
-                Err(e) => {
-                    tracing::trace!(error = %e, "skipping non-Zarr object during dataset discovery");
-                    None
-                }
-            })
-            .collect();
-
-        let datasets: Vec<DatasetMetadata> = zarr_paths
-            .into_iter()
-            .map(|path| DatasetMetadata::new(path.as_zarr_json_path(), self.get_ext()))
-            .collect();
-        Ok(datasets)
+            .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
+            .collect())
     }
 
     fn file_format_name(&self) -> String {
@@ -1101,37 +1093,53 @@ mod tests {
         assert!(message.contains("maybe"), "{message}");
     }
 
+    /// Only the top-level `zarr.json` of a store is a dataset.
     #[tokio::test]
-    async fn factory_discovers_gridded_example() {
+    async fn only_the_top_level_zarr_json_is_a_dataset() {
         use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
         use object_store::{ObjectMeta, path::Path};
 
+        let meta = |path: &str| ObjectMeta {
+            location: Path::from(path),
+            last_modified: Default::default(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        };
         let factory = <ZarrFormatFactory as Default>::default();
         let objects = vec![
-            ObjectMeta {
-                location: Path::from("gridded-example.zarr/zarr.json"),
-                last_modified: Default::default(),
-                size: 0,
-                e_tag: None,
-                version: None,
-            },
-            // A nested array's metadata must NOT become its own dataset.
-            ObjectMeta {
-                location: Path::from("gridded-example.zarr/lat/zarr.json"),
-                last_modified: Default::default(),
-                size: 0,
-                e_tag: None,
-                version: None,
-            },
+            meta("gridded-example.zarr/zarr.json"),
+            meta("gridded-example.zarr/lat/zarr.json"),
+            meta("gridded-example.zarr/lat/c/0"),
+            meta("plain-dir/zarr.json"),
         ];
         let datasets = factory.discover_datasets(&objects).unwrap();
-        assert_eq!(datasets.len(), 1);
-        assert!(
-            datasets[0]
-                .file_path
-                .ends_with("gridded-example.zarr/zarr.json")
+        let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+        let mut paths = paths;
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["gridded-example.zarr/zarr.json", "plain-dir/zarr.json"]
         );
-        assert_eq!(datasets[0].format, "zarr");
+        assert!(datasets.iter().all(|d| d.format == "zarr"));
+    }
+
+    /// Zarr holds its markers so it can compare them, and nothing else.
+    #[test]
+    fn zarr_holds_its_markers_only() {
+        use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+
+        let meta = |path: &str| object_store::ObjectMeta {
+            location: object_store::path::Path::from(path),
+            last_modified: Default::default(),
+            size: 1,
+            e_tag: None,
+            version: None,
+        };
+        let factory = <ZarrFormatFactory as Default>::default();
+        assert!(factory.holds(&meta("cube.zarr/zarr.json")));
+        assert!(factory.holds(&meta("cube.zarr/lat/zarr.json")));
+        assert!(!factory.holds(&meta("cube.zarr/lat/c/0")));
     }
 
     #[tokio::test]

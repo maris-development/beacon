@@ -6,18 +6,17 @@ use datafusion::prelude::SessionContext;
 // The shared table-function trait and the glob-arg parser now live in
 // `beacon-common` so each `beacon-arrow-*` format crate can host its own
 // `read_*` table function. Re-exported here for the cross-format functions
-// (`<read_fn>_schema`, `list_datasets`) and existing consumers.
+// (`<read_fn>_schema`) and existing consumers. `list_datasets` lives in
+// `crate::listing`.
 pub use beacon_common::table_function::{parse_glob_paths_arg, BeaconTableFunctionImpl};
 
-// Cross-format table functions that don't belong to a single format crate.
-pub mod list_datasets;
 pub mod schema_function;
 
 use schema_function::SchemaTableFunc;
 
 /// Build the `read_*` table functions plus their `<read_fn>_schema` schema
-/// counterparts. The per-format readers are constructed from their respective
-/// `beacon-arrow-*` crate; the cross-format `list_datasets` lives here.
+/// counterparts, and `list_datasets`. The per-format readers are constructed
+/// from their respective `beacon-arrow-*` crate.
 pub fn register_table_functions(
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
@@ -96,10 +95,6 @@ pub fn register_table_functions(
 
     let mut functions = readers;
     functions.extend(schema_funcs);
-    functions.push(Arc::new(list_datasets::ListDatasetsFunc::new(
-        runtime_handle,
-        Arc::downgrade(&session_ctx),
-        file_formats,
-    )));
+    functions.push(Arc::new(crate::listing::ListDatasetsFunc::new(file_formats)));
     functions
 }

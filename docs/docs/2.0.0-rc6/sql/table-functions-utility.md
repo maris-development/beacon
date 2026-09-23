@@ -59,12 +59,28 @@ Lists every file in the dataset storage root of Beacon. Returns one row for each
 | ------ | ---- | ----------- |
 | `file_name` | `TEXT` | The path, relative to the storage root |
 | `file_format` | `TEXT` | The format that Beacon detects |
+| `can_inspect` | `BOOLEAN` | `true` if Beacon can inspect the file |
+| `can_partial_explore` | `BOOLEAN` | `true` if Beacon can read a part of the file |
+| `size` | `BIGINT UNSIGNED` | The size in bytes. `NULL` if Beacon does not know it. |
+| `last_modified` | `TEXT` | The last change, in RFC 3339. `NULL` if Beacon does not know it. |
+
+The function accepts three optional arguments: `list_datasets(pattern, offset, limit)`. The
+`pattern` is a glob, relative to the storage root. The default is `**/*`.
+
+A Zarr v3 store has a `zarr.json` file at its root and in each array. The store gives one row, for
+the `zarr.json` file at its root.
+
+The rows stream as the storage listing arrives. A `LIMIT` stops the listing. The rows have no
+fixed order. Add `ORDER BY file_name` if you need a sorted result.
 
 ```sql
 SELECT * FROM list_datasets()
 
 -- Find all NetCDF files
 SELECT file_name FROM list_datasets() WHERE file_format = 'nc'
+
+-- The first 50 Parquet files under argo/, sorted
+SELECT file_name FROM list_datasets('argo/**/*.parquet') ORDER BY file_name LIMIT 50
 ```
 
 ## `view_dataset_statistics`
