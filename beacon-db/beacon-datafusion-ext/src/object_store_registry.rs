@@ -121,11 +121,12 @@ pub(crate) fn build_object_store(
                     }
                 }
             }
-            Arc::new(
+            // Sized pages, walked in parallel shards. See `big_page_list`.
+            Arc::new(crate::big_page_list::BigPageList::new(
                 builder
                     .build()
                     .map_err(|e| exec_datafusion_err!("failed to build S3 store for {url}: {e}"))?,
-            )
+            ))
         }
         "gs" => {
             let mut builder = GoogleCloudStorageBuilder::from_env().with_url(url.as_str());

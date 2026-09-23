@@ -233,6 +233,23 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **`list_datasets` streams, and an S3 listing walks the bucket in parallel.** The listing used to
+  run inside the synchronous table-function call. It held a query worker thread for the whole
+  walk, during planning, and it built every row before the first one could leave. It is now a
+  table with its own plan node, `DatasetsExec`, which emits rows as listing pages arrive. A
+  `LIMIT` stops the walk, so `LIMIT 50` over a bucket of millions reads one page. Memory is bounded
+  by one batch of rows instead of by the store. A format judges each object as it passes. Zarr
+  keeps only its `zarr.json` markers and names the top-level one of each store when the walk
+  ends, so a store is still one dataset. The crawler reads the same stream as the table. An S3
+  store now asks for 5000 keys per page instead of the server default of 1000, and a recursive
+  walk splits into one page chain per sub-directory, three levels down, 16 in flight. A recursive
+  listing of a SeaweedFS bucket of 2 853 217 objects took 79.9 s and takes 19.4 s. Both the
+  configured S3 datasets store and an ad-hoc `s3://` path get the wrapper. Two things change. The
+  rows arrive in no fixed order, because the shards interleave; add `ORDER BY file_name` for a
+  sorted result. And a listing error is an error: a timeout part-way through the walk used to end
+  the listing quietly and report the rows so far as the whole answer. See
+  [`list_datasets`](docs/docs/2.0.0-rc6/sql/table-functions-utility.md#list_datasets).
+
 - **An Atlas query must name its columns.** The Atlas reader flattens each dataset on the
   dimensions of the columns the query selects, so `SELECT * FROM read_atlas(...)` and
   `SELECT count(*)` now fail at plan time with a message that says to list the columns, as BBF
