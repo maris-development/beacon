@@ -43,6 +43,8 @@ pub struct AtlasSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     read_dimensions: Option<Vec<String>>,
+    /// Skip a dataset whose columns fit no one grid, instead of failing.
+    skip_unbroadcastable: bool,
     /// The projection the scan pushed down, split into the columns to read
     /// and the rest, which `ProjectionOpener` applies above the adapter.
     projection: SplitProjection,
@@ -70,11 +72,18 @@ impl AtlasSource {
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             predicate: None,
             read_dimensions,
+            skip_unbroadcastable: false,
             cache,
             queues: Arc::new(CollectionQueues::new()),
             type_widening: Arc::new(DefaultArrowTypeWidening::new()),
             cancel: CancellationToken::new(),
         }
+    }
+
+    /// The same source, skipping the datasets that cannot broadcast when `skip`.
+    pub fn with_skip_unbroadcastable(mut self, skip: bool) -> Self {
+        self.skip_unbroadcastable = skip;
+        self
     }
 
     /// The same source, with the merge rule of the session.
@@ -137,7 +146,8 @@ impl FileSource for AtlasSource {
             self.read_dimensions.clone(),
             self.predicate.clone(),
             self.cancel.clone(),
-        )?;
+        )?
+        .with_skip_unbroadcastable(self.skip_unbroadcastable);
         let raw: Arc<dyn FileOpener> = Arc::new(AtlasOpener {
             object_store,
             cache: self.cache.clone(),

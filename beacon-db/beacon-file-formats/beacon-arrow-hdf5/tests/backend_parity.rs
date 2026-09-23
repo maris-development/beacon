@@ -741,6 +741,42 @@ async fn the_metadata_grid_needs_an_explicit_dimension_list() {
     assert_eq!(batch.num_rows(), 3);
 }
 
+/// `COMPOUND_FILE` has no axis of length 3, so a list of `phony_len_3` does not
+/// fit it. Without `skip_unbroadcastable` it fails the table. With it, the
+/// file is skipped and `NESTED_FILE` next to it is read.
+#[tokio::test]
+async fn the_skip_option_reads_past_a_file_the_dimension_list_does_not_fit() {
+    let dir = tempfile::tempdir().unwrap();
+    for file in [NESTED_FILE, COMPOUND_FILE] {
+        std::fs::copy(hdf5_file(file), dir.path().join(file)).unwrap();
+    }
+    let ctx = session();
+    let listing = Arc::new(ListingFactory::dynamic());
+    let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
+    let table = async |skip: &str| {
+        let options = HashMap::from([
+            ("use_rust_reader".to_string(), "true".to_string()),
+            ("read_dimensions".to_string(), "phony_len_3".to_string()),
+            ("skip_unbroadcastable".to_string(), skip.to_string()),
+        ]);
+        let format = factory(Backend::Rust)
+            .create_with_native_root(&ctx.state(), &options, &url, &listing)
+            .unwrap();
+        FastObjectTable::try_new(&ctx.state(), format, vec![url.clone()]).await
+    };
+
+    let error = table("false")
+        .await
+        .expect_err("the compound file has no phony_len_3")
+        .to_string();
+    assert!(error.contains("phony_len_3"), "{error}");
+
+    let lenient = table("true").await.unwrap();
+    ctx.register_table("mixed", Arc::new(lenient)).unwrap();
+    let batch = collect(&ctx, "SELECT station_id FROM mixed").await;
+    assert_eq!(batch.num_rows(), 3, "the nested file alone");
+}
+
 /// Both backends invent the same dimension names for a plain HDF5 file.
 ///
 /// netcdf-c reads the root group alone, so the payload is all the two share.

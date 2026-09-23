@@ -9,6 +9,7 @@ description: Read Zarr v3 stores with read_zarr(). Chunk-level predicate pushdow
 ```text
 read_zarr(glob_paths)
 read_zarr(glob_paths, dimensions)
+read_zarr(glob_paths, dimensions, skip_unbroadcastable)
 ```
 
 Beacon reads the Zarr stores that match one or more glob patterns. Each path must point at a
@@ -16,6 +17,8 @@ Beacon reads the Zarr stores that match one or more glob patterns. Each path mus
 
 The optional `dimensions` argument selects the arrays. Beacon returns an array only if the list
 holds all of its dimensions. Use the argument to drop arrays with many dimensions.
+
+The optional `skip_unbroadcastable` argument sets what Beacon does with a group that does not fit the list. Beacon fails the query by default. Set it to true to skip the group instead. Beacon writes a warning and reads the next group.
 
 Predicate pushdown is automatic. Beacon prunes chunks and slices the coordinate dimensions such as
 `time`, `latitude` and `longitude`. It uses the `WHERE` clause of your query. You declare no
@@ -105,11 +108,12 @@ full read model.
 
 ### `OPTIONS`
 
-`STORED AS ZARR` reads two keys:
+`STORED AS ZARR` reads three keys:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `read_dimensions` | List of dimension names | The default grid of each store | The dimensions the table reads. Beacon returns an array only if the list holds every dimension of that array. |
+| `skip_unbroadcastable` | Boolean | `false` | Skip a group that does not fit `read_dimensions`. Beacon writes a warning and reads the next group. Without it the query fails. |
 | `enable_statistics` | Boolean | `true` (`BEACON_ZARR_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per store, not per table. Set `BEACON_ZARR_ENABLE_STATISTICS` to turn the column ranges off. |
 
 ```sql

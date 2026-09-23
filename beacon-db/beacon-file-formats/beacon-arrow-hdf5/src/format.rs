@@ -51,6 +51,8 @@ struct EffectiveOptions {
     use_rust_reader: bool,
     enable_statistics: bool,
     read_dimensions: Option<Vec<String>>,
+    /// Skip a file that does not fit `read_dimensions`, instead of failing.
+    skip_unbroadcastable: bool,
     read: ReadOptions,
 }
 
@@ -134,6 +136,7 @@ impl Hdf5FormatFactory {
             use_rust_reader: self.uses_rust_reader(format_options)?,
             enable_statistics: self.config.enable_statistics,
             read_dimensions: None,
+            skip_unbroadcastable: false,
             read: ReadOptions {
                 unify_phony_dimensions: self.config.unify_phony_dimensions,
                 convention: self.config.convention,
@@ -148,6 +151,9 @@ impl Hdf5FormatFactory {
                     .filter(|s| !s.is_empty())
                     .collect(),
             );
+        }
+        if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
+            options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
         }
         if let Some(value) = format_option(format_options, "enable_statistics") {
             options.enable_statistics = parse_bool_option("enable_statistics", value)?;
@@ -172,6 +178,7 @@ impl Hdf5FormatFactory {
         Hdf5Format {
             ext: self.ext.clone(),
             read_dimensions: options.read_dimensions,
+            skip_unbroadcastable: options.skip_unbroadcastable,
             read: options.read,
             // Carried from the effective options. Every caller but
             // `create_for_analysis` clears it first, so a query computes
@@ -215,6 +222,7 @@ impl FileFormatFactory for Hdf5FormatFactory {
             // A query never computes statistics. See `create_for_analysis`.
             enable_statistics: false,
             read_dimensions: None,
+            skip_unbroadcastable: false,
             read: ReadOptions {
                 unify_phony_dimensions: self.config.unify_phony_dimensions,
                 convention: self.config.convention,
@@ -334,6 +342,9 @@ pub struct Hdf5Format {
     ext: String,
     /// Columns to treat as dimensions when reading, or `None` to auto-select.
     read_dimensions: Option<Vec<String>>,
+    /// Skip a file that does not fit `read_dimensions`, with a warning,
+    /// instead of failing the query.
+    skip_unbroadcastable: bool,
     /// How this format reads one file: the naming of the invented dimensions,
     /// and the layout convention. See [`crate::ReadOptions`].
     read: ReadOptions,
@@ -352,6 +363,11 @@ impl Hdf5Format {
     /// The dimensions this format reads, or `None` to auto-select a default.
     pub fn read_dimensions(&self) -> Option<&Vec<String>> {
         self.read_dimensions.as_ref()
+    }
+
+    /// Whether this format skips a file that does not fit its dimensions.
+    pub fn skips_unbroadcastable(&self) -> bool {
+        self.skip_unbroadcastable
     }
 
     /// Whether this format unifies the dimensions netCDF invents, by length.
@@ -417,7 +433,13 @@ impl FileFormat for Hdf5Format {
         let tasks: Vec<_> = objects
             .iter()
             .map(|object| {
-                crate::open::fetch_schema(store, object, self.read_dimensions.clone(), self.read)
+                crate::open::fetch_schema(
+                    store,
+                    object,
+                    self.read_dimensions.clone(),
+                    self.skip_unbroadcastable,
+                    self.read,
+                )
             })
             .collect();
         let schemas: Vec<SchemaRef> = futures::stream::iter(tasks)
@@ -508,6 +530,7 @@ impl FileFormat for Hdf5Format {
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = Hdf5Source::new(self.read_dimensions.clone(), self.read, table_schema)
+            .with_skip_unbroadcastable(self.skip_unbroadcastable)
             .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -535,11 +558,10 @@ impl FileFormat for Hdf5Format {
     }
 
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
-        Arc::new(Hdf5Source::new(
-            self.read_dimensions.clone(),
-            self.read,
-            table_schema,
-        ))
+        Arc::new(
+            Hdf5Source::new(self.read_dimensions.clone(), self.read, table_schema)
+                .with_skip_unbroadcastable(self.skip_unbroadcastable),
+        )
     }
 }
 

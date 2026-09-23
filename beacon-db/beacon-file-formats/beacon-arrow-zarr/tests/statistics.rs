@@ -278,12 +278,13 @@ async fn statistics_over(store: Arc<dyn ObjectStore>) -> (SchemaRef, Statistics)
         storage.inner(),
         "/",
         None,
+        false,
         None,
         &beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
     )
     .await
     .unwrap();
-    let statistics = generate_statistics(storage.inner(), "/", None, &schema)
+    let statistics = generate_statistics(storage.inner(), "/", None, false, &schema)
         .await
         .unwrap();
     (schema, statistics)

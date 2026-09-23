@@ -4,12 +4,7 @@ use std::sync::{Arc, Weak};
 use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::{ListingFactory, RootStore};
-use datafusion::{
-    catalog::TableFunctionImpl,
-    common::plan_err,
-    prelude::{Expr, SessionContext},
-    scalar::ScalarValue,
-};
+use datafusion::{catalog::TableFunctionImpl, common::plan_err, prelude::SessionContext};
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
@@ -60,7 +55,12 @@ impl BeaconTableFunctionImpl for ReadNetCDFFunc {
     }
 
     fn description(&self) -> Option<String> {
-        Some("Reads NetCDF files from specified glob paths.".to_string())
+        Some(
+            "Reads NetCDF files from specified glob paths. The optional second argument lists \
+             the dimensions to read. The optional third argument, a boolean, skips a file that \
+             does not fit that list instead of failing the query."
+                .to_string(),
+        )
     }
 
     fn name(&self) -> String {
@@ -68,11 +68,19 @@ impl BeaconTableFunctionImpl for ReadNetCDFFunc {
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
-        Some(vec![Field::new(
-            "glob_paths",
-            DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
-            false,
-        )])
+        Some(vec![
+            Field::new(
+                "glob_paths",
+                DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
+                false,
+            ),
+            Field::new(
+                "dimensions",
+                DataType::List(Arc::new(Field::new("dimension", DataType::Utf8, false))),
+                true,
+            ),
+            Field::new("skip_unbroadcastable", DataType::Boolean, true),
+        ])
     }
 }
 
@@ -103,28 +111,16 @@ impl ReadNetCDFFunc {
                 ))
             })?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, &self.name)?;
-        let mut dimensions: Vec<String> = vec![];
-        if let Some(dimensions_arg) = args.get(1) {
-            if let Expr::Literal(ScalarValue::List(values), _) = dimensions_arg {
-                let string_array = values.as_ref().values();
-                match string_array
-                    .as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                {
-                    Some(str_arr) => {
-                        dimensions = str_arr
-                            .iter()
-                            .filter_map(|opt_str| opt_str.map(|s| s.to_string()))
-                            .collect();
-                    }
-                    None => {
-                        return plan_err!(
-                            "read_netcdf second argument must be a List<Utf8> of dimension names"
-                        );
-                    }
-                }
-            }
-        }
+        let dimensions =
+            beacon_common::table_function::parse_dimensions_arg(args, 1, &self.name, "second")?;
+        // Optional third argument: skip a file that does not fit the list.
+        let skip_unbroadcastable = beacon_common::table_function::parse_bool_arg(
+            args,
+            2,
+            &self.name,
+            "third",
+            "skip the files that cannot broadcast",
+        )?;
 
         tracing::debug!("read_netcdf glob paths: {:?}", glob_paths);
 
@@ -146,6 +142,9 @@ impl ReadNetCDFFunc {
         let mut format_options: HashMap<String, String> = extra_options;
         if !dimensions.is_empty() {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));
+        }
+        if let Some(skip) = skip_unbroadcastable {
+            format_options.insert("skip_unbroadcastable".to_string(), skip.to_string());
         }
 
         let factory = state

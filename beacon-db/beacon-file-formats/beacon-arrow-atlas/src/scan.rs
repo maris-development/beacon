@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::metrics::AtlasScanMetrics;
 use crate::open::AtlasReaderCache;
+use beacon_nd_array::dataset::UnbroadcastableDataset;
+
 use crate::view::AtlasView;
 
 /// What one scan reads. Shared by every stage through one handle.
@@ -37,6 +39,8 @@ pub struct ScanSpec {
     pub read_dimensions: Option<Vec<String>>,
     /// The predicate to prune datasets with, if any.
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// Skip a dataset whose columns fit no one grid, instead of failing.
+    pub skip_unbroadcastable: bool,
     /// The query's token. When it fires, every stage stops with an error.
     pub cancel: CancellationToken,
 }
@@ -53,8 +57,15 @@ impl ScanSpec {
             logical_schema: logical_schema(&projected_schema)?,
             read_dimensions,
             predicate,
+            skip_unbroadcastable: false,
             cancel,
         })
+    }
+
+    /// The same scan, skipping the datasets that cannot broadcast when `skip`.
+    pub fn with_skip_unbroadcastable(mut self, skip: bool) -> Self {
+        self.skip_unbroadcastable = skip;
+        self
     }
 }
 
@@ -242,25 +253,41 @@ fn dataset_batches(
     dataset: String,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     futures::stream::once(async move {
-        let source = view.dataset(&dataset).await?;
+        let source = match view.dataset(&dataset).await {
+            Ok(source) => source,
+            // The flag turns a grid the columns do not fit into a skip.
+            Err(error)
+                if spec.skip_unbroadcastable
+                    && error.downcast_ref::<UnbroadcastableDataset>().is_some() =>
+            {
+                tracing::warn!("skipping dataset '{dataset}': {error:#}");
+                scan_metrics.datasets_skipped.add(1);
+                return Ok(futures::stream::empty().boxed());
+            }
+            Err(error) => return Err(error),
+        };
         drop(view);
         scan_metrics.datasets_scanned.add(1);
         let chunks = source.chunks();
         let dataset = Arc::<str>::from(dataset);
-        Ok::<_, anyhow::Error>(futures::stream::iter(chunks).then(move |chunk| {
-            let spec = Arc::clone(&spec);
-            let source = Arc::clone(&source);
-            let dataset = Arc::clone(&dataset);
-            async move {
-                if spec.cancel.is_cancelled() {
-                    return Err(cancelled());
-                }
-                // The batch carries the dataset's own columns and types. The
-                // adapting opener above maps it onto the scan's schema.
-                let nd = read_chunk(&source, chunk, &dataset).await?;
-                Ok(encode_nd_record_batch(&nd)?)
-            }
-        }))
+        Ok::<_, anyhow::Error>(
+            futures::stream::iter(chunks)
+                .then(move |chunk| {
+                    let spec = Arc::clone(&spec);
+                    let source = Arc::clone(&source);
+                    let dataset = Arc::clone(&dataset);
+                    async move {
+                        if spec.cancel.is_cancelled() {
+                            return Err(cancelled());
+                        }
+                        // The batch carries the dataset's own columns and types. The
+                        // adapting opener above maps it onto the scan's schema.
+                        let nd = read_chunk(&source, chunk, &dataset).await?;
+                        Ok(encode_nd_record_batch(&nd)?)
+                    }
+                })
+                .boxed(),
+        )
     })
     .try_flatten()
     .boxed()
@@ -392,6 +419,63 @@ mod tests {
         };
         assert!(error.contains("cancelled"), "{error}");
         assert_eq!(metrics.datasets_scanned.value(), 0);
+    }
+
+    /// A stream over a fixture, with `skip_unbroadcastable` set as given.
+    async fn stream_skipping(
+        dir: &Path,
+        skip_unbroadcastable: bool,
+        metrics: AtlasScanMetrics,
+    ) -> DatasetStream {
+        let (store, marker) = test_support::store_and_marker(dir);
+        let projected = Arc::new(encoded_schema(logical_schema(dir).await.as_ref()));
+        let spec = ScanSpec::new(projected, None, None, CancellationToken::new())
+            .unwrap()
+            .with_skip_unbroadcastable(skip_unbroadcastable);
+        CollectionQueues::new()
+            .open(None, store, marker, Arc::new(spec), metrics)
+            .await
+            .unwrap()
+    }
+
+    /// `mixed` holds columns on two grids and no list says which one to read.
+    /// Without the flag, it fails the scan at its open.
+    #[tokio::test]
+    async fn a_dataset_that_cannot_broadcast_fails_the_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_grids_then_plain(tmp.path()).await;
+        let set = ExecutionPlanMetricsSet::new();
+        let metrics = AtlasScanMetrics::new(&set, 0);
+
+        let error = stream_skipping(tmp.path(), false, metrics)
+            .await
+            .try_collect::<Vec<_>>()
+            .await
+            .expect_err("two grids, no list")
+            .to_string();
+
+        assert!(error.contains("mixed"), "{error}");
+        assert!(error.contains("more than one grid"), "{error}");
+    }
+
+    /// With the flag, `mixed` is skipped and counted, and the scan reads
+    /// `plain` after it.
+    #[tokio::test]
+    async fn the_flag_skips_a_dataset_that_cannot_broadcast() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_grids_then_plain(tmp.path()).await;
+        let set = ExecutionPlanMetricsSet::new();
+        let metrics = AtlasScanMetrics::new(&set, 0);
+
+        let batches: Vec<RecordBatch> = stream_skipping(tmp.path(), true, metrics.clone())
+            .await
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert_eq!(rows(&batches), vec![4], "`plain` alone is read");
+        assert_eq!(metrics.datasets_skipped.value(), 1);
+        assert_eq!(metrics.datasets_scanned.value(), 1);
     }
 
     /// The scan holds the queues in a `FileSource`, which must be `Send + Sync`.

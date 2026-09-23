@@ -106,12 +106,18 @@ impl FileFormatFactory for ZarrFormatFactory {
                 .filter(|s| !s.is_empty())
                 .collect()
         });
+        let skip_unbroadcastable = match format_option(format_options, "skip_unbroadcastable") {
+            Some(value) => parse_bool_option("skip_unbroadcastable", value)?,
+            None => false,
+        };
         // Parsed here only so a bad value is an error at `CREATE EXTERNAL
         // TABLE` rather than at the first analysis pass. A query computes no
         // statistics whatever it says: see `create_for_analysis`.
         self.statistics_wanted(format_options)?;
         Ok(Arc::new(
-            ZarrFormat::new(read_dimensions).with_enable_statistics(false),
+            ZarrFormat::new(read_dimensions)
+                .with_skip_unbroadcastable(skip_unbroadcastable)
+                .with_enable_statistics(false),
         ))
     }
 
@@ -226,6 +232,9 @@ pub struct ZarrFormat {
     /// only variables whose dimensions are a subset of these are read; when
     /// `None`, a broadcast-compatible default is auto-selected.
     pub read_dimensions: Option<Vec<String>>,
+    /// Skip a group that does not fit `read_dimensions`, with a warning,
+    /// instead of failing the table.
+    pub skip_unbroadcastable: bool,
     /// Storage to open groups over, replacing the session's object store.
     /// Set by the Icechunk reader; `None` for a listed zarr store.
     storage: Option<ZarrStorage>,
@@ -247,9 +256,16 @@ impl ZarrFormat {
     pub fn new(read_dimensions: Option<Vec<String>>) -> Self {
         Self {
             read_dimensions,
+            skip_unbroadcastable: false,
             storage: None,
             enable_statistics: ZarrConfig::default().enable_statistics,
         }
+    }
+
+    /// The same format, skipping the groups that cannot broadcast when `skip`.
+    pub fn with_skip_unbroadcastable(mut self, skip: bool) -> Self {
+        self.skip_unbroadcastable = skip;
+        self
     }
 
     /// Returns a copy of this format that opens groups over `storage` instead of
@@ -343,6 +359,7 @@ impl FileFormat for ZarrFormat {
                 storage.inner(),
                 &zarr_path.as_zarr_path(),
                 self.read_dimensions.clone(),
+                self.skip_unbroadcastable,
                 Some("read_zarr"),
                 &widening,
             )
@@ -401,6 +418,7 @@ impl FileFormat for ZarrFormat {
             storage,
             &group_path.as_zarr_path(),
             self.read_dimensions.clone(),
+            self.skip_unbroadcastable,
             &table_schema,
         )
         .await
@@ -454,6 +472,7 @@ impl FileFormat for ZarrFormat {
         let projection = conf.file_source().projection().cloned();
         let mut source = ZarrSource::new(table_schema)
             .with_read_dimensions(self.read_dimensions.clone())
+            .with_skip_unbroadcastable(self.skip_unbroadcastable)
             .with_projection(projection);
         if let Some(storage) = &self.storage {
             source = source.with_storage(storage.clone());
@@ -470,8 +489,9 @@ impl FileFormat for ZarrFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        let mut source =
-            ZarrSource::new(table_schema).with_read_dimensions(self.read_dimensions.clone());
+        let mut source = ZarrSource::new(table_schema)
+            .with_read_dimensions(self.read_dimensions.clone())
+            .with_skip_unbroadcastable(self.skip_unbroadcastable);
         if let Some(storage) = &self.storage {
             source = source.with_storage(storage.clone());
         }
@@ -520,13 +540,15 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::datatypes::{DataType, TimeUnit};
-    use datafusion::datasource::file_format::FileFormat;
+    use datafusion::catalog::TableProvider as _;
+    use datafusion::datasource::file_format::{FileFormat, FileFormatFactory as _};
     use datafusion::datasource::listing::{
         ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
     };
     use datafusion::prelude::SessionContext;
+    use std::collections::HashMap;
 
-    use super::{ZarrFormat, ZarrFormatFactory, ZarrSource, parse_bool_option};
+    use super::{ZarrConfig, ZarrFormat, ZarrFormatFactory, ZarrSource, parse_bool_option};
 
     /// Register the bundled `gridded-example.zarr` store as a DataFusion table
     /// backed by [`ZarrFormat`] + [`ListingTable`].
@@ -1084,7 +1106,7 @@ mod tests {
         use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
         use object_store::{ObjectMeta, path::Path};
 
-        let factory = ZarrFormatFactory::default();
+        let factory = <ZarrFormatFactory as Default>::default();
         let objects = vec![
             ObjectMeta {
                 location: Path::from("gridded-example.zarr/zarr.json"),
@@ -1137,6 +1159,80 @@ mod tests {
 
     /// An explicit `read_dimensions` projects the schema down to only the
     /// variables whose dimensions are a subset of those requested.
+    /// A table over the example store, on `format`.
+    async fn example_table(
+        ctx: &SessionContext,
+        format: ZarrFormat,
+    ) -> datafusion::error::Result<ListingTable> {
+        let store_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_files/gridded-example.zarr/"
+        );
+        let table_path = ListingTableUrl::parse(format!("file://{store_dir}")).unwrap();
+        let listing_options =
+            ListingOptions::new(Arc::new(format)).with_file_extension("zarr.json");
+        let config = ListingTableConfig::new(table_path)
+            .with_listing_options(listing_options)
+            .infer_schema(&ctx.state())
+            .await?;
+        ListingTable::try_new(config)
+    }
+
+    /// The store has no `depth` axis, so that list does not fit it. Without
+    /// `skip_unbroadcastable` the table fails. With it, the store is skipped:
+    /// it gives the table no column and the scan no row.
+    #[tokio::test]
+    async fn the_skip_option_reads_past_a_store_the_dimension_list_does_not_fit() {
+        let ctx = SessionContext::new();
+        let dims = Some(vec!["depth".to_string()]);
+
+        let error = example_table(&ctx, ZarrFormat::new(dims.clone()))
+            .await
+            .expect_err("no depth axis")
+            .to_string();
+        assert!(error.contains("depth"), "{error}");
+
+        let table = example_table(
+            &ctx,
+            ZarrFormat::new(dims).with_skip_unbroadcastable(true),
+        )
+        .await
+        .unwrap();
+        assert!(table.schema().fields().is_empty(), "{:?}", table.schema());
+        ctx.register_table("skipped", Arc::new(table)).unwrap();
+        let batches = ctx
+            .sql("SELECT count(*) FROM skipped")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let count = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, 0);
+    }
+
+    /// `OPTIONS ('skip_unbroadcastable' 'true')` reaches the format.
+    #[tokio::test]
+    async fn the_factory_reads_the_skip_option() {
+        let factory = ZarrFormatFactory::new(ZarrConfig::default());
+        let ctx = SessionContext::new();
+        let options =
+            HashMap::from([("skip_unbroadcastable".to_string(), "true".to_string())]);
+
+        let format = factory.create(&ctx.state(), &options).unwrap();
+        let format = format.as_any().downcast_ref::<ZarrFormat>().unwrap();
+        assert!(format.skip_unbroadcastable);
+
+        let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
+        let default = default.as_any().downcast_ref::<ZarrFormat>().unwrap();
+        assert!(!default.skip_unbroadcastable);
+    }
+
     #[tokio::test]
     async fn explicit_read_dimensions_limits_schema() {
         use datafusion::catalog::TableProvider;

@@ -84,6 +84,7 @@ impl BeaconTableFunctionImpl for ReadHdf5Func {
                 true,
             ),
             Field::new("convention", DataType::Utf8, true),
+            Field::new("skip_unbroadcastable", DataType::Boolean, true),
         ])
     }
 }
@@ -128,6 +129,7 @@ impl TableFunctionImpl for ReadHdf5Func {
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_hdf5")?;
         let dimensions = parse_dimensions_arg(args)?;
         let convention = parse_convention_arg(args)?;
+        let skip_unbroadcastable = parse_skip_unbroadcastable_arg(args)?;
 
         let listing_urls = glob_paths
             .iter()
@@ -148,6 +150,9 @@ impl TableFunctionImpl for ReadHdf5Func {
         }
         if let Some(convention) = convention {
             format_options.insert("convention".to_string(), convention);
+        }
+        if let Some(skip) = skip_unbroadcastable {
+            format_options.insert("skip_unbroadcastable".to_string(), skip.to_string());
         }
         let file_format = hdf5_factory.create(&state, &format_options)?;
 
@@ -181,21 +186,21 @@ fn parse_convention_arg(args: &[Expr]) -> datafusion::error::Result<Option<Strin
     }
 }
 
+/// The optional fourth argument: skip a file that does not fit the dimensions.
+///
+/// A call that wants it and no convention passes `NULL` for that slot:
+/// `read_hdf5('das/*.h5', ['time'], NULL, true)`.
+fn parse_skip_unbroadcastable_arg(args: &[Expr]) -> datafusion::error::Result<Option<bool>> {
+    beacon_common::table_function::parse_bool_arg(
+        args,
+        3,
+        "read_hdf5",
+        "fourth",
+        "skip the files that cannot broadcast",
+    )
+}
+
 /// The optional second argument: the dimensions to read.
 fn parse_dimensions_arg(args: &[Expr]) -> datafusion::error::Result<Vec<String>> {
-    let Some(Expr::Literal(ScalarValue::List(values), _)) = args.get(1) else {
-        return Ok(vec![]);
-    };
-    let Some(strings) = values
-        .as_ref()
-        .values()
-        .as_any()
-        .downcast_ref::<arrow::array::StringArray>()
-    else {
-        return plan_err!("read_hdf5 second argument must be a List<Utf8> of dimension names");
-    };
-    Ok(strings
-        .iter()
-        .filter_map(|value| value.map(|s| s.to_string()))
-        .collect())
+    beacon_common::table_function::parse_dimensions_arg(args, 1, "read_hdf5", "second")
 }

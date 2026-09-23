@@ -14,7 +14,7 @@ use beacon_datafusion_ext::cancel::query_cancellation;
 use beacon_datafusion_ext::format_ext::{
     DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
 };
-use beacon_datafusion_ext::format_options::format_option;
+use beacon_datafusion_ext::format_options::{format_option, parse_bool_option};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema, session_widening};
 use datafusion::{
@@ -88,6 +88,9 @@ impl FileFormatFactory for AtlasFormatFactory {
                     .filter(|dimension| !dimension.is_empty())
                     .collect(),
             );
+        }
+        if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
+            options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
         }
         Ok(self.format(options))
     }
@@ -210,6 +213,7 @@ impl AtlasFormat {
             table_schema,
             self.cache.clone(),
         )
+        .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
     }
 }
 
@@ -543,6 +547,7 @@ mod scan_tests {
 
         let options = AtlasOptions {
             read_dimensions: Some(vec!["lat".to_string(), "lon".to_string()]),
+            ..AtlasOptions::default()
         };
         let (ctx, table) = table_with(tmp.path(), 1, options).await;
         ctx.register_table("mixed", table).unwrap();
@@ -555,6 +560,56 @@ mod scan_tests {
             .unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 6, "the lat by lon grid; temperature reads null");
+    }
+
+    /// With `skip_unbroadcastable`, the dataset on two grids is skipped and
+    /// the query answers from the rest.
+    #[tokio::test]
+    async fn the_skip_option_reads_past_a_dataset_on_two_grids() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_grids_then_plain(tmp.path()).await;
+        let options = AtlasOptions {
+            skip_unbroadcastable: true,
+            ..AtlasOptions::default()
+        };
+        let (ctx, table) = table_with(tmp.path(), 1, options).await;
+        ctx.register_table("t", table).unwrap();
+
+        let batches = ctx
+            .sql("SELECT temperature, grid FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 4, "`plain` alone is read");
+    }
+
+    /// `OPTIONS ('skip_unbroadcastable' 'true')` reaches the format. A value
+    /// that is not a boolean is refused at `CREATE EXTERNAL TABLE`.
+    #[tokio::test]
+    async fn the_factory_reads_the_skip_option() {
+        let factory = AtlasFormatFactory::new(AtlasOptions::default());
+        let ctx = SessionContext::new();
+        let options = |value: &str| {
+            HashMap::from([("skip_unbroadcastable".to_string(), value.to_string())])
+        };
+
+        let format = factory.create(&ctx.state(), &options("true")).unwrap();
+        let format = format.as_any().downcast_ref::<AtlasFormat>().unwrap();
+        assert!(format.options.skip_unbroadcastable);
+
+        let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
+        let default = default.as_any().downcast_ref::<AtlasFormat>().unwrap();
+        assert!(!default.options.skip_unbroadcastable);
+
+        let error = factory
+            .create(&ctx.state(), &options("maybe"))
+            .expect_err("not a boolean")
+            .to_string();
+        assert!(error.contains("skip_unbroadcastable"), "{error}");
     }
 
     /// Every format a factory builds opens through the factory's one cache,
