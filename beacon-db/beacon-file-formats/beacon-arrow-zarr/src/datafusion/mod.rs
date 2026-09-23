@@ -163,14 +163,23 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
         units_over_stores(objects, &crate::util::top_level_zarr_meta_v3(objects))
     }
 
-    /// Every `zarr.json` is a dataset, judged by its own name.
+    /// Every group and array has a `zarr.json`; the store root is the top-level one.
+    fn holds(&self, object: &ObjectMeta) -> bool {
+        is_zarr_v3_metadata(object)
+    }
+
+    /// One dataset per store, named by its top-level `zarr.json`.
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-        Ok(objects
+        let markers: Vec<ObjectMeta> = objects
             .iter()
             .filter(|obj| is_zarr_v3_metadata(obj))
+            .cloned()
+            .collect();
+        Ok(top_level_zarr_meta_v3(&markers)
+            .into_iter()
             .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
             .collect())
     }
@@ -1084,9 +1093,9 @@ mod tests {
         assert!(message.contains("maybe"), "{message}");
     }
 
-    /// Each `zarr.json` is a dataset on its own name, as each `data.atlas` is.
+    /// Only the top-level `zarr.json` of a store is a dataset.
     #[tokio::test]
-    async fn every_zarr_json_is_a_dataset() {
+    async fn only_the_top_level_zarr_json_is_a_dataset() {
         use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
         use object_store::{ObjectMeta, path::Path};
 
@@ -1106,15 +1115,31 @@ mod tests {
         ];
         let datasets = factory.discover_datasets(&objects).unwrap();
         let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+        let mut paths = paths;
+        paths.sort();
         assert_eq!(
             paths,
-            vec![
-                "gridded-example.zarr/zarr.json",
-                "gridded-example.zarr/lat/zarr.json",
-                "plain-dir/zarr.json",
-            ]
+            vec!["gridded-example.zarr/zarr.json", "plain-dir/zarr.json"]
         );
         assert!(datasets.iter().all(|d| d.format == "zarr"));
+    }
+
+    /// Zarr holds its markers so it can compare them, and nothing else.
+    #[test]
+    fn zarr_holds_its_markers_only() {
+        use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+
+        let meta = |path: &str| object_store::ObjectMeta {
+            location: object_store::path::Path::from(path),
+            last_modified: Default::default(),
+            size: 1,
+            e_tag: None,
+            version: None,
+        };
+        let factory = <ZarrFormatFactory as Default>::default();
+        assert!(factory.holds(&meta("cube.zarr/zarr.json")));
+        assert!(factory.holds(&meta("cube.zarr/lat/zarr.json")));
+        assert!(!factory.holds(&meta("cube.zarr/lat/c/0")));
     }
 
     #[tokio::test]

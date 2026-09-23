@@ -14,14 +14,22 @@ use datafusion::{
 use crate::listing_factory::ListingFactory;
 
 pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
-    /// The datasets among `objects`, one per object this format claims.
+    /// The datasets among `objects`.
     ///
-    /// A listing streams and asks about one object at a time, so the answer
-    /// must depend on each object alone.
+    /// A listing streams and asks about one object at a time. Objects this
+    /// format [`holds`](Self::holds) are asked about together, once the walk ends.
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>>;
+
+    /// Whether a listing keeps `object` to judge it with the others it keeps.
+    ///
+    /// For a format whose datasets depend on a comparison, such as the
+    /// top-level marker among nested ones. Hold as little as that needs.
+    fn holds(&self, _object: &ObjectMeta) -> bool {
+        false
+    }
 
     fn file_format_name(&self) -> String;
     fn list_with_file_extension(&self) -> bool {

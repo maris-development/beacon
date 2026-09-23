@@ -228,9 +228,10 @@ fn copy_dir_all(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// Every `zarr.json` is a dataset, the store root and each array alike.
+/// A Zarr v3 store has a `zarr.json` at its root and inside every array. Only
+/// the root is a dataset.
 #[tokio::test(flavor = "multi_thread")]
-async fn every_zarr_json_is_a_dataset() {
+async fn a_zarr_store_is_one_dataset_not_one_per_array() {
     let rt = seeded_runtime("stream_zarr").await;
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -239,14 +240,20 @@ async fn every_zarr_json_is_a_dataset() {
         .join("test-datasets/gridded-example.zarr");
     copy_dir_all(&fixture, &rt.datasets_dir().join("gridded-example.zarr"));
 
-    let zarr = column_strings(
-        &rt.sql(
-            "SELECT file_name FROM list_datasets() WHERE file_format = 'zarr' ORDER BY file_name",
-        )
-        .await,
-        0,
+    let batches = rt
+        .sql("SELECT file_name, size FROM list_datasets() WHERE file_format = 'zarr'")
+        .await;
+    assert_eq!(
+        column_strings(&batches, 0),
+        vec!["gridded-example.zarr/zarr.json"]
     );
-    assert_eq!(zarr.len(), 8, "one row per zarr.json, got {zarr:?}");
-    assert!(zarr.contains(&"gridded-example.zarr/zarr.json".to_string()));
-    assert!(zarr.contains(&"gridded-example.zarr/lat/zarr.json".to_string()));
+    let size = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+        .expect("size is UInt64");
+    assert!(
+        !datafusion::arrow::array::Array::is_null(size, 0),
+        "a held row carries its marker's size"
+    );
 }
