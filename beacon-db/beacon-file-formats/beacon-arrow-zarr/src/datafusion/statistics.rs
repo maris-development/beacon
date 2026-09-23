@@ -45,7 +45,7 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::{
     backend::{cf_offset_to_timestamp, parse_cf_time_units},
-    reader::{ArrayAttributes, dataset_and_attributes_from_group, project_read_dimensions},
+    reader::{ArrayAttributes, dataset_and_attributes_from_group, project_read_dimensions_or_skip},
     util::recursive_groups,
 };
 
@@ -58,11 +58,13 @@ use crate::{
 /// store, an Icechunk repository passes a repository session.
 ///
 /// `read_dimensions` is the scan's narrowing, applied here too so a column that
-/// the scan never returns is never measured.
+/// the scan never returns is never measured. `skip_unbroadcastable` is the
+/// scan's too: a leaf the scan skips is not measured either.
 pub async fn generate_statistics(
     storage: Arc<dyn AsyncReadableListableStorageTraits>,
     group_path: &str,
     read_dimensions: Option<Vec<String>>,
+    skip_unbroadcastable: bool,
     table_schema: &Schema,
 ) -> anyhow::Result<Statistics> {
     let group = Group::async_open(storage, group_path)
@@ -84,7 +86,15 @@ pub async fn generate_statistics(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read Zarr group as dataset: {e}"))?;
         // Match what the scan returns: the same narrowing runs per partition.
-        let dataset = project_read_dimensions(dataset, read_dimensions.clone(), None)?;
+        let Some(dataset) = project_read_dimensions_or_skip(
+            dataset,
+            read_dimensions.clone(),
+            skip_unbroadcastable,
+            None,
+        )?
+        else {
+            continue;
+        };
 
         for name in &names {
             let Some(array) = dataset.get_array(name) else {

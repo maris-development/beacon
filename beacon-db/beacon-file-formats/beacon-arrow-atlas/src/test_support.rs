@@ -214,6 +214,68 @@ pub async fn two_grids(dir: &Path) {
     writer.finish().await.expect("finish the collection");
 }
 
+/// A dataset on two grids, then one on a single grid.
+/// `mixed`: temperature: Float32[obs=4], grid: Float64[lat=2, lon=3], attr season.
+/// `plain`: temperature: Float32[obs=4]=[5,6,7,8].
+pub async fn two_grids_then_plain(dir: &Path) {
+    let writer = AtlasWriter::create_path(dir, WriterConfig::default())
+        .await
+        .expect("create the collection");
+
+    {
+        let mut mixed = writer.add_dataset("mixed").await.expect("add mixed");
+        mixed
+            .define_array::<f32>("temperature", vec!["obs".into()], vec![4], None, None)
+            .await
+            .expect("define temperature");
+        mixed
+            .write_array(
+                "temperature",
+                vec![0],
+                arr1(&[1.0f32, 2.0, 3.0, 4.0]).into_dyn().view(),
+            )
+            .await
+            .expect("write temperature");
+        mixed
+            .define_array::<f64>(
+                "grid",
+                vec!["lat".into(), "lon".into()],
+                vec![2, 3],
+                None,
+                None,
+            )
+            .await
+            .expect("define grid");
+        let cells = ArrayD::from_shape_fn(IxDyn(&[2, 3]), |i| (i[0] * 3 + i[1]) as f64);
+        mixed
+            .write_array("grid", vec![0, 0], cells.view())
+            .await
+            .expect("write grid");
+        // A third column, so a query on the two arrays is not a scan of every column.
+        mixed.set_attribute("season", Attr::String("spring".into()));
+        mixed.finish().await.expect("finish mixed");
+    }
+
+    {
+        let mut plain = writer.add_dataset("plain").await.expect("add plain");
+        plain
+            .define_array::<f32>("temperature", vec!["obs".into()], vec![4], None, None)
+            .await
+            .expect("define temperature");
+        plain
+            .write_array(
+                "temperature",
+                vec![0],
+                arr1(&[5.0f32, 6.0, 7.0, 8.0]).into_dyn().view(),
+            )
+            .await
+            .expect("write temperature");
+        plain.finish().await.expect("finish plain");
+    }
+
+    writer.finish().await.expect("finish the collection");
+}
+
 /// Two datasets whose shared array has two numeric types.
 /// `a`: value: Int16[2]=[1,2], flag: Int32[2]=[7,8].
 /// `b`: value: Float32[2]=[3.5,4.5]. Merged `value` widens; `flag` stays a-only.
