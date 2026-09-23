@@ -228,16 +228,16 @@ tag. Releases before 2.0.0 are recorded in the
   walk, during planning, and it built every row before the first one could leave. It is now a
   table with its own plan node, `DatasetsExec`, which emits rows as listing pages arrive. A
   `LIMIT` stops the walk, so `LIMIT 50` over a bucket of millions reads one page. Memory is bounded
-  by one batch of rows instead of by the store. A format that judges each file alone answers as
-  the file passes; Zarr, which picks the outermost marker among many, holds only its markers and
-  answers when the walk ends, so the datasets a listing reports do not change. An S3
-  store now asks for 5000 keys per page instead of the server default of 1000, and a recursive
+  by one batch of rows instead of by the store. Every format judges each object alone, and the
+  crawler reads the same stream as the table. An S3 store now asks for 5000 keys per page instead of the server default of 1000, and a recursive
   walk splits into one page chain per sub-directory, three levels down, 16 in flight. A recursive
   listing of a SeaweedFS bucket of 2 853 217 objects took 79.9 s and takes 19.4 s. Both the
-  configured S3 datasets store and an ad-hoc `s3://` path get the wrapper. Two things change. The
+  configured S3 datasets store and an ad-hoc `s3://` path get the wrapper. Three things change. The
   rows arrive in no fixed order, because the shards interleave; add `ORDER BY file_name` for a
-  sorted result. And a listing error is an error: a timeout part-way through the walk used to end
-  the listing quietly and report the rows so far as the whole answer. See
+  sorted result. A listing error is an error: a timeout part-way through the walk used to end
+  the listing quietly and report the rows so far as the whole answer. And every `zarr.json` is a
+  dataset, as every `data.atlas` is: a Zarr v3 store lists its root and each of its arrays, where
+  it listed the root alone. Filter on `file_name` to keep the roots. See
   [`list_datasets`](docs/docs/2.0.0-rc6/sql/table-functions-utility.md#list_datasets).
 
 - **An Atlas query must name its columns.** The Atlas reader flattens each dataset on the

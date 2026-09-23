@@ -228,10 +228,9 @@ fn copy_dir_all(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// A Zarr v3 store has a `zarr.json` at its root and inside every array. Only
-/// the root is a dataset.
+/// Every `zarr.json` is a dataset, the store root and each array alike.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_zarr_store_is_one_dataset_not_one_per_array() {
+async fn every_zarr_json_is_a_dataset() {
     let rt = seeded_runtime("stream_zarr").await;
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -241,9 +240,13 @@ async fn a_zarr_store_is_one_dataset_not_one_per_array() {
     copy_dir_all(&fixture, &rt.datasets_dir().join("gridded-example.zarr"));
 
     let zarr = column_strings(
-        &rt.sql("SELECT file_name FROM list_datasets() WHERE file_format = 'zarr'")
-            .await,
+        &rt.sql(
+            "SELECT file_name FROM list_datasets() WHERE file_format = 'zarr' ORDER BY file_name",
+        )
+        .await,
         0,
     );
-    assert_eq!(zarr, vec!["gridded-example.zarr/zarr.json"]);
+    assert_eq!(zarr.len(), 8, "one row per zarr.json, got {zarr:?}");
+    assert!(zarr.contains(&"gridded-example.zarr/zarr.json".to_string()));
+    assert!(zarr.contains(&"gridded-example.zarr/lat/zarr.json".to_string()));
 }

@@ -67,6 +67,9 @@ Lists every file in the dataset storage root of Beacon. Returns one row for each
 The function accepts three optional arguments: `list_datasets(pattern, offset, limit)`. The
 `pattern` is a glob, relative to the storage root. The default is `**/*`.
 
+Beacon examines each file alone. A Zarr v3 store has a `zarr.json` file at its root and in each
+array, so the store gives one row for each `zarr.json` file.
+
 The rows stream as the storage listing arrives. A `LIMIT` stops the listing. The rows have no
 fixed order. Add `ORDER BY file_name` if you need a sorted result.
 

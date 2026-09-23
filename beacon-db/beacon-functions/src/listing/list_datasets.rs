@@ -10,19 +10,19 @@ use datafusion::{
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
 };
+use futures::TryStreamExt;
 
+use super::classify::classify;
 use super::provider::DatasetsTable;
 use crate::file_formats::BeaconTableFunctionImpl;
 
-/// Discover the datasets matching `pattern` (default `**/*`) under the datasets
-/// object store, as a `Vec`. A query goes through [`ListDatasetsFunc`], which
-/// streams.
+/// Every dataset matching `pattern` under the datasets store, as a `Vec`.
+///
+/// The same stream a query reads through [`ListDatasetsFunc`], collected.
 pub async fn list_datasets(
     session_ctx: &SessionContext,
     file_formats: &[Arc<dyn FileFormatFactoryExt>],
-    offset: Option<usize>,
-    limit: Option<usize>,
-    search_pattern: Option<String>,
+    pattern: &str,
 ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
     let state = session_ctx.state();
     let listing_factory = state
@@ -34,24 +34,10 @@ pub async fn list_datasets(
             )
         })?;
 
-    let datasets = listing_factory
-        .list_datasets(
-            &state,
-            file_formats,
-            &search_pattern.unwrap_or_else(|| "**/*".to_string()),
-        )
-        .await?;
-
-    // `saturating_sub`: an offset past the end yields an empty page.
-    let start = offset.unwrap_or(0);
-    let end = limit.map(|l| start + l).unwrap_or(datasets.len());
-    let datasets = datasets
-        .into_iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect();
-
-    Ok(datasets)
+    let listing = listing_factory.listing(&state, pattern)?;
+    classify(file_formats.to_vec(), listing.stream())
+        .try_collect()
+        .await
 }
 
 pub struct ListDatasetsFunc {

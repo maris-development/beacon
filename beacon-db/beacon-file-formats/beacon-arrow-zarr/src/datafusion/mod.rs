@@ -9,8 +9,7 @@ use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{
-    DatasetMetadata, Discovery, FileFormatFactoryExt, SchemaOptions, SchemaUnit,
-    units_over_stores,
+    DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
 };
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::type_widening::{LabeledSchema, session_widening};
@@ -164,41 +163,16 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
         units_over_stores(objects, &crate::util::top_level_zarr_meta_v3(objects))
     }
 
-    /// Every group and array has a `zarr.json`; only a comparison across the
-    /// markers finds the store root.
-    fn discovery(&self) -> Discovery {
-        Discovery::Deferred {
-            candidate: is_zarr_v3_metadata,
-        }
-    }
-
+    /// Every `zarr.json` is a dataset, judged by its own name.
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-        let datasets: Vec<ObjectMeta> = objects
+        Ok(objects
             .iter()
             .filter(|obj| is_zarr_v3_metadata(obj))
-            .cloned()
-            .collect();
-
-        let top_level_datasets = top_level_zarr_meta_v3(&datasets);
-        let zarr_paths: Vec<ZarrPath> = top_level_datasets
-            .into_iter()
-            .filter_map(|path| match ZarrPath::new_from_object_meta(path) {
-                Ok(zarr_path) => Some(zarr_path),
-                Err(e) => {
-                    tracing::trace!(error = %e, "skipping non-Zarr object during dataset discovery");
-                    None
-                }
-            })
-            .collect();
-
-        let datasets: Vec<DatasetMetadata> = zarr_paths
-            .into_iter()
-            .map(|path| DatasetMetadata::new(path.as_zarr_json_path(), self.get_ext()))
-            .collect();
-        Ok(datasets)
+            .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
+            .collect())
     }
 
     fn file_format_name(&self) -> String {
@@ -558,26 +532,6 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{ZarrConfig, ZarrFormat, ZarrFormatFactory, ZarrSource, parse_bool_option};
-
-    #[test]
-    fn discovery_is_deferred_to_the_markers() {
-        use beacon_datafusion_ext::format_ext::{Discovery, FileFormatFactoryExt};
-
-        let meta = |path: &str| object_store::ObjectMeta {
-            location: object_store::path::Path::from(path),
-            last_modified: Default::default(),
-            size: 1,
-            e_tag: None,
-            version: None,
-        };
-        let factory = ZarrFormatFactory::new(Default::default());
-        let Discovery::Deferred { candidate } = factory.discovery() else {
-            panic!("Zarr must defer");
-        };
-        assert!(candidate(&meta("cube/zarr.json")));
-        assert!(candidate(&meta("cube/lat/zarr.json")));
-        assert!(!candidate(&meta("cube/lat/c/0/0")), "a chunk is not held");
-    }
 
     /// Register the bundled `gridded-example.zarr` store as a DataFusion table
     /// backed by [`ZarrFormat`] + [`ListingTable`].
@@ -1130,37 +1084,37 @@ mod tests {
         assert!(message.contains("maybe"), "{message}");
     }
 
+    /// Each `zarr.json` is a dataset on its own name, as each `data.atlas` is.
     #[tokio::test]
-    async fn factory_discovers_gridded_example() {
+    async fn every_zarr_json_is_a_dataset() {
         use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
         use object_store::{ObjectMeta, path::Path};
 
+        let meta = |path: &str| ObjectMeta {
+            location: Path::from(path),
+            last_modified: Default::default(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        };
         let factory = <ZarrFormatFactory as Default>::default();
         let objects = vec![
-            ObjectMeta {
-                location: Path::from("gridded-example.zarr/zarr.json"),
-                last_modified: Default::default(),
-                size: 0,
-                e_tag: None,
-                version: None,
-            },
-            // A nested array's metadata must NOT become its own dataset.
-            ObjectMeta {
-                location: Path::from("gridded-example.zarr/lat/zarr.json"),
-                last_modified: Default::default(),
-                size: 0,
-                e_tag: None,
-                version: None,
-            },
+            meta("gridded-example.zarr/zarr.json"),
+            meta("gridded-example.zarr/lat/zarr.json"),
+            meta("gridded-example.zarr/lat/c/0"),
+            meta("plain-dir/zarr.json"),
         ];
         let datasets = factory.discover_datasets(&objects).unwrap();
-        assert_eq!(datasets.len(), 1);
-        assert!(
-            datasets[0]
-                .file_path
-                .ends_with("gridded-example.zarr/zarr.json")
+        let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "gridded-example.zarr/zarr.json",
+                "gridded-example.zarr/lat/zarr.json",
+                "plain-dir/zarr.json",
+            ]
         );
-        assert_eq!(datasets[0].format, "zarr");
+        assert!(datasets.iter().all(|d| d.format == "zarr"));
     }
 
     #[tokio::test]

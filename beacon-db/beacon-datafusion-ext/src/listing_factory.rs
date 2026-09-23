@@ -8,7 +8,6 @@ use futures::stream::{BoxStream, StreamExt, TryStreamExt};
 use object_store::ObjectMeta;
 use url::Url;
 
-use crate::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use crate::listing_url_resolver::scheme_of;
 use crate::object_store_registry::store_key_url;
 
@@ -176,36 +175,6 @@ impl ListingFactory {
         }
     }
 
-    /// Discover the datasets matching `glob_path` under the resolved store,
-    /// asking each registered file format which of the listed objects it owns.
-    ///
-    /// The path is resolved through [`Self::parse_listing_table_url`] (so it
-    /// honors both configured and dynamic modes), every matching object is
-    /// listed once, and each format's [`FileFormatFactoryExt::discover_datasets`]
-    /// classifies them. The returned datasets are enriched with size and
-    /// last-modified time from the object listing.
-    pub async fn list_datasets(
-        &self,
-        session: &dyn Session,
-        file_formats: &[Arc<dyn FileFormatFactoryExt>],
-        glob_path: &str,
-    ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-        use futures::TryStreamExt;
-
-        // A listing error propagates rather than truncating the result.
-        let objects: Vec<ObjectMeta> = self.listing(session, glob_path)?.stream().try_collect().await?;
-
-        // Ask each file format which objects it owns and how to interpret them.
-        let mut datasets = vec![];
-        for file_format in file_formats.iter() {
-            datasets.extend(file_format.discover_datasets(&objects)?);
-        }
-
-        enrich_with_object_metadata(&mut datasets, &objects);
-
-        Ok(datasets)
-    }
-
     /// Resolve `glob_path` into the listing it names. The result holds no
     /// session and reads as many times as a caller wants.
     pub fn listing(
@@ -285,44 +254,6 @@ impl ObjectListing {
         })
         .flatten()
         .boxed()
-    }
-}
-
-/// Fill each dataset's `size` + `last_modified` from the object listing.
-///
-/// A single-file dataset matches an object exactly; a directory-shaped dataset
-/// (e.g. Zarr) aggregates every object under its prefix (sum of sizes, newest
-/// mtime). Datasets with no matching object keep `None`.
-pub fn enrich_with_object_metadata(
-    datasets: &mut [DatasetMetadata],
-    objects: &[object_store::ObjectMeta],
-) {
-    use std::collections::HashMap;
-
-    let by_path: HashMap<&str, &object_store::ObjectMeta> =
-        objects.iter().map(|o| (o.location.as_ref(), o)).collect();
-    for ds in datasets.iter_mut() {
-        if let Some(obj) = by_path.get(ds.file_path.as_str()) {
-            ds.size = Some(obj.size);
-            ds.last_modified = Some(obj.last_modified);
-        } else {
-            let prefix = format!("{}/", ds.file_path);
-            let mut total = 0u64;
-            let mut latest = None;
-            for o in objects {
-                if o.location.as_ref().starts_with(&prefix) {
-                    total += o.size;
-                    latest = Some(match latest {
-                        Some(l) if l >= o.last_modified => l,
-                        _ => o.last_modified,
-                    });
-                }
-            }
-            if latest.is_some() {
-                ds.size = Some(total);
-                ds.last_modified = latest;
-            }
-        }
     }
 }
 
@@ -553,55 +484,5 @@ mod tests {
         );
         // Dynamic: the path passes through untouched.
         assert_eq!(ListingFactory::dynamic().rewrite_path("a/b.nc"), "a/b.nc");
-    }
-
-    // ---- enrich_with_object_metadata -------------------------------------
-
-    fn meta(location: &str, size: u64, ts: i64) -> object_store::ObjectMeta {
-        object_store::ObjectMeta {
-            location: ObjectPath::from(location),
-            last_modified: chrono::DateTime::from_timestamp(ts, 0).unwrap(),
-            size,
-            e_tag: None,
-            version: None,
-        }
-    }
-
-    #[test]
-    fn enrich_matches_a_single_file_dataset_to_its_object() {
-        let objects = vec![meta("argo/a.nc", 100, 10), meta("argo/b.nc", 200, 20)];
-        let mut datasets = vec![DatasetMetadata::new("argo/a.nc".into(), "nc".into())];
-        enrich_with_object_metadata(&mut datasets, &objects);
-        assert_eq!(datasets[0].size, Some(100));
-        assert_eq!(datasets[0].last_modified, Some(objects[0].last_modified));
-    }
-
-    #[test]
-    fn enrich_aggregates_a_directory_dataset_over_its_prefix() {
-        // A directory-shaped dataset (e.g. Zarr): its `file_path` is a prefix, not
-        // an object, so size sums and last_modified is the newest across the prefix.
-        let objects = vec![
-            meta("cube.zarr/.zmetadata", 10, 5),
-            meta("cube.zarr/temp/0.0", 300, 30),
-            meta("cube.zarr/temp/0.1", 400, 25),
-            meta("other.nc", 999, 99), // outside the prefix, must be ignored
-        ];
-        let mut datasets = vec![DatasetMetadata::new("cube.zarr".into(), "zarr".into())];
-        enrich_with_object_metadata(&mut datasets, &objects);
-        assert_eq!(datasets[0].size, Some(10 + 300 + 400));
-        // Newest mtime among the three prefixed objects (ts=30).
-        assert_eq!(
-            datasets[0].last_modified,
-            Some(chrono::DateTime::from_timestamp(30, 0).unwrap())
-        );
-    }
-
-    #[test]
-    fn enrich_leaves_a_dataset_with_no_matching_object_untouched() {
-        let objects = vec![meta("argo/a.nc", 100, 10)];
-        let mut datasets = vec![DatasetMetadata::new("ghost/missing.nc".into(), "nc".into())];
-        enrich_with_object_metadata(&mut datasets, &objects);
-        assert_eq!(datasets[0].size, None);
-        assert_eq!(datasets[0].last_modified, None);
     }
 }

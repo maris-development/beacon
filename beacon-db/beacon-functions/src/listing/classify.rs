@@ -1,91 +1,56 @@
-//! From objects to datasets, as the listing streams. See [`Discovery`].
+//! From objects to datasets, as the listing streams.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, Discovery, FileFormatFactoryExt};
-use beacon_datafusion_ext::listing_factory::enrich_with_object_metadata;
+use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use datafusion::error::Result;
 use futures::stream::{BoxStream, StreamExt};
 use object_store::ObjectMeta;
 
-/// A deferred format and the objects held for it so far.
-struct Held {
-    format: Arc<dyn FileFormatFactoryExt>,
-    candidate: fn(&ObjectMeta) -> bool,
-    objects: Vec<ObjectMeta>,
-}
-
-/// Turn a walk into dataset rows.
+/// Turn a walk into dataset rows, one object at a time.
 ///
 /// Every format is asked about every object, so two formats that claim one
-/// object produce two rows. A per-object format answers as the object passes.
-/// A deferred format gets its candidates together after the walk. An error in
-/// the walk is an error row.
+/// object produce two rows. Each row carries its object's size and timestamp.
+/// An error in the walk or in a format is an error row.
 pub fn classify(
     formats: Vec<Arc<dyn FileFormatFactoryExt>>,
     objects: BoxStream<'static, Result<ObjectMeta>>,
 ) -> BoxStream<'static, Result<DatasetMetadata>> {
-    let mut per_object = Vec::new();
-    let mut held = Vec::new();
+    objects
+        .flat_map(move |object| futures::stream::iter(datasets_of(&formats, object)))
+        .boxed()
+}
+
+/// The rows every format finds in one object.
+fn datasets_of(
+    formats: &[Arc<dyn FileFormatFactoryExt>],
+    object: Result<ObjectMeta>,
+) -> Vec<Result<DatasetMetadata>> {
+    let object = match object {
+        Ok(object) => object,
+        Err(e) => return vec![Err(e)],
+    };
+    let mut rows = Vec::new();
     for format in formats {
-        match format.discovery() {
-            Discovery::PerObject => per_object.push(format),
-            Discovery::Deferred { candidate } => held.push(Held {
-                format,
-                candidate,
-                objects: Vec::new(),
-            }),
+        match format.discover_datasets(std::slice::from_ref(&object)) {
+            Ok(found) => rows.extend(found.into_iter().map(|mut dataset| {
+                dataset.size = Some(object.size);
+                dataset.last_modified = Some(object.last_modified);
+                Ok(dataset)
+            })),
+            Err(e) => rows.push(Err(e)),
         }
     }
-    // Shared with the tail, which runs only after the walk has ended.
-    let held = Arc::new(Mutex::new(held));
-    let held_for_tail = Arc::clone(&held);
-
-    let walk = objects
-        .map(move |object| -> Vec<Result<DatasetMetadata>> {
-            let object = match object {
-                Ok(object) => object,
-                Err(e) => return vec![Err(e)],
-            };
-            for h in held.lock().expect("no poisoned listing").iter_mut() {
-                if (h.candidate)(&object) {
-                    h.objects.push(object.clone());
-                }
-            }
-            per_object
-                .iter()
-                .filter_map(|format| format.classify_object(&object))
-                .map(Ok)
-                .collect()
-        })
-        .flat_map(futures::stream::iter);
-
-    let tail = futures::stream::once(async move {
-        let held = std::mem::take(&mut *held_for_tail.lock().expect("no poisoned listing"));
-        let mut rows = Vec::new();
-        for h in held {
-            match h.format.discover_datasets(&h.objects) {
-                Ok(mut datasets) => {
-                    enrich_with_object_metadata(&mut datasets, &h.objects);
-                    rows.extend(datasets.into_iter().map(Ok));
-                }
-                Err(e) => rows.push(Err(e)),
-            }
-        }
-        futures::stream::iter(rows)
-    })
-    .flatten();
-
-    walk.chain(tail).boxed()
+    rows
 }
 
 #[cfg(test)]
 mod tests {
     use std::any::Any;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    use beacon_datafusion_ext::format_ext::{DatasetMetadata, Discovery, FileFormatFactoryExt};
+    use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
     use datafusion::{
         catalog::Session,
         common::GetExt,
@@ -127,17 +92,17 @@ mod tests {
         rows.iter().map(|r| r.file_path.as_str()).collect()
     }
 
-    /// Claims every `.foo` object, one at a time.
+    /// Claims every object with extension `ext`.
     #[derive(Debug)]
-    struct FooFactory;
+    struct ExtFactory(&'static str);
 
-    impl GetExt for FooFactory {
+    impl GetExt for ExtFactory {
         fn get_ext(&self) -> String {
-            "foo".to_string()
+            self.0.to_string()
         }
     }
 
-    impl FileFormatFactory for FooFactory {
+    impl FileFormatFactory for ExtFactory {
         fn create(
             &self,
             _state: &dyn Session,
@@ -153,99 +118,23 @@ mod tests {
         }
     }
 
-    impl FileFormatFactoryExt for FooFactory {
+    impl FileFormatFactoryExt for ExtFactory {
         fn discover_datasets(&self, objects: &[ObjectMeta]) -> Result<Vec<DatasetMetadata>> {
             Ok(objects
                 .iter()
-                .filter(|o| o.location.extension() == Some("foo"))
-                .map(|o| DatasetMetadata::new(o.location.to_string(), "foo".to_string()))
+                .filter(|o| o.location.extension() == Some(self.0))
+                .map(|o| DatasetMetadata::new(o.location.to_string(), self.0.to_string()))
                 .collect())
         }
         fn file_format_name(&self) -> String {
-            "foo".to_string()
+            self.0.to_string()
         }
-    }
-
-    fn is_marker(object: &ObjectMeta) -> bool {
-        object.location.filename() == Some("marker")
-    }
-
-    /// The paths each `discover_datasets` call was handed.
-    type Seen = Arc<Mutex<Vec<Vec<String>>>>;
-
-    /// Claims the outermost `marker` of each tree. Records what each call was handed.
-    #[derive(Debug)]
-    struct MarkerFactory {
-        seen: Seen,
-    }
-
-    impl GetExt for MarkerFactory {
-        fn get_ext(&self) -> String {
-            "marked".to_string()
-        }
-    }
-
-    impl FileFormatFactory for MarkerFactory {
-        fn create(
-            &self,
-            _state: &dyn Session,
-            _options: &HashMap<String, String>,
-        ) -> Result<Arc<dyn FileFormat>> {
-            unimplemented!("a listing never creates a format")
-        }
-        fn default(&self) -> Arc<dyn FileFormat> {
-            unimplemented!("a listing never creates a format")
-        }
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-    }
-
-    impl FileFormatFactoryExt for MarkerFactory {
-        fn discovery(&self) -> Discovery {
-            Discovery::Deferred {
-                candidate: is_marker,
-            }
-        }
-        fn discover_datasets(&self, objects: &[ObjectMeta]) -> Result<Vec<DatasetMetadata>> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push(objects.iter().map(|o| o.location.to_string()).collect());
-            let dirs: Vec<String> = objects
-                .iter()
-                .filter(|o| is_marker(o))
-                .map(|o| o.location.to_string().trim_end_matches("/marker").to_string())
-                .collect();
-            Ok(objects
-                .iter()
-                .filter(|o| is_marker(o))
-                .filter(|o| {
-                    let dir = o.location.to_string().trim_end_matches("/marker").to_string();
-                    !dirs.iter().any(|d| d != &dir && dir.starts_with(&format!("{d}/")))
-                })
-                .map(|o| DatasetMetadata::new(o.location.to_string(), "marked".to_string()))
-                .collect())
-        }
-        fn file_format_name(&self) -> String {
-            "marked".to_string()
-        }
-    }
-
-    fn marker_factory() -> (Arc<MarkerFactory>, Seen) {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        (
-            Arc::new(MarkerFactory {
-                seen: Arc::clone(&seen),
-            }),
-            seen,
-        )
     }
 
     #[tokio::test]
-    async fn per_object_rows_leave_with_their_metadata() {
+    async fn rows_leave_with_their_object_metadata() {
         let got = rows(
-            vec![Arc::new(FooFactory)],
+            vec![Arc::new(ExtFactory("foo"))],
             objects(&[("a.foo", 3), ("b.txt", 1), ("c/d.foo", 5)]),
         )
         .await;
@@ -256,46 +145,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_deferred_format_judges_its_candidates_together() {
-        let (factory, seen) = marker_factory();
+    async fn two_formats_that_claim_one_object_give_two_rows() {
         let got = rows(
-            vec![factory],
-            objects(&[
-                ("x/marker", 1),
-                ("x/inner/marker", 1),
-                ("x/data.bin", 9),
-                ("y/marker", 1),
-            ]),
+            vec![Arc::new(ExtFactory("foo")), Arc::new(ExtFactory("foo"))],
+            objects(&[("a.foo", 1)]),
         )
         .await;
-        assert_eq!(paths(&got), vec!["x/marker", "y/marker"], "the inner marker is not a dataset");
-
-        let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "one call, at the end");
-        assert_eq!(
-            seen[0],
-            vec!["x/marker", "x/inner/marker", "y/marker"],
-            "only the candidates are held"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_deferred_row_carries_its_object_metadata() {
-        let (factory, _) = marker_factory();
-        let got = rows(vec![factory], objects(&[("x/marker", 7)])).await;
-        assert_eq!(got[0].size, Some(7));
-        assert!(got[0].last_modified.is_some());
-    }
-
-    #[tokio::test]
-    async fn deferred_rows_come_after_the_walk() {
-        let (factory, _) = marker_factory();
-        let got = rows(
-            vec![factory, Arc::new(FooFactory)],
-            objects(&[("x/marker", 1), ("a.foo", 1)]),
-        )
-        .await;
-        assert_eq!(paths(&got), vec!["a.foo", "x/marker"]);
+        assert_eq!(paths(&got), vec!["a.foo", "a.foo"]);
     }
 
     #[tokio::test]
@@ -305,7 +161,7 @@ mod tests {
             Err(DataFusionError::Execution("the store went away".to_string())),
         ])
         .boxed();
-        let err = classify(vec![Arc::new(FooFactory)], walk)
+        let err = classify(vec![Arc::new(ExtFactory("foo"))], walk)
             .try_collect::<Vec<_>>()
             .await
             .expect_err("the error propagates");
