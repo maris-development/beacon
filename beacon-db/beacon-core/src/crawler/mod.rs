@@ -17,7 +17,7 @@ pub mod persistence;
 
 pub use beacon_common::CrawlerConfig;
 pub use definition::{CrawlerDefinition, TableNaming, CRAWLER_OWNER_OPTION};
-pub use discovery::{assign_table_names, group_into_tables, CandidateTable};
+pub use discovery::{assign_table_names, group_into_tables, CandidateTable, FormatExtensions};
 pub use engine::{CrawlEngine, CrawlReport};
 pub use manager::{new_crawler_manager_handle, CrawlerManager, CrawlerManagerHandle};
 pub use persistence::CrawlerPersistence;
