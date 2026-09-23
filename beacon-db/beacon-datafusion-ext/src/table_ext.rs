@@ -640,11 +640,22 @@ impl TableDefinition for ViewTableDefinition {
 pub struct MaterializedView {
     definition: MaterializedViewDefinition,
     inner: FastObjectTable,
+    /// The full `CREATE MATERIALIZED VIEW` statement, for `SHOW CREATE TABLE`.
+    statement: String,
 }
 
 impl MaterializedView {
     pub fn new(definition: MaterializedViewDefinition, inner: FastObjectTable) -> Self {
-        Self { definition, inner }
+        let name = datafusion::sql::sqlparser::ast::Ident::with_quote('"', &definition.name);
+        let statement = format!(
+            "CREATE MATERIALIZED VIEW {name} AS {}",
+            definition.definition
+        );
+        Self {
+            definition,
+            inner,
+            statement,
+        }
     }
 
     pub fn definition(&self) -> &MaterializedViewDefinition {
@@ -678,7 +689,7 @@ impl TableProvider for MaterializedView {
     }
 
     fn get_table_definition(&self) -> Option<&str> {
-        Some(self.definition.definition.as_str())
+        Some(self.statement.as_str())
     }
 
     async fn scan(

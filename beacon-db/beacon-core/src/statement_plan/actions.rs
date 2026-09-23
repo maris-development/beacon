@@ -373,7 +373,7 @@ async fn create_delta_table(
         name: cmd.name.to_string(),
         location: cmd.location.clone(),
         options: cmd.options.clone(),
-        definition: None,
+        definition: cmd.definition.clone(),
     };
 
     // `build_provider` resolves the schema from the Delta log; registration
@@ -395,7 +395,7 @@ async fn create_iceberg_table(
         name: cmd.name.to_string(),
         location: cmd.location.clone(),
         options: cmd.options.clone(),
-        definition: None,
+        definition: cmd.definition.clone(),
     };
 
     // `build_provider` reads the schema from the table metadata; registration
@@ -417,7 +417,7 @@ async fn create_icechunk_table(
         name: cmd.name.to_string(),
         location: cmd.location.clone(),
         options: cmd.options.clone(),
-        definition: None,
+        definition: cmd.definition.clone(),
     };
 
     // `build_provider` reads the schema from the repository; registration
@@ -535,12 +535,14 @@ pub(crate) async fn create_view(
 /// the engine resolved from session/global config (Lance by default, or
 /// Iceberg). For `CREATE TABLE AS SELECT` (`is_ctas`), also populate it from
 /// `child` and return the inserted-row count stream; otherwise return `None`.
+/// `definition` is the statement text that is stored with the table.
 pub(crate) async fn create_table(
     session: &Arc<SessionContext>,
     name: &TableReference,
     child: Arc<dyn ExecutionPlan>,
     is_ctas: bool,
     if_not_exists: bool,
+    definition: Option<String>,
 ) -> anyhow::Result<Option<SendableRecordBatchStream>> {
     let table_name = name.table().to_string();
 
@@ -565,7 +567,8 @@ pub(crate) async fn create_table(
     let namespace = beacon_lance::beacon_namespace();
     let table =
         beacon_lance::create_lance_table(warehouse.clone(), &namespace, &table_name, &arrow_schema)
-            .await?;
+            .await?
+            .with_sql_definition(definition);
     let location = table.definition().location.clone();
     let provider: Arc<dyn datafusion::catalog::TableProvider> = Arc::new(table);
 
@@ -849,6 +852,32 @@ pub(crate) async fn list_indexes(
         vec![
             Arc::new(arrow::array::StringArray::from_iter_values(names)),
             Arc::new(arrow::array::StringArray::from_iter_values(columns)),
+        ],
+    )?;
+    Ok(batch)
+}
+
+/// `SHOW CREATE TABLE <table>`: one row with the table's resolved name and the
+/// statement that created it. The definition is null when no statement is stored.
+pub(crate) async fn show_create_table(
+    session: &Arc<SessionContext>,
+    table: &TableReference,
+) -> anyhow::Result<arrow::record_batch::RecordBatch> {
+    let state = session.state();
+    let catalog_options = &state.config().options().catalog;
+    let resolved = table
+        .clone()
+        .resolve(&catalog_options.default_catalog, &catalog_options.default_schema);
+    let provider = session.table_provider(table.clone()).await?;
+    let definition = provider.get_table_definition().map(str::to_string);
+
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        super::logical::show_create_table_arrow_schema(),
+        vec![
+            Arc::new(arrow::array::StringArray::from(vec![resolved.catalog.to_string()])),
+            Arc::new(arrow::array::StringArray::from(vec![resolved.schema.to_string()])),
+            Arc::new(arrow::array::StringArray::from(vec![resolved.table.to_string()])),
+            Arc::new(arrow::array::StringArray::from(vec![definition])),
         ],
     )?;
     Ok(batch)

@@ -52,6 +52,15 @@ CREATE VIEW all_profiles AS
     SELECT * FROM read_netcdf(['wod/**/*.nc'])
 ```
 
+## `SHOW CREATE VIEW`
+
+`SHOW CREATE VIEW` returns the statement that created the view. `SHOW CREATE TABLE` returns the
+same row. Only the admin can run it:
+
+```sql
+SHOW CREATE VIEW north_atlantic
+```
+
 ## `DROP TABLE`
 
 `DROP TABLE` removes a view from the catalog:

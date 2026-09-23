@@ -65,6 +65,7 @@ const CLIENT_ENDPOINTS: &[(&str, &str)] = &[
     ("get", "/api/admin/check"),
     // Deprecated, kept routed and answering a notice — see the module docs.
     ("get", "/api/admin/table-config"),
+    ("get", "/api/admin/table-definition"),
     ("get", "/api/admin/auth/users"),
     ("get", "/api/admin/auth/roles"),
     ("get", "/api/admin/crawlers"),

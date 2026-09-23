@@ -31,7 +31,7 @@ use super::{
     actions, crawler,
     logical::{
         analyze_files_arrow_schema, compact_table_arrow_schema, count_arrow_schema,
-        run_crawler_arrow_schema, show_crawlers_arrow_schema,
+        run_crawler_arrow_schema, show_crawlers_arrow_schema, show_create_table_arrow_schema,
         show_indexes_arrow_schema, show_secrets_arrow_schema, AlterTableSpec,
         Mutation,
     },
@@ -889,6 +889,7 @@ pub(crate) struct CreateTableExec {
     name: TableReference,
     is_ctas: bool,
     if_not_exists: bool,
+    definition: Option<String>,
     child: Arc<dyn ExecutionPlan>,
     session: SessionCell,
     cache: Arc<PlanProperties>,
@@ -899,6 +900,7 @@ impl CreateTableExec {
         name: TableReference,
         is_ctas: bool,
         if_not_exists: bool,
+        definition: Option<String>,
         child: Arc<dyn ExecutionPlan>,
         session: SessionCell,
     ) -> Self {
@@ -911,6 +913,7 @@ impl CreateTableExec {
             name,
             is_ctas,
             if_not_exists,
+            definition,
             child,
             session,
             cache: Arc::new(plan_properties(schema)),
@@ -950,6 +953,7 @@ impl ExecutionPlan for CreateTableExec {
             name: self.name.clone(),
             is_ctas: self.is_ctas,
             if_not_exists: self.if_not_exists,
+            definition: self.definition.clone(),
             child: children.swap_remove(0),
             session: self.session.clone(),
             cache: self.cache.clone(),
@@ -965,9 +969,10 @@ impl ExecutionPlan for CreateTableExec {
         let child = self.child.clone();
         let is_ctas = self.is_ctas;
         let if_not_exists = self.if_not_exists;
+        let definition = self.definition.clone();
         let schema = self.schema();
         Ok(optional_forward_stream(schema, async move {
-            actions::create_table(&session, &name, child, is_ctas, if_not_exists)
+            actions::create_table(&session, &name, child, is_ctas, if_not_exists, definition)
                 .await
                 .map_err(to_df_err)
         }))
@@ -1416,6 +1421,69 @@ impl ExecutionPlan for ShowIndexesExec {
         let schema = show_indexes_arrow_schema();
         let stream = futures::stream::once(async move {
             actions::list_indexes(&session, &table).await.map_err(to_df_err)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
+
+/// Physical node for `SHOW CREATE TABLE <table>`. Produces one row.
+#[derive(Debug)]
+pub(crate) struct ShowCreateTableExec {
+    table: TableReference,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl ShowCreateTableExec {
+    pub(crate) fn new(table: TableReference, session: SessionCell) -> Self {
+        Self {
+            table,
+            session,
+            cache: Arc::new(plan_properties(show_create_table_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for ShowCreateTableExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "ShowCreateTableExec: table={}", self.table)
+            }
+            DisplayFormatType::TreeRender => write!(f, "ShowCreateTableExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for ShowCreateTableExec {
+    fn name(&self) -> &str {
+        "ShowCreateTableExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let table = self.table.clone();
+        let schema = show_create_table_arrow_schema();
+        let stream = futures::stream::once(async move {
+            actions::show_create_table(&session, &table).await.map_err(to_df_err)
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }

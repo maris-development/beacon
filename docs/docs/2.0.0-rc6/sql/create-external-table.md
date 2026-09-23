@@ -190,7 +190,14 @@ DROP TABLE IF EXISTS argo
 SHOW TABLES;
 
 DESCRIBE ocean_profiles;
+
+SHOW CREATE TABLE ocean_profiles;
 ```
+
+`SHOW CREATE TABLE` returns the statement that created the table. Beacon stores the statement
+when you create the table. It masks each secret option value, such as a password or an access key,
+as `'***'`. The `definition` column is null for a table that has no stored statement. A table that
+a crawler creates has no stored statement. Only the admin can run `SHOW CREATE TABLE`.
 
 The [External Tables](/docs/2.0.0-rc6/data-sources/external-tables) setup guide gives an
 example for each format. It also shows the HTTP API that lists the tables.

@@ -177,3 +177,29 @@ describe("AdminClient.datasetStorage", () => {
     expect(info.object_count).toBe(7);
   });
 });
+
+describe("AdminClient.tableDefinition", () => {
+  it("asks for one table and returns its statement", async () => {
+    const calls: string[] = [];
+    const fn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push(`${(init?.method ?? "GET").toUpperCase()} ${String(url)}`);
+      return new Response(
+        JSON.stringify({
+          table_catalog: "beacon",
+          table_schema: "public",
+          table_name: "argo",
+          definition: "CREATE VIEW argo AS SELECT 1",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const client = adminClient(fn as unknown as typeof fetch);
+
+    const result = await client.admin.tableDefinition("argo", { catalog: "beacon", schema: "public" });
+
+    expect(calls).toEqual([
+      "GET http://beacon.test/api/admin/table-definition?table_name=argo&catalog=beacon&schema=public",
+    ]);
+    expect(result.definition).toBe("CREATE VIEW argo AS SELECT 1");
+  });
+});

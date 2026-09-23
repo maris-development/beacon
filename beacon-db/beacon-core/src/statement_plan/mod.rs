@@ -15,6 +15,7 @@ mod actions;
 mod auth;
 mod authz;
 pub(crate) mod crawler;
+mod definition;
 mod logical;
 mod lower;
 pub(crate) mod materialized_view;
@@ -98,7 +99,11 @@ pub(crate) fn plan_produces_result_set(plan: &LogicalPlan) -> bool {
         // copy-on-write `DELETE`/`UPDATE`, crawler/index DDL) report an empty
         // schema, while the row-producing ones (`SHOW CRAWLERS`, `SHOW INDEXES`)
         // report real columns — so the schema decides whether they can be exported.
-        LogicalPlan::Extension(ext) => !ext.node.schema().fields().is_empty(),
+        // CTAS reports a row count like DML, so it stays DDL here.
+        LogicalPlan::Extension(ext) => {
+            !ext.node.as_any().is::<logical::CreateManagedTableNode>()
+                && !ext.node.schema().fields().is_empty()
+        }
         // Everything else is a row-producing query (`SELECT`, `VALUES`, ...).
         other => !other.schema().fields().is_empty(),
     }
@@ -695,6 +700,33 @@ mod tests {
 
         assert!(plan_produces_result_set(&beacon_plan("SHOW CRAWLERS")));
         assert!(plan_produces_result_set(&beacon_plan("SHOW INDEXES ON t")));
+    }
+
+    /// Lowering turns `CREATE TABLE` into a Beacon node and `SHOW CREATE TABLE`
+    /// into another. CTAS reports a row count, but it stays a statement that
+    /// cannot be exported.
+    #[tokio::test]
+    async fn lowered_create_and_show_create_nodes_keep_their_export_rule() {
+        let session = Arc::new(SessionContext::new());
+        session.sql("CREATE TABLE t (a INT)").await.expect("seed table");
+        let lowered = |sql: &'static str| {
+            let session = session.clone();
+            async move {
+                let mut statements = datafusion::sql::parser::DFParser::parse_sql(sql).unwrap();
+                lower_df_statement(&session, statements.pop_front().unwrap())
+                    .await
+                    .expect("statement should lower")
+            }
+        };
+
+        let ctas = lowered("CREATE TABLE u AS SELECT 1 AS a").await;
+        assert!(matches!(ctas, LogicalPlan::Extension(_)), "{ctas}");
+        assert!(!plan_produces_result_set(&ctas));
+        assert!(!plan_produces_result_set(&lowered("CREATE TABLE v (a INT)").await));
+
+        let show = lowered("SHOW CREATE TABLE t").await;
+        assert!(matches!(show, LogicalPlan::Extension(_)), "{show}");
+        assert!(plan_produces_result_set(&show));
     }
 
     /// The super-user gate is the single enforcement point for privileged

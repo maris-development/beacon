@@ -852,6 +852,116 @@ impl UserDefinedLogicalNodeCore for ShowIndexesNode {
     }
 }
 
+fn count_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(count_arrow_schema().as_ref().clone())
+                .expect("count schema is valid"),
+        )
+    })
+}
+
+/// Logical node for `CREATE TABLE` and `CREATE TABLE AS SELECT`. It replaces
+/// DataFusion's DDL node, which has no field for the statement text.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct CreateManagedTableNode {
+    pub(crate) name: TableReference,
+    pub(crate) if_not_exists: bool,
+    /// Set at lowering, so an input that the optimizer empties stays a CTAS.
+    pub(crate) is_ctas: bool,
+    pub(crate) input: LogicalPlan,
+    /// The `CREATE TABLE` statement, stored with the table.
+    pub(crate) definition: Option<String>,
+}
+
+impl UserDefinedLogicalNodeCore for CreateManagedTableNode {
+    fn name(&self) -> &str {
+        "CreateManagedTable"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        // CTAS returns the inserted-row count, like `CreateTableExec`.
+        if self.is_ctas {
+            count_df_schema()
+        } else {
+            empty_schema()
+        }
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "CreateManagedTable: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, mut inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+            if_not_exists: self.if_not_exists,
+            is_ctas: self.is_ctas,
+            input: inputs.swap_remove(0),
+            definition: self.definition.clone(),
+        })
+    }
+}
+
+/// Arrow schema produced by `SHOW CREATE TABLE`. The columns match the
+/// DataFusion statement that it replaces.
+pub(crate) fn show_create_table_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("table_catalog", DataType::Utf8, false),
+                Field::new("table_schema", DataType::Utf8, false),
+                Field::new("table_name", DataType::Utf8, false),
+                Field::new("definition", DataType::Utf8, true),
+            ]))
+        })
+        .clone()
+}
+
+fn show_create_table_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(show_create_table_arrow_schema().as_ref().clone())
+                .expect("SHOW CREATE TABLE schema is valid"),
+        )
+    })
+}
+
+/// Logical node for `SHOW CREATE TABLE <table>` and `SHOW CREATE VIEW <view>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct ShowCreateTableNode {
+    pub(crate) table: TableReference,
+}
+
+impl UserDefinedLogicalNodeCore for ShowCreateTableNode {
+    fn name(&self) -> &str {
+        "ShowCreateTable"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        show_create_table_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ShowCreateTable: table={}", self.table)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            table: self.table.clone(),
+        })
+    }
+}
+
 /// The report `COMPACT TABLE` returns.
 pub(crate) fn compact_table_arrow_schema() -> Arc<Schema> {
     static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();

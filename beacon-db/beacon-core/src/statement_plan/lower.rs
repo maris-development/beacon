@@ -10,6 +10,9 @@
 //!   derived from the predicate, which the optimizer may otherwise push into the
 //!   table scan, changing the plan's shape.
 //! - `COPY` — only its output path is rewritten into the datasets object store.
+//! - `CREATE TABLE` / `CREATE EXTERNAL TABLE` — the node gets the full statement
+//!   text, which Beacon stores with the table.
+//! - `SHOW CREATE TABLE` / `SHOW CREATE VIEW` — reads only the named table.
 //!
 //! Everything else passes through unchanged.
 
@@ -17,14 +20,23 @@ use std::sync::Arc;
 
 use datafusion::{
     logical_expr::{
-        dml::CopyTo, not, when, DmlStatement, Expr, Extension, Filter, LogicalPlan,
+        dml::CopyTo, not, when, DdlStatement, DmlStatement, Expr, Extension, Filter, LogicalPlan,
         LogicalPlanBuilder, WriteOp,
     },
     prelude::{lit, SessionContext},
-    sql::sqlparser::ast::{AlterTableOperation, ObjectName, Statement as SqlAstStatement},
+    sql::{
+        parser::Statement as DFStatement,
+        planner::object_name_to_table_reference,
+        sqlparser::ast::{
+            AlterTableOperation, ObjectName, ShowCreateObject, Statement as SqlAstStatement,
+        },
+    },
 };
 
-use super::logical::{AlterTableNode, AlterTableSpec, Keyed, Mutation, ReplaceTableContentsNode};
+use super::logical::{
+    AlterTableNode, AlterTableSpec, CreateManagedTableNode, Keyed, Mutation,
+    ReplaceTableContentsNode, ShowCreateTableNode,
+};
 
 /// Render a DataFusion `Expr` back to a SQL string (best-effort). Used to derive
 /// native Lance `DELETE`/`UPDATE` predicates and `SET` values; `None` if the
@@ -68,19 +80,76 @@ pub(crate) async fn lower_df_statement(
     session_ctx: &Arc<SessionContext>,
     statement: datafusion::sql::parser::Statement,
 ) -> anyhow::Result<LogicalPlan> {
-    // DataFusion has no `ALTER TABLE` planning, so build the node from the AST.
-    if let datafusion::sql::parser::Statement::Statement(sql_stmt) = &statement {
-        if let SqlAstStatement::AlterTable(alter) = sql_stmt.as_ref() {
-            return Ok(alter_table_plan(
-                alter.name.clone(),
-                alter.operations.clone(),
-            ));
+    if let DFStatement::Statement(sql_stmt) = &statement {
+        match sql_stmt.as_ref() {
+            // DataFusion has no `ALTER TABLE` planning, so build the node from the AST.
+            SqlAstStatement::AlterTable(alter) => {
+                return Ok(alter_table_plan(
+                    alter.name.clone(),
+                    alter.operations.clone(),
+                ));
+            }
+            // DataFusion answers from `information_schema.views`, which opens every table.
+            SqlAstStatement::ShowCreate {
+                obj_type: ShowCreateObject::Table | ShowCreateObject::View,
+                obj_name,
+            } => {
+                let normalize = session_ctx
+                    .state()
+                    .config()
+                    .options()
+                    .sql_parser
+                    .enable_ident_normalization;
+                let table = object_name_to_table_reference(obj_name.clone(), normalize)?;
+                return Ok(extension(Arc::new(ShowCreateTableNode { table })));
+            }
+            _ => {}
         }
     }
 
+    let definition = statement_definition(&statement);
     let state = session_ctx.state();
     let plan = state.statement_to_plan(statement).await?;
-    rewrite_logical_plan(plan)
+    rewrite_logical_plan(attach_definition(plan, definition))
+}
+
+/// The statement text to store with a table that `statement` creates, or `None`.
+fn statement_definition(statement: &DFStatement) -> Option<String> {
+    match statement {
+        DFStatement::CreateExternalTable(create) => {
+            Some(super::definition::render_create_external_table(create))
+        }
+        DFStatement::Statement(sql_stmt)
+            if matches!(sql_stmt.as_ref(), SqlAstStatement::CreateTable(_)) =>
+        {
+            Some(sql_stmt.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Put `definition` on the create node of `plan`. `CREATE TABLE` becomes a
+/// [`CreateManagedTableNode`], because the DataFusion node has no text field.
+fn attach_definition(plan: LogicalPlan, definition: Option<String>) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Ddl(DdlStatement::CreateExternalTable(mut create)) => {
+            if definition.is_some() {
+                create.definition = definition;
+            }
+            LogicalPlan::Ddl(DdlStatement::CreateExternalTable(create))
+        }
+        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(create)) => {
+            let is_ctas = !matches!(create.input.as_ref(), LogicalPlan::EmptyRelation(_));
+            extension(Arc::new(CreateManagedTableNode {
+                name: create.name,
+                if_not_exists: create.if_not_exists,
+                is_ctas,
+                input: Arc::unwrap_or_clone(create.input),
+                definition,
+            }))
+        }
+        other => other,
+    }
 }
 
 /// Rewrite only the statements the planner cannot handle from their standard

@@ -71,4 +71,5 @@ export type {
   CatalogsView,
   Crawler,
   ExternalTableSpec,
+  TableDefinition,
 } from "./types.js";

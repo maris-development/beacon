@@ -173,6 +173,10 @@ impl TableProvider for BeaconIcebergTable {
         TableType::Base
     }
 
+    fn get_table_definition(&self) -> Option<&str> {
+        self.definition.definition.as_deref()
+    }
+
     async fn scan(
         &self,
         state: &dyn Session,

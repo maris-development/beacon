@@ -90,6 +90,7 @@ impl QueryPlanner for BeaconQueryPlanner {
                     table.name.clone(),
                     is_ctas,
                     table.if_not_exists,
+                    None,
                     child,
                     session,
                 )))
@@ -275,6 +276,29 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             return Ok(Some(Arc::new(physical::DropIndexExec::new(
                 drop.table.clone(),
                 drop.name.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(create) = any.downcast_ref::<logical::CreateManagedTableNode>() {
+            let child = physical_inputs.first().cloned().ok_or_else(|| {
+                datafusion::error::DataFusionError::Internal(
+                    "CREATE TABLE is missing its planned input".to_string(),
+                )
+            })?;
+            return Ok(Some(Arc::new(physical::CreateTableExec::new(
+                create.name.clone(),
+                create.is_ctas,
+                create.if_not_exists,
+                create.definition.clone(),
+                child,
+                session,
+            ))));
+        }
+
+        if let Some(show) = any.downcast_ref::<logical::ShowCreateTableNode>() {
+            return Ok(Some(Arc::new(physical::ShowCreateTableExec::new(
+                show.table.clone(),
                 session,
             ))));
         }
