@@ -220,7 +220,7 @@ fn read_function_for_extension(ext: &str) -> Option<&'static str> {
     Some(match ext.to_ascii_lowercase().as_str() {
         "parquet" => "read_parquet",
         "csv" => "read_csv",
-        "nc" | "cdf" | "netcdf" => "read_netcdf",
+        "nc" | "nc3" | "nc4" | "netcdf" => "read_netcdf",
         "arrow" | "arrows" | "ipc" => "read_arrow",
         "zarr" => "read_zarr",
         "atlas" => "read_atlas",
@@ -266,4 +266,22 @@ pub(crate) async fn dataset_schema(
 /// catalog state, so it needs no query.
 pub(crate) fn default_table(server: &Arc<Server>) -> String {
     server.config().sql.default_table.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_function_for_extension;
+
+    #[test]
+    fn every_netcdf_extension_reads_through_read_netcdf() {
+        for ext in ["nc", "nc3", "nc4", "netcdf", "NC4"] {
+            assert_eq!(read_function_for_extension(ext), Some("read_netcdf"), "{ext}");
+        }
+    }
+
+    /// A `.cdf` file can be a NASA Common Data Format file, which the netCDF reader cannot open.
+    #[test]
+    fn cdf_has_no_read_function() {
+        assert_eq!(read_function_for_extension("cdf"), None);
+    }
 }
