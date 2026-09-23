@@ -9,6 +9,9 @@
 
 use std::collections::HashMap;
 
+use datafusion::common::exec_datafusion_err;
+use datafusion::error::Result;
+
 /// Read one `CREATE EXTERNAL TABLE ... OPTIONS (...)` key.
 ///
 /// Reads the bare key and the `format.`-prefixed key that DataFusion's SQL
@@ -19,9 +22,34 @@ pub fn format_option<'a>(options: &'a HashMap<String, String>, key: &str) -> Opt
         .or_else(|| options.get(&format!("format.{key}")))
 }
 
+/// Parse the boolean value of one `OPTIONS` key.
+///
+/// Accepts `true`/`false`, `1`/`0`, `yes`/`no` and `on`/`off`, in any case.
+pub fn parse_bool_option(key: &str, value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(exec_datafusion_err!(
+            "invalid boolean for option '{key}': '{other}'"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_boolean_option_reads_the_usual_spellings() {
+        for value in ["true", "1", "yes", "ON", " True "] {
+            assert!(parse_bool_option("k", value).unwrap(), "{value}");
+        }
+        for value in ["false", "0", "no", "Off"] {
+            assert!(!parse_bool_option("k", value).unwrap(), "{value}");
+        }
+        let error = parse_bool_option("skip", "maybe").unwrap_err().to_string();
+        assert!(error.contains("skip") && error.contains("maybe"), "{error}");
+    }
 
     fn options(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

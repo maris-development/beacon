@@ -37,6 +37,7 @@ read_icechunk(location)
 read_icechunk(location, branch)
 read_icechunk(location, branch, snapshot)
 read_icechunk(location, branch, snapshot, dimensions)
+read_icechunk(location, branch, snapshot, dimensions, skip_unbroadcastable)
 ```
 
 Give one `location`. The `location` is the path to the directory of the repository. The `location`
@@ -54,6 +55,9 @@ SELECT avg(sst) FROM read_icechunk('sst/repo', NULL, 'NNNGCAX7Z99K7XTTYK8G');
 
 -- Read only the arrays on the `time` dimension
 SELECT * FROM read_icechunk('sst/repo', NULL, NULL, ['time']);
+
+-- Skip a group that does not fit the dimension list
+SELECT * FROM read_icechunk('sst/repo', NULL, NULL, ['time'], true);
 ```
 
 A branch selects a different version than a snapshot. Give one of the two. Beacon rejects a call
@@ -81,6 +85,7 @@ two. Beacon reads the tip of `main` if you set none.
 | `tag` | Tag name | None | Read this tag. The tag does not move. |
 | `snapshot` | Snapshot id | None | Read this snapshot. The snapshot does not move. |
 | `read_dimensions` | List of dimension names | The default grid of the repository | The dimensions the table reads. Beacon returns an array only if the list holds every dimension of that array. |
+| `skip_unbroadcastable` | Boolean | `false` | Skip a group that does not fit `read_dimensions`. Beacon writes a warning and reads the next group. Without it the query fails. |
 
 ```sql
 CREATE EXTERNAL TABLE sst_v1

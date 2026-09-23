@@ -159,12 +159,16 @@ impl NetcdfInput {
 /// so the schema matches
 /// what `SELECT *` can actually return.
 ///
+/// With `skip_unbroadcastable`, a file the list does not fit gets an empty
+/// schema, the same way the scan reads no row from it.
+///
 /// A repeated inference of the same file is answered by the schema cache of
 /// [`beacon_datafusion_ext::format_ext`], above this function, so this one
 /// always opens the file.
 pub async fn fetch_schema(
     input: NetcdfInput,
     read_dimensions: Option<Vec<String>>,
+    skip_unbroadcastable: bool,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
     let dataset = input.open().await.map_err(|e| {
         datafusion::error::DataFusionError::Execution(format!(
@@ -172,22 +176,16 @@ pub async fn fetch_schema(
         ))
     })?;
 
-    let dataset = if let Some(dims) = beacon_nd_array::dataset::resolve_read_dimensions(
-        &dataset,
+    // A skipped file gives the table no column.
+    let Some(dataset) = beacon_nd_array::dataset::project_read_dimensions_or_skip(
+        dataset,
         read_dimensions,
+        skip_unbroadcastable,
         Some("read_netcdf"),
-    ) {
-        let proj = beacon_nd_array::projection::DatasetProjection {
-            dimension_projection: Some(dims),
-            index_projection: None,
-        };
-        dataset.project(&proj).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to project NetCDF dataset with dimensions: {e}"
-            ))
-        })?
-    } else {
-        dataset
+    )
+    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?
+    else {
+        return Ok(Arc::new(arrow::datatypes::Schema::empty()));
     };
 
     let schema =

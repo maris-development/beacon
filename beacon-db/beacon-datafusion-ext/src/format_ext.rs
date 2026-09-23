@@ -14,10 +14,23 @@ use datafusion::{
 use crate::listing_factory::ListingFactory;
 
 pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
+    /// The datasets among `objects`.
+    ///
+    /// A listing streams and asks about one object at a time. Objects this
+    /// format [`holds`](Self::holds) are asked about together, once the walk ends.
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>>;
+
+    /// Whether a listing keeps `object` to judge it with the others it keeps.
+    ///
+    /// For a format whose datasets depend on a comparison, such as the
+    /// top-level marker among nested ones. Hold as little as that needs.
+    fn holds(&self, _object: &ObjectMeta) -> bool {
+        false
+    }
+
     fn file_format_name(&self) -> String;
     fn list_with_file_extension(&self) -> bool {
         true
@@ -30,6 +43,15 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     /// consult this list to honor aliases. Defaults to the canonical extension;
     /// override when a format accepts more than one spelling.
     fn file_extensions(&self) -> Vec<String> {
+        vec![self.get_ext()]
+    }
+
+    /// The filename extensions the crawler builds a table on.
+    ///
+    /// A crawled table reads with default options. An alias that needs other
+    /// options (CSV reads `tsv` only with a tab delimiter) must stay out of
+    /// this list. Defaults to the canonical extension.
+    fn crawlable_extensions(&self) -> Vec<String> {
         vec![self.get_ext()]
     }
 

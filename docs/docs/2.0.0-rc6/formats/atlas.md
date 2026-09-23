@@ -9,6 +9,7 @@ description: Read Atlas collections with read_atlas(). One file holds thousands 
 ```text
 read_atlas(glob_paths)
 read_atlas(glob_paths, dimensions)
+read_atlas(glob_paths, dimensions, skip_unbroadcastable)
 ```
 
 Beacon reads the [Atlas](https://github.com/maris-development/atlas) collections that match one or
@@ -17,6 +18,10 @@ exact path or a glob such as `**/data.atlas`.
 
 The optional `dimensions` argument keeps the arrays whose dimensions are all in the list. Use it to
 drop the wide grids of a collection and keep its coordinates.
+
+The optional `skip_unbroadcastable` argument sets what Beacon does with a dataset whose columns fit
+no one grid. Beacon fails the query by default. Set it to true to skip the dataset instead. Beacon
+writes a warning and reads the next dataset.
 
 ```sql
 SELECT time, temperature FROM read_atlas('collections/sensor/data.atlas')
@@ -84,7 +89,8 @@ What Beacon does with that:
   time. A query whose columns sit on more than one grid in a dataset names no grid to flatten
   onto, so it fails at the open. Name fewer columns, or pass the `dimensions` argument:
   `read_atlas(paths, ['time', 'latitude', 'longitude'])` reads the selected columns on that grid
-  and the rest as null.
+  and the rest as null. Pass `skip_unbroadcastable` to skip such a dataset and read the rest:
+  `read_atlas(paths, [], true)`.
 - **Object storage.** A collection reads from local disk, S3, GCS, Azure and HTTP alike.
 
 ### Columns
@@ -196,11 +202,12 @@ See [Create External Tables](/docs/2.0.0-rc6/data-sources/external-tables) for t
 
 ### `OPTIONS`
 
-`STORED AS ATLAS` reads one key:
+`STORED AS ATLAS` reads two keys:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `read_dimensions` | List of dimension names | The default grid of each dataset | The dimensions the table reads. An array survives only when the list holds every one of its own. |
+| `skip_unbroadcastable` | Boolean | `false` | Skip a dataset whose columns fit no one grid. Beacon writes a warning and reads the next dataset. Without it the query fails. |
 
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas

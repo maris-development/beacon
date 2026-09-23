@@ -103,8 +103,15 @@ SELECT * FROM read_hdf5(['a.h5', 'b.hdf5']);
 Like NetCDF, `read_hdf5` takes an optional second argument: the dimensions to read. It sets the
 grid, and Beacon returns a dataset only if the list holds all of that dataset's dimensions.
 
+A fourth argument sets what Beacon does with a file that does not fit the list. Beacon fails the
+query by default. Set it to true to skip the file instead. Beacon writes a warning and reads the
+next file. The third slot holds the convention, so give `NULL` there.
+
 ```sql
 SELECT * FROM read_hdf5(['experiments/**/*.h5'], ['sample', 'channel']);
+
+-- Skip a file that does not fit the list. Give NULL for the convention.
+SELECT * FROM read_hdf5(['experiments/**/*.h5'], ['sample', 'channel'], NULL, true);
 ```
 
 A netCDF-4 file names its axes with HDF5 *dimension scales*, and Beacon uses those names.
@@ -157,11 +164,12 @@ LOCATION 'experiments/';
 
 ### `OPTIONS`
 
-`STORED AS HDF5` reads five keys. `STORED AS H5` reads the same five:
+`STORED AS HDF5` reads six keys. `STORED AS H5` reads the same six:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `read_dimensions` | List of dimension names | The default grid of each file | The dimensions the table reads. Beacon returns a dataset only if the list holds every dimension of that dataset. |
+| `skip_unbroadcastable` | Boolean | `false` | Skip a file that does not fit `read_dimensions`. Beacon writes a warning and reads the next file. Without it the query fails. |
 | `use_rust_reader` | Boolean | `true` (`BEACON_HDF5_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library reads no nested group and no compound dataset, and it needs anonymous access to a bucket. |
 | `enable_statistics` | Boolean | `true` (`BEACON_HDF5_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_HDF5_ENABLE_STATISTICS` to turn the column ranges off. |
 | `unify_phony_dimensions` | Boolean | `true` (`BEACON_HDF5_UNIFY_PHONY_DIMENSIONS`) | Give every unnamed axis one name per length, over the whole file, so two groups broadcast together. Set it to `false` to keep one dimension per length per group. |

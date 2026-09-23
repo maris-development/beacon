@@ -163,3 +163,97 @@ async fn listing_composes_with_sql() {
     );
     assert_eq!(csv_count, 3, "the three CSVs should be countable through SQL");
 }
+
+// ---- the streaming plan ----------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listing_plans_as_its_own_node() {
+    let rt = seeded_runtime("plan_node").await;
+    let plan = column_strings(
+        &rt.sql("EXPLAIN SELECT file_name FROM list_datasets('**/*.csv')").await,
+        1,
+    )
+    .join("\n");
+    assert!(plan.contains("DatasetsExec"), "plan was:\n{plan}");
+    assert!(plan.contains("glob=**/*.csv"), "plan was:\n{plan}");
+}
+
+/// A `LIMIT` reaches the node, so the node can stop the walk.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_limit_reaches_the_listing_node() {
+    let rt = seeded_runtime("plan_limit").await;
+    let plan = column_strings(
+        &rt.sql("EXPLAIN SELECT file_name FROM list_datasets() LIMIT 2").await,
+        1,
+    )
+    .join("\n");
+    assert!(plan.contains("limit=2"), "plan was:\n{plan}");
+
+    let rows = rt.sql("SELECT file_name FROM list_datasets() LIMIT 2").await;
+    assert_eq!(total_rows(&rows), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streamed_rows_keep_their_object_metadata() {
+    let rt = seeded_runtime("stream_meta").await;
+    let sized = rt
+        .sql("SELECT file_name FROM list_datasets() WHERE size > 0 AND last_modified IS NOT NULL")
+        .await;
+    assert_eq!(total_rows(&sized), 4, "every dataset carries its object metadata");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projection_reads_a_subset_of_the_columns() {
+    let rt = seeded_runtime("stream_projection").await;
+    let batches = rt
+        .sql("SELECT file_format, file_name FROM list_datasets() WHERE file_name = 'a.csv'")
+        .await;
+    assert_eq!(total_rows(&batches), 1);
+    assert_eq!(batches[0].num_columns(), 2);
+    assert_eq!(column_strings(&batches, 1), vec!["a.csv"]);
+}
+
+// ---- formats that judge the whole listing -----------------------------------
+
+fn copy_dir_all(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("create target dir");
+    for entry in std::fs::read_dir(from).expect("read source dir") {
+        let entry = entry.expect("dir entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_dir_all(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy file");
+        }
+    }
+}
+
+/// A Zarr v3 store has a `zarr.json` at its root and inside every array. Only
+/// the root is a dataset.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zarr_store_is_one_dataset_not_one_per_array() {
+    let rt = seeded_runtime("stream_zarr").await;
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .join("test-datasets/gridded-example.zarr");
+    copy_dir_all(&fixture, &rt.datasets_dir().join("gridded-example.zarr"));
+
+    let batches = rt
+        .sql("SELECT file_name, size FROM list_datasets() WHERE file_format = 'zarr'")
+        .await;
+    assert_eq!(
+        column_strings(&batches, 0),
+        vec!["gridded-example.zarr/zarr.json"]
+    );
+    let size = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+        .expect("size is UInt64");
+    assert!(
+        !datafusion::arrow::array::Array::is_null(size, 0),
+        "a held row carries its marker's size"
+    );
+}

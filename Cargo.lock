@@ -1960,6 +1960,7 @@ name = "beacon-functions"
 version = "2.0.0-rc.6"
 dependencies = [
  "arrow 58.4.0",
+ "async-trait",
  "beacon-arrow-atlas",
  "beacon-arrow-bbf",
  "beacon-arrow-csv",

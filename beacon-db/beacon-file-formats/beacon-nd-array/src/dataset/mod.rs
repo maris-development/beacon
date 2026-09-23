@@ -361,6 +361,74 @@ pub fn resolve_read_dimensions(
     Some(default_dims)
 }
 
+/// A dataset that does not fit the dimension list it was asked to flatten
+/// onto, so it cannot broadcast.
+///
+/// A scan matches on this type: with `skip_unbroadcastable` set, it skips the
+/// dataset and reads on. Every other error still fails the scan.
+#[derive(Debug)]
+pub struct UnbroadcastableDataset {
+    dataset: String,
+    source: anyhow::Error,
+}
+
+impl UnbroadcastableDataset {
+    /// The dataset named `dataset` cannot broadcast, because of `source`.
+    pub fn new(dataset: impl Into<String>, source: anyhow::Error) -> Self {
+        Self {
+            dataset: dataset.into(),
+            source,
+        }
+    }
+}
+
+impl std::fmt::Display for UnbroadcastableDataset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "dataset '{}' cannot broadcast: {:#}",
+            self.dataset, self.source
+        )
+    }
+}
+
+impl std::error::Error for UnbroadcastableDataset {}
+
+/// Narrow `dataset` to `read_dimensions`, or to its default grid when there
+/// is no list. See [`resolve_read_dimensions`].
+///
+/// A list the dataset does not fit is an [`UnbroadcastableDataset`] error.
+pub fn project_read_dimensions(
+    dataset: AnyDataset,
+    read_dimensions: Option<Vec<String>>,
+    log_label: Option<&str>,
+) -> anyhow::Result<AnyDataset> {
+    let Some(dims) = resolve_read_dimensions(&dataset, read_dimensions, log_label) else {
+        return Ok(dataset);
+    };
+    dataset
+        .project(&crate::projection::DatasetProjection::new_with_dimension_projection(dims))
+        .map_err(|source| UnbroadcastableDataset::new(dataset.name(), source).into())
+}
+
+/// [`project_read_dimensions`], with `skip_unbroadcastable`: `Ok(None)` for a
+/// dataset the list does not fit when `skip` is set, after a warning.
+pub fn project_read_dimensions_or_skip(
+    dataset: AnyDataset,
+    read_dimensions: Option<Vec<String>>,
+    skip: bool,
+    log_label: Option<&str>,
+) -> anyhow::Result<Option<AnyDataset>> {
+    match project_read_dimensions(dataset, read_dimensions, log_label) {
+        Ok(dataset) => Ok(Some(dataset)),
+        Err(error) if skip && error.downcast_ref::<UnbroadcastableDataset>().is_some() => {
+            tracing::warn!("skipping {error}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1758,5 +1826,61 @@ mod tests {
             any.default_broadcast_dimensions(),
             Some(vec!["x".to_string(), "y".to_string(), "z".to_string()])
         );
+    }
+
+    /// `temp` on (x, y) and `coord` on (x).
+    async fn grid() -> AnyDataset {
+        let ds = make_dataset(
+            "grid",
+            vec![
+                ("temp", arr_shaped(&["x", "y"], &[2, 3]).await),
+                ("coord", arr_shaped(&["x"], &[2]).await),
+            ],
+        )
+        .await;
+        AnyDataset::try_from_dataset(ds).await.unwrap()
+    }
+
+    fn names(names: &[&str]) -> Option<Vec<String>> {
+        Some(names.iter().map(|name| name.to_string()).collect())
+    }
+
+    /// A list the dataset lacks a dimension of is refused with the typed
+    /// error, so a scan can tell it from an I/O failure.
+    #[tokio::test]
+    async fn project_read_dimensions_refuses_a_list_the_dataset_lacks() {
+        let error = project_read_dimensions(grid().await, names(&["z"]), None).unwrap_err();
+
+        assert!(
+            error.downcast_ref::<UnbroadcastableDataset>().is_some(),
+            "{error}"
+        );
+        assert!(error.to_string().contains("'z'"), "{error}");
+    }
+
+    /// A list that fits keeps the arrays on it and drops the rest.
+    #[tokio::test]
+    async fn project_read_dimensions_keeps_the_arrays_on_the_list() {
+        let projected = project_read_dimensions(grid().await, names(&["x"]), None).unwrap();
+
+        let fields = projected.fields();
+        assert!(fields.contains_key("coord"));
+        assert!(!fields.contains_key("temp"));
+    }
+
+    /// With `skip`, the list the dataset lacks is a skip, not an error. Any
+    /// other outcome is unchanged.
+    #[tokio::test]
+    async fn project_read_dimensions_or_skip_turns_a_refusal_into_none() {
+        let skipped =
+            project_read_dimensions_or_skip(grid().await, names(&["z"]), true, None).unwrap();
+        assert!(skipped.is_none());
+
+        let kept =
+            project_read_dimensions_or_skip(grid().await, names(&["x"]), true, None).unwrap();
+        assert!(kept.is_some());
+
+        let refused = project_read_dimensions_or_skip(grid().await, names(&["z"]), false, None);
+        assert!(refused.is_err());
     }
 }

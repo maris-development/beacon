@@ -32,6 +32,11 @@ use crate::datafusion::{
 
 pub const NETCDF_EXTENSION: &str = "nc";
 
+/// Every filename extension that a netCDF file uses, canonical first.
+///
+/// `cdf` is not here: it is also the NASA Common Data Format, which this reader cannot open.
+pub const NETCDF_EXTENSIONS: [&str; 4] = [NETCDF_EXTENSION, "nc3", "nc4", "netcdf"];
+
 pub mod object_meta_resolver;
 pub mod options;
 #[cfg(test)]
@@ -184,6 +189,9 @@ impl FileFormatFactory for NetCDFFormatFactory {
                     .collect(),
             );
         }
+        if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
+            options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
+        }
         // Parsed here only so a bad value is an error at `CREATE EXTERNAL
         // TABLE` rather than at the first analysis pass. The value itself is
         // read by `create_for_analysis`; a format built for a query computes no
@@ -292,10 +300,11 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         let datasets = objects
             .iter()
             .filter(|obj| {
-                obj.location
-                    .extension()
-                    .map(|ext| ext == NETCDF_EXTENSION)
-                    .unwrap_or(false)
+                obj.location.extension().is_some_and(|ext| {
+                    NETCDF_EXTENSIONS
+                        .iter()
+                        .any(|known| ext.eq_ignore_ascii_case(known))
+                })
             })
             .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
             .collect();
@@ -304,6 +313,15 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
 
     fn file_format_name(&self) -> String {
         self.get_ext()
+    }
+
+    fn file_extensions(&self) -> Vec<String> {
+        NETCDF_EXTENSIONS.map(String::from).to_vec()
+    }
+
+    /// Every spelling reads the same way, so the crawler can build a table on each.
+    fn crawlable_extensions(&self) -> Vec<String> {
+        self.file_extensions()
     }
 
     /// netCDF opts into the schema cache on its reader backend alone.
@@ -438,7 +456,13 @@ impl FileFormat for NetcdfFormat {
             .meta_fetch_concurrency
             .max(1);
         let schemas: Vec<SchemaRef> = futures::stream::iter(inputs)
-            .map(|input| reader::fetch_schema(input, self.options.read_dimensions.clone()))
+            .map(|input| {
+                reader::fetch_schema(
+                    input,
+                    self.options.read_dimensions.clone(),
+                    self.options.skip_unbroadcastable,
+                )
+            })
             .buffered(width)
             .try_collect()
             .await?;
@@ -543,6 +567,7 @@ impl FileFormat for NetcdfFormat {
             self.options.read_dimensions.clone(),
             table_schema,
         )
+        .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
         .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -618,11 +643,14 @@ impl FileFormat for NetcdfFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(NetCDFSource::new(
-            self.access.clone(),
-            self.options.read_dimensions.clone(),
-            table_schema,
-        ))
+        Arc::new(
+            NetCDFSource::new(
+                self.access.clone(),
+                self.options.read_dimensions.clone(),
+                table_schema,
+            )
+            .with_skip_unbroadcastable(self.options.skip_unbroadcastable),
+        )
     }
 }
 
@@ -748,6 +776,37 @@ mod reader_backend_tests {
                 .await
                 .unwrap_or_else(|e| panic!("register {} on {backend:?}: {e}", path.display()));
         ctx.register_table(table, Arc::new(listing)).unwrap();
+    }
+
+    /// Both readers open a file by its content, so an alias extension reads the same rows.
+    #[tokio::test]
+    async fn a_file_with_an_alias_extension_reads_on_both_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let alias = dir.path().join("wod.nc4");
+        std::fs::copy(test_file(WOD_FILE), &alias).unwrap();
+
+        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
+            let ctx = session();
+            register(&ctx, "canonical", backend, WOD_FILE).await;
+            register_path(&ctx, "alias", backend, &alias).await;
+
+            let count = |table: &'static str| {
+                let ctx = ctx.clone();
+                async move {
+                    let batches = ctx
+                        .sql(&format!("SELECT COUNT(*) FROM {table}"))
+                        .await
+                        .unwrap()
+                        .collect()
+                        .await
+                        .unwrap();
+                    arrow::util::pretty::pretty_format_batches(&batches)
+                        .unwrap()
+                        .to_string()
+                }
+            };
+            assert_eq!(count("alias").await, count("canonical").await, "{backend:?}");
+        }
     }
 
     // ── statistics follow the reader ───────────────────────────────────
@@ -1344,6 +1403,77 @@ mod reader_backend_tests {
 
         ctx.register_table(table, Arc::new(ListingTable::try_new(config).unwrap()))
             .unwrap();
+    }
+
+    /// A table on the Rust reader over `path`, built from `options`.
+    async fn table_with_options(
+        ctx: &SessionContext,
+        options: NetcdfOptions,
+        path: &std::path::Path,
+    ) -> datafusion::error::Result<Arc<FastObjectTable>> {
+        let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
+        let format = NetcdfFormat::new(Arc::new(ListingFactory::dynamic()), options)
+            .with_access(FileAccess::Oxcdf);
+        FastObjectTable::try_new(&ctx.state(), Arc::new(format), vec![url])
+            .await
+            .map(Arc::new)
+    }
+
+    /// `WOD_FILE` is ragged, so no dimension list fits it. Without
+    /// `skip_unbroadcastable` it fails the table. With it, the file is skipped
+    /// and the gridded file next to it is read whole.
+    #[tokio::test]
+    async fn the_skip_option_reads_past_a_file_the_dimension_list_does_not_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in [GRIDDED_FILE, WOD_FILE] {
+            std::fs::copy(test_file(file), dir.path().join(file)).unwrap();
+        }
+        let dims = Some(vec!["time".to_string(), "lat".to_string(), "lon".to_string()]);
+        let ctx = session();
+
+        let strict = NetcdfOptions {
+            read_dimensions: dims.clone(),
+            ..NetcdfOptions::default()
+        };
+        let error = table_with_options(&ctx, strict, dir.path())
+            .await
+            .expect_err("the ragged file fits no list")
+            .to_string();
+        assert!(error.contains("ragged"), "{error}");
+
+        let lenient = NetcdfOptions {
+            read_dimensions: dims,
+            skip_unbroadcastable: true,
+            ..NetcdfOptions::default()
+        };
+        let table = table_with_options(&ctx, lenient, dir.path()).await.unwrap();
+        ctx.register_table("mixed", table).unwrap();
+        let batches = ctx
+            .sql("SELECT lat FROM mixed")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let read: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+
+        assert_eq!(read, rows_in_one_file(&ctx, "lat").await, "the gridded file alone");
+    }
+
+    /// `OPTIONS ('skip_unbroadcastable' 'true')` reaches the format.
+    #[tokio::test]
+    async fn the_factory_reads_the_skip_option() {
+        let factory = factory();
+        let ctx = SessionContext::new();
+        let options = HashMap::from([("skip_unbroadcastable".to_string(), "true".to_string())]);
+
+        let format = factory.create(&ctx.state(), &options).unwrap();
+        let format = format.as_any().downcast_ref::<NetcdfFormat>().unwrap();
+        assert!(format.options.skip_unbroadcastable);
+
+        let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
+        let default = default.as_any().downcast_ref::<NetcdfFormat>().unwrap();
+        assert!(!default.options.skip_unbroadcastable);
     }
 
     /// The rows one copy of `GRIDDED_FILE` contributes to `column`.
@@ -2394,5 +2524,60 @@ mod reader_backend_tests {
                 );
             }
         }
+    }
+}
+
+/// The filename extensions that netCDF files use.
+#[cfg(test)]
+mod extension_tests {
+    use object_store::path::Path;
+
+    use super::*;
+
+    fn factory() -> NetCDFFormatFactory {
+        NetCDFFormatFactory::new(
+            Arc::new(ListingFactory::dynamic()),
+            std::env::temp_dir(),
+            NetcdfOptions::default(),
+            NetcdfConfig::default(),
+        )
+    }
+
+    fn object_meta(path: &str) -> ObjectMeta {
+        ObjectMeta {
+            location: Path::from(path),
+            last_modified: Default::default(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        }
+    }
+
+    /// The registry keys a format by these, so each spelling resolves to netCDF.
+    #[test]
+    fn factory_advertises_every_netcdf_extension() {
+        let factory = factory();
+        assert_eq!(factory.get_ext(), "nc");
+        assert_eq!(
+            factory.file_extensions(),
+            vec!["nc", "nc3", "nc4", "netcdf"]
+        );
+    }
+
+    /// Discovery keeps every spelling, in any case, and labels it `nc`.
+    #[test]
+    fn discovery_keeps_every_netcdf_extension() {
+        let objects: Vec<ObjectMeta> = [
+            "a.nc", "b.nc3", "c.nc4", "d.netcdf", "e.cdf", "f.NC4", "g.h5", "h.ncml", "i.parquet",
+        ]
+        .into_iter()
+        .map(object_meta)
+        .collect();
+
+        let datasets = factory().discover_datasets(&objects).unwrap();
+
+        let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+        assert_eq!(paths, ["a.nc", "b.nc3", "c.nc4", "d.netcdf", "f.NC4"]);
+        assert!(datasets.iter().all(|d| d.format == "nc"));
     }
 }
