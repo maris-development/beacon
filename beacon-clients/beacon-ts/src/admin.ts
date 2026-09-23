@@ -1,7 +1,7 @@
 /** Authenticated administrative endpoints (`/api/admin/*`). */
 
 import type { Http } from "./http.js";
-import type { Crawler, ExternalTableSpec } from "./types.js";
+import type { Crawler, ExternalTableSpec, TableDefinition } from "./types.js";
 
 /**
  * Sub-client for Beacon's admin surface. All endpoints require basic-auth
@@ -54,6 +54,22 @@ export class AdminClient {
    */
   async createExternalTable(spec: ExternalTableSpec): Promise<void> {
     await this.http.fetchRaw("POST", "/api/admin/external-tables", { json: spec });
+  }
+
+  /**
+   * Gets the statement that created a table or view
+   * (`GET /api/admin/table-definition`).
+   *
+   * The table resolves in the default catalog and schema unless `in_` names
+   * another one.
+   */
+  tableDefinition(
+    tableName: string,
+    in_: { catalog?: string; schema?: string } = {},
+  ): Promise<TableDefinition> {
+    return this.http.fetchJson<TableDefinition>("GET", "/api/admin/table-definition", {
+      query: { table_name: tableName, catalog: in_.catalog, schema: in_.schema },
+    });
   }
 
   // -- dataset files ----------------------------------------------------------

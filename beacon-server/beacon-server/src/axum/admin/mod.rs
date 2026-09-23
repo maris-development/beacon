@@ -53,6 +53,7 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Server>>, utoipa::openapi::Ope
         .routes(routes!(datasets::abort_upload))
         .routes(routes!(datasets::dataset_storage))
         .routes(routes!(tables::list_table_config))
+        .routes(routes!(tables::get_table_definition))
         .routes(routes!(auth::list_users))
         .routes(routes!(auth::list_roles))
         .routes(routes!(

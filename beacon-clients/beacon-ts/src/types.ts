@@ -186,3 +186,15 @@ export type Crawler = Record<string, unknown>;
 
 /** A request to create an external table via the admin API. */
 export type ExternalTableSpec = Record<string, unknown>;
+
+/**
+ * The statement that created a table (`GET /api/admin/table-definition`).
+ * `definition` is `null` when Beacon stores no statement for the table.
+ * Secret option values are masked as `'***'`.
+ */
+export interface TableDefinition {
+  table_catalog: string;
+  table_schema: string;
+  table_name: string;
+  definition: string | null;
+}

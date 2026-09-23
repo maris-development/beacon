@@ -28,6 +28,9 @@ pub struct LanceTableDefinition {
     pub namespace: Vec<String>,
     /// The dataset's `db://` URI into the redb object store.
     pub location: String,
+    /// The `CREATE TABLE` statement that made the table, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
 }
 
 impl LanceTableDefinition {
@@ -40,6 +43,7 @@ impl LanceTableDefinition {
             name: name.into(),
             namespace,
             location: location.into(),
+            definition: None,
         }
     }
 }

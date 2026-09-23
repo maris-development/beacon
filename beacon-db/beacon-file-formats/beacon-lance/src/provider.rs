@@ -68,6 +68,12 @@ impl LanceTable {
     pub fn definition(&self) -> &LanceTableDefinition {
         &self.definition
     }
+
+    /// Record the `CREATE TABLE` statement that made this table.
+    pub fn with_sql_definition(mut self, definition: Option<String>) -> Self {
+        self.definition.definition = definition;
+        self
+    }
 }
 
 /// Open the latest dataset version at `uri` (resolved through `session`'s
@@ -201,6 +207,10 @@ impl TableProvider for LanceTable {
 
     fn table_type(&self) -> TableType {
         TableType::Base
+    }
+
+    fn get_table_definition(&self) -> Option<&str> {
+        self.definition.definition.as_deref()
     }
 
     async fn scan(

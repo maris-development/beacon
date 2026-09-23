@@ -1280,6 +1280,133 @@ mod restart_tests {
 }
 
 #[cfg(test)]
+mod show_create_tests {
+    use super::test_support::{build_runtime, test_runtime};
+    use super::Runtime;
+    use arrow::array::{Array, AsArray};
+    use futures::TryStreamExt;
+
+    async fn try_collect(
+        runtime: &Runtime,
+        sql: &str,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
+        Ok(runtime
+            .run_query(crate::query::Query::sql(sql.to_string()), identity)
+            .await?
+            .into_record_stream()?
+            .try_collect::<Vec<_>>()
+            .await?)
+    }
+
+    async fn run_sql(runtime: &Runtime, sql: &str) {
+        try_collect(runtime, sql, beacon_auth::AuthIdentity::system())
+            .await
+            .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"));
+    }
+
+    /// The `definition` column of `SHOW CREATE TABLE <table>`.
+    async fn definition(runtime: &Runtime, table: &str) -> Option<String> {
+        let sql = format!("SHOW CREATE TABLE {table}");
+        let batches = try_collect(runtime, &sql, beacon_auth::AuthIdentity::system())
+            .await
+            .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"));
+        assert_eq!(batches.len(), 1, "one batch for {table}");
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 1, "one row for {table}");
+        assert_eq!(batch.column(2).as_string::<i32>().value(0), table);
+        let column = batch.column(3).as_string::<i32>();
+        (!column.is_null(0)).then(|| column.value(0).to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn returns_the_statement_of_each_table_kind() {
+        let rt = test_runtime().await;
+        let runtime = &rt.runtime;
+        std::fs::write(rt.root.path().join("datasets/e.csv"), "a,b\n1,x\n").unwrap();
+
+        run_sql(runtime, "CREATE TABLE managed (a BIGINT)").await;
+        run_sql(runtime, "INSERT INTO managed VALUES (1), (2)").await;
+        run_sql(runtime, "CREATE TABLE copied AS SELECT a FROM managed WHERE a > 1").await;
+        run_sql(runtime, "CREATE VIEW v AS SELECT a FROM managed").await;
+        run_sql(runtime, "CREATE MATERIALIZED VIEW mv AS SELECT a FROM managed").await;
+        run_sql(runtime, "CREATE EXTERNAL TABLE ext STORED AS CSV LOCATION 'e.csv'").await;
+
+        assert_eq!(
+            definition(runtime, "managed").await.as_deref(),
+            Some("CREATE TABLE managed (a BIGINT)")
+        );
+        assert_eq!(
+            definition(runtime, "copied").await.as_deref(),
+            Some("CREATE TABLE copied AS SELECT a FROM managed WHERE a > 1")
+        );
+        assert_eq!(
+            definition(runtime, "v").await.as_deref(),
+            Some("CREATE VIEW v AS SELECT a FROM managed")
+        );
+        assert_eq!(
+            definition(runtime, "mv").await.as_deref(),
+            Some("CREATE MATERIALIZED VIEW \"mv\" AS SELECT a FROM managed")
+        );
+        assert_eq!(
+            definition(runtime, "ext").await.as_deref(),
+            Some("CREATE EXTERNAL TABLE ext STORED AS CSV LOCATION 'e.csv'")
+        );
+
+        // The CTAS input still ran: it copied the one matching row.
+        let rows: usize = try_collect(runtime, "SELECT * FROM copied", beacon_auth::AuthIdentity::system())
+            .await
+            .unwrap()
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum();
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn names_a_missing_table_and_refuses_other_users() {
+        let rt = test_runtime().await;
+        let runtime = &rt.runtime;
+        run_sql(runtime, "CREATE TABLE secret_shape (a BIGINT)").await;
+
+        let err = try_collect(runtime, "SHOW CREATE TABLE missing", beacon_auth::AuthIdentity::system())
+            .await
+            .expect_err("a missing table is an error");
+        assert!(err.to_string().contains("missing"), "unexpected error: {err}");
+
+        let err = try_collect(
+            runtime,
+            "SHOW CREATE TABLE secret_shape",
+            beacon_auth::AuthIdentity::empty(),
+        )
+        .await
+        .expect_err("only the super-user sees definitions");
+        assert!(err.to_string().contains("super-user"), "unexpected error: {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn statements_survive_a_restart() {
+        let root = tempfile::TempDir::new().expect("temp root");
+        let db_path = root.path().join("beacon.db");
+
+        let runtime = build_runtime(root.path(), Some(db_path.clone())).await;
+        run_sql(&runtime, "CREATE TABLE kept (a BIGINT)").await;
+        run_sql(&runtime, "CREATE VIEW kept_view AS SELECT a FROM kept").await;
+        drop(runtime);
+
+        let restarted = build_runtime(root.path(), Some(db_path)).await;
+        assert_eq!(
+            definition(&restarted, "kept").await.as_deref(),
+            Some("CREATE TABLE kept (a BIGINT)")
+        );
+        assert_eq!(
+            definition(&restarted, "kept_view").await.as_deref(),
+            Some("CREATE VIEW kept_view AS SELECT a FROM kept")
+        );
+    }
+}
+
+#[cfg(test)]
 mod crawler_sql_tests {
     use super::test_support::test_runtime;
     use super::Runtime;

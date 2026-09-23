@@ -220,6 +220,16 @@ tag. Releases before 2.0.0 are recorded in the
   reaches the alias with the new `apiPrefix: ADMIN_API_PREFIX` client option. The alias stays out of
   `/openapi.json`: publishing it would list every operation twice and repeat each operation id. See
   [the REST API reference](docs/docs/2.0.0-rc6/api/index.md#admin-path-alias).
+- **See the statement that created a table.** `SHOW CREATE TABLE <table>` (and `SHOW CREATE
+  VIEW`) returns the `CREATE` statement Beacon stored for the table. The new
+  `GET /api/admin/table-definition` returns the same row, and the admin panel shows it in a
+  **Definition** tab on the Tables page. Beacon now stores the full statement for external tables
+  (with the columns, partitions and `OPTIONS` that DataFusion left out), Delta, Iceberg and
+  Icechunk tables, Lance tables from `CREATE TABLE` and CTAS, views and materialized views. Secret
+  option values and URL passwords are masked as `'***'` before the statement is stored. A table
+  made before this change keeps the text it had, or has none. `SHOW CREATE TABLE` now opens only the
+  named table, not every table in every catalog. Remote, PostgreSQL/MySQL and crawler tables still
+  have no stored statement.
 
 ### Changed
 

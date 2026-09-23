@@ -3,6 +3,7 @@
 //! through the real router with `tower::ServiceExt::oneshot`:
 //! - crawlers (`create` / `list` / `get` / `run` / `drop`),
 //! - external tables (`/api/admin/external-tables`),
+//! - table definitions (`/api/admin/table-definition`),
 //! - table extensions (`PUT`/`DELETE /api/admin/table-extensions/{table}`),
 //! - the chunked-upload abort path.
 //!
@@ -310,6 +311,48 @@ async fn create_external_table_rejects_an_unknown_format() {
     )
     .await;
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
+}
+
+// --------------------------------------------------------------------------
+// Table definitions
+// --------------------------------------------------------------------------
+
+/// The admin panel reads the statement that created a table. The endpoint is
+/// super-user only and answers 404 for an unknown table.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_definition_returns_the_create_statement() {
+    let (router, _lake, cfg) = app(config(false)).await;
+    let admin = admin(&cfg);
+    place_dataset(&cfg, "ext/a.csv", "v\n1\n");
+
+    let created = send(
+        &router,
+        json_req(
+            "POST",
+            "/api/admin/external-tables",
+            json!({ "name": "defined", "location": "ext/", "file_type": "CSV" }),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "external table should be created");
+
+    let uri = "/api/admin/table-definition?table_name=defined";
+    let res = send(&router, req("GET", uri, Some(&admin), Body::empty())).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let body = json(&res.body);
+    assert_eq!(body["table_name"], "defined");
+    assert_eq!(
+        body["definition"],
+        r#"CREATE EXTERNAL TABLE "defined" STORED AS CSV LOCATION 'ext/'"#
+    );
+
+    let missing = "/api/admin/table-definition?table_name=nope";
+    let res = send(&router, req("GET", missing, Some(&admin), Body::empty())).await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+
+    let res = send(&router, req("GET", uri, None, Body::empty())).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
 }
 
 // --------------------------------------------------------------------------

@@ -2,8 +2,10 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   Database,
   Loader2,
   Plus,
@@ -355,10 +357,15 @@ function TableDetail({
         <TabsList>
           <TabsTrigger value="schema">Schema</TabsTrigger>
           <TabsTrigger value="preview">Preview</TabsTrigger>
+          <TabsTrigger value="definition">Definition</TabsTrigger>
         </TabsList>
 
         <TabsContent value="preview">
           <TablePreview table={table} defaults={defaults} />
+        </TabsContent>
+
+        <TabsContent value="definition">
+          <TableDefinition table={table} />
         </TabsContent>
 
         <TabsContent value="schema">
@@ -511,6 +518,63 @@ function TablePreview({ table, defaults }: { table: TableRef; defaults: CatalogD
       {result.numRows > 0 && (
         <p className="text-xs text-muted-foreground">First {result.numRows} rows.</p>
       )}
+    </div>
+  );
+}
+
+/** The statement that created the table (`SHOW CREATE TABLE`), with a copy button. */
+function TableDefinition({ table }: { table: TableRef }) {
+  const beacon = useBeacon();
+  const [copied, setCopied] = React.useState(false);
+  const query = useQuery({
+    queryKey: ["table-definition", refKey(table)],
+    queryFn: () =>
+      beacon.admin.tableDefinition(table.name, { catalog: table.catalog, schema: table.schema }),
+  });
+
+  if (query.isLoading) return <Spinner />;
+  if (query.isError)
+    return <Err msg={`Could not load the definition: ${errorMessage(query.error)}`} />;
+
+  const definition = query.data?.definition;
+  if (!definition)
+    return (
+      <p className="py-4 text-sm text-muted-foreground">
+        Beacon has no stored statement for this table. Tables that a crawler made, and tables
+        made before Beacon stored statements, have none.
+      </p>
+    );
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(definition);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="relative rounded-md border bg-secondary/40">
+        <Button
+          variant="outline"
+          size="sm"
+          className="absolute right-2 top-2 gap-1.5 bg-background"
+          onClick={copy}
+        >
+          {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+          {copied ? "Copied" : "Copy"}
+        </Button>
+        <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words p-3 pr-24 font-mono text-[13px]">
+          {definition}
+        </pre>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Beacon writes the statement again from its parsed form, so spacing and case can differ
+        from the text you sent. Secret option values show as <span className="font-mono">'***'</span>.
+      </p>
     </div>
   );
 }

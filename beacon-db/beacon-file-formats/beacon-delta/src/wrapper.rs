@@ -106,6 +106,10 @@ impl TableProvider for BeaconDeltaTable {
         self.inner.table_type()
     }
 
+    fn get_table_definition(&self) -> Option<&str> {
+        self.definition.definition.as_deref()
+    }
+
     async fn scan(
         &self,
         state: &dyn Session,

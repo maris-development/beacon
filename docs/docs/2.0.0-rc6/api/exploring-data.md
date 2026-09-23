@@ -179,8 +179,30 @@ The endpoint still exists, for an admin only. It answers `200` with a notice:
 ```
 
 Use `GET /api/table-schema` for the columns of a table. Use `SHOW EXTENSIONS FOR <table>` through
-`/api/query` for its extensions.
+`/api/query` for its extensions. Use `GET /api/admin/table-definition` for the statement that
+created it.
 :::
+
+### Table definition
+
+Get the statement that created a table or a view. The endpoint needs the admin credentials:
+
+```http
+GET /api/admin/table-definition?table_name=ocean_profiles
+```
+
+```json
+{
+  "table_catalog": "beacon",
+  "table_schema": "public",
+  "table_name": "ocean_profiles",
+  "definition": "CREATE EXTERNAL TABLE ocean_profiles STORED AS PARQUET LOCATION 'argo/'"
+}
+```
+
+Add `catalog` and `schema` for a table outside the default schema. The endpoint runs
+`SHOW CREATE TABLE`. Beacon masks each secret option value as `'***'`. The `definition` is `null`
+when Beacon has no stored statement for the table. An unknown table gets `404`.
 
 ## Functions
 
@@ -238,6 +260,7 @@ You can still create, replace and remove a table with authenticated SQL DDL on `
 | ------ | ---- | ------- |
 | `GET` | `/api/admin/check` | Check the connection. Returns `{ "is_admin": true }` |
 | `GET` | `/api/admin/table-config` | **Deprecated.** It answers a notice. Beacon no longer serves a table configuration |
+| `GET` | `/api/admin/table-definition` | Return the statement that created a table. See [Table definition](#table-definition) |
 | `POST` | `/api/admin/crawlers` | Define or replace a crawler |
 | `GET` | `/api/admin/crawlers` | List every crawler |
 | `GET` | `/api/admin/crawlers/{name}` | Return one crawler. Returns `404` for an unknown name |
