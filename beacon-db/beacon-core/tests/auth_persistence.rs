@@ -72,6 +72,48 @@ async fn users_roles_and_grants_survive_a_restart() {
     );
 }
 
+/// Earlier versions stored a quoted table name with its quotes, so the rule never matched. A load
+/// strips them, and a revoke then also removes the stored row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_quoted_table_rule_matches_and_revokes_after_a_restart() {
+    let rt = restartable_runtime("auth-legacy-quoted", |b| b.with_auth_enforcement(true)).await;
+    for statement in [
+        "CREATE TABLE \"with space\" (a BIGINT)",
+        "INSERT INTO \"with space\" VALUES (1)",
+        "CREATE ROLE legacy_reader",
+        "CREATE USER legacy_alice WITH PASSWORD 'pw'",
+        "GRANT ROLE legacy_reader TO USER legacy_alice",
+        "INSERT INTO __beacon_role_rules (role, kind, privilege, target_type, target_value) \
+         VALUES ('legacy_reader', 'grant', 'SELECT', 'table', '\"with space\"')",
+    ] {
+        rt.sql_as(statement, AuthIdentity::system()).await;
+    }
+
+    let rt = rt.restart().await;
+    let alice = rt
+        .runtime
+        .authenticate(&Credential::basic("legacy_alice", "pw"))
+        .await
+        .unwrap();
+    let read = rt
+        .try_sql_as("SELECT * FROM \"with space\"", alice.clone())
+        .await
+        .expect("the stored rule matches once its quotes are gone");
+    assert_eq!(total_rows(&read), 1);
+
+    rt.sql_as(
+        "REVOKE SELECT ON TABLE \"with space\" FROM ROLE legacy_reader",
+        AuthIdentity::system(),
+    )
+    .await;
+    let rt = rt.restart().await;
+    let denied = rt.try_sql_as("SELECT * FROM \"with space\"", alice).await;
+    assert!(
+        denied.is_err_and(|e| e.to_string().contains("permission denied")),
+        "the revoked rule must not come back after a restart"
+    );
+}
+
 /// The security gate: a non-super-user cannot read the internal `__beacon_users` table (which holds
 /// Argon2 password hashes) even with enforcement OFF — the gate is unconditional and fails closed.
 #[tokio::test(flavor = "multi_thread")]

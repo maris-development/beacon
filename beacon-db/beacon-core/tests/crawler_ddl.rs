@@ -132,3 +132,23 @@ async fn drop_crawler_removes_it_and_unknown_names_error() {
         "dropping an unknown crawler should fail"
     );
 }
+
+/// `CREATE CRAWLER` refuses a name that exists, as `CREATE VIEW` does, so a second definition
+/// does not silently replace the first. `CREATE OR REPLACE CRAWLER` replaces on purpose.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_crawler_refuses_a_taken_name_unless_it_replaces() {
+    let rt = runtime("crawler-replace").await;
+    rt.sql("CREATE CRAWLER dupc ON 'first/'").await;
+
+    let error = rt
+        .try_sql("CREATE CRAWLER dupc ON 'second/'")
+        .await
+        .expect_err("a second CREATE CRAWLER must fail");
+    assert!(error.to_string().contains("already exists"), "{error}");
+    let shown = rt.sql("SHOW CRAWLERS").await;
+    assert!(column_strings(&shown, 1).contains(&"first/".to_string()), "the first definition stays");
+
+    rt.sql("CREATE OR REPLACE CRAWLER dupc ON 'second/'").await;
+    let shown = rt.sql("SHOW CRAWLERS").await;
+    assert!(column_strings(&shown, 1).contains(&"second/".to_string()), "OR REPLACE swaps it");
+}

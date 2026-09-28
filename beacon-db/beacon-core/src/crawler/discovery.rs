@@ -212,6 +212,78 @@ pub fn group_into_tables(
     (candidates, skipped)
 }
 
+/// A table format that keeps one table in one directory, with its own log of the live files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DirectoryFormat {
+    Delta,
+    Iceberg,
+}
+
+impl DirectoryFormat {
+    /// The format name, as `STORED AS` spells it in lower case.
+    pub fn name(self) -> &'static str {
+        match self {
+            DirectoryFormat::Delta => "delta",
+            DirectoryFormat::Iceberg => "iceberg",
+        }
+    }
+}
+
+/// A Delta or Iceberg table directory among the crawled objects.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DirectoryTable {
+    pub format: DirectoryFormat,
+    /// The table directory, relative to the datasets store.
+    pub base: String,
+}
+
+impl DirectoryTable {
+    /// The table as a candidate, so it takes part in the naming of the other candidates.
+    pub fn as_candidate(&self) -> CandidateTable {
+        CandidateTable {
+            format: self.format.name().to_string(),
+            extension: self.format.name().to_string(),
+            base: self.base.clone(),
+            partition_cols: Vec::new(),
+            recursive: false,
+            file_count: 0,
+        }
+    }
+}
+
+/// The Delta and Iceberg table directories among the object `paths`.
+///
+/// A Delta table holds a `_delta_log/` directory. An Iceberg table holds a `metadata/` directory
+/// with a `*.metadata.json` file. The directory also keeps the data files of old versions, so its
+/// Parquet files are not a table of their own.
+pub fn find_directory_tables(paths: &[String]) -> Vec<DirectoryTable> {
+    let mut tables = std::collections::BTreeSet::new();
+    for path in paths {
+        let segments: Vec<&str> = path.split('/').collect();
+        if let Some(log) = segments.iter().position(|segment| *segment == "_delta_log") {
+            tables.insert(DirectoryTable {
+                format: DirectoryFormat::Delta,
+                base: segments[..log].join("/"),
+            });
+        } else if let [parents @ .., "metadata", file] = segments.as_slice() {
+            if file.ends_with(".metadata.json") {
+                tables.insert(DirectoryTable {
+                    format: DirectoryFormat::Iceberg,
+                    base: parents.join("/"),
+                });
+            }
+        }
+    }
+    tables.into_iter().collect()
+}
+
+/// Whether `path` lies inside one of the table directories.
+pub fn inside_directory_table(path: &str, tables: &[DirectoryTable]) -> bool {
+    tables.iter().any(|table| {
+        table.base.is_empty() || path.starts_with(&format!("{}/", table.base))
+    })
+}
+
 /// Slugify a path leaf into a safe SQL table identifier.
 fn slugify(input: &str) -> String {
     let s: String = input
@@ -292,6 +364,34 @@ mod tests {
             event_driven: false,
             options: Default::default(),
         }
+    }
+
+    #[test]
+    fn finds_delta_and_iceberg_directories() {
+        let paths = [
+            "lake/delta/_delta_log/00000000000000000000.json",
+            "lake/delta/_delta_log/00000000000000000001.json",
+            "lake/delta/part-0.parquet",
+            "lake/ice/metadata/00001-abc.metadata.json",
+            "lake/ice/data/f.parquet",
+            "lake/plain/p.parquet",
+            "notes/metadata/readme.json",
+        ]
+        .map(String::from);
+
+        let tables = find_directory_tables(&paths);
+
+        assert_eq!(
+            tables,
+            vec![
+                DirectoryTable { format: DirectoryFormat::Delta, base: "lake/delta".to_string() },
+                DirectoryTable { format: DirectoryFormat::Iceberg, base: "lake/ice".to_string() },
+            ]
+        );
+        assert!(inside_directory_table("lake/delta/part-0.parquet", &tables));
+        assert!(inside_directory_table("lake/ice/data/f.parquet", &tables));
+        assert!(!inside_directory_table("lake/plain/p.parquet", &tables));
+        assert!(!inside_directory_table("lake/delta_2/x.parquet", &tables));
     }
 
     #[test]

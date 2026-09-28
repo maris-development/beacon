@@ -61,16 +61,15 @@ same row. Only the admin can run it:
 SHOW CREATE VIEW north_atlantic
 ```
 
-## `DROP TABLE`
+## `DROP VIEW`
 
-`DROP TABLE` removes a view from the catalog:
+`DROP VIEW` removes a view from the catalog:
 
 ```sql
-DROP TABLE north_atlantic
+DROP VIEW north_atlantic
 
-DROP TABLE IF EXISTS north_atlantic
+DROP VIEW IF EXISTS north_atlantic
 ```
 
-:::info
-`DROP TABLE` removes an external table and a view. There is no separate `DROP VIEW` statement.
-:::
+`DROP VIEW` refuses a table, so it cannot remove data by mistake. `DROP TABLE` removes a table and
+a view.

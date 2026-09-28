@@ -54,7 +54,8 @@ fn create_crawler_sql(req: &CreateCrawlerRequest) -> String {
         .collect();
 
     format!(
-        "CREATE CRAWLER {} ON {} WITH ({})",
+        "CREATE {}CRAWLER {} ON {} WITH ({})",
+        if req.replace { "OR REPLACE " } else { "" },
         quote_ident(&req.name),
         quote_literal(&req.target_prefix),
         rendered.join(", ")
@@ -97,7 +98,7 @@ async fn show_crawlers(
     Ok(rows.iter().map(crawler_view).collect())
 }
 
-/// Defines (or replaces) a crawler and starts its triggers.
+/// Defines a crawler and starts its triggers. `replace: true` replaces one of the same name.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "admin",
@@ -106,7 +107,8 @@ async fn show_crawlers(
     request_body = CreateCrawlerRequest,
     responses(
         (status = 200, description = "Crawler created"),
-        (status = 400, description = "Invalid crawler definition")
+        (status = 400, description = "Invalid crawler definition"),
+        (status = 409, description = "A crawler with this name exists and `replace` is not set")
     ),
     security(("basic-auth" = []), ("bearer" = []))
 )]
@@ -117,7 +119,14 @@ pub(crate) async fn create_crawler(
 ) -> Result<(), (StatusCode, String)> {
     crate::server::sql::execute(&state, create_crawler_sql(&req), identity)
         .await
-        .map_err(bad_request)
+        .map_err(|error| {
+            let (status, message) = bad_request(error);
+            if !req.replace && message.contains("already exists") {
+                (StatusCode::CONFLICT, message)
+            } else {
+                (status, message)
+            }
+        })
 }
 
 /// Lists all defined crawlers.

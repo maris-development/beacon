@@ -37,12 +37,13 @@ DDL over the HTTP API needs the SQL interface. That interface is on by default
 ## CREATE CRAWLER
 
 ```sql
-CREATE CRAWLER <name>
+CREATE [ OR REPLACE ] CRAWLER <name>
 [ ON '<prefix>' ]
 [ WITH ( '<key>' '<value>' [, ...] ) ]
 ```
 
-- **`<name>`**: a unique crawler name.
+- **`<name>`**: a unique crawler name. A name that exists gives an error.
+- **`OR REPLACE`**: replace the crawler with the same name. Beacon stops its old triggers.
 - **`ON '<prefix>'`**: the storage prefix to scan, relative to the datasets root, for example
   `argo/`. It equals the `target_prefix` option.
 - **`WITH (...)`**: the key and value options. They use the same form as
@@ -179,7 +180,7 @@ endpoints:
 
 | Method & path | Purpose |
 | --- | --- |
-| `POST /api/admin/crawlers` | Define or replace a crawler. Start its triggers. |
+| `POST /api/admin/crawlers` | Define a crawler. Start its triggers. A name that exists gives 409. Set `"replace": true` to replace it. |
 | `GET /api/admin/crawlers` | List every crawler. |
 | `GET /api/admin/crawlers/{name}` | Return the definition of one crawler. Returns 404 for an unknown name. |
 | `POST /api/admin/crawlers/{name}/run` | Run a crawler once on demand. Return its report. |
@@ -211,9 +212,12 @@ with GeoArrow geometry decoding. The crawler reads a plain `.parquet` file as an
 table, also with `geo` metadata. To get geometry decoding for such a file, give it the
 `.geoparquet` extension. You can also register a GeoParquet external table yourself.
 
-The crawler also **skips** a **Delta Lake** table. Such a table is a directory with a `_delta_log/`
-folder. Register it with
-[`CREATE EXTERNAL TABLE ... STORED AS DELTA`](/docs/2.0.0-rc6/formats/delta-lake).
+The crawler registers a **Delta Lake** table and an **Iceberg** table as one table each. A Delta
+table is a directory with a `_delta_log/` folder. An Iceberg table is a directory with a
+`metadata/` folder that holds a `*.metadata.json` file. The crawler registers the directory
+`STORED AS DELTA` or `STORED AS ICEBERG`, and it does not read the Parquet files in the directory
+as a Parquet table. Those files include the files of old versions, so a Parquet read returns
+rows that the table no longer holds.
 
 ## See also
 

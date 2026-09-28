@@ -4,6 +4,7 @@ mod admin;
 mod auth;
 mod client;
 mod home;
+pub(crate) mod redact;
 mod router;
 mod security;
 

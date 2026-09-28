@@ -235,6 +235,8 @@ pub(crate) async fn parse_query(Json(_query_obj): Json<QueryRequest>) -> StatusC
 }
 
 /// Returns recorded planner/execution metrics for a previously executed query.
+///
+/// Only the user that ran the query and the super-user get the metrics.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "query",
@@ -246,7 +248,7 @@ pub(crate) async fn parse_query(Json(_query_obj): Json<QueryRequest>) -> StatusC
     responses(
         (status = 200, description = "Recorded metrics for the query", body = QueryMetricsView),
         (status = 400, description = "The query id is not a valid UUID"),
-        (status = 404, description = "No metrics recorded for the given query id"),
+        (status = 404, description = "No metrics recorded for the given query id, or the query belongs to another user"),
     ),
     security(
         (),
@@ -256,6 +258,7 @@ pub(crate) async fn parse_query(Json(_query_obj): Json<QueryRequest>) -> StatusC
 )]
 pub(crate) async fn query_metrics(
     State(state): State<Arc<Server>>,
+    Extension(identity): Extension<AuthIdentity>,
     Path(query_id): Path<String>,
 ) -> Result<Json<QueryMetricsView>, (StatusCode, Json<String>)> {
     let query_id = uuid::Uuid::parse_str(&query_id).map_err(|_| {
@@ -288,6 +291,8 @@ pub(crate) async fn query_metrics(
         })?
         .into_iter()
         .next()
+        // A query of another user gives the same 404 as an unknown id.
+        .filter(|row| identity.is_super_user || metrics_owner(row) == caller_name(&identity))
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -296,6 +301,20 @@ pub(crate) async fn query_metrics(
         })?;
 
     Ok(Json(QueryMetricsView::from_row(&row)))
+}
+
+/// The user that ran the query of a metrics row.
+fn metrics_owner(row: &serde_json::Value) -> &str {
+    row.get("username").and_then(serde_json::Value::as_str).unwrap_or_default()
+}
+
+/// The name that the metrics table records for `identity`.
+fn caller_name(identity: &AuthIdentity) -> &str {
+    if identity.username.is_empty() {
+        "anonymous"
+    } else {
+        &identity.username
+    }
 }
 
 /// Returns a JSON-encoded explanation of the plan the runtime would produce for

@@ -495,6 +495,36 @@ async fn query_metrics_are_retrievable_by_query_id() {
     assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn query_metrics_go_only_to_the_owner_and_the_super_user() {
+    let (router, harness, _cfg) = app(config(false)).await;
+    seed(harness.server.runtime(), "CREATE USER alice WITH PASSWORD 'pw'").await;
+    seed(harness.server.runtime(), "CREATE USER bob WITH PASSWORD 'pw'").await;
+    let alice = basic("alice", "pw");
+    let bob = basic("bob", "pw");
+    let admin = basic(ADMIN_USERNAME, ADMIN_PASSWORD);
+
+    let query = send(
+        &router,
+        post_json("/api/query", json!({ "sql": "SELECT 1 AS v" }), Some(&alice)),
+    )
+    .await;
+    assert_eq!(query.status, StatusCode::OK);
+    let query_id = query
+        .headers
+        .get("x-beacon-query-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("a successful query returns its id")
+        .to_string();
+    let uri = format!("/api/query/metrics/{query_id}");
+
+    assert_eq!(send(&router, get(&uri, Some(&alice))).await.status, StatusCode::OK);
+    assert_eq!(send(&router, get(&uri, Some(&admin))).await.status, StatusCode::OK);
+    // Another user and an anonymous caller see the same 404 as for an unknown id.
+    assert_eq!(send(&router, get(&uri, Some(&bob))).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(send(&router, get(&uri, None)).await.status, StatusCode::NOT_FOUND);
+}
+
 // --------------------------------------------------------------------------
 // Table discovery
 // --------------------------------------------------------------------------
@@ -722,4 +752,41 @@ async fn dataset_discovery_endpoints_reflect_stored_files() {
         !schema_json["fields"].as_array().unwrap().is_empty(),
         "the parquet schema should have fields"
     );
+}
+
+/// The response body of a failed dataset-schema request, as text.
+fn error_text(res: &Res) -> String {
+    String::from_utf8_lossy(&res.body).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dataset_schema_of_an_unknown_extension_is_a_400_with_the_reason() {
+    let (router, _lake, cfg) = app(config(false)).await;
+    place_dataset(&cfg, "notes/readme.xyz", "text");
+
+    let res = send(&router, get("/api/dataset-schema?file=notes/readme.xyz", None)).await;
+
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert!(error_text(&res).contains("cannot infer a reader"), "{}", error_text(&res));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dataset_schema_of_a_missing_file_is_a_404() {
+    let (router, _lake, _cfg) = app(config(false)).await;
+
+    let res = send(&router, get("/api/dataset-schema?file=obs/missing.parquet", None)).await;
+
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    assert!(error_text(&res).contains("obs/missing.parquet"), "{}", error_text(&res));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dataset_schema_of_a_corrupt_file_is_a_400_with_the_reader_error() {
+    let (router, _lake, cfg) = app(config(false)).await;
+    place_dataset(&cfg, "obs/bad.parquet", "not a parquet file");
+
+    let res = send(&router, get("/api/dataset-schema?file=obs/bad.parquet", None)).await;
+
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert!(error_text(&res).contains("Parquet"), "{}", error_text(&res));
 }

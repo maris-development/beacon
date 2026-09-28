@@ -115,6 +115,42 @@ async fn anonymous_enabled_resolves_to_roleless_identity() {
     assert!(!identity.is_super_user);
 }
 
+/// The anonymous principal has no password, so a Basic login as it must fail. Otherwise
+/// `anonymous:` with an empty password gets its roles even with anonymous access off.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_basic_login_as_the_anonymous_user_is_rejected() {
+    for anonymous_enabled in [true, false] {
+        let rt = auth_runtime("auth-anon-basic", false, anonymous_enabled).await;
+        assert!(
+            rt.runtime
+                .authenticate(&Credential::basic(ANONYMOUS_USERNAME, ""))
+                .await
+                .is_err(),
+            "anonymous enabled: {anonymous_enabled}"
+        );
+    }
+}
+
+/// An empty password is no password, so a Basic login with one fails for every user.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_basic_login_with_an_empty_password_is_rejected() {
+    let rt = auth_runtime("auth-empty-password", false, true).await;
+    let user = unique("nopw");
+    rt.sql_as(
+        &format!("CREATE USER {user} WITH PASSWORD ''"),
+        AuthIdentity::system(),
+    )
+    .await;
+
+    assert!(rt
+        .runtime
+        .authenticate(&Credential::basic(user, ""))
+        .await
+        .is_err());
+    // The anonymous path itself still resolves.
+    assert!(rt.runtime.authenticate_anonymous().await.is_ok());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn anonymous_disabled_errors() {
     let rt = auth_runtime("auth-anon-off", false, false).await;
@@ -287,6 +323,56 @@ async fn enforced_table_grant_allows_only_the_granted_table() {
         denied.is_err_and(|e| e.to_string().contains("permission denied")),
         "ungranted table must be denied"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enforced_rules_on_quoted_table_names_match() {
+    let rt = auth_runtime("auth-quoted-names", true, true).await;
+    let tables = ["\"Mixed Case\"", "\"with space\"", "\"ünïcode\"", "\"quote\"\"d\""];
+    for table in tables.iter().chain(["\"Closed One\""].iter()) {
+        rt.sql_as(&format!("CREATE TABLE {table} (a BIGINT)"), AuthIdentity::system())
+            .await;
+        rt.sql_as(&format!("INSERT INTO {table} VALUES (1)"), AuthIdentity::system())
+            .await;
+    }
+    for statement in [
+        "CREATE ROLE quoted_reader".to_string(),
+        "CREATE USER quoted_alice WITH PASSWORD 'pw'".to_string(),
+        "GRANT ROLE quoted_reader TO USER quoted_alice".to_string(),
+    ]
+    .into_iter()
+    .chain(tables.iter().map(|t| format!("GRANT SELECT ON TABLE {t} TO ROLE quoted_reader")))
+    {
+        rt.sql_as(&statement, AuthIdentity::system()).await;
+    }
+    let alice = rt
+        .runtime
+        .authenticate(&Credential::basic("quoted_alice", "pw"))
+        .await
+        .unwrap();
+
+    for table in tables {
+        let read = rt.try_sql_as(&format!("SELECT * FROM {table}"), alice.clone()).await;
+        assert_eq!(total_rows(&read.unwrap_or_else(|e| panic!("{table}: {e}"))), 1, "{table}");
+    }
+    let closed = rt.try_sql_as("SELECT * FROM \"Closed One\"", alice.clone()).await;
+    assert!(closed.is_err_and(|e| e.to_string().contains("permission denied")));
+
+    // A deny on a quoted name blocks, and a revoke with the same spelling removes the grant.
+    rt.sql_as(
+        "DENY SELECT ON TABLE \"with space\" TO ROLE quoted_reader",
+        AuthIdentity::system(),
+    )
+    .await;
+    let denied = rt.try_sql_as("SELECT * FROM \"with space\"", alice.clone()).await;
+    assert!(denied.is_err_and(|e| e.to_string().contains("permission denied")));
+    rt.sql_as(
+        "REVOKE SELECT ON TABLE \"Mixed Case\" FROM ROLE quoted_reader",
+        AuthIdentity::system(),
+    )
+    .await;
+    let revoked = rt.try_sql_as("SELECT * FROM \"Mixed Case\"", alice).await;
+    assert!(revoked.is_err_and(|e| e.to_string().contains("permission denied")));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -685,10 +771,11 @@ async fn enforced_path_glob_is_segment_aware() {
     )
     .await;
 
-    // Top-level file under the single-segment grant is allowed.
+    // Top-level file under the single-segment grant is allowed. A `data/*.parquet` glob is not:
+    // the listing lets `*` cross `/`, so it also reads `data/sub/nested.parquet`.
     assert!(rt
         .try_sql_as(
-            &format!("SELECT * FROM read_parquet('{root}/data/*.parquet')"),
+            &format!("SELECT * FROM read_parquet('{root}/data/top.parquet')"),
             alice.clone(),
         )
         .await

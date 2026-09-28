@@ -59,6 +59,40 @@ impl Query {
         }
     }
 
+    /// Parses a request body.
+    ///
+    /// Serde tries the structured form as an untagged variant, so its own error only says that
+    /// the body matched no variant. On failure this parses the parts on their own, and the error
+    /// names the field or the value that is wrong.
+    pub fn from_json(value: serde_json::Value) -> anyhow::Result<Self> {
+        match serde_json::from_value::<Self>(value.clone()) {
+            Ok(query) => Ok(query),
+            Err(error) => Err(match Self::diagnose(value) {
+                Some(reason) => anyhow::anyhow!("invalid query: {reason}"),
+                None => error.into(),
+            }),
+        }
+    }
+
+    /// The error a part of a malformed structured body gives on its own, if one does.
+    fn diagnose(value: serde_json::Value) -> Option<String> {
+        let serde_json::Value::Object(mut body) = value else {
+            return None;
+        };
+        // The SQL form is tagged, so serde already names what is wrong with it.
+        if body.contains_key("sql") {
+            return None;
+        }
+        if let Some(output) = body.remove("output") {
+            if let Err(error) = serde_json::from_value::<Output>(output) {
+                return Some(format!("output: {error}"));
+            }
+        }
+        serde_json::from_value::<QueryBody>(serde_json::Value::Object(body))
+            .err()
+            .map(|error| error.to_string())
+    }
+
     /// A SQL query whose `$1..$n` placeholders are bound to `params` after planning.
     pub fn sql_with_params(sql: String, params: Vec<ScalarValue>) -> Self {
         Self {
@@ -84,8 +118,8 @@ pub enum InnerQuery {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueryBody {
-    /// Columns, functions, or literals to project.
-    #[serde(alias = "query_parameters")]
+    /// Columns, functions, or literals to project. A query with `distinct` can leave it out.
+    #[serde(alias = "query_parameters", default)]
     select: Vec<Select>,
     /// Row filter to apply (a single, possibly nested, filter expression).
     filter: Option<Filter>,
@@ -143,6 +177,8 @@ pub enum Select {
 #[serde(untagged)]
 pub enum Literal {
     String(String),
+    /// A JSON number without a fraction. Before `Number`, so `2` stays an integer.
+    Integer(i64),
     Number(f64),
     Boolean(bool),
     Null(Option<()>),
@@ -153,6 +189,7 @@ impl Literal {
         match self {
             Literal::Null(_) => lit(ScalarValue::Null),
             Literal::String(s) => lit(s),
+            Literal::Integer(i) => lit(*i),
             Literal::Number(n) => lit(*n),
             Literal::Boolean(b) => lit(*b),
         }
@@ -227,7 +264,9 @@ fn column_name(name: &str) -> Expr {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub enum Sort {
+    #[serde(alias = "asc", alias = "ASC")]
     Asc(String),
+    #[serde(alias = "desc", alias = "DESC")]
     Desc(String),
 }
 
@@ -328,6 +367,11 @@ mod tests {
         assert_eq!(Literal::Boolean(true).to_expr(), lit(true));
         assert_eq!(Literal::Number(3.0).to_expr(), lit(3.0f64));
         assert_eq!(Literal::String("a".to_string()).to_expr(), lit("a"));
+        // A number without a fraction deserializes as an integer, one with a fraction as a float.
+        let integer: Literal = serde_json::from_str("2").unwrap();
+        assert_eq!(integer.to_expr(), lit(2i64));
+        let float: Literal = serde_json::from_str("2.5").unwrap();
+        assert_eq!(float.to_expr(), lit(2.5f64));
     }
 
     /// Sorting is ascending-nulls-last / descending-nulls-last: the `nulls_first`
@@ -361,6 +405,50 @@ mod tests {
         }
 
         assert!(serde_json::from_str::<Query>(r#"{"select": ["depth"], "limmit": 10}"#).is_err());
+    }
+
+    /// The error of a malformed structured query names what is wrong, not only that the body
+    /// matched no variant.
+    fn from_json_error(json: &str) -> String {
+        Query::from_json(serde_json::from_str(json).unwrap())
+            .expect_err("the body is malformed")
+            .to_string()
+    }
+
+    #[test]
+    fn a_malformed_query_error_names_the_problem() {
+        let typo = from_json_error(r#"{"select": ["depth"], "limmit": 10}"#);
+        assert!(typo.contains("limmit"), "{typo}");
+
+        let sort = from_json_error(r#"{"select": ["depth"], "sort_by": [{"Descending": "depth"}]}"#);
+        assert!(sort.contains("Descending") && sort.contains("Asc"), "{sort}");
+
+        let output = from_json_error(r#"{"select": ["depth"], "output": {"format": "xlsx"}}"#);
+        assert!(output.contains("xlsx"), "{output}");
+    }
+
+    #[test]
+    fn from_json_takes_what_serde_takes() {
+        let query = Query::from_json(serde_json::json!({"sql": "SELECT 1"})).unwrap();
+        assert!(matches!(query.inner, InnerQuery::Sql(sql) if sql == "SELECT 1"));
+        let query =
+            Query::from_json(serde_json::json!({"select": ["depth"], "output": {"format": "csv"}}))
+                .unwrap();
+        assert!(matches!(query.inner, InnerQuery::Json(_)) && query.output.is_some());
+    }
+
+    /// The direction takes any case, so `asc` and `DESC` sort like `Asc` and `Desc`.
+    #[test]
+    fn sort_directions_take_any_case() {
+        for (json, ascending) in [
+            (r#"{"asc": "t"}"#, true),
+            (r#"{"ASC": "t"}"#, true),
+            (r#"{"desc": "t"}"#, false),
+            (r#"{"DESC": "t"}"#, false),
+        ] {
+            let sort: Sort = serde_json::from_str(json).expect(json);
+            assert_eq!(sort.to_expr().asc, ascending, "{json}");
+        }
     }
 }
 

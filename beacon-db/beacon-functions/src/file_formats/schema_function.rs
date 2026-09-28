@@ -119,6 +119,51 @@ impl TableFunctionImpl for SchemaTableFunc {
             ],
         )?;
 
-        Ok(Arc::new(MemTable::try_new(out_schema, vec![vec![batch]])?))
+        Ok(Arc::new(ReaderSchemaTable {
+            rows: MemTable::try_new(out_schema, vec![vec![batch]])?,
+            source: provider,
+        }))
+    }
+}
+
+/// The rows of a `<read_fn>_schema` call, with the reader whose schema they describe.
+///
+/// The schema of files is metadata about them, so read authorization checks `source` as if
+/// the call read the files.
+#[derive(Debug)]
+pub struct ReaderSchemaTable {
+    rows: MemTable,
+    source: Arc<dyn TableProvider>,
+}
+
+impl ReaderSchemaTable {
+    /// The reader's table, whose files the schema describes.
+    pub fn source(&self) -> &Arc<dyn TableProvider> {
+        &self.source
+    }
+}
+
+#[async_trait::async_trait]
+impl TableProvider for ReaderSchemaTable {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn schema(&self) -> arrow::datatypes::SchemaRef {
+        self.rows.schema()
+    }
+
+    fn table_type(&self) -> datafusion::datasource::TableType {
+        self.rows.table_type()
+    }
+
+    async fn scan(
+        &self,
+        state: &dyn datafusion::catalog::Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> datafusion::error::Result<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        self.rows.scan(state, projection, filters, limit).await
     }
 }

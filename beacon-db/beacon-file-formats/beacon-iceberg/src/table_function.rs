@@ -10,7 +10,7 @@ use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::table_function::BeaconTableFunctionImpl;
-use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_datafusion_ext::{listing_factory::ListingFactory, located_table::LocatedTable};
 use datafusion::{
     catalog::{TableFunctionImpl, TableProvider},
     common::plan_err,
@@ -116,14 +116,16 @@ impl TableFunctionImpl for ReadIcebergFunc {
             .get_store(store_url.as_ref())
             .map_err(|e| datafusion::error::DataFusionError::External(e.into()))?;
 
+        let open_location = location.clone();
         let opened = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                open_iceberg_table(store, &location, None, snapshot_id).await
+                open_iceberg_table(store, &open_location, None, snapshot_id).await
             })
         })
         .map_err(|e| datafusion::error::DataFusionError::External(e.into()))?;
 
-        Ok(opened.provider)
+        // Read authorization lists the table directory, which the Iceberg provider does not name.
+        Ok(Arc::new(LocatedTable::new(opened.provider, location)))
     }
 }
 

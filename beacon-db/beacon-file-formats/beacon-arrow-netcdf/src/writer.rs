@@ -54,14 +54,46 @@ impl<E: Encoder> Writer<E> {
 pub struct ArrowRecordBatchWriter<E: Encoder> {
     path: PathBuf,
     writer: FileWriter<SpooledTempFile>,
+    /// The input schema with every column mapped to a type the encoder writes.
+    schema: SchemaRef,
     fixed_string_sizes: HashMap<String, usize>,
     encoder: PhantomData<E>,
+}
+
+/// The type the encoder writes a column of `data_type` as, or `None` when it writes the type
+/// as it is.
+fn encodable_type(data_type: &DataType) -> Option<DataType> {
+    match data_type {
+        DataType::LargeUtf8 | DataType::Utf8View => Some(DataType::Utf8),
+        DataType::Dictionary(_, values)
+            if matches!(
+                values.as_ref(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ) =>
+        {
+            Some(DataType::Utf8)
+        }
+        // NetCDF has no boolean type. The ND sink writes one as `u8` too.
+        DataType::Boolean => Some(DataType::UInt8),
+        _ => None,
+    }
 }
 
 impl<E: Encoder> ArrowRecordBatchWriter<E> {
     /// Create a buffered writer targeting `path`.
     pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
+        let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            schema
+                .fields()
+                .iter()
+                .map(|field| match encodable_type(field.data_type()) {
+                    Some(data_type) => field.as_ref().clone().with_data_type(data_type),
+                    None => field.as_ref().clone(),
+                })
+                .collect::<Vec<_>>(),
+            schema.metadata().clone(),
+        ));
         // 256 MB spooled temp file
         let file = SpooledTempFile::new(256 * 1024 * 1024);
         let writer = FileWriter::try_new(file, &schema).map_err(|e| anyhow::anyhow!(e))?;
@@ -70,6 +102,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         Ok(Self {
             path,
             writer,
+            schema,
             fixed_string_sizes,
             encoder: PhantomData,
         })
@@ -80,6 +113,22 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         &mut self,
         record_batch: arrow::record_batch::RecordBatch,
     ) -> anyhow::Result<()> {
+        let columns = record_batch
+            .columns()
+            .iter()
+            .zip(self.schema.fields())
+            .map(|(column, field)| {
+                if column.data_type() == field.data_type() {
+                    Ok(column.clone())
+                } else {
+                    arrow::compute::cast(column, field.data_type())
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let record_batch =
+            RecordBatch::try_new(self.schema.clone(), columns).map_err(|e| anyhow::anyhow!(e))?;
+
         self.writer
             .write(&record_batch)
             .map_err(|e| anyhow::anyhow!(e))?;

@@ -1,7 +1,7 @@
 //! Axum-specific authentication middleware backed by the runtime's auth context.
 //!
 //! Credential validation is delegated to the runtime; these helpers only parse the wire formats
-//! (HTTP Basic, Bearer) into a [`Credential`] and resolve the caller's [`AuthIdentity`].
+//! (HTTP Basic, Bearer) into a [`Credential`] and resolve the caller's [`AuthIdentity`](beacon_core::AuthIdentity).
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use ::axum::{
     response::Response,
 };
 use crate::server::Server;
-use beacon_core::{AuthIdentity, Credential};
+use beacon_core::Credential;
 
 use crate::auth::{parse_basic_auth_credentials, parse_bearer_token};
 
@@ -31,11 +31,10 @@ fn credential_from_header(value: &str) -> Result<Credential, StatusCode> {
     }
 }
 
-/// Resolves the caller's [`AuthIdentity`] for client routes and stores it in request extensions.
+/// Resolves the caller's [`AuthIdentity`](beacon_core::AuthIdentity) for client routes and stores it in request extensions.
 ///
-/// Credentials present → authenticate (401 on invalid). No credentials → the anonymous user, or an
-/// empty (role-less) identity when anonymous access is disabled. Missing credentials never hard-fail
-/// here; query-time enforcement (when enabled) is what rejects unauthorized access.
+/// Credentials present → authenticate (401 on invalid). No credentials → the anonymous user, or a
+/// 401 when anonymous access is disabled: without enforcement a role-less caller reads everything.
 pub(super) async fn resolve_identity(
     State(runtime): State<Arc<Server>>,
     headers: HeaderMap,
@@ -56,7 +55,7 @@ pub(super) async fn resolve_identity(
             .runtime()
             .authenticate_anonymous()
             .await
-            .unwrap_or_else(|_| AuthIdentity::empty()),
+            .map_err(|_| StatusCode::UNAUTHORIZED)?,
     };
 
     request.extensions_mut().insert(identity);

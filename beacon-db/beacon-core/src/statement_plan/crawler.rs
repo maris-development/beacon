@@ -26,17 +26,18 @@ fn crawler_manager(session: &Arc<SessionContext>) -> anyhow::Result<Arc<CrawlerM
         .ok_or_else(|| anyhow::anyhow!("crawler manager is not initialized yet"))
 }
 
-/// `CREATE CRAWLER`: build a definition from the SQL surface, then create it.
+/// `CREATE [OR REPLACE] CRAWLER`: build a definition from the SQL surface, then create it.
 pub(crate) async fn create_crawler(
     session: &Arc<SessionContext>,
     name: &str,
     target_prefix: Option<String>,
     options: &[(String, String)],
+    or_replace: bool,
 ) -> anyhow::Result<()> {
     let with: HashMap<String, String> = options.iter().cloned().collect();
     let def = CrawlerDefinition::from_sql(name, target_prefix, &with)
         .map_err(|e| anyhow::anyhow!("invalid CREATE CRAWLER: {e}"))?;
-    crawler_manager(session)?.create(def).await?;
+    crawler_manager(session)?.create(def, or_replace).await?;
     tracing::info!("created crawler '{name}'");
     Ok(())
 }

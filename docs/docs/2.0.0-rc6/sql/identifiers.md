@@ -81,6 +81,12 @@ A grant names one exact table too:
 GRANT SELECT ON TABLE mytable TO ROLE reader   -- does not cover MyTable
 ```
 
+Quote a table name with a space or another special character, the same as in `SELECT`:
+
+```sql
+GRANT SELECT ON TABLE "with space" TO ROLE reader   -- covers SELECT * FROM "with space"
+```
+
 ## What stays case-insensitive
 
 | Element | Rule | Example |

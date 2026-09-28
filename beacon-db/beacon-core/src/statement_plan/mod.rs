@@ -41,7 +41,7 @@ use crate::parser::statement::{
     SummarizeStatement,
 };
 
-pub(crate) use authz::authorize_logical_plan;
+pub(crate) use authz::{authorize_logical_plan, authorize_table_read, table_targets};
 pub(crate) use stream_coalescer::CoalesceSqlStream;
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;
@@ -204,6 +204,7 @@ pub(crate) fn create_crawler_plan(statement: CreateCrawlerStatement) -> LogicalP
             object_name_value(&statement.name),
             statement.target_prefix,
             options,
+            statement.or_replace,
         )),
     })
 }

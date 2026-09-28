@@ -292,6 +292,8 @@ impl Default for OdvOptions {
 pub struct AsyncOdvWriter<W: AsyncWrite + Unpin + Send> {
     /// Configuration options for ODV output
     options: OdvOptions,
+    /// The input schema with every string column as `Utf8`.
+    input_schema: SchemaRef,
     /// Compression settings for ODV output
     compression: async_zip::Compression,
     /// File for writing records that cannot be clearly classified
@@ -371,6 +373,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
         options: OdvOptions,
     ) -> anyhow::Result<Self> {
         let zip_file_writer = ZipFileWriter::new(writer);
+        let input_schema = Self::utf8_schema(&input_schema);
 
         let error_file =
             OdvFile::<Error, File>::new(tempfile::tempfile()?, &options, input_schema.clone())?;
@@ -398,6 +401,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
 
         Ok(Self {
             options,
+            input_schema,
             error_file,
             timeseries_file,
             profile_file,
@@ -407,6 +411,45 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
             trajectory_profile_key_entry_state: None,
             trajectory_time_series_key_entry_state: None,
         })
+    }
+
+    /// `schema` with each `LargeUtf8`, `Utf8View` and string dictionary column as `Utf8`,
+    /// the one string type the ODV files write.
+    fn utf8_schema(schema: &SchemaRef) -> SchemaRef {
+        let fields = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                let is_string = match field.data_type() {
+                    DataType::LargeUtf8 | DataType::Utf8View => true,
+                    DataType::Dictionary(_, values) => matches!(
+                        values.as_ref(),
+                        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                    ),
+                    _ => false,
+                };
+                if is_string {
+                    field.as_ref().clone().with_data_type(DataType::Utf8)
+                } else {
+                    field.as_ref().clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+    }
+
+    /// Casts each column of `batch` whose type differs from `schema`.
+    fn cast_to_schema(batch: RecordBatch, schema: &SchemaRef) -> anyhow::Result<RecordBatch> {
+        if batch.schema().fields() == schema.fields() {
+            return Ok(batch);
+        }
+        let columns = batch
+            .columns()
+            .iter()
+            .zip(schema.fields())
+            .map(|(column, field)| arrow::compute::cast(column, field.data_type()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(RecordBatch::try_new(schema.clone(), columns)?)
     }
 
     /// Creates a compressed zip archive containing all ODV output files
@@ -483,6 +526,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
     /// # Returns
     /// Result indicating success or error during writing
     pub async fn write(&mut self, record_batch: RecordBatch) -> anyhow::Result<()> {
+        let record_batch = Self::cast_to_schema(record_batch, &self.input_schema)?;
         //Key batches
         let key_batches = Self::key_batches(record_batch, &self.options)?;
         let mut classified_batches = vec![];
@@ -1251,7 +1295,7 @@ impl<T: OdvType, W: Write> OdvFile<T, W> {
     /// * `value_type` - ODV value type
     /// * `comment` - Optional comment about the variable
     fn data_header(label: &str, qf_schema: &str, value_type: &str, comment: &str) -> String {
-        const GENERIC_DATA_HEADER : &'static str = "//<DataVariable> label=\"$LABEL\" value_type=\"$VALUE_TYPE\" qf_scheme=\"$QF_SCHEMA\" comment=\"$COMMENT\" </DataVariable>";
+        const GENERIC_DATA_HEADER : &'static str = "//<DataVariable> label=\"$LABEL\" value_type=\"$VALUE_TYPE\" qf_schema=\"$QF_SCHEMA\" comment=\"$COMMENT\" </DataVariable>";
 
         let header = GENERIC_DATA_HEADER
             .replace("$LABEL", label)
@@ -1276,7 +1320,7 @@ impl<T: OdvType, W: Write> OdvFile<T, W> {
         comment: &str,
         primary_variable: &str,
     ) -> String {
-        const GENERIC_DATA_HEADER : &'static str = "//<DataVariable> label=\"$LABEL\" value_type=\"$VALUE_TYPE\" qf_scheme=\"$QF_SCHEMA\" comment=\"$COMMENT\" is_primary_variable=\"$PRIMARY_VARIABLE\" </DataVariable>";
+        const GENERIC_DATA_HEADER : &'static str = "//<DataVariable> label=\"$LABEL\" value_type=\"$VALUE_TYPE\" qf_schema=\"$QF_SCHEMA\" comment=\"$COMMENT\" is_primary_variable=\"$PRIMARY_VARIABLE\" </DataVariable>";
 
         let header = GENERIC_DATA_HEADER
             .replace("$LABEL", label)
@@ -1526,7 +1570,8 @@ impl OdvBatchSchemaMapper {
             })?;
 
         projection.push(projection_idx);
-        output_fields.push(field.clone().with_name("yyyy-MM-ddTHH:mm:ss.SSS"));
+        // The ODV spreadsheet specification spells the time column label in lower case.
+        output_fields.push(field.clone().with_name("yyyy-mm-ddThh:mm:ss.sss"));
 
         let (projection_idx, field) = input_schema
             .column_with_name(&odv_options.longitude_column.column_name)
@@ -1741,6 +1786,92 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// Writes `batch` through [`AsyncOdvWriter`] and returns the named file of the archive.
+    async fn write_and_extract(schema: SchemaRef, batch: RecordBatch, entry: &str) -> String {
+        use std::io::Read;
+
+        let mut writer = AsyncOdvWriter::new_from_dyn(
+            futures::io::Cursor::new(Vec::new()),
+            schema,
+            OdvOptions::default(),
+        )
+        .await
+        .expect("writer");
+        writer.write(batch).await.expect("write");
+        let archive = writer.finish().await.expect("finish").into_inner();
+
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("a zip");
+        let mut text = String::new();
+        zip.by_name(entry)
+            .expect("archive entry")
+            .read_to_string(&mut text)
+            .unwrap();
+        text
+    }
+
+    /// The reader recovers the types the writer declares, so an export reads back typed.
+    #[tokio::test]
+    async fn a_written_profile_reads_back_with_its_declared_types() {
+        let schema = user_input_schema();
+        let profile = write_and_extract(schema.clone(), user_input_batch(&schema), "profile.txt").await;
+
+        let stream = futures::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from(profile))]);
+        let mapper = crate::reader::AsyncOdvDecoder::decode_schema_mapper(stream)
+            .await
+            .expect("the written file should parse");
+        let read_schema = mapper.output_schema();
+
+        let depth = read_schema.field_with_name("Depth").expect("the depth column");
+        assert_eq!(depth.data_type(), &DataType::Float32, "declared FLOAT");
+        let time = read_schema
+            .field_with_name("yyyy-mm-ddThh:mm:ss.sss")
+            .expect("the ODV time column");
+        assert!(matches!(time.data_type(), DataType::Timestamp(_, _)), "{time:?}");
+    }
+
+    /// Parquet written by pandas or pyarrow holds `LargeUtf8` strings. The writer takes them.
+    #[tokio::test]
+    async fn async_writer_takes_large_utf8_strings() {
+        use std::io::Read;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("Cruise", DataType::LargeUtf8, true),
+            Field::new("yyyy-MM-ddTHH:mm:ss.SSS", DataType::Utf8, true),
+            Field::new("Longitude [degrees east]", DataType::Float64, true),
+            Field::new("Latitude [degrees north]", DataType::Float64, true),
+            Field::new("Depth [m]", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(LargeStringArray::from(vec!["c1", "c1"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["2020-01-01T00:00:00.000"; 2])),
+                Arc::new(Float64Array::from(vec![1.5, 1.5])),
+                Arc::new(Float64Array::from(vec![2.5, 2.5])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+            ],
+        )
+        .unwrap();
+
+        let mut writer = AsyncOdvWriter::new_from_dyn(
+            futures::io::Cursor::new(Vec::new()),
+            schema,
+            OdvOptions::default(),
+        )
+        .await
+        .expect("a LargeUtf8 column should be accepted");
+        writer.write(batch).await.expect("write");
+        let archive = writer.finish().await.expect("finish").into_inner();
+
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("a zip");
+        let mut profile = String::new();
+        zip.by_name("profile.txt")
+            .expect("profile.txt")
+            .read_to_string(&mut profile)
+            .unwrap();
+        assert!(profile.lines().any(|line| line.starts_with("c1\t")), "{profile}");
     }
 
     #[test]

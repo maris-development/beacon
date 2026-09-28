@@ -117,7 +117,8 @@ pub fn setup_router(
         BEACON_VERSION,
         base_path,
         web_ui.is_some(),
-        mcp_enabled,
+        // MCP is unreleased, so the home page does not show its address.
+        false,
     )
     .leak();
 
@@ -135,6 +136,11 @@ pub fn setup_router(
     }
 
     let router = router
+        // An error message names the path it failed on; keep the server's layout private.
+        .layer(::axum::middleware::from_fn_with_state(
+            Arc::new(crate::axum::redact::PathRedactor::from_config(&config)),
+            crate::axum::redact::redact_error_paths,
+        ))
         .layer(build_cors_layer(&config.cors)?)
         // Publish the config so middleware/handlers can read transport settings.
         .layer(::axum::Extension(config.clone()))

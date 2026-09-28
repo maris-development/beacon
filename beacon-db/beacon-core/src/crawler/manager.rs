@@ -83,8 +83,21 @@ impl CrawlerManager {
         Ok(())
     }
 
-    /// Define (or replace) a crawler: persist it and (re)start its triggers.
-    pub async fn create(self: &Arc<Self>, mut def: CrawlerDefinition) -> anyhow::Result<()> {
+    /// Define a crawler: persist it and (re)start its triggers.
+    ///
+    /// A name that exists is refused unless `or_replace` is set, so a second definition does not
+    /// silently replace the first.
+    pub async fn create(
+        self: &Arc<Self>,
+        mut def: CrawlerDefinition,
+        or_replace: bool,
+    ) -> anyhow::Result<()> {
+        if !or_replace && self.crawlers.lock().contains_key(&def.name) {
+            anyhow::bail!(
+                "crawler '{}' already exists; use CREATE OR REPLACE CRAWLER to replace it",
+                def.name
+            );
+        }
         self.apply_event_driven_fallback(&mut def);
         self.persistence.save(&def).await?;
         self.stop_tasks(&def.name);

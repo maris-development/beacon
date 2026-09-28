@@ -4,7 +4,8 @@ use std::str::FromStr;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::sql::{
     parser::{DFParser, DFParserBuilder},
-    sqlparser::{keywords::Keyword, tokenizer::Token},
+    planner::object_name_to_table_reference,
+    sqlparser::{ast::ObjectName, keywords::Keyword, tokenizer::Token},
 };
 
 use beacon_auth::{Privilege, PrivilegeTarget};
@@ -27,6 +28,25 @@ impl<'a> BeaconParser<'a> {
         Ok(Self {
             df_parser: DFParserBuilder::new(sql).build()?,
         })
+    }
+
+    /// Parse the one statement of `sql` and refuse anything after it but semicolons.
+    ///
+    /// A request runs one statement, so a second one would otherwise not run and give no
+    /// error.
+    pub fn parse_single_statement(&mut self) -> Result<BeaconStatement> {
+        let statement = self.parse_statement()?;
+        let parser = &mut self.df_parser.parser;
+        while parser.consume_token(&Token::SemiColon) {}
+        let next = parser.peek_token();
+        if next.token != Token::EOF {
+            return Err(DataFusionError::Plan(format!(
+                // The location renders with its own leading " at".
+                "a request holds one SQL statement; found `{}`{} after it",
+                next.token, next.span.start
+            )));
+        }
+        Ok(statement)
     }
 
     /// Parse a single statement, returning a `BeaconStatement`.
@@ -167,7 +187,11 @@ impl<'a> BeaconParser<'a> {
     }
 
     fn is_create_crawler(&self) -> bool {
-        self.is_keyword_then_crawler(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::CREATE))
+        let parser = &self.df_parser.parser;
+        let word = |n: usize, value: &str| {
+            matches!(&parser.peek_nth_token(n).token, Token::Word(w) if w.value.eq_ignore_ascii_case(value))
+        };
+        word(0, "CREATE") && (word(1, "CRAWLER") || (word(1, "OR") && word(2, "REPLACE") && word(3, "CRAWLER")))
     }
 
     fn is_run_crawler(&self) -> bool {
@@ -185,9 +209,13 @@ impl<'a> BeaconParser<'a> {
             && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "CRAWLERS")
     }
 
-    /// Parse: CREATE CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
+    /// Parse: CREATE [OR REPLACE] CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
     fn parse_create_crawler(&mut self) -> Result<BeaconStatement> {
         self.df_parser.parser.next_token(); // CREATE
+        let or_replace = self
+            .df_parser
+            .parser
+            .parse_keywords(&[Keyword::OR, Keyword::REPLACE]);
         self.df_parser.parser.next_token(); // CRAWLER
 
         let name = self
@@ -220,6 +248,7 @@ impl<'a> BeaconParser<'a> {
             name,
             target_prefix,
             options,
+            or_replace,
         }))
     }
 
@@ -733,15 +762,15 @@ impl<'a> BeaconParser<'a> {
         matches!(t, Token::Word(w) if w.value.to_uppercase() == "REFRESH")
     }
 
-    /// Parse: REFRESH [TABLE] <name>
+    /// Parse: REFRESH [TABLE | MATERIALIZED VIEW] <name>
     fn parse_refresh(&mut self) -> Result<BeaconStatement> {
         // Consume REFRESH
         self.df_parser.parser.next_token();
 
-        // Optional TABLE keyword
-        let t = &self.df_parser.parser.peek_nth_token(0).token;
-        if matches!(t, Token::Word(w) if w.keyword == Keyword::TABLE) {
-            self.df_parser.parser.next_token();
+        // Optional TABLE, or the PostgreSQL spelling MATERIALIZED VIEW
+        let parser = &mut self.df_parser.parser;
+        if !parser.parse_keywords(&[Keyword::MATERIALIZED, Keyword::VIEW]) {
+            parser.parse_keyword(Keyword::TABLE);
         }
 
         let name = self
@@ -941,7 +970,7 @@ impl<'a> BeaconParser<'a> {
                 .parser
                 .parse_object_name(false)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            Ok(PrivilegeTarget::Table(name.to_string()))
+            Ok(PrivilegeTarget::Table(table_rule_name(name)?))
         } else if self.word_at(0, "PATH") {
             self.df_parser.parser.next_token(); // PATH
             Ok(PrivilegeTarget::Path(self.parse_string_value()?))
@@ -955,6 +984,35 @@ impl<'a> BeaconParser<'a> {
             )))
         }
     }
+}
+
+/// The name a table rule stores: the parts of `name` as the catalog holds them, joined with `.`.
+///
+/// The quotes go and the case stays, because the session turns identifier normalization off.
+/// The authorization check builds its table targets in the same form.
+pub(crate) fn table_rule_name(name: ObjectName) -> Result<String> {
+    Ok(object_name_to_table_reference(name, false)?.to_vec().join("."))
+}
+
+/// The table rule name for `stored`, when `stored` is a quoted SQL name.
+///
+/// Earlier versions stored the name of a table rule as written, quotes included, so the rule
+/// never matched. `None` for a value that already holds the catalog form.
+pub(crate) fn unquoted_table_rule_name(stored: &str) -> Option<String> {
+    if !stored.contains(['"', '`']) {
+        return None;
+    }
+    let mut parser = DFParserBuilder::new(stored).build().ok()?;
+    let name = parser.parser.parse_object_name(false).ok()?;
+    let quoted = name
+        .0
+        .iter()
+        .any(|part| part.as_ident().is_some_and(|ident| ident.quote_style.is_some()));
+    // A catalog name such as `quote"d` does not parse to the end, so it stays as it is.
+    if !quoted || parser.parser.peek_token().token != Token::EOF {
+        return None;
+    }
+    table_rule_name(name).ok()
 }
 
 #[cfg(test)]
@@ -1029,6 +1087,21 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+        // A table target holds the name as the catalog does: no quotes, case kept.
+        for (sql_name, stored) in [
+            ("\"Mixed Case\"", "Mixed Case"),
+            ("\"with space\"", "with space"),
+            ("\"quote\"\"d\"", "quote\"d"),
+            ("public.\"with space\"", "public.with space"),
+            ("Obs", "Obs"),
+        ] {
+            match parse_auth(&format!("GRANT SELECT ON TABLE {sql_name} TO ROLE reader")) {
+                AuthStatement::GrantPrivilege { target, .. } => {
+                    assert_eq!(target, Some(PrivilegeTarget::Table(stored.to_string())), "{sql_name}");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
         // No `ON` clause means the grant applies to every target.
         match parse_auth("GRANT ALL TO ROLE admin") {
             AuthStatement::GrantPrivilege { privilege, target, role } => {
@@ -1037,6 +1110,18 @@ mod tests {
                 assert_eq!(role, "admin");
             }
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_a_quoted_stored_table_name_is_rewritten() {
+        assert_eq!(unquoted_table_rule_name("\"with space\"").as_deref(), Some("with space"));
+        assert_eq!(unquoted_table_rule_name("public.\"Mixed Case\"").as_deref(), Some("public.Mixed Case"));
+        assert_eq!(unquoted_table_rule_name("\"quote\"\"d\"").as_deref(), Some("quote\"d"));
+        assert_eq!(unquoted_table_rule_name("`obs`").as_deref(), Some("obs"));
+        // Values already in the catalog form stay as they are.
+        for stored in ["obs", "Mixed Case", "with space", "quote\"d", "public.obs"] {
+            assert_eq!(unquoted_table_rule_name(stored), None, "{stored}");
         }
     }
 
@@ -1073,9 +1158,28 @@ mod tests {
         }
     }
 
+    /// A request runs one statement. A second one after the `;` is an error, not a
+    /// statement that silently does not run.
+    #[test]
+    fn a_single_statement_refuses_a_second_one() {
+        for sql in ["SELECT 1", "SELECT 1;", "SELECT 1 ; ;", "REFRESH my_table;"] {
+            let mut parser = BeaconParser::new(sql).unwrap();
+            assert!(parser.parse_single_statement().is_ok(), "{sql}");
+        }
+        for sql in ["SELECT 1; DROP TABLE x", "REFRESH a; REFRESH b", "SHOW CRAWLERS extra"] {
+            let mut parser = BeaconParser::new(sql).unwrap();
+            let err = parser.parse_single_statement().expect_err(sql);
+            assert!(err.to_string().contains("one SQL statement"), "{sql}: {err}");
+        }
+    }
+
     #[test]
     fn test_parse_refresh_statement() {
-        for sql in ["REFRESH my_table", "REFRESH TABLE my_table"] {
+        for sql in [
+            "REFRESH my_table",
+            "REFRESH TABLE my_table",
+            "REFRESH MATERIALIZED VIEW my_table",
+        ] {
             let mut parser = BeaconParser::new(sql).unwrap();
             let stmt = parser.parse_statement().unwrap();
             match stmt {

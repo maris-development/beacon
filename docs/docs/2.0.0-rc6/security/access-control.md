@@ -72,9 +72,9 @@ The internal `__beacon_*` tables need the super-user too. Another principal gets
 `permission denied` on a read. This also holds for `SHOW TABLES`, because
 DataFusion rewrites that statement onto `information_schema.tables`.
 
+<!-- MCP is unreleased. On release, add "and the MCP `list_tables` tool" to the list below. -->
 Beacon builds a catalog listing for those principals instead. `GET /api/tables`,
-`GET /api/catalogs`, the metadata commands of Flight SQL and the MCP
-`list_tables` tool read the catalog as the engine. They return only what the
+`GET /api/catalogs` and the metadata commands of Flight SQL read the catalog as the engine. They return only what the
 caller can see. They show no metadata schema and no internal table. With
 enforcement on, they show only the tables with a `SELECT` grant from the roles of
 the caller. A principal therefore sees exactly what it can read.
@@ -86,15 +86,42 @@ can also name a *target*.
 
 | Privilege | Meaning for read enforcement |
 | --- | --- |
-| `SELECT` | Read the target. Query authorization uses this privilege. |
-| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP` | The grammar accepts them. A **write still needs the super-user**. A grant of one of these to a role gives no write access. |
-| `ALL` | Matches every privilege. |
+| `SELECT` | Read the target. Query authorization uses this privilege. A grant takes only `SELECT`. |
+| `ALL` | Matches every privilege. A deny takes it, so `DENY ALL` stops a read like `DENY SELECT`. A grant refuses it. |
+| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP` | The grammar accepts them, but a grant and a deny refuse them. A **write always needs the super-user**. |
 
 | Target | Matches |
 | --- | --- |
-| `ON TABLE <name>` | A registered table, by name. |
+| `ON TABLE <name>` | A registered table, by name. Write the name as in `SELECT`, with quotes when it needs them. |
 | `ON PATH '<glob>'` | Files by path, relative to the datasets root. A glob pattern works, for example `argo/**/*.nc`. |
 | *(omitted)* | Every target of that privilege. |
+
+### How Beacon checks a read
+
+Beacon checks the **files a read reaches**, not the text of the query. It lists the files of
+each scan and matches each file against the rules:
+
+- **A path rule** matches a file path. In a rule, `*` stays in one folder and `**` crosses
+  folders.
+- **A query glob** reaches more than a rule. In `read_parquet('data/*.parquet')`, `*` also
+  crosses folders, so the read also includes `data/sub/x.parquet`. A grant on `data/*` therefore
+  does not cover it. Name the files, or grant `data/**`.
+- **A read of files** needs a grant that matches every file. A deny on a table that holds one of
+  the files also stops the read.
+- **A read that reaches one denied file fails as a whole.** Beacon does not drop the file from
+  the result. With the deny on `argo/restricted/*` above, `read_netcdf('argo/**/*.nc')` fails.
+  Read the allowed folders by name instead.
+- **A read of a table** needs a grant on the table. A path deny that matches one of its files
+  also stops the read, through a view as well.
+- **A deny matches a path in any case.** A disk that ignores case reads `SECRET/x` from
+  `secret/x`, so a deny on `secret/**` also stops `SECRET/x`. A grant matches in its own case.
+- **A source whose files Beacon cannot see is refused.** The `*_schema` table functions and
+  `list_datasets()` need the same grants as a read of the files.
+- **`DESCRIBE <table>`** needs the super-user when enforcement is on. Use
+  `GET /api/table-schema` for the schema of a granted table.
+
+The dataset listings (`GET /api/list-datasets`, `/api/datasets` and `/api/total-datasets`)
+show only the files the caller can read.
 
 ## Manage users and roles (SQL)
 
@@ -132,8 +159,8 @@ GRANT SELECT ON PATH 'argo/**/*.nc' TO ROLE reader;
 -- Carve out an exception — deny-wins over any matching grant
 DENY SELECT ON PATH 'argo/restricted/*' TO ROLE reader;
 
--- Grant every privilege on every target (still read-only in practice)
-GRANT ALL TO ROLE reader;
+-- Allow a role to read every target
+GRANT SELECT TO ROLE reader;
 ```
 
 Remove a rule with `REVOKE`. Add the `DENY` keyword to remove a *deny* rule
@@ -156,7 +183,11 @@ GRANT SELECT ON TABLE observations TO ROLE public_reader;
 GRANT ROLE public_reader TO USER anonymous;
 ```
 
-Set `BEACON_AUTH_ANONYMOUS_ENABLED=false` to make every request authenticate.
+Set `BEACON_AUTH_ANONYMOUS_ENABLED=false` to make every request authenticate. A request without
+credentials then gets `401 Unauthorized`, on HTTP and on Flight SQL.
+
+The anonymous user has no password. A Basic login as it therefore fails. A Basic login with an
+empty password fails for every stored user.
 
 ## OIDC (single sign-on)
 

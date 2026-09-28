@@ -28,6 +28,11 @@ pub struct GeoJsonFilter {
 }
 
 impl GeoJsonFilter {
+    /// The longitude and the latitude column, in that order.
+    pub fn columns(&self) -> (&str, &str) {
+        (&self.longitude_column, &self.latitude_column)
+    }
+
     /// Renders the filter as `ST_Within(ST_Point(lon, lat), ST_GeomFromGeoJSON('<geometry>'))`.
     ///
     /// The three functions come from `datafusion-spatial`, so the JSON path and the SQL path

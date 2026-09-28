@@ -87,7 +87,10 @@ impl PrivilegeRule {
     }
 
     /// Whether this rule matches a concrete access request.
-    fn matches(&self, privilege: Privilege, target: &ConcreteTarget) -> bool {
+    ///
+    /// `case_sensitive` applies to a path. A deny matches a path in any case: a disk that ignores
+    /// case reads `SECRET/x` from `secret/x`, so a case-sensitive deny would let it through.
+    fn matches(&self, privilege: Privilege, target: &ConcreteTarget, case_sensitive: bool) -> bool {
         let privilege_matches = self.privilege == privilege || self.privilege == Privilege::All;
         if !privilege_matches {
             return false;
@@ -98,9 +101,10 @@ impl PrivilegeRule {
             Some(PrivilegeTarget::Table(name)) => {
                 matches!(target, ConcreteTarget::Table(requested) if requested == name)
             }
-            Some(PrivilegeTarget::Path(pattern)) => {
-                matches!(target, ConcreteTarget::Path(path) if path_matches(pattern, path))
-            }
+            Some(PrivilegeTarget::Path(pattern)) => matches!(
+                target,
+                ConcreteTarget::Path(path) if path_matches(pattern, path, case_sensitive)
+            ),
         }
     }
 }
@@ -266,6 +270,26 @@ impl RoleProvider {
     ) -> anyhow::Result<()> {
         let _write = self.write_lock.lock().await;
         self.assert_role_exists(role)?;
+        // A mistyped rule must not look like it took access away.
+        let held = self.roles.read().get(role).is_some_and(|entry| {
+            if is_deny {
+                entry.denies.contains(rule)
+            } else {
+                entry.grants.contains(rule)
+            }
+        });
+        if !held {
+            let target = rule
+                .target
+                .as_ref()
+                .map(|target| format!(" ON {target}"))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "role '{role}' has no {} {}{target} to revoke",
+                rule_kind(is_deny),
+                rule.privilege
+            );
+        }
         if let Some(store) = &self.persistence {
             store.persist_remove_rule(role, is_deny, rule).await?;
         }
@@ -325,22 +349,51 @@ impl RoleProvider {
         privilege: Privilege,
         target: &ConcreteTarget,
     ) -> bool {
-        let registry = self.roles.read();
-        let matched: Vec<&Role> = roles
-            .iter()
-            .filter_map(|name| registry.get(name))
-            .collect();
-
-        let denied = matched
-            .iter()
-            .any(|role| role.denies.iter().any(|rule| rule.matches(privilege, target)));
-        if denied {
+        if self.is_denied(roles, privilege, target) {
             return false;
         }
 
-        matched
+        let registry = self.roles.read();
+        roles
             .iter()
-            .any(|role| role.grants.iter().any(|rule| rule.matches(privilege, target)))
+            .filter_map(|name| registry.get(name))
+            .any(|role| role.grants.iter().any(|rule| rule.matches(privilege, target, true)))
+    }
+
+    /// [`Self::is_allowed`] for one resource with several spellings, such as a bare and a
+    /// qualified table name: a deny on any spelling wins, then a grant on any spelling allows.
+    pub fn is_allowed_any(
+        &self,
+        roles: &[String],
+        privilege: Privilege,
+        targets: &[ConcreteTarget],
+    ) -> bool {
+        if targets
+            .iter()
+            .any(|target| self.is_denied(roles, privilege, target))
+        {
+            return false;
+        }
+        let registry = self.roles.read();
+        roles
+            .iter()
+            .filter_map(|name| registry.get(name))
+            .any(|role| {
+                role.grants.iter().any(|rule| {
+                    targets
+                        .iter()
+                        .any(|target| rule.matches(privilege, target, true))
+                })
+            })
+    }
+
+    /// Whether a deny rule of the given roles matches `privilege` on `target`.
+    pub fn is_denied(&self, roles: &[String], privilege: Privilege, target: &ConcreteTarget) -> bool {
+        let registry = self.roles.read();
+        roles
+            .iter()
+            .filter_map(|name| registry.get(name))
+            .any(|role| role.denies.iter().any(|rule| rule.matches(privilege, target, false)))
     }
 }
 
@@ -381,15 +434,16 @@ pub fn decode_target(
 
 /// Segment-aware glob match: `*` does not cross `/`, so `example/*` does not match
 /// `example_2/file.parquet` nor `example/sub/file.parquet`.
-fn path_matches(pattern: &str, path: &str) -> bool {
+fn path_matches(pattern: &str, path: &str, case_sensitive: bool) -> bool {
     let options = MatchOptions {
-        case_sensitive: true,
+        case_sensitive,
         require_literal_separator: true,
         require_literal_leading_dot: false,
     };
     match Pattern::new(pattern) {
         Ok(compiled) => compiled.matches_with(path, options),
-        Err(_) => pattern == path,
+        Err(_) if case_sensitive => pattern == path,
+        Err(_) => pattern.eq_ignore_ascii_case(path),
     }
 }
 
@@ -413,6 +467,25 @@ mod tests {
         provider.drop_role("reader").await.unwrap();
         assert!(!provider.role_exists("reader"));
         assert!(provider.drop_role("reader").await.is_err());
+    }
+
+    /// A deny matches a path in any case, a grant only in its own case: the wrong case fails
+    /// closed either way.
+    #[tokio::test]
+    async fn a_deny_matches_a_path_in_any_case_and_a_grant_in_its_own() {
+        let provider = RoleProvider::new();
+        provider.create_role("reader").await.unwrap();
+        let rule = |pattern: &str| {
+            PrivilegeRule::new(Privilege::Select, Some(PrivilegeTarget::Path(pattern.to_string())))
+        };
+        provider.grant("reader", rule("data/**")).await.unwrap();
+        provider.deny("reader", rule("data/secret/**")).await.unwrap();
+        let roles = vec!["reader".to_string()];
+
+        assert!(provider.is_allowed(&roles, Privilege::Select, &path("data/public/a")));
+        assert!(!provider.is_allowed(&roles, Privilege::Select, &path("data/SECRET/a")));
+        assert!(provider.is_denied(&roles, Privilege::Select, &path("DATA/Secret/a")));
+        assert!(!provider.is_allowed(&roles, Privilege::Select, &path("DATA/public/a")));
     }
 
     #[tokio::test]
@@ -464,10 +537,10 @@ mod tests {
 
     #[test]
     fn path_matching_is_segment_aware() {
-        assert!(path_matches("example/*", "example/file.parquet"));
-        assert!(!path_matches("example/*", "example_2/file.parquet"));
-        assert!(!path_matches("example/*", "example/sub/file.parquet"));
-        assert!(path_matches("example/**", "example/sub/file.parquet"));
+        assert!(path_matches("example/*", "example/file.parquet", true));
+        assert!(!path_matches("example/*", "example_2/file.parquet", true));
+        assert!(!path_matches("example/*", "example/sub/file.parquet", true));
+        assert!(path_matches("example/**", "example/sub/file.parquet", true));
     }
 
     #[tokio::test]
@@ -721,21 +794,21 @@ mod tests {
     /// Globs are matched, not substring-tested, and `?`/`[...]` behave as globs.
     #[test]
     fn path_matching_details() {
-        assert!(path_matches("data/*.parquet", "data/a.parquet"));
-        assert!(!path_matches("data/*.parquet", "data/a.csv"));
-        assert!(path_matches("data/file?.nc", "data/file1.nc"));
-        assert!(!path_matches("data/file?.nc", "data/file10.nc"));
+        assert!(path_matches("data/*.parquet", "data/a.parquet", true));
+        assert!(!path_matches("data/*.parquet", "data/a.csv", true));
+        assert!(path_matches("data/file?.nc", "data/file1.nc", true));
+        assert!(!path_matches("data/file?.nc", "data/file10.nc", true));
         // Case-sensitive.
-        assert!(!path_matches("Data/*", "data/a"));
+        assert!(!path_matches("Data/*", "data/a", true));
         // Anchored at both ends: no substring matching.
-        assert!(!path_matches("data", "data/a"));
-        assert!(!path_matches("data/a", "x/data/a"));
+        assert!(!path_matches("data", "data/a", true));
+        assert!(!path_matches("data/a", "x/data/a", true));
         // A literal pattern only matches itself.
-        assert!(path_matches("data/a.parquet", "data/a.parquet"));
+        assert!(path_matches("data/a.parquet", "data/a.parquet", true));
         // An unparsable pattern degrades to literal equality rather than matching
         // everything.
-        assert!(!path_matches("data/[", "data/anything"));
-        assert!(path_matches("data/[", "data/["));
+        assert!(!path_matches("data/[", "data/anything", true));
+        assert!(path_matches("data/[", "data/[", true));
     }
 
     /// A durable [`RoleStore`] used to assert write-through and hydration. Its
@@ -936,10 +1009,10 @@ mod tests {
         assert!(listed[1].grants.is_empty());
     }
 
-    /// Rules are a set: re-granting the same rule is idempotent, and revoking a
-    /// rule that was never granted is a no-op rather than an error.
+    /// Rules are a set: re-granting the same rule is idempotent. A revoke of a rule the role does
+    /// not hold is an error, so a mistyped `REVOKE` does not look like it took access away.
     #[tokio::test]
-    async fn rules_are_a_set_and_revoke_is_forgiving() {
+    async fn rules_are_a_set_and_a_revoke_needs_the_rule() {
         let provider = RoleProvider::new();
         provider.create_role("reader").await.unwrap();
         let rule = PrivilegeRule::new(Privilege::Select, None);
@@ -947,12 +1020,13 @@ mod tests {
         provider.grant("reader", rule.clone()).await.unwrap();
         assert_eq!(provider.list_roles()[0].grants.len(), 1);
 
-        provider.revoke("reader", &rule, true).await.unwrap(); // not a deny
+        let wrong_kind = provider.revoke("reader", &rule, true).await; // not a deny
+        assert!(wrong_kind.is_err_and(|e| e.to_string().contains("has no deny")));
         assert_eq!(provider.list_roles()[0].grants.len(), 1, "wrong kind must not remove");
         provider.revoke("reader", &rule, false).await.unwrap();
         assert!(provider.list_roles()[0].grants.is_empty());
-        // Revoking again is fine; revoking on a missing role is not.
-        provider.revoke("reader", &rule, false).await.unwrap();
+        let again = provider.revoke("reader", &rule, false).await;
+        assert!(again.is_err_and(|e| e.to_string().contains("has no grant")));
         assert!(provider.revoke("ghost", &rule, false).await.is_err());
         assert!(provider.deny("ghost", rule).await.is_err());
     }

@@ -1,30 +1,45 @@
-//! Query-time authorization for **reads**: checks the tables/paths a logical plan scans against
-//! the caller's roles. For every `TableScan` the caller needs `Select` on the resolved target (a
-//! named table or its file paths). Deny-wins, default-deny (see [`beacon_auth`]).
+//! Query-time authorization for **reads**: checks the tables and files a logical plan scans against
+//! the caller's roles. Deny-wins, default-deny (see [`beacon_auth`]).
+//!
+//! A read is checked on what it **reaches**, not on how the query spells it. A listing lets `*`
+//! cross `/`, so the text of a glob says little about its files: the check lists the objects of
+//! each scan and matches every one against the rules.
+//!
+//! - A registered table needs `Select` on its name, and no path deny may match one of its files.
+//! - An ad-hoc file read needs `Select` on every file, and no deny on a table that holds one of
+//!   them may apply.
+//! - A source whose files the check cannot see is refused.
 //!
 //! DDL/DML privileges are intentionally **not** handled here — those are gated by the super-user
 //! check in [`validate_query_plan`](super::validate_query_plan).
 
-use beacon_auth::{AuthContext, AuthIdentity, ConcreteTarget, Privilege};
+use beacon_auth::{AuthContext, AuthIdentity, ConcreteTarget, Privilege, PrivilegeTarget};
 use beacon_datafusion_ext::{
     fast_object::FastObjectTable,
+    listing_factory::ListingFactory,
+    located_table::LocatedTable,
     table_ext::{ExternalTable, INTERNAL_TABLE_PREFIX},
 };
 use datafusion::{
+    catalog::TableProvider,
     common::tree_node::TreeNodeRecursion,
     datasource::{
         listing::{ListingTable, ListingTableUrl},
         source_as_provider,
     },
+    functions_table::generate_series::GenerateSeriesTable,
     logical_expr::{LogicalPlan, TableScan},
     prelude::SessionContext,
+    sql::TableReference,
 };
+use futures::TryStreamExt;
+use object_store::path::Path as ObjectPath;
 
 /// Authorizes the reads in a logical plan for `identity`. Returns `Ok(())` when allowed.
 ///
 /// No-op when `enforce` is false or the caller is a super-user. Only `TableScan` reads are checked;
 /// write/DDL authorization happens via the super-user gate in `validate_query_plan`.
-pub(crate) fn authorize_logical_plan(
+pub(crate) async fn authorize_logical_plan(
     plan: &LogicalPlan,
     session_ctx: &SessionContext,
     auth: &AuthContext,
@@ -60,23 +75,361 @@ pub(crate) fn authorize_logical_plan(
         return Ok(());
     }
 
-    let mut targets: Vec<ConcreteTarget> = Vec::new();
+    // `DESCRIBE <table>` plans no scan and keeps no table name, so no grant can be checked.
+    if plan_describes(plan) {
+        anyhow::bail!(
+            "permission denied: DESCRIBE is restricted to the super-user when authorization is \
+             enforced; read a table's schema with GET /api/table-schema"
+        );
+    }
 
     // Every table scan anywhere in the plan (including subqueries and write inputs) is a read.
+    let mut reads: Vec<ScanRead> = Vec::new();
     let _ = plan.apply_with_subqueries(|node| {
         if let LogicalPlan::TableScan(scan) = node {
-            targets.extend(scan_targets(scan, session_ctx));
+            reads.push(scan_read(scan, session_ctx));
         }
         Ok(TreeNodeRecursion::Continue)
     });
 
-    for target in &targets {
-        if !auth.is_allowed(&identity.roles, Privilege::Select, target) {
-            anyhow::bail!("permission denied: SELECT on {}", describe_target(target));
+    let checker = ReadChecker::new(session_ctx, auth, identity);
+    for read in &reads {
+        checker.check(read).await?;
+    }
+    Ok(())
+}
+
+/// Authorizes a read of the registered table `name`, served by `provider`, for `identity`.
+///
+/// The table-level half of [`authorize_logical_plan`], for a caller that reads a table without a
+/// plan, such as a schema request. The caller has already applied the super-user gates.
+pub(crate) async fn authorize_table_read(
+    reference: &TableReference,
+    provider: &dyn TableProvider,
+    session_ctx: &SessionContext,
+    auth: &AuthContext,
+    identity: &AuthIdentity,
+) -> anyhow::Result<()> {
+    let read = ScanRead::Table {
+        name: reference.table().to_string(),
+        targets: table_targets(reference, session_ctx),
+        locations: provider_locations(provider).unwrap_or_default(),
+    };
+    ReadChecker::new(session_ctx, auth, identity).check(&read).await
+}
+
+/// Every spelling of `reference` that a table rule can use: `catalog.schema.table` always,
+/// `schema.table` in the default catalog, and `table` in the default schema.
+///
+/// A rule stores the name as the `GRANT` wrote it, so the check tries each spelling.
+pub(crate) fn table_targets(
+    reference: &TableReference,
+    session_ctx: &SessionContext,
+) -> Vec<ConcreteTarget> {
+    let options = session_ctx.copied_config().options().catalog.clone();
+    let resolved = reference
+        .clone()
+        .resolve(&options.default_catalog, &options.default_schema);
+    let (catalog, schema, table) = (&*resolved.catalog, &*resolved.schema, &*resolved.table);
+
+    let mut targets = vec![ConcreteTarget::Table(format!("{catalog}.{schema}.{table}"))];
+    if catalog == options.default_catalog {
+        targets.push(ConcreteTarget::Table(format!("{schema}.{table}")));
+        if schema == options.default_schema {
+            targets.push(ConcreteTarget::Table(table.to_string()));
+        }
+    }
+    targets
+}
+
+/// Whether any node of `plan` is a `DESCRIBE <table>`.
+fn plan_describes(plan: &LogicalPlan) -> bool {
+    let mut found = false;
+    let _ = plan.apply_with_subqueries(|node| {
+        found = matches!(node, LogicalPlan::DescribeTable(_));
+        Ok(if found { TreeNodeRecursion::Stop } else { TreeNodeRecursion::Continue })
+    });
+    found
+}
+
+/// What one table scan reads, as the check sees it.
+enum ScanRead {
+    /// A registered table: its name for messages, the spellings a rule can use, and the
+    /// locations of its files (empty when it has no files).
+    Table {
+        name: String,
+        targets: Vec<ConcreteTarget>,
+        locations: Vec<Location>,
+    },
+    /// An ad-hoc read of files: a `read_*` table function or a JSON-query file source.
+    Files(Vec<Location>),
+    /// A source whose files the check cannot see, by the name the plan gives it.
+    Unknown(String),
+}
+
+/// Where the files of a scan are.
+enum Location {
+    /// A listing URL and the file extension its table filters on, listed as the scan lists it.
+    Listing { url: ListingTableUrl, extension: String },
+    /// A path the runtime's listing factory lists: a table directory (with a trailing `/`) or
+    /// the glob of `list_datasets`.
+    Pattern(String),
+}
+
+impl Location {
+    /// The path as the query spells it, relative to the datasets root.
+    fn spelling(&self) -> String {
+        match self {
+            Location::Listing { url, .. } => listing_url_to_path(url),
+            Location::Pattern(pattern) => pattern.trim_end_matches('/').to_string(),
+        }
+    }
+}
+
+/// Resolves what a table scan reads.
+fn scan_read(scan: &TableScan, session_ctx: &SessionContext) -> ScanRead {
+    let provider = source_as_provider(&scan.source).ok();
+    let locations = provider
+        .as_ref()
+        .and_then(|provider| provider_locations(provider.as_ref()));
+
+    if session_ctx
+        .table_exist(scan.table_name.clone())
+        .unwrap_or(false)
+    {
+        return ScanRead::Table {
+            name: scan.table_name.table().to_string(),
+            targets: table_targets(&scan.table_name, session_ctx),
+            locations: locations.unwrap_or_default(),
+        };
+    }
+    match locations {
+        Some(locations) => ScanRead::Files(locations),
+        None => ScanRead::Unknown(scan.table_name.to_string()),
+    }
+}
+
+/// The file locations `provider` reads, or `None` when the check cannot see them.
+///
+/// `Some(vec![])` is a provider that reads no files, such as `generate_series`.
+fn provider_locations(provider: &dyn TableProvider) -> Option<Vec<Location>> {
+    let any = provider.as_any();
+    if let Some(table) = any.downcast_ref::<FastObjectTable>() {
+        return Some(listing_locations(table.inner()));
+    }
+    if let Some(external) = any.downcast_ref::<ExternalTable>() {
+        return Some(listing_locations(external.inner().inner()));
+    }
+    if let Some(listing) = any.downcast_ref::<ListingTable>() {
+        return Some(listing_locations(listing));
+    }
+    // The table formats keep their files under one directory: every object there is theirs.
+    if let Some(located) = any.downcast_ref::<LocatedTable>() {
+        return Some(vec![directory(located.location())]);
+    }
+    if let Some(delta) = any.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
+        return Some(vec![directory(&delta.definition().location)]);
+    }
+    if let Some(iceberg) = any.downcast_ref::<beacon_iceberg::BeaconIcebergTable>() {
+        return Some(vec![directory(&iceberg.definition().location)]);
+    }
+    if let Some(icechunk) = any.downcast_ref::<beacon_icechunk::IcechunkTable>() {
+        return Some(vec![directory(&icechunk.definition().location)]);
+    }
+    if let Some(datasets) = any.downcast_ref::<beacon_functions::listing::provider::DatasetsTable>()
+    {
+        return Some(vec![Location::Pattern(datasets.pattern().to_string())]);
+    }
+    // A schema describes the files its reader would read, so it needs the same grant.
+    if let Some(schema) =
+        any.downcast_ref::<beacon_functions::file_formats::schema_function::ReaderSchemaTable>()
+    {
+        return provider_locations(schema.source().as_ref());
+    }
+    if any.is::<GenerateSeriesTable>() {
+        return Some(Vec::new());
+    }
+    None
+}
+
+fn listing_locations(table: &ListingTable) -> Vec<Location> {
+    let extension = table.options().file_extension.clone();
+    table
+        .table_paths()
+        .iter()
+        .map(|url| Location::Listing {
+            url: url.clone(),
+            extension: extension.clone(),
+        })
+        .collect()
+}
+
+/// A table directory as a listing pattern: every object below it.
+fn directory(location: &str) -> Location {
+    Location::Pattern(format!("{}/", location.trim_end_matches('/')))
+}
+
+/// Checks the reads of one caller.
+struct ReadChecker<'a> {
+    session_ctx: &'a SessionContext,
+    auth: &'a AuthContext,
+    identity: &'a AuthIdentity,
+    /// Whether a role of the caller denies a path, so a table's files need a look.
+    denies_paths: bool,
+    /// The tables a role of the caller denies, whose files a path read must not reach.
+    denied_tables: Vec<String>,
+}
+
+impl<'a> ReadChecker<'a> {
+    fn new(session_ctx: &'a SessionContext, auth: &'a AuthContext, identity: &'a AuthIdentity) -> Self {
+        let denies: Vec<_> = auth
+            .list_roles()
+            .into_iter()
+            .filter(|role| identity.roles.contains(&role.name))
+            .flat_map(|role| role.denies.into_iter())
+            .filter(|rule| matches!(rule.privilege, Privilege::Select | Privilege::All))
+            .collect();
+        let denies_paths = denies
+            .iter()
+            .any(|rule| matches!(rule.target, Some(PrivilegeTarget::Path(_))));
+        let denied_tables = denies
+            .iter()
+            .filter_map(|rule| match &rule.target {
+                Some(PrivilegeTarget::Table(name)) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        Self {
+            session_ctx,
+            auth,
+            identity,
+            denies_paths,
+            denied_tables,
         }
     }
 
-    Ok(())
+    async fn check(&self, read: &ScanRead) -> anyhow::Result<()> {
+        match read {
+            ScanRead::Unknown(name) => anyhow::bail!(
+                "permission denied: SELECT on '{name}': its files cannot be checked"
+            ),
+            ScanRead::Table {
+                name,
+                targets,
+                locations,
+            } => {
+                if !self
+                    .auth
+                    .is_allowed_any(&self.identity.roles, Privilege::Select, targets)
+                {
+                    anyhow::bail!("permission denied: SELECT on table '{name}'");
+                }
+                if self.denies_paths {
+                    for file in self.files(locations).await? {
+                        self.refuse_denied(&ConcreteTarget::Path(file.to_string()))?;
+                    }
+                }
+                Ok(())
+            }
+            ScanRead::Files(locations) => {
+                // The spelling can name a file the disk resolves in another case.
+                for location in locations {
+                    self.refuse_denied(&ConcreteTarget::Path(location.spelling()))?;
+                }
+                let files = self.files(locations).await?;
+                for file in &files {
+                    self.require(&ConcreteTarget::Path(file.to_string()))?;
+                }
+                self.refuse_denied_tables(&files).await
+            }
+        }
+    }
+
+    /// Fails unless the caller may read `target`.
+    fn require(&self, target: &ConcreteTarget) -> anyhow::Result<()> {
+        if self.auth.is_allowed(&self.identity.roles, Privilege::Select, target) {
+            Ok(())
+        } else {
+            anyhow::bail!("permission denied: SELECT on {}", describe_target(target))
+        }
+    }
+
+    /// Fails when a deny of the caller matches `target`.
+    fn refuse_denied(&self, target: &ConcreteTarget) -> anyhow::Result<()> {
+        if self.auth.is_denied(&self.identity.roles, Privilege::Select, target) {
+            anyhow::bail!("permission denied: SELECT on {}", describe_target(target))
+        }
+        Ok(())
+    }
+
+    /// Fails when one of `files` belongs to a table a role of the caller denies.
+    async fn refuse_denied_tables(&self, files: &[ObjectPath]) -> anyhow::Result<()> {
+        for table in &self.denied_tables {
+            let Ok(provider) = self.session_ctx.table_provider(table.as_str()).await else {
+                continue;
+            };
+            let Some(locations) = provider_locations(provider.as_ref()) else {
+                continue;
+            };
+            let covered = files.iter().any(|file| {
+                locations.iter().any(|location| match location {
+                    Location::Listing { url, .. } => url.contains(file, false),
+                    Location::Pattern(pattern) => file.as_ref().starts_with(pattern.as_str()),
+                })
+            });
+            if covered {
+                anyhow::bail!("permission denied: SELECT on table '{table}'");
+            }
+        }
+        Ok(())
+    }
+
+    /// Every object the locations reach, listed the way the scan lists them.
+    async fn files(&self, locations: &[Location]) -> anyhow::Result<Vec<ObjectPath>> {
+        let state = self.session_ctx.state();
+        let mut files = Vec::new();
+        for location in locations {
+            match location {
+                Location::Listing { url, extension } => {
+                    let store = state.runtime_env().object_store(url.object_store())?;
+                    let objects: Vec<_> = url
+                        .list_all_files(&state, store.as_ref(), extension)
+                        .await?
+                        .try_collect()
+                        .await?;
+                    files.extend(objects.into_iter().map(|object| object.location));
+                }
+                Location::Pattern(pattern) => {
+                    let factory = state.config().get_extension::<ListingFactory>().ok_or_else(
+                        || anyhow::anyhow!("the listing factory is not registered on the session"),
+                    )?;
+                    let pattern = strip_default_scheme(&factory, pattern);
+                    let objects: Vec<_> = factory
+                        .listing(&state, &pattern)?
+                        .stream()
+                        .try_collect()
+                        .await?;
+                    files.extend(objects.into_iter().map(|object| object.location));
+                }
+            }
+        }
+        Ok(files)
+    }
+}
+
+/// `pattern` without the scheme of the default store, which a table location can carry
+/// (`datasets://argo`) but the listing factory refuses next to its own default.
+fn strip_default_scheme(factory: &ListingFactory, pattern: &str) -> String {
+    let Some(scheme) = factory
+        .default_store_url()
+        .and_then(|url| url.as_str().split("://").next().map(str::to_string))
+    else {
+        return pattern.to_string();
+    };
+    match pattern.strip_prefix(&format!("{scheme}://")) {
+        Some(relative) => relative.trim_start_matches('/').to_string(),
+        None => pattern.to_string(),
+    }
 }
 
 /// The name of the first metadata schema (`beacon.system` / `information_schema`)
@@ -132,51 +485,6 @@ fn plan_touches_internal_tables(plan: &LogicalPlan) -> bool {
         Ok(TreeNodeRecursion::Continue)
     });
     touches
-}
-
-/// Resolves the concrete resource(s) a table scan touches.
-///
-/// - Unintrospectable sources are exempt (empty).
-/// - A scan of a registered catalog table → `Table(name)` (admins grant by name).
-/// - An ad-hoc file scan (a `read_*` UDTF / listing) → `Path` per underlying listing URL.
-///
-/// The metadata schemas never reach here: a non-super-user's plan that touches
-/// one is rejected above, and a super-user's plan returns before any target is
-/// resolved.
-fn scan_targets(scan: &TableScan, session_ctx: &SessionContext) -> Vec<ConcreteTarget> {
-    if session_ctx
-        .table_exist(scan.table_name.clone())
-        .unwrap_or(false)
-    {
-        return vec![ConcreteTarget::Table(scan.table_name.table().to_string())];
-    }
-
-    let Ok(provider) = source_as_provider(&scan.source) else {
-        return vec![];
-    };
-
-    // A `read_*` table function, and the JSON query API's ad-hoc multi-glob
-    // scans, both resolve to a `FastObjectTable` over their glob paths.
-    if let Some(table) = provider.as_any().downcast_ref::<FastObjectTable>() {
-        return paths_of(table.table_paths());
-    }
-    // A single-glob `read_*` (and external tables) resolve to a self-refreshing `ExternalTable`
-    // wrapping a `ListingTable`.
-    if let Some(external) = provider.as_any().downcast_ref::<ExternalTable>() {
-        return paths_of(external.inner().table_paths());
-    }
-    if let Some(listing) = provider.as_any().downcast_ref::<ListingTable>() {
-        return paths_of(listing.table_paths());
-    }
-
-    vec![]
-}
-
-/// Maps listing URLs to `Path` targets.
-fn paths_of(urls: &[ListingTableUrl]) -> Vec<ConcreteTarget> {
-    urls.iter()
-        .map(|url| ConcreteTarget::Path(listing_url_to_path(url)))
-        .collect()
 }
 
 /// Reconstructs the datasets-root-relative path (matching `GRANT ... ON PATH`) from a listing URL.
@@ -258,13 +566,13 @@ mod tests {
 
         let denied = auth_with_reader_grant(None).await;
         assert!(
-            authorize_logical_plan(&plan, &ctx, &denied, &identity(&["reader"]), true).is_err()
+            authorize_logical_plan(&plan, &ctx, &denied, &identity(&["reader"]), true).await.is_err()
         );
 
         let allowed =
             auth_with_reader_grant(Some(PrivilegeRule::new(Privilege::Select, None))).await;
         assert!(
-            authorize_logical_plan(&plan, &ctx, &allowed, &identity(&["reader"]), true).is_ok()
+            authorize_logical_plan(&plan, &ctx, &allowed, &identity(&["reader"]), true).await.is_ok()
         );
     }
 
@@ -275,12 +583,12 @@ mod tests {
         let auth = auth_with_reader_grant(None).await;
 
         // enforce=false bypasses.
-        assert!(authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), false).is_ok());
+        assert!(authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), false).await.is_ok());
 
         // super-user bypasses even with enforce=true and no grants.
         let mut su = identity(&[]);
         su.is_super_user = true;
-        assert!(authorize_logical_plan(&plan, &ctx, &auth, &su, true).is_ok());
+        assert!(authorize_logical_plan(&plan, &ctx, &auth, &su, true).await.is_ok());
     }
 
     #[tokio::test]
@@ -297,7 +605,7 @@ mod tests {
         ] {
             let plan = plan_for(&ctx, sql).await;
             // Denied with enforcement on despite a blanket SELECT grant…
-            let err = authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), true)
+            let err = authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), true).await
                 .err()
                 .unwrap_or_else(|| panic!("non-super read should be rejected: {sql}"));
             assert!(
@@ -306,7 +614,7 @@ mod tests {
             );
             // …and denied with enforcement off, where a grant-based gate would leak.
             assert!(
-                authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), false).is_err(),
+                authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), false).await.is_err(),
                 "`{sql}` must stay denied with enforcement off"
             );
         }
@@ -315,6 +623,6 @@ mod tests {
         let mut su = identity(&[]);
         su.is_super_user = true;
         let plan = plan_for(&ctx, "SELECT table_name FROM information_schema.tables").await;
-        assert!(authorize_logical_plan(&plan, &ctx, &auth, &su, true).is_ok());
+        assert!(authorize_logical_plan(&plan, &ctx, &auth, &su, true).await.is_ok());
     }
 }

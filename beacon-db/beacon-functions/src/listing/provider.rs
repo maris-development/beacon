@@ -58,6 +58,11 @@ impl DatasetsTable {
             schema: list_datasets_schema(),
         }
     }
+
+    /// The glob whose datasets the listing names.
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
 }
 
 /// The tighter of the function's own limit and the planner push-down.

@@ -7,12 +7,13 @@ use std::{
     time::Duration,
 };
 
+use crate::axum::redact::PathRedactor;
 use crate::flight_sql::{
     auth::{AuthContext, Authenticator},
     metadata::FlightSqlMetadata,
     storage::SqlHandleStore,
     util::{
-        batch_to_response, build_flight_info, encode_schema, to_internal_status, FlightDataStream,
+        batch_to_response, build_flight_info, encode_schema, FlightDataStream,
         HandshakeStream,
     },
 };
@@ -44,6 +45,8 @@ pub(crate) struct BeaconFlightSqlService {
     statements: SqlHandleStore,
     prepared_statements: SqlHandleStore,
     metadata: FlightSqlMetadata,
+    /// Removes the server data paths from query errors.
+    redactor: Arc<PathRedactor>,
 }
 
 impl BeaconFlightSqlService {
@@ -62,6 +65,7 @@ impl BeaconFlightSqlService {
         let runtime = server.clone();
 
         Ok(Self {
+            redactor: Arc::new(PathRedactor::from_config(server.config())),
             metadata: FlightSqlMetadata::new(server.clone())?,
             authenticator: Authenticator::new(
                 server.clone(),
@@ -88,9 +92,9 @@ impl BeaconFlightSqlService {
             .runtime()
             .run_query(beacon_core::query::Query::sql(sql.clone()), auth.identity.clone())
             .await
-            .map_err(to_internal_status)?
+            .map_err(|error| self.internal_status(error))?
             .into_record_stream()
-            .map_err(to_internal_status)?;
+            .map_err(|error| self.internal_status(error))?;
         let schema = stream.schema();
         // Statement tickets are one-shot: the SQL is stored once and consumed by `do_get_statement`.
         let handle = self.statements.insert(sql).await;
@@ -116,9 +120,9 @@ impl BeaconFlightSqlService {
             .runtime()
             .run_query(beacon_core::query::Query::sql(sql), auth.identity.clone())
             .await
-            .map_err(to_internal_status)?
+            .map_err(|error| self.internal_status(error))?
             .into_record_stream()
-            .map_err(to_internal_status)?;
+            .map_err(|error| self.internal_status(error))?;
 
         build_flight_info(stream.schema().as_ref(), &descriptor, &query.as_any())
     }
@@ -134,17 +138,23 @@ impl BeaconFlightSqlService {
             .runtime()
             .run_query(beacon_core::query::Query::sql(sql), auth.identity.clone())
             .await
-            .map_err(to_internal_status)?
+            .map_err(|error| self.internal_status(error))?
             .into_record_stream()
-            .map_err(to_internal_status)?;
+            .map_err(|error| self.internal_status(error))?;
         let schema = stream.schema();
 
+        let redactor = self.redactor.clone();
         let flight_stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
             .build(stream.map_err(|error| FlightError::ExternalError(error.into())))
-            .map_err(to_internal_status);
+            .map_err(move |error| Status::internal(redactor.redact(&error.to_string())));
 
         Ok(Box::pin(flight_stream))
+    }
+
+    /// A gRPC internal status for a query error, without the server data paths.
+    fn internal_status(&self, error: impl std::fmt::Display) -> Status {
+        Status::internal(self.redactor.redact(&error.to_string()))
     }
 
     /// Resolves a prepared statement handle to the stored SQL text.
@@ -389,13 +399,13 @@ impl FlightSqlService for BeaconFlightSqlService {
             .runtime()
             .run_query(beacon_core::query::Query::sql(sql), auth.identity.clone())
             .await
-            .map_err(to_internal_status)?
+            .map_err(|error| self.internal_status(error))?
             .into_record_stream()
-            .map_err(to_internal_status)?;
+            .map_err(|error| self.internal_status(error))?;
 
         // We consume the stream to ensure the update is fully executed, but ignore any output batches.
         let row_count = stream
-            .map_err(to_internal_status)
+            .map_err(|error| self.internal_status(error))
             .try_collect::<Vec<_>>()
             .await?
             .into_iter()
@@ -424,9 +434,9 @@ impl FlightSqlService for BeaconFlightSqlService {
                 .runtime()
             .run_query(beacon_core::query::Query::sql(query.query.clone()), auth.identity.clone())
             .await
-            .map_err(to_internal_status)?
+            .map_err(|error| self.internal_status(error))?
             .into_record_stream()
-            .map_err(to_internal_status)?;
+            .map_err(|error| self.internal_status(error))?;
             encode_schema(stream.schema().as_ref())?
         };
 

@@ -48,7 +48,7 @@ tag. Releases before 2.0.0 are recorded in the
   that links to all of them, plus the OpenAPI document and the health endpoint, and names the
   running version. The documentation link is pinned to that version, so a server two releases old
   no longer sends its operator to the newest manual. The admin card appears only when the admin UI
-  is mounted, and the MCP address only when MCP is enabled. Every link carries the configured
+  is mounted. Every link carries the configured
   `BEACON_BASE_PATH`, and that root now answers in both forms: `/prefix/` redirects to `/prefix`,
   where it used to be a `404`. The page carries the colors, the type and the card layout of the
   documentation site, and it loads nothing from the network, so it also renders on a server with

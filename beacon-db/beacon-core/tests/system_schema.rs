@@ -145,6 +145,34 @@ async fn query_metrics_table_records_completed_queries() {
     );
 }
 
+/// The metrics row counts the rows the scans read and names the files they opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn query_metrics_record_the_scanned_rows_and_files() {
+    let rt = runtime("system-schema-scan-metrics").await;
+    common::write_file(&rt.datasets_dir().join("m/data.csv"), "a,b\n1,x\n2,y\n3,z\n");
+
+    rt.sql("SELECT a FROM read_csv('m/data.csv') WHERE a > 1").await;
+
+    let batches = rt
+        .sql(
+            "SELECT input_rows, file_paths FROM beacon.system.query_metrics \
+             WHERE query LIKE '%m/data.csv%' AND query NOT LIKE '%query_metrics%'",
+        )
+        .await;
+    assert_eq!(total_rows(&batches), 1, "one metrics row for the scan");
+
+    let input_rows = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("input_rows is UInt64")
+        .value(0);
+    assert_eq!(input_rows, 3, "the scan read every row of the file");
+
+    let file_paths = batches[0].column(1).as_string::<i32>().value(0).to_string();
+    assert!(file_paths.contains("m/data.csv"), "file_paths: {file_paths}");
+}
+
 /// The metrics row carries both logical plans — parsed and optimized — because
 /// `run_query` registers the plan with the tracker before execution. This is
 /// what `EXPLAIN`-style introspection over past queries is built on.

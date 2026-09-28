@@ -66,14 +66,10 @@ def test_functions_endpoint_is_documented(client):
 
 
 def test_table_functions_endpoint_returns_list(client):
+    # Deprecated: table functions have no catalog, so the listing is always empty.
     resp = client.get("/api/table-functions")
     assert resp.status_code == 200
-    assert isinstance(resp.json(), list)
-
-
-def test_table_functions_include_readers(client):
-    names = {f["function_name"] for f in client.get("/api/table-functions").json()}
-    assert "read_parquet" in names and "read_csv" in names, names
+    assert resp.json() == []
 
 
 def test_default_table_endpoint_responds(client):
