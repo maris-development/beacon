@@ -40,6 +40,7 @@ use beacon_auth::{
 use datafusion::{prelude::SessionContext, sql::parser::DFParserBuilder};
 use futures::TryStreamExt;
 
+use crate::parser::beacon_parser::unquoted_table_rule_name;
 use crate::statement_plan::SessionCell;
 
 // The four internal tables. Their names are under `beacon_datafusion_ext::table_ext`'s
@@ -263,6 +264,31 @@ impl UserDirectory for TablesAuthStore {
     }
 }
 
+impl TablesAuthStore {
+    /// Replaces the stored rule row whose target value is `stored_value` with `rule`.
+    async fn rewrite_rule_value(
+        &self,
+        role: &str,
+        is_deny: bool,
+        rule: &PrivilegeRule,
+        stored_value: &str,
+    ) -> anyhow::Result<()> {
+        let (target_type, _) = encode_target(&rule.target);
+        self.run(format!(
+            "DELETE FROM {ROLE_RULES_TABLE} \
+             WHERE role = '{}' AND kind = '{}' AND privilege = '{}' \
+             AND target_type = '{}' AND target_value = '{}'",
+            quote_literal(role),
+            quote_literal(rule_kind(is_deny)),
+            quote_literal(&rule.privilege.to_string()),
+            quote_literal(target_type),
+            quote_literal(stored_value),
+        ))
+        .await?;
+        self.persist_insert_rule(role, is_deny, rule).await
+    }
+}
+
 #[async_trait]
 impl RoleStore for TablesAuthStore {
     async fn load_roles(&self) -> anyhow::Result<HashMap<String, Role>> {
@@ -294,14 +320,28 @@ impl RoleStore for TablesAuthStore {
                 let privilege = Privilege::from_str(&string_at(privilege_col.as_ref(), row)?)
                     .map_err(|err| anyhow::anyhow!(err))?;
                 let target_type = string_at(target_type_col.as_ref(), row)?;
-                let target_value = string_at(target_value_col.as_ref(), row)?;
-                let target = decode_target(&target_type, target_value)?;
+                let stored_value = string_at(target_value_col.as_ref(), row)?;
+                let unquoted = (target_type == "table")
+                    .then(|| unquoted_table_rule_name(&stored_value))
+                    .flatten();
+                let target =
+                    decode_target(&target_type, unquoted.clone().unwrap_or(stored_value.clone()))?;
                 let rule = PrivilegeRule::new(privilege, target);
+                let is_deny = kind == rule_kind(true);
+                if unquoted.is_some() {
+                    // Rewrite the row, or a later revoke would miss it and the rule would return.
+                    if let Err(error) = self
+                        .rewrite_rule_value(&role, is_deny, &rule, &stored_value)
+                        .await
+                    {
+                        tracing::warn!(%role, %stored_value, ?error, "could not rewrite a quoted table rule");
+                    }
+                }
 
                 let entry = roles
                     .entry(role.clone())
                     .or_insert_with(|| Role::new(role));
-                if kind == rule_kind(true) {
+                if is_deny {
                     entry.denies.insert(rule);
                 } else {
                     entry.grants.insert(rule);

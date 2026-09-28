@@ -326,6 +326,56 @@ async fn enforced_table_grant_allows_only_the_granted_table() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn enforced_rules_on_quoted_table_names_match() {
+    let rt = auth_runtime("auth-quoted-names", true, true).await;
+    let tables = ["\"Mixed Case\"", "\"with space\"", "\"ünïcode\"", "\"quote\"\"d\""];
+    for table in tables.iter().chain(["\"Closed One\""].iter()) {
+        rt.sql_as(&format!("CREATE TABLE {table} (a BIGINT)"), AuthIdentity::system())
+            .await;
+        rt.sql_as(&format!("INSERT INTO {table} VALUES (1)"), AuthIdentity::system())
+            .await;
+    }
+    for statement in [
+        "CREATE ROLE quoted_reader".to_string(),
+        "CREATE USER quoted_alice WITH PASSWORD 'pw'".to_string(),
+        "GRANT ROLE quoted_reader TO USER quoted_alice".to_string(),
+    ]
+    .into_iter()
+    .chain(tables.iter().map(|t| format!("GRANT SELECT ON TABLE {t} TO ROLE quoted_reader")))
+    {
+        rt.sql_as(&statement, AuthIdentity::system()).await;
+    }
+    let alice = rt
+        .runtime
+        .authenticate(&Credential::basic("quoted_alice", "pw"))
+        .await
+        .unwrap();
+
+    for table in tables {
+        let read = rt.try_sql_as(&format!("SELECT * FROM {table}"), alice.clone()).await;
+        assert_eq!(total_rows(&read.unwrap_or_else(|e| panic!("{table}: {e}"))), 1, "{table}");
+    }
+    let closed = rt.try_sql_as("SELECT * FROM \"Closed One\"", alice.clone()).await;
+    assert!(closed.is_err_and(|e| e.to_string().contains("permission denied")));
+
+    // A deny on a quoted name blocks, and a revoke with the same spelling removes the grant.
+    rt.sql_as(
+        "DENY SELECT ON TABLE \"with space\" TO ROLE quoted_reader",
+        AuthIdentity::system(),
+    )
+    .await;
+    let denied = rt.try_sql_as("SELECT * FROM \"with space\"", alice.clone()).await;
+    assert!(denied.is_err_and(|e| e.to_string().contains("permission denied")));
+    rt.sql_as(
+        "REVOKE SELECT ON TABLE \"Mixed Case\" FROM ROLE quoted_reader",
+        AuthIdentity::system(),
+    )
+    .await;
+    let revoked = rt.try_sql_as("SELECT * FROM \"Mixed Case\"", alice).await;
+    assert!(revoked.is_err_and(|e| e.to_string().contains("permission denied")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn enforced_deny_wins_over_grant() {
     let rt = auth_runtime("auth-deny-wins", true, true).await;
     let t1 = unique("t1");

@@ -4,7 +4,8 @@ use std::str::FromStr;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::sql::{
     parser::{DFParser, DFParserBuilder},
-    sqlparser::{keywords::Keyword, tokenizer::Token},
+    planner::object_name_to_table_reference,
+    sqlparser::{ast::ObjectName, keywords::Keyword, tokenizer::Token},
 };
 
 use beacon_auth::{Privilege, PrivilegeTarget};
@@ -969,7 +970,7 @@ impl<'a> BeaconParser<'a> {
                 .parser
                 .parse_object_name(false)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            Ok(PrivilegeTarget::Table(name.to_string()))
+            Ok(PrivilegeTarget::Table(table_rule_name(name)?))
         } else if self.word_at(0, "PATH") {
             self.df_parser.parser.next_token(); // PATH
             Ok(PrivilegeTarget::Path(self.parse_string_value()?))
@@ -983,6 +984,35 @@ impl<'a> BeaconParser<'a> {
             )))
         }
     }
+}
+
+/// The name a table rule stores: the parts of `name` as the catalog holds them, joined with `.`.
+///
+/// The quotes go and the case stays, because the session turns identifier normalization off.
+/// The authorization check builds its table targets in the same form.
+pub(crate) fn table_rule_name(name: ObjectName) -> Result<String> {
+    Ok(object_name_to_table_reference(name, false)?.to_vec().join("."))
+}
+
+/// The table rule name for `stored`, when `stored` is a quoted SQL name.
+///
+/// Earlier versions stored the name of a table rule as written, quotes included, so the rule
+/// never matched. `None` for a value that already holds the catalog form.
+pub(crate) fn unquoted_table_rule_name(stored: &str) -> Option<String> {
+    if !stored.contains(['"', '`']) {
+        return None;
+    }
+    let mut parser = DFParserBuilder::new(stored).build().ok()?;
+    let name = parser.parser.parse_object_name(false).ok()?;
+    let quoted = name
+        .0
+        .iter()
+        .any(|part| part.as_ident().is_some_and(|ident| ident.quote_style.is_some()));
+    // A catalog name such as `quote"d` does not parse to the end, so it stays as it is.
+    if !quoted || parser.parser.peek_token().token != Token::EOF {
+        return None;
+    }
+    table_rule_name(name).ok()
 }
 
 #[cfg(test)]
@@ -1057,6 +1087,21 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+        // A table target holds the name as the catalog does: no quotes, case kept.
+        for (sql_name, stored) in [
+            ("\"Mixed Case\"", "Mixed Case"),
+            ("\"with space\"", "with space"),
+            ("\"quote\"\"d\"", "quote\"d"),
+            ("public.\"with space\"", "public.with space"),
+            ("Obs", "Obs"),
+        ] {
+            match parse_auth(&format!("GRANT SELECT ON TABLE {sql_name} TO ROLE reader")) {
+                AuthStatement::GrantPrivilege { target, .. } => {
+                    assert_eq!(target, Some(PrivilegeTarget::Table(stored.to_string())), "{sql_name}");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
         // No `ON` clause means the grant applies to every target.
         match parse_auth("GRANT ALL TO ROLE admin") {
             AuthStatement::GrantPrivilege { privilege, target, role } => {
@@ -1065,6 +1110,18 @@ mod tests {
                 assert_eq!(role, "admin");
             }
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_a_quoted_stored_table_name_is_rewritten() {
+        assert_eq!(unquoted_table_rule_name("\"with space\"").as_deref(), Some("with space"));
+        assert_eq!(unquoted_table_rule_name("public.\"Mixed Case\"").as_deref(), Some("public.Mixed Case"));
+        assert_eq!(unquoted_table_rule_name("\"quote\"\"d\"").as_deref(), Some("quote\"d"));
+        assert_eq!(unquoted_table_rule_name("`obs`").as_deref(), Some("obs"));
+        // Values already in the catalog form stay as they are.
+        for stored in ["obs", "Mixed Case", "with space", "quote\"d", "public.obs"] {
+            assert_eq!(unquoted_table_rule_name(stored), None, "{stored}");
         }
     }
 

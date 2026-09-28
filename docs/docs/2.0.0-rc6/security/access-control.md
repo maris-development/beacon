@@ -92,7 +92,7 @@ can also name a *target*.
 
 | Target | Matches |
 | --- | --- |
-| `ON TABLE <name>` | A registered table, by name. |
+| `ON TABLE <name>` | A registered table, by name. Write the name as in `SELECT`, with quotes when it needs them. |
 | `ON PATH '<glob>'` | Files by path, relative to the datasets root. A glob pattern works, for example `argo/**/*.nc`. |
 | *(omitted)* | Every target of that privilege. |
 
