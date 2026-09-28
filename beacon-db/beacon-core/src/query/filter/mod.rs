@@ -87,7 +87,52 @@ impl Filter {
             Filter::GeoJson(geo_json_filter) => geo_json_filter.parse(session_state, schema),
         }
     }
+
+    /// Appends every column the filter reads, in the order the filter names them.
+    pub fn collect_columns(&self, columns: &mut Vec<String>) {
+        match self {
+            Filter::And(And(filters)) | Filter::Or(Or(filters)) => {
+                for filter in filters {
+                    filter.collect_columns(columns);
+                }
+            }
+            Filter::IsNotNull(is_not_null) => columns.push(is_not_null.column.clone()),
+            Filter::IsNull(is_null) => columns.push(is_null.column.clone()),
+            Filter::Between(between) => columns.push(between.column().to_string()),
+            Filter::Eq(eq) => columns.push(eq.column().to_string()),
+            Filter::Neq(neq) => columns.push(neq.column().to_string()),
+            Filter::Gt(gt) => columns.push(gt.column().to_string()),
+            Filter::Gteq(gteq) => columns.push(gteq.column().to_string()),
+            Filter::Lt(lt) => columns.push(lt.column().to_string()),
+            Filter::Lteq(lteq) => columns.push(lteq.column().to_string()),
+            Filter::GeoJson(geo_json_filter) => {
+                let (longitude, latitude) = geo_json_filter.columns();
+                columns.push(longitude.to_string());
+                columns.push(latitude.to_string());
+            }
+        }
+    }
 }
+
+/// Gives each single-column comparison a `column()` accessor. Every variant names its column.
+macro_rules! impl_leaf_column {
+    ($($leaf:ty),* $(,)?) => {
+        $(
+            impl $leaf {
+                /// The column this comparison reads.
+                pub fn column(&self) -> &str {
+                    match self {
+                        Self::Number { column, .. }
+                        | Self::Timestamp { column, .. }
+                        | Self::String { column, .. } => column,
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_leaf_column!(between::Between, eq::Eq, neq::Neq, Gt, Gteq, Lt, Lteq);
 
 pub(crate) fn try_coerce_number_to_schema(literal: f64, dtype: &DataType) -> Expr {
     let result = match dtype {
@@ -303,6 +348,25 @@ mod tests {
             error.to_string().contains("st_point"),
             "unexpected error: {error}"
         );
+    }
+
+    /// Every column a filter tree reads, so a projection pushed to the source keeps them.
+    #[test]
+    fn collect_columns_reaches_every_leaf() {
+        let filter: Filter = serde_json::from_str(
+            r#"{"and": [
+                {"column": "depth", "gt_eq": 0, "lt_eq": 10},
+                {"or": [{"column": "platform", "eq": "argo"}, {"is_null": {"column": "qc"}}]},
+                {"longitude_column": "lon", "latitude_column": "lat",
+                 "geometry": {"type": "Point", "coordinates": [0.0, 0.0]}}
+            ]}"#,
+        )
+        .expect("filter should deserialize");
+
+        let mut columns = Vec::new();
+        filter.collect_columns(&mut columns);
+
+        assert_eq!(columns, vec!["depth", "platform", "qc", "lon", "lat"]);
     }
 
     /// Null literals in a filter payload are not accepted as comparison values —

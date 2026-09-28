@@ -178,6 +178,10 @@ pub(crate) async fn table_arrow_schema(
 ///
 /// `pattern` defaults to a recursive listing; `offset`/`limit` paginate. The
 /// UDTF returns the full metadata, so this maps straight onto [`DatasetInfo`].
+///
+/// A caller sees only the files it may read. `list_datasets` refuses a pattern that reaches
+/// one file the caller may not read, so the engine lists, and the rows are filtered before the
+/// page is cut.
 pub(crate) async fn list_datasets(
     server: &Arc<Server>,
     pattern: Option<String>,
@@ -185,17 +189,21 @@ pub(crate) async fn list_datasets(
     limit: Option<usize>,
     identity: AuthIdentity,
 ) -> anyhow::Result<Vec<DatasetInfo>> {
+    let runtime = server.runtime();
+    let filtered = runtime.checks_reads_of(&identity);
+    let (listing_offset, listing_limit) = if filtered { (None, None) } else { (offset, limit) };
     let sql = format!(
         "SELECT * FROM list_datasets({}, {}, {})",
         quote_literal(&pattern.unwrap_or_else(|| "**/*".to_string())),
-        offset.unwrap_or(0),
+        listing_offset.unwrap_or(0),
         // 0 would mean "no rows"; the UDTF treats a missing limit as unbounded,
         // so pass a limit only when the caller asked for one.
-        limit.map(|l| l.to_string()).unwrap_or_else(|| "NULL".to_string()),
+        listing_limit.map(|l| l.to_string()).unwrap_or_else(|| "NULL".to_string()),
     );
-    let rows = query_rows(server, sql, identity).await?;
+    let lister = if filtered { AuthIdentity::system() } else { identity.clone() };
+    let rows = query_rows(server, sql, lister).await?;
 
-    Ok(rows
+    let datasets = rows
         .iter()
         .map(|row| DatasetInfo {
             file_path: str_field(row, "file_name").to_string(),
@@ -210,7 +218,14 @@ pub(crate) async fn list_datasets(
                 .get("last_modified")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-        })
+        });
+    if !filtered {
+        return Ok(datasets.collect());
+    }
+    Ok(datasets
+        .filter(|dataset| runtime.can_read_path(&identity, &dataset.file_path))
+        .skip(offset.unwrap_or(0))
+        .take(limit.unwrap_or(usize::MAX))
         .collect())
 }
 
@@ -226,8 +241,42 @@ fn read_function_for_extension(ext: &str) -> Option<&'static str> {
         "atlas" => "read_atlas",
         "tif" | "tiff" => "read_tiff",
         "bbf" => "read_bbf",
+        "h5" | "hdf5" => "read_hdf5",
         _ => return None,
     })
+}
+
+/// The `read_*` table function that reads `file`, a path as the dataset listing names it.
+///
+/// A Zarr store is listed by its root `zarr.json`, so that file name selects `read_zarr`.
+/// Every other file is chosen by its extension.
+fn read_function_for_file(file: &str) -> Option<&'static str> {
+    let path = std::path::Path::new(file);
+    if path.file_name().and_then(|name| name.to_str()) == Some("zarr.json") {
+        return Some("read_zarr");
+    }
+    read_function_for_extension(path.extension().and_then(|e| e.to_str()).unwrap_or(""))
+}
+
+/// Why [`dataset_schema`] has no schema to give.
+#[derive(Debug)]
+pub(crate) enum DatasetSchemaError {
+    /// No `read_*` function reads a file with this name.
+    NoReader(String),
+    /// No dataset matches the path.
+    NotFound(String),
+    /// The reader failed on the file.
+    Read(anyhow::Error),
+}
+
+impl std::fmt::Display for DatasetSchemaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoReader(file) => write!(f, "cannot infer a reader for '{file}'"),
+            Self::NotFound(file) => write!(f, "no dataset matches '{file}'"),
+            Self::Read(error) => write!(f, "{error}"),
+        }
+    }
 }
 
 /// The Arrow schema produced when reading a dataset file.
@@ -240,14 +289,17 @@ pub(crate) async fn dataset_schema(
     server: &Arc<Server>,
     file: &str,
     identity: AuthIdentity,
-) -> anyhow::Result<arrow::datatypes::SchemaRef> {
-    let ext = std::path::Path::new(file)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let read_fn = read_function_for_extension(ext).ok_or_else(|| {
-        anyhow::anyhow!("cannot infer a reader for '{file}': unsupported extension '{ext}'")
-    })?;
+) -> Result<arrow::datatypes::SchemaRef, DatasetSchemaError> {
+    let read_fn =
+        read_function_for_file(file).ok_or_else(|| DatasetSchemaError::NoReader(file.to_string()))?;
+
+    // A reader fails in its own words on a missing file, so look for the dataset first.
+    let matches = list_datasets(server, Some(file.to_string()), None, Some(1), identity.clone())
+        .await
+        .map_err(DatasetSchemaError::Read)?;
+    if matches.is_empty() {
+        return Err(DatasetSchemaError::NotFound(file.to_string()));
+    }
 
     let result = server
         .runtime()
@@ -258,8 +310,12 @@ pub(crate) async fn dataset_schema(
             )),
             identity,
         )
-        .await?;
-    Ok(result.into_record_stream()?.schema())
+        .await
+        .map_err(DatasetSchemaError::Read)?;
+    result
+        .into_record_stream()
+        .map(|stream| stream.schema())
+        .map_err(DatasetSchemaError::Read)
 }
 
 /// The table a JSON query without a `from` resolves against. Configuration, not
@@ -270,7 +326,7 @@ pub(crate) fn default_table(server: &Arc<Server>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::read_function_for_extension;
+    use super::{read_function_for_extension, read_function_for_file};
 
     #[test]
     fn every_netcdf_extension_reads_through_read_netcdf() {
@@ -283,5 +339,21 @@ mod tests {
     #[test]
     fn cdf_has_no_read_function() {
         assert_eq!(read_function_for_extension("cdf"), None);
+    }
+
+    /// The dataset listing names a Zarr store by its `zarr.json`, and a store's
+    /// root `zarr.json` is what `read_zarr` opens.
+    #[test]
+    fn a_zarr_json_reads_through_read_zarr() {
+        assert_eq!(read_function_for_file("grid.zarr/zarr.json"), Some("read_zarr"));
+        assert_eq!(read_function_for_file("a/b/zarr.json"), Some("read_zarr"));
+        assert_eq!(read_function_for_file("a/other.json"), None);
+    }
+
+    #[test]
+    fn every_hdf5_extension_reads_through_read_hdf5() {
+        for file in ["data.h5", "data.hdf5", "DATA.H5"] {
+            assert_eq!(read_function_for_file(file), Some("read_hdf5"), "{file}");
+        }
     }
 }

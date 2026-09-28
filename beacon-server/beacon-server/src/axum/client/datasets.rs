@@ -117,7 +117,8 @@ pub struct ListDatasetSchemaQuery {
     params(ListDatasetSchemaQuery),
     responses(
         (status = 200, description = "The Arrow schema produced when reading the dataset", body = Object),
-        (status = 500, description = "Failed to read the dataset schema"),
+        (status = 400, description = "No reader for the file, or the reader failed on it; the body gives the reason"),
+        (status = 404, description = "No dataset matches the path"),
     ),
     security(
         (),
@@ -135,11 +136,14 @@ pub(crate) async fn list_dataset_schema(
     match result {
         Ok(schema) => Ok(Json(schema)),
         Err(err) => {
-            tracing::error!("Error listing dataset schema: {:?}", err);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Error listing dataset schema".to_string(),
-            ))
+            tracing::warn!("Error listing dataset schema: {err}");
+            let status = match err {
+                catalog::DatasetSchemaError::NotFound(_) => StatusCode::NOT_FOUND,
+                catalog::DatasetSchemaError::NoReader(_) | catalog::DatasetSchemaError::Read(_) => {
+                    StatusCode::BAD_REQUEST
+                }
+            };
+            Err((status, err.to_string()))
         }
     }
 }

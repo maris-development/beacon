@@ -240,6 +240,12 @@ impl DataSink for GeoParquetSink {
             rows_written += mapped_batch.num_rows() as u64;
         }
 
+        // The `geo` key makes the file GeoParquet; it holds the bbox of every batch written.
+        let geo_metadata = encoder
+            .into_keyvalue()
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        arrow_writer.append_key_value_metadata(geo_metadata);
+
         arrow_writer
             .finish()
             .await
@@ -488,6 +494,44 @@ mod tests {
             geometry.data_type()
         );
         assert!(read_schema.field_with_name("id").is_ok());
+    }
+
+    /// The GeoParquet specification requires the `geo` key in the file metadata; readers such
+    /// as geopandas refuse a file without it.
+    #[tokio::test]
+    async fn sink_writes_the_geo_file_metadata() {
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let schema = lonlat_schema();
+        let input = Arc::new(EmptyExec::new(schema.clone())) as Arc<dyn ExecutionPlan>;
+        let conf = test_sink_config(schema.clone(), "memory:///geo.geoparquet");
+        let sink = GeoParquetSink::new(input, conf, object_store.clone(), "lon", "lat").unwrap();
+        let stream = Box::pin(RecordBatchStreamAdapter::new(
+            schema.clone(),
+            futures::stream::iter(vec![Ok(lonlat_batch(&schema))]),
+        ));
+        sink.write_all(stream, &Arc::new(TaskContext::default()))
+            .await
+            .expect("write_all");
+
+        let path = object_store::path::Path::from("geo.geoparquet");
+        let bytes = object_store::ObjectStoreExt::get(object_store.as_ref(), &path)
+            .await
+            .expect("output object should exist")
+            .bytes()
+            .await
+            .expect("output bytes");
+        let reader = SerializedFileReader::new(bytes).expect("a Parquet file");
+        let geo = reader
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kv| kv.iter().find(|entry| entry.key == "geo"))
+            .and_then(|entry| entry.value.clone())
+            .expect("the file metadata should hold the `geo` key");
+        assert!(geo.contains("\"primary_column\":\"geometry\""), "geo metadata: {geo}");
     }
 
     #[tokio::test]

@@ -41,7 +41,7 @@ use crate::parser::statement::{
     SummarizeStatement,
 };
 
-pub(crate) use authz::authorize_logical_plan;
+pub(crate) use authz::{authorize_logical_plan, authorize_table_read};
 pub(crate) use stream_coalescer::CoalesceSqlStream;
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;

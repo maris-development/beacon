@@ -26,12 +26,6 @@ pub(super) struct AuthContext {
 }
 
 impl AuthContext {
-    fn anonymous() -> Self {
-        Self {
-            identity: AuthIdentity::empty(),
-        }
-    }
-
     fn from_identity(identity: AuthIdentity) -> Self {
         Self { identity }
     }
@@ -99,18 +93,20 @@ impl Authenticator {
     ) -> Result<AuthContext, Status> {
         match auth_value {
             Some(auth_value) => self.authorize_value(auth_value).await,
-            None if self.allow_anonymous => Ok(self.anonymous_context().await),
+            None if self.allow_anonymous => self.anonymous_context().await,
             None => Err(Status::unauthenticated("missing authorization metadata")),
         }
     }
 
-    /// Resolves the anonymous principal's context, falling back to a role-less context when the
-    /// anonymous user is disabled in the auth model.
-    async fn anonymous_context(&self) -> AuthContext {
-        match self.runtime.runtime().authenticate_anonymous().await {
-            Ok(identity) => AuthContext::from_identity(identity),
-            Err(_) => AuthContext::anonymous(),
-        }
+    /// Resolves the anonymous principal's context. Refused when the anonymous user is disabled
+    /// in the auth model: without enforcement a role-less caller reads everything.
+    async fn anonymous_context(&self) -> Result<AuthContext, Status> {
+        self.runtime
+            .runtime()
+            .authenticate_anonymous()
+            .await
+            .map(AuthContext::from_identity)
+            .map_err(|_| Status::unauthenticated("anonymous access is disabled"))
     }
 
     /// Authenticates the Flight SQL handshake and resolves the principal's roles.
@@ -137,7 +133,7 @@ impl Authenticator {
         }
 
         if self.allow_anonymous {
-            Ok(self.anonymous_context().await)
+            self.anonymous_context().await
         } else {
             Err(Status::unauthenticated("invalid credentials"))
         }

@@ -73,6 +73,67 @@ async fn select_filter_sort_and_limit() {
     assert_eq!(column_strings(&batches, 1), vec!["z", "y"]);
 }
 
+/// An integer literal stays an integer, so a function that wants an integer argument, such
+/// as the decimal places of `round`, takes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_integer_literal_is_an_integer_argument() {
+    let rt = seeded("json-integer-literal").await;
+
+    let batches = run_json(
+        &rt,
+        json!({
+            "select": [
+                { "function": "round", "args": ["a", { "value": 0 }], "alias": "rounded" }
+            ],
+            "from": "jq",
+            "sort_by": [ { "Asc": "rounded" } ]
+        }),
+    )
+    .await;
+
+    assert_eq!(total_rows(&batches), 4);
+}
+
+/// `distinct` selects its own columns, so it needs no top-level `select`, and it reads the
+/// source columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn distinct_on_without_a_top_level_select() {
+    let rt = seeded("json-distinct").await;
+
+    let batches = run_json(
+        &rt,
+        json!({
+            "from": "jq",
+            "distinct": { "on": ["name"], "select": ["name", "a"] },
+            "sort_by": [ { "Asc": "name" } ]
+        }),
+    )
+    .await;
+
+    assert_eq!(batches[0].schema().fields().len(), 2);
+    assert_eq!(column_strings(&batches, 0), vec!["x", "y", "z"]);
+}
+
+/// A filter can name a column that the `select` leaves out.
+#[tokio::test(flavor = "multi_thread")]
+async fn filter_on_a_column_outside_the_select() {
+    let rt = seeded("json-filter-unselected").await;
+
+    let batches = run_json(
+        &rt,
+        json!({
+            "select": ["name"],
+            "from": "jq",
+            "filters": [ { "column": "a", "gt": 2 } ],
+            "sort_by": [ { "Asc": "name" } ]
+        }),
+    )
+    .await;
+
+    assert_eq!(batches[0].schema().fields().len(), 1, "only the selected column");
+    assert_eq!(column_strings(&batches, 0), vec!["y", "z"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn offset_skips_rows() {
     let rt = seeded("json-offset").await;
@@ -167,30 +228,6 @@ async fn nested_filters_combine() {
     .await;
 
     assert_eq!(i64_column(&batches, 0), vec![1, 2, 3]);
-}
-
-/// The JSON compiler applies `select` (projection) before `filter`, so a filter
-/// can only reference projected columns — unlike SQL, where `WHERE` sees the
-/// source. This pins that ordering: filtering on an unprojected column errors.
-#[tokio::test(flavor = "multi_thread")]
-async fn filter_sees_the_projected_schema() {
-    let rt = seeded("json-filter-scope").await;
-
-    let query: Query = serde_json::from_value(json!({
-        "select": ["a"],
-        "from": "jq",
-        "filter": { "column": "name", "eq": "x" }
-    }))
-    .expect("body should deserialize");
-
-    let err = match rt.runtime.run_query(query, rt.admin().await).await {
-        Err(e) => e,
-        Ok(_) => panic!("filtering on an unprojected column should fail"),
-    };
-    assert!(
-        err.to_string().contains("name"),
-        "the error should name the unprojected column, got: {err}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -402,3 +402,35 @@ async fn listings_show_only_what_the_callers_role_grants() {
         "got: {schemas:?}"
     );
 }
+
+/// The dataset listings name files, so a caller sees only the files its roles let it read.
+#[tokio::test(flavor = "multi_thread")]
+async fn dataset_listings_show_only_the_files_the_caller_may_read() {
+    let (harness, config) = app(config(true)).await;
+    let admin = basic(&config.admin.username, &config.admin.password);
+    let open = unique("open");
+    for rel in [format!("{open}/a.csv"), format!("{}/b.csv", unique("hidden"))] {
+        let path = config.data.datasets.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x\n1\n").unwrap();
+    }
+
+    let router = setup_router(harness.server.clone(), config.clone()).unwrap();
+    admin_ok(&router, &admin, "CREATE ROLE reader").await;
+    admin_ok(&router, &admin, &format!("GRANT SELECT ON PATH '{open}/**' TO ROLE reader")).await;
+    admin_ok(&router, &admin, "CREATE USER alice WITH PASSWORD 'pw'").await;
+    admin_ok(&router, &admin, "GRANT ROLE reader TO USER alice").await;
+    let alice = basic("alice", "pw");
+
+    let (status, body) = send(&router, get("/api/datasets", Some(&alice))).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed: Vec<String> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(listed, vec![format!("{open}/a.csv")]);
+
+    let (status, body) = send(&router, get("/api/total-datasets", Some(&alice))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json(&body), 1);
+
+    let (_, body) = send(&router, get("/api/total-datasets", Some(&admin))).await;
+    assert_eq!(json(&body), 2, "the admin sees every file");
+}

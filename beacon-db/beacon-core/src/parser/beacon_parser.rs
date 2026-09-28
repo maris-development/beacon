@@ -29,6 +29,25 @@ impl<'a> BeaconParser<'a> {
         })
     }
 
+    /// Parse the one statement of `sql` and refuse anything after it but semicolons.
+    ///
+    /// A request runs one statement, so a second one would otherwise not run and give no
+    /// error.
+    pub fn parse_single_statement(&mut self) -> Result<BeaconStatement> {
+        let statement = self.parse_statement()?;
+        let parser = &mut self.df_parser.parser;
+        while parser.consume_token(&Token::SemiColon) {}
+        let next = parser.peek_token();
+        if next.token != Token::EOF {
+            return Err(DataFusionError::Plan(format!(
+                // The location renders with its own leading " at".
+                "a request holds one SQL statement; found `{}`{} after it",
+                next.token, next.span.start
+            )));
+        }
+        Ok(statement)
+    }
+
     /// Parse a single statement, returning a `BeaconStatement`.
     pub fn parse_statement(&mut self) -> Result<BeaconStatement> {
         if let Some(statement) = self.try_parse_auth()? {
@@ -733,15 +752,15 @@ impl<'a> BeaconParser<'a> {
         matches!(t, Token::Word(w) if w.value.to_uppercase() == "REFRESH")
     }
 
-    /// Parse: REFRESH [TABLE] <name>
+    /// Parse: REFRESH [TABLE | MATERIALIZED VIEW] <name>
     fn parse_refresh(&mut self) -> Result<BeaconStatement> {
         // Consume REFRESH
         self.df_parser.parser.next_token();
 
-        // Optional TABLE keyword
-        let t = &self.df_parser.parser.peek_nth_token(0).token;
-        if matches!(t, Token::Word(w) if w.keyword == Keyword::TABLE) {
-            self.df_parser.parser.next_token();
+        // Optional TABLE, or the PostgreSQL spelling MATERIALIZED VIEW
+        let parser = &mut self.df_parser.parser;
+        if !parser.parse_keywords(&[Keyword::MATERIALIZED, Keyword::VIEW]) {
+            parser.parse_keyword(Keyword::TABLE);
         }
 
         let name = self
@@ -1073,9 +1092,28 @@ mod tests {
         }
     }
 
+    /// A request runs one statement. A second one after the `;` is an error, not a
+    /// statement that silently does not run.
+    #[test]
+    fn a_single_statement_refuses_a_second_one() {
+        for sql in ["SELECT 1", "SELECT 1;", "SELECT 1 ; ;", "REFRESH my_table;"] {
+            let mut parser = BeaconParser::new(sql).unwrap();
+            assert!(parser.parse_single_statement().is_ok(), "{sql}");
+        }
+        for sql in ["SELECT 1; DROP TABLE x", "REFRESH a; REFRESH b", "SHOW CRAWLERS extra"] {
+            let mut parser = BeaconParser::new(sql).unwrap();
+            let err = parser.parse_single_statement().expect_err(sql);
+            assert!(err.to_string().contains("one SQL statement"), "{sql}: {err}");
+        }
+    }
+
     #[test]
     fn test_parse_refresh_statement() {
-        for sql in ["REFRESH my_table", "REFRESH TABLE my_table"] {
+        for sql in [
+            "REFRESH my_table",
+            "REFRESH TABLE my_table",
+            "REFRESH MATERIALIZED VIEW my_table",
+        ] {
             let mut parser = BeaconParser::new(sql).unwrap();
             let stmt = parser.parse_statement().unwrap();
             match stmt {

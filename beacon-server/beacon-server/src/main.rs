@@ -34,21 +34,27 @@ fn main() -> anyhow::Result<()> {
     // a process-global.
     let config = Arc::new(beacon_server_config::Config::load().context("failed to load configuration")?);
 
-    let api_runtime = Builder::new_multi_thread()
-        .worker_threads(config.server.api_threads)
-        .thread_name("beacon-api")
-        .enable_all()
-        .build()
+    let api_runtime = build_runtime("beacon-api", config.server.api_threads)
         .context("failed to build the API Tokio runtime")?;
-    let query_runtime = Builder::new_multi_thread()
-        .worker_threads(config.server.worker_threads)
-        .thread_name("beacon-query")
-        .enable_all()
-        .build()
+    let query_runtime = build_runtime("beacon-query", config.server.worker_threads)
         .context("failed to build the query Tokio runtime")?;
 
     // Both runtimes live until this returns, so a task on one can always reach the other.
     api_runtime.block_on(async_main(config, query_runtime.handle().clone()))
+}
+
+/// The stack of each runtime thread. DataFusion plans an expression recursively, and the
+/// default 2 MiB overflows at a few hundred levels, below the SQL depth limit.
+const THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+/// A multi-thread Tokio runtime with `threads` workers named `name`.
+fn build_runtime(name: &str, threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
+    Builder::new_multi_thread()
+        .worker_threads(threads)
+        .thread_name(name)
+        .thread_stack_size(THREAD_STACK_SIZE)
+        .enable_all()
+        .build()
 }
 
 /// Initializes shared services and starts all configured API transports.
@@ -214,7 +220,29 @@ fn setup_tracing(config: &beacon_server_config::Config) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::log_filter;
+    use super::{build_runtime, log_filter};
+
+    /// The runtime threads plan the deepest expression the SQL check lets through. The default
+    /// Tokio stack overflows at a few hundred levels.
+    #[test]
+    fn a_runtime_thread_plans_an_expression_at_the_depth_limit() {
+        let runtime = build_runtime("test-deep", 1).expect("a runtime");
+        let depth = beacon_core::parser::expression_depth::MAX_EXPRESSION_DEPTH;
+        let sql = format!("SELECT {}", vec!["1"; depth].join("+"));
+
+        let rows = runtime
+            .block_on(async move {
+                tokio::spawn(async move {
+                    let ctx = datafusion::prelude::SessionContext::new();
+                    ctx.sql(&sql).await?.collect().await
+                })
+                .await
+            })
+            .expect("the task should finish")
+            .expect("the query should run");
+
+        assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+    }
 
     #[test]
     fn debug_level_covers_every_beacon_crate() {

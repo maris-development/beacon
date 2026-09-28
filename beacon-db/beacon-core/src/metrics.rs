@@ -9,7 +9,11 @@ use std::{
     sync::{Arc, atomic::AtomicU64},
 };
 
-use datafusion::{logical_expr::LogicalPlan, physical_plan::ExecutionPlan};
+use datafusion::{
+    datasource::{physical_plan::FileScanConfig, source::DataSourceExec},
+    logical_expr::LogicalPlan,
+    physical_plan::ExecutionPlan,
+};
 use parking_lot::{Mutex, RwLock};
 
 /// Consolidated metrics for a query execution.
@@ -148,6 +152,12 @@ impl MetricsTracker {
         // The physical plan is optional: callers that only track output
         // rows/bytes (e.g. the unified query path) never register one.
         let physical_plan = self.physical_plan.read().clone();
+        let mut scans = ScanTotals::default();
+        if let Some(plan) = &physical_plan {
+            collect_scan_totals(plan.as_ref(), &mut scans);
+        }
+        let mut file_paths = self.file_paths.lock().clone();
+        file_paths.extend(scans.files);
 
         let logical_plan_json = self
             .parsed_logical_plan
@@ -168,13 +178,14 @@ impl MetricsTracker {
             query: self.query.clone(),
             username: self.username.clone(),
             finished_at: chrono::Utc::now(),
-            input_rows: self.input_rows.load(std::sync::atomic::Ordering::Relaxed),
-            input_bytes: self.input_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            input_rows: self.input_rows.load(std::sync::atomic::Ordering::Relaxed) + scans.rows,
+            input_bytes: self.input_bytes.load(std::sync::atomic::Ordering::Relaxed)
+                + scans.bytes,
             result_num_rows: self.result_rows.load(std::sync::atomic::Ordering::Relaxed),
             result_size_in_bytes: self
                 .result_size_in_bytes
                 .load(std::sync::atomic::Ordering::Relaxed),
-            file_paths: self.file_paths.lock().clone(),
+            file_paths,
             parsed_logical_plan: logical_plan_json,
             optimized_logical_plan: optimized_logical_plan_json,
             node_metrics: physical_plan
@@ -197,6 +208,56 @@ pub struct NodeMetrics {
     pub metrics: HashMap<String, serde_json::Value>,
     /// Metrics for child nodes.
     pub children: Vec<NodeMetrics>,
+}
+
+/// What the leaf scans of an executed plan read.
+#[derive(Debug, Default, PartialEq)]
+struct ScanTotals {
+    rows: u64,
+    bytes: u64,
+    files: Vec<String>,
+}
+
+/// Adds the rows, bytes and files of every leaf node under `plan` to `totals`.
+///
+/// A leaf is a scan, so its output rows are the query's input rows. A leaf without a
+/// `bytes_scanned` metric counts the size of the files it opened.
+fn collect_scan_totals(plan: &dyn ExecutionPlan, totals: &mut ScanTotals) {
+    let children = plan.children();
+    if !children.is_empty() {
+        for child in children {
+            collect_scan_totals(child.as_ref(), totals);
+        }
+        return;
+    }
+
+    let metrics = plan.metrics().map(|metrics| metrics.aggregate_by_name());
+    if let Some(rows) = metrics.as_ref().and_then(|metrics| metrics.output_rows()) {
+        totals.rows += rows as u64;
+    }
+    let bytes_scanned = metrics
+        .as_ref()
+        .and_then(|metrics| metrics.sum_by_name("bytes_scanned"))
+        .map(|value| value.as_usize() as u64);
+
+    let files: Vec<&object_store::ObjectMeta> = plan
+        .as_any()
+        .downcast_ref::<DataSourceExec>()
+        .and_then(|exec| exec.data_source().as_any().downcast_ref::<FileScanConfig>())
+        .map(|config| {
+            config
+                .file_groups
+                .iter()
+                .flat_map(|group| group.files())
+                .map(|file| &file.object_meta)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    totals.bytes += bytes_scanned.unwrap_or_else(|| files.iter().map(|file| file.size).sum());
+    totals
+        .files
+        .extend(files.iter().map(|file| file.location.to_string()));
 }
 
 /// Recursively collect metrics from an execution plan node.

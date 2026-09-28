@@ -179,3 +179,20 @@ async fn enforced_http_query_respects_table_grants() {
         StatusCode::BAD_REQUEST
     );
 }
+
+/// With anonymous access off, every client request must authenticate: a request without
+/// credentials is a 401, not a role-less caller that reads everything when enforcement is off.
+#[tokio::test(flavor = "multi_thread")]
+async fn anonymous_off_requires_credentials_on_client_routes() {
+    let mut cfg = config(false);
+    cfg.auth.anonymous_enabled = false;
+    let (harness, cfg) = app(cfg).await;
+    let router = setup_router(harness.server.clone(), cfg).unwrap();
+
+    assert_eq!(status(&router, post_query("SELECT 1", None)).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(status(&router, get("/api/tables", None)).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(status(&router, get("/api/health", None)).await, StatusCode::OK);
+
+    let admin = basic(common::ADMIN_USERNAME, common::ADMIN_PASSWORD);
+    assert_eq!(status(&router, post_query("SELECT 1", Some(&admin))).await, StatusCode::OK);
+}

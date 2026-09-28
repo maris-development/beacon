@@ -8,9 +8,7 @@ use crate::query_result::{OutputFileKind, QueryOutputFile};
 use std::sync::Arc;
 
 use beacon_arrow_csv::datafusion::DEFAULT_CSV_EXTENSION;
-use beacon_arrow_geoparquet::datafusion::{
-    GeoParquetFormatFactory, GeoParquetOptions, GEOPARQUET_EXTENSION,
-};
+use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
 use beacon_arrow_ipc::datafusion::{ArrowFormatFactory, DEFAULT_ARROW_EXTENSION};
 use beacon_arrow_netcdf::datafusion::NETCDF_EXTENSION;
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
@@ -175,16 +173,12 @@ impl OutputFormat {
             OutputFormat::GeoParquet {
                 longitude_column,
                 latitude_column,
-            } => Ok(format_as_file_type(
-                session
-                    .state()
-                    .get_file_format_factory(GEOPARQUET_EXTENSION)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                        "GeoParquet format factory not registered under extension 'geo_parquet'"
-                    )
-                    })?,
-            )),
+            } => Ok(format_as_file_type(Arc::new(GeoParquetFormatFactory::new(
+                GeoParquetOptions {
+                    longitude_column: longitude_column.clone(),
+                    latitude_column: latitude_column.clone(),
+                },
+            )))),
             OutputFormat::NetCDF => {
                 let options = NetcdfOptions::default();
 
@@ -203,21 +197,31 @@ impl OutputFormat {
                 ))
             }
             OutputFormat::NdNetCDF { dimension_columns } => {
-                let mut options = NetcdfOptions::default();
-                options.unique_value_columns = dimension_columns.clone();
-                options.write_dimensions = Some(dimension_columns.clone());
+                let registered = session
+                    .state()
+                    .get_file_format_factory(NETCDF_EXTENSION)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "NetCDF format factory not registered under extension '{}'",
+                            NETCDF_EXTENSION
+                        )
+                    })?;
+                // The COPY sink reads its write dimensions from the factory, so clone the
+                // registered one and set them there.
+                let mut factory = registered
+                    .as_any()
+                    .downcast_ref::<NetCDFFormatFactory>()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "the format factory under extension '{}' is not the NetCDF factory",
+                            NETCDF_EXTENSION
+                        )
+                    })?
+                    .clone();
+                factory.options.unique_value_columns = dimension_columns.clone();
+                factory.options.write_dimensions = Some(dimension_columns.clone());
 
-                Ok(format_as_file_type(
-                    session
-                        .state()
-                        .get_file_format_factory(NETCDF_EXTENSION)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "NetCDF format factory not registered under extension '{}'",
-                                NETCDF_EXTENSION
-                            )
-                        })?,
-                ))
+                Ok(format_as_file_type(Arc::new(factory)))
             }
             OutputFormat::Odv(options) => Ok(format_as_file_type(Arc::new(
                 OdvFileFormatFactory::new(Some(options.clone())),

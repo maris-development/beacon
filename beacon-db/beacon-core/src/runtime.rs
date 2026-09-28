@@ -89,6 +89,24 @@ impl Runtime {
         self.auth.anonymous_enabled()
     }
 
+    /// Whether reads of `identity` are checked against its roles.
+    pub fn checks_reads_of(&self, identity: &beacon_auth::AuthIdentity) -> bool {
+        self.auth_enforce && !identity.is_super_user
+    }
+
+    /// Whether `identity` may read the file at `path`, relative to the datasets root.
+    ///
+    /// For a transport that lists files on a caller's behalf and shows only what the caller
+    /// could go on to read.
+    pub fn can_read_path(&self, identity: &beacon_auth::AuthIdentity, path: &str) -> bool {
+        !self.checks_reads_of(identity)
+            || self.auth.is_allowed(
+                &identity.roles,
+                beacon_auth::Privilege::Select,
+                &beacon_auth::ConcreteTarget::Path(path.to_string()),
+            )
+    }
+
     /// Execute a client query (JSON or SQL) and return a metrics-tracked result.
     ///
     /// The single entry point for query execution: the JSON form is compiled by
@@ -152,7 +170,8 @@ impl Runtime {
             &self.auth,
             &identity,
             self.auth_enforce,
-        )?;
+        )
+        .await?;
 
         match output {
             Some(output) => {
@@ -330,6 +349,17 @@ impl Runtime {
             .table_provider(table.clone())
             .await
             .map_err(|e| anyhow::anyhow!("table '{table}' could not be resolved: {e}"))?;
+        if self.auth_enforce && !identity.is_super_user {
+            // A path deny on one of the table's files also hides its schema.
+            crate::statement_plan::authorize_table_read(
+                table.table(),
+                provider.as_ref(),
+                &self.session_ctx,
+                &self.auth,
+                identity,
+            )
+            .await?;
+        }
         Ok(provider.schema())
     }
 
@@ -492,7 +522,8 @@ impl Runtime {
             &self.auth,
             &identity,
             self.auth_enforce,
-        )?;
+        )
+        .await?;
         // Bound to a local: the `Display` wrapper borrows `plan`, so formatting
         // it inline would drop `plan` while the temporary still holds the borrow.
         let pg_json = plan.display_pg_json().to_string();
@@ -543,7 +574,8 @@ impl Runtime {
             &self.auth,
             &identity,
             self.auth_enforce,
-        )?;
+        )
+        .await?;
 
         // Keep the `Arc` so per-node metrics can be read once the stream drains.
         // `execute_statement_plan` discards the plan, so create/execute are inlined.
@@ -635,6 +667,7 @@ impl Runtime {
                 crate::statement_plan::summarize_plan(&self.session_ctx, statement).await
             }
             BeaconStatement::DFStatement(statement) => {
+                crate::parser::expression_depth::check_expression_depth(&statement)?;
                 crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
             }
         }
@@ -642,7 +675,7 @@ impl Runtime {
 
     fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
         let mut parser = BeaconParser::new(sql)?;
-        parser.parse_statement().map_err(Into::into)
+        parser.parse_single_statement().map_err(Into::into)
     }
 }
 

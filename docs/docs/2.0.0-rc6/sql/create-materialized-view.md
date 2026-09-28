@@ -55,6 +55,8 @@ This scans the stored Parquet result. It uses columnar projection and predicate 
 REFRESH monthly_sales
 ```
 
+`REFRESH TABLE monthly_sales` and `REFRESH MATERIALIZED VIEW monthly_sales` do the same refresh.
+
 A refresh runs the original query again. It replaces the stored Parquet data with the new result.
 This is a full refresh. Beacon writes the new data to a new directory. It then swaps the catalog
 pointer atomically. A failed refresh therefore keeps the previous result. You can still query it.

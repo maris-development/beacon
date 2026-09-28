@@ -148,7 +148,7 @@ impl AuthContext {
             .anonymous_user
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("anonymous access is disabled"))?;
-        self.authenticate(&Credential::basic(username, "")).await
+        self.authenticate_with(&Credential::basic(username, ""), true).await
     }
 
     /// Enumerate all stored local users with their assigned roles. Returns empty when the
@@ -192,7 +192,20 @@ impl AuthContext {
     /// super-user identity without consulting the provider or role store. Every other principal is
     /// resolved by the provider and is **always non-super** — the only super-user is the configured
     /// one. Authorization for non-super principals comes entirely from their (read-only) roles.
+    ///
+    /// Past the super-user, a Basic credential with an empty password is refused. The anonymous
+    /// principal is stored with an empty password, so without this rule `anonymous:` would log in
+    /// as it even with anonymous access off.
     pub async fn authenticate(&self, credential: &Credential) -> anyhow::Result<AuthIdentity> {
+        self.authenticate_with(credential, false).await
+    }
+
+    /// [`Self::authenticate`]; `allow_empty_password` is for the anonymous principal only.
+    async fn authenticate_with(
+        &self,
+        credential: &Credential,
+        allow_empty_password: bool,
+    ) -> anyhow::Result<AuthIdentity> {
         if let Credential::Basic { username, password } = credential {
             if let Some(super_user) = &self.super_user {
                 if constant_time_eq(username, &super_user.username)
@@ -204,6 +217,9 @@ impl AuthContext {
                         is_super_user: true,
                     });
                 }
+            }
+            if password.is_empty() && !allow_empty_password {
+                anyhow::bail!("a password is required");
             }
         }
 
@@ -223,6 +239,11 @@ impl AuthContext {
         target: &ConcreteTarget,
     ) -> bool {
         self.role_provider.is_allowed(roles, privilege, target)
+    }
+
+    /// Whether a deny rule of the given roles matches `privilege` on `target`.
+    pub fn is_denied(&self, roles: &[String], privilege: Privilege, target: &ConcreteTarget) -> bool {
+        self.role_provider.is_denied(roles, privilege, target)
     }
 
     // --- Role management (delegated to the role provider) ---

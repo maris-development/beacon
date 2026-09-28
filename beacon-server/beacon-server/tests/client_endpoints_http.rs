@@ -723,3 +723,40 @@ async fn dataset_discovery_endpoints_reflect_stored_files() {
         "the parquet schema should have fields"
     );
 }
+
+/// The response body of a failed dataset-schema request, as text.
+fn error_text(res: &Res) -> String {
+    String::from_utf8_lossy(&res.body).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dataset_schema_of_an_unknown_extension_is_a_400_with_the_reason() {
+    let (router, _lake, cfg) = app(config(false)).await;
+    place_dataset(&cfg, "notes/readme.xyz", "text");
+
+    let res = send(&router, get("/api/dataset-schema?file=notes/readme.xyz", None)).await;
+
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert!(error_text(&res).contains("cannot infer a reader"), "{}", error_text(&res));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dataset_schema_of_a_missing_file_is_a_404() {
+    let (router, _lake, _cfg) = app(config(false)).await;
+
+    let res = send(&router, get("/api/dataset-schema?file=obs/missing.parquet", None)).await;
+
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    assert!(error_text(&res).contains("obs/missing.parquet"), "{}", error_text(&res));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dataset_schema_of_a_corrupt_file_is_a_400_with_the_reader_error() {
+    let (router, _lake, cfg) = app(config(false)).await;
+    place_dataset(&cfg, "obs/bad.parquet", "not a parquet file");
+
+    let res = send(&router, get("/api/dataset-schema?file=obs/bad.parquet", None)).await;
+
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert!(error_text(&res).contains("Parquet"), "{}", error_text(&res));
+}

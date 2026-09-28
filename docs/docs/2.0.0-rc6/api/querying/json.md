@@ -272,14 +272,9 @@ The `min` and `max` keys on this page are aliases of `gt_eq` and `lt_eq`.
 
 | Field | Description |
 | ----- | ----------- |
-| `sort_by` | Array of `{"Asc": "col"}` or `{"Desc": "col"}` objects |
+| `sort_by` | Array of `{"Asc": "col"}` or `{"Desc": "col"}` objects. The key also takes `asc`, `ASC`, `desc` and `DESC`. |
 | `limit` | Maximum number of rows |
 | `offset` | Number of rows to skip |
-
-:::warning
-The `sort_by` enum keys use exact case. Write `"Asc"` and `"Desc"`. Do not write `"asc"` or
-`"desc"`.
-:::
 
 ```http
 POST /api/query

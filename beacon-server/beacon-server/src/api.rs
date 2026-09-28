@@ -183,9 +183,9 @@ pub struct QueryRequest {
 
 impl QueryRequest {
     pub fn into_query(self) -> anyhow::Result<beacon_core::query::Query> {
-        Ok(serde_json::from_value(Value::Object(
+        beacon_core::query::Query::from_json(Value::Object(
             self.query.into_iter().collect::<Map<String, Value>>(),
-        ))?)
+        ))
     }
 }
 
@@ -535,12 +535,11 @@ mod query_request_tests {
     /// dropped and producing a subtly different query.
     #[test]
     fn unknown_keys_are_rejected_at_conversion() {
-        // Note: `InnerQuery` is untagged, so serde reports only "data did not
-        // match any variant" — the offending key is not named. The contract tested
-        // here is that the body is *rejected*, not that the message is precise.
-        assert!(request(r#"{"select": ["depth"], "limmit": 5}"#)
+        // The message names the offending key, so the client can find the typo.
+        let error = request(r#"{"select": ["depth"], "limmit": 5}"#)
             .into_query()
-            .is_err());
+            .expect_err("a typo'd key should be rejected");
+        assert!(error.to_string().contains("limmit"), "{error}");
 
         // A body that is neither SQL nor a structured query is rejected too.
         assert!(request(r#"{"nonsense": true}"#).into_query().is_err());

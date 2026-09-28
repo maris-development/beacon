@@ -21,12 +21,25 @@ pub async fn compile_json_query(
         .from
         .unwrap_or_else(|| crate::query::from::From::Table(settings.default_table.clone()));
 
+    let filters: Vec<_> = query_body
+        .filter
+        .into_iter()
+        .chain(query_body.filters.into_iter().flatten())
+        .collect();
+
     let mut builder = if enable_pushdown_projection {
         let mut all_columns = vec![];
         for select in &query_body.select {
-            let mut select_cols = vec![];
-            select.collect_columns(&mut select_cols);
-            all_columns.extend(select_cols);
+            select.collect_columns(&mut all_columns);
+        }
+        // A filter and a distinct can read a column that the select leaves out.
+        for filter in &filters {
+            filter.collect_columns(&mut all_columns);
+        }
+        if let Some(distinct) = &query_body.distinct {
+            for select in distinct.on.iter().chain(&distinct.select) {
+                select.collect_columns(&mut all_columns);
+            }
         }
 
         from.init_builder(session, Some(&all_columns)).await?
@@ -36,44 +49,45 @@ pub async fn compile_json_query(
 
     let session_state = session.state();
 
-    builder = builder.project(
-        query_body
-            .select
-            .iter()
-            .map(|s| s.to_expr(&session.state()))
-            .collect::<anyhow::Result<Vec<_>>>()?,
-    )?;
-
+    // Filter before the projection, so the filter sees every source column.
     let df_schema = builder.schema().clone();
     let schema = df_schema.as_arrow();
-    if let Some(filter) = query_body.filter {
+    for filter in &filters {
         builder = builder.filter(filter.parse(&session_state, schema)?)?;
     }
 
-    if let Some(filters) = query_body.filters {
-        for filter in filters {
-            builder = builder.filter(filter.parse(&session_state, schema)?)?;
-        }
-    }
-
-    if let Some(sort_by) = query_body.sort_by {
-        builder = builder.sort(sort_by.iter().map(|s| s.to_expr()))?;
-    }
+    let select_exprs = query_body
+        .select
+        .iter()
+        .map(|s| s.to_expr(&session.state()))
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     if let Some(distinct) = query_body.distinct {
+        // The distinct reads the source columns and selects its own output, so it runs before
+        // the top-level select, which is optional here.
         let on_exprs = distinct
             .on
             .iter()
             .map(|s| s.to_expr(&session.state()))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let select_exprs = distinct
+        let distinct_exprs = distinct
             .select
             .iter()
             .map(|s| s.to_expr(&session.state()))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        builder = builder.distinct_on(on_exprs, select_exprs, None)?;
+        builder = builder.distinct_on(on_exprs, distinct_exprs, None)?;
+        if !select_exprs.is_empty() {
+            builder = builder.project(select_exprs)?;
+        }
+    } else {
+        builder = builder.project(select_exprs)?;
+    }
+
+    // Sort last, so the rows come out in the requested order.
+    if let Some(sort_by) = query_body.sort_by {
+        builder = builder.sort(sort_by.iter().map(|s| s.to_expr()))?;
     }
 
     let offset = query_body.offset.unwrap_or(0);

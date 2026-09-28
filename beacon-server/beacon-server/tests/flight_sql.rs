@@ -18,12 +18,20 @@ struct FlightHarness {
 /// Spawns a Flight SQL server on an ephemeral loopback port, backed by a fresh
 /// ephemeral server. `allow_anonymous` sets the service's anonymous-access policy.
 async fn spawn_server(allow_anonymous: bool) -> FlightHarness {
+    spawn_server_with(common::config(false), allow_anonymous).await
+}
+
+/// [`spawn_server`] over a server built from `config`.
+async fn spawn_server_with(
+    config: beacon_server_config::Config,
+    allow_anonymous: bool,
+) -> FlightHarness {
     let tmp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = tmp.local_addr().unwrap().port();
     drop(tmp);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let harness = common::test_server().await;
+    let harness = common::server_with(config).await;
     let service =
         beacon_server::flight_sql::flight_service(harness.server.clone(), allow_anonymous).unwrap();
 
@@ -667,6 +675,23 @@ async fn unauthenticated_execute_is_rejected_when_anonymous_is_off() {
         .await
         .expect_err("an unauthenticated query must be rejected when anonymous is off");
     assert!(!err.to_string().is_empty());
+
+    server.handle.abort();
+}
+
+/// Anonymous Flight access needs the anonymous user. With it off in the auth model, a caller
+/// without credentials is refused, not given a role-less context that reads everything.
+#[tokio::test(flavor = "multi_thread")]
+async fn anonymous_flight_access_needs_the_anonymous_user() {
+    let mut config = common::config(false);
+    config.auth.anonymous_enabled = false;
+    let server = spawn_server_with(config, true).await;
+    let mut client = client(server.addr).await;
+
+    client
+        .execute("SELECT 1".to_string(), None)
+        .await
+        .expect_err("no anonymous user, so an unauthenticated query must be refused");
 
     server.handle.abort();
 }
