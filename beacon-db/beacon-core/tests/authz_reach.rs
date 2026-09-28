@@ -96,12 +96,7 @@ async fn a_path_deny_holds_against_a_wildcard_that_reaches_it() {
         &carol,
     )
     .await;
-    for spelling in [
-        "*.parquet",
-        "[s]ecret/*.parquet",
-        "secre?/*.parquet",
-        "SECRET/s.parquet",
-    ] {
+    for spelling in ["*.parquet", "[s]ecret/*.parquet", "secre?/*.parquet"] {
         assert_denied(
             &rt,
             &format!("SELECT * FROM read_parquet('{root}/{spelling}')"),
@@ -109,6 +104,18 @@ async fn a_path_deny_holds_against_a_wildcard_that_reaches_it() {
         )
         .await;
     }
+
+    // A disk that ignores case reads the file, so the deny must stop it. A case-sensitive disk
+    // has no such file, and the read fails before the check.
+    let upper = format!("SELECT * FROM read_parquet('{root}/SECRET/s.parquet')");
+    let result = rt.try_sql_as(&upper, carol.clone()).await;
+    assert!(
+        result.as_ref().is_err_and(|e| {
+            let message = e.to_string();
+            message.contains("permission denied") || message.contains("no file matched")
+        }),
+        "`{upper}` must not read the file, got: {result:?}"
+    );
 }
 
 /// Issue #519: a deny on one file holds when the query reads the whole folder.
