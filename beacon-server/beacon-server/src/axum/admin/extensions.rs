@@ -45,9 +45,9 @@ async fn apply_extensions(
     Ok(())
 }
 
-/// Replaces the named table's extensions document (MCP descriptor, query
-/// presets). The document is validated against the table schema; an empty body
-/// (`{}`) clears all extensions.
+/// Replaces the named table's extensions document (query presets). The document
+/// is validated against the table schema; an empty body (`{}`) clears all
+/// extensions.
 #[tracing::instrument(level = "info", skip(state, extensions))]
 #[utoipa::path(
     tag = "admin",

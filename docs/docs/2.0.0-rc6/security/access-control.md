@@ -72,9 +72,9 @@ The internal `__beacon_*` tables need the super-user too. Another principal gets
 `permission denied` on a read. This also holds for `SHOW TABLES`, because
 DataFusion rewrites that statement onto `information_schema.tables`.
 
+<!-- MCP is unreleased. On release, add "and the MCP `list_tables` tool" to the list below. -->
 Beacon builds a catalog listing for those principals instead. `GET /api/tables`,
-`GET /api/catalogs`, the metadata commands of Flight SQL and the MCP
-`list_tables` tool read the catalog as the engine. They return only what the
+`GET /api/catalogs` and the metadata commands of Flight SQL read the catalog as the engine. They return only what the
 caller can see. They show no metadata schema and no internal table. With
 enforcement on, they show only the tables with a `SELECT` grant from the roles of
 the caller. A principal therefore sees exactly what it can read.

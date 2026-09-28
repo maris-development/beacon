@@ -71,7 +71,9 @@ impl PresetOp {
 #[serde(deny_unknown_fields)]
 pub struct TableExtensions {
     /// MCP descriptor: how downstream MCP servers should surface this table.
+    // MCP is unreleased, so the OpenAPI document does not show this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
     pub mcp: Option<McpExtension>,
     /// Named, predefined filter sets consumers can apply downstream.
     #[serde(default, skip_serializing_if = "Option::is_none")]

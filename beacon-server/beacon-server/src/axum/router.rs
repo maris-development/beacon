@@ -117,7 +117,8 @@ pub fn setup_router(
         BEACON_VERSION,
         base_path,
         web_ui.is_some(),
-        mcp_enabled,
+        // MCP is unreleased, so the home page does not show its address.
+        false,
     )
     .leak();
 

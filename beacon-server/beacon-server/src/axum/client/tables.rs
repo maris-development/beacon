@@ -244,7 +244,7 @@ pub struct ListTableExtensionsQuery {
     pub table_name: String,
 }
 
-/// Returns the downstream extensions (MCP descriptor, query presets) attached to
+/// Returns the downstream extensions (query presets) attached to
 /// the named table, or 404 if the table is not registered. A table with no
 /// extensions returns an empty object.
 #[tracing::instrument(level = "info", skip(state))]
