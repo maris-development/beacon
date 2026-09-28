@@ -531,6 +531,25 @@ pub(crate) async fn create_view(
     Ok(())
 }
 
+/// `DROP VIEW [IF EXISTS] <name>`. Refuses a name that holds a table, so it cannot drop data.
+pub(crate) async fn drop_view(
+    session: &Arc<SessionContext>,
+    name: &TableReference,
+    if_exists: bool,
+) -> anyhow::Result<()> {
+    let Ok(provider) = session.table_provider(name.clone()).await else {
+        if if_exists {
+            return Ok(());
+        }
+        anyhow::bail!("View '{name}' does not exist");
+    };
+    if !provider.as_any().is::<ViewTable>() {
+        anyhow::bail!("'{name}' is not a view; use DROP TABLE");
+    }
+    session.deregister_table(name.clone())?;
+    Ok(())
+}
+
 /// Create a managed table from `child`'s output schema and register it, using
 /// the engine resolved from session/global config (Lance by default, or
 /// Iceberg). For `CREATE TABLE AS SELECT` (`is_ctas`), also populate it from

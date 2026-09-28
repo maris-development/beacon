@@ -241,6 +241,16 @@ impl AuthContext {
         self.role_provider.is_allowed(roles, privilege, target)
     }
 
+    /// Whether the given roles may perform `privilege` on a resource spelled as any of `targets`.
+    pub fn is_allowed_any(
+        &self,
+        roles: &[String],
+        privilege: Privilege,
+        targets: &[ConcreteTarget],
+    ) -> bool {
+        self.role_provider.is_allowed_any(roles, privilege, targets)
+    }
+
     /// Whether a deny rule of the given roles matches `privilege` on `target`.
     pub fn is_denied(&self, roles: &[String], privilege: Privilege, target: &ConcreteTarget) -> bool {
         self.role_provider.is_denied(roles, privilege, target)
@@ -248,14 +258,30 @@ impl AuthContext {
 
     // --- Role management (delegated to the role provider) ---
     //
-    // Roles are strictly read-only: only `SELECT` may be granted or denied. Write/management access
-    // is reserved to the configured super-user and is never expressible as a role grant.
+    // Roles are strictly read-only: only `SELECT` may be granted, and a deny takes `SELECT` or
+    // `ALL`. Write/management access is reserved to the configured super-user and is never
+    // expressible as a role grant.
 
     pub async fn create_role(&self, name: &str) -> anyhow::Result<()> {
         self.role_provider.create_role(name).await
     }
 
+    /// Drops the role and removes it from every user that holds it.
+    ///
+    /// Otherwise a new role with the same name would give its access to the old users. The users
+    /// lose the role before the role goes, so a failure between the two steps leaves less access,
+    /// not more.
     pub async fn drop_role(&self, name: &str) -> anyhow::Result<()> {
+        if !self.role_provider.role_exists(name) {
+            anyhow::bail!("role '{name}' does not exist");
+        }
+        if let Some(directory) = self.auth_provider.user_directory() {
+            for user in directory.list_users().await? {
+                if user.roles.iter().any(|role| role == name) {
+                    directory.revoke_role(&user.username, name).await?;
+                }
+            }
+        }
         self.role_provider.drop_role(name).await
     }
 
@@ -264,8 +290,16 @@ impl AuthContext {
         self.role_provider.grant(role, rule).await
     }
 
+    /// Adds a deny rule. `ALL` is valid here: a deny only takes access away, and `ALL` matches
+    /// `SELECT`.
     pub async fn deny(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
-        Self::ensure_read_only(&rule)?;
+        if !matches!(rule.privilege, Privilege::Select | Privilege::All) {
+            anyhow::bail!(
+                "only SELECT or ALL may be denied (got {}): roles never hold write access, so a \
+                 deny of it would do nothing",
+                rule.privilege
+            );
+        }
         self.role_provider.deny(role, rule).await
     }
 
@@ -475,6 +509,40 @@ mod tests {
         // be the super-user (the config check only matches Basic).
         let ctx = context_with_super_user();
         assert!(ctx.authenticate(&Credential::bearer("root")).await.is_err());
+    }
+
+    /// A deny only takes access away, so `DENY ALL` is a valid read restriction. A deny of a
+    /// write privilege is refused: roles never hold writes, so it would do nothing.
+    #[tokio::test]
+    async fn a_deny_of_all_is_accepted_and_blocks_reads() {
+        let ctx = admin_context();
+        ctx.create_role("reader").await.unwrap();
+        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None)).await.unwrap();
+        let secret = Some(PrivilegeTarget::Path("secret/**".to_string()));
+
+        ctx.deny("reader", PrivilegeRule::new(Privilege::All, secret.clone()))
+            .await
+            .expect("DENY ALL should be accepted");
+        assert!(ctx.deny("reader", PrivilegeRule::new(Privilege::Insert, secret)).await.is_err());
+
+        let roles = vec!["reader".to_string()];
+        let path = ConcreteTarget::Path("secret/a.parquet".to_string());
+        assert!(!ctx.is_allowed(&roles, Privilege::Select, &path));
+    }
+
+    /// A dropped role leaves its users. A new role with the same name gives them nothing.
+    #[tokio::test]
+    async fn drop_role_removes_it_from_its_users() {
+        let ctx = admin_context();
+        ctx.create_role("reader").await.unwrap();
+        ctx.create_user("alice", "secret").await.unwrap();
+        ctx.grant_role_to_user("alice", "reader").await.unwrap();
+
+        ctx.drop_role("reader").await.unwrap();
+        ctx.create_role("reader").await.unwrap();
+
+        let alice = ctx.authenticate(&Credential::basic("alice", "secret")).await.unwrap();
+        assert!(alice.roles.is_empty(), "alice kept {:?}", alice.roles);
     }
 
     #[tokio::test]

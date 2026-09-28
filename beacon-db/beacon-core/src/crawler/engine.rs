@@ -11,12 +11,14 @@
 //! The only crawler-specific behaviour is grouping (`super::discovery`) and an
 //! ownership guard so a crawl never overwrites a hand-created table.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::Schema;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, TableDefinition};
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::TableProvider, prelude::SessionContext};
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use beacon_functions::listing::list_datasets;
@@ -24,7 +26,10 @@ use beacon_functions::listing::list_datasets;
 use crate::statement_plan::{upgrade_session, SessionCell};
 
 use super::definition::{CrawlerDefinition, CRAWLER_OWNER_OPTION};
-use super::discovery::{assign_table_names, group_into_tables, FormatExtensions};
+use super::discovery::{
+    assign_table_names, find_directory_tables, group_into_tables, inside_directory_table,
+    DirectoryFormat, DirectoryTable, FormatExtensions,
+};
 
 /// Outcome of a single crawl, suitable for logging or returning over the API.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -81,9 +86,14 @@ impl CrawlEngine {
         // 1. Scan + classify (reuses list_datasets + per-format discover_datasets).
         // Crawlers run periodically, so the cache-backed registered store is fine.
         let pattern = scan_pattern(&def.target_prefix);
-        let datasets = list_datasets(&session_ctx, &self.file_formats, &pattern)
+        let mut datasets = list_datasets(&session_ctx, &self.file_formats, &pattern)
             .await
         .map_err(|e| anyhow::anyhow!("crawler '{}' scan failed: {e}", def.name))?;
+
+        // A Delta or Iceberg directory is one table. Its Parquet files include those of old
+        // versions, so they must not become a Parquet table of their own.
+        let directory_tables = find_directory_tables(&object_paths(&session_ctx, &pattern).await?);
+        datasets.retain(|dataset| !inside_directory_table(&dataset.file_path, &directory_tables));
 
         // 2. Group into candidate tables + detect partitions (pure logic).
         let extensions: FormatExtensions = self
@@ -97,22 +107,20 @@ impl CrawlEngine {
             })
             .collect();
         let (candidates, skipped_files) = group_into_tables(&datasets, def, &extensions);
-        let names = assign_table_names(&candidates, def);
-        report.discovered = candidates.len();
+        // One naming pass over both kinds keeps every name unique.
+        let mut named = candidates.clone();
+        named.extend(directory_tables.iter().map(DirectoryTable::as_candidate));
+        let names = assign_table_names(&named, def);
+        report.discovered = named.len();
         report.skipped_files = skipped_files.len();
 
-        // 3. Build + register each candidate.
-        for (cand, name) in candidates.iter().zip(names) {
+        // 3. Build + register each candidate. Directory tables follow the file groups.
+        for (index, name) in names.into_iter().enumerate() {
             // Ownership guard: only (re)write tables this crawler owns.
             let is_update = match session_ctx.table_provider(name.as_str()).await {
                 Err(_) => false, // does not exist yet
                 Ok(provider) => {
-                    let owned = provider
-                        .as_any()
-                        .downcast_ref::<ExternalTable>()
-                        .and_then(|ext| ext.definition().options.get(CRAWLER_OWNER_OPTION).cloned())
-                        .map(|owner| owner == def.name)
-                        .unwrap_or(false);
+                    let owned = crawler_owner(provider.as_ref()).is_some_and(|owner| owner == def.name);
                     if !owned {
                         tracing::debug!(
                             "crawler '{}' skipping '{}' (not crawler-owned)",
@@ -126,19 +134,27 @@ impl CrawlEngine {
                 }
             };
 
-            let mut options = def.options.clone();
-            options.insert(CRAWLER_OWNER_OPTION.to_string(), def.name.clone());
-
-            let table_def = ExternalTableDefinition {
-                name: name.clone(),
-                location: cand.location(),
-                file_type: cand.format.clone(),
-                // Empty schema -> infer now and keep re-inferring on refresh.
-                schema: Arc::new(Schema::empty()),
-                definition: None,
-                partition_cols: cand.partition_cols.clone(),
-                options,
-                if_not_exists: false,
+            let owner = (CRAWLER_OWNER_OPTION.to_string(), def.name.clone());
+            let table_def: Box<dyn TableDefinition> = match candidates.get(index) {
+                Some(cand) => {
+                    let mut options = def.options.clone();
+                    options.insert(owner.0, owner.1);
+                    Box::new(ExternalTableDefinition {
+                        name: name.clone(),
+                        location: cand.location(),
+                        file_type: cand.format.clone(),
+                        // Empty schema -> infer now and keep re-inferring on refresh.
+                        schema: Arc::new(Schema::empty()),
+                        definition: None,
+                        partition_cols: cand.partition_cols.clone(),
+                        options,
+                        if_not_exists: false,
+                    })
+                }
+                None => {
+                    let table = &directory_tables[index - candidates.len()];
+                    directory_table_definition(table, &name, HashMap::from([owner]))
+                }
             };
 
             // build_provider infers schema and validates partitions; failures are
@@ -170,6 +186,60 @@ impl CrawlEngine {
         );
 
         Ok(report)
+    }
+}
+
+/// Every object path under `pattern`, the ones no format claims included.
+///
+/// The dataset listing drops a `_delta_log/*.json` file, because no format reads it, so the
+/// table directories are found in this raw listing.
+async fn object_paths(session_ctx: &SessionContext, pattern: &str) -> anyhow::Result<Vec<String>> {
+    let state = session_ctx.state();
+    let factory = state
+        .config()
+        .get_extension::<ListingFactory>()
+        .ok_or_else(|| anyhow::anyhow!("the listing factory is not registered on the session"))?;
+    let objects: Vec<_> = factory.listing(&state, pattern)?.stream().try_collect().await?;
+    Ok(objects
+        .into_iter()
+        .map(|object| object.location.to_string())
+        .collect())
+}
+
+/// The crawler that registered `provider`, when a crawler did.
+fn crawler_owner(provider: &dyn TableProvider) -> Option<String> {
+    let any = provider.as_any();
+    let options = if let Some(external) = any.downcast_ref::<ExternalTable>() {
+        &external.definition().options
+    } else if let Some(delta) = any.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
+        &delta.definition().options
+    } else if let Some(iceberg) = any.downcast_ref::<beacon_iceberg::BeaconIcebergTable>() {
+        &iceberg.definition().options
+    } else {
+        return None;
+    };
+    options.get(CRAWLER_OWNER_OPTION).cloned()
+}
+
+/// The table definition of a Delta or Iceberg directory, registered as `name`.
+fn directory_table_definition(
+    table: &DirectoryTable,
+    name: &str,
+    options: HashMap<String, String>,
+) -> Box<dyn TableDefinition> {
+    match table.format {
+        DirectoryFormat::Delta => Box::new(beacon_delta::DeltaTableDefinition {
+            name: name.to_string(),
+            location: table.base.clone(),
+            options,
+            definition: None,
+        }),
+        DirectoryFormat::Iceberg => Box::new(beacon_iceberg::IcebergTableDefinition {
+            name: name.to_string(),
+            location: table.base.clone(),
+            options,
+            definition: None,
+        }),
     }
 }
 

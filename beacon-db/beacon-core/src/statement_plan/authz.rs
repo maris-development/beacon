@@ -30,6 +30,7 @@ use datafusion::{
     functions_table::generate_series::GenerateSeriesTable,
     logical_expr::{LogicalPlan, TableScan},
     prelude::SessionContext,
+    sql::TableReference,
 };
 use futures::TryStreamExt;
 use object_store::path::Path as ObjectPath;
@@ -103,17 +104,42 @@ pub(crate) async fn authorize_logical_plan(
 /// The table-level half of [`authorize_logical_plan`], for a caller that reads a table without a
 /// plan, such as a schema request. The caller has already applied the super-user gates.
 pub(crate) async fn authorize_table_read(
-    name: &str,
+    reference: &TableReference,
     provider: &dyn TableProvider,
     session_ctx: &SessionContext,
     auth: &AuthContext,
     identity: &AuthIdentity,
 ) -> anyhow::Result<()> {
     let read = ScanRead::Table {
-        name: name.to_string(),
+        name: reference.table().to_string(),
+        targets: table_targets(reference, session_ctx),
         locations: provider_locations(provider).unwrap_or_default(),
     };
     ReadChecker::new(session_ctx, auth, identity).check(&read).await
+}
+
+/// Every spelling of `reference` that a table rule can use: `catalog.schema.table` always,
+/// `schema.table` in the default catalog, and `table` in the default schema.
+///
+/// A rule stores the name as the `GRANT` wrote it, so the check tries each spelling.
+pub(crate) fn table_targets(
+    reference: &TableReference,
+    session_ctx: &SessionContext,
+) -> Vec<ConcreteTarget> {
+    let options = session_ctx.copied_config().options().catalog.clone();
+    let resolved = reference
+        .clone()
+        .resolve(&options.default_catalog, &options.default_schema);
+    let (catalog, schema, table) = (&*resolved.catalog, &*resolved.schema, &*resolved.table);
+
+    let mut targets = vec![ConcreteTarget::Table(format!("{catalog}.{schema}.{table}"))];
+    if catalog == options.default_catalog {
+        targets.push(ConcreteTarget::Table(format!("{schema}.{table}")));
+        if schema == options.default_schema {
+            targets.push(ConcreteTarget::Table(table.to_string()));
+        }
+    }
+    targets
 }
 
 /// Whether any node of `plan` is a `DESCRIBE <table>`.
@@ -128,8 +154,13 @@ fn plan_describes(plan: &LogicalPlan) -> bool {
 
 /// What one table scan reads, as the check sees it.
 enum ScanRead {
-    /// A registered table, with the locations of its files (empty when it has no files).
-    Table { name: String, locations: Vec<Location> },
+    /// A registered table: its name for messages, the spellings a rule can use, and the
+    /// locations of its files (empty when it has no files).
+    Table {
+        name: String,
+        targets: Vec<ConcreteTarget>,
+        locations: Vec<Location>,
+    },
     /// An ad-hoc read of files: a `read_*` table function or a JSON-query file source.
     Files(Vec<Location>),
     /// A source whose files the check cannot see, by the name the plan gives it.
@@ -168,6 +199,7 @@ fn scan_read(scan: &TableScan, session_ctx: &SessionContext) -> ScanRead {
     {
         return ScanRead::Table {
             name: scan.table_name.table().to_string(),
+            targets: table_targets(&scan.table_name, session_ctx),
             locations: locations.unwrap_or_default(),
         };
     }
@@ -281,8 +313,17 @@ impl<'a> ReadChecker<'a> {
             ScanRead::Unknown(name) => anyhow::bail!(
                 "permission denied: SELECT on '{name}': its files cannot be checked"
             ),
-            ScanRead::Table { name, locations } => {
-                self.require(&ConcreteTarget::Table(name.clone()))?;
+            ScanRead::Table {
+                name,
+                targets,
+                locations,
+            } => {
+                if !self
+                    .auth
+                    .is_allowed_any(&self.identity.roles, Privilege::Select, targets)
+                {
+                    anyhow::bail!("permission denied: SELECT on table '{name}'");
+                }
                 if self.denies_paths {
                     for file in self.files(locations).await? {
                         self.refuse_denied(&ConcreteTarget::Path(file.to_string()))?;

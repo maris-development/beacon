@@ -233,6 +233,38 @@ async fn a_path_deny_holds_for_a_table_and_a_view_over_the_path() {
     assert_denied(&rt, &format!("SELECT * FROM {view}"), &carol).await;
 }
 
+/// A table rule matches however it spells the name: bare, with the schema, or with the catalog.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_table_rule_matches_every_spelling_of_the_name() {
+    let rt = enforced_runtime("reach-qualified").await;
+    let root = unique("reach");
+    place_dataset(rt.datasets_dir(), &format!("{root}/p.parquet"));
+    let table = unique("t");
+    admin(
+        &rt,
+        &format!("CREATE EXTERNAL TABLE {table} STORED AS PARQUET LOCATION '{root}/p.parquet'"),
+    )
+    .await;
+    let read = format!("SELECT * FROM {table}");
+
+    for spelling in [format!("public.{table}"), format!("beacon.public.{table}")] {
+        let granted = reader(&rt, &[&format!("GRANT SELECT ON TABLE {spelling} TO ROLE {{r}}")]).await;
+        assert_allowed(&rt, &read, &granted).await;
+        assert!(
+            rt.runtime.table_arrow_schema(table.as_str(), &granted).await.is_ok(),
+            "the schema of {spelling} should be readable"
+        );
+        assert!(rt.runtime.can_list_table(&granted, None, &table), "{spelling} should be listed");
+
+        let denied = reader(
+            &rt,
+            &["GRANT SELECT TO ROLE {r}", &format!("DENY SELECT ON TABLE {spelling} TO ROLE {{r}}")],
+        )
+        .await;
+        assert_denied(&rt, &read, &denied).await;
+    }
+}
+
 /// A table deny also holds when the table's files are read by path.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_table_deny_holds_for_the_tables_files() {

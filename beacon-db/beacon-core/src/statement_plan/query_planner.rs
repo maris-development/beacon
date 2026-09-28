@@ -65,6 +65,10 @@ impl QueryPlanner for BeaconQueryPlanner {
                 physical::DropTableExec::new(drop.name.clone(), drop.if_exists, session),
             )),
 
+            LogicalPlan::Ddl(DdlStatement::DropView(drop)) => Ok(Arc::new(
+                physical::DropViewExec::new(drop.name.clone(), drop.if_exists, session),
+            )),
+
             LogicalPlan::Ddl(DdlStatement::CreateExternalTable(cmd)) => Ok(Arc::new(
                 physical::CreateExternalTableExec::new(cmd.clone(), session),
             )),

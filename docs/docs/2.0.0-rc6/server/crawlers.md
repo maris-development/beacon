@@ -211,9 +211,12 @@ with GeoArrow geometry decoding. The crawler reads a plain `.parquet` file as an
 table, also with `geo` metadata. To get geometry decoding for such a file, give it the
 `.geoparquet` extension. You can also register a GeoParquet external table yourself.
 
-The crawler also **skips** a **Delta Lake** table. Such a table is a directory with a `_delta_log/`
-folder. Register it with
-[`CREATE EXTERNAL TABLE ... STORED AS DELTA`](/docs/2.0.0-rc6/formats/delta-lake).
+The crawler registers a **Delta Lake** table and an **Iceberg** table as one table each. A Delta
+table is a directory with a `_delta_log/` folder. An Iceberg table is a directory with a
+`metadata/` folder that holds a `*.metadata.json` file. The crawler registers the directory
+`STORED AS DELTA` or `STORED AS ICEBERG`, and it does not read the Parquet files in the directory
+as a Parquet table. Those files include the files of old versions, so a Parquet read returns
+rows that the table no longer holds.
 
 ## See also
 

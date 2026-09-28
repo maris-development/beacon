@@ -311,7 +311,7 @@ impl Runtime {
         table: impl Into<datafusion::sql::TableReference>,
         identity: &beacon_auth::AuthIdentity,
     ) -> anyhow::Result<arrow::datatypes::SchemaRef> {
-        use beacon_auth::{ConcreteTarget, Privilege};
+        use beacon_auth::Privilege;
         use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
 
         let table: datafusion::sql::TableReference = table.into();
@@ -335,10 +335,10 @@ impl Runtime {
 
         if self.auth_enforce
             && !identity.is_super_user
-            && !self.auth.is_allowed(
+            && !self.auth.is_allowed_any(
                 &identity.roles,
                 Privilege::Select,
-                &ConcreteTarget::Table(table.table().to_string()),
+                &crate::statement_plan::table_targets(&table, &self.session_ctx),
             )
         {
             anyhow::bail!("permission denied: SELECT on table {}", table.table());
@@ -352,7 +352,7 @@ impl Runtime {
         if self.auth_enforce && !identity.is_super_user {
             // A path deny on one of the table's files also hides its schema.
             crate::statement_plan::authorize_table_read(
-                table.table(),
+                &table,
                 provider.as_ref(),
                 &self.session_ctx,
                 &self.auth,
@@ -436,7 +436,7 @@ impl Runtime {
         schema: Option<&str>,
         table: &str,
     ) -> bool {
-        use beacon_auth::{ConcreteTarget, Privilege};
+        use beacon_auth::Privilege;
         use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
 
         if identity.is_super_user {
@@ -450,11 +450,15 @@ impl Runtime {
         }
         // With enforcement off every table is readable, so listing them all is
         // what the listing promises: what you see is what you can read.
+        let reference = match schema {
+            Some(schema) => datafusion::sql::TableReference::partial(schema, table),
+            None => datafusion::sql::TableReference::bare(table),
+        };
         !self.auth_enforce
-            || self.auth.is_allowed(
+            || self.auth.is_allowed_any(
                 &identity.roles,
                 Privilege::Select,
-                &ConcreteTarget::Table(table.to_string()),
+                &crate::statement_plan::table_targets(&reference, &self.session_ctx),
             )
     }
 

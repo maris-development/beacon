@@ -86,9 +86,9 @@ can also name a *target*.
 
 | Privilege | Meaning for read enforcement |
 | --- | --- |
-| `SELECT` | Read the target. Query authorization uses this privilege. |
-| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP` | The grammar accepts them. A **write still needs the super-user**. A grant of one of these to a role gives no write access. |
-| `ALL` | Matches every privilege. |
+| `SELECT` | Read the target. Query authorization uses this privilege. A grant takes only `SELECT`. |
+| `ALL` | Matches every privilege. A deny takes it, so `DENY ALL` stops a read like `DENY SELECT`. A grant refuses it. |
+| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP` | The grammar accepts them, but a grant and a deny refuse them. A **write always needs the super-user**. |
 
 | Target | Matches |
 | --- | --- |
@@ -159,8 +159,8 @@ GRANT SELECT ON PATH 'argo/**/*.nc' TO ROLE reader;
 -- Carve out an exception — deny-wins over any matching grant
 DENY SELECT ON PATH 'argo/restricted/*' TO ROLE reader;
 
--- Grant every privilege on every target (still read-only in practice)
-GRANT ALL TO ROLE reader;
+-- Allow a role to read every target
+GRANT SELECT TO ROLE reader;
 ```
 
 Remove a rule with `REVOKE`. Add the `DENY` keyword to remove a *deny* rule

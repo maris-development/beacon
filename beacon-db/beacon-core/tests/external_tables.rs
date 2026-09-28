@@ -186,6 +186,42 @@ async fn a_view_and_a_table_do_not_share_a_name() {
     );
 }
 
+/// `DROP VIEW` removes a view. It refuses a table, so it cannot drop data by mistake.
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_view_removes_a_view_and_refuses_a_table() {
+    let rt = runtime("drop-view").await;
+    write_file(&rt.datasets_dir().join("dv/a.csv"), "v\n1\n");
+    rt.sql("CREATE EXTERNAL TABLE dv_table STORED AS CSV LOCATION 'dv/'")
+        .await;
+    rt.sql("CREATE VIEW dv_view AS SELECT 1 AS a").await;
+
+    rt.sql("DROP VIEW dv_view").await;
+    assert!(rt.try_sql("SELECT * FROM dv_view").await.is_err(), "the view is gone");
+    rt.sql("DROP VIEW IF EXISTS dv_view").await;
+    assert!(rt.try_sql("DROP VIEW dv_view").await.is_err(), "no view to drop");
+
+    let error = rt
+        .try_sql("DROP VIEW dv_table")
+        .await
+        .expect_err("a table is not a view");
+    assert!(error.to_string().contains("not a view"), "unexpected error: {error}");
+    assert_eq!(total_rows(&rt.sql("SELECT * FROM dv_table").await), 1);
+}
+
+/// A dropped view stays dropped after a restart: its stored definition goes too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_view_stays_dropped_after_a_restart() {
+    let rt = common::restartable_runtime("drop-view-restart", |builder| builder).await;
+    rt.sql("CREATE VIEW kept AS SELECT 1 AS a").await;
+    rt.sql("CREATE VIEW gone AS SELECT 2 AS a").await;
+    rt.sql("DROP VIEW gone").await;
+
+    let rt = rt.restart().await;
+
+    assert_eq!(scalar_i64(&rt.sql("SELECT a FROM kept").await), 1);
+    assert!(rt.try_sql("SELECT a FROM gone").await.is_err(), "the dropped view came back");
+}
+
 /// `OR REPLACE` is how you repoint a table without a `DROP`, as the SQL reference
 /// documents.
 #[tokio::test(flavor = "multi_thread")]

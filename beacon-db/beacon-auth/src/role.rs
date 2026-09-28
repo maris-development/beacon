@@ -340,6 +340,33 @@ impl RoleProvider {
             .any(|role| role.grants.iter().any(|rule| rule.matches(privilege, target, true)))
     }
 
+    /// [`Self::is_allowed`] for one resource with several spellings, such as a bare and a
+    /// qualified table name: a deny on any spelling wins, then a grant on any spelling allows.
+    pub fn is_allowed_any(
+        &self,
+        roles: &[String],
+        privilege: Privilege,
+        targets: &[ConcreteTarget],
+    ) -> bool {
+        if targets
+            .iter()
+            .any(|target| self.is_denied(roles, privilege, target))
+        {
+            return false;
+        }
+        let registry = self.roles.read();
+        roles
+            .iter()
+            .filter_map(|name| registry.get(name))
+            .any(|role| {
+                role.grants.iter().any(|rule| {
+                    targets
+                        .iter()
+                        .any(|target| rule.matches(privilege, target, true))
+                })
+            })
+    }
+
     /// Whether a deny rule of the given roles matches `privilege` on `target`.
     pub fn is_denied(&self, roles: &[String], privilege: Privilege, target: &ConcreteTarget) -> bool {
         let registry = self.roles.read();

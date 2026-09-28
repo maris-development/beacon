@@ -644,6 +644,40 @@ impl ExecutionPlan for ShowSecretsExec {
     }
 }
 
+/// Physical node for `DROP VIEW`.
+#[derive(Debug)]
+pub(crate) struct DropViewExec {
+    name: TableReference,
+    if_exists: bool,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl DropViewExec {
+    pub(crate) fn new(name: TableReference, if_exists: bool, session: SessionCell) -> Self {
+        Self {
+            name,
+            if_exists,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DropViewExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(DropViewExec, "DropViewExec", |exec: &DropViewExec| {
+    let session = upgrade_session(&exec.session)?;
+    let name = exec.name.clone();
+    let if_exists = exec.if_exists;
+    Ok(side_effect_stream(async move {
+        actions::drop_view(&session, &name, if_exists)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
 /// Physical node for `CREATE VIEW`.
 #[derive(Debug)]
 pub(crate) struct CreateViewExec {
