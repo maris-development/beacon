@@ -368,6 +368,10 @@ pub struct CreateCrawlerRequest {
     #[serde(default)]
     #[schema(example = json!({ "read_dimensions": "lat,lon" }))]
     pub options: HashMap<String, String>,
+    /// Replace a crawler of the same name. Without it, a taken name is a 409.
+    #[serde(default)]
+    #[schema(default = false, example = false)]
+    pub replace: bool,
 }
 
 fn default_true() -> bool {

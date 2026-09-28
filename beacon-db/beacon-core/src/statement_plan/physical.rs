@@ -1019,6 +1019,7 @@ pub(crate) struct CreateCrawlerExec {
     name: String,
     target_prefix: Option<String>,
     options: Vec<(String, String)>,
+    or_replace: bool,
     session: SessionCell,
     cache: Arc<PlanProperties>,
 }
@@ -1028,12 +1029,14 @@ impl CreateCrawlerExec {
         name: String,
         target_prefix: Option<String>,
         options: Vec<(String, String)>,
+        or_replace: bool,
         session: SessionCell,
     ) -> Self {
         Self {
             name,
             target_prefix,
             options,
+            or_replace,
             session,
             cache: Arc::new(side_effect_properties()),
         }
@@ -1051,8 +1054,9 @@ side_effect_exec!(
         let name = exec.name.clone();
         let target_prefix = exec.target_prefix.clone();
         let options = exec.options.clone();
+        let or_replace = exec.or_replace;
         Ok(side_effect_stream(async move {
-            crawler::create_crawler(&session, &name, target_prefix, &options)
+            crawler::create_crawler(&session, &name, target_prefix, &options, or_replace)
                 .await
                 .map_err(to_df_err)
         }))

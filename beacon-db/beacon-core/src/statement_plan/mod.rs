@@ -204,6 +204,7 @@ pub(crate) fn create_crawler_plan(statement: CreateCrawlerStatement) -> LogicalP
             object_name_value(&statement.name),
             statement.target_prefix,
             options,
+            statement.or_replace,
         )),
     })
 }

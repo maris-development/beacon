@@ -455,3 +455,28 @@ async fn aborting_a_chunked_upload_invalidates_the_session() {
         "a part for an aborted upload should be rejected"
     );
 }
+
+/// A second POST with a taken name is a 409 and keeps the first definition. `replace: true`
+/// replaces it on purpose.
+#[tokio::test(flavor = "multi_thread")]
+async fn crawler_create_refuses_a_taken_name_unless_it_replaces() {
+    let (router, _lake, cfg) = app(config(false)).await;
+    let admin = admin(&cfg);
+    let create = |body: serde_json::Value| json_req("POST", "/api/admin/crawlers", body, Some(&admin));
+
+    let first = send(&router, create(json!({ "name": "dupc", "target_prefix": "first/" }))).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let second = send(&router, create(json!({ "name": "dupc", "target_prefix": "second/" }))).await;
+    assert_eq!(second.status, StatusCode::CONFLICT);
+    let one = json(&send(&router, req("GET", "/api/admin/crawlers/dupc", Some(&admin), Body::empty())).await.body);
+    assert_eq!(one["target_prefix"], "first/", "the first definition stays");
+
+    let replaced = send(
+        &router,
+        create(json!({ "name": "dupc", "target_prefix": "second/", "replace": true })),
+    )
+    .await;
+    assert_eq!(replaced.status, StatusCode::OK);
+    let one = json(&send(&router, req("GET", "/api/admin/crawlers/dupc", Some(&admin), Body::empty())).await.body);
+    assert_eq!(one["target_prefix"], "second/");
+}

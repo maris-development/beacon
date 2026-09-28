@@ -195,6 +195,7 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
                 create.name.clone(),
                 create.target_prefix.clone(),
                 create.options.clone(),
+                create.or_replace,
                 session,
             ))));
         }

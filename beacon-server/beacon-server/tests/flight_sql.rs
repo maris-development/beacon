@@ -647,6 +647,31 @@ async fn anonymous_write_statement_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_read_error_does_not_show_the_server_paths() {
+    let server = spawn_server(true).await;
+    let datasets = server.harness.server.config().data.datasets.clone();
+    std::fs::create_dir_all(&datasets).unwrap();
+    std::fs::create_dir_all(datasets.join("grid.zarr/temp")).unwrap();
+    std::fs::write(datasets.join("grid.zarr/temp/c0"), b"chunk").unwrap();
+    let mut client = client(server.addr).await;
+
+    // Windows refuses to open a directory as a file, and the store error names the full path.
+    let error = client
+        .execute("SELECT * FROM read_parquet(['grid.zarr'])".to_string(), None)
+        .await
+        .unwrap_err()
+        .to_string();
+    let root = std::path::absolute(&datasets).unwrap();
+    let root = root.to_string_lossy();
+    if cfg!(windows) {
+        assert!(error.contains("grid.zarr"), "the error names the file: {error}");
+    }
+    assert!(!error.contains(root.as_ref()), "the error shows a server path: {error}");
+
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn wrong_credentials_are_rejected_at_handshake() {
     let server = spawn_server(false).await;
     let mut client = client(server.addr).await;

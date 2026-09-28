@@ -378,8 +378,19 @@ impl AuthContext {
         self.user_directory()?.grant_role(username, role).await
     }
 
+    /// Takes `role` from `username`. Fails when the user does not hold it, so a mistyped
+    /// `REVOKE ROLE` does not look like it took access away.
     pub async fn revoke_role_from_user(&self, username: &str, role: &str) -> anyhow::Result<()> {
-        self.user_directory()?.revoke_role(username, role).await
+        let directory = self.user_directory()?;
+        let holds = directory
+            .list_users()
+            .await?
+            .into_iter()
+            .any(|user| user.username == username && user.roles.iter().any(|held| held == role));
+        if !holds && directory.user_exists(username).await {
+            anyhow::bail!("user '{username}' does not hold role '{role}'");
+        }
+        directory.revoke_role(username, role).await
     }
 }
 
@@ -528,6 +539,20 @@ mod tests {
         let roles = vec!["reader".to_string()];
         let path = ConcreteTarget::Path("secret/a.parquet".to_string());
         assert!(!ctx.is_allowed(&roles, Privilege::Select, &path));
+    }
+
+    /// A revoke of a role the user does not hold is an error, so a typo does not look like success.
+    #[tokio::test]
+    async fn revoke_role_needs_the_user_to_hold_it() {
+        let ctx = admin_context();
+        ctx.create_role("reader").await.unwrap();
+        ctx.create_user("alice", "secret").await.unwrap();
+
+        let error = ctx.revoke_role_from_user("alice", "reader").await.unwrap_err();
+        assert!(error.to_string().contains("does not hold"), "{error}");
+
+        ctx.grant_role_to_user("alice", "reader").await.unwrap();
+        ctx.revoke_role_from_user("alice", "reader").await.unwrap();
     }
 
     /// A dropped role leaves its users. A new role with the same name gives them nothing.

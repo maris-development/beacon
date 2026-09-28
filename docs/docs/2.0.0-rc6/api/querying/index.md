@@ -64,6 +64,8 @@ fetch the timing and the row count:
 GET /api/query/metrics/{query_id}
 ```
 
+Only the user that ran the query and the super-user get the metrics. Other users get 404.
+
 ## Default response: Arrow IPC stream
 
 Without an `output` field, `/api/query` returns an

@@ -270,6 +270,26 @@ impl RoleProvider {
     ) -> anyhow::Result<()> {
         let _write = self.write_lock.lock().await;
         self.assert_role_exists(role)?;
+        // A mistyped rule must not look like it took access away.
+        let held = self.roles.read().get(role).is_some_and(|entry| {
+            if is_deny {
+                entry.denies.contains(rule)
+            } else {
+                entry.grants.contains(rule)
+            }
+        });
+        if !held {
+            let target = rule
+                .target
+                .as_ref()
+                .map(|target| format!(" ON {target}"))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "role '{role}' has no {} {}{target} to revoke",
+                rule_kind(is_deny),
+                rule.privilege
+            );
+        }
         if let Some(store) = &self.persistence {
             store.persist_remove_rule(role, is_deny, rule).await?;
         }
@@ -989,10 +1009,10 @@ mod tests {
         assert!(listed[1].grants.is_empty());
     }
 
-    /// Rules are a set: re-granting the same rule is idempotent, and revoking a
-    /// rule that was never granted is a no-op rather than an error.
+    /// Rules are a set: re-granting the same rule is idempotent. A revoke of a rule the role does
+    /// not hold is an error, so a mistyped `REVOKE` does not look like it took access away.
     #[tokio::test]
-    async fn rules_are_a_set_and_revoke_is_forgiving() {
+    async fn rules_are_a_set_and_a_revoke_needs_the_rule() {
         let provider = RoleProvider::new();
         provider.create_role("reader").await.unwrap();
         let rule = PrivilegeRule::new(Privilege::Select, None);
@@ -1000,12 +1020,13 @@ mod tests {
         provider.grant("reader", rule.clone()).await.unwrap();
         assert_eq!(provider.list_roles()[0].grants.len(), 1);
 
-        provider.revoke("reader", &rule, true).await.unwrap(); // not a deny
+        let wrong_kind = provider.revoke("reader", &rule, true).await; // not a deny
+        assert!(wrong_kind.is_err_and(|e| e.to_string().contains("has no deny")));
         assert_eq!(provider.list_roles()[0].grants.len(), 1, "wrong kind must not remove");
         provider.revoke("reader", &rule, false).await.unwrap();
         assert!(provider.list_roles()[0].grants.is_empty());
-        // Revoking again is fine; revoking on a missing role is not.
-        provider.revoke("reader", &rule, false).await.unwrap();
+        let again = provider.revoke("reader", &rule, false).await;
+        assert!(again.is_err_and(|e| e.to_string().contains("has no grant")));
         assert!(provider.revoke("ghost", &rule, false).await.is_err());
         assert!(provider.deny("ghost", rule).await.is_err());
     }

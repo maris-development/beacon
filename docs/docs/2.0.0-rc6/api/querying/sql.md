@@ -136,3 +136,5 @@ Fetch the metrics after the query. The query ID comes from the `x-beacon-query-i
 ```http
 GET /api/query/metrics/{query_id}
 ```
+
+Only the user that ran the query and the super-user get the metrics. Other users get 404.

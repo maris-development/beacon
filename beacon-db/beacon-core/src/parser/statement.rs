@@ -295,11 +295,14 @@ pub struct CreateCrawlerStatement {
     pub target_prefix: Option<String>,
     /// The `WITH (...)` options.
     pub options: HashMap<String, String>,
+    /// `CREATE OR REPLACE CRAWLER`: replace a crawler of the same name.
+    pub or_replace: bool,
 }
 
 impl Display for CreateCrawlerStatement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CREATE CRAWLER {}", self.name)?;
+        let or_replace = if self.or_replace { " OR REPLACE" } else { "" };
+        write!(f, "CREATE{or_replace} CRAWLER {}", self.name)?;
         if let Some(prefix) = &self.target_prefix {
             write!(f, " ON '{prefix}'")?;
         }

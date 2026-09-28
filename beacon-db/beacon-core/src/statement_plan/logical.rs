@@ -285,6 +285,8 @@ pub(crate) struct CreateCrawlerNode {
     /// Options as a sorted `(key, value)` list (the node trait needs `Ord`/`Hash`,
     /// which `HashMap` is not).
     pub(crate) options: Vec<(String, String)>,
+    /// `CREATE OR REPLACE CRAWLER`.
+    pub(crate) or_replace: bool,
 }
 
 impl CreateCrawlerNode {
@@ -292,12 +294,14 @@ impl CreateCrawlerNode {
         name: String,
         target_prefix: Option<String>,
         mut options: Vec<(String, String)>,
+        or_replace: bool,
     ) -> Self {
         options.sort();
         Self {
             name,
             target_prefix,
             options,
+            or_replace,
         }
     }
 }
@@ -323,6 +327,7 @@ impl UserDefinedLogicalNodeCore for CreateCrawlerNode {
             name: self.name.clone(),
             target_prefix: self.target_prefix.clone(),
             options: self.options.clone(),
+            or_replace: self.or_replace,
         })
     }
 }

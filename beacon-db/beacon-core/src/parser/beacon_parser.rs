@@ -186,7 +186,11 @@ impl<'a> BeaconParser<'a> {
     }
 
     fn is_create_crawler(&self) -> bool {
-        self.is_keyword_then_crawler(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::CREATE))
+        let parser = &self.df_parser.parser;
+        let word = |n: usize, value: &str| {
+            matches!(&parser.peek_nth_token(n).token, Token::Word(w) if w.value.eq_ignore_ascii_case(value))
+        };
+        word(0, "CREATE") && (word(1, "CRAWLER") || (word(1, "OR") && word(2, "REPLACE") && word(3, "CRAWLER")))
     }
 
     fn is_run_crawler(&self) -> bool {
@@ -204,9 +208,13 @@ impl<'a> BeaconParser<'a> {
             && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "CRAWLERS")
     }
 
-    /// Parse: CREATE CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
+    /// Parse: CREATE [OR REPLACE] CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
     fn parse_create_crawler(&mut self) -> Result<BeaconStatement> {
         self.df_parser.parser.next_token(); // CREATE
+        let or_replace = self
+            .df_parser
+            .parser
+            .parse_keywords(&[Keyword::OR, Keyword::REPLACE]);
         self.df_parser.parser.next_token(); // CRAWLER
 
         let name = self
@@ -239,6 +247,7 @@ impl<'a> BeaconParser<'a> {
             name,
             target_prefix,
             options,
+            or_replace,
         }))
     }
 
