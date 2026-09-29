@@ -1,4 +1,4 @@
-# Beacon — Quick Start
+# Beacon Quick Start
 
 Get a Beacon query engine running and query your first dataset in a couple of
 minutes. For the full picture, see the [README](README.md) and the
@@ -20,13 +20,13 @@ docker run -d \
   ghcr.io/maris-development/beacon:latest
 ```
 
-That's it — Beacon is now serving on <http://localhost:5001>. That page links to the
+That's it. Beacon is now serving on <http://localhost:5001>. That page links to the
 admin UI, the API docs and this documentation.
 
 ## 2. Add data
 
 Drop any supported files (e.g. `.parquet`, `.nc`, `.zarr`, `.csv`) into the
-`./datasets` folder you just mounted. Beacon discovers them automatically — no
+`./datasets` folder you just mounted. Beacon discovers them automatically. There is no
 import step.
 
 ## 3. Explore in the Admin UI
@@ -36,12 +36,12 @@ password you set above (`admin` / `securepassword`).
 
 From the UI you can:
 
-- **Query editor** — write SQL, run it (⌘/Ctrl + Enter), view results, and
+- **Query editor**: write SQL, run it (⌘/Ctrl + Enter), view results, and
   download CSV/Parquet.
-- **Datasets** — browse discovered files and inspect their schemas.
-- **Tables** — register and manage queryable tables over your datasets.
-- **Crawlers & external tables** — automate discovery and register external sources.
-- **Server** — runtime info, health, and available functions.
+- **Datasets**: browse discovered files and inspect their schemas.
+- **Tables**: register and manage queryable tables over your datasets.
+- **Crawlers & external tables**: automate discovery and register external sources.
+- **Server**: runtime info, health, and available functions.
 
 ## 4. Or query over HTTP
 
@@ -61,8 +61,8 @@ Interactive API docs are at <http://localhost:5001/swagger/>.
 
 ## Next steps
 
-- [README](README.md) — start a server, point it at data, query it from Python.
-- [Quick Start](https://maris-development.github.io/beacon/docs/2.0.0-rc6/quickstart) — the same steps, with a public server to try.
-- [Documentation](https://maris-development.github.io/beacon/) — full data model and API reference.
-- [Configuration reference](https://maris-development.github.io/beacon/docs/2.0.0-rc6/server/configuration.html) — all `BEACON_*` settings.
+- [README](README.md): start a server, point it at data, query it from Python.
+- [Quick Start](https://maris-development.github.io/beacon/docs/2.0.0/quickstart): the same steps, with a public server to try.
+- [Documentation](https://maris-development.github.io/beacon/): full data model and API reference.
+- [Configuration reference](https://maris-development.github.io/beacon/docs/2.0.0/server/configuration.html): all `BEACON_*` settings.
 - Community [Slack](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg).

@@ -5,24 +5,35 @@ import { LATEST_VERSION, LATEST_ENTRY } from '../version.js'
 
 // GitHub Pages serves 404.html for any unknown path, which lets this component
 // act as a catch-all rewrite for the `/docs/latest/...` alias:
-//   /docs/latest/data-lake  ->  /docs/1.8.0/data-lake
+//   /docs/latest/data-lake  ->  /docs/<LATEST_VERSION>/data-lake
+// It also sends a retired pre-release path to its release:
+//   /docs/2.0.0-rc6/sql/  ->  /docs/2.0.0/sql/
 // Anything else renders the normal 404.
-const redirecting = ref(false)
+// Version of the redirect target, or null on a real 404.
+const redirecting = ref(null)
 
 onMounted(() => {
   const base = withBase('/')                       // e.g. "/beacon/"
   const prefix = `${base}docs/latest`
   const path = window.location.pathname
+  const suffix = window.location.search + window.location.hash
+
+  // A release renames its pre-release folder, so the old folder is gone.
+  const retired = path
+    .slice(base.length)
+    .match(/^docs\/(\d+\.\d+\.\d+)-[^/]+(?:\/(.*))?$/)
+  if (retired) {
+    redirecting.value = retired[1]
+    window.location.replace(`${base}docs/${retired[1]}/${retired[2] || LATEST_ENTRY}${suffix}`)
+    return
+  }
 
   if (path !== prefix && !path.startsWith(`${prefix}/`)) return
 
   const sub = path.slice(prefix.length).replace(/^\//, '')
-  const target =
-    `${base}docs/${LATEST_VERSION}/${sub || LATEST_ENTRY}` +
-    window.location.search +
-    window.location.hash
+  const target = `${base}docs/${LATEST_VERSION}/${sub || LATEST_ENTRY}` + suffix
 
-  redirecting.value = true
+  redirecting.value = LATEST_VERSION
   window.location.replace(target)
 })
 
@@ -32,7 +43,7 @@ const home = withBase('/')
 <template>
   <div class="nf">
     <template v-if="redirecting">
-      <p class="nf-lead">Redirecting to the Beacon {{ LATEST_VERSION }} documentation…</p>
+      <p class="nf-lead">Redirecting to the Beacon {{ redirecting }} documentation…</p>
     </template>
     <template v-else>
       <p class="nf-code">404</p>

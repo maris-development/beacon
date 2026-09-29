@@ -30,9 +30,30 @@ No download. No conversion. No ETL.
 
 </div>
 
-Beacon is a query engine server. Point it at an archive (directory or S3 bucket) of scientific files. Your users then query that archive
-with SQL or with a JSON query. It runs no import job. It makes no second copy. It sends back only the
-rows and columns of the answer.
+Beacon is a query engine server. Point it at an archive (directory or S3 bucket) of scientific
+files. Your users then query that archive with SQL or with a JSON query. It runs no import job. It
+makes no second copy. It sends back only the rows and columns of the answer.
+
+## Beacon 2.0.0
+
+Beacon 2.0.0 is the current release. The main changes from 1.8.0:
+
+- **N-dimensional execution.** NetCDF, HDF5, Zarr, Atlas, BBF and GeoTIFF read as arrays. A
+  filter and a projection run before Beacon expands an array into rows.
+- **File statistics.** Beacon records the column ranges of each file. A query skips each file
+  that holds no match.
+- **One database file.** `beacon.db` holds the catalog, the managed tables, and the users, roles
+  and grants. To back up a server, stop it and copy that file.
+- **New readers.** Beacon reads Apache Iceberg tables and Icechunk repositories. Pure-Rust readers
+  read NetCDF and HDF5.
+- **123 spatial functions** with PostGIS names, such as `ST_Intersects` and `ST_Transform`.
+- **`CREATE SECRET` and `ATTACH`.** Query the tables of another Beacon server, and join them with
+  your own tables.
+
+A 1.8.0 server does not upgrade in place. A 2.0.0 server does not read the table definitions of
+a 1.8.0 server, so create your tables again. Read
+[Upgrade from 1.8.0](https://maris-development.github.io/beacon/docs/2.0.0/upgrade) before you
+change the image tag. The [changelog](CHANGELOG.md) lists all the changes.
 
 ## 1. Start a server
 
@@ -41,23 +62,27 @@ docker run -d --name beacon -p 5001:5001 \
   -e BEACON_ADMIN_USERNAME=admin \
   -e BEACON_ADMIN_PASSWORD=securepassword \
   -v ./datasets:/beacon/data/datasets \
+  -v ./tables:/beacon/data/tables \
   ghcr.io/maris-development/beacon:latest
 ```
 
 Port `5001` serves the HTTP API and the admin UI at `/admin`. Add `-p 32011:32011` for Arrow Flight SQL.
 
+The `./tables` mount holds `beacon.db`. That file keeps your tables, views, managed data and users
+when you restart or replace the container. Without the mount, a new container starts empty.
+
 ## 2. Point it at your data
 
 Copy files into `./datasets`. Beacon finds them. You register nothing first.
 
-Beacon reads Parquet, GeoParquet, NetCDF, HDF5, Zarr, Atlas, CSV, Arrow IPC, GeoTIFF, Delta Lake,
-ODV ASCII and BBF.
+Beacon reads Parquet, GeoParquet, NetCDF, HDF5, Zarr, Icechunk, Atlas, CSV, Arrow IPC, GeoTIFF,
+Delta Lake, Apache Iceberg, ODV ASCII and BBF.
 
 A path in a query is relative to the datasets root. A file at `./datasets/obs/a.parquet` is
 `obs/a.parquet`. Do not repeat `datasets/`. Do not write an `s3://` scheme.
 
 To use a bucket instead of a directory, set `BEACON_S3_DATASETS=true` and `BEACON_S3_BUCKET`. See
-[Object Storage](https://maris-development.github.io/beacon/docs/2.0.0-rc6/data-sources/object-storage).
+[Object Storage](https://maris-development.github.io/beacon/docs/2.0.0/data-sources/object-storage).
 
 ## 3. Query it from Python
 
@@ -114,37 +139,41 @@ curl -X POST http://localhost:5001/api/query \
 ```
 
 Both interfaces compile to the same plan. See the
-[JSON Query DSL](https://maris-development.github.io/beacon/docs/2.0.0-rc6/api/querying/json).
+[JSON Query DSL](https://maris-development.github.io/beacon/docs/2.0.0/api/querying/json).
 
 ### Other clients
 
 There is a
-[TypeScript SDK](https://maris-development.github.io/beacon/docs/2.0.0-rc6/connect/typescript), a
-[terminal client](https://maris-development.github.io/beacon/docs/2.0.0-rc6/connect/cli), and an
+[TypeScript SDK](https://maris-development.github.io/beacon/docs/2.0.0/connect/typescript), a
+[terminal client](https://maris-development.github.io/beacon/docs/2.0.0/connect/cli), and an
 Arrow Flight SQL endpoint for JDBC and ADBC tools.
 
 ## Next steps
 
 | | |
 | --- | --- |
-| Name your files as tables and views | [Server Setup](https://maris-development.github.io/beacon/docs/2.0.0-rc6/server/) |
-| Set ports, storage and limits | [Configuration](https://maris-development.github.io/beacon/docs/2.0.0-rc6/server/configuration) |
-| Decide who reads what | [Access Control](https://maris-development.github.io/beacon/docs/2.0.0-rc6/security/access-control) |
-| Write queries | [SQL Reference](https://maris-development.github.io/beacon/docs/2.0.0-rc6/sql/) · [REST API](https://maris-development.github.io/beacon/docs/2.0.0-rc6/api/querying/) |
-| Move from an xarray loop | [Coming from xarray](https://maris-development.github.io/beacon/docs/2.0.0-rc6/coming-from-xarray) |
+| Name your files as tables and views | [Server Setup](https://maris-development.github.io/beacon/docs/2.0.0/server/) |
+| Set ports, storage and limits | [Configuration](https://maris-development.github.io/beacon/docs/2.0.0/server/configuration) |
+| Decide who reads what | [Access Control](https://maris-development.github.io/beacon/docs/2.0.0/security/access-control) |
+| Write queries | [SQL Reference](https://maris-development.github.io/beacon/docs/2.0.0/sql/) · [REST API](https://maris-development.github.io/beacon/docs/2.0.0/api/querying/) |
+| Move from an xarray loop | [Coming from xarray](https://maris-development.github.io/beacon/docs/2.0.0/coming-from-xarray) |
 
 Documentation home: <https://maris-development.github.io/beacon/>
 
 ## Contributing
 
-Beacon is a Rust workspace. Build and test it:
+Beacon is a Rust workspace. A build needs Rust 1.94 or later, the netCDF and HDF5 libraries,
+PROJ 9.6.2 or later, and `pkg-config`. The BBF reader is a git submodule, so clone with
+`--recurse-submodules`. Build and test it:
 
 ```bash
-git clone https://github.com/maris-development/beacon.git
+git clone --recurse-submodules https://github.com/maris-development/beacon.git
 cd beacon
-cargo build --release
+cargo build --release -p beacon-server
 cargo test
 ```
+
+The server binary is `target/release/beacon-server`.
 
 Send issues and pull requests to [GitHub](https://github.com/maris-development/beacon/issues). Open
 an issue first for a large change. The issue lets you discuss the approach.
