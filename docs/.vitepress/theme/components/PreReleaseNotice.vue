@@ -6,7 +6,7 @@ import { LATEST_VERSION, LATEST_ENTRY } from '../version.js'
 // Versions whose docs are published but not released. Keep in sync with the
 // version dropdown label in config.mts. `route.path` carries the site base, so
 // match on the version segment rather than a full path.
-const PRE_RELEASE = ['2.0.0-rc6']
+const PRE_RELEASE = []
 
 const route = useRoute()
 
@@ -22,7 +22,7 @@ const stableHref = withBase(`/docs/${LATEST_VERSION}/${LATEST_ENTRY}`)
     <p class="custom-block-title">Pre-release documentation</p>
     <p>
       This describes Beacon <strong>{{ version }}</strong>, a release candidate.
-      Behavior documented here may still change before 2.0.0 ships, and some of
+      Behavior documented here may still change before the release ships, and some of
       it is not in any released build yet. For the current stable release, see
       the <a :href="stableHref">{{ LATEST_VERSION }} documentation</a>.
     </p>

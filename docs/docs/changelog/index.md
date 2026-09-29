@@ -1,10 +1,49 @@
 # Changelog
 
-> **Release posts:** [What's new in 1.8.0](/docs/changelog/release-1.8.0) · [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
+> **Release posts:** [Upgrade from 1.8.0 to 2.0.0](/docs/2.0.0/upgrade) · [What's new in 1.8.0](/docs/changelog/release-1.8.0) · [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
 
 All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
 changes), and **Fixed** (bug fixes).
+
+## v2.0.0 — 2026-09-29
+
+Beacon 2.0.0 is a major release. A 1.8.0 server does not upgrade in place. A 2.0.0 server does not
+read the table definitions of a 1.8.0 server, so create your tables again. Read
+[Upgrade from 1.8.0](/docs/2.0.0/upgrade) before you change the image tag. The
+[full changelog](https://github.com/maris-development/beacon/blob/main/CHANGELOG.md) lists each
+change.
+
+### Added
+
+- **N-dimensional execution.** NetCDF, HDF5, Zarr, Atlas, BBF and GeoTIFF read through an nd
+  pipeline. A `WHERE` filter and a projection run before the broadcast. See
+  [How it works](/docs/2.0.0/how-it-works).
+- **A single-file database.** One `beacon.db` file holds the catalog, the managed tables and the
+  users. See [Storage internals](/docs/2.0.0/internals/storage).
+- **File statistics.** Beacon records the column ranges of each file. A query skips each file that
+  holds no match. See [File statistics](/docs/2.0.0/internals/file-statistics).
+- **New readers.** Read [Iceberg](/docs/2.0.0/formats/iceberg) tables and
+  [Icechunk](/docs/2.0.0/formats/icechunk) repositories. Pure-Rust readers read
+  [netCDF](/docs/2.0.0/formats/netcdf) and [HDF5](/docs/2.0.0/formats/hdf5).
+- **123 spatial functions with PostGIS names.** See
+  [Spatial Functions](/docs/2.0.0/sql/spatial-functions).
+- **Secrets and remote catalogs.** `CREATE SECRET` holds credentials. `ATTACH` queries another
+  Beacon server. See [ATTACH](/docs/2.0.0/data-sources/attach).
+- **An embedded engine.** `pip install beacondb` runs the engine in your Python process.
+
+### Changed
+
+- **One product, one name.** "Beacon Data Lake" and "BeaconDB" are now Beacon.
+- **The netCDF and HDF5 readers are pure Rust by default.** Set
+  `BEACON_NETCDF_USE_RUST_READER=false` or `BEACON_HDF5_USE_RUST_READER=false` to use netCDF-C.
+- **File statistics are on by default.** Set `BEACON_FILE_STATS_ENABLE=false` to stop them.
+- **`BEACON_S3_DATA_LAKE` is now `BEACON_S3_DATASETS`.** The old name still works.
+- **The minimum Rust version is 1.94.** A build from source also needs PROJ 9.6.2 or later.
+
+### Removed
+
+- **`st_within_point` and `st_geojson_as_wkt`.** Use the PostGIS functions, such as `ST_Within`.
 
 ## v1.8.0 — 2026-06-27
 

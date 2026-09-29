@@ -35,18 +35,18 @@ Point a server at your archive. Connect a client. Write queries.
 ## Choose a version
 
 <div class="dgrid">
-  <a class="dcard" href="docs/2.0.0-rc6/introduction">
+  <a class="dcard" href="docs/2.0.0/introduction">
     <span class="dcard-head">
-      <span class="dcard-title mono">2.0.0-rc6</span>
-      <span class="dcard-tag">Pre-release</span>
+      <span class="dcard-title mono">2.0.0</span>
+      <span class="dcard-tag is-stable">Stable</span>
     </span>
-    <span class="dcard-body">This is the upcoming 2.0 version release.</span>
+    <span class="dcard-body">Read this for a 2.0.0 server. This is the current release.</span>
     <span class="dcard-cta is-primary">Read the docs <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
   </a>
   <a class="dcard" href="docs/1.8.0/introduction">
     <span class="dcard-head">
       <span class="dcard-title mono">1.8.0</span>
-      <span class="dcard-tag is-stable">Stable</span>
+      <span class="dcard-tag">Older</span>
     </span>
     <span class="dcard-body">Read this for a 1.8.0 server.</span>
     <span class="dcard-cta">Read the docs <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
@@ -61,35 +61,38 @@ Point a server at your archive. Connect a client. Write queries.
   </a>
 </div>
 
+Beacon 2.0.0 is the current release. A 1.8.0 server does not upgrade in place. Read
+[Upgrade from 1.8.0](/docs/2.0.0/upgrade) before you change the image tag.
+
 ## Common tasks
 
 <div class="dgrid">
-  <a class="dcard" href="docs/2.0.0-rc6/getting-started">
+  <a class="dcard" href="docs/2.0.0/getting-started">
     <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg></span>
     <span class="dcard-title">Deploy a server</span>
     <span class="dcard-body">Point Beacon at a directory or a bucket. Set the ports, the storage and the limits.</span>
   </a>
-  <a class="dcard" href="docs/2.0.0-rc6/connect/python">
+  <a class="dcard" href="docs/2.0.0/connect/python">
     <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/><path d="M4 4v16"/><path d="M20 4v16"/></svg></span>
     <span class="dcard-title">Connect a client</span>
     <span class="dcard-body">Use Python, TypeScript or the terminal client. DataGrip and DBeaver use Arrow Flight SQL.</span>
   </a>
-  <a class="dcard" href="docs/2.0.0-rc6/sql/">
+  <a class="dcard" href="docs/2.0.0/sql/">
     <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg></span>
     <span class="dcard-title">Write SQL</span>
     <span class="dcard-body">Query your files with SELECT, JOIN and UNION BY NAME. Beacon adds 123 spatial functions.</span>
   </a>
-  <a class="dcard" href="docs/2.0.0-rc6/api/">
+  <a class="dcard" href="docs/2.0.0/api/">
     <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
     <span class="dcard-title">Call the API</span>
     <span class="dcard-body">One endpoint accepts SQL or a JSON query. It answers in Arrow, Parquet, CSV, NetCDF or ODV.</span>
   </a>
-  <a class="dcard" href="docs/2.0.0-rc6/formats/">
+  <a class="dcard" href="docs/2.0.0/formats/">
     <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg></span>
     <span class="dcard-title">Read your formats</span>
-    <span class="dcard-body">Beacon reads NetCDF, Zarr, Parquet, GeoParquet, CSV, ODV, HDF5, Arrow, GeoTIFF, Iceberg, Delta and BBF.</span>
+    <span class="dcard-body">Beacon reads NetCDF, HDF5, Zarr, Icechunk, Atlas, Parquet, GeoParquet, CSV, ODV, Arrow, GeoTIFF, Iceberg, Delta and BBF.</span>
   </a>
-  <a class="dcard" href="docs/2.0.0-rc6/server/configuration">
+  <a class="dcard" href="docs/2.0.0/server/configuration">
     <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></span>
     <span class="dcard-title">Tune and fix</span>
     <span class="dcard-body">Set every BEACON_* variable. Find the answer for a common error.</span>
