@@ -19,6 +19,7 @@ use std::sync::Arc;
 use lance::dataset::{DEFAULT_INDEX_CACHE_SIZE, DEFAULT_METADATA_CACHE_SIZE};
 use lance::session::Session;
 use lance_core::Result as LanceResult;
+use lance_core::cache::{CacheBackend, MokaCacheBackend};
 use lance_io::object_store::{
     ObjectStore, ObjectStoreParams, ObjectStoreProvider, ObjectStoreRegistry,
     DEFAULT_LOCAL_IO_PARALLELISM,
@@ -94,6 +95,9 @@ pub struct LanceWarehouse {
     store: Arc<DynObjectStore>,
     /// Lance session carrying the registry that resolves `db://`.
     session: Arc<Session>,
+    /// The index cache of `session`. Lance keeps it private, so we hold the
+    /// backend to clear a dropped table's entries (see [`Self::forget`]).
+    index_cache: Arc<MokaCacheBackend>,
     /// Per-dataset write locks, keyed by dataset URI.
     locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
 }
@@ -143,14 +147,16 @@ impl LanceWarehouse {
         // scan re-read the dataset and column metadata. That is invisible on
         // narrow tables and very expensive on wide ones (Lance notes column
         // metadata alone can be ~40MB for a few hundred columns).
-        let session = Arc::new(Session::new(
-            DEFAULT_INDEX_CACHE_SIZE,
+        let index_cache = Arc::new(MokaCacheBackend::with_capacity(DEFAULT_INDEX_CACHE_SIZE));
+        let session = Arc::new(Session::with_index_cache_backend(
+            index_cache.clone(),
             DEFAULT_METADATA_CACHE_SIZE,
             Arc::new(registry),
         ));
         Self {
             store,
             session,
+            index_cache,
             locks: Mutex::new(HashMap::new()),
         }
     }
@@ -158,6 +164,22 @@ impl LanceWarehouse {
     /// The Lance session (carries the object-store registry) for open/write.
     pub fn session(&self) -> Arc<Session> {
         self.session.clone()
+    }
+
+    /// Remove every cache entry of the dataset at `uri` from the session.
+    ///
+    /// Lance keys its caches by URI and version number. A new table with the
+    /// name of a dropped table has the same URI and starts again at version 1,
+    /// so without this it reads the manifests and index lists of the dropped
+    /// table, and then fails on the index files that `DROP` deleted.
+    pub async fn forget(&self, uri: &str) {
+        // Lance prefixes each key with the dataset URI and a `/`.
+        let prefix = format!("{uri}/");
+        self.session
+            .file_metadata_cache()
+            .invalidate_prefix(&prefix)
+            .await;
+        self.index_cache.invalidate_prefix(&prefix).await;
     }
 
     /// The tables object store, for `DROP` cleanup.

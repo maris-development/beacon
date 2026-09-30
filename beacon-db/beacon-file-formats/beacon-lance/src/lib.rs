@@ -62,6 +62,8 @@ pub async fn create_lance_table(
     {
         let lock = warehouse.lock(&uri);
         let _guard = lock.lock().await;
+        // A read during an earlier DROP of this name can leave cache entries.
+        warehouse.forget(&uri).await;
         // Create an empty dataset that just establishes the schema; CTAS inserts
         // rows afterwards through the streaming insert path.
         io::write_stream(
@@ -77,7 +79,8 @@ pub async fn create_lance_table(
     Ok(LanceTable::new(definition, schema, warehouse))
 }
 
-/// Drop a Lance table by deleting all of its objects from the tables store.
+/// Drop a Lance table by deleting all of its objects from the tables store,
+/// and its entries from the Lance session caches.
 pub async fn drop_lance_table(warehouse: &LanceWarehouse, uri: &str) -> anyhow::Result<()> {
     tracing::info!(uri = %uri, "dropping Lance table");
 
@@ -101,6 +104,7 @@ pub async fn drop_lance_table(warehouse: &LanceWarehouse, uri: &str) -> anyhow::
             .await
             .map_err(|e| anyhow::anyhow!("Failed to delete Lance table file: {e}"))?;
     }
+    warehouse.forget(uri).await;
     Ok(())
 }
 
@@ -465,6 +469,156 @@ mod tests {
 
         let after = warehouse.store().list(Some(&prefix)).count().await;
         assert_eq!(after, 0, "drop must remove every object under the table prefix");
+    }
+
+    /// Create table `mt` with two inserts, then add a BTREE index and compact
+    /// it. Returns the table location.
+    async fn indexed_mt(warehouse: &Arc<LanceWarehouse>) -> String {
+        let table = create_lance_table(
+            warehouse.clone(),
+            &beacon_namespace(),
+            "mt",
+            &sample_schema(),
+        )
+        .await
+        .unwrap();
+        let location = table.definition().location.clone();
+        let ctx = SessionContext::new();
+        ctx.register_table("mt", Arc::new(table)).unwrap();
+        for sql in [
+            "INSERT INTO mt VALUES (1, 'a')",
+            "INSERT INTO mt VALUES (2, 'b')",
+        ] {
+            ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        }
+        create_index(warehouse, &location, "id", "id_idx", ScalarIndexKind::BTree)
+            .await
+            .unwrap();
+        compact_table(warehouse, &location, &CompactOptions::default())
+            .await
+            .unwrap();
+        location
+    }
+
+    /// Create table `mt` again with two inserts and an update, so its versions
+    /// pass the versions of the indexed table. Then check that the new table
+    /// has no indexes and compacts.
+    async fn recreate_mt_and_compact(warehouse: &Arc<LanceWarehouse>) {
+        let table = create_lance_table(
+            warehouse.clone(),
+            &beacon_namespace(),
+            "mt",
+            &sample_schema(),
+        )
+        .await
+        .unwrap();
+        let location = table.definition().location.clone();
+        let ctx = SessionContext::new();
+        ctx.register_table("mt", Arc::new(table)).unwrap();
+        for sql in [
+            "INSERT INTO mt VALUES (1, 'a')",
+            "INSERT INTO mt VALUES (2, 'b')",
+        ] {
+            ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        }
+        update_rows(
+            warehouse,
+            &location,
+            Some("id = 2"),
+            &[("name".to_string(), "'Z'".to_string())],
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            list_indices(warehouse, &location).await.unwrap().is_empty(),
+            "the new table has no indexes"
+        );
+        compact_table(warehouse, &location, &CompactOptions::default())
+            .await
+            .expect("compact must not read the index files of the dropped table");
+    }
+
+    /// A new table with the name of a dropped table reuses its URI and its
+    /// version numbers. It must not see the indexes of the dropped table.
+    #[tokio::test]
+    async fn recreate_after_drop_does_not_see_the_old_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = test_warehouse(&dir);
+
+        let location = indexed_mt(&warehouse).await;
+        drop_lance_table(&warehouse, &location).await.unwrap();
+
+        recreate_mt_and_compact(&warehouse).await;
+    }
+
+    /// A read that runs during `DROP` can put cache entries back after the
+    /// drop removes them. `CREATE` must not use those entries.
+    #[tokio::test]
+    async fn create_ignores_cache_entries_left_after_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = test_warehouse(&dir);
+
+        let location = indexed_mt(&warehouse).await;
+        // Delete the files but keep the cache entries, as that late read does.
+        let prefix = LanceWarehouse::object_path(&location);
+        let files: Vec<_> = warehouse
+            .store()
+            .list(Some(&prefix))
+            .map(|meta| meta.unwrap().location)
+            .collect()
+            .await;
+        for file in files {
+            warehouse.store().delete(&file).await.unwrap();
+        }
+
+        recreate_mt_and_compact(&warehouse).await;
+    }
+
+    /// A write that waits for the lock while `DROP` runs gets the lock after
+    /// the files are gone. It must fail, and it must not create a new dataset.
+    #[tokio::test]
+    async fn writes_after_drop_fail_and_leave_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = test_warehouse(&dir);
+
+        let table = create_lance_table(
+            warehouse.clone(),
+            &beacon_namespace(),
+            "gone",
+            &sample_schema(),
+        )
+        .await
+        .unwrap();
+        let location = table.definition().location.clone();
+        let ctx = SessionContext::new();
+        ctx.register_table("gone", Arc::new(table)).unwrap();
+        drop_lance_table(&warehouse, &location).await.unwrap();
+
+        let insert = match ctx.sql("INSERT INTO gone VALUES (1, 'a')").await {
+            Ok(df) => df.collect().await.map(|_| ()),
+            Err(e) => Err(e),
+        };
+        assert!(insert.is_err(), "INSERT into a dropped table must fail");
+
+        let keep = ctx
+            .sql("SELECT * FROM (VALUES (CAST(1 AS BIGINT), 'a')) AS t(id, name)")
+            .await
+            .unwrap()
+            .execute_stream()
+            .await
+            .unwrap();
+        let err = replace_table_contents(&warehouse, &location, keep)
+            .await
+            .expect_err("a rewrite of a dropped table must fail");
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+
+        let prefix = LanceWarehouse::object_path(&location);
+        let left = warehouse.store().list(Some(&prefix)).count().await;
+        assert_eq!(left, 0, "no write may create a new dataset after DROP");
     }
 
     #[tokio::test]
