@@ -17,7 +17,7 @@ appears only when the server serves the UI.
 
 The UI is a React single-page application. It uses Vite, Tailwind CSS and
 shadcn/ui. It reaches Beacon through the
-[`@beacon/client`](/docs/2.0.0/connect/typescript) TypeScript SDK
+[`@maris-development/beacon-client`](/docs/2.0.0/connect/typescript) TypeScript SDK
 only.
 
 ## Log in
@@ -121,7 +121,7 @@ workspace. It depends on the SDK. Build the SDK first:
 ```bash
 # from beacon-clients/
 npm install                       # installs the JS workspace (beacon-ts + beacon-web)
-npm run build -w @beacon/client   # build the SDK so beacon-web can import it
+npm run build -w beacon-ts        # build the SDK so beacon-web can import it
 npm run dev -w @beacon/web        # start the Vite dev server
 ```
 

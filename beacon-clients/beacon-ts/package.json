@@ -1,5 +1,5 @@
 {
-  "name": "@beacon/client",
+  "name": "@maris-development/beacon-client",
   "version": "2.0.0",
   "description": "Isomorphic TypeScript SDK for managing and querying a Beacon instance.",
   "license": "Apache-2.0",

@@ -1,10 +1,10 @@
 name: Publish beacon-ts
 
-# Publishes the `@beacon/client` TypeScript package to npm.
+# Publishes the `@maris-development/beacon-client` TypeScript package to npm.
 #
 # Release candidates: a pre-release tag (v2.0.0-rc.1) publishes under a matching npm dist-tag
-# (`rc`) rather than `latest`, so `npm i @beacon/client` keeps resolving to the last stable
-# release and RC users opt in with `npm i @beacon/client@rc`.
+# (`rc`) rather than `latest`, so `npm i @maris-development/beacon-client` keeps resolving to the
+# last stable release and RC users opt in with `npm i @maris-development/beacon-client@rc`.
 
 on:
   push:
@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: npm
-      url: https://www.npmjs.com/package/@beacon/client
+      url: https://www.npmjs.com/package/@maris-development/beacon-client
     permissions:
       contents: read
       id-token: write # provenance attestation

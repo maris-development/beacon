@@ -6,7 +6,9 @@ export default defineConfig({
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
       // Run against the SDK source rather than its built `dist`.
-      "@beacon/client": fileURLToPath(new URL("../beacon-ts/src/index.ts", import.meta.url)),
+      "@maris-development/beacon-client": fileURLToPath(
+        new URL("../beacon-ts/src/index.ts", import.meta.url),
+      ),
     },
   },
   test: {

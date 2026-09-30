@@ -1,6 +1,6 @@
 /** Error helpers shared across pages. */
 
-import { ApiError } from "@beacon/client";
+import { ApiError } from "@maris-development/beacon-client";
 
 /** Extracts a human-readable message from any thrown value. */
 export function errorMessage(err: unknown): string {
