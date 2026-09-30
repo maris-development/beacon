@@ -5,7 +5,7 @@
 //! the scan, and [`ZarrSource`] streams each leaf group through the shared
 //! `beacon-nd-array` engine with predicate pushdown.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{
@@ -126,9 +126,6 @@ impl FileFormatFactory for ZarrFormatFactory {
         Arc::new(ZarrFormat::default().with_enable_statistics(false))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl FileFormatFactoryExt for ZarrFormatFactory {
@@ -145,7 +142,7 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
     /// names dimensions derives its schema, exactly as it did before the cache
     /// existed. The default read is cached.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let format = format.as_any().downcast_ref::<ZarrFormat>()?;
+        let format = format.downcast_ref::<ZarrFormat>()?;
         if format.has_storage() || format.read_dimensions.is_some() {
             return None;
         }
@@ -203,7 +200,6 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
         let wanted = self.statistics_wanted(format_options)?;
         let format = self.create_with_native_root(state, format_options, url, listing)?;
         let zarr = format
-            .as_any()
             .downcast_ref::<ZarrFormat>()
             .ok_or_else(|| {
                 datafusion::error::DataFusionError::Execution(
@@ -299,10 +295,6 @@ pub use beacon_datafusion_ext::nd::exec::nd_scan_plan;
 
 #[async_trait::async_trait]
 impl FileFormat for ZarrFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         None
     }
@@ -466,8 +458,15 @@ impl FileFormat for ZarrFormat {
             .with_read_dimensions(self.read_dimensions.clone())
             .with_skip_unbroadcastable(self.skip_unbroadcastable)
             .with_projection(projection);
-        if let Some(storage) = &self.storage {
-            source = source.with_storage(storage.clone());
+        match &self.storage {
+            Some(storage) => source = source.with_storage(storage.clone()),
+            // Only a listed store shares opens: a store that replaces the object
+            // store can hold other data under the same path.
+            None => {
+                source = source.with_metadata_cache(Some(
+                    state.runtime_env().cache_manager.get_file_metadata_cache(),
+                ));
+            }
         }
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
@@ -700,10 +699,9 @@ mod tests {
     /// the 10 MB minimum below would decline a store of any size. The caller
     /// passes one anyway, and it must still be ignored.
     ///
-    /// What changed is *how* the partitions divide it. They used to each hold
-    /// the group with a share between them; now the scan plans one standing
-    /// entry per partition and the group sits in a [`MorselSource`] they all
-    /// draw from. Either way one group reaches every partition and is read once.
+    /// The group becomes one part per partition. At run time DataFusion's
+    /// shared queue hands out the parts, and each part reads its own slice of
+    /// the chunk list. So one group reaches every partition and is read once.
     #[test]
     fn one_group_is_planned_across_every_partition() {
         use datafusion::datasource::listing::PartitionedFile;
@@ -734,26 +732,19 @@ mod tests {
             .expect("a zarr group is planned across the partitions");
 
         assert_eq!(planned.file_groups.len(), PARTITIONS);
-        for group in &planned.file_groups {
-            assert_eq!(group.len(), 1, "one standing entry per partition");
-            assert!(
-                group.iter().next().unwrap().range.is_none(),
-                "nothing is divided at plan time; the partitions divide it as \
-                 they read it"
-            );
-        }
-
-        // The queue is what stops every partition reading the whole group.
-        let planned_source = planned
-            .file_source()
-            .as_any()
-            .downcast_ref::<ZarrSource>()
-            .expect("the config carries a ZarrSource");
-        assert_eq!(
-            planned_source.morsel_groups(),
-            Some(1),
-            "the group is in the queue the openers draw from"
-        );
+        let parts: Vec<beacon_nd_array::arrow::morsel::FilePart> = planned
+            .file_groups
+            .iter()
+            .flat_map(|group| group.iter())
+            .inspect(|entry| {
+                assert!(entry.range.is_none(), "no part is a byte range");
+            })
+            .map(beacon_nd_array::arrow::morsel::FilePart::of)
+            .collect();
+        assert_eq!(parts.len(), PARTITIONS, "one part per partition");
+        let mut indices: Vec<usize> = parts.iter().map(|part| part.index).collect();
+        indices.sort_unstable();
+        assert_eq!(indices, (0..PARTITIONS).collect::<Vec<_>>(), "every part once");
     }
 
     /// One group scans in several partitions and returns the same rows it
@@ -1033,7 +1024,6 @@ mod tests {
                 .unwrap();
             assert!(
                 !format
-                    .as_any()
                     .downcast_ref::<ZarrFormat>()
                     .unwrap()
                     .enable_statistics,
@@ -1066,7 +1056,6 @@ mod tests {
                 .create_for_analysis(&ctx.state(), &options, &url, &listing)
                 .unwrap();
             format
-                .as_any()
                 .downcast_ref::<ZarrFormat>()
                 .unwrap()
                 .enable_statistics
@@ -1233,11 +1222,11 @@ mod tests {
             HashMap::from([("skip_unbroadcastable".to_string(), "true".to_string())]);
 
         let format = factory.create(&ctx.state(), &options).unwrap();
-        let format = format.as_any().downcast_ref::<ZarrFormat>().unwrap();
+        let format = format.downcast_ref::<ZarrFormat>().unwrap();
         assert!(format.skip_unbroadcastable);
 
         let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
-        let default = default.as_any().downcast_ref::<ZarrFormat>().unwrap();
+        let default = default.downcast_ref::<ZarrFormat>().unwrap();
         assert!(!default.skip_unbroadcastable);
     }
 

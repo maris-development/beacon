@@ -9,7 +9,6 @@
 //! It wraps the reader in [`AdaptingOpener`], which maps a file's columns onto
 //! the schema the scan reports.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
@@ -124,10 +123,6 @@ impl FileSource for BeaconArrowSource {
 
         let adapting = AdaptingOpener::wrap(inner, read_schema, Arc::clone(&self.type_widening));
         ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn table_schema(&self) -> &TableSchema {

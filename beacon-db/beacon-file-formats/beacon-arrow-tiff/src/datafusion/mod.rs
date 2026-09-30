@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -48,9 +47,6 @@ impl FileFormatFactory for TiffFormatFactory {
         Arc::new(TiffFormat::new(self.options.clone()))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl GetExt for TiffFormatFactory {
@@ -63,7 +59,7 @@ impl FileFormatFactoryExt for TiffFormatFactory {
     /// TIFF opts into the schema cache on its name alone. `TiffOptions` carries
     /// nothing today, so there is nothing else to tell two reads apart.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        format.as_any().downcast_ref::<TiffFormat>()?;
+        format.downcast_ref::<TiffFormat>()?;
         Some(SchemaOptions::new("tiff").finish())
     }
 
@@ -106,10 +102,6 @@ impl TiffFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for TiffFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         None
     }
@@ -178,7 +170,7 @@ impl FileFormat for TiffFormat {
 
     async fn create_physical_plan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
@@ -200,7 +192,11 @@ impl FileFormat for TiffFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = TiffSource::new(table_schema).with_projection(projection);
+        let source = TiffSource::new(table_schema)
+            .with_projection(projection)
+            .with_metadata_cache(Some(
+                state.runtime_env().cache_manager.get_file_metadata_cache(),
+            ));
 
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -392,10 +388,8 @@ mod tests {
     /// A partitioned table carries the value of a raster's path on every row
     /// that raster contributes.
     ///
-    /// The value is in the *path*, and a TIFF scan reads a whole collection
-    /// behind one plan entry, so `FileStream` cannot append it: it does not know
-    /// which raster a batch came from. The reader appends it itself instead —
-    /// per file, which is per morsel.
+    /// The value is in the *path*. The nd reader appends it itself, per
+    /// raster, onto its nd-encoded batches.
     #[tokio::test]
     async fn a_partitioned_raster_carries_the_value_of_its_path() {
         let store = Arc::new(InMemory::new());

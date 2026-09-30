@@ -103,7 +103,7 @@ pub(crate) fn query_box(
 
 /// The box one predicate states, or `None` if it is not one of the five.
 fn conjunct_box(expr: &Arc<dyn PhysicalExpr>, table_schema: &SchemaRef) -> Option<QueryBox> {
-    let call = expr.as_any().downcast_ref::<ScalarFunctionExpr>()?;
+    let call = expr.downcast_ref::<ScalarFunctionExpr>()?;
     let args = call.args();
 
     if BOX_PREDICATES.contains(&call.name()) && args.len() == 2 {
@@ -141,12 +141,12 @@ fn geometry_and_constant<'a>(
     left: &'a Arc<dyn PhysicalExpr>,
     right: &'a Arc<dyn PhysicalExpr>,
 ) -> Option<(String, &'a Arc<dyn PhysicalExpr>)> {
-    if let Some(column) = left.as_any().downcast_ref::<Column>()
+    if let Some(column) = left.downcast_ref::<Column>()
         && collect_columns(right).is_empty()
     {
         return Some((column.name().to_string(), right));
     }
-    if let Some(column) = right.as_any().downcast_ref::<Column>()
+    if let Some(column) = right.downcast_ref::<Column>()
         && collect_columns(left).is_empty()
     {
         return Some((column.name().to_string(), left));

@@ -14,7 +14,6 @@
 //! coordinate axis (e.g. `lat * 2`) evaluates over `|lat|` elements instead of
 //! the full `time·lat·lon` cross-product.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -173,10 +172,6 @@ impl DisplayAs for NdProjectionExec {
 impl ExecutionPlan for NdProjectionExec {
     fn name(&self) -> &str {
         "NdProjectionExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

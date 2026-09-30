@@ -5,6 +5,7 @@
 //! persisted as `table.json`. The credential is stored encrypted (see
 //! [`crate::secret`]); everything else is plaintext connection metadata.
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -109,7 +110,6 @@ impl TableDefinition for SqlDatabaseTableDefinition {
         // inner `SQLTable` (which still reports the correct remote
         // `table_reference`) so it additionally carries our definition.
         let adaptor = provider
-            .as_any()
             .downcast_ref::<FederatedTableProviderAdaptor>()
             .ok_or_else(|| {
                 anyhow!(
@@ -118,9 +118,7 @@ impl TableDefinition for SqlDatabaseTableDefinition {
                     self.name
                 )
             })?;
-        let sql_source = adaptor
-            .source
-            .as_any()
+        let sql_source = (adaptor.source.as_ref() as &dyn Any)
             .downcast_ref::<SQLTableSource>()
             .ok_or_else(|| {
                 anyhow!(

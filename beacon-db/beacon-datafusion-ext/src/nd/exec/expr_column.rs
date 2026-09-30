@@ -78,7 +78,7 @@ impl NdExprColumn {
                 .collect::<Vec<_>>(),
         ));
         let expr = reassign_expr_columns(expr.clone(), &compact_schema)?;
-        let passthrough = expr.as_any().is::<Column>();
+        let passthrough = expr.is::<Column>();
         Ok(Self {
             expr,
             compact_schema,
@@ -168,7 +168,6 @@ pub(super) fn footprint_of(
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::sync::Arc;
 
     use arrow::array::{ArrayRef, AsArray, Int32Array};
@@ -203,9 +202,6 @@ mod tests {
     }
 
     impl ScalarUDFImpl for SumUdf {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
         fn name(&self) -> &str {
             "test_sum"
         }

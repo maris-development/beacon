@@ -213,40 +213,39 @@ fn scan_read(scan: &TableScan, session_ctx: &SessionContext) -> ScanRead {
 ///
 /// `Some(vec![])` is a provider that reads no files, such as `generate_series`.
 fn provider_locations(provider: &dyn TableProvider) -> Option<Vec<Location>> {
-    let any = provider.as_any();
-    if let Some(table) = any.downcast_ref::<FastObjectTable>() {
+    if let Some(table) = provider.downcast_ref::<FastObjectTable>() {
         return Some(listing_locations(table.inner()));
     }
-    if let Some(external) = any.downcast_ref::<ExternalTable>() {
+    if let Some(external) = provider.downcast_ref::<ExternalTable>() {
         return Some(listing_locations(external.inner().inner()));
     }
-    if let Some(listing) = any.downcast_ref::<ListingTable>() {
+    if let Some(listing) = provider.downcast_ref::<ListingTable>() {
         return Some(listing_locations(listing));
     }
     // The table formats keep their files under one directory: every object there is theirs.
-    if let Some(located) = any.downcast_ref::<LocatedTable>() {
+    if let Some(located) = provider.downcast_ref::<LocatedTable>() {
         return Some(vec![directory(located.location())]);
     }
-    if let Some(delta) = any.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
+    if let Some(delta) = provider.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
         return Some(vec![directory(&delta.definition().location)]);
     }
-    if let Some(iceberg) = any.downcast_ref::<beacon_iceberg::BeaconIcebergTable>() {
+    if let Some(iceberg) = provider.downcast_ref::<beacon_iceberg::BeaconIcebergTable>() {
         return Some(vec![directory(&iceberg.definition().location)]);
     }
-    if let Some(icechunk) = any.downcast_ref::<beacon_icechunk::IcechunkTable>() {
+    if let Some(icechunk) = provider.downcast_ref::<beacon_icechunk::IcechunkTable>() {
         return Some(vec![directory(&icechunk.definition().location)]);
     }
-    if let Some(datasets) = any.downcast_ref::<beacon_functions::listing::provider::DatasetsTable>()
+    if let Some(datasets) = provider.downcast_ref::<beacon_functions::listing::provider::DatasetsTable>()
     {
         return Some(vec![Location::Pattern(datasets.pattern().to_string())]);
     }
     // A schema describes the files its reader would read, so it needs the same grant.
     if let Some(schema) =
-        any.downcast_ref::<beacon_functions::file_formats::schema_function::ReaderSchemaTable>()
+        provider.downcast_ref::<beacon_functions::file_formats::schema_function::ReaderSchemaTable>()
     {
         return provider_locations(schema.source().as_ref());
     }
-    if any.is::<GenerateSeriesTable>() {
+    if provider.is::<GenerateSeriesTable>() {
         return Some(Vec::new());
     }
     None
@@ -455,7 +454,6 @@ fn metadata_surface_touched(plan: &LogicalPlan) -> Option<String> {
             // and the provider is matched instead.
             if source_as_provider(&scan.source).is_ok_and(|provider| {
                 provider
-                    .as_any()
                     .is::<crate::system_schema::FileStatisticsTable>()
             }) {
                 found = Some(format!(

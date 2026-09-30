@@ -4,7 +4,6 @@
 //! [`AtlasFormatFactory`] recognizes a collection and builds an
 //! [`AtlasFormat`] per table; scan entries are collections, not files.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -99,9 +98,6 @@ impl FileFormatFactory for AtlasFormatFactory {
         self.format(self.options.clone())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl GetExt for AtlasFormatFactory {
@@ -135,7 +131,7 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
     ///
     /// TODO(#367): also cache a dimension-projected read.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let format = format.as_any().downcast_ref::<AtlasFormat>()?;
+        let format = format.downcast_ref::<AtlasFormat>()?;
         if format.options.read_dimensions.is_some() {
             return None;
         }
@@ -221,10 +217,6 @@ pub use beacon_datafusion_ext::nd::exec::nd_scan_plan;
 
 #[async_trait::async_trait]
 impl FileFormat for AtlasFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         None
     }
@@ -598,11 +590,11 @@ mod scan_tests {
         };
 
         let format = factory.create(&ctx.state(), &options("true")).unwrap();
-        let format = format.as_any().downcast_ref::<AtlasFormat>().unwrap();
+        let format = format.downcast_ref::<AtlasFormat>().unwrap();
         assert!(format.options.skip_unbroadcastable);
 
         let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
-        let default = default.as_any().downcast_ref::<AtlasFormat>().unwrap();
+        let default = default.downcast_ref::<AtlasFormat>().unwrap();
         assert!(!default.options.skip_unbroadcastable);
 
         let error = factory
@@ -624,8 +616,8 @@ mod scan_tests {
 
         let created = factory.create(&ctx.state(), &HashMap::new()).unwrap();
         let default = factory.default();
-        let created = created.as_any().downcast_ref::<AtlasFormat>().unwrap();
-        let default = default.as_any().downcast_ref::<AtlasFormat>().unwrap();
+        let created = created.downcast_ref::<AtlasFormat>().unwrap();
+        let default = default.downcast_ref::<AtlasFormat>().unwrap();
         let first = get_or_open_atlas(Some(&created.cache), Arc::clone(&store), &marker)
             .await
             .unwrap();

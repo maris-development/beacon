@@ -17,6 +17,8 @@ pub use definition::{BeaconRemoteSqlTable, RemoteTableDefinition, unresolved_sch
 pub use executor::BeaconFlightSqlExecutor;
 pub use geometry_sql::{geometry_literals_in_expr, geometry_literals_to_calls};
 
+use std::any::Any;
+
 use datafusion::catalog::TableProvider;
 use datafusion_federation::FederatedTableProviderAdaptor;
 use datafusion_federation::sql::SQLTableSource;
@@ -28,10 +30,8 @@ use datafusion_federation::sql::SQLTableSource;
 /// federation optimizer recognizes it); this digs through its public `source`
 /// and our [`BeaconRemoteSqlTable`] to recover the definition for persistence.
 pub fn remote_table_definition(provider: &dyn TableProvider) -> Option<RemoteTableDefinition> {
-    let adaptor = provider
-        .as_any()
-        .downcast_ref::<FederatedTableProviderAdaptor>()?;
-    let source = adaptor.source.as_any().downcast_ref::<SQLTableSource>()?;
+    let adaptor = provider.downcast_ref::<FederatedTableProviderAdaptor>()?;
+    let source = (adaptor.source.as_ref() as &dyn Any).downcast_ref::<SQLTableSource>()?;
     let table = source.table.as_any().downcast_ref::<BeaconRemoteSqlTable>()?;
     Some(table.definition().clone())
 }

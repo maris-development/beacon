@@ -15,12 +15,13 @@
 //! [`DefaultFileStatisticsCache`]: datafusion::execution::cache::cache_unit::DefaultFileStatisticsCache
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use datafusion::{
-    common::Statistics,
+    common::{Statistics, TableReference},
     execution::cache::{
-        CacheAccessor,
+        CacheAccessor, TableScopedPath,
         cache_manager::{CachedFileMetadata, FileStatisticsCache, FileStatisticsCacheEntry},
     },
 };
@@ -51,14 +52,30 @@ const DEFAULT_MAX_CAPACITY: u64 = 10_000;
 ///
 /// Cache entries are invalidated on size or last-modified mismatch, matching
 /// the behaviour of DataFusion's built-in `DefaultFileStatisticsCache`.
+///
+/// The entry count bounds the cache. DataFusion also hands the cache a memory
+/// limit in bytes. The cache stores and reports that limit, but does not evict by it.
 pub struct BeaconFileStatisticsCache {
-    inner: Cache<Path, CachedFileMetadata>,
+    inner: Cache<TableScopedPath, CachedFileMetadata>,
+    memory_limit: AtomicUsize,
 }
 
 impl BeaconFileStatisticsCache {
     pub fn with_capacity(max_capacity: u64) -> Self {
         Self {
-            inner: Cache::builder().max_capacity(max_capacity).build(),
+            inner: Cache::builder()
+                .max_capacity(max_capacity)
+                .support_invalidation_closures()
+                .build(),
+            memory_limit: AtomicUsize::new(0),
+        }
+    }
+
+    /// The key of a file that no table reference scopes.
+    fn unscoped(path: &Path) -> TableScopedPath {
+        TableScopedPath {
+            table: None,
+            path: path.clone(),
         }
     }
 }
@@ -74,56 +91,66 @@ impl BeaconFileStatisticsCache {
     pub fn list_entries(&self) -> Vec<(Path, ObjectMeta, Arc<Statistics>)> {
         self.inner
             .iter()
-            .map(|(path, cached)| {
-                ((*path).clone(), cached.meta.clone(), Arc::clone(&cached.statistics))
+            .map(|(key, cached)| {
+                (key.path.clone(), cached.meta.clone(), Arc::clone(&cached.statistics))
             })
             .collect()
     }
 
     /// Returns `None` if the entry does not exist or the file has changed
     /// (size or last-modified mismatch).
+    ///
+    /// Any table scope matches. The unscoped entry is tried first.
     pub fn get_with_extra(&self, k: &Path, e: &ObjectMeta) -> Option<Arc<Statistics>> {
+        let valid = |cached: &CachedFileMetadata| cached.is_valid_for(e);
         self.inner
-            .get(k)
-            .filter(|cached| cached.is_valid_for(e))
+            .get(&Self::unscoped(k))
+            .filter(valid)
+            .or_else(|| {
+                self.inner
+                    .iter()
+                    .find(|(key, cached)| &key.path == k && valid(cached))
+                    .map(|(_, cached)| cached)
+            })
             .map(|cached| Arc::clone(&cached.statistics))
     }
 
-    /// Insert `value` keyed by `key`, validating against the file metadata `e`.
-    /// Returns the previously cached statistics, if any.
+    /// Insert `value` keyed by `key` with no table scope, validating against
+    /// the file metadata `e`. Returns the previously cached statistics, if any.
     pub fn put_with_extra(
         &self,
         key: &Path,
         value: Arc<Statistics>,
         e: &ObjectMeta,
     ) -> Option<Arc<Statistics>> {
-        let old = self.inner.get(key).map(|cached| Arc::clone(&cached.statistics));
+        let key = Self::unscoped(key);
+        let old = self.inner.get(&key).map(|cached| Arc::clone(&cached.statistics));
         self.inner
-            .insert(key.clone(), CachedFileMetadata::new(e.clone(), value, None));
+            .insert(key, CachedFileMetadata::new(e.clone(), value, None));
         old
     }
 }
 
 // ─── DataFusion CacheAccessor / FileStatisticsCache impls ────────────────────
 
-impl CacheAccessor<Path, CachedFileMetadata> for BeaconFileStatisticsCache {
-    fn get(&self, k: &Path) -> Option<CachedFileMetadata> {
+impl CacheAccessor<TableScopedPath, CachedFileMetadata> for BeaconFileStatisticsCache {
+    fn get(&self, k: &TableScopedPath) -> Option<CachedFileMetadata> {
         self.inner.get(k)
     }
 
-    fn put(&self, key: &Path, value: CachedFileMetadata) -> Option<CachedFileMetadata> {
+    fn put(&self, key: &TableScopedPath, value: CachedFileMetadata) -> Option<CachedFileMetadata> {
         let old = self.inner.get(key);
         self.inner.insert(key.clone(), value);
         old
     }
 
-    fn remove(&self, k: &Path) -> Option<CachedFileMetadata> {
+    fn remove(&self, k: &TableScopedPath) -> Option<CachedFileMetadata> {
         let old = self.inner.get(k);
         self.inner.invalidate(k);
         old
     }
 
-    fn contains_key(&self, k: &Path) -> bool {
+    fn contains_key(&self, k: &TableScopedPath) -> bool {
         self.inner.contains_key(k)
     }
 
@@ -141,12 +168,31 @@ impl CacheAccessor<Path, CachedFileMetadata> for BeaconFileStatisticsCache {
 }
 
 impl FileStatisticsCache for BeaconFileStatisticsCache {
-    fn list_entries(&self) -> HashMap<Path, FileStatisticsCacheEntry> {
+    fn cache_limit(&self) -> usize {
+        self.memory_limit.load(Ordering::Relaxed)
+    }
+
+    fn update_cache_limit(&self, limit: usize) {
+        self.memory_limit.store(limit, Ordering::Relaxed);
+    }
+
+    fn drop_table_entries(
+        &self,
+        table_ref: &Option<TableReference>,
+    ) -> datafusion::common::Result<()> {
+        let table_ref = table_ref.clone();
+        self.inner
+            .invalidate_entries_if(move |key, _| key.table == table_ref)
+            .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))?;
+        Ok(())
+    }
+
+    fn list_entries(&self) -> HashMap<TableScopedPath, FileStatisticsCacheEntry> {
         self.inner
             .iter()
-            .map(|(path, cached)| {
+            .map(|(key, cached)| {
                 (
-                    (*path).clone(),
+                    (*key).clone(),
                     FileStatisticsCacheEntry {
                         object_meta: cached.meta.clone(),
                         num_rows: cached.statistics.num_rows,
@@ -211,7 +257,7 @@ mod tests {
     #[test]
     fn cache_accessor_put_get_remove_roundtrip() {
         let cache = BeaconFileStatisticsCache::with_capacity(8);
-        let p = Path::from("d.parquet");
+        let p = BeaconFileStatisticsCache::unscoped(&Path::from("d.parquet"));
         let entry = CachedFileMetadata::new(meta("d.parquet", 10), stats(), None);
 
         assert!(cache.put(&p, entry).is_none());
@@ -230,7 +276,7 @@ mod tests {
         assert_eq!(cache.name(), "BeaconFileStatisticsCache");
         // A fresh cache reports no entries (entry_count is exact at zero).
         assert_eq!(cache.len(), 0);
-        assert!(cache.get(&Path::from("missing")).is_none());
+        assert!(cache.get(&BeaconFileStatisticsCache::unscoped(&Path::from("missing"))).is_none());
     }
 
     #[test]
@@ -245,7 +291,47 @@ mod tests {
 
         // DataFusion trait API: maps statistics into cache-entry summaries.
         let trait_entries = FileStatisticsCache::list_entries(&cache);
-        let summary = trait_entries.get(&p).expect("entry present");
+        let summary = trait_entries
+            .get(&BeaconFileStatisticsCache::unscoped(&p))
+            .expect("entry present");
         assert_eq!(summary.num_columns, 0);
+    }
+
+    #[test]
+    fn get_with_extra_finds_a_table_scoped_entry() {
+        let cache = BeaconFileStatisticsCache::with_capacity(8);
+        let key = TableScopedPath {
+            table: Some(TableReference::bare("t")),
+            path: Path::from("f.parquet"),
+        };
+        cache.put(&key, CachedFileMetadata::new(meta("f.parquet", 3), stats(), None));
+
+        assert!(cache.get_with_extra(&key.path, &meta("f.parquet", 3)).is_some());
+        assert!(cache.get_with_extra(&key.path, &meta("f.parquet", 4)).is_none());
+    }
+
+    #[test]
+    fn drop_table_entries_keeps_other_tables() {
+        let cache = BeaconFileStatisticsCache::with_capacity(8);
+        let scoped = |table: &str| TableScopedPath {
+            table: Some(TableReference::bare(table)),
+            path: Path::from("g.parquet"),
+        };
+        let entry = || CachedFileMetadata::new(meta("g.parquet", 1), stats(), None);
+        cache.put(&scoped("a"), entry());
+        cache.put(&scoped("b"), entry());
+
+        cache.drop_table_entries(&Some(TableReference::bare("a"))).unwrap();
+        cache.inner.run_pending_tasks();
+
+        assert!(!cache.contains_key(&scoped("a")));
+        assert!(cache.contains_key(&scoped("b")));
+    }
+
+    #[test]
+    fn cache_limit_reports_the_last_update() {
+        let cache = BeaconFileStatisticsCache::with_capacity(8);
+        cache.update_cache_limit(1024);
+        assert_eq!(cache.cache_limit(), 1024);
     }
 }

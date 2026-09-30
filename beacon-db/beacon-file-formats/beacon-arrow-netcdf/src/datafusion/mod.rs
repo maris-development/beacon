@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -216,9 +215,6 @@ impl FileFormatFactory for NetCDFFormatFactory {
         ))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl GetExt for NetCDFFormatFactory {
@@ -256,7 +252,6 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         let wanted = self.statistics_wanted(format_options)?;
         let format = self.create_with_native_root(state, format_options, url, listing)?;
         let netcdf = format
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .ok_or_else(|| {
                 exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
@@ -274,7 +269,6 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         let format = self.create(state, format_options)?;
         let netcdf = format
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .ok_or_else(|| {
                 exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
@@ -343,7 +337,7 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
     /// existed. The default read — every table, and every collector pass — is
     /// what the 9.2s was measured on, and that one is cached.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let format = format.as_any().downcast_ref::<NetcdfFormat>()?;
+        let format = format.downcast_ref::<NetcdfFormat>()?;
         if format.options.read_dimensions.is_some() {
             return None;
         }
@@ -408,10 +402,6 @@ impl NetcdfFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for NetcdfFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         None
     }
@@ -538,7 +528,7 @@ impl FileFormat for NetcdfFormat {
 
     async fn create_physical_plan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
@@ -568,7 +558,10 @@ impl FileFormat for NetcdfFormat {
             table_schema,
         )
         .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
-        .with_projection(projection);
+        .with_projection(projection)
+        .with_metadata_cache(Some(
+            state.runtime_env().cache_manager.get_file_metadata_cache(),
+        ));
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -695,7 +688,6 @@ mod reader_backend_tests {
     ) -> datafusion::error::Result<ReaderBackend> {
         let format = factory.create(state, format_options)?;
         Ok(format
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .expect("the factory builds a NetcdfFormat")
             .reader_backend())
@@ -1161,7 +1153,6 @@ mod reader_backend_tests {
         let format = FileFormatFactory::default(&factory);
         assert_eq!(
             format
-                .as_any()
                 .downcast_ref::<NetcdfFormat>()
                 .unwrap()
                 .reader_backend(),
@@ -1279,15 +1270,14 @@ mod reader_backend_tests {
     /// (`repartition_file_min_size`), and what these tests pass by hand.
     const MIN_SHARE_SIZE: usize = 10 * 1024 * 1024;
 
-    /// A scan of any size plans one entry per partition, and one queue.
+    /// A scan of any size fills every partition.
     ///
-    /// Size decides nothing here. It used to: a file under the minimum was left
-    /// whole, and one over it went into every partition's group with a share.
-    /// Both were guesses made at plan time, and both were measured losing to no
-    /// guess at all. A queue does not guess — whoever is free takes the next
-    /// file, and a partition with nothing left helps divide an open one.
+    /// Size decides nothing here. A file becomes one part per partition when
+    /// it is alone, and a collection larger than the partition count is not
+    /// split. At run time DataFusion's shared queue hands out the entries.
     #[test]
-    fn a_scan_plans_one_entry_per_partition_whatever_its_files() {
+    fn a_scan_fills_every_partition_whatever_its_files() {
+        use beacon_nd_array::arrow::morsel::FilePart;
         use datafusion::datasource::listing::PartitionedFile;
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
@@ -1329,26 +1319,25 @@ mod reader_backend_tests {
             let planned = source
                 .repartitioned(PARTITIONS, MIN_SHARE_SIZE, None, &config)
                 .unwrap()
-                .unwrap_or_else(|| panic!("{what}: a scan is planned morsel-driven"));
+                .unwrap_or_else(|| panic!("{what}: a scan is split over the partitions"));
 
             assert_eq!(planned.file_groups.len(), PARTITIONS, "{what}");
-            for group in &planned.file_groups {
-                assert_eq!(
-                    group.len(),
-                    1,
-                    "{what}: one standing entry, not a file list"
-                );
-            }
-
-            let planned_source = planned
-                .file_source()
-                .as_any()
-                .downcast_ref::<NetCDFSource>()
-                .expect("the config carries a NetCDFSource");
-            assert_eq!(
-                planned_source.morsel_files(),
-                Some(count),
-                "{what}: every file is in the queue the openers draw from"
+            let entries: Vec<&PartitionedFile> =
+                planned.file_groups.iter().flat_map(|group| group.iter()).collect();
+            let parts = if count >= PARTITIONS { 1 } else { PARTITIONS.div_ceil(count) };
+            assert_eq!(entries.len(), count * parts, "{what}: {parts} parts per file");
+            let paths: std::collections::HashSet<String> = entries
+                .iter()
+                .map(|entry| entry.object_meta.location.to_string())
+                .collect();
+            assert_eq!(paths.len(), count, "{what}: every file is in the scan");
+            assert!(
+                entries.iter().all(|file| file.range.is_none()),
+                "{what}: no file is split by byte range"
+            );
+            assert!(
+                entries.iter().all(|entry| FilePart::of(entry).count == parts),
+                "{what}: every entry names its part"
             );
         }
     }
@@ -1453,11 +1442,11 @@ mod reader_backend_tests {
         let options = HashMap::from([("skip_unbroadcastable".to_string(), "true".to_string())]);
 
         let format = factory.create(&ctx.state(), &options).unwrap();
-        let format = format.as_any().downcast_ref::<NetcdfFormat>().unwrap();
+        let format = format.downcast_ref::<NetcdfFormat>().unwrap();
         assert!(format.options.skip_unbroadcastable);
 
         let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
-        let default = default.as_any().downcast_ref::<NetcdfFormat>().unwrap();
+        let default = default.downcast_ref::<NetcdfFormat>().unwrap();
         assert!(!default.options.skip_unbroadcastable);
     }
 
@@ -1477,10 +1466,8 @@ mod reader_backend_tests {
     /// A partitioned table reads, and every row holds the value of its own
     /// file's path.
     ///
-    /// The value is in the *path*, and an nd scan reads a whole collection
-    /// behind one plan entry, so `FileStream` cannot append it: it does not know
-    /// which file a batch came from. The reader appends it itself instead —
-    /// per file, which is per morsel.
+    /// The value is in the *path*. The nd reader appends it itself, per file,
+    /// onto its nd-encoded batches.
     #[tokio::test]
     async fn a_partitioned_table_gives_every_row_the_value_of_its_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -1590,9 +1577,8 @@ mod reader_backend_tests {
 
     /// The same values come back when the scan divides over many partitions.
     ///
-    /// That is the morsel path: every partition draws from one queue, and the
-    /// entry it is handed stands for the scan rather than for a file. The values
-    /// travel on the queued files instead.
+    /// That is the split path: each file becomes several parts, and every
+    /// partition draws parts from one queue. The values travel on each part.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_parallel_partitioned_scan_keeps_the_values_apart() {
         let dir = tempfile::tempdir().unwrap();

@@ -202,23 +202,23 @@ pub fn definition_from_provider(
     table_name: &str,
     table: &dyn TableProvider,
 ) -> datafusion::error::Result<Arc<dyn TableDefinition>> {
-    if let Some(table) = table.as_any().downcast_ref::<beacon_lance::LanceTable>() {
+    if let Some(table) = table.downcast_ref::<beacon_lance::LanceTable>() {
         Ok(Arc::new(table.definition().clone()))
-    } else if let Some(table) = table.as_any().downcast_ref::<ExternalTable>() {
+    } else if let Some(table) = table.downcast_ref::<ExternalTable>() {
         Ok(Arc::new(table.definition().clone()))
-    } else if let Some(table) = table.as_any().downcast_ref::<MaterializedView>() {
+    } else if let Some(table) = table.downcast_ref::<MaterializedView>() {
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(definition) = beacon_datafusion_ext::remote::remote_table_definition(table) {
         Ok(Arc::new(definition))
-    } else if let Some(table) = table.as_any().downcast_ref::<beacon_delta::BeaconDeltaTable>() {
+    } else if let Some(table) = table.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(definition) = beacon_iceberg::iceberg_table_definition(table) {
         Ok(Arc::new(definition))
-    } else if let Some(table) = table.as_any().downcast_ref::<beacon_icechunk::IcechunkTable>() {
+    } else if let Some(table) = table.downcast_ref::<beacon_icechunk::IcechunkTable>() {
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(definition) = beacon_sql_databases::sql_database_table_definition(table) {
         Ok(Arc::new(definition))
-    } else if let Some(table) = table.as_any().downcast_ref::<ViewTable>() {
+    } else if let Some(table) = table.downcast_ref::<ViewTable>() {
         let definition =
             ViewTableDefinition::try_from_view(table_name, table).map_err(|error| {
                 DataFusionError::Plan(format!(

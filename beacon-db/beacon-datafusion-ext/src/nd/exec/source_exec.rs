@@ -1,6 +1,5 @@
 //! Decoder node: nd-encoded `RecordBatch`es from a child plan → nd batches.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -71,10 +70,6 @@ impl DisplayAs for NdSourceExec {
 impl ExecutionPlan for NdSourceExec {
     fn name(&self) -> &str {
         "NdSourceExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

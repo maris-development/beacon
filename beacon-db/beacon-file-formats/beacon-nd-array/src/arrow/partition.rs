@@ -1,10 +1,8 @@
 //! The `PARTITIONED BY` columns of a scan, as columns of a file's batches.
 //!
 //! A partition column lives in the *path* of a file rather than inside it, so
-//! every row that file contributes carries the same value. DataFusion's
-//! `FileStream` appends that value per file, which it can do because a plan
-//! entry is a file. An nd scan reads a whole collection behind one entry, so it
-//! appends the values itself — per morsel, which is per file.
+//! every row that file contributes carries the same value. An nd reader
+//! appends the values itself, per file, onto its nd-encoded batches.
 //!
 //! The value repeats over the whole file, and an nd array of rank 0 says
 //! exactly that: one value, no axis. It broadcasts onto whatever grid the

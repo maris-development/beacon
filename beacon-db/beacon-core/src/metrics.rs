@@ -240,16 +240,18 @@ fn collect_scan_totals(plan: &dyn ExecutionPlan, totals: &mut ScanTotals) {
         .and_then(|metrics| metrics.sum_by_name("bytes_scanned"))
         .map(|value| value.as_usize() as u64);
 
+    let mut seen = std::collections::HashSet::new();
     let files: Vec<&object_store::ObjectMeta> = plan
-        .as_any()
         .downcast_ref::<DataSourceExec>()
-        .and_then(|exec| exec.data_source().as_any().downcast_ref::<FileScanConfig>())
+        .and_then(|exec| exec.data_source().downcast_ref::<FileScanConfig>())
         .map(|config| {
             config
                 .file_groups
                 .iter()
                 .flat_map(|group| group.files())
                 .map(|file| &file.object_meta)
+                // A split file is listed once per part. Count each path once.
+                .filter(|meta| seen.insert(&meta.location))
                 .collect()
         })
         .unwrap_or_default();
@@ -292,7 +294,7 @@ fn collect_metrics_json(plan: &dyn ExecutionPlan) -> NodeMetrics {
 /// The output is the array form consumed by pgjson visualizers (e.g. dalibo):
 /// a single-element array wrapping the root `"Plan"` node, with children nested
 /// recursively under `"Plans"`. Newer DataFusion produces this natively via
-/// `EXPLAIN (ANALYZE, FORMAT pgjson)`, which the pinned DataFusion 53 rejects;
+/// `EXPLAIN (ANALYZE, FORMAT pgjson)`, which the pinned DataFusion 54 rejects;
 /// this backports the same shape by walking the already-executed plan.
 ///
 /// The plan must have been run to completion first so its metrics are populated.
@@ -451,6 +453,35 @@ mod tests {
         assert_eq!(metrics.parsed_logical_plan, serde_json::Value::Null);
         assert_eq!(metrics.node_metrics.operator, "");
         assert!(metrics.node_metrics.children.is_empty());
+    }
+
+    /// A file split into parts is one file: its path and its size count once.
+    #[test]
+    fn a_split_file_counts_once() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::physical_plan::{
+            CsvSource, FileGroup, FileScanConfigBuilder, FileSource,
+        };
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let schema = Arc::new(arrow::datatypes::Schema::empty());
+        let source: Arc<dyn FileSource> = Arc::new(CsvSource::new(schema));
+        let big = PartitionedFile::new("argo/big.nc", 1_000);
+        let small = PartitionedFile::new("argo/small.nc", 10);
+        // Three parts of one file over three partitions, and one whole file.
+        let config = FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), source)
+            .with_file_groups(vec![
+                FileGroup::new(vec![big.clone(), small]),
+                FileGroup::new(vec![big.clone()]),
+                FileGroup::new(vec![big]),
+            ])
+            .build();
+        let plan = DataSourceExec::from_data_source(config);
+
+        let mut totals = ScanTotals::default();
+        collect_scan_totals(plan.as_ref(), &mut totals);
+        assert_eq!(totals.files, ["argo/big.nc", "argo/small.nc"]);
+        assert_eq!(totals.bytes, 1_010, "each file's size counts once");
     }
 
     /// The file tracer shares the tracker's path list rather than copying it, so

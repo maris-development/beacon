@@ -12,7 +12,7 @@
 //! [`EmptyTable`](datafusion::datasource::empty::EmptyTable), so the `CREATE`
 //! paths recognize it and say that in the error.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::{
@@ -48,10 +48,6 @@ impl Default for DefaultTablePlaceholder {
 
 #[async_trait::async_trait]
 impl TableProvider for DefaultTablePlaceholder {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }
@@ -74,7 +70,7 @@ impl TableProvider for DefaultTablePlaceholder {
 /// True when `name` holds nothing but the default-table stand-in.
 pub async fn holds_placeholder(session_ctx: &SessionContext, name: TableReference) -> bool {
     match session_ctx.table_provider(name).await {
-        Ok(provider) => provider.as_any().is::<DefaultTablePlaceholder>(),
+        Ok(provider) => provider.is::<DefaultTablePlaceholder>(),
         Err(_) => false,
     }
 }

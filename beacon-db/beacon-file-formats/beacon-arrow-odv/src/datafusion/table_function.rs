@@ -4,10 +4,7 @@ use crate::datafusion::OdvFormat;
 use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use datafusion::{
-    catalog::TableFunctionImpl,
-    prelude::{Expr, SessionContext},
-};
+use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
@@ -54,10 +51,11 @@ impl BeaconTableFunctionImpl for ReadOdvAsciiFunc {
 }
 
 impl TableFunctionImpl for ReadOdvAsciiFunc {
-    fn call(
+    fn call_with_args(
         &self,
-        args: &[Expr],
+        args: datafusion::catalog::TableFunctionArgs,
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        let args = args.exprs();
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;

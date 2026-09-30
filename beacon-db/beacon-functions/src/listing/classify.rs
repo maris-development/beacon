@@ -86,7 +86,6 @@ fn judge(format: &dyn FileFormatFactoryExt, objects: &[ObjectMeta]) -> Vec<Resul
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -153,9 +152,6 @@ mod tests {
         fn default(&self) -> Arc<dyn FileFormat> {
             unimplemented!("a listing never creates a format")
         }
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
     }
 
     impl FileFormatFactoryExt for ExtFactory {
@@ -191,9 +187,6 @@ mod tests {
         }
         fn default(&self) -> Arc<dyn FileFormat> {
             unimplemented!("a listing never creates a format")
-        }
-        fn as_any(&self) -> &dyn Any {
-            self
         }
     }
 

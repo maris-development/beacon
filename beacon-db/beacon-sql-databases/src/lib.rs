@@ -24,6 +24,7 @@ mod options;
 mod secret;
 mod source;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -48,10 +49,8 @@ pub use source::BeaconSqlTable;
 pub fn sql_database_table_definition(
     provider: &dyn TableProvider,
 ) -> Option<SqlDatabaseTableDefinition> {
-    let adaptor = provider
-        .as_any()
-        .downcast_ref::<FederatedTableProviderAdaptor>()?;
-    let source = adaptor.source.as_any().downcast_ref::<SQLTableSource>()?;
+    let adaptor = provider.downcast_ref::<FederatedTableProviderAdaptor>()?;
+    let source = (adaptor.source.as_ref() as &dyn Any).downcast_ref::<SQLTableSource>()?;
     let table = source.table.as_any().downcast_ref::<BeaconSqlTable>()?;
     Some(table.definition().clone())
 }

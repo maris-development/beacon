@@ -209,7 +209,6 @@ impl OutputFormat {
                 // The COPY sink reads its write dimensions from the factory, so clone the
                 // registered one and set them there.
                 let mut factory = registered
-                    .as_any()
                     .downcast_ref::<NetCDFFormatFactory>()
                     .ok_or_else(|| {
                         anyhow::anyhow!(

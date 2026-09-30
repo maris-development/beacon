@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_binary_format::{
@@ -49,10 +49,6 @@ impl FileFormatFactory for BBFFormatFactory {
         Ok(Arc::new(BBFFormat))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn default(&self) -> std::sync::Arc<dyn FileFormat> {
         std::sync::Arc::new(BBFFormat)
     }
@@ -62,7 +58,7 @@ impl FileFormatFactoryExt for BBFFormatFactory {
     /// BBF opts into the schema cache on its name alone. A file carries its own
     /// schema, and the format has no options.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        format.as_any().downcast_ref::<BBFFormat>()?;
+        format.downcast_ref::<BBFFormat>()?;
         Some(SchemaOptions::new("bbf").finish())
     }
 
@@ -93,12 +89,6 @@ pub struct BBFFormat;
 
 #[async_trait::async_trait]
 impl FileFormat for BBFFormat {
-    /// Returns the table provider as [`Any`](std::any::Any) so that it can be
-    /// downcast to a specific implementation.
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     /// Returns the extension for this FileFormat, e.g. "file.csv" -> csv
     fn get_ext(&self) -> String {
         BBF_FORMAT_NAME.to_string()
@@ -187,7 +177,7 @@ impl FileFormat for BBFFormat {
             .with_projection(projection)
             .with_type_widening(Arc::clone(&session_widening(state).strategy));
         // Keep the token a caller set on the incoming source.
-        if let Some(incoming) = conf.file_source().as_any().downcast_ref::<BBFSource>() {
+        if let Some(incoming) = conf.file_source().downcast_ref::<BBFSource>() {
             source.set_cancellation_token(incoming.cancellation_token());
         }
         // Fail at plan time, so the user sees the error before the scan runs.
@@ -312,7 +302,7 @@ mod tests {
         let format = BBFFormatFactory
             .create(&ctx.state(), &opts)
             .expect("an unknown option must not fail");
-        assert!(format.as_any().downcast_ref::<BBFFormat>().is_some());
+        assert!(format.downcast_ref::<BBFFormat>().is_some());
     }
 
     /// Only `.bbf` objects are BBF datasets; anything else in the listing must be
@@ -459,7 +449,6 @@ mod tests {
         let source = format.file_source(TableSchema::from_file_schema(schema));
         let token = CancellationToken::new();
         source
-            .as_any()
             .downcast_ref::<BBFSource>()
             .expect("bbf source")
             .set_cancellation_token(token.clone());
@@ -475,15 +464,12 @@ mod tests {
         // NdBroadcastExec over NdSourceExec over the scan.
         let scan = plan.children()[0].children()[0];
         let planned = scan
-            .as_any()
             .downcast_ref::<datafusion::datasource::source::DataSourceExec>()
             .expect("data source exec")
             .data_source()
-            .as_any()
             .downcast_ref::<FileScanConfig>()
             .expect("file scan config")
             .file_source()
-            .as_any()
             .downcast_ref::<BBFSource>()
             .expect("bbf source")
             .cancellation_token();

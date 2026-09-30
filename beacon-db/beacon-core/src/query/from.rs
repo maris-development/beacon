@@ -50,7 +50,7 @@ impl From {
                 // Use a registered table from the catalog.
                 if let Ok(mut table) = session_context.table_provider(name.as_str()).await {
                     if let (Some(projection), Some(object_table)) =
-                        (projection, table.as_any().downcast_ref::<FastObjectTable>())
+                        (projection, table.downcast_ref::<FastObjectTable>())
                     {
                         let projected_table =
                             object_table.with_pushdown_projection(projection.clone())?;

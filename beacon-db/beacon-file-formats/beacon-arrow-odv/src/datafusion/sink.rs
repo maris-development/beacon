@@ -1,4 +1,4 @@
-use std::{any::Any, fmt::Formatter, sync::Arc};
+use std::{fmt::Formatter, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use datafusion::{
@@ -60,10 +60,6 @@ impl DisplayAs for OdvSink {
 
 #[async_trait::async_trait]
 impl DataSink for OdvSink {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> &SchemaRef {
         self.config.output_schema()
     }

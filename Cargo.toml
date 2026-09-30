@@ -6,7 +6,7 @@ members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", 
 
 version = "2.0.0"
 
-rust-version = "1.94"
+rust-version = "1.95"
 
 [workspace.dependencies]
 tokio = {version = "1.47.1", features = ["full"]}
@@ -61,22 +61,24 @@ redb = "=4.1.0"
 memmap2 = "=0.9.11"
 
 
-deltalake = { version = "=0.32.4", features = ["datafusion"] }
+# No crates.io deltalake release is on DataFusion 54. Pin the last DataFusion 54 commit of delta-rs main.
+deltalake = { git = "https://github.com/delta-io/delta-rs.git", rev = "37ee982736b645b4d3f79a5d59e680add229a58c", features = ["datafusion"] }
 
-iceberg = "=0.10.0"
-iceberg-datafusion = "=0.10.0"
-datafusion = "^53"
+# The last DataFusion 54 commit of iceberg-rust main, before the DataFusion 55 bump.
+iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2" }
+iceberg-datafusion = { git = "https://github.com/apache/iceberg-rust.git", rev = "c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2" }
+datafusion = "^54.1"
 
-datafusion-datasource = "^53"
+datafusion-datasource = "^54.1"
 
-datafusion-datasource-parquet = "^53"
+datafusion-datasource-parquet = "^54.1"
 
-datafusion-federation = { version = "=0.5.3", features = ["sql"] }
+datafusion-federation = { version = "=0.5.5", features = ["sql"] }
 
 
-datafusion-table-providers = { version = "=0.11.2", default-features = false }
+datafusion-table-providers = { version = "=0.12.1", default-features = false }
 
-datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "92245ff8e2eaad939425993cff7fa9180d471ec1", default-features = false, features = ["df53", "sql"] }
+datafusion-spatial = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "92245ff8e2eaad939425993cff7fa9180d471ec1", default-features = false, features = ["df54", "sql"] }
 
 datafusion-spatial-kernels = { git = "https://github.com/robinskil/datafusion-spatial.git", rev = "92245ff8e2eaad939425993cff7fa9180d471ec1" }
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
@@ -91,12 +93,12 @@ oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", version = "0.4.0"
 tonic = "0.14.1"
 
 
-lance = { version = "=7.0.0", default-features = false }
-lance-index = "=7.0.0"
-lance-io = { version = "=7.0.0", default-features = false }
-lance-core = "=7.0.0"
+lance = { version = "=11.0.0", default-features = false }
+lance-index = "=11.0.0"
+lance-io = { version = "=11.0.0", default-features = false }
+lance-core = "=11.0.0"
 
-lance-encoding = "=7.0.0"
+lance-file = "=11.0.0"
 
 arrow = { version = "^58", features = ["prettyprint"]}
 arrow-schema = { version = "^58", features = ["serde"] }

@@ -19,7 +19,6 @@
 //! query, with no restart, and a plan never disagrees with the data its scan
 //! returns.
 
-use std::any::Any;
 use std::sync::{Arc, RwLock};
 
 use datafusion::arrow::datatypes::SchemaRef;
@@ -155,10 +154,6 @@ impl BeaconIcebergTable {
 
 #[async_trait::async_trait]
 impl TableProvider for BeaconIcebergTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     /// The schema of the table as of now.
     ///
     /// The planner calls this before it plans, so this is where the table is
@@ -231,7 +226,6 @@ impl TableProvider for BeaconIcebergTable {
 /// configuration.
 pub fn iceberg_table_definition(table: &dyn TableProvider) -> Option<IcebergTableDefinition> {
     table
-        .as_any()
         .downcast_ref::<BeaconIcebergTable>()
         .map(|table| table.definition().clone())
 }

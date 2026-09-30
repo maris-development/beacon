@@ -35,7 +35,7 @@ use datafusion::{
     datasource::MemTable,
     execution::object_store::ObjectStoreUrl,
     logical_expr::{Signature, Volatility},
-    prelude::{Expr, SessionContext},
+    prelude::SessionContext,
 };
 use object_store::ObjectStoreExt;
 use tokio::runtime::Handle;
@@ -117,9 +117,9 @@ impl BeaconTableFunctionImpl for ViewStatisticsCacheFunc {
 // ─── TableFunctionImpl ──────────────────────────────────────────────────────
 
 impl TableFunctionImpl for ViewStatisticsCacheFunc {
-    fn call(
+    fn call_with_args(
         &self,
-        _args: &[Expr],
+        _args: datafusion::catalog::TableFunctionArgs,
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
         let entries = self.cache.list_entries();
         let schema = output_schema();

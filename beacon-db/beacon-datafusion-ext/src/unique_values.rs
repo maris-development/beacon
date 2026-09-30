@@ -114,10 +114,6 @@ impl ExecutionPlan for UniqueValuesExec {
         "UniqueValuesExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<datafusion::physical_plan::PlanProperties> {
         &self.cache
     }

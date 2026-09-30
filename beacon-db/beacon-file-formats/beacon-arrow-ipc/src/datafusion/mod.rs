@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
@@ -41,9 +41,6 @@ impl FileFormatFactory for ArrowFormatFactory {
         Arc::new(ArrowFormat::new())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl GetExt for ArrowFormatFactory {
@@ -56,7 +53,7 @@ impl FileFormatFactoryExt for ArrowFormatFactory {
     /// Arrow IPC opts into the schema cache on its name alone. A file carries
     /// its own schema, and this format takes no option that could change it.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        format.as_any().downcast_ref::<ArrowFormat>()?;
+        format.downcast_ref::<ArrowFormat>()?;
         Some(SchemaOptions::new("arrow").finish())
     }
 
@@ -112,10 +109,6 @@ impl Default for ArrowFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for ArrowFormat {
-    fn as_any(&self) -> &dyn Any {
-        self.inner_format.as_any()
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         self.inner_format.compression_type()
     }

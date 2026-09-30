@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
@@ -72,9 +72,6 @@ impl FileFormatFactory for OdvFileFormatFactory {
         Arc::new(OdvFormat::new())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 #[derive(Debug)]
@@ -120,10 +117,6 @@ impl OdvFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for OdvFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     /// Returns the extension for this FileFormat when compressed, e.g. "file.csv.gz" -> csv
     fn get_ext_with_compression(
         &self,

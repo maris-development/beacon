@@ -3,7 +3,6 @@
 //! A plan entry is one collection; partitions share its datasets through
 //! [`CollectionQueues`] instead of splitting it by byte range.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use datafusion::{
@@ -157,10 +156,6 @@ impl FileSource for AtlasSource {
         });
         let adapting = AdaptingOpener::wrap(raw, read_schema, Arc::clone(&self.type_widening));
         ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn table_schema(&self) -> &TableSchema {

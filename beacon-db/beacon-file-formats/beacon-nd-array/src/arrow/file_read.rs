@@ -3,7 +3,6 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, RecordBatchOptions};
 use arrow::datatypes::{FieldRef, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use crossbeam::queue::ArrayQueue;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_expr::PhysicalExpr;
 use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
@@ -28,13 +27,12 @@ use crate::arrow::partition::FilePartitions;
 use crate::arrow::pushdown_filter::PushdownFilter;
 use crate::dataset::AnyDataset;
 
-/// What the scan wants out of a file, and so what a batch off the queue becomes.
+/// What the scan wants out of a file, and so what a read unit becomes.
 ///
-/// A scan is one or the other throughout: the first partition to arrive decides,
-/// and every partition of a scan would decide the same. The decision reaches
-/// down to the read itself, because the two want different batches — a column
-/// read wants `beacon.nd`-encoded chunks for the `NdSourceExec` above it to
-/// decode, and `COUNT(*)` wants flat ones it can take a row count off.
+/// The decision reaches down to the read itself, because the two want
+/// different batches: a column read wants `beacon.nd`-encoded chunks for the
+/// `NdSourceExec` above it to decode, and `COUNT(*)` wants flat ones it can
+/// take a row count off.
 #[derive(Debug)]
 enum Output {
     /// Columns: nd-encoded batches, reordered and null-filled onto the
@@ -69,14 +67,55 @@ impl Output {
     fn encoded(&self) -> bool {
         matches!(self, Output::Columns { .. })
     }
+
+    /// `batches` turned into what the scan wants.
+    fn finish(
+        &self,
+        batches: BoxStream<'static, Result<RecordBatch>>,
+    ) -> BoxStream<'static, Result<RecordBatch>> {
+        match self {
+            Output::Columns {
+                adapter,
+                partition_fields,
+                partition_columns,
+            } => {
+                let adapter = adapter.clone();
+                let fields = partition_fields.clone();
+                let columns = partition_columns.clone();
+                batches
+                    .and_then(move |batch| {
+                        let adapted = with_partitions(&batch, &fields, &columns)
+                            .and_then(|batch| adapter.adapt_batch(&batch))
+                            .map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "Failed to adapt the batch onto the scan's schema: {e}"
+                                ))
+                            });
+                        futures::future::ready(adapted)
+                    })
+                    .boxed()
+            }
+            Output::Rows { schema, partitions } => {
+                let schema = schema.clone();
+                let partitions = partitions.clone();
+                batches
+                    .and_then(move |batch| {
+                        futures::future::ready(count_batch(&schema, &partitions, batch.num_rows()))
+                    })
+                    .boxed()
+            }
+            // `FileRead::plan` pairs `Nothing` with no units, so nothing
+            // reaches here.
+            Output::Nothing => futures::stream::empty().boxed(),
+        }
+    }
 }
 
-/// One unit of work: what a partition reads for one pop.
+/// One unit of work: what one read of a file produces.
 ///
-/// The two dataset shapes divide differently, so the queue carries whichever
-/// unit its file is made of. Both are read once and by one partition, which is
-/// all the queue needs of them.
-#[derive(Debug)]
+/// The two dataset shapes divide differently, so a plan holds whichever unit
+/// its file is made of.
+#[derive(Debug, Clone)]
 enum Work {
     /// One hyperslab of a regular dataset's chunk grid.
     Grid(ArraySubset),
@@ -84,23 +123,31 @@ enum Work {
     ///
     /// A ragged dataset has no chunk grid. Its batches are cut where the cast
     /// boundaries fall, which takes the cumulative offsets and the predicate
-    /// masks to work out, so the plan is built once by whichever partition
-    /// arrives first. After that a range reads on its own, exactly as a chunk
-    /// does.
+    /// masks to work out. After that a range reads on its own, as a chunk does.
     Ragged(Range<usize>),
 }
 
-/// A file opened once, and the subsets left to read from it.
+/// The units of a file worth reading, and how to read one.
 ///
-/// The queue holds only what the query needs: [`WorkQueue::build`] applies the
-/// predicate as it fills it, so every unit in here is a read that will produce
-/// rows.
+/// [`ChunkPlan::build`] applies the predicate as it fills the list, so every
+/// unit in it is a read that can produce rows.
 #[derive(Debug)]
-pub struct WorkQueue {
-    queue: ArrayQueue<Work>,
-    read: ReadKind,
+pub(crate) struct ChunkPlan {
+    units: Vec<Work>,
+    read: Arc<ReadKind>,
     /// Whether a chunk leaves nd-encoded. See [`Output`].
     encoded: bool,
+    /// What the predicate excluded before the list existed. A slice holds
+    /// none, so that a file's counts are reported once.
+    pruned: Pruned,
+}
+
+/// The chunks (regular) or casts (ragged) the predicate excluded from a file,
+/// and the rows they held.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pruned {
+    pub chunks: usize,
+    pub rows: usize,
 }
 
 #[derive(Debug)]
@@ -115,25 +162,20 @@ enum ReadKind {
     },
 }
 
-impl WorkQueue {
-    /// Open `dataset` and fill the queue with the subsets worth reading.
+impl ChunkPlan {
+    /// Open `dataset` and list the units worth reading.
     ///
     /// A regular dataset is cut on its chunk grid; a ragged one on its batch
-    /// plan. Whichever partitions reach this file draw from the queue, and each
-    /// subset in it is popped once, so no two of them read the same data.
+    /// plan. The list depends only on the dataset, `batch_size` and the
+    /// predicate, so two plans of one file agree unit by unit. The parts of a
+    /// split file rely on that.
     ///
     /// # The predicate is applied here, not later
     ///
-    /// The coordinate arrays are read once, before the queue is filled, and a
+    /// The coordinate arrays are read once, before the list is filled, and a
     /// chunk no row of which can meet the predicate never enters it. So the
-    /// queue holds the work the query actually needs, and the partitions divide
-    /// *that*.
-    ///
-    /// Filtering as each chunk is popped would divide the file evenly and the
-    /// work unevenly: one partition can draw a run of chunks that are all
-    /// excluded and finish having read nothing, while another reads everything
-    /// the query wanted. It would also leave `remaining` counting work that does
-    /// not exist.
+    /// list holds the work the query actually needs, and the parts of a file
+    /// divide *that*.
     ///
     /// A ragged dataset already works this way: `plan_ragged_read` applies the
     /// predicate when it chooses which casts survive, so its plan holds only the
@@ -143,8 +185,7 @@ impl WorkQueue {
         batch_size: usize,
         predicate: Option<PushdownFilter>,
         encoded: bool,
-        metrics: Option<&ReadMetrics>,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Self> {
         let regular = match dataset {
             AnyDataset::Regular(regular) => regular,
             AnyDataset::Ragged { ragged, .. } => {
@@ -152,25 +193,20 @@ impl WorkQueue {
                     .await
                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
 
-                // Casts the predicate excluded before the plan existed. No batch
-                // can account for them, so they are counted here.
-                if let (Some(metrics), Some((casts, rows))) = (metrics, plan.pruned) {
-                    metrics.chunks_pruned.add(casts);
-                    metrics.rows_pruned.add(rows);
-                }
-
-                let queue = ArrayQueue::new(plan.ranges.len().max(1));
-                for range in plan.ranges.clone() {
-                    // The capacity is the range count, so this cannot fail.
-                    let _ = queue.push(Work::Ragged(range));
-                }
-                return Ok(Arc::new(Self {
-                    queue,
-                    read: ReadKind::Ragged {
+                // Casts the predicate excluded before the plan existed. No
+                // unit can account for them, so the plan keeps their count.
+                let pruned = plan
+                    .pruned
+                    .map_or_else(Pruned::default, |(chunks, rows)| Pruned { chunks, rows });
+                let units = plan.ranges.iter().cloned().map(Work::Ragged).collect();
+                return Ok(Self {
+                    units,
+                    read: Arc::new(ReadKind::Ragged {
                         plan: Arc::new(plan),
-                    },
+                    }),
                     encoded,
-                }));
+                    pruned,
+                });
             }
         };
 
@@ -180,8 +216,8 @@ impl WorkQueue {
         let arrays = Arc::new(regular.arrays);
         let schema = build_dataset_schema(&arrays);
 
-        // Read once for the file, before anything is queued. Computing them per
-        // work unit instead would read the coordinate arrays once per chunk.
+        // Read once for the file, before anything is listed. Computing them per
+        // unit instead would read the coordinate arrays once per chunk.
         let dim_masks = compute_predicate_masks(&arrays, predicate)
             .await
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
@@ -193,75 +229,100 @@ impl WorkQueue {
             .into_iter()
             .partition(|subset| !chunk_is_pruned(&dim_masks, &dims, subset));
 
-        if let Some(metrics) = metrics {
-            metrics.chunks_pruned.add(pruned.len());
-            metrics
-                .rows_pruned
-                .add(pruned.iter().map(|subset| subset.rows()).sum::<usize>());
-        }
+        let pruned = Pruned {
+            chunks: pruned.len(),
+            rows: pruned.iter().map(|subset| subset.rows()).sum(),
+        };
 
-        // A dataset with no chunks left still needs a queue, and `ArrayQueue`
-        // will not take a capacity of zero.
-        let queue = ArrayQueue::new(wanted.len().max(1));
-        for subset in wanted {
-            // The capacity is the chunk count, so this cannot fail.
-            let _ = queue.push(Work::Grid(subset));
-        }
-
-        Ok(Arc::new(Self {
-            queue,
-            read: ReadKind::Grid {
+        Ok(Self {
+            units: wanted.into_iter().map(Work::Grid).collect(),
+            read: Arc::new(ReadKind::Grid {
                 arrays,
                 dims: Arc::new(dims),
                 schema,
-            },
+            }),
             encoded,
-        }))
-    }
-
-    /// How many subsets are left. For tests and diagnostics.
-    pub fn remaining(&self) -> usize {
-        self.queue.len()
-    }
-
-    /// One partition's stream: pop, read, yield, until the queue is empty.
-    ///
-    /// Every partition of the file calls this and they all pull from the same
-    /// queue, so the batches divide between them as fast as each can take them.
-    /// A partition that drops its stream stops popping, and whatever it had not
-    /// taken is left for the others.
-    pub(crate) fn stream(
-        self: Arc<Self>,
-        metrics: Option<ReadMetrics>,
-    ) -> BoxStream<'static, Result<RecordBatch>> {
-        futures::stream::unfold((self, metrics), |(shared, metrics)| async move {
-            let work = shared.queue.pop()?;
-            let batches = shared.read(work, metrics.clone());
-            Some((batches, (shared, metrics)))
+            pruned,
         })
-        .flatten()
-        .boxed()
     }
 
-    /// The batches one unit of work produces.
-    fn read(
-        &self,
-        work: Work,
+    /// How many units are left to read. For tests and diagnostics.
+    pub(crate) fn len(&self) -> usize {
+        self.units.len()
+    }
+
+    /// A copy of part `index` of `count`. See [`part_range`].
+    fn slice(&self, index: usize, count: usize) -> Self {
+        let range = part_range(self.units.len(), index, count);
+        Self {
+            units: self.units[range].to_vec(),
+            read: Arc::clone(&self.read),
+            encoded: self.encoded,
+            pruned: Pruned::default(),
+        }
+    }
+
+    /// One lazy stream per unit, in list order. Nothing is read until a
+    /// stream is polled.
+    fn into_streams(
+        self,
+        metrics: Option<ReadMetrics>,
+    ) -> Vec<BoxStream<'static, Result<RecordBatch>>> {
+        let Self {
+            units,
+            read,
+            encoded,
+            ..
+        } = self;
+        units
+            .into_iter()
+            .map(|work| read_unit(&read, encoded, work, metrics.clone()))
+            .collect()
+    }
+
+    /// Every unit, one after the other.
+    pub(crate) fn stream(
+        self,
         metrics: Option<ReadMetrics>,
     ) -> BoxStream<'static, Result<RecordBatch>> {
-        match (work, &self.read) {
-            (
-                Work::Grid(subset),
-                ReadKind::Grid {
-                    arrays,
-                    dims,
-                    schema,
-                },
-            ) => {
-                let arrays = arrays.clone();
-                let dims = dims.clone();
-                let schema = schema.clone();
-                let flat = !self.encoded;
+        futures::stream::iter(self.into_streams(metrics))
+            .flatten()
+            .boxed()
+    }
+}
+
+/// The units that part `index` of `count` reads, out of `len`.
+///
+/// The parts are contiguous and differ in size by one unit at most. Between
+/// them they cover `0..len` exactly once. A part past the end of a short list
+/// is empty.
+pub(crate) fn part_range(len: usize, index: usize, count: usize) -> Range<usize> {
+    let count = count.max(1);
+    let index = index.min(count);
+    (index * len / count)..((index + 1).min(count) * len / count)
+}
+
+/// The batches one unit of work produces.
+fn read_unit(
+    read: &ReadKind,
+    encoded: bool,
+    work: Work,
+    metrics: Option<ReadMetrics>,
+) -> BoxStream<'static, Result<RecordBatch>> {
+    match (work, read) {
+        (
+            Work::Grid(subset),
+            ReadKind::Grid {
+                arrays,
+                dims,
+                schema,
+            },
+        ) => {
+            let arrays = arrays.clone();
+            let dims = dims.clone();
+            let schema = schema.clone();
+            let flat = !encoded;
+            futures::stream::once(async move {
                 // The rows this chunk holds, as the scan will broadcast them.
                 // An encoded batch carries the lot in one row, so counting the
                 // batch would say nothing.
@@ -269,128 +330,115 @@ impl WorkQueue {
                     metrics.chunks_read.add(1);
                     metrics.rows_read.add(subset.rows());
                 }
-                futures::stream::once(async move {
-                    // No masks here: `build` applied them when it filled the
-                    // queue, so this chunk is one the query wants. Passing them
-                    // again would rebuild the same chunk mask per read and
-                    // always come to the same answer.
-                    if flat {
-                        return read_chunk(&arrays, subset, schema, &dims, &[])
-                            .await
-                            .map_err(|e| DataFusionError::Execution(e.to_string()));
-                    }
-                    let nd = read_nd_chunk(&arrays, &dims, schema, subset).await?;
-                    beacon_datafusion_ext::nd::encode_nd_record_batch(&nd).map(Some)
-                })
-                .filter_map(|batch| futures::future::ready(batch.transpose()))
-                .boxed()
-            }
-            (Work::Ragged(range), ReadKind::Ragged { plan }) => {
-                let plan = plan.clone();
-                // A ragged read is flat already, and its plan applied the
-                // predicate when it chose which casts survive, so there is
-                // nothing left to prune here.
-                let encode = self.encoded;
-                futures::stream::once(async move {
-                    let flat = read_ragged_range(&plan, range)
+                // No masks here: `build` applied them when it listed the unit.
+                if flat {
+                    return read_chunk(&arrays, subset, schema, &dims, &[])
                         .await
-                        .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-                    if let Some(metrics) = &metrics {
-                        metrics.chunks_read.add(1);
-                        metrics.rows_read.add(flat.num_rows());
-                    }
-                    if encode {
-                        beacon_datafusion_ext::nd::encode_flat_batch_as_nd(&flat)
-                    } else {
-                        Ok(flat)
-                    }
-                })
-                .boxed()
-            }
-            // `build` pairs the unit with the kind, so a mismatch would be a bug
-            // in this file rather than bad input.
-            _ => futures::stream::once(async {
-                Err(DataFusionError::Internal(
-                    "nd read: work unit does not match the dataset it came from".to_string(),
-                ))
+                        .map_err(|e| DataFusionError::Execution(e.to_string()));
+                }
+                let nd = read_nd_chunk(&arrays, &dims, schema, subset).await?;
+                beacon_datafusion_ext::nd::encode_nd_record_batch(&nd).map(Some)
             })
-            .boxed(),
+            .filter_map(|batch| futures::future::ready(batch.transpose()))
+            .boxed()
         }
+        (Work::Ragged(range), ReadKind::Ragged { plan }) => {
+            let plan = plan.clone();
+            // A ragged read is flat already, and its plan applied the
+            // predicate when it chose which casts survive.
+            futures::stream::once(async move {
+                let flat = read_ragged_range(&plan, range)
+                    .await
+                    .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                if let Some(metrics) = &metrics {
+                    metrics.chunks_read.add(1);
+                    metrics.rows_read.add(flat.num_rows());
+                }
+                if encoded {
+                    beacon_datafusion_ext::nd::encode_flat_batch_as_nd(&flat)
+                } else {
+                    Ok(flat)
+                }
+            })
+            .boxed()
+        }
+        // `build` pairs the unit with the kind, so a mismatch is a bug in this
+        // file rather than bad input.
+        _ => futures::stream::once(async {
+            Err(DataFusionError::Internal(
+                "nd read: work unit does not match the dataset it came from".to_string(),
+            ))
+        })
+        .boxed(),
     }
 }
 
 /// Read a whole dataset as flat, broadcast batches, in file order.
 ///
-/// This is the [`WorkQueue`] a `COUNT(*)` builds, minus the counting: one
-/// consumer, the whole queue, and the predicate pruning chunks it cannot use.
-/// It is the only way to get flat batches out of a dataset, and it exists for
-/// the readers' own tests — a scan goes through [`FileRead::plan`], which
-/// resolves a projection and encodes.
+/// This is the [`ChunkPlan`] a `COUNT(*)` builds, minus the counting: the whole
+/// list, and the predicate pruning chunks it cannot use. It exists for the
+/// readers' own tests. A scan goes through [`FileRead::plan`], which resolves
+/// a projection and encodes.
 pub async fn flat_stream(
     dataset: AnyDataset,
     batch_size: usize,
     predicate: Option<PushdownFilter>,
 ) -> Result<BoxStream<'static, Result<RecordBatch>>> {
-    Ok(
-        WorkQueue::build(dataset, batch_size, predicate, false, None)
-            .await?
-            .stream(None),
-    )
+    Ok(ChunkPlan::build(dataset, batch_size, predicate, false)
+        .await?
+        .stream(None))
 }
 
-/// One file, opened and planned once: the [`WorkQueue`] of what is left to read
-/// from it, and what a batch off that queue becomes.
+/// One file, opened and planned: the units to read from it, and what a unit's
+/// batches become.
 ///
-/// This is what a format's [`OpenFile`](crate::arrow::morsel::OpenFile) returns,
-/// and what a [`MorselSource`](crate::arrow::morsel::MorselSource) hands to its
-/// workers. One is built per file, by whichever worker opens it, and every
-/// worker that reaches that file afterwards draws from the same one — which is
-/// what lets several of them finish a file together.
+/// This is what one part of a scan reads. A split file has several parts, and
+/// each builds its own `FileRead` and keeps its own slice. See
+/// [`FileRead::part`].
 ///
 /// Every format that reads through the nd pipeline plans a file the same way, so
 /// the planning lives here rather than four times over. What differs between
-/// them — how a file is opened, which dimensions it reads on — happens before
+/// them (how a file is opened, which dimensions it reads on) happens before
 /// this and is handed in as an [`AnyDataset`].
 #[derive(Debug)]
 pub struct FileRead {
     /// `None` when the file holds none of the projected columns. There is
-    /// nothing to queue, so nothing is opened for reading either.
-    queue: Option<Arc<WorkQueue>>,
-    output: Output,
+    /// nothing to list, so nothing is opened for reading either.
+    plan: Option<ChunkPlan>,
+    output: Arc<Output>,
 }
 
 impl FileRead {
     /// A file the scan decided not to read at all.
     ///
-    /// Nothing is queued and nothing is streamed, so the file costs one pop and
-    /// no I/O. This is what a format returns for a file it ruled out *before*
-    /// opening it — an Atlas dataset whose footer statistics cannot satisfy the
-    /// predicate, say. That decision belongs to the format, because only the
-    /// format knows what it can prove from its own metadata.
+    /// Nothing is listed and nothing is streamed, so the file costs no I/O.
+    /// This is what a format returns for a file it ruled out *before* reading
+    /// it. That decision belongs to the format, because only the format knows
+    /// what it can prove from its own metadata.
     ///
     /// This is not the same as a file that holds none of the projected columns.
     /// [`plan`](Self::plan) reaches that state on its own, having opened the
     /// file to find out.
-    pub fn skipped() -> Arc<Self> {
-        Arc::new(Self {
-            queue: None,
-            output: Output::Nothing,
-        })
+    pub fn skipped() -> Self {
+        Self {
+            plan: None,
+            output: Arc::new(Output::Nothing),
+        }
     }
 
     /// Plan `dataset` for a scan that wants `projected_schema`.
     ///
-    /// Resolves the projection, fills the queue, and decides what a batch off it
-    /// becomes. `predicate` is a hint: it prunes chunks that cannot hold a row
-    /// the query wants, and the scan is expected to apply it again above.
+    /// Resolves the projection, lists the units, and decides what a batch of
+    /// them becomes. `predicate` is a hint: it prunes chunks that cannot hold a
+    /// row the query wants, and the scan is expected to apply it again above.
     ///
-    /// `metrics` belong to the partition that plans. They take the counts made
-    /// here rather than per chunk: a chunk the predicate excluded is dropped
-    /// before the queue exists, so no reader of the queue can account for it.
+    /// A chunk the predicate excludes is dropped before the list exists, so no
+    /// reader can count it. The plan keeps the count instead. See
+    /// [`pruned`](Self::pruned).
     ///
     /// `partitions` are the table's `PARTITIONED BY` columns and this file's
     /// values for them. They are in the file's path rather than in the file, so
-    /// they are appended to its batches here — see [`FilePartitions`]. Pass
+    /// they are appended to its batches here. See [`FilePartitions`]. Pass
     /// [`FilePartitions::none`] for an unpartitioned table.
     pub async fn plan(
         dataset: AnyDataset,
@@ -398,8 +446,7 @@ impl FileRead {
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         partitions: FilePartitions,
-        metrics: Option<&ReadMetrics>,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Self> {
         let dataset_schema: SchemaRef = Arc::new(
             crate::arrow::schema::any_dataset_to_arrow_schema(&dataset).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -414,8 +461,8 @@ impl FileRead {
         let partition_fields = partitions.projected_fields(&projected_schema);
 
         // The columns of this file the query needs, in file order. A partition
-        // column shadows a variable of the same name — the path wins, as it does
-        // for every other format — so it never counts as one of these.
+        // column shadows a variable of the same name (the path wins, as it does
+        // for every other format), so it never counts as one of these.
         let projection: Vec<usize> = dataset_schema
             .fields()
             .iter()
@@ -437,23 +484,15 @@ impl FileRead {
         let (output, projection) = if projection.is_empty() {
             if wanted_file_columns > 0 {
                 // The query named columns and this file has none of them. A
-                // collection is not obliged to be uniform — of one CORA year, 2%
-                // of the files carry no `TEMP` and 10% no `DEPH` — so this is an
+                // collection is not obliged to be uniform (of one CORA year, 2%
+                // of the files carry no `TEMP` and 10% no `DEPH`), so this is an
                 // ordinary file, not a broken one.
                 //
                 // It contributes no rows. Its row count is a property of the
                 // arrays being read, and there are none; inventing one would
                 // mean picking a grid from variables the query never asked for
                 // and returning that many nulls.
-                //
-                // Reading it as a `COUNT(*)` instead, which is what this used to
-                // do, built a batch of no columns against a schema that has
-                // some, and the scan failed outright with "number of columns(0)
-                // must match number of fields(1)".
-                return Ok(Arc::new(Self {
-                    queue: None,
-                    output: Output::Nothing,
-                }));
+                return Ok(Self::skipped());
             }
 
             // `COUNT(*)`, or a scan of nothing but partition columns: no column
@@ -497,71 +536,66 @@ impl FileRead {
         };
 
         let dataset = project(dataset, &dataset_schema, projection)?;
-        let queue =
-            WorkQueue::build(dataset, batch_size, pushdown, output.encoded(), metrics).await?;
+        let plan = ChunkPlan::build(dataset, batch_size, pushdown, output.encoded()).await?;
 
-        Ok(Arc::new(Self {
-            queue: Some(queue),
-            output,
-        }))
+        Ok(Self {
+            plan: Some(plan),
+            output: Arc::new(output),
+        })
     }
 
-    /// How much of the file is left to read. For tests and diagnostics.
-    pub fn remaining(&self) -> usize {
-        self.queue.as_ref().map_or(0, |queue| queue.remaining())
+    /// How many units this read holds. For tests and diagnostics.
+    pub fn units(&self) -> usize {
+        self.plan.as_ref().map_or(0, ChunkPlan::len)
     }
 
-    /// One partition's stream over the file.
+    /// A read of part `index` of `count` of the units.
     ///
-    /// Every worker that reaches this file calls it on the same `FileRead`, and
-    /// they draw from the one queue behind it, so no two of them read the same
-    /// chunk. `metrics` are the calling partition's, so what each one read is
-    /// what it reports.
-    pub fn stream(
-        &self,
+    /// The parts are contiguous slices of the pruned unit list, balanced to
+    /// one unit, and between them they cover every unit exactly once. The
+    /// parts of a file agree on the slices because they slice one list: a
+    /// shared plan, or plans built from the same inputs.
+    ///
+    /// The plan itself does not change, so several parts can slice one
+    /// shared plan. Each slice owns its units.
+    pub fn slice(&self, index: usize, count: usize) -> Self {
+        Self {
+            plan: self.plan.as_ref().map(|plan| plan.slice(index, count)),
+            output: Arc::clone(&self.output),
+        }
+    }
+
+    /// What the predicate excluded from the file when it was planned. A slice
+    /// reports nothing, so that the file's counts are reported once.
+    pub fn pruned(&self) -> Pruned {
+        self.plan.as_ref().map_or_else(Pruned::default, |plan| plan.pruned)
+    }
+
+    /// One lazy stream per unit, in list order.
+    ///
+    /// Each becomes one DataFusion morsel. `metrics` are the reading
+    /// partition's, so what each partition read is what it reports.
+    pub fn into_streams(
+        self,
         metrics: Option<ReadMetrics>,
-    ) -> BoxStream<'static, Result<RecordBatch>> {
-        let Some(queue) = self.queue.clone() else {
+    ) -> Vec<BoxStream<'static, Result<RecordBatch>>> {
+        let Some(plan) = self.plan else {
             // The file holds none of the projected columns. See
             // [`FileRead::plan`].
-            return futures::stream::empty().boxed();
+            return Vec::new();
         };
-        let batches = queue.stream(metrics);
-        match &self.output {
-            Output::Columns {
-                adapter,
-                partition_fields,
-                partition_columns,
-            } => {
-                let adapter = adapter.clone();
-                let fields = partition_fields.clone();
-                let columns = partition_columns.clone();
-                batches
-                    .and_then(move |batch| {
-                        let adapted = with_partitions(&batch, &fields, &columns)
-                            .and_then(|batch| adapter.adapt_batch(&batch))
-                            .map_err(|e| {
-                                DataFusionError::Execution(format!(
-                                    "Failed to adapt the batch onto the scan's schema: {e}"
-                                ))
-                            });
-                        futures::future::ready(adapted)
-                    })
-                    .boxed()
-            }
-            Output::Rows { schema, partitions } => {
-                let schema = schema.clone();
-                let partitions = partitions.clone();
-                batches
-                    .and_then(move |batch| {
-                        futures::future::ready(count_batch(&schema, &partitions, batch.num_rows()))
-                    })
-                    .boxed()
-            }
-            // Unreachable: `plan` pairs `Nothing` with no read, and the early
-            // return above covers it.
-            Output::Nothing => futures::stream::empty().boxed(),
-        }
+        let output = self.output;
+        plan.into_streams(metrics)
+            .into_iter()
+            .map(|batches| output.finish(batches))
+            .collect()
+    }
+
+    /// Every unit of this read, one after the other.
+    pub fn stream(self, metrics: Option<ReadMetrics>) -> BoxStream<'static, Result<RecordBatch>> {
+        futures::stream::iter(self.into_streams(metrics))
+            .flatten()
+            .boxed()
     }
 }
 
@@ -631,8 +665,8 @@ fn count_batch(
 ///
 /// Reading no column at all would give an empty stream and a count of zero. The
 /// read is driven by the widest variable instead, so the row count is the full
-/// broadcast row count — a scalar attribute like `.Conventions` would give one
-/// row — plus any column the predicate names, so a pushed-down filter still
+/// broadcast row count (a scalar attribute like `.Conventions` would give one
+/// row), plus any column the predicate names, so a pushed-down filter still
 /// applies ([`PushdownFilter`] matches by name).
 fn count_projection(
     dataset: &AnyDataset,
@@ -692,9 +726,6 @@ mod tests {
     use crate::dataset::Dataset;
 
     /// A projection that wants no column, so a plan takes the `COUNT(*)` path.
-    ///
-    /// These tests are about who opens the file, not what comes out of it, and
-    /// this is the shortest way to a real [`FileRead`] with a filled queue.
     fn no_columns() -> SchemaRef {
         Arc::new(Schema::empty())
     }
@@ -773,7 +804,7 @@ mod tests {
         (any, observations)
     }
 
-    /// Drain one partition's encoded stream into the rows it read.
+    /// Drain an encoded stream into the rows it read.
     async fn drain(stream: BoxStream<'static, Result<RecordBatch>>) -> usize {
         let batches: Vec<RecordBatch> = stream.try_collect().await.unwrap();
         batches
@@ -795,47 +826,23 @@ mod tests {
         batches.iter().map(|batch| batch.num_rows()).sum()
     }
 
-    /// Run `partitions` partitions over one read, and return the rows each one
-    /// took. This is the shape the opener runs: every partition of a file holds
-    /// the same `Arc` and streams from it.
-    async fn read_in_partitions(
-        shared: Arc<WorkQueue>,
-        partitions: usize,
-        encoded: bool,
-    ) -> Vec<usize> {
-        let mut set = tokio::task::JoinSet::new();
-        for _ in 0..partitions {
-            let shared = shared.clone();
-            set.spawn(async move {
-                if encoded {
-                    drain(shared.stream(None)).await
-                } else {
-                    drain_flat(shared.stream(None)).await
-                }
-            });
-        }
-
-        let mut rows = Vec::new();
-        while let Some(read) = set.join_next().await {
-            rows.push(read.expect("a partition finishes"));
-        }
-        rows
-    }
-
     // ── pruning on the predicate ───────────────────────────────────────
 
     /// `value > threshold`, as the scan would push it down.
     fn greater_than(column: &str, threshold: i64) -> PushdownFilter {
+        PushdownFilter::new(greater_than_expr(column, threshold))
+    }
+
+    fn greater_than_expr(column: &str, threshold: i64) -> Arc<dyn PhysicalExpr> {
         use datafusion::logical_expr::Operator;
-        use datafusion::physical_expr::PhysicalExpr;
         use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
         use datafusion::scalar::ScalarValue;
 
-        PushdownFilter::new(Arc::new(BinaryExpr::new(
+        Arc::new(BinaryExpr::new(
             Arc::new(Column::new(column, 0)),
             Operator::Gt,
             Arc::new(Literal::new(ScalarValue::Int64(Some(threshold)))),
-        )) as Arc<dyn PhysicalExpr>)
+        ))
     }
 
     /// Every value an encoded read returned, decoded and broadcast.
@@ -861,61 +868,52 @@ mod tests {
         values
     }
 
-    /// The queue holds only the chunks the predicate keeps, and keeps every row
+    /// The plan holds only the chunks the predicate keeps, and keeps every row
     /// the query wants.
     ///
     /// Both halves matter and neither implies the other. Reading everything is
     /// correct but pointless; reading less is pointless if it drops a row the
-    /// query asked for, and nothing about that raises an error — the chunk is
-    /// simply never fetched.
-    ///
-    /// The queue length is the first assertion because it is where the saving
-    /// is. A queue still holding the excluded chunks would give a partition a
-    /// run of work that turns out to be nothing, while another partition reads
-    /// everything the query wanted.
+    /// query asked for, and nothing about that raises an error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_queue_holds_only_the_chunks_the_predicate_keeps() {
+    async fn the_plan_holds_only_the_chunks_the_predicate_keeps() {
         const ROWS: usize = 10_000;
         const BATCH: usize = 512;
         const THRESHOLD: i64 = 8_000;
 
-        let whole = WorkQueue::build(dataset(ROWS).await, BATCH, None, true, None)
+        let whole = ChunkPlan::build(dataset(ROWS).await, BATCH, None, true)
             .await
             .expect("the read builds");
-        let chunks = whole.remaining();
+        let chunks = whole.len();
         let all = values_read(whole.stream(None)).await;
         assert_eq!(all.len(), ROWS, "the unfiltered read returns the file");
 
-        let pruned = WorkQueue::build(
+        let pruned = ChunkPlan::build(
             dataset(ROWS).await,
             BATCH,
             Some(greater_than("value", THRESHOLD)),
             true,
-            None,
         )
         .await
         .expect("the read builds");
 
         // The fixture counts up, so a chunk below the threshold holds nothing
-        // the query wants, and it is left out before any partition can draw it.
-        let queued = pruned.remaining();
+        // the query wants, and it is left out of the list.
+        let listed = pruned.len();
         assert!(
-            queued > 0 && queued < chunks,
-            "the queue should hold some of the {chunks} chunks, it holds {queued}"
+            listed > 0 && listed < chunks,
+            "the plan should hold some of the {chunks} chunks, it holds {listed}"
         );
 
-        // The rows read come from the queued chunks and no others. The last
+        // The rows read come from the listed chunks and no others. The last
         // chunk of the file is short, so this is a bound rather than a product.
         let kept = values_read(pruned.stream(None)).await;
         assert!(
-            kept.len() <= queued * BATCH && kept.len() > (queued - 1) * BATCH,
-            "{} rows off {queued} chunks of at most {BATCH}",
+            kept.len() <= listed * BATCH && kept.len() > (listed - 1) * BATCH,
+            "{} rows off {listed} chunks of at most {BATCH}",
             kept.len()
         );
 
-        // Nothing the predicate keeps may go missing. The read is allowed to
-        // return more than that — it skips whole chunks, not rows — and the
-        // scan applies the predicate again above.
+        // Nothing the predicate keeps may go missing.
         let wanted: Vec<i64> = all.iter().copied().filter(|v| *v > THRESHOLD).collect();
         let returned: std::collections::HashSet<i64> = kept.iter().copied().collect();
         assert!(
@@ -924,26 +922,22 @@ mod tests {
         );
     }
 
-    /// A predicate no row can meet leaves an empty queue.
-    ///
-    /// The partitions then find nothing to do, which is the point: the file is
-    /// never opened for reading at all.
+    /// A predicate no row can meet leaves an empty plan.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_predicate_nothing_meets_queues_no_work() {
+    async fn a_predicate_nothing_meets_lists_no_work() {
         const ROWS: usize = 10_000;
 
-        let shared = WorkQueue::build(
+        let plan = ChunkPlan::build(
             dataset(ROWS).await,
             512,
             Some(greater_than("value", ROWS as i64 * 10)),
             true,
-            None,
         )
         .await
         .expect("the read builds");
 
-        assert_eq!(shared.remaining(), 0, "no chunk can hold a matching row");
-        assert_eq!(drain(shared.stream(None)).await, 0);
+        assert_eq!(plan.len(), 0, "no chunk can hold a matching row");
+        assert_eq!(drain(plan.stream(None)).await, 0);
     }
 
     /// The flat read and the nd read skip the same chunks.
@@ -956,23 +950,21 @@ mod tests {
         const BATCH: usize = 512;
         const THRESHOLD: i64 = 8_000;
 
-        let nd = WorkQueue::build(
+        let nd = ChunkPlan::build(
             dataset(ROWS).await,
             BATCH,
             Some(greater_than("value", THRESHOLD)),
             true,
-            None,
         )
         .await
         .expect("the read builds");
         let nd_rows = drain(nd.stream(None)).await;
 
-        let flat = WorkQueue::build(
+        let flat = ChunkPlan::build(
             dataset(ROWS).await,
             BATCH,
             Some(greater_than("value", THRESHOLD)),
             false,
-            None,
         )
         .await
         .expect("the read builds");
@@ -990,223 +982,173 @@ mod tests {
     async fn an_unrelated_predicate_reads_the_whole_file() {
         const ROWS: usize = 4_000;
 
-        let shared = WorkQueue::build(
+        let plan = ChunkPlan::build(
             dataset(ROWS).await,
             512,
             Some(greater_than("no_such_column", 10)),
             true,
-            None,
         )
         .await
         .expect("the read builds");
 
-        assert_eq!(drain(shared.stream(None)).await, ROWS);
+        assert_eq!(drain(plan.stream(None)).await, ROWS);
     }
 
-    /// The partitions of one file read every row once between them.
+    // ── parts of a split file ──────────────────────────────────────────
+
+    /// The parts of a list are contiguous, balanced, and cover it once.
+    #[test]
+    fn parts_are_contiguous_balanced_and_cover_the_list_once() {
+        for len in [0_usize, 1, 5, 7, 64, 1_000] {
+            for count in [1_usize, 2, 3, 8, 24] {
+                let ranges: Vec<Range<usize>> =
+                    (0..count).map(|index| part_range(len, index, count)).collect();
+
+                assert_eq!(ranges[0].start, 0, "len={len} count={count}: starts at 0");
+                assert_eq!(ranges[count - 1].end, len, "len={len} count={count}: ends at len");
+                for pair in ranges.windows(2) {
+                    assert_eq!(pair[0].end, pair[1].start, "len={len} count={count}: contiguous");
+                }
+                let sizes: Vec<usize> = ranges.iter().map(|range| range.len()).collect();
+                let (min, max) = (sizes.iter().min().unwrap(), sizes.iter().max().unwrap());
+                assert!(max - min <= 1, "len={len} count={count}: balanced, got {sizes:?}");
+            }
+        }
+    }
+
+    /// The parts of a file read every row once between them.
     ///
-    /// This is the property the whole design rests on. A subset popped by two
-    /// partitions is a row returned twice, and one popped by none is a row lost,
-    /// and neither raises an error.
+    /// A unit in two parts is a row returned twice, and one in no part is a row
+    /// lost, and neither raises an error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_partitions_of_a_share_read_every_row_once() {
+    async fn the_parts_of_a_file_read_every_row_once() {
         const ROWS: usize = 10_000;
 
-        for partitions in [1_usize, 2, 3, 8] {
-            let shared = WorkQueue::build(dataset(ROWS).await, 512, None, true, None)
+        for count in [1_usize, 2, 3, 8, 40] {
+            let mut columns = 0;
+            let mut counted = 0;
+            for index in 0..count {
+                let wanted: SchemaRef = Arc::new(Schema::new(vec![
+                    beacon_datafusion_ext::nd::nd_encoded_field(
+                        "value",
+                        &arrow::datatypes::DataType::Int64,
+                    ),
+                ]));
+                let read = FileRead::plan(
+                    dataset(ROWS).await,
+                    wanted,
+                    512,
+                    None,
+                    FilePartitions::none(),
+                )
                 .await
-                .expect("the read builds");
-            let rows = read_in_partitions(shared, partitions, true).await;
+                .expect("a column read plans");
+                columns += drain(read.slice(index, count).stream(None)).await;
 
-            assert_eq!(
-                rows.iter().sum::<usize>(),
-                ROWS,
-                "partitions={partitions}: every row is read exactly once"
-            );
+                let read = FileRead::plan(
+                    dataset(ROWS).await,
+                    no_columns(),
+                    512,
+                    None,
+                    FilePartitions::none(),
+                )
+                .await
+                .expect("a count plans");
+                counted += drain_flat(read.slice(index, count).stream(None)).await;
+            }
+            assert_eq!(columns, ROWS, "count={count}: every row read once");
+            assert_eq!(counted, ROWS, "count={count}: every row counted once");
         }
     }
 
-    /// The partitions of a file count its rows once between them.
+    /// The parts of a ragged file read every observation once between them.
     ///
-    /// `COUNT(*)` reads through the flat mode, which never decodes an nd array
-    /// and so cannot inherit the division from the decode. A file every
-    /// partition holds would be counted once per partition if this mode did not
-    /// take its work from the same queue: the answer would grow with
-    /// `target_partitions`, silently.
+    /// A ragged dataset has no chunk grid, so its list holds ranges of its
+    /// batch plan instead. The property is the same.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_partitions_of_a_share_count_its_rows_once() {
-        const ROWS: usize = 10_000;
-
-        for partitions in [1_usize, 2, 4, 8] {
-            let shared = WorkQueue::build(dataset(ROWS).await, 512, None, false, None)
-                .await
-                .expect("the read builds");
-            let counted = read_in_partitions(shared, partitions, false).await;
-
-            assert_eq!(
-                counted.iter().sum::<usize>(),
-                ROWS,
-                "partitions={partitions}: every row counted exactly once"
-            );
-        }
-    }
-
-    /// Several partitions draw from one file's queue, and each gets its own
-    /// work.
-    ///
-    /// Every partition takes a batch before any of them drains, so what is
-    /// asserted is the division and not the scheduling. Letting them race and
-    /// counting afterwards says nothing: a queue this small is often emptied by
-    /// whichever partition is polled first, and that is correct behaviour.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_shared_file_divides_across_partitions() {
-        const ROWS: usize = 10_000;
-        const BATCH: usize = 512;
-        const PARTITIONS: usize = 4;
-
-        let shared = WorkQueue::build(dataset(ROWS).await, BATCH, None, true, None)
-            .await
-            .expect("the read builds");
-        let chunks = shared.remaining();
-        assert!(
-            chunks >= PARTITIONS,
-            "the fixture must hold at least one chunk per partition, it holds {chunks}"
-        );
-
-        let mut streams: Vec<_> = (0..PARTITIONS)
-            .map(|_| shared.clone().stream(None))
-            .collect();
-        let mut taken = 0;
-        for (partition, stream) in streams.iter_mut().enumerate() {
-            let batch = stream
-                .next()
-                .await
-                .unwrap_or_else(|| panic!("partition {partition} gets a chunk of its own"))
-                .expect("it reads");
-            taken += beacon_datafusion_ext::nd::decode_nd_record_batch(&batch)
-                .unwrap()
-                .num_rows();
-        }
-        assert_eq!(
-            shared.remaining(),
-            chunks - PARTITIONS,
-            "each partition took one chunk, and no chunk went to two of them"
-        );
-
-        // The rest divides between them, and between them they read the file.
-        let mut rest = 0;
-        for stream in streams {
-            rest += drain(stream).await;
-        }
-        assert_eq!(taken + rest, ROWS, "every row is read exactly once");
-    }
-
-    /// The partitions of a ragged file read every observation once between them.
-    ///
-    /// A ragged dataset has no chunk grid, so its queue holds ranges of its
-    /// batch plan instead. The property is the same and so is the risk: a range
-    /// popped twice is an observation returned twice, and one popped by nobody
-    /// is an observation lost.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_partitions_of_a_ragged_share_read_every_row_once() {
+    async fn the_parts_of_a_ragged_file_read_every_row_once() {
         const CASTS: usize = 60;
 
         // A batch size well under the file, so the plan holds many ranges to
         // divide, and one over it, so it holds one.
         for batch_size in [8_usize, 64, usize::MAX] {
-            for partitions in [1_usize, 2, 3, 8] {
-                let (source, observations) = ragged_dataset(CASTS).await;
-                let shared = WorkQueue::build(source, batch_size, None, true, None)
-                    .await
-                    .expect("the plan builds");
-                let rows = read_in_partitions(shared, partitions, true).await;
-
+            for count in [1_usize, 2, 3, 8] {
+                let mut rows = 0;
+                let mut observations = 0;
+                for index in 0..count {
+                    let (source, total) = ragged_dataset(CASTS).await;
+                    observations = total;
+                    let plan = ChunkPlan::build(source, batch_size, None, true)
+                        .await
+                        .expect("the plan builds");
+                    rows += drain(plan.slice(index, count).stream(None)).await;
+                }
                 assert_eq!(
-                    rows.iter().sum::<usize>(),
-                    observations,
-                    "batch_size={batch_size} partitions={partitions}: every row once"
+                    rows, observations,
+                    "batch_size={batch_size} count={count}: every row once"
                 );
             }
         }
     }
 
-    /// A ragged file counts its rows once too.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_partitions_of_a_ragged_share_count_its_rows_once() {
-        const CASTS: usize = 60;
-        const PARTITIONS: usize = 4;
-
-        let (source, observations) = ragged_dataset(CASTS).await;
-        let shared = WorkQueue::build(source, 8, None, false, None)
-            .await
-            .expect("the plan builds");
-        let counted = read_in_partitions(shared, PARTITIONS, false).await;
-
-        assert_eq!(
-            counted.iter().sum::<usize>(),
-            observations,
-            "every observation counted once"
-        );
-    }
-
-    /// A ragged file divides across partitions rather than falling to one.
+    /// A file is pruned before it is sliced, so the parts divide only the
+    /// chunks the predicate keeps.
     ///
-    /// The queue used to hold a ragged file as a single unit, so one partition
-    /// read it and the rest found the queue empty. This is the assertion that
-    /// says it no longer does — and, as above, it takes a batch per partition
-    /// up front so that it asserts the division rather than the scheduling.
+    /// A predicate on time prunes a prefix of the chunk list. A slice of the
+    /// whole list would leave the first parts with nothing to read.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_ragged_file_divides_across_partitions() {
-        const CASTS: usize = 60;
-        const PARTITIONS: usize = 4;
+    async fn the_parts_divide_only_the_chunks_the_predicate_keeps() {
+        const ROWS: usize = 10_000;
+        const BATCH: usize = 100;
+        const THRESHOLD: i64 = 5_000;
+        const PARTS: usize = 4;
 
-        let (source, observations) = ragged_dataset(CASTS).await;
-        let shared = WorkQueue::build(source, 8, None, true, None)
+        let kept = ChunkPlan::build(
+            dataset(ROWS).await,
+            BATCH,
+            Some(greater_than("value", THRESHOLD)),
+            true,
+        )
+        .await
+        .unwrap()
+        .len();
+
+        let mut sizes = Vec::new();
+        for index in 0..PARTS {
+            let wanted: SchemaRef = Arc::new(Schema::new(vec![
+                beacon_datafusion_ext::nd::nd_encoded_field(
+                    "value",
+                    &arrow::datatypes::DataType::Int64,
+                ),
+            ]));
+            let read = FileRead::plan(
+                dataset(ROWS).await,
+                wanted,
+                BATCH,
+                Some(greater_than_expr("value", THRESHOLD)),
+                FilePartitions::none(),
+            )
             .await
-            .expect("the plan builds");
-        let ranges = shared.remaining();
+            .unwrap();
+            // The plan keeps the pruned count, and a slice reports none of it.
+            assert_eq!(read.pruned().chunks + kept, ROWS / BATCH, "every chunk is kept or pruned");
+            assert_eq!(read.slice(index, PARTS).pruned(), Pruned::default());
+            sizes.push(read.slice(index, PARTS).units());
+        }
+
+        assert_eq!(sizes.iter().sum::<usize>(), kept, "the parts cover the kept chunks");
         assert!(
-            ranges >= PARTITIONS,
-            "the fixture must hold at least one range per partition, got {ranges}"
+            sizes.iter().all(|size| *size >= kept / PARTS),
+            "every part has its share of the kept chunks: {sizes:?}"
         );
-
-        let mut streams: Vec<_> = (0..PARTITIONS)
-            .map(|_| shared.clone().stream(None))
-            .collect();
-        let mut taken = 0;
-        for (partition, stream) in streams.iter_mut().enumerate() {
-            let batch = stream
-                .next()
-                .await
-                .unwrap_or_else(|| panic!("partition {partition} gets a range of its own"))
-                .expect("it reads");
-            taken += beacon_datafusion_ext::nd::decode_nd_record_batch(&batch)
-                .unwrap()
-                .num_rows();
-        }
-        assert_eq!(
-            shared.remaining(),
-            ranges - PARTITIONS,
-            "each partition took one range, and no range went to two of them"
-        );
-
-        let mut rest = 0;
-        for stream in streams {
-            rest += drain(stream).await;
-        }
-        assert_eq!(taken + rest, observations, "every row is read exactly once");
     }
 
     /// A file holding none of the projected columns contributes nothing.
     ///
     /// A collection is not obliged to be uniform. Of one CORA year, 2% of the
     /// files carry no `TEMP` and 10% no `DEPH`, so `SELECT TEMP` meets files
-    /// that have none of what it asked for. Those are ordinary files.
-    ///
-    /// This used to be read as a `COUNT(*)` — the projection resolves empty
-    /// either way — which built a batch of no columns against a schema that has
-    /// one, and failed the whole scan with "number of columns(0) must match
-    /// number of fields(1)".
+    /// that have none of what it asked for. Those are ordinary files, and the
+    /// scan must not fail on them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_file_without_any_projected_column_is_read_as_nothing() {
         let wanted: SchemaRef = Arc::new(Schema::new(vec![arrow::datatypes::Field::new(
@@ -1222,12 +1164,11 @@ mod tests {
             16,
             None,
             FilePartitions::none(),
-            None,
         )
         .await
         .expect("a file without the column is planned, not rejected");
 
-        assert_eq!(planned.remaining(), 0, "nothing is queued to read");
+        assert_eq!(planned.units(), 0, "nothing is listed to read");
         let batches: Vec<RecordBatch> = planned
             .stream(None)
             .try_collect()
@@ -1236,17 +1177,12 @@ mod tests {
         assert!(batches.is_empty(), "it contributes no rows");
     }
 
-    /// A file the scan ruled out before opening reads as nothing.
-    ///
-    /// The format decides this from its own metadata — Atlas from the
-    /// statistics in a collection footer — so nothing here can check the
-    /// decision. What this pins is the shape of the answer: no work queued, no
-    /// batch emitted, and a clean stream rather than an error.
+    /// A file the scan ruled out before reading it reads as nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_skipped_file_queues_nothing_and_emits_nothing() {
+    async fn a_skipped_file_lists_nothing_and_emits_nothing() {
         let skipped = FileRead::skipped();
 
-        assert_eq!(skipped.remaining(), 0, "nothing is queued to read");
+        assert_eq!(skipped.units(), 0, "nothing is listed to read");
         let batches: Vec<RecordBatch> = skipped
             .stream(None)
             .try_collect()
@@ -1267,63 +1203,11 @@ mod tests {
             16,
             None,
             FilePartitions::none(),
-            None,
         )
         .await
         .expect("a count is planned");
 
-        assert!(planned.remaining() > 0, "a count has work to do");
+        assert!(planned.units() > 0, "a count has work to do");
         assert_eq!(drain_flat(planned.stream(None)).await, ROWS);
-    }
-
-    /// More partitions than subsets is not an error. The surplus find the queue
-    /// empty and finish at once.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_partition_with_nothing_left_to_pop_just_finishes() {
-        const ROWS: usize = 100;
-
-        // One chunk, eight partitions.
-        let shared = WorkQueue::build(dataset(ROWS).await, usize::MAX, None, true, None)
-            .await
-            .expect("the read builds");
-        let rows = read_in_partitions(shared, 8, true).await;
-
-        assert_eq!(rows.iter().sum::<usize>(), ROWS);
-        assert_eq!(
-            rows.iter().filter(|read| **read > 0).count(),
-            1,
-            "one chunk is read by one partition, and the rest read nothing"
-        );
-    }
-
-    /// A partition that leaves early leaves its work for the others.
-    ///
-    /// Nothing is reserved up front, so a dropped stream costs only the subsets
-    /// it had already popped. A `LIMIT` that stops one partition mid-file must
-    /// not take rows away from the rest.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn work_a_partition_does_not_take_is_left_for_the_others() {
-        const ROWS: usize = 10_000;
-        const BATCH: usize = 500;
-
-        let shared = WorkQueue::build(dataset(ROWS).await, BATCH, None, true, None)
-            .await
-            .expect("the read builds");
-
-        // One partition takes a single batch and leaves.
-        let mut early = shared.clone().stream(None);
-        let first = early.next().await.expect("one batch").expect("it reads");
-        let taken = beacon_datafusion_ext::nd::decode_nd_record_batch(&first)
-            .unwrap()
-            .num_rows();
-        drop(early);
-
-        // The other reads what is left, and between them that is the file.
-        let rest = drain(shared.stream(None)).await;
-        assert_eq!(
-            taken + rest,
-            ROWS,
-            "the subsets the leaver never popped are still there"
-        );
     }
 }

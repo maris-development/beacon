@@ -1,4 +1,4 @@
-use std::{any::Any, fmt::Formatter, sync::Arc};
+use std::{fmt::Formatter, sync::Arc};
 
 use arrow::{
     array::{ArrayRef, AsArray},
@@ -173,10 +173,6 @@ impl DisplayAs for GeoParquetSink {
 
 #[async_trait::async_trait]
 impl DataSink for GeoParquetSink {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     /// The schema of the batches this sink consumes — the input schema, **without** the
     /// geometry column.
     ///

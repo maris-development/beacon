@@ -78,7 +78,11 @@ impl BeaconTableFunctionImpl for ReadAtlasFunc {
 }
 
 impl TableFunctionImpl for ReadAtlasFunc {
-    fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
+    fn call_with_args(
+        &self,
+        args: datafusion::catalog::TableFunctionArgs,
+    ) -> Result<Arc<dyn TableProvider>> {
+        let args = args.exprs();
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_atlas")?;
         let format_options = format_options_from_args(args)?;
 

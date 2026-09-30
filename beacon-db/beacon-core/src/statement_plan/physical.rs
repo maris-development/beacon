@@ -7,7 +7,7 @@
 //! `DataSinkExec` uses), with the [`SessionContext`] recovered from the planner's
 //! [`SessionCell`] at execution time.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::array::{ArrayRef, UInt64Array};
 use arrow::datatypes::{Schema, SchemaRef};
@@ -159,10 +159,6 @@ impl ExecutionPlan for CreateMaterializedViewExec {
         "CreateMaterializedViewExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
@@ -228,10 +224,6 @@ impl ExecutionPlan for RefreshExec {
         "RefreshExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
@@ -281,9 +273,6 @@ macro_rules! side_effect_exec {
         impl ExecutionPlan for $exec {
             fn name(&self) -> &str {
                 $display
-            }
-            fn as_any(&self) -> &dyn Any {
-                self
             }
             fn properties(&self) -> &Arc<PlanProperties> {
                 &self.cache
@@ -615,9 +604,6 @@ impl ExecutionPlan for ShowSecretsExec {
     fn name(&self) -> &str {
         "ShowSecretsExec"
     }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
@@ -797,9 +783,6 @@ impl ExecutionPlan for ReplaceTableContentsExec {
     fn name(&self) -> &str {
         "ReplaceTableContentsExec"
     }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
@@ -876,9 +859,6 @@ impl DisplayAs for InsertExec {
 impl ExecutionPlan for InsertExec {
     fn name(&self) -> &str {
         "InsertExec"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
@@ -969,9 +949,6 @@ impl DisplayAs for CreateTableExec {
 impl ExecutionPlan for CreateTableExec {
     fn name(&self) -> &str {
         "CreateTableExec"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
@@ -1097,9 +1074,6 @@ impl ExecutionPlan for RunCrawlerExec {
     fn name(&self) -> &str {
         "RunCrawlerExec"
     }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
@@ -1165,9 +1139,6 @@ impl DisplayAs for AnalyzeFilesExec {
 impl ExecutionPlan for AnalyzeFilesExec {
     fn name(&self) -> &str {
         "AnalyzeFilesExec"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
@@ -1291,9 +1262,6 @@ impl DisplayAs for ShowCrawlersExec {
 impl ExecutionPlan for ShowCrawlersExec {
     fn name(&self) -> &str {
         "ShowCrawlersExec"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
@@ -1434,9 +1402,6 @@ impl ExecutionPlan for ShowIndexesExec {
     fn name(&self) -> &str {
         "ShowIndexesExec"
     }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
@@ -1496,9 +1461,6 @@ impl DisplayAs for ShowCreateTableExec {
 impl ExecutionPlan for ShowCreateTableExec {
     fn name(&self) -> &str {
         "ShowCreateTableExec"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
@@ -1567,9 +1529,6 @@ impl DisplayAs for CompactTableExec {
 impl ExecutionPlan for CompactTableExec {
     fn name(&self) -> &str {
         "CompactTableExec"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
@@ -1712,9 +1671,6 @@ impl DisplayAs for ShowExtensionsExec {
 impl ExecutionPlan for ShowExtensionsExec {
     fn name(&self) -> &str {
         "ShowExtensionsExec"
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache

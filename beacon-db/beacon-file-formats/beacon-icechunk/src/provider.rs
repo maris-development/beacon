@@ -5,7 +5,6 @@
 //! the leaf-group walk, the `beacon-nd-array` scan and the predicate pushdown —
 //! is the same code a plain zarr store goes through.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -170,10 +169,6 @@ fn skip_unbroadcastable_option(definition: &IcechunkTableDefinition) -> anyhow::
 
 #[async_trait::async_trait]
 impl TableProvider for IcechunkTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

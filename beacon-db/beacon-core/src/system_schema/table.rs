@@ -1,6 +1,6 @@
 //! The `TableProvider` every `beacon.system` table is built from.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use datafusion::{
@@ -49,10 +49,6 @@ impl std::fmt::Debug for SystemTable {
 
 #[async_trait::async_trait]
 impl TableProvider for SystemTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

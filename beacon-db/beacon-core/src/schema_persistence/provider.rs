@@ -7,10 +7,7 @@
 //! registered or deregistered — so that the catalog survives restarts (it is
 //! rebuilt at startup by [`super::init_tables`]).
 
-use std::{
-    any::Any,
-    sync::{Arc, Weak},
-};
+use std::sync::{Arc, Weak};
 
 use datafusion::{
     catalog::{MemorySchemaProvider, SchemaProvider, TableProvider},
@@ -143,10 +140,6 @@ impl PersistentSchemaProvider {
 
 #[async_trait::async_trait]
 impl SchemaProvider for PersistentSchemaProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn table_names(&self) -> Vec<String> {
         // Beacon's internal auth tables are hidden from user-facing listings
         // (this backs both `SHOW TABLES` and `information_schema`); they hold

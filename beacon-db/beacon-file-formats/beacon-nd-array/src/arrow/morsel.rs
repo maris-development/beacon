@@ -1,262 +1,162 @@
-//! Morsel-driven scanning: one queue for a scan, and workers that pull from it.
+//! nd scans on DataFusion's morsel API.
 //!
-//! Nothing is assigned at plan time. Every file of a scan goes into one queue,
-//! and a worker takes the next unit of work when it is free. Balance follows
-//! completion, so no estimate is needed and no estimate can be wrong.
-//!
-//! This replaces a deal made from file sizes. That deal could not balance,
-//! because file size does not say what a file costs: an nd file's work follows
-//! the uncompressed cells the query keeps, and a netCDF collection holds those
-//! at compression ratios that differ file to file. One CORA year is 19 GB of
-//! grid in 2.3 GB on disk.
-//!
-//! See `MORSEL_DRIVEN_SCAN.md` at the crate root for the measurements this
-//! comes from.
-//!
-//! # Two levels
-//!
-//! A whole file is not a fine enough unit on its own. Four large files cannot
-//! fill twenty-four partitions. So work is cut at two levels, and a worker
-//! reaches the second only when the first runs dry:
+//! DataFusion does the parallel work. Its shared queue hands the entries of a
+//! scan to whichever partition is free, and each entry becomes morsels. This
+//! module only says what an entry of an nd scan is, and how it becomes morsels.
 //!
 //! ```text
-//! LEVEL 1 — a file                   LEVEL 2 — a chunk of an open file
-//! ─────────────────                  ─────────────────────────────────
-//! unit : one whole file              unit : one subset off its queue
-//! cost : one open                    cost : none, the file is open
-//! when : files remain unopened       when : no file remains unopened
-//! gives: balance over many files     gives: balance over few large files
+//! plan time   split_files     a file becomes n entries, "part i of n", when
+//!                             the scan has fewer files than partitions
+//! run time    NdMorselizer    a partition takes an entry, opens the file,
+//!                             prunes its chunk list, keeps slice i of n,
+//!                             and makes one morsel per unit of that slice
 //! ```
 //!
-//! Level 2 is not new. [`FileRead`] already holds a queue of the chunks a
-//! file is worth reading, and already hands them out one at a time. This module
-//! only decides *who* may draw from it, and when.
-//!
-//! # The worker loop
-//!
-//! ```text
-//!            ┌───────────────────────┐  yes   ┌──────────────────┐
-//!            │ chunks left in the    ├───────>│ read one chunk,  │
-//!            │ file I hold?          │        │ emit a batch     │──┐
-//!            └───────────┬───────────┘        └──────────────────┘  │
-//!                        │ no                                       │
-//!                        v                                          │
-//!            ┌───────────────────────┐  yes   ┌──────────────────┐  │
-//!            │ a file left unopened? ├───────>│ open it, hold it │──┤
-//!            │  (level 1)            │        └──────────────────┘  │
-//!            └───────────┬───────────┘                              │
-//!                        │ no                                       │
-//!                        v                                          │
-//!            ┌───────────────────────┐  yes                         │
-//!            │ an open file with     ├─────────────────────────────>┤
-//!            │ chunks left? (level 2)│                              │
-//!            └───────────┬───────────┘                              │
-//!                        │ no                                       │
-//!                        v                                          │
-//!                   ┌─────────┐<─────────────────────────────────────┘
-//!                   │  done   │
-//!                   └─────────┘
-//! ```
+//! The parts of a split file share one pruned chunk list. It lives in
+//! [`ScanPlans`] on the format's source, so only the parts of one query use
+//! it. They also share one open through DataFusion's file metadata cache. The
+//! first part that needs either one computes it, and the other parts wait for
+//! it. Each part then takes its own slice of the list. See [`NdScan`].
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use arrow::datatypes::{FieldRef, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use crossbeam::queue::ArrayQueue;
 use datafusion::datasource::listing::PartitionedFile;
-use datafusion::datasource::physical_plan::{FileGroup, FileScanConfig};
+use datafusion::datasource::physical_plan::{FileGroup, FileOpenFuture, FileOpener, FileScanConfig};
 use datafusion::error::{DataFusionError, Result};
-use futures::StreamExt;
+use datafusion::execution::cache::cache_manager::{
+    CachedFileMetadataEntry, FileMetadata, FileMetadataCache,
+};
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::scalar::ScalarValue;
+use datafusion_datasource::morsel::{Morsel, MorselPlan, MorselPlanner};
+use futures::FutureExt;
 use futures::stream::BoxStream;
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 
-use crate::arrow::metrics::ReadMetrics;
+pub use datafusion_datasource::morsel::Morselizer;
+
 use crate::arrow::file_read::FileRead;
+use crate::arrow::metrics::ReadMetrics;
+use crate::arrow::partition::FilePartitions;
+use crate::dataset::AnyDataset;
 
 /// How a format opens one of its files.
 ///
-/// The only thing a format supplies. Everything else about dividing a scan is
-/// the same for netCDF, HDF5 and Zarr, because all three read through
-/// [`FileRead`].
+/// The only thing a format supplies. Everything else about a scan is the same
+/// for every nd format, because all of them read through [`FileRead`].
 #[async_trait::async_trait]
 pub trait OpenFile: Send + Sync + 'static {
-    /// Open `file` and plan what the query reads from it.
-    async fn open(&self, file: &PartitionedFile) -> Result<Arc<FileRead>>;
+    /// Open `file` and read its metadata.
+    ///
+    /// The result depends on the file and on the reader's options only, never
+    /// on the query, because the parts of a file share it through the cache.
+    async fn open(&self, file: &PartitionedFile) -> Result<AnyDataset>;
+
+    /// Narrow an opened dataset to what this scan reads on. `None` skips the
+    /// file.
+    fn narrow(&self, dataset: AnyDataset) -> Result<Option<AnyDataset>> {
+        Ok(Some(dataset))
+    }
+
+    /// Names every option that changes what [`narrow`] returns.
+    ///
+    /// It is part of the fingerprint of a cached plan, so two tables that
+    /// narrow one file differently never share a plan.
+    ///
+    /// [`narrow`]: Self::narrow
+    fn narrow_tag(&self) -> String {
+        String::new()
+    }
+
+    /// Names the reader and every option that changes what [`open`] returns.
+    ///
+    /// A cached open is used only when its tag matches, so two tables that
+    /// open one path with different readers never share a dataset.
+    ///
+    /// [`open`]: Self::open
+    fn cache_tag(&self) -> String;
 }
 
-/// Every file of one scan, and the ones already open.
+/// Which part of a split file a queue entry reads.
 ///
-/// One of these per scan, shared by every partition. Between them the workers
-/// read every file exactly once: a file leaves `unopened` once, and the queue
-/// behind an open file hands out each chunk once.
-#[derive(Debug)]
-pub struct MorselSource {
-    /// Files nobody has opened. Level 1.
-    unopened: ArrayQueue<PartitionedFile>,
-    /// Files opened and not yet drained. Level 2.
-    ///
-    /// Pruned whenever it is touched, so it holds about one entry per worker
-    /// rather than one per file. Holding every file a scan ever opened would
-    /// keep every one of their arrays alive.
-    open: RwLock<Vec<Arc<FileRead>>>,
-    /// Opens in progress.
-    ///
-    /// A worker that finds `unopened` empty and nothing open is not necessarily
-    /// finished: another worker may be part-way through an open whose chunks it
-    /// could share. This is how it tells the difference.
-    opening: AtomicUsize,
-    /// Woken when an open finishes, so a worker waiting on one sleeps instead of
-    /// spinning.
-    ///
-    /// It used to spin on [`tokio::task::yield_now`], which is a poor way to
-    /// wait on a runtime that is busy: the waiter is rescheduled continuously
-    /// and competes with the very task it is waiting for. Beacon's server runs
-    /// its scans on 8 worker threads by default while planning 24 partitions, so
-    /// "busy" is the normal case rather than the exception.
-    opened: tokio::sync::Notify,
-    /// Files this scan started with. For diagnostics.
-    files: usize,
+/// [`split_files`] sets it at plan time. An entry without it reads its whole
+/// file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilePart {
+    pub index: usize,
+    pub count: usize,
 }
 
-impl MorselSource {
-    /// A source over every file the scan reads.
-    pub fn new(files: Vec<PartitionedFile>) -> Arc<Self> {
-        let count = files.len();
-        // `ArrayQueue` will not take a capacity of zero, and a scan with no
-        // files still needs a queue for its workers to find empty.
-        let unopened = ArrayQueue::new(count.max(1));
-        for file in files {
-            // The capacity is the file count, so this cannot fail.
-            let _ = unopened.push(file);
-        }
-        Arc::new(Self {
-            unopened,
-            open: RwLock::new(Vec::new()),
-            opening: AtomicUsize::new(0),
-            opened: tokio::sync::Notify::new(),
-            files: count,
-        })
+impl FilePart {
+    /// The part of `file`: the whole file when it is not split.
+    pub fn of(file: &PartitionedFile) -> Self {
+        file.extension::<FilePart>()
+            .copied()
+            .unwrap_or(Self { index: 0, count: 1 })
+    }
+}
+
+/// Split and deal the files of a scan over `target_partitions` file groups.
+///
+/// With fewer files than partitions, each file becomes
+/// `ceil(target_partitions / files)` entries, and entry `i` reads part `i` of
+/// the file. With at least as many files as partitions, no file is split. The
+/// entries go round robin into `target_partitions` groups, so the parts of one
+/// file land in different groups, and the first groups hold different files.
+///
+/// No entry is a byte range. An nd file divides on its chunk list, and only an
+/// open shows that list, so a part is a fraction of it. See [`FileRead::slice`].
+///
+/// Returns `None` for one partition or for no files. The scan then keeps the
+/// groups it has.
+pub fn split_files(file_groups: &[FileGroup], target_partitions: usize) -> Option<Vec<FileGroup>> {
+    if target_partitions <= 1 {
+        return None;
+    }
+    let files: Vec<PartitionedFile> = file_groups
+        .iter()
+        .flat_map(FileGroup::iter)
+        .cloned()
+        .collect();
+    if files.is_empty() {
+        return None;
     }
 
-    /// How many files this scan started with.
-    pub fn files(&self) -> usize {
-        self.files
-    }
-
-    /// Files nobody has opened yet. For tests and diagnostics.
-    pub fn unopened(&self) -> usize {
-        self.unopened.len()
-    }
-
-    /// Files open and not yet drained. For tests and diagnostics.
-    pub fn open_files(&self) -> usize {
-        self.open.read().len()
-    }
-
-    /// One worker's stream over the whole scan.
-    ///
-    /// Every partition calls this on the same `MorselSource`. `worker` is the
-    /// partition index; it decides which open file this worker prefers at level
-    /// 2, so the workers spread over the last few files rather than meeting at
-    /// one of them.
-    ///
-    /// The stream is a plain [`Stream`](futures::Stream) and needs no task of
-    /// its own: it is the worker loop, driven by whoever polls it.
-    pub fn stream(
-        self: &Arc<Self>,
-        worker: usize,
-        opener: Arc<dyn OpenFile>,
-        metrics: Option<ReadMetrics>,
-    ) -> BoxStream<'static, Result<RecordBatch>> {
-        let state = Worker {
-            source: Arc::clone(self),
-            worker,
-            opener,
-            metrics,
-            failed: false,
-            next: None,
-        };
-
-        futures::stream::unfold(state, |mut state| async move {
-            if state.failed {
-                return None;
-            }
-            match state.take().await {
-                Ok(Some(dataset)) => {
-                    let batches = dataset.stream(state.metrics.clone());
-                    Some((batches, state))
-                }
-                Ok(None) => None,
-                Err(error) => {
-                    // Report it and stop. Carrying on would read a partial scan
-                    // and return it as a whole one.
-                    state.failed = true;
-                    Some((
-                        futures::stream::once(async move { Err(error) }).boxed(),
-                        state,
-                    ))
-                }
+    let count = if files.len() >= target_partitions {
+        1
+    } else {
+        target_partitions.div_ceil(files.len())
+    };
+    // Part 0 of every file first, then part 1, and so on, so that partitions
+    // that start together open different files.
+    let entries = (0..count).flat_map(|index| {
+        files.iter().map(move |file| {
+            if count == 1 {
+                file.clone()
+            } else {
+                file.clone().with_extension(FilePart { index, count })
             }
         })
-        .flatten()
-        .boxed()
-    }
+    });
 
-    /// Open one file, naming it if that fails.
-    ///
-    /// `FileStream` would have put the path in the error. Nothing else will,
-    /// because the whole scan reaches DataFusion as one file.
-    async fn open_one(
-        &self,
-        opener: &dyn OpenFile,
-        file: &PartitionedFile,
-    ) -> Result<Arc<FileRead>> {
-        opener.open(file).await.map_err(|error| {
-            DataFusionError::Execution(format!(
-                "Failed to open {}: {error}",
-                file.object_meta.location
-            ))
-        })
+    let mut groups: Vec<Vec<PartitionedFile>> = vec![Vec::new(); target_partitions];
+    for (index, entry) in entries.enumerate() {
+        groups[index % target_partitions].push(entry);
     }
-
-    /// Add a newly opened file to the ones workers may draw from.
-    fn register(&self, dataset: Arc<FileRead>) {
-        let mut open = self.open.write();
-        open.retain(|dataset| dataset.remaining() > 0);
-        open.push(dataset);
-    }
-
-    /// An open file with chunks left, preferring this worker's own.
-    fn borrow_open(&self, worker: usize) -> Option<Arc<FileRead>> {
-        let mut open = self.open.write();
-        open.retain(|dataset| dataset.remaining() > 0);
-        if open.is_empty() {
-            return None;
-        }
-        // Spread the workers over what is left rather than piling them onto the
-        // first entry. A drained file is dropped on the next look, so a worker
-        // that lands on one simply comes back.
-        Some(Arc::clone(&open[worker % open.len()]))
-    }
+    Some(groups.into_iter().map(FileGroup::new).collect())
 }
 
 /// Refuse a scan whose table declares partition columns.
 ///
-/// A `PARTITIONED BY` column lives in the *path* of a file rather than inside
-/// it, and `FileStream` appends its value to every batch of that file — which it
-/// can do only because it knows which file each batch came from.
-///
-/// An nd scan reads a whole collection behind one plan entry, so `FileStream`
-/// does not know. The file readers do it themselves instead: a morsel carries
-/// its file's values and
-/// [`FilePartitions`](crate::arrow::partition::FilePartitions) appends them to
-/// its batches. That works because a morsel is a file.
-///
-/// A Zarr table is not made of files. Its entries are groups inside a store,
-/// and a group is not a path a partition value can be read off, so Zarr still
-/// refuses such a table. The alternatives are to return those columns silently
-/// empty or to say so, and a query that quietly drops a column it was asked for
-/// is the worse of the two.
+/// A `PARTITIONED BY` column lives in the path of a file. A reader that cannot
+/// map its rows to such a path refuses the table. A Zarr table is made of
+/// groups inside a store, not of files, and Atlas and BBF read a collection as
+/// one unit. A query that silently drops a column it asked for is worse than
+/// an error.
 ///
 /// `format` names the reader in the error, since a user reaches this through
 /// `CREATE EXTERNAL TABLE ... PARTITIONED BY` and needs to know which format
@@ -276,185 +176,551 @@ pub fn reject_partition_columns(format: &str, config: &FileScanConfig) -> Result
     )))
 }
 
-/// Plan a scan morsel-driven: one queue for its files, one entry per partition.
+/// The memory a cached open claims in DataFusion's file metadata cache.
 ///
-/// Returns the source every partition draws from, and the file groups to put in
-/// the scan config. A format calls this from `repartitioned` and stores the
-/// source on itself, so the openers it builds later reach the same one.
-///
-/// ```text
-///  planned by a deal                    planned morsel-driven
-///  ─────────────────                    ─────────────────────
-///  [f0 ... f148]                        [scan]
-///  [f149 ... f297]                      [scan]
-///   ...                                  ...
-///  [f3441 ... f3583]                    [scan]
-///
-///  3,584 entries, 3,584 opens           24 entries, 3,584 opens
-/// ```
-///
-/// The entry is not a file. It is the scan, and the opener behind it reads
-/// whatever the queue hands out. Its path says so, and its size is the scan's,
-/// so `EXPLAIN` still shows how much a partition is pointed at.
-///
-/// A partitioned table divides the same way. A file's `PARTITIONED BY` values
-/// travel on its [`PartitionedFile`], the queue hands that whole entry to
-/// whoever opens it, and the reader appends the values to the batches it reads
-/// from it — see
-/// [`FilePartitions`](crate::arrow::partition::FilePartitions). So the standing
-/// entry below carries no values of its own, and needs none.
-///
-/// Returns `None` when the scan should keep the grouping it was planned with:
-///
-/// - one partition, where there is nobody to divide the work with;
-/// - no files.
-pub fn morsel_scan(
-    file_groups: &[FileGroup],
-    target_partitions: usize,
-) -> Option<(Arc<MorselSource>, Vec<FileGroup>)> {
-    if target_partitions <= 1 {
-        return None;
-    }
+/// An opened dataset holds lazy arrays and parsed headers, and no reader
+/// reports their size. This fixed claim keeps the entries countable against
+/// the cache limit. An entry leaves the cache when the last part of its file
+/// opens, so it holds only the files of scans that run now. No plan goes in
+/// this cache. See [`ScanPlans`].
+const CACHED_OPEN_SIZE: usize = 256 * 1024;
 
-    let files: Vec<PartitionedFile> = file_groups
-        .iter()
-        .flat_map(FileGroup::iter)
-        .cloned()
-        .collect();
-    if files.is_empty() {
-        return None;
-    }
-
-    let count = files.len();
-    let total: u64 = files.iter().map(|file| file.effective_size()).sum();
-    let source = MorselSource::new(files);
-
-    let entry = PartitionedFile::new(format!("nd-morsel-scan/{count}-files"), total);
-    let groups = (0..target_partitions)
-        .map(|_| FileGroup::new(vec![entry.clone()]))
-        .collect();
-
-    Some((source, groups))
+/// Everything a plan of a file depends on, apart from the file itself.
+///
+/// [`FileRead::plan`] reads the narrowed dataset, the projected schema,
+/// `batch_size`, the predicate and the partition columns with their values.
+/// The file is the entry key (path, size and modification time), and the
+/// reader is the source that owns the [`ScanPlans`]. The narrowing is
+/// [`OpenFile::narrow_tag`]. A part uses a plan only when the fingerprints are
+/// equal, so a source clone with another configuration never uses it.
+struct ScanFingerprint {
+    narrow_tag: String,
+    projected_schema: SchemaRef,
+    batch_size: usize,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
+    partition_fields: Vec<FieldRef>,
+    partition_values: Vec<ScalarValue>,
 }
 
-/// One worker's place in the scan.
-struct Worker {
-    source: Arc<MorselSource>,
-    worker: usize,
-    opener: Arc<dyn OpenFile>,
-    metrics: Option<ReadMetrics>,
-    /// An open failed. The stream reported it and is over.
-    failed: bool,
-    /// This worker's next file, already opening.
-    ///
-    /// The worker loop is a stream of streams: while the batches of one file are
-    /// being polled, the loop that would fetch the next file is not. So without
-    /// this the two never overlap, and every worker sits idle through every open
-    /// it makes. `FileStream` opened one file ahead for exactly this reason, and
-    /// a scan behind one entry has to do it itself.
-    next: Option<tokio::task::JoinHandle<Result<Arc<FileRead>>>>,
+impl PartialEq for ScanFingerprint {
+    fn eq(&self, other: &Self) -> bool {
+        // The predicate compares as an expression tree, not as its display text.
+        let predicates_equal = match (&self.predicate, &other.predicate) {
+            (None, None) => true,
+            (Some(ours), Some(theirs)) => ours.as_ref() == theirs.as_ref(),
+            _ => false,
+        };
+        predicates_equal
+            && self.batch_size == other.batch_size
+            && self.narrow_tag == other.narrow_tag
+            && self.projected_schema == other.projected_schema
+            && self.partition_fields == other.partition_fields
+            && self.partition_values == other.partition_values
+    }
 }
 
-impl Worker {
-    /// Start opening this worker's next file, unless one is already in flight.
+/// A planned file: the pruned unit list, and whether narrow skipped the file.
+struct PlannedFile {
+    read: FileRead,
+    skipped: bool,
+}
+
+/// One file's plan, set by the first part that needs it.
+type PlanCell = tokio::sync::OnceCell<Arc<PlannedFile>>;
+
+/// A plan of one file for one configuration, and the parts that took it.
+struct PlanEntry {
+    /// The file's size and modification time in nanoseconds, when planned.
+    version: (u64, Option<i64>),
+    fingerprint: ScanFingerprint,
+    plan: Arc<PlanCell>,
+    taken: usize,
+}
+
+/// The plans of the split files of one scan.
+///
+/// A format's source owns one, and the source is part of one query's plan, so
+/// no other query sees these plans. The source's clones share it: DataFusion
+/// clones the source for each partition of a run. The [`ScanFingerprint`] of
+/// an entry keeps a clone with another configuration off it.
+///
+/// An entry leaves when the last part of its file takes it. What a stopped run
+/// leaves is dropped with the source.
+#[derive(Default)]
+pub struct ScanPlans {
+    files: Mutex<HashMap<String, Vec<PlanEntry>>>,
+}
+
+impl std::fmt::Debug for ScanPlans {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScanPlans")
+            .field("files", &self.files.lock().len())
+            .finish()
+    }
+}
+
+impl ScanPlans {
+    /// Whether no plan is held. For tests and diagnostics.
+    pub fn is_empty(&self) -> bool {
+        self.files.lock().is_empty()
+    }
+
+    /// The plan cell of `file` for `fingerprint`, added when it is missing.
     ///
-    /// The open runs as its own task, so it makes progress while this worker
-    /// reads the file it already holds. A no-op when nothing is left to open.
-    fn prefetch(&mut self) {
-        if self.next.is_some() {
+    /// Each call takes one part of the file. The call that takes the last
+    /// part removes the entry, so a later run of the same plan builds anew.
+    fn take(
+        &self,
+        file: &PartitionedFile,
+        fingerprint: ScanFingerprint,
+        count: usize,
+    ) -> Arc<PlanCell> {
+        let meta = &file.object_meta;
+        let key = meta.location.to_string();
+        let version = (meta.size, meta.last_modified.timestamp_nanos_opt());
+        let mut files = self.files.lock();
+        let entries = files.entry(key.clone()).or_default();
+        let found = entries
+            .iter()
+            .position(|entry| entry.version == version && entry.fingerprint == fingerprint);
+        let plan = match found {
+            Some(index) => {
+                let entry = &mut entries[index];
+                entry.taken += 1;
+                let plan = Arc::clone(&entry.plan);
+                if entry.taken >= count {
+                    entries.remove(index);
+                }
+                plan
+            }
+            None => {
+                let plan = Arc::new(PlanCell::new());
+                if count > 1 {
+                    entries.push(PlanEntry {
+                        version,
+                        fingerprint,
+                        plan: Arc::clone(&plan),
+                        taken: 1,
+                    });
+                }
+                plan
+            }
+        };
+        if entries.is_empty() {
+            files.remove(&key);
+        }
+        plan
+    }
+}
+
+/// One file's open, shared by the parts of that file.
+#[derive(Default)]
+struct OpenCell {
+    /// Set by the first part that opens the file. The other parts wait on it.
+    dataset: tokio::sync::OnceCell<AnyDataset>,
+    /// Parts of the file that took the open.
+    taken: AtomicUsize,
+}
+
+/// The value this module puts in DataFusion's file metadata cache.
+struct CachedOpen {
+    tag: String,
+    cell: Arc<OpenCell>,
+}
+
+impl FileMetadata for CachedOpen {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn memory_size(&self) -> usize {
+        CACHED_OPEN_SIZE
+    }
+
+    fn extra_info(&self) -> HashMap<String, String> {
+        HashMap::from([("nd_reader".to_string(), self.tag.clone())])
+    }
+}
+
+/// What a scan reads from each file, for one partition.
+///
+/// A format builds one in `create_morselizer` and hands it to
+/// [`NdMorselizer`], or to [`NdFileOpener`] for a direct caller.
+#[derive(Clone)]
+pub struct NdScan {
+    pub files: Arc<dyn OpenFile>,
+    pub projected_schema: SchemaRef,
+    pub batch_size: usize,
+    pub predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// The table's `PARTITIONED BY` columns, nd-encoded as the scan carries
+    /// them. Each file brings its own values on its `PartitionedFile`.
+    pub partition_fields: Vec<FieldRef>,
+    /// This partition's counters, registered once. See [`ReadMetrics::new`].
+    pub metrics: ReadMetrics,
+    /// DataFusion's file metadata cache, from the session's runtime. Scans
+    /// share an open through it. With `None`, the part that builds a plan
+    /// opens the file for it.
+    pub metadata_cache: Option<Arc<dyn FileMetadataCache>>,
+    /// The plans of this scan's split files. The source owns them, so they
+    /// belong to one query.
+    pub plans: Arc<ScanPlans>,
+}
+
+impl NdScan {
+    /// The scan `config` describes, for `partition`.
+    pub fn new(
+        files: Arc<dyn OpenFile>,
+        config: &FileScanConfig,
+        batch_size: usize,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
+        metrics: ReadMetrics,
+        metadata_cache: Option<Arc<dyn FileMetadataCache>>,
+        plans: Arc<ScanPlans>,
+    ) -> Result<Self> {
+        Ok(Self {
+            files,
+            projected_schema: config.projected_schema()?,
+            batch_size,
+            predicate,
+            partition_fields: config.table_partition_cols().clone(),
+            metrics,
+            metadata_cache,
+            plans,
+        })
+    }
+
+    /// Open the part of a file that `file` names, and plan its slice.
+    ///
+    /// The parts of a split file share one plan in [`ScanPlans`]. The first
+    /// part that needs it builds it, and the others wait. Part 0 of each run
+    /// reports the pruned chunks and a skipped file, so that each run counts
+    /// them once, whichever part built the plan.
+    pub async fn read(&self, file: &PartitionedFile) -> Result<FileRead> {
+        let part = FilePart::of(file);
+        self.plan(file, part).await.map_err(|error| {
+            // DataFusion's file stream does not add the path to an error.
+            DataFusionError::Execution(format!(
+                "Failed to open {}: {error}",
+                file.object_meta.location
+            ))
+        })
+    }
+
+    async fn plan(&self, file: &PartitionedFile, part: FilePart) -> Result<FileRead> {
+        if part.count <= 1 {
+            let planned = self.plan_dataset(self.files.open(file).await?, file).await?;
+            self.report(&planned);
+            return Ok(planned.read);
+        }
+
+        let cell = self.plans.take(file, self.fingerprint(file), part.count);
+        let cache = self.metadata_cache.as_deref();
+        let planned = match cell.get() {
+            // The plan is there, so this part needs no open. It still counts
+            // as a part of the cached open, so that the last part takes the
+            // entry out of the cache.
+            Some(planned) => {
+                if let Some(cache) = cache {
+                    count_open(cache, file, &self.files.cache_tag(), part, None);
+                }
+                Arc::clone(planned)
+            }
+            None => {
+                let opened = match cache {
+                    Some(cache) => Some(self.open_cached(cache, file, part).await?),
+                    None => None,
+                };
+                let planned = cell
+                    .get_or_try_init(|| async {
+                        let dataset = match opened {
+                            Some(dataset) => dataset,
+                            None => self.files.open(file).await?,
+                        };
+                        Ok::<_, DataFusionError>(Arc::new(self.plan_dataset(dataset, file).await?))
+                    })
+                    .await?;
+                Arc::clone(planned)
+            }
+        };
+        if part.index == 0 {
+            self.report(&planned);
+        }
+        Ok(planned.read.slice(part.index, part.count))
+    }
+
+    /// Report a file's pruned chunks, or its skip, into this partition's
+    /// counters.
+    fn report(&self, planned: &PlannedFile) {
+        if planned.skipped {
+            self.metrics.files_skipped.add(1);
             return;
         }
-        let Some(file) = self.source.unopened.pop() else {
-            return;
+        let pruned = planned.read.pruned();
+        self.metrics.chunks_pruned.add(pruned.chunks);
+        self.metrics.rows_pruned.add(pruned.rows);
+    }
+
+    /// Narrow `dataset` and plan it.
+    async fn plan_dataset(&self, dataset: AnyDataset, file: &PartitionedFile) -> Result<PlannedFile> {
+        let Some(dataset) = self.files.narrow(dataset)? else {
+            return Ok(PlannedFile {
+                read: FileRead::skipped(),
+                skipped: true,
+            });
+        };
+        let read = FileRead::plan(
+            dataset,
+            self.projected_schema.clone(),
+            self.batch_size,
+            self.predicate.clone(),
+            FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
+        )
+        .await?;
+        Ok(PlannedFile {
+            read,
+            skipped: false,
+        })
+    }
+
+    /// Everything this scan's plan of `file` depends on.
+    fn fingerprint(&self, file: &PartitionedFile) -> ScanFingerprint {
+        ScanFingerprint {
+            narrow_tag: self.files.narrow_tag(),
+            projected_schema: self.projected_schema.clone(),
+            batch_size: self.batch_size,
+            predicate: self.predicate.clone(),
+            partition_fields: self.partition_fields.clone(),
+            partition_values: file.partition_values.clone(),
+        }
+    }
+
+    /// Open the file through DataFusion's metadata cache.
+    ///
+    /// The parts of one file share one open. The last part of the file takes
+    /// the entry out, so the cache does not keep the file open after the scan.
+    async fn open_cached(
+        &self,
+        cache: &dyn FileMetadataCache,
+        file: &PartitionedFile,
+        part: FilePart,
+    ) -> Result<AnyDataset> {
+        let tag = self.files.cache_tag();
+        let cell = match cached_cell(cache, file, &tag) {
+            Some(cell) => cell,
+            None => {
+                let cell = Arc::new(OpenCell::default());
+                let value = CachedOpen {
+                    tag: tag.clone(),
+                    cell: Arc::clone(&cell),
+                };
+                cache.put(
+                    &file.object_meta.location,
+                    CachedFileMetadataEntry::new(file.object_meta.clone(), Arc::new(value)),
+                );
+                cell
+            }
         };
 
-        // Counted from before the task starts. A worker asking whether the scan
-        // is over must not see a gap between the pop and the open, or it will
-        // finish while this file is still on its way.
-        self.source.opening.fetch_add(1, Ordering::AcqRel);
-        let source = Arc::clone(&self.source);
-        let opener = Arc::clone(&self.opener);
-
-        self.next = Some(tokio::spawn(async move {
-            let opened = source.open_one(opener.as_ref(), &file).await;
-            if let Ok(dataset) = &opened {
-                // Published as soon as it is open, rather than when its own
-                // worker gets to it: a worker that runs dry meanwhile can take
-                // its chunks.
-                source.register(Arc::clone(dataset));
-            }
-            source.opening.fetch_sub(1, Ordering::AcqRel);
-            // After the register and the decrement, so a woken worker sees both.
-            // Also on failure: a worker waiting for this open must not wait for
-            // one that is never coming.
-            source.opened.notify_waiters();
-            opened
-        }));
+        let opened = cell
+            .dataset
+            .get_or_try_init(|| self.files.open(file))
+            .await
+            .cloned();
+        count_open(cache, file, &tag, part, Some(&cell));
+        opened
     }
+}
 
-    /// The next thing this worker should read, or `None` when the scan is done.
-    async fn take(&mut self) -> Result<Option<Arc<FileRead>>> {
-        loop {
-            // Level 1. Opening a file is preferred over helping with one: it
-            // gives this worker something no other worker is on, and it adds a
-            // queue the others can draw from later.
-            self.prefetch();
+/// Count one part of `file` against its cached open, the one in `cell` or the
+/// one the cache holds. The last part takes the entry out of the cache.
+fn count_open(
+    cache: &dyn FileMetadataCache,
+    file: &PartitionedFile,
+    tag: &str,
+    part: FilePart,
+    cell: Option<&Arc<OpenCell>>,
+) {
+    let Some(cell) = cell.cloned().or_else(|| cached_cell(cache, file, tag)) else {
+        return;
+    };
+    let taken = cell.taken.fetch_add(1, Ordering::AcqRel) + 1;
+    if taken >= part.count
+        && cached_cell(cache, file, tag).is_some_and(|cached| Arc::ptr_eq(&cached, &cell))
+    {
+        cache.remove(&file.object_meta.location);
+    }
+}
 
-            if let Some(handle) = self.next.take() {
-                // Start the one after it *before* waiting on this one, so the
-                // pipeline stays full across the whole scan rather than just
-                // the first file.
-                self.prefetch();
-                return handle
-                    .await
-                    .map_err(|error| {
-                        DataFusionError::Execution(format!("nd morsel open failed: {error}"))
-                    })?
-                    .map(Some);
-            }
+/// The open cell the cache holds for `file`, when it is valid for this reader.
+fn cached_cell(
+    cache: &dyn FileMetadataCache,
+    file: &PartitionedFile,
+    tag: &str,
+) -> Option<Arc<OpenCell>> {
+    let entry = cache.get(&file.object_meta.location)?;
+    if !entry.is_valid_for(&file.object_meta) {
+        return None;
+    }
+    let cached = entry.file_metadata.as_any().downcast_ref::<CachedOpen>()?;
+    (cached.tag == tag).then(|| Arc::clone(&cached.cell))
+}
 
-            // Nothing left to open. Register for the next open to finish
-            // *before* looking at what is available, so an open that completes
-            // between the look and the wait still wakes this worker.
-            // `notify_waiters` wakes only those already registered, so checking
-            // first and registering after would lose that wake-up and hang here
-            // for the rest of the scan.
-            let mut opened = std::pin::pin!(self.source.opened.notified());
-            opened.as_mut().enable();
+/// One partition's [`Morselizer`] for an nd format.
+///
+/// A format returns this from `FileSource::create_morselizer`.
+pub struct NdMorselizer {
+    scan: NdScan,
+}
 
-            // Level 2. Help with a file somebody else opened.
-            if let Some(dataset) = self.source.borrow_open(self.worker) {
-                return Ok(Some(dataset));
-            }
+impl NdMorselizer {
+    pub fn new(scan: NdScan) -> Self {
+        Self { scan }
+    }
+}
 
-            // Nothing open and nothing left to open. If another worker is still
-            // opening a file, its chunks are work this one could take, so wait
-            // for it rather than finishing early — finishing early is the whole
-            // problem this module exists to solve. The wait is bounded by one
-            // open and only happens at the end of a scan.
-            if self.source.opening.load(Ordering::Acquire) == 0 {
-                return Ok(None);
-            }
-            opened.await;
+impl std::fmt::Debug for NdMorselizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NdMorselizer").finish_non_exhaustive()
+    }
+}
+
+impl Morselizer for NdMorselizer {
+    fn plan_file(&self, file: PartitionedFile) -> Result<Box<dyn MorselPlanner>> {
+        Ok(Box::new(PartPlanner {
+            file,
+            scan: self.scan.clone(),
+        }))
+    }
+}
+
+/// Opens one queue entry: a whole file, or one part of it.
+struct PartPlanner {
+    file: PartitionedFile,
+    scan: NdScan,
+}
+
+impl std::fmt::Debug for PartPlanner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PartPlanner")
+            .field("file", &self.file.object_meta.location)
+            .field("part", &FilePart::of(&self.file))
+            .finish_non_exhaustive()
+    }
+}
+
+impl MorselPlanner for PartPlanner {
+    fn plan(self: Box<Self>) -> Result<Option<MorselPlan>> {
+        let Self { file, scan } = *self;
+        let open = async move {
+            let read = scan.read(&file).await?;
+            Ok(Box::new(OpenedPlanner {
+                read,
+                metrics: scan.metrics,
+            }) as Box<dyn MorselPlanner>)
+        };
+        Ok(Some(MorselPlan::new().with_pending_planner(open)))
+    }
+}
+
+/// An opened part: one morsel per unit of its slice.
+struct OpenedPlanner {
+    read: FileRead,
+    metrics: ReadMetrics,
+}
+
+impl std::fmt::Debug for OpenedPlanner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenedPlanner")
+            .field("units", &self.read.units())
+            .finish_non_exhaustive()
+    }
+}
+
+impl MorselPlanner for OpenedPlanner {
+    fn plan(self: Box<Self>) -> Result<Option<MorselPlan>> {
+        let morsels: Vec<Box<dyn Morsel>> = self
+            .read
+            .into_streams(Some(self.metrics))
+            .into_iter()
+            .map(|stream| Box::new(UnitMorsel { stream }) as Box<dyn Morsel>)
+            .collect();
+        if morsels.is_empty() {
+            return Ok(None);
         }
+        Ok(Some(MorselPlan::new().with_morsels(morsels)))
+    }
+}
+
+/// One unit of a file: one chunk of a regular dataset, or one batch range of
+/// a ragged one.
+///
+/// The stream is lazy. The unit is read when DataFusion makes it the active
+/// reader.
+struct UnitMorsel {
+    stream: BoxStream<'static, Result<RecordBatch>>,
+}
+
+impl std::fmt::Debug for UnitMorsel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnitMorsel").finish_non_exhaustive()
+    }
+}
+
+impl Morsel for UnitMorsel {
+    fn into_stream(self: Box<Self>) -> BoxStream<'static, Result<RecordBatch>> {
+        self.stream
+    }
+}
+
+/// A plain [`FileOpener`] for an nd format: open one entry and read it.
+///
+/// For callers that ask a source for its opener directly. A scan goes through
+/// [`NdMorselizer`].
+pub struct NdFileOpener {
+    scan: NdScan,
+}
+
+impl NdFileOpener {
+    pub fn new(scan: NdScan) -> Self {
+        Self { scan }
+    }
+}
+
+impl FileOpener for NdFileOpener {
+    fn open(&self, file: PartitionedFile) -> Result<FileOpenFuture> {
+        let scan = self.scan.clone();
+        Ok(async move {
+            let read = scan.read(&file).await?;
+            Ok(read.stream(Some(scan.metrics)))
+        }
+        .boxed())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::atomic::AtomicUsize;
 
     use arrow::datatypes::{Schema, SchemaRef};
-    use datafusion::error::DataFusionError;
-    use futures::TryStreamExt;
+    use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
+    use datafusion::datasource::source::DataSourceExec;
+    use datafusion::datasource::table_schema::TableSchema;
+    use datafusion::execution::TaskContext;
+    use datafusion::execution::cache::DefaultFilesMetadataCache;
+    use datafusion::execution::object_store::ObjectStoreUrl;
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+    use datafusion::physical_plan::limit::GlobalLimitExec;
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+    use datafusion::prelude::SessionConfig;
+    use futures::{StreamExt, TryStreamExt};
     use indexmap::IndexMap;
     use parking_lot::Mutex;
 
     use super::*;
     use crate::NdArray;
     use crate::NdArrayD;
-    use crate::dataset::{AnyDataset, Dataset};
+    use crate::dataset::Dataset;
 
     /// A projection that wants no column, so a plan takes the `COUNT(*)` path
     /// and a batch carries only its row count. These tests are about who reads
@@ -463,7 +729,7 @@ mod tests {
         Arc::new(Schema::empty())
     }
 
-    /// A dataset of `rows` values on one dimension.
+    /// A dataset of `rows` values on one dimension, counting up from 0.
     async fn dataset(rows: usize) -> AnyDataset {
         let values = NdArray::<i64>::try_new_from_vec_in_mem(
             (0..rows as i64).collect(),
@@ -490,85 +756,201 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         opened: Mutex<Vec<String>>,
-        batch_size: usize,
         /// Paths that fail to open.
         broken: HashSet<String>,
-        /// How long an open takes. Long enough makes the race in
-        /// [`MorselSource::take`] happen every run instead of sometimes.
-        opening_takes: Option<std::time::Duration>,
+        /// Narrow calls. A plan narrows once, before its predicate masks, so
+        /// this counts the plans that read the coordinate arrays.
+        narrowed: std::sync::atomic::AtomicUsize,
+        /// Narrow every file to nothing, as `skip_unbroadcastable` does.
+        skips: bool,
     }
 
     impl Fake {
-        fn new(batch_size: usize) -> Arc<Self> {
-            Arc::new(Self {
-                opened: Mutex::new(Vec::new()),
-                batch_size,
-                broken: HashSet::new(),
-                opening_takes: None,
-            })
+        fn new() -> Arc<Self> {
+            Arc::new(Self::default())
         }
 
-        fn breaking(batch_size: usize, path: &str) -> Arc<Self> {
+        fn breaking(path: &str) -> Arc<Self> {
             Arc::new(Self {
-                opened: Mutex::new(Vec::new()),
-                batch_size,
                 broken: HashSet::from([path.to_string()]),
-                opening_takes: None,
+                ..Self::default()
             })
         }
 
-        fn slow(batch_size: usize, millis: u64) -> Arc<Self> {
+        fn skipping() -> Arc<Self> {
             Arc::new(Self {
-                opened: Mutex::new(Vec::new()),
-                batch_size,
-                broken: HashSet::new(),
-                opening_takes: Some(std::time::Duration::from_millis(millis)),
+                skips: true,
+                ..Self::default()
             })
         }
 
         fn opened(&self) -> Vec<String> {
             self.opened.lock().clone()
         }
+
+        fn plans(&self) -> usize {
+            self.narrowed.load(Ordering::Acquire)
+        }
     }
 
     #[async_trait::async_trait]
     impl OpenFile for Fake {
-        async fn open(&self, file: &PartitionedFile) -> Result<Arc<FileRead>> {
+        async fn open(&self, file: &PartitionedFile) -> Result<AnyDataset> {
             let path = file.object_meta.location.to_string();
             if self.broken.contains(&path) {
                 return Err(DataFusionError::Execution("the disk said no".to_string()));
             }
-            if let Some(delay) = self.opening_takes {
-                tokio::time::sleep(delay).await;
-            }
             self.opened.lock().push(path);
-            FileRead::plan(
-                dataset(file.object_meta.size as usize).await,
-                no_columns(),
-                self.batch_size,
-                None,
-                crate::arrow::partition::FilePartitions::none(),
-                None,
-            )
-            .await
+            Ok(dataset(file.object_meta.size as usize).await)
+        }
+
+        fn narrow(&self, dataset: AnyDataset) -> Result<Option<AnyDataset>> {
+            self.narrowed.fetch_add(1, Ordering::AcqRel);
+            Ok((!self.skips).then_some(dataset))
+        }
+
+        fn cache_tag(&self) -> String {
+            "fake".to_string()
         }
     }
 
-    /// Run `workers` workers over `source` and return the rows each one read.
-    /// The longest any test here may take before it is treated as stuck.
+    /// A [`FileSource`] over [`Fake`], wired the way the nd formats wire theirs.
     ///
-    /// A worker waits on [`MorselSource::opened`] when an open is in flight, and
-    /// the way that goes wrong is a missed wake-up: the worker sleeps and the
-    /// scan never finishes. Without this bound the suite hangs instead of
-    /// failing, which reports as a timed-out job rather than a broken test.
-    /// Removing the `notify_waiters` call is exactly that mutation, and it turns
-    /// this into a clean failure naming the worker that never came back.
+    /// A clone shares the plans, as a format's clones do. [`Self::new_query`]
+    /// stands for the source another query builds.
+    #[derive(Clone)]
+    struct FakeSource {
+        opener: Arc<Fake>,
+        batch_size: usize,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
+        cache: Option<Arc<dyn FileMetadataCache>>,
+        plans: Arc<ScanPlans>,
+        table_schema: TableSchema,
+        metrics: ExecutionPlanMetricsSet,
+    }
+
+    impl FakeSource {
+        fn new(opener: Arc<Fake>, batch_size: usize) -> Self {
+            Self {
+                opener,
+                batch_size,
+                predicate: None,
+                cache: None,
+                plans: Arc::default(),
+                table_schema: TableSchema::from_file_schema(no_columns()),
+                metrics: ExecutionPlanMetricsSet::new(),
+            }
+        }
+
+        /// The source of another query over the same files, opener and cache.
+        fn new_query(&self) -> Self {
+            Self {
+                plans: Arc::default(),
+                metrics: ExecutionPlanMetricsSet::new(),
+                ..self.clone()
+            }
+        }
+
+        fn with_cache(mut self) -> Self {
+            self.cache = Some(Arc::new(DefaultFilesMetadataCache::new(64 * 1024 * 1024)));
+            self
+        }
+
+        fn with_predicate(mut self, predicate: Arc<dyn PhysicalExpr>) -> Self {
+            self.predicate = Some(predicate);
+            self
+        }
+
+        fn scan(&self, config: &FileScanConfig, partition: usize) -> Result<NdScan> {
+            NdScan::new(
+                self.opener.clone(),
+                config,
+                self.batch_size,
+                self.predicate.clone(),
+                ReadMetrics::new(&self.metrics, partition),
+                self.cache.clone(),
+                Arc::clone(&self.plans),
+            )
+        }
+
+        fn metric(&self, name: &str) -> usize {
+            self.metrics
+                .clone_inner()
+                .sum_by_name(name)
+                .map_or(0, |value| value.as_usize())
+        }
+    }
+
+    impl FileSource for FakeSource {
+        fn create_file_opener(
+            &self,
+            _object_store: Arc<dyn object_store::ObjectStore>,
+            config: &FileScanConfig,
+            partition: usize,
+        ) -> Result<Arc<dyn FileOpener>> {
+            Ok(Arc::new(NdFileOpener::new(self.scan(config, partition)?)))
+        }
+
+        fn create_morselizer(
+            &self,
+            _object_store: Arc<dyn object_store::ObjectStore>,
+            config: &FileScanConfig,
+            partition: usize,
+        ) -> Result<Box<dyn Morselizer>> {
+            Ok(Box::new(NdMorselizer::new(self.scan(config, partition)?)))
+        }
+
+        fn table_schema(&self) -> &TableSchema {
+            &self.table_schema
+        }
+
+        fn with_batch_size(&self, _batch_size: usize) -> Arc<dyn FileSource> {
+            Arc::new(self.clone())
+        }
+
+        fn metrics(&self) -> &ExecutionPlanMetricsSet {
+            &self.metrics
+        }
+
+        fn file_type(&self) -> &str {
+            "fake"
+        }
+    }
+
+    /// The groups a format plans for `files` over `partitions`.
+    fn groups(files: Vec<PartitionedFile>, partitions: usize) -> Vec<FileGroup> {
+        split_files(&[FileGroup::new(files.clone())], partitions)
+            .unwrap_or_else(|| vec![FileGroup::new(files)])
+    }
+
+    fn config(source: &FakeSource, groups: Vec<FileGroup>) -> FileScanConfig {
+        FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file_groups(groups)
+        .build()
+    }
+
+    /// A scan of `files` split over `partitions`, as a format plans it.
+    fn scan(source: &FakeSource, files: Vec<PartitionedFile>, partitions: usize) -> Arc<dyn ExecutionPlan> {
+        DataSourceExec::from_data_source(config(source, groups(files, partitions)))
+    }
+
+    fn context() -> Arc<TaskContext> {
+        Arc::new(TaskContext::default())
+    }
+
+    /// The longest any scan here may take before it is treated as stuck.
     const BEFORE_STUCK: std::time::Duration = std::time::Duration::from_secs(20);
 
-    async fn run(source: &Arc<MorselSource>, opener: Arc<dyn OpenFile>, workers: usize) -> Vec<usize> {
+    /// Run every partition of `plan` at the same time. Return the rows each
+    /// partition read.
+    async fn run(plan: &Arc<dyn ExecutionPlan>, context: Arc<TaskContext>) -> Result<Vec<usize>> {
+        let partitions = plan.output_partitioning().partition_count();
         let mut tasks = Vec::new();
-        for worker in 0..workers {
-            let stream = source.stream(worker, Arc::clone(&opener), None);
+        for partition in 0..partitions {
+            let stream = plan.execute(partition, Arc::clone(&context))?;
             tasks.push(tokio::spawn(async move {
                 let batches: Vec<RecordBatch> = stream.try_collect().await?;
                 Ok::<usize, DataFusionError>(batches.iter().map(|b| b.num_rows()).sum())
@@ -576,327 +958,92 @@ mod tests {
         }
 
         let mut rows = Vec::new();
-        for (worker, task) in tasks.into_iter().enumerate() {
+        for (partition, task) in tasks.into_iter().enumerate() {
             let read = tokio::time::timeout(BEFORE_STUCK, task)
                 .await
-                .unwrap_or_else(|_| {
-                    panic!("worker {worker} never finished — a wake-up was missed")
-                })
-                .expect("the worker finishes")
-                .expect("it reads");
+                .unwrap_or_else(|_| panic!("partition {partition} never finished"))
+                .expect("the partition finishes")?;
             rows.push(read);
+        }
+        Ok(rows)
+    }
+
+    /// Start every partition one after the other, then drain them all.
+    ///
+    /// Each partition takes its first batch before the next partition starts.
+    /// A partition holds its entry until it has read every morsel of it, so
+    /// partition `k` takes the `k`-th entry of the queue. This makes the spread
+    /// over the partitions deterministic.
+    async fn run_in_turn(plan: &Arc<dyn ExecutionPlan>, context: Arc<TaskContext>) -> Vec<usize> {
+        let partitions = plan.output_partitioning().partition_count();
+        let mut streams = Vec::new();
+        let mut rows = Vec::new();
+        for partition in 0..partitions {
+            let mut stream = plan.execute(partition, Arc::clone(&context)).unwrap();
+            let first = stream.next().await.transpose().unwrap();
+            rows.push(first.map_or(0, |batch| batch.num_rows()));
+            streams.push(stream);
+        }
+        for (partition, stream) in streams.into_iter().enumerate() {
+            let rest: Vec<RecordBatch> = stream.try_collect().await.unwrap();
+            rows[partition] += rest.iter().map(|batch| batch.num_rows()).sum::<usize>();
         }
         rows
     }
 
-    /// Every file is read, once, however the workers happen to interleave.
-    ///
-    /// This is the correctness property the whole module rests on. A file leaves
-    /// the queue once, and the queue behind an open file hands out each chunk
-    /// once, so no worker can duplicate another's work and none can be skipped.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn every_file_is_read_exactly_once() {
-        const FILES: usize = 200;
-        const ROWS: usize = 64;
-        const WORKERS: usize = 8;
-
-        let opener = Fake::new(16);
-        let source = MorselSource::new((0..FILES).map(|i| file(i, ROWS)).collect());
-
-        let rows = run(&source, opener.clone(), WORKERS).await;
-
-        assert_eq!(
-            rows.iter().sum::<usize>(),
-            FILES * ROWS,
-            "every row of every file came back exactly once"
-        );
-
-        let opened = opener.opened();
-        assert_eq!(opened.len(), FILES, "and every file was opened once");
-        assert_eq!(
-            opened.iter().collect::<HashSet<_>>().len(),
-            FILES,
-            "no file was opened twice"
-        );
-        assert_eq!(source.unopened(), 0, "the queue is empty");
-    }
-
-    /// The work spreads over the workers instead of landing on one.
-    ///
-    /// Not a balance assertion — that depends on scheduling — but the thing a
-    /// deal could not guarantee at all: every worker gets some of it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn every_worker_gets_some_of_the_scan() {
-        const FILES: usize = 400;
-        const WORKERS: usize = 8;
-
-        let opener = Fake::new(16);
-        let source = MorselSource::new((0..FILES).map(|i| file(i, 64)).collect());
-
-        let rows = run(&source, opener, WORKERS).await;
-
-        assert_eq!(rows.len(), WORKERS);
-        assert!(
-            rows.iter().all(|read| *read > 0),
-            "no worker sat idle while the others worked: {rows:?}"
-        );
-    }
-
-    /// One worker reads the whole scan on its own.
-    ///
-    /// A scan on one partition has nobody to share with, and must still be
-    /// complete.
-    #[tokio::test]
-    async fn one_worker_reads_the_whole_scan() {
-        const FILES: usize = 20;
-        const ROWS: usize = 32;
-
-        let opener = Fake::new(8);
-        let source = MorselSource::new((0..FILES).map(|i| file(i, ROWS)).collect());
-
-        let rows = run(&source, opener, 1).await;
-        assert_eq!(rows, vec![FILES * ROWS]);
-    }
-
-    /// More workers than files is not an error.
-    ///
-    /// The surplus find the queue empty. They must finish, not hang, and they
-    /// must not invent rows.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn more_workers_than_files_still_finish() {
-        const FILES: usize = 3;
-        const ROWS: usize = 16;
-        const WORKERS: usize = 16;
-
-        let opener = Fake::new(8);
-        let source = MorselSource::new((0..FILES).map(|i| file(i, ROWS)).collect());
-
-        let rows = run(&source, opener, WORKERS).await;
-
-        assert_eq!(rows.len(), WORKERS);
-        assert_eq!(rows.iter().sum::<usize>(), FILES * ROWS);
-    }
-
-    /// A scan with no files finishes at once, on every worker.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_empty_scan_finishes() {
-        let opener = Fake::new(8);
-        let source = MorselSource::new(Vec::new());
-
-        let rows = run(&source, opener, 4).await;
-        assert_eq!(rows, vec![0; 4]);
-        assert_eq!(source.files(), 0);
-    }
-
-    /// Few files and many workers: the file is opened once and read once.
-    ///
-    /// This is level 2, and the case a deal of whole files cannot serve at all.
-    /// Eight workers reach one file; between them they read it exactly once,
-    /// however the eight happen to interleave.
-    ///
-    /// No test asserts how much of the file each worker gets. The scheduler
-    /// decides that. The first worker can empty the queue before the other seven
-    /// start. One worker then reads the whole file alone. That result is
-    /// correct.
-    ///
-    /// One property holds on every schedule. A worker does not stop while an
-    /// open is in flight.
-    /// [`a_worker_waits_for_a_file_another_is_still_opening`] asserts it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn one_big_file_is_read_once_by_whichever_workers_reach_it() {
-        const ROWS: usize = 1_024;
-        const BATCH: usize = 16;
-        const WORKERS: usize = 8;
-
-        let opener = Fake::new(BATCH);
-        let source = MorselSource::new(vec![file(0, ROWS)]);
-
-        let rows = run(&source, opener.clone(), WORKERS).await;
-
-        assert_eq!(rows.iter().sum::<usize>(), ROWS, "the file is read once over");
-        assert_eq!(opener.opened().len(), 1, "and opened once");
-    }
-
-    /// A worker waits for a file that another worker opens.
-    ///
-    /// The queue is empty and no file is open. The scan is not over. One worker
-    /// is part way through an open. The other workers can take the chunks of
-    /// that file. A worker that reads this state as "done" stops too early. This
-    /// module exists to prevent that failure.
-    ///
-    /// This test sets the open in flight by hand. It then drives one worker step
-    /// by step. A scan of real workers cannot show the wait. It shows only the
-    /// result. The number of workers with rows depends on the speed of the first
-    /// worker. The scheduler controls that speed. A count of those workers is
-    /// therefore not a valid assertion. It reports a busy machine as a bug.
-    ///
-    /// This test asserts the two parts of the wait instead. Part 1: the worker
-    /// stays while the open is in flight. Part 2: the worker takes the chunks
-    /// after the open publishes them.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_worker_waits_for_a_file_another_is_still_opening() {
-        const ROWS: usize = 512;
-        const BATCH: usize = 8;
-        /// A worker that stops early stops in less time than this.
-        const A_MOMENT: std::time::Duration = std::time::Duration::from_millis(50);
-
-        let opener = Fake::new(BATCH);
-        // The scan has no files. Nothing is open, and nothing is left to open.
-        // The open in flight is the only reason to stay.
-        let source = MorselSource::new(Vec::new());
-        source.opening.fetch_add(1, Ordering::AcqRel);
-
-        let mut worker = Worker {
-            source: Arc::clone(&source),
-            worker: 0,
-            opener: opener.clone(),
-            metrics: None,
-            failed: false,
-            next: None,
-        };
-        // The test holds this future across both parts. A second call to `take`
-        // cannot show that the wake-up reaches the first waiter.
-        let mut taking = std::pin::pin!(worker.take());
-
-        assert!(
-            tokio::time::timeout(A_MOMENT, taking.as_mut()).await.is_err(),
-            "the worker stays for the open in flight. It does not report the scan as done"
-        );
-
-        // The open finishes. The prefetch task ends in this order: publish the
-        // file, drop the count, wake the waiters.
-        let dataset = opener.open(&file(0, ROWS)).await.expect("the file opens");
-        source.register(dataset);
-        source.opening.fetch_sub(1, Ordering::AcqRel);
-        source.opened.notify_waiters();
-
-        let taken = tokio::time::timeout(BEFORE_STUCK, taking)
-            .await
-            .expect("the worker wakes when the open finishes")
-            .expect("and it takes work, not an error")
-            .expect("the scan is not over: the file has chunks");
-
-        let batches: Vec<RecordBatch> = taken.stream(None).try_collect().await.expect("it reads");
-        assert_eq!(
-            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
-            ROWS,
-            "and the worker takes every chunk of the file"
-        );
-    }
-
-    /// A slow open reads the file one time, with real workers.
-    ///
-    /// [`a_worker_waits_for_a_file_another_is_still_opening`] drives one worker
-    /// by hand. This test uses the worker loop itself. Eight workers read one
-    /// file. The open is slow, so seven workers reach the empty state before it
-    /// ends. Each worker must wake and stop. A lost wake-up keeps a worker
-    /// asleep. [`BEFORE_STUCK`] then fails the test and names that worker. A
-    /// test without that limit hangs the job instead.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn a_slow_open_is_still_read_once() {
-        const ROWS: usize = 512;
-        const BATCH: usize = 8;
-        const WORKERS: usize = 8;
-
-        let opener = Fake::slow(BATCH, 60);
-        let source = MorselSource::new(vec![file(0, ROWS)]);
-
-        let rows = run(&source, opener.clone(), WORKERS).await;
-
-        assert_eq!(rows.iter().sum::<usize>(), ROWS, "the file is read once over");
-        assert_eq!(opener.opened().len(), 1, "and opened once");
-    }
-
-    /// The open list holds workers, not files — *while the scan runs*.
-    ///
-    /// It is pruned whenever it is touched. Left unpruned it would hold every
-    /// file the scan ever opened, and every one of their arrays with it, for the
-    /// length of the query.
-    ///
-    /// Two per worker is the ceiling, and it is the pipeline: a worker holds the
-    /// file it is reading and has published the one it prefetched behind it.
-    ///
-    /// The measurement has to happen mid-scan. Checking after it ends proves
-    /// nothing: the last look prunes the list on its way out, so a version that
-    /// never pruned during the scan still finishes with it empty.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_open_list_does_not_grow_while_the_scan_runs() {
-        const FILES: usize = 60;
-        const WORKERS: usize = 2;
-
-        // A slow open stretches the scan out, so the watcher below samples it
-        // many times over rather than racing it.
-        let opener = Fake::slow(16, 2);
-        let source = MorselSource::new((0..FILES).map(|i| file(i, 32)).collect());
-
-        let peak = Arc::new(AtomicUsize::new(0));
-        let watched = Arc::clone(&source);
-        let seen = Arc::clone(&peak);
-        let watcher = tokio::spawn(async move {
-            loop {
-                seen.fetch_max(watched.open_files(), Ordering::AcqRel);
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-        });
-
-        let rows = run(&source, opener, WORKERS).await;
-        watcher.abort();
-
-        assert_eq!(rows.iter().sum::<usize>(), FILES * 32, "the scan completed");
-        let peak = peak.load(Ordering::Acquire);
-        assert!(peak > 0, "the watcher saw the scan at all");
-        assert!(
-            peak <= 2 * WORKERS + 1,
-            "{peak} files listed as open at once, for {WORKERS} workers over {FILES} files \
-             — the ceiling is one held and one prefetched each"
-        );
-    }
-
-    /// A morsel scan plans one entry per partition, whatever the file count.
-    ///
-    /// This is the point of the whole module. A deal plans one entry per file,
-    /// and `FileStream` calls the opener once per entry — so a 3,584-file scan
-    /// paid 3,584 opener calls whether or not it read the file behind each one.
+    /// The split: few files become parts, many files stay whole.
     #[test]
-    fn a_morsel_scan_plans_one_entry_per_partition() {
+    fn a_scan_is_split_to_fill_its_partitions() {
         const PARTITIONS: usize = 24;
 
-        for files in [1, 100, 3_584] {
-            let group = FileGroup::new((0..files).map(|i| file(i, 32)).collect());
+        for (files, parts) in [(1, 24), (3, 8), (5, 5), (23, 2), (24, 1), (3_584, 1)] {
+            let planned = split_files(
+                &[FileGroup::new((0..files).map(|i| file(i, 32)).collect())],
+                PARTITIONS,
+            )
+            .unwrap_or_else(|| panic!("{files} files are split"));
 
-            let (source, groups) = morsel_scan(&[group], PARTITIONS)
-                .unwrap_or_else(|| panic!("{files} files plan morsel-driven"));
+            assert_eq!(planned.len(), PARTITIONS, "{files} files: one group per partition");
+            let entries: Vec<&PartitionedFile> = planned.iter().flat_map(FileGroup::iter).collect();
+            assert_eq!(entries.len(), files * parts, "{files} files: {parts} parts each");
+            assert!(
+                entries.iter().all(|entry| entry.range.is_none()),
+                "no entry is a byte range"
+            );
 
-            assert_eq!(groups.len(), PARTITIONS, "one group per partition");
-            for group in &groups {
-                assert_eq!(group.len(), 1, "holding one entry, whatever the file count");
+            // The first groups start on different files.
+            let starts: HashSet<String> = planned
+                .iter()
+                .take(files.min(PARTITIONS))
+                .map(|group| group.iter().next().unwrap().object_meta.location.to_string())
+                .collect();
+            assert_eq!(starts.len(), files.min(PARTITIONS), "{files} files: distinct starts");
+
+            // Each file appears with every part index once.
+            let mut seen: HashSet<(String, usize)> = HashSet::new();
+            for entry in &entries {
+                let part = FilePart::of(entry);
+                assert_eq!(part.count, parts);
+                assert!(seen.insert((entry.object_meta.location.to_string(), part.index)));
             }
-            assert_eq!(source.files(), files, "and the queue holds every file");
-            assert_eq!(source.unopened(), files);
         }
     }
 
-    /// The entry names the scan, not a file, and carries its size.
-    ///
-    /// `EXPLAIN` shows this instead of a file list, so it has to say what a
-    /// partition is pointed at.
+    /// One partition, or no files, is left alone.
     #[test]
-    fn the_entry_describes_the_scan() {
-        let group = FileGroup::new((0..10).map(|i| file(i, 100)).collect());
-        let (_, groups) = morsel_scan(&[group], 4).expect("ten files plan morsel-driven");
-
-        let entry = groups[0].iter().next().expect("an entry");
-        assert_eq!(entry.object_meta.location.to_string(), "nd-morsel-scan/10-files");
-        assert_eq!(entry.object_meta.size, 1_000, "the scan's bytes, not a file's");
+    fn a_scan_with_nothing_to_divide_is_left_alone() {
+        let group = FileGroup::new((0..10).map(|i| file(i, 32)).collect());
+        assert!(split_files(&[group], 1).is_none(), "one partition divides nothing");
+        assert!(split_files(&[], 8).is_none(), "no files to divide");
+        assert!(
+            split_files(&[FileGroup::new(vec![])], 8).is_none(),
+            "an empty group is no files either"
+        );
     }
 
-    /// A partitioned table divides like any other, values and all.
-    ///
-    /// The values travel on the [`PartitionedFile`] the queue holds, so whoever
-    /// opens that file has them and appends them to what it reads. Only the
-    /// standing entry is valueless, and nothing reads it as a file.
+    /// A partitioned table splits like any other, values and all.
     #[test]
-    fn a_partitioned_table_divides_and_keeps_its_values() {
+    fn a_split_keeps_the_values_of_each_path() {
         use datafusion::scalar::ScalarValue;
 
         let year = |value: &str| vec![ScalarValue::Utf8(Some(value.to_string()))];
@@ -904,86 +1051,587 @@ mod tests {
         first.partition_values = year("2023");
         let mut second = file(1, 32);
         second.partition_values = year("2024");
-        let group = FileGroup::new(vec![first, second]);
+        let planned = split_files(&[FileGroup::new(vec![first, second])], 8).unwrap();
 
-        let (source, groups) =
-            morsel_scan(&[group], 8).expect("a partitioned table plans morsel-driven");
-
-        assert_eq!(groups.len(), 8, "one entry per partition, as for any scan");
-        assert_eq!(source.files(), 2, "and both files are in the queue");
-
-        let mut taken: Vec<Vec<ScalarValue>> = Vec::new();
-        while let Some(file) = source.unopened.pop() {
-            taken.push(file.partition_values.clone());
+        for entry in planned.iter().flat_map(FileGroup::iter) {
+            let expected = if entry.object_meta.location.as_ref() == "f-0000.nc" {
+                year("2023")
+            } else {
+                year("2024")
+            };
+            assert_eq!(entry.partition_values, expected, "each part keeps its file's values");
         }
-        taken.sort_by_key(|values| format!("{values:?}"));
-        assert_eq!(
-            taken,
-            vec![year("2023"), year("2024")],
-            "each file keeps the values of its own path"
-        );
-
-        let entry = groups[0].iter().next().expect("an entry");
-        assert!(
-            entry.partition_values.is_empty(),
-            "the standing entry stands for the scan, not for a file, so it holds no values"
-        );
     }
 
-    /// One partition, or none at all, is left alone.
-    #[test]
-    fn a_scan_with_nothing_to_divide_is_left_alone() {
-        let group = FileGroup::new((0..10).map(|i| file(i, 32)).collect());
-        assert!(morsel_scan(&[group], 1).is_none(), "one partition divides nothing");
-        assert!(morsel_scan(&[], 8).is_none(), "no files to divide");
-        assert!(
-            morsel_scan(&[FileGroup::new(vec![])], 8).is_none(),
-            "an empty group is no files either"
-        );
-    }
-
-    /// The planned scan reads every file exactly once, end to end.
-    ///
-    /// The planner and the worker loop are separately correct above; this is the
-    /// two of them together, which is what a format actually wires up.
+    /// One big file over many partitions: every chunk once, on several
+    /// partitions.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn a_planned_scan_reads_every_file_once() {
-        const FILES: usize = 300;
+    async fn one_big_file_is_read_once_by_several_partitions() {
+        const ROWS: usize = 1_024;
+        const BATCH: usize = 16;
+        const PARTITIONS: usize = 8;
+
+        let source = FakeSource::new(Fake::new(), BATCH);
+        let plan = scan(&source, vec![file(0, ROWS)], PARTITIONS);
+
+        let rows = run_in_turn(&plan, context()).await;
+
+        assert_eq!(rows.iter().sum::<usize>(), ROWS, "every row once");
+        assert_eq!(source.metric("chunks_read"), ROWS / BATCH, "every chunk once");
+        assert!(
+            rows.iter().filter(|read| **read > 0).count() > 1,
+            "more than one partition read the file: {rows:?}"
+        );
+        assert_eq!(rows, vec![ROWS / PARTITIONS; PARTITIONS], "the parts are balanced");
+    }
+
+    /// The same scan with all partitions at once still reads every row once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn one_big_file_read_by_racing_partitions_returns_every_row_once() {
+        const ROWS: usize = 1_024;
+        const PARTITIONS: usize = 8;
+
+        let source = FakeSource::new(Fake::new(), 16).with_cache();
+        let plan = scan(&source, vec![file(0, ROWS)], PARTITIONS);
+
+        let rows = run(&plan, context()).await.expect("it reads");
+        assert_eq!(rows.iter().sum::<usize>(), ROWS);
+    }
+
+    /// Many small files: no split, and every row once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn many_small_files_are_not_split_and_read_once() {
+        const FILES: usize = 200;
         const ROWS: usize = 64;
         const PARTITIONS: usize = 8;
 
-        let group = FileGroup::new((0..FILES).map(|i| file(i, ROWS)).collect());
-        let (source, groups) = morsel_scan(&[group], PARTITIONS).expect("it plans");
+        let opener = Fake::new();
+        let source = FakeSource::new(opener.clone(), 16);
+        let plan = scan(&source, (0..FILES).map(|i| file(i, ROWS)).collect(), PARTITIONS);
 
-        let opener = Fake::new(16);
-        // One worker per group, as `create_file_opener` would build them.
-        let rows = run(&source, opener.clone(), groups.len()).await;
+        let rows = run(&plan, context()).await.expect("it reads");
 
-        assert_eq!(rows.iter().sum::<usize>(), FILES * ROWS);
-        assert_eq!(opener.opened().len(), FILES, "every file opened once");
+        assert_eq!(rows.iter().sum::<usize>(), FILES * ROWS, "every row once");
+        let opened = opener.opened();
+        assert_eq!(opened.len(), FILES, "every file was opened once");
+        assert_eq!(opened.iter().collect::<HashSet<_>>().len(), FILES, "no file twice");
+    }
+
+    /// Without the cache, the part that builds the plan opens the file, and
+    /// the other parts need no open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn without_the_cache_the_part_that_plans_opens_the_file() {
+        const PARTITIONS: usize = 4;
+
+        let opener = Fake::new();
+        let source = FakeSource::new(opener.clone(), 16);
+        let plan = scan(&source, vec![file(0, 256)], PARTITIONS);
+
+        let rows = run_in_turn(&plan, context()).await;
+        assert_eq!(rows.iter().sum::<usize>(), 256);
+        assert_eq!(opener.opened().len(), 1, "one open for the plan");
+        assert!(source.plans.is_empty(), "the last part took the plan");
+    }
+
+    /// With the cache, the parts of a file share one open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn with_the_cache_the_parts_of_a_file_share_one_open() {
+        const PARTITIONS: usize = 8;
+
+        let opener = Fake::new();
+        let source = FakeSource::new(opener.clone(), 16).with_cache();
+        let plan = scan(&source, vec![file(0, 512), file(1, 512)], PARTITIONS);
+
+        let rows = run_in_turn(&plan, context()).await;
+
+        assert_eq!(rows.iter().sum::<usize>(), 1_024, "every row once");
+        let mut opened = opener.opened();
+        opened.sort();
+        assert_eq!(opened, ["f-0000.nc", "f-0001.nc"], "one open per file, not per part");
+        let cache = source.cache.as_ref().unwrap();
+        assert!(
+            cache.list_entries().is_empty(),
+            "the last part of each file took its entry out of the cache"
+        );
+    }
+
+    /// A cached open of another reader is not used.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cached_open_of_another_reader_is_not_used() {
+        let opener = Fake::new();
+        let source = FakeSource::new(opener.clone(), 16).with_cache();
+        let cache = source.cache.clone().unwrap();
+        let entry = file(0, 256);
+
+        struct Other;
+        impl FileMetadata for Other {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn memory_size(&self) -> usize {
+                1
+            }
+            fn extra_info(&self) -> HashMap<String, String> {
+                HashMap::new()
+            }
+        }
+        cache.put(
+            &entry.object_meta.location,
+            CachedFileMetadataEntry::new(entry.object_meta.clone(), Arc::new(Other)),
+        );
+
+        let plan = scan(&source, vec![entry], 2);
+        let rows = run_in_turn(&plan, context()).await;
+        assert_eq!(rows.iter().sum::<usize>(), 256);
+        assert_eq!(opener.opened().len(), 1, "the parts opened the file themselves, once");
+    }
+
+    /// A scan runs again after `reset_state`, returns the same rows, and
+    /// counts its pruned chunks once per run.
+    ///
+    /// A finished run took every entry out of the plans, so the second run
+    /// builds its plans again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_scan_runs_again_after_reset_state() {
+        const ROWS: usize = 512;
+        const BATCH: usize = 16;
+        const PARTITIONS: usize = 4;
+        // The rows at or below 255 hold nothing the predicate keeps.
+        const PRUNED_PER_FILE: usize = 256 / BATCH;
+
+        for files in [1_usize, 30] {
+            let opener = Fake::new();
+            let source = FakeSource::new(opener.clone(), BATCH)
+                .with_cache()
+                .with_predicate(greater_than(255));
+            let plan = scan(&source, (0..files).map(|i| file(i, ROWS)).collect(), PARTITIONS);
+
+            let first = run(&plan, context()).await.expect("the first run reads");
+            assert_eq!(first.iter().sum::<usize>(), files * 256, "{files} files");
+            assert_eq!(source.metric("chunks_pruned"), files * PRUNED_PER_FILE, "{files} files");
+
+            let again = Arc::clone(&plan).reset_state().expect("the plan resets");
+            let second = run(&again, context()).await.expect("the second run reads");
+            assert_eq!(second.iter().sum::<usize>(), files * 256, "{files} files, rerun");
+            assert_eq!(
+                source.metric("chunks_pruned"),
+                2 * files * PRUNED_PER_FILE,
+                "{files} files: each run counts once"
+            );
+            assert!(source.plans.is_empty(), "{files} files: no plan is left");
+        }
+    }
+
+    /// A run that stops early does not change the rows of the next run, and
+    /// each run counts its pruned chunks once.
+    ///
+    /// The first run takes one batch of part 0 and stops. Its plan stays with
+    /// three parts not taken. The next run takes that plan for its first three
+    /// parts, and builds a new one for the last. Either plan comes from the
+    /// same, unchanged file, so every row comes back once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_cancelled_run_is_followed_by_a_correct_run() {
+        const ROWS: usize = 1_024;
+        const BATCH: usize = 16;
+        const PARTITIONS: usize = 4;
+
+        let opener = Fake::new();
+        let source = FakeSource::new(opener.clone(), BATCH)
+            .with_cache()
+            .with_predicate(greater_than(767));
+        let plan = scan(&source, vec![file(0, ROWS)], PARTITIONS);
+
+        let context = context();
+        let mut stream = plan.execute(0, Arc::clone(&context)).unwrap();
+        stream.next().await.expect("one batch").expect("it reads");
+        drop(stream);
+        assert_eq!(source.metric("chunks_pruned"), 48, "the stopped run counted once");
+
+        let again = Arc::clone(&plan).reset_state().expect("the plan resets");
+        let rows = run(&again, Arc::clone(&context)).await.expect("the next run reads");
+        assert_eq!(rows.iter().sum::<usize>(), ROWS / 4, "every kept row once");
+        assert_eq!(source.metric("chunks_pruned"), 96, "and the next run counted once");
+        assert_eq!(opener.plans(), 2, "the next run built a plan for its last part");
+    }
+
+    /// With work stealing off, each partition reads its own entries, and the
+    /// scan still returns every row once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_scan_without_work_stealing_reads_every_row_once() {
+        const PARTITIONS: usize = 4;
+
+        for files in [1_usize, 10] {
+            let source = FakeSource::new(Fake::new(), 16).with_cache();
+            let plan = scan(&source, (0..files).map(|i| file(i, 256)).collect(), PARTITIONS);
+
+            let mut config = SessionConfig::new();
+            config.options_mut().execution.enable_file_stream_work_stealing = false;
+            let context = Arc::new(TaskContext::default().with_session_config(config));
+
+            let rows = run(&plan, context).await.expect("it reads");
+            assert_eq!(rows.iter().sum::<usize>(), files * 256, "{files} files");
+        }
+    }
+
+    /// An ordered scan, and one partitioned by file group, keep each partition
+    /// on its own group, and still return every row once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_scan_that_keeps_its_groups_reads_every_row_once() {
+        const PARTITIONS: usize = 4;
+
+        for files in [1_usize, 10] {
+            for ordered in [true, false] {
+                let source = FakeSource::new(Fake::new(), 16);
+                let files_list: Vec<_> = (0..files).map(|i| file(i, 256)).collect();
+                let mut config = config(&source, groups(files_list, PARTITIONS));
+                if ordered {
+                    config.preserve_order = true;
+                } else {
+                    config.partitioned_by_file_group = true;
+                }
+                let plan: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(config);
+
+                let rows = run(&plan, context()).await.expect("it reads");
+                assert_eq!(
+                    rows.iter().sum::<usize>(),
+                    files * 256,
+                    "{files} files, ordered={ordered}"
+                );
+            }
+        }
+    }
+
+    /// A `LIMIT` scan finishes and returns the limit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_limit_scan_finishes_and_returns_the_limit() {
+        const LIMIT: usize = 100;
+
+        let source = FakeSource::new(Fake::new(), 16).with_cache();
+        let config = FileScanConfigBuilder::from(config(&source, groups(vec![file(0, 4_096)], 8)))
+            .with_limit(Some(LIMIT))
+            .build();
+        let scan: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(config);
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(
+            Arc::new(CoalescePartitionsExec::new(scan)),
+            0,
+            Some(LIMIT),
+        ));
+
+        let batches = tokio::time::timeout(
+            BEFORE_STUCK,
+            datafusion::physical_plan::collect(plan, context()),
+        )
+        .await
+        .expect("the limit scan finishes")
+        .expect("it reads");
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), LIMIT);
+    }
+
+    /// `value > threshold`, built anew on each call.
+    fn greater_than(threshold: i64) -> Arc<dyn PhysicalExpr> {
+        use datafusion::logical_expr::Operator;
+        use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+
+        Arc::new(BinaryExpr::new(
+            Arc::new(Column::new("value", 0)),
+            Operator::Gt,
+            Arc::new(Literal::new(ScalarValue::Int64(Some(threshold)))),
+        ))
+    }
+
+    /// A split file with a predicate: the predicate still skips chunks, the
+    /// skip counts once, and the parts divide the kept chunks.
+    ///
+    /// One query builds the chunk list once, with or without the metadata
+    /// cache, so its coordinate arrays are read once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_split_file_with_a_predicate_is_planned_once_per_query() {
+        const ROWS: usize = 1_024;
+        const BATCH: usize = 16;
+        const PARTITIONS: usize = 4;
+
+        for cached in [true, false] {
+            let opener = Fake::new();
+            let mut source = FakeSource::new(opener.clone(), BATCH).with_predicate(greater_than(767));
+            if cached {
+                source = source.with_cache();
+            }
+            let plan = scan(&source, vec![file(0, ROWS)], PARTITIONS);
+
+            let rows = run_in_turn(&plan, context()).await;
+
+            // The fixture counts up, so the first three quarters hold nothing
+            // above 767.
+            assert_eq!(rows.iter().sum::<usize>(), ROWS / 4, "cached={cached}: kept chunks only");
+            assert!(
+                rows.iter().all(|read| *read == ROWS / 4 / PARTITIONS),
+                "cached={cached}: the parts divide the kept chunks: {rows:?}"
+            );
+            assert_eq!(
+                source.metric("chunks_pruned"),
+                3 * ROWS / 4 / BATCH,
+                "cached={cached}: the skip counts once per file"
+            );
+            assert_eq!(
+                source.metric("rows_pruned"),
+                3 * ROWS / 4,
+                "cached={cached}: the pruned rows count once per file"
+            );
+            assert_eq!(opener.plans(), 1, "cached={cached}: one plan");
+            assert_eq!(opener.opened().len(), 1, "cached={cached}: one open");
+            assert!(source.plans.is_empty(), "cached={cached}: the plan left with the query");
+        }
+    }
+
+    /// Racing partitions over a cached split file still read every kept row
+    /// once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn racing_parts_of_a_cached_plan_read_every_kept_row_once() {
+        const ROWS: usize = 4_096;
+        const PARTITIONS: usize = 8;
+
+        for _ in 0..20 {
+            let source = FakeSource::new(Fake::new(), 16)
+                .with_cache()
+                .with_predicate(greater_than(1_023));
+            let plan = scan(&source, vec![file(0, ROWS)], PARTITIONS);
+            let rows = run(&plan, context()).await.expect("it reads");
+            assert_eq!(rows.iter().sum::<usize>(), ROWS - 1_024);
+        }
+    }
+
+    /// A source clone with another predicate shares the plans of the source,
+    /// and still never uses a plan built for the first predicate.
+    ///
+    /// Filter pushdown makes such a clone. Scan A plans and holds its first two
+    /// parts. Scan B then runs in full on the same plans and the same cached
+    /// open. Scan A then finishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_clone_with_another_predicate_does_not_use_the_plan() {
+        const ROWS: usize = 1_024;
+        const PARTITIONS: usize = 4;
+
+        let opener = Fake::new();
+        let first = FakeSource::new(opener.clone(), 16)
+            .with_cache()
+            .with_predicate(greater_than(767));
+        let second = first.clone().with_predicate(greater_than(511));
+        let first_plan = scan(&first, vec![file(0, ROWS)], PARTITIONS);
+        let second_plan = scan(&second, vec![file(0, ROWS)], PARTITIONS);
+
+        let context = context();
+        let mut held = Vec::new();
+        let mut first_rows = 0;
+        for partition in 0..2 {
+            let mut stream = first_plan.execute(partition, Arc::clone(&context)).unwrap();
+            first_rows += stream.next().await.unwrap().unwrap().num_rows();
+            held.push(stream);
+        }
+
+        let second_rows: usize = run_in_turn(&second_plan, Arc::clone(&context)).await.iter().sum();
+        assert_eq!(second_rows, ROWS / 2, "the second scan keeps the rows above 511");
+
+        for stream in held {
+            let rest: Vec<RecordBatch> = stream.try_collect().await.unwrap();
+            first_rows += rest.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        }
+        for partition in 2..PARTITIONS {
+            let stream = first_plan.execute(partition, Arc::clone(&context)).unwrap();
+            let rest: Vec<RecordBatch> = stream.try_collect().await.unwrap();
+            first_rows += rest.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        }
+        assert_eq!(first_rows, ROWS / 4, "the first scan keeps the rows above 767");
+
+        assert_eq!(opener.plans(), 2, "one plan per predicate");
+        assert!(first.plans.is_empty(), "no plan is left");
+    }
+
+    /// Two sources of one table in one run, as a self-join plans them, with
+    /// different predicates: each reads its own rows from its own plan.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn two_sources_of_one_table_in_one_run_keep_their_own_plans() {
+        const ROWS: usize = 1_024;
+        const PARTITIONS: usize = 4;
+
+        let opener = Fake::new();
+        let left = FakeSource::new(opener.clone(), 16)
+            .with_cache()
+            .with_predicate(greater_than(767));
+        let right = left.new_query().with_predicate(greater_than(511));
+        let left_plan = scan(&left, vec![file(0, ROWS)], PARTITIONS);
+        let right_plan = scan(&right, vec![file(0, ROWS)], PARTITIONS);
+
+        let context = context();
+        let (left_rows, right_rows) =
+            futures::join!(run(&left_plan, Arc::clone(&context)), run(&right_plan, Arc::clone(&context)));
+        assert_eq!(left_rows.unwrap().iter().sum::<usize>(), ROWS / 4, "rows above 767");
+        assert_eq!(right_rows.unwrap().iter().sum::<usize>(), ROWS / 2, "rows above 511");
+        assert!(opener.plans() >= 2, "each source built its own plan");
+        assert!(left.plans.is_empty() && right.plans.is_empty(), "no plan is left");
+    }
+
+    /// Two queries of one file with the same predicate each build their own
+    /// chunk list, even while both run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_queries_with_the_same_predicate_each_build_their_own_list() {
+        const ROWS: usize = 1_024;
+        const PARTITIONS: usize = 4;
+
+        let opener = Fake::new();
+        let first = FakeSource::new(opener.clone(), 16)
+            .with_cache()
+            .with_predicate(greater_than(767));
+        let second = first.new_query().with_predicate(greater_than(767));
+        let first_plan = scan(&first, vec![file(0, ROWS)], PARTITIONS);
+        let second_plan = scan(&second, vec![file(0, ROWS)], PARTITIONS);
+
+        let context = context();
+        let mut held = first_plan.execute(0, Arc::clone(&context)).unwrap();
+        let mut rows = held.next().await.unwrap().unwrap().num_rows();
+
+        let mut second_stream = second_plan.execute(0, Arc::clone(&context)).unwrap();
+        let mut second_rows = second_stream.next().await.unwrap().unwrap().num_rows();
+        assert_eq!(opener.plans(), 2, "the second query built its own list");
+
+        let rest: Vec<RecordBatch> = held.try_collect().await.unwrap();
+        rows += rest.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        let rest: Vec<RecordBatch> = second_stream.try_collect().await.unwrap();
+        second_rows += rest.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        for partition in 1..PARTITIONS {
+            for (plan, total) in [(&first_plan, &mut rows), (&second_plan, &mut second_rows)] {
+                let stream = plan.execute(partition, Arc::clone(&context)).unwrap();
+                let rest: Vec<RecordBatch> = stream.try_collect().await.unwrap();
+                *total += rest.iter().map(|batch| batch.num_rows()).sum::<usize>();
+            }
+        }
+        assert_eq!(rows, ROWS / 4, "the first query reads every kept row once");
+        assert_eq!(second_rows, ROWS / 4, "and so does the second");
+        assert_eq!(opener.plans(), 2, "neither query used the other's list");
+    }
+
+    /// DataFusion's metadata cache holds only opens, and nothing after the
+    /// query.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_metadata_cache_holds_no_plan_data() {
+        const PARTITIONS: usize = 4;
+
+        let source = FakeSource::new(Fake::new(), 16)
+            .with_cache()
+            .with_predicate(greater_than(767));
+        let cache = source.cache.clone().unwrap();
+        let plan = scan(&source, vec![file(0, 1_024)], PARTITIONS);
+
+        let context = context();
+        let mut held = plan.execute(0, Arc::clone(&context)).unwrap();
+        let first = held.next().await.unwrap().unwrap().num_rows();
+        let entries = cache.list_entries();
+        assert_eq!(entries.len(), 1, "one open while the query runs");
+        assert!(
+            entries.values().all(|entry| entry.size_bytes == CACHED_OPEN_SIZE),
+            "the entry claims an open and nothing more: {entries:?}"
+        );
+        assert!(!source.plans.is_empty(), "the plan is with the query");
+
+        let rest: Vec<RecordBatch> = held.try_collect().await.unwrap();
+        let mut rows: usize = rest.iter().map(|batch| batch.num_rows()).sum::<usize>() + first;
+        for partition in 1..PARTITIONS {
+            let stream = plan.execute(partition, Arc::clone(&context)).unwrap();
+            let rest: Vec<RecordBatch> = stream.try_collect().await.unwrap();
+            rows += rest.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        }
+        assert_eq!(rows, 256, "every kept row once");
+        assert!(cache.list_entries().is_empty(), "nothing is left in the cache");
+        assert!(source.plans.is_empty(), "and no plan is left with the query");
+    }
+
+    /// A second run on the same source, after the first one finished, plans
+    /// again: the first run took every entry out of the plans.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_scan_after_a_finished_scan_plans_again() {
+        const ROWS: usize = 1_024;
+        const PARTITIONS: usize = 4;
+
+        let opener = Fake::new();
+        let source = FakeSource::new(opener.clone(), 16)
+            .with_cache()
+            .with_predicate(greater_than(767));
+
+        for run_number in 1..=2 {
+            let plan = scan(&source, vec![file(0, ROWS)], PARTITIONS);
+            let rows = run_in_turn(&plan, context()).await;
+            assert_eq!(rows.iter().sum::<usize>(), ROWS / 4, "run {run_number}");
+            assert_eq!(opener.plans(), run_number, "run {run_number}: one plan per run");
+            assert_eq!(opener.opened().len(), run_number, "run {run_number}: one open per run");
+        }
+    }
+
+    /// A skipped file with parts: no rows, and the skip counts once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_skipped_split_file_returns_no_rows_and_counts_once() {
+        const PARTITIONS: usize = 4;
+
+        for cached in [true, false] {
+            let opener = Fake::skipping();
+            let mut source = FakeSource::new(opener.clone(), 16);
+            if cached {
+                source = source.with_cache();
+            }
+            let plan = scan(&source, vec![file(0, 512)], PARTITIONS);
+
+            let rows = run_in_turn(&plan, context()).await;
+            assert_eq!(rows, vec![0; PARTITIONS], "cached={cached}: no rows");
+            assert_eq!(source.metric("files_skipped"), 1, "cached={cached}: one skip");
+            assert_eq!(opener.plans(), 1, "cached={cached}: one plan");
+        }
+    }
+
+    /// Two scans that narrow one file differently never share a plan.
+    #[test]
+    fn the_fingerprint_tells_scans_apart() {
+        let scan = |batch_size: usize, predicate: Option<Arc<dyn PhysicalExpr>>| NdScan {
+            files: Fake::new(),
+            projected_schema: no_columns(),
+            batch_size,
+            predicate,
+            partition_fields: Vec::new(),
+            metrics: ReadMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            metadata_cache: None,
+            plans: Arc::default(),
+        };
+        let entry = file(0, 32);
+        let base = scan(16, Some(greater_than(5))).fingerprint(&entry);
+
+        assert!(
+            scan(16, Some(greater_than(5))).fingerprint(&entry) == base,
+            "an equal predicate built anew is the same scan"
+        );
+        assert!(scan(16, Some(greater_than(6))).fingerprint(&entry) != base, "another predicate");
+        assert!(scan(16, None).fingerprint(&entry) != base, "no predicate");
+        assert!(scan(32, Some(greater_than(5))).fingerprint(&entry) != base, "another batch size");
+
+        let mut other_schema = scan(16, Some(greater_than(5)));
+        other_schema.projected_schema = Arc::new(Schema::new(vec![
+            arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Int64, true),
+        ]));
+        assert!(other_schema.fingerprint(&entry) != base, "another projection");
+
+        let mut valued = entry.clone();
+        valued.partition_values = vec![ScalarValue::Utf8(Some("2024".to_string()))];
+        assert!(
+            scan(16, Some(greater_than(5))).fingerprint(&valued) != base,
+            "other partition values"
+        );
     }
 
     /// A file that will not open fails the scan, and says which file it was.
-    ///
-    /// DataFusion's `FileStream` would have put the path in the error. Nothing
-    /// else will, because the whole scan reaches it as one file.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_file_that_will_not_open_names_itself() {
-        let opener = Fake::breaking(16, "f-0003.nc");
-        let source = MorselSource::new((0..8).map(|i| file(i, 32)).collect());
+        let source = FakeSource::new(Fake::breaking("f-0003.nc"), 16);
+        let plan = scan(&source, (0..8).map(|i| file(i, 32)).collect(), 1);
 
-        // Whichever worker draws the broken file fails; run one so it is this one.
-        let stream = source.stream(0, opener, None);
-        let error = stream
-            .try_collect::<Vec<RecordBatch>>()
-            .await
-            .expect_err("the scan fails");
-
+        let error = run(&plan, context()).await.expect_err("the scan fails");
         let message = error.to_string();
-        assert!(
-            message.contains("f-0003.nc"),
-            "the error names the file: {message}"
-        );
+        assert!(message.contains("f-0003.nc"), "the error names the file: {message}");
         assert!(
             message.contains("the disk said no"),
             "and keeps what the reader said: {message}"

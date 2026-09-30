@@ -10,6 +10,19 @@ tag. Releases before 2.0.0 are recorded in the
 
 ## [Unreleased]
 
+### Changed
+
+- **DataFusion 54.** The query engine moves from DataFusion 53.1 to 54.1. Arrow stays on 58 and
+  object_store on 0.13. The DataFusion crates that Beacon uses move with it: datafusion-federation
+  0.5.5, datafusion-table-providers 0.12.1 and Lance 11. Lance 12 needs object_store 0.14, so
+  Beacon stays on Lance 11. No crates.io release of deltalake or iceberg-datafusion is on
+  DataFusion 54. Beacon pins the last DataFusion 54 commit of each: delta-rs `37ee9827` and
+  iceberg-rust `c8fc70e5`.
+- **Minimum supported Rust is 1.95**, up from 1.94. The pinned iceberg-rust commit declares
+  `rust-version = "1.95"`. CI builds the floor leg at 1.95.
+- **String and number comparisons coerce to numbers.** DataFusion 54 changes this rule. A filter
+  such as `int_col = 'abc'` now returns an error, not an empty result.
+
 ## [2.0.0] — 2026-09-29
 
 Beacon 2.0.0 is the first stable release of the 2.0 line. NetCDF, HDF5, Zarr, Atlas, BBF and

@@ -20,7 +20,7 @@
 //! | `None` / empty               | [`NetCDFSink`]  | flat, unlimited `obs`   |
 //! | `Some(["lat", "lon", …])`  | [`NetCDFNdSink`]| gridded, named dims     |
 
-use std::{any::Any, fmt::Formatter, path::PathBuf, sync::Arc};
+use std::{fmt::Formatter, path::PathBuf, sync::Arc};
 
 use crate::{encoders::default::DefaultEncoder, writer::ArrowRecordBatchWriter};
 use arrow::{
@@ -77,10 +77,6 @@ impl DisplayAs for NetCDFSink {
 
 #[async_trait::async_trait]
 impl DataSink for NetCDFSink {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> &SchemaRef {
         self.sink_config.output_schema()
     }
@@ -190,10 +186,6 @@ impl DisplayAs for NetCDFNdSink {
 
 #[async_trait::async_trait]
 impl DataSink for NetCDFNdSink {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> &SchemaRef {
         self.sink_config.output_schema()
     }

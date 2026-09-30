@@ -96,9 +96,9 @@ pub(crate) async fn refresh_table(
         .await
         .map_err(|_| anyhow::anyhow!("'{name}' does not exist"))?;
 
-    if let Some(external) = provider.as_any().downcast_ref::<ExternalTable>() {
+    if let Some(external) = provider.downcast_ref::<ExternalTable>() {
         external.refresh(&session_ctx.state()).await?;
-    } else if provider.as_any().is::<MaterializedView>() {
+    } else if provider.is::<MaterializedView>() {
         refresh_materialized_view(session_ctx, name).await?;
     } else {
         return Err(anyhow::anyhow!(
@@ -213,7 +213,6 @@ pub(crate) async fn refresh_materialized_view(
         .map_err(|_| anyhow::anyhow!("Materialized view '{name}' does not exist"))?;
 
     let old_definition = provider
-        .as_any()
         .downcast_ref::<MaterializedView>()
         .ok_or_else(|| anyhow::anyhow!("Object '{name}' is not a materialized view"))?
         .definition()

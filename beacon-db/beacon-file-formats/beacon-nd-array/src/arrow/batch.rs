@@ -405,9 +405,9 @@ pub(crate) struct ChunkGrid {
 /// else. Two callers that pass the same dataset and the same `batch_size` get
 /// the same chunks, in the same order.
 ///
-/// The shared queue rests on that: the partitions of one file draw chunks from
-/// one list, and it is built once. Keep this function pure in its two inputs,
-/// and keep every reader on it.
+/// The parts of a split file rest on that: each part builds the list and takes
+/// its own slice of it. Keep this function pure in its two inputs, and keep
+/// every reader on it.
 pub(crate) fn chunk_grid(dataset: &Dataset, batch_size: usize) -> anyhow::Result<ChunkGrid> {
     let (dims, max_shape, chunk_shape) = extract_dataset_layout(dataset)?;
 

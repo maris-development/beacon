@@ -54,12 +54,11 @@ impl PhysicalOptimizerRule for NdProjectionPushdown {
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         plan.transform_down(|node| {
-            let Some(projection) = node.as_any().downcast_ref::<ProjectionExec>() else {
+            let Some(projection) = node.downcast_ref::<ProjectionExec>() else {
                 return Ok(Transformed::no(node));
             };
             let Some(broadcast) = projection
                 .input()
-                .as_any()
                 .downcast_ref::<NdBroadcastExec>()
             else {
                 return Ok(Transformed::no(node));
@@ -141,7 +140,7 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         plan.transform_down(|node| {
-            let Some(filter) = node.as_any().downcast_ref::<FilterExec>() else {
+            let Some(filter) = node.downcast_ref::<FilterExec>() else {
                 return Ok(Transformed::no(node));
             };
             // A `FilterExec` carrying an embedded projection also changes the
@@ -150,7 +149,7 @@ impl PhysicalOptimizerRule for NdFilterPushdown {
             if filter.projection().is_some() {
                 return Ok(Transformed::no(node));
             }
-            let Some(broadcast) = filter.input().as_any().downcast_ref::<NdBroadcastExec>() else {
+            let Some(broadcast) = filter.input().downcast_ref::<NdBroadcastExec>() else {
                 return Ok(Transformed::no(node));
             };
 
@@ -206,23 +205,22 @@ pub fn is_pushable_expr(expr: &Arc<dyn PhysicalExpr>) -> bool {
 /// Whether a single node (ignoring its children) is a known element-wise,
 /// deterministic operator.
 fn is_elementwise_node(expr: &Arc<dyn PhysicalExpr>) -> bool {
-    let any = expr.as_any();
-    if any.is::<Column>()
-        || any.is::<Literal>()
-        || any.is::<BinaryExpr>()
-        || any.is::<CastExpr>()
-        || any.is::<TryCastExpr>()
-        || any.is::<NegativeExpr>()
-        || any.is::<NotExpr>()
-        || any.is::<IsNullExpr>()
-        || any.is::<IsNotNullExpr>()
-        || any.is::<CaseExpr>()
+    if expr.is::<Column>()
+        || expr.is::<Literal>()
+        || expr.is::<BinaryExpr>()
+        || expr.is::<CastExpr>()
+        || expr.is::<TryCastExpr>()
+        || expr.is::<NegativeExpr>()
+        || expr.is::<NotExpr>()
+        || expr.is::<IsNullExpr>()
+        || expr.is::<IsNotNullExpr>()
+        || expr.is::<CaseExpr>()
     {
         return true;
     }
     // Scalar functions are row-wise, but a volatile one (e.g. `random()`) would
     // produce fewer distinct values if evaluated before broadcast.
-    if let Some(func) = any.downcast_ref::<ScalarFunctionExpr>() {
+    if let Some(func) = expr.downcast_ref::<ScalarFunctionExpr>() {
         return func.fun().signature().volatility != Volatility::Volatile;
     }
     false
@@ -230,7 +228,6 @@ fn is_elementwise_node(expr: &Arc<dyn PhysicalExpr>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::sync::Arc;
 
     use arrow::datatypes::{DataType, Field, Schema};
@@ -282,9 +279,6 @@ mod tests {
     }
 
     impl ScalarUDFImpl for VolatileUdf {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
         fn name(&self) -> &str {
             "test_volatile"
         }
@@ -330,9 +324,6 @@ mod tests {
         }
 
         impl ScalarUDFImpl for ImmutableUdf {
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
             fn name(&self) -> &str {
                 "test_immutable"
             }

@@ -38,7 +38,7 @@ use datafusion::{
         MemTable,
     },
     execution::{cache::CacheAccessor, object_store::ObjectStoreUrl},
-    prelude::{Expr, SessionContext},
+    prelude::SessionContext,
     scalar::ScalarValue,
 };
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
@@ -99,10 +99,11 @@ impl BeaconTableFunctionImpl for ViewDatasetStatisticsFunc {
 }
 
 impl TableFunctionImpl for ViewDatasetStatisticsFunc {
-    fn call(
+    fn call_with_args(
         &self,
-        args: &[Expr],
+        args: datafusion::catalog::TableFunctionArgs,
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        let args = args.exprs();
         // let path_str = match args.first() {
         //     Some(Expr::Literal(ScalarValue::Utf8(Some(s)), _)) => s.clone(),
         //     _ => return plan_err!("view_dataset_statistics requires a single Utf8 path argument"),

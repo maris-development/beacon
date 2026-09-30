@@ -8,7 +8,6 @@
 //! carries its `RemoteTableDefinition`. All query/write behavior is delegated to
 //! the inner delta provider.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use beacon_datafusion_ext::listing_factory::ListingFactory;
@@ -90,10 +89,6 @@ impl BeaconDeltaTable {
 
 #[async_trait::async_trait]
 impl TableProvider for BeaconDeltaTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }

@@ -8,6 +8,7 @@ readme = "README.md"
 [dependencies]
 arrow = { workspace = true }
 datafusion = { workspace = true }
+datafusion-datasource = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 ndarray = {workspace = true}

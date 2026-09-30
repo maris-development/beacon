@@ -107,10 +107,6 @@ impl FileSource for GeoParquetSource {
         ProjectionOpener::try_new(self.projection.clone(), opener, file_schema)
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn table_schema(&self) -> &TableSchema {
         &self.table_schema
     }

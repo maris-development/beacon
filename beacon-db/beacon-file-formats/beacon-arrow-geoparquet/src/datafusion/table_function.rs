@@ -55,10 +55,11 @@ impl BeaconTableFunctionImpl for ReadGeoParquetFunc {
 }
 
 impl TableFunctionImpl for ReadGeoParquetFunc {
-    fn call(
+    fn call_with_args(
         &self,
-        args: &[datafusion::prelude::Expr],
+        args: datafusion::catalog::TableFunctionArgs,
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let args = args.exprs();
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;

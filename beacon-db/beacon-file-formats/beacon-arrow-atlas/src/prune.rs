@@ -9,6 +9,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, UInt64Array, new_null_array};
 use arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use atlas::{ArrayFile, Attr, StatValue};
+use beacon_datafusion_ext::container_counts::ContainerCounts;
 use datafusion::common::Column;
 use datafusion::common::pruning::PruningStatistics;
 use datafusion::physical_expr::PhysicalExpr;
@@ -92,6 +93,19 @@ struct StatColumn {
 struct PruningIndex {
     rows: usize,
     columns: HashMap<String, StatColumn>,
+    /// One row count per dataset for all columns. See [`ContainerCounts`].
+    counts: ContainerCounts,
+}
+
+impl PruningIndex {
+    fn new(rows: usize, columns: HashMap<String, StatColumn>) -> Self {
+        let counts = ContainerCounts::new(rows, columns.values().map(|c| &c.row_count));
+        Self {
+            rows,
+            columns,
+            counts,
+        }
+    }
 }
 
 impl PruningStatistics for PruningIndex {
@@ -104,15 +118,12 @@ impl PruningStatistics for PruningIndex {
     }
 
     fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
-        self.columns
-            .get(column.name())
-            .map(|c| Arc::clone(&c.null_count))
+        let c = self.columns.get(column.name())?;
+        self.counts.null_counts(&c.null_count, &c.row_count)
     }
 
-    fn row_counts(&self, column: &Column) -> Option<ArrayRef> {
-        self.columns
-            .get(column.name())
-            .map(|c| Arc::clone(&c.row_count))
+    fn row_counts(&self) -> Option<ArrayRef> {
+        Some(self.counts.row_counts())
     }
 
     fn num_containers(&self) -> usize {
@@ -158,10 +169,7 @@ fn build_index(
         columns.insert(column.clone(), packed);
     }
 
-    Some(PruningIndex {
-        rows: names.len(),
-        columns,
-    })
+    Some(PruningIndex::new(names.len(), columns))
 }
 
 /// Whether the pivot should stop at `row`. Looked at every
@@ -699,9 +707,9 @@ mod tests {
         let counts: UInt64Array = (0..ROWS).map(|_| Some(0u64)).collect();
         let rows: UInt64Array = (0..ROWS).map(|_| Some(1u64)).collect();
 
-        let index = PruningIndex {
-            rows: ROWS,
-            columns: HashMap::from([(
+        let index = PruningIndex::new(
+            ROWS,
+            HashMap::from([(
                 "temperature".to_string(),
                 StatColumn {
                     min: Arc::new(mins),
@@ -710,7 +718,7 @@ mod tests {
                     row_count: Arc::new(rows),
                 },
             )]),
-        };
+        );
 
         let pruning = PruningPredicate::try_new(
             binary(

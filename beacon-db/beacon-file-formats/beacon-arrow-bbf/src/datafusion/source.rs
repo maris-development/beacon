@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use beacon_datafusion_ext::nd::{encoding::nd_value_type, is_nd_encoded};
@@ -191,11 +191,6 @@ impl FileSource for BBFSource {
         ))
     }
 
-    /// Any
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn table_schema(&self) -> &TableSchema {
         &self.table_schema
     }
@@ -225,7 +220,7 @@ impl FileSource for BBFSource {
         // optimizer can sink it below the materialization.
         let columns_only = projection
             .iter()
-            .all(|expr| expr.expr.as_any().downcast_ref::<Column>().is_some());
+            .all(|expr| expr.expr.downcast_ref::<Column>().is_some());
         if !columns_only {
             return Ok(None);
         }
@@ -285,7 +280,6 @@ mod tests {
 
     fn downcast(source: &Arc<dyn FileSource>) -> &BBFSource {
         source
-            .as_any()
             .downcast_ref::<BBFSource>()
             .expect("should still be a BBFSource")
     }

@@ -72,14 +72,14 @@ mod tests {
     use beacon_datafusion_ext::nd::decode_nd_record_batch;
 
     use crate::arrow::batch::build_dataset_schema;
-    use crate::arrow::file_read::{WorkQueue, flat_stream};
+    use crate::arrow::file_read::{ChunkPlan, flat_stream};
     use crate::dataset::{AnyDataset, Dataset};
     use crate::{NdArray, NdArrayD};
 
     /// Read `dataset` as the scan would: encoded, then broadcast back.
     async fn read_encoded(dataset: Dataset, batch_size: usize) -> Vec<RecordBatch> {
         let encoded: Vec<RecordBatch> =
-            WorkQueue::build(AnyDataset::Regular(dataset), batch_size, None, true, None)
+            ChunkPlan::build(AnyDataset::Regular(dataset), batch_size, None, true)
                 .await
                 .unwrap()
                 .stream(None)

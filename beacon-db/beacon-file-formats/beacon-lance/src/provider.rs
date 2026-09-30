@@ -6,7 +6,6 @@
 //! reopened at the **latest version** on every scan so prior inserts/replaces are
 //! visible. Writes go through a [`LanceDataSink`] (Lance's provider is read-only).
 
-use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -197,10 +196,6 @@ fn lance_materialization_style() -> Option<MaterializationStyle> {
 
 #[async_trait]
 impl TableProvider for LanceTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

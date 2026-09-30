@@ -208,12 +208,11 @@ async fn object_paths(session_ctx: &SessionContext, pattern: &str) -> anyhow::Re
 
 /// The crawler that registered `provider`, when a crawler did.
 fn crawler_owner(provider: &dyn TableProvider) -> Option<String> {
-    let any = provider.as_any();
-    let options = if let Some(external) = any.downcast_ref::<ExternalTable>() {
+    let options = if let Some(external) = provider.downcast_ref::<ExternalTable>() {
         &external.definition().options
-    } else if let Some(delta) = any.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
+    } else if let Some(delta) = provider.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
         &delta.definition().options
-    } else if let Some(iceberg) = any.downcast_ref::<beacon_iceberg::BeaconIcebergTable>() {
+    } else if let Some(iceberg) = provider.downcast_ref::<beacon_iceberg::BeaconIcebergTable>() {
         &iceberg.definition().options
     } else {
         return None;

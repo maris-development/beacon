@@ -4,7 +4,6 @@
 //! write path: `LanceTable::insert_into` returns a `DataSinkExec` wrapping this
 //! sink, which collects the input stream and applies it via [`crate::io`].
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -53,10 +52,6 @@ impl DisplayAs for LanceDataSink {
 
 #[async_trait]
 impl DataSink for LanceDataSink {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> &SchemaRef {
         &self.schema
     }

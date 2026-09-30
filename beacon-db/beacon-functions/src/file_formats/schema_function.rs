@@ -85,10 +85,13 @@ impl BeaconTableFunctionImpl for SchemaTableFunc {
 }
 
 impl TableFunctionImpl for SchemaTableFunc {
-    fn call(&self, args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+    fn call_with_args(
+        &self,
+        args: datafusion::catalog::TableFunctionArgs,
+    ) -> datafusion::error::Result<Arc<dyn TableProvider>> {
         // Delegate to the reader to resolve the paths and infer the schema; take
         // its schema rather than its data.
-        let provider = self.reader.call(args)?;
+        let provider = self.reader.call_with_args(args)?;
         let schema = provider.schema();
 
         let column_names: StringArray = schema
@@ -145,10 +148,6 @@ impl ReaderSchemaTable {
 
 #[async_trait::async_trait]
 impl TableProvider for ReaderSchemaTable {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> arrow::datatypes::SchemaRef {
         self.rows.schema()
     }

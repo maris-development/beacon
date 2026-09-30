@@ -1,6 +1,6 @@
 //! A table provider that records the directory its files are in.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use datafusion::{
@@ -43,10 +43,6 @@ impl LocatedTable {
 
 #[async_trait::async_trait]
 impl TableProvider for LocatedTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }

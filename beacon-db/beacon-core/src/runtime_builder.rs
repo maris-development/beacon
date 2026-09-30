@@ -1045,7 +1045,7 @@ fn runtime_env_builder(
                 .unwrap_or_else(default_vm_memory_limit),
         )))
         .with_cache_manager(CacheManagerConfig {
-            table_files_statistics_cache: Some(Arc::new(BeaconFileStatisticsCache::default())),
+            file_statistics_cache: Some(Arc::new(BeaconFileStatisticsCache::default())),
             list_files_cache_limit: 0,
             ..Default::default()
         })

@@ -9,7 +9,6 @@
 //! remote afterward. Each table's schema and provider are resolved lazily on first access and
 //! cached.
 
-use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -65,10 +64,6 @@ impl RemoteCatalogProvider {
 }
 
 impl CatalogProvider for RemoteCatalogProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema_names(&self) -> Vec<String> {
         self.schemas.keys().cloned().collect()
     }
@@ -111,10 +106,6 @@ impl std::fmt::Debug for RemoteSchemaProvider {
 
 #[async_trait]
 impl SchemaProvider for RemoteSchemaProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn table_names(&self) -> Vec<String> {
         self.tables.clone()
     }

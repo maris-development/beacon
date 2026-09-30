@@ -144,7 +144,11 @@ fn options_from_args(args: &[Expr]) -> datafusion::error::Result<HashMap<String,
 }
 
 impl TableFunctionImpl for ReadIcechunkFunc {
-    fn call(&self, args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+    fn call_with_args(
+        &self,
+        args: datafusion::catalog::TableFunctionArgs,
+    ) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+        let args = args.exprs();
         let Some(location) = args.first().and_then(string_literal) else {
             return plan_err!("read_icechunk requires a location string as the first argument");
         };
@@ -294,7 +298,12 @@ mod tests {
     fn call_without_a_location_is_a_plan_error() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let func = ReadIcechunkFunc::new(runtime.handle().clone(), Weak::new());
-        let err = func.call(&[]).unwrap_err();
+        let err = func
+            .call_with_args(datafusion::catalog::TableFunctionArgs::new(
+                &[],
+                &datafusion::prelude::SessionContext::new().state(),
+            ))
+            .unwrap_err();
         assert!(err.to_string().contains("location"), "{err}");
     }
 
@@ -302,7 +311,12 @@ mod tests {
     fn call_with_a_dropped_session_context_errors_cleanly() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let func = ReadIcechunkFunc::new(runtime.handle().clone(), Weak::new());
-        let err = func.call(&[utf8("argo/repo")]).unwrap_err();
+        let err = func
+            .call_with_args(datafusion::catalog::TableFunctionArgs::new(
+                &[utf8("argo/repo")],
+                &datafusion::prelude::SessionContext::new().state(),
+            ))
+            .unwrap_err();
         assert!(err.to_string().contains("session context"), "{err}");
     }
 }

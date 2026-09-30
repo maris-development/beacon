@@ -75,10 +75,10 @@ pub async fn prune_plan(
     let Some((wrappers, scan)) = split_at_scan(&plan) else {
         return (plan, None);
     };
-    let Some(exec) = scan.as_any().downcast_ref::<DataSourceExec>() else {
+    let Some(exec) = scan.downcast_ref::<DataSourceExec>() else {
         return (plan, None);
     };
-    let Some(config) = exec.data_source().as_any().downcast_ref::<FileScanConfig>() else {
+    let Some(config) = exec.data_source().downcast_ref::<FileScanConfig>() else {
         // A `DataSourceExec` over something that is not a file scan has no file
         // list to prune.
         return (plan, None);
@@ -124,7 +124,7 @@ fn split_at_scan(plan: &Arc<dyn ExecutionPlan>) -> Option<(ScanWrappers, Arc<dyn
     let mut wrappers: ScanWrappers = Vec::new();
     let mut node = Arc::clone(plan);
     loop {
-        if node.as_any().is::<DataSourceExec>() {
+        if node.is::<DataSourceExec>() {
             return Some((wrappers, node));
         }
         // Only a single-child chain. A join or a union has more than one scan
@@ -395,7 +395,7 @@ mod tests {
     fn a_bare_scan_is_its_own_bottom() {
         let (wrappers, found) = split_at_scan(&scan()).expect("a scan is a scan");
         assert!(wrappers.is_empty());
-        assert!(found.as_any().is::<DataSourceExec>());
+        assert!(found.is::<DataSourceExec>());
     }
 
     /// The nd shape: the file list lives under the nodes that decode and
@@ -409,15 +409,14 @@ mod tests {
 
         let (wrappers, found) = split_at_scan(&plan).expect("two wrappers is still a scan");
         assert_eq!(wrappers.len(), 2);
-        assert!(found.as_any().is::<DataSourceExec>());
+        assert!(found.is::<DataSourceExec>());
 
         // Rebuilding restores the shape, with the replacement scan underneath.
         let rebuilt = rebuild_over_scan(wrappers, scan()).expect("the wrappers rebuild");
-        assert!(rebuilt.as_any().is::<CoalescePartitionsExec>());
-        assert!(rebuilt.children()[0].as_any().is::<CoalescePartitionsExec>());
+        assert!(rebuilt.is::<CoalescePartitionsExec>());
+        assert!(rebuilt.children()[0].is::<CoalescePartitionsExec>());
         assert!(
             rebuilt.children()[0].children()[0]
-                .as_any()
                 .is::<DataSourceExec>()
         );
     }
@@ -447,15 +446,15 @@ mod tests {
 
         let (wrappers, found) = split_at_scan(&plan).expect("depth is not a failure");
         assert_eq!(wrappers.len(), DEPTH);
-        assert!(found.as_any().is::<DataSourceExec>());
+        assert!(found.is::<DataSourceExec>());
 
         let rebuilt = rebuild_over_scan(wrappers, scan()).expect("the wrappers rebuild");
         let mut node = rebuilt;
         for _ in 0..DEPTH {
-            assert!(node.as_any().is::<CoalescePartitionsExec>());
+            assert!(node.is::<CoalescePartitionsExec>());
             node = Arc::clone(node.children()[0]);
         }
-        assert!(node.as_any().is::<DataSourceExec>());
+        assert!(node.is::<DataSourceExec>());
     }
 
     /// Only an entry a listing filled in may contradict the record. One a

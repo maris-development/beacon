@@ -9,7 +9,6 @@
 //! file's content and a rewrite is visible in the answer. That is what lets
 //! these assert the cache never serves a schema for content that is gone.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,10 +54,6 @@ struct CountingFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for CountingFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn get_ext(&self) -> String {
         "counted".to_string()
     }
@@ -170,9 +165,6 @@ impl FileFormatFactory for CountingFactory {
         self.format()
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl FileFormatFactoryExt for CountingFactory {

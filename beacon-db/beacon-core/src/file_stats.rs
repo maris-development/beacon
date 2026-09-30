@@ -132,7 +132,7 @@ impl FormatFileAnalyzer {
     /// simply found no ranges in. Naming the reason is the difference between a
     /// node that prunes nothing and a node whose operator knows why.
     fn report_netcdf_c_once(&self, format_name: &str, format: &dyn FileFormat) {
-        let Some(netcdf) = format.as_any().downcast_ref::<NetcdfFormat>() else {
+        let Some(netcdf) = format.downcast_ref::<NetcdfFormat>() else {
             return; // the Rust reader, or a format with no netcdf-c in it
         };
         if netcdf.reader_backend() != ReaderBackend::NetcdfC {

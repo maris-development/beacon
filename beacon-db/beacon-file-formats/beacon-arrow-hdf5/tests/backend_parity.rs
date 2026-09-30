@@ -305,9 +305,9 @@ async fn each_reader_serves_its_own_source() {
 /// built its chunk list before reading a byte, and on a small file that setup
 /// cost more than the parallelism returned.
 ///
-/// The scan is planned morsel-driven now — one standing entry per partition and
-/// one queue behind them — so a partition that finds the queue empty simply
-/// finishes. There is nothing to decline, and no size at which declining helps.
+/// The file becomes one part per partition, and DataFusion's shared queue hands
+/// out the parts at run time. A part with no chunk simply finishes. There is
+/// nothing to decline, and no size at which declining helps.
 ///
 /// The row check is what matters and it is unchanged: whatever the partitions
 /// divide between them, the answer must equal a single partition's.
@@ -498,10 +498,8 @@ async fn a_nested_group_reads_end_to_end() {
 /// A partitioned table reads, and every row holds the value of its own file's
 /// path.
 ///
-/// A `PARTITIONED BY` column is in the *path* of a file, and an HDF5 scan reads
-/// a whole collection behind one plan entry, so `FileStream` cannot append it:
-/// it does not know which file a batch came from. The reader appends it itself
-/// instead — per file, which is per morsel.
+/// A `PARTITIONED BY` column is in the *path* of a file. The nd reader appends
+/// it itself, per file, onto its nd-encoded batches.
 #[tokio::test]
 async fn a_partitioned_table_gives_every_row_the_value_of_its_path() {
     use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};

@@ -14,7 +14,6 @@
 //! gather per column, so the filtered-out cross-product is never materialized —
 //! and every operator above the broadcast sees only the surviving rows.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -178,10 +177,6 @@ impl DisplayAs for NdFilterExec {
 impl ExecutionPlan for NdFilterExec {
     fn name(&self) -> &str {
         "NdFilterExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

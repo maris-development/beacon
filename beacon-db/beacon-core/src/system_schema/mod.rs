@@ -35,7 +35,7 @@ pub(crate) use file_stats::{FileStatisticsFunc, FileStatisticsTable};
 /// The name `file_statistics(path)` is registered under.
 pub const FILE_STATISTICS_FUNCTION: &str = "file_statistics";
 
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
@@ -122,10 +122,6 @@ impl SystemSchemaProvider {
 
 #[async_trait::async_trait]
 impl SchemaProvider for SystemSchemaProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn table_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tables.keys().cloned().collect();
         names.push(QUERY_METRICS.to_string());

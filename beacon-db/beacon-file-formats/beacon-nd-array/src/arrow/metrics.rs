@@ -1,11 +1,11 @@
 use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder};
 
-/// What one partition did with a file it read through a share.
+/// What one partition did with the files and file parts it read.
 ///
-/// These are the numbers the sharing exists for, and none of them is visible
-/// anywhere else. `FileStream` reports what the scan *emitted* — for an nd read
-/// that is one row per chunk, which says nothing about how the file divided
-/// between the partitions or how much of it the predicate skipped.
+/// None of these numbers is visible anywhere else. `FileStream` reports what
+/// the scan *emitted*. For an nd read that is one row per chunk, which says
+/// nothing about how a file divided between the partitions or how much of it
+/// the predicate skipped.
 ///
 /// # Why not `output_rows`
 ///
@@ -16,26 +16,25 @@ use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricB
 /// plus these, which is a number that means nothing.
 #[derive(Debug, Clone)]
 pub struct ReadMetrics {
-    /// Chunks (regular) or batches (ragged) this partition took off the queue.
+    /// Chunks (regular) or batches (ragged) this partition read.
     ///
-    /// The queue is shared, so these sum across the partitions to the file's
-    /// total. A file read by one partition while the others idle shows up here
-    /// and nowhere else.
+    /// The parts of a split file read disjoint chunks, so these sum across the
+    /// partitions to the file's total. A file read by one partition while the
+    /// others idle shows up here and nowhere else.
     pub chunks_read: Count,
     /// Rows those chunks hold, counted as the scan will broadcast them.
     ///
     /// An nd batch carries a whole chunk in one row, so this is the row count
     /// the query sees, not the row count the scan emits.
     pub rows_read: Count,
-    /// Chunks the predicate excluded before the queue was filled.
+    /// Chunks the predicate excluded before the chunk list was made.
     ///
-    /// Recorded once for the file, by the partition that opened it. The others
-    /// find the work already gone, which is the point.
+    /// Recorded once for the file, by the partition that reads its first part.
     pub chunks_pruned: Count,
     /// Rows those chunks held.
     pub rows_pruned: Count,
     /// Files `skip_unbroadcastable` skipped because they did not fit the
-    /// dimension list. Recorded by the partition that opened the file.
+    /// dimension list. Recorded by the partition that reads the first part.
     pub files_skipped: Count,
 }
 
