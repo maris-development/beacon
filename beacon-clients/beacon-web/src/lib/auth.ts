@@ -1,6 +1,6 @@
 /** Connection + admin-credential storage for the login-gated admin UI. */
 
-import { ADMIN_API_PREFIX, BeaconClient } from "@beacon/client";
+import { ADMIN_API_PREFIX, BeaconClient } from "@maris-development/beacon-client";
 
 import { serverBase } from "./base-path";
 

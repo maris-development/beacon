@@ -1,7 +1,7 @@
 /** React context exposing the authenticated BeaconClient and session actions. */
 
 import * as React from "react";
-import type { BeaconClient } from "@beacon/client";
+import type { BeaconClient } from "@maris-development/beacon-client";
 
 import {
   type Connection,

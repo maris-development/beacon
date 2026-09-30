@@ -1,6 +1,6 @@
 /** A columnar view over the Arrow chunks a query returns. */
 
-import type { ArrowRecordBatch, ArrowTable, ArrowVector } from "@beacon/client";
+import type { ArrowRecordBatch, ArrowTable, ArrowVector } from "@maris-development/beacon-client";
 
 /** A decoded Arrow chunk: one streamed record batch, or a whole table. */
 export type ArrowChunk = ArrowTable | ArrowRecordBatch;

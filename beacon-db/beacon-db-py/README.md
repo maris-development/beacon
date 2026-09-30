@@ -16,7 +16,7 @@ tables, remote Postgres/MySQL. Copy `beacon.db` and the managed lake travels wit
 
 This is the engine linked **in-process**. There is no server and no HTTP; for talking to a
 running Beacon server, use [`beacon-datalake-cli`](../../beacon-clients/beacon-datalake-cli/) or
-[`@beacon/client`](../../beacon-clients/beacon-ts/).
+[`@maris-development/beacon-client`](../../beacon-clients/beacon-ts/).
 
 ## Install
 

@@ -1,4 +1,4 @@
-# @beacon/client
+# @maris-development/beacon-client
 
 Isomorphic TypeScript SDK for managing and querying a [Beacon](../../README.md)
 instance. Runs in Node.js (18+) and the browser, built on the global `fetch`.
@@ -6,7 +6,7 @@ instance. Runs in Node.js (18+) and the browser, built on the global `fetch`.
 ## Install
 
 ```bash
-npm install @beacon/client
+npm install @maris-development/beacon-client
 ```
 
 `apache-arrow` (the result decoder) and `fzstd` (a tiny pure-JS zstd
@@ -17,7 +17,7 @@ fzstd-backed zstd codec with apache-arrow so they decode out of the box.
 ## Quick start
 
 ```ts
-import { BeaconClient } from "@beacon/client";
+import { BeaconClient } from "@maris-development/beacon-client";
 
 const beacon = new BeaconClient({ url: "http://localhost:5001" });
 
@@ -45,7 +45,7 @@ operators, so predicates use methods (`col("d").gte(0)`) rather than `d >= 0`;
 otherwise it reads like EF Core's method syntax.
 
 ```ts
-import { column, func } from "@beacon/client";
+import { column, func } from "@maris-development/beacon-client";
 
 const { rows } = await beacon
   .from({ netcdf: { paths: ["argo.nc"] } })       // or .fromNetcdf("argo.nc"), .fromTable("t")
@@ -169,7 +169,7 @@ for await (const batch of batches) {
 zstd-enabled `apache-arrow` — so you can decode Beacon's Arrow output yourself:
 
 ```ts
-import { getArrowDecoder, responseByteStream } from "@beacon/client";
+import { getArrowDecoder, responseByteStream } from "@maris-development/beacon-client";
 
 const decoder = await getArrowDecoder();
 const res = await beacon.queryRaw("SELECT * FROM ctd");

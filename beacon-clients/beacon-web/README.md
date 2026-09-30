@@ -1,8 +1,8 @@
 # Beacon Admin Web UI
 
 An admin web interface for a Beacon instance, built with React, Vite, Tailwind
-CSS and shadcn/ui. It talks to Beacon exclusively through the [`@beacon/client`](../beacon-ts)
-TypeScript SDK.
+CSS and shadcn/ui. It talks to Beacon exclusively through the
+[`@maris-development/beacon-client`](../beacon-ts) TypeScript SDK.
 
 The app is **admin-only**: a login screen gates the whole UI. You sign in with a Beacon
 server URL and the admin Basic-auth credentials (`BEACON_ADMIN_USERNAME` /
@@ -28,13 +28,14 @@ server URL and the admin Basic-auth credentials (`BEACON_ADMIN_USERNAME` /
 
 ## Prerequisites
 
-This package lives in the `beacon-clients/` npm workspace and depends on `@beacon/client`, which must
-be built first (it resolves through its `dist/` output):
+This package lives in the `beacon-clients/` npm workspace and depends on
+`@maris-development/beacon-client`, which must be built first (it resolves through its `dist/`
+output):
 
 ```bash
 # from beacon-clients/
-npm install                       # installs the whole JS workspace (beacon-ts + beacon-web)
-npm run build -w @beacon/client   # build the SDK so beacon-web can import it
+npm install              # installs the whole JS workspace (beacon-ts + beacon-web)
+npm run build -w beacon-ts   # build the SDK so beacon-web can import it
 ```
 
 You also need a running Beacon server to point at. With defaults:

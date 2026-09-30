@@ -2,7 +2,12 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Plus, Shield, Trash2, UserPlus, X } from "lucide-react";
 
-import type { AuthRole, AuthRule, AuthUser, PrivilegeTarget } from "@beacon/client";
+import type {
+  AuthRole,
+  AuthRule,
+  AuthUser,
+  PrivilegeTarget,
+} from "@maris-development/beacon-client";
 import { useBeacon } from "@/lib/beacon-context";
 import { errorMessage } from "@/lib/errors";
 import { PageContainer } from "@/components/app-shell";
