@@ -363,6 +363,28 @@ impl Runtime {
         Ok(provider.schema())
     }
 
+    /// A registered table's extensions (`mcp`, `preset`), for any caller who may
+    /// read the table.
+    ///
+    /// `SHOW EXTENSIONS` stays super-user only, like every beacon statement. A
+    /// transport that serves a regular caller, such as the MCP server, reads the
+    /// extensions here instead. The gate is the one of [`Self::table_arrow_schema`]:
+    /// extensions describe the table, so they need the same access as its schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the table does not resolve, when `identity` may not
+    /// read it, or when the stored extensions are not valid.
+    pub async fn table_extensions(
+        &self,
+        table: impl Into<datafusion::sql::TableReference>,
+        identity: &beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<crate::extensions::TableExtensions> {
+        let table: datafusion::sql::TableReference = table.into();
+        self.table_arrow_schema(table.clone(), identity).await?;
+        crate::extensions::get_table_extensions(&self.session_ctx, &table.to_string()).await
+    }
+
     /// The catalog and schema an unqualified table name resolves against.
     pub fn default_catalog_and_schema(&self) -> (String, String) {
         let options = self.session_ctx.copied_config().options().catalog.clone();

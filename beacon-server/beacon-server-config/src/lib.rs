@@ -28,6 +28,7 @@ pub struct Config {
     pub sql: SqlConfig,
     pub flight_sql: FlightSqlConfig,
     pub cors: CorsConfig,
+    pub mcp: McpConfig,
     pub netcdf: NetcdfConfig,
     pub hdf5: Hdf5Config,
     pub zarr: ZarrConfig,
@@ -155,6 +156,14 @@ pub struct CorsConfig {
     pub expose_headers: String,
     pub allowed_credentials: bool,
     pub max_age: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct McpConfig {
+    /// Extra `Host` values that `/mcp` accepts, from the comma-separated
+    /// `BEACON_MCP_ALLOWED_HOSTS`. An entry is a host (`example.org`) or a
+    /// `host:port`. Loopback hosts are always accepted. `*` accepts every host.
+    pub allowed_hosts: Vec<String>,
 }
 
 /// Metadata exposed at the top level of the OpenAPI document (and the Swagger /
@@ -410,6 +419,8 @@ struct RawConfig {
     allowed_credentials: bool,
     #[envconfig(from = "BEACON_CORS_MAX_AGE", default = "3600")]
     max_age: u64,
+    #[envconfig(from = "BEACON_MCP_ALLOWED_HOSTS", default = "")]
+    mcp_allowed_hosts: String,
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "true")]
     enable_pushdown_projection: bool,
     #[envconfig(from = "BEACON_ENABLE_ND_PIPELINE", default = "true")]
@@ -667,6 +678,15 @@ impl From<RawConfig> for Config {
                 expose_headers: raw.expose_headers,
                 allowed_credentials: raw.allowed_credentials,
                 max_age: raw.max_age,
+            },
+            mcp: McpConfig {
+                allowed_hosts: raw
+                    .mcp_allowed_hosts
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|host| !host.is_empty())
+                    .map(str::to_string)
+                    .collect(),
             },
             netcdf: NetcdfConfig {
                 enable_statistics: raw.netcdf_enable_statistics,
