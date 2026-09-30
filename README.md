@@ -34,27 +34,6 @@ Beacon is a query engine server. Point it at an archive (directory or S3 bucket)
 files. Your users then query that archive with SQL or with a JSON query. It runs no import job. It
 makes no second copy. It sends back only the rows and columns of the answer.
 
-## Beacon 2.0.0
-
-Beacon 2.0.0 is the current release. The main changes from 1.8.0:
-
-- **N-dimensional execution.** NetCDF, HDF5, Zarr, Atlas, BBF and GeoTIFF read as arrays. A
-  filter and a projection run before Beacon expands an array into rows.
-- **File statistics.** Beacon records the column ranges of each file. A query skips each file
-  that holds no match.
-- **One database file.** `beacon.db` holds the catalog, the managed tables, and the users, roles
-  and grants. To back up a server, stop it and copy that file.
-- **New readers.** Beacon reads Apache Iceberg tables and Icechunk repositories. Pure-Rust readers
-  read NetCDF and HDF5.
-- **123 spatial functions** with PostGIS names, such as `ST_Intersects` and `ST_Transform`.
-- **`CREATE SECRET` and `ATTACH`.** Query the tables of another Beacon server, and join them with
-  your own tables.
-
-A 1.8.0 server does not upgrade in place. A 2.0.0 server does not read the table definitions of
-a 1.8.0 server, so create your tables again. Read
-[Upgrade from 1.8.0](https://maris-development.github.io/beacon/docs/2.0.0/upgrade) before you
-change the image tag. The [changelog](CHANGELOG.md) lists all the changes.
-
 ## 1. Start a server
 
 ```bash
