@@ -11,8 +11,9 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use futures::StreamExt;
+use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::write::InsertBuilder;
-use lance::dataset::{WriteMode, WriteParams};
+use lance::dataset::{WriteDestination, WriteMode, WriteParams};
 use lance::session::Session;
 use lance_encoding::version::LanceFileVersion;
 
@@ -224,6 +225,10 @@ impl From<WriteKind> for WriteMode {
 /// is coerced to a Lance-writable schema (Arrow view types widened) on the fly.
 /// Returns the number of rows written.
 ///
+/// [`WriteKind::Append`] and [`WriteKind::Overwrite`] fail when no dataset is at
+/// `uri`. A write that waited for the lock while `DROP` ran gets this error,
+/// so it cannot create files that no table owns.
+///
 /// Callers hold the dataset's [`LanceWarehouse`](crate::warehouse::LanceWarehouse)
 /// write lock across the call.
 pub async fn write_stream(
@@ -232,6 +237,24 @@ pub async fn write_stream(
     rows: SendableRecordBatchStream,
     kind: WriteKind,
 ) -> anyhow::Result<u64> {
+    // With a URI destination, Lance turns Append and Overwrite into Create.
+    let dest = match kind {
+        WriteKind::Create => WriteDestination::Uri(uri),
+        WriteKind::Append | WriteKind::Overwrite => {
+            let dataset = DatasetBuilder::from_uri(uri)
+                .with_session(session.clone())
+                .load()
+                .await
+                .map_err(|e| match e {
+                    lance::Error::DatasetNotFound { .. } => {
+                        anyhow::anyhow!("Lance table '{uri}' does not exist")
+                    }
+                    e => anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"),
+                })?;
+            WriteDestination::Dataset(Arc::new(dataset))
+        }
+    };
+
     let target = lance_compatible_schema(&rows.schema());
 
     // Count rows + coerce view types as batches stream past, without collecting.
@@ -252,7 +275,7 @@ pub async fn write_stream(
         data_storage_version: lance_storage_version(),
         ..Default::default()
     };
-    InsertBuilder::new(uri)
+    InsertBuilder::new(dest)
         .with_params(&params)
         .execute_stream(source)
         .await
