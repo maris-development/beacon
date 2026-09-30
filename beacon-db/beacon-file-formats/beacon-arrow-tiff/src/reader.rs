@@ -1,16 +1,17 @@
-use std::{ops::Range, sync::Arc};
+use std::{ops::Range, panic::AssertUnwindSafe, sync::Arc};
 
 use async_tiff::ImageFileDirectory;
-use async_tiff::decoder::DecoderRegistry;
 use async_tiff::metadata::{TiffMetadataReader, cache::ReadaheadMetadataCache};
-use async_tiff::reader::AsyncFileReader;
-use async_tiff::tags::{PlanarConfiguration, Predictor, SampleFormat};
+use async_tiff::reader::{AsyncFileReader, Endianness};
+use async_tiff::tags::SampleFormat;
 use beacon_nd_array::{
     NdArray, NdArrayD,
     dataset::{AnyDataset, Dataset},
 };
+use futures::FutureExt;
 
-use crate::backend::{BandConfig, TiffTileBackend};
+use crate::backend::TiffBandBackend;
+use crate::block::{BlockLayout, TiffImage, TiffSample};
 use indexmap::IndexMap;
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 
@@ -34,6 +35,10 @@ impl AsyncFileReader for ObjectStoreAsyncReader {
         &self,
         range: Range<u64>,
     ) -> async_tiff::error::AsyncTiffResult<bytes::Bytes> {
+        // Object stores reject an empty range, so answer it here.
+        if range.is_empty() {
+            return Ok(bytes::Bytes::new());
+        }
         self.store.get_range(&self.path, range).await.map_err(|e| {
             async_tiff::error::AsyncTiffError::General(format!(
                 "Object store read failed for '{}': {}",
@@ -45,10 +50,10 @@ impl AsyncFileReader for ObjectStoreAsyncReader {
 
 /// Open a TIFF/GeoTIFF file and return its contents as an AnyDataset.
 ///
-/// Current implementation:
 /// - Reads TIFF metadata through `async-tiff`.
 /// - Exposes deterministic metadata arrays.
-/// - Fails fast for non-tiled TIFF files (v1 policy).
+/// - Exposes each band as a lazy array. Tiled and stripped images read their
+///   blocks on demand, and sparse blocks read as nodata.
 pub async fn open_dataset(
     object_store: Arc<dyn ObjectStore>,
     path: Path,
@@ -59,22 +64,8 @@ pub async fn open_dataset(
         store: object_store,
         path,
     };
-    let cached_reader = ReadaheadMetadataCache::new(reader.clone());
 
-    let mut metadata_reader = TiffMetadataReader::try_open(&cached_reader)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to open TIFF metadata: {e}"))?;
-
-    let ifds = metadata_reader
-        .read_all_ifds(&cached_reader)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read TIFF metadata IFDs: {e}"))?;
-
-    let first_ifd = Arc::new(
-        ifds.into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("TIFF contains no image file directories (IFDs)."))?,
-    );
+    let (first_ifd, endianness) = read_image_ifd(&reader).await?;
 
     let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
 
@@ -90,17 +81,14 @@ pub async fn open_dataset(
         insert_scalar(&mut arrays, "image.bits_per_sample", *bits_per_sample)?;
     }
 
-    if let Some((tiles_x, tiles_y)) = first_ifd.tile_count() {
-        let tile_width = first_ifd
-            .tile_width()
-            .ok_or_else(|| anyhow::anyhow!("tiled TIFF reports a tile count but is missing TileWidth"))?;
-        let tile_height = first_ifd
-            .tile_height()
-            .ok_or_else(|| anyhow::anyhow!("tiled TIFF reports a tile count but is missing TileLength"))?;
-        insert_scalar(&mut arrays, "image.tile_width", tile_width)?;
-        insert_scalar(&mut arrays, "image.tile_height", tile_height)?;
-        insert_scalar(&mut arrays, "image.tile_count_x", tiles_x as u64)?;
-        insert_scalar(&mut arrays, "image.tile_count_y", tiles_y as u64)?;
+    let layout = BlockLayout::from_ifd(&first_ifd, endianness)
+        .map_err(|e| anyhow::anyhow!("Failed to read TIFF block layout: {e}"))?;
+
+    if layout.tiled {
+        insert_scalar(&mut arrays, "image.tile_width", layout.block_width as u32)?;
+        insert_scalar(&mut arrays, "image.tile_height", layout.block_height as u32)?;
+        insert_scalar(&mut arrays, "image.tile_count_x", layout.blocks_across as u64)?;
+        insert_scalar(&mut arrays, "image.tile_count_y", layout.blocks_down as u64)?;
     }
 
     if let Some(geo_keys) = first_ifd.geo_key_directory()
@@ -134,15 +122,13 @@ pub async fn open_dataset(
         )?;
     }
 
-    let nodata_value: Option<f64> = first_ifd.gdal_nodata().and_then(|s| match s.parse::<f64>() {
-        Ok(value) => Some(value),
-        Err(e) => {
-            tracing::warn!(value = %s, error = %e, "ignoring unparseable GDAL_NODATA tag");
-            None
-        }
-    });
+    // GDAL ends the tag with a NUL byte, and some writers add spaces.
+    let nodata = first_ifd
+        .gdal_nodata()
+        .map(|s| s.trim_matches(|c: char| c == '\0' || c.is_whitespace()))
+        .filter(|s| !s.is_empty());
 
-    if let Some(nodata) = first_ifd.gdal_nodata() {
+    if let Some(nodata) = nodata {
         insert_scalar(&mut arrays, "geo.nodata", nodata.to_string())?;
     }
 
@@ -150,14 +136,8 @@ pub async fn open_dataset(
         insert_scalar(&mut arrays, "geo.gdal_metadata", gdal_metadata.to_string())?;
     }
 
-    let bands = if first_ifd.tile_count().is_some() {
-        read_pixel_bands(Arc::clone(&first_ifd), &reader, nodata_value)
-            .map_err(|e| anyhow::anyhow!("Failed to build TIFF tile backends: {e}"))?
-    } else {
-        read_pixel_bands_stripped(&first_ifd, &reader, nodata_value)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read TIFF strip data: {e}"))?
-    };
+    let bands = read_pixel_bands(layout, &reader, nodata)
+        .map_err(|e| anyhow::anyhow!("Failed to build TIFF band arrays: {e}"))?;
     for (band_idx, band_array) in bands.into_iter().enumerate() {
         arrays.insert(format!("band.{band_idx}"), band_array);
     }
@@ -203,6 +183,8 @@ fn format_f64_list(values: &[f64]) -> String {
 /// - `lon_array`: dim `["x"]`, shape `[image_width]`
 /// - `lat_array`: dim `["y"]`, shape `[image_height]`
 ///
+/// Each value is the center of its pixel, the same as a CF coordinate.
+///
 /// Returns `None` when no supported geolocation tags are found, or when the
 /// transformation involves a rotation that cannot be collapsed to 1-D axes.
 fn build_coordinate_arrays(
@@ -211,9 +193,13 @@ fn build_coordinate_arrays(
     let image_width = ifd.image_width() as usize;
     let image_height = ifd.image_height() as usize;
 
+    // For PixelIsArea, raster point (i, j) is the top-left corner of pixel (i, j),
+    // so its center is at (i + 0.5, j + 0.5). For PixelIsPoint, it is the center.
+    let center = pixel_center_offset(ifd);
+
     // Tiepoint + pixel scale (most common GeoTIFF encoding).
-    // Formula: lon[x] = tie_wx + (x - tie_px) * scale_x
-    //          lat[y] = tie_wy - (y - tie_py) * scale_y
+    // Formula: lon[x] = tie_wx + (x + center - tie_px) * scale_x
+    //          lat[y] = tie_wy - (y + center - tie_py) * scale_y
     if let (Some(tiepoints), Some(pixel_scale)) = (ifd.model_tiepoint(), ifd.model_pixel_scale()) {
         if tiepoints.len() >= 6 && pixel_scale.len() >= 2 {
             let tie_px = tiepoints[0];
@@ -224,10 +210,10 @@ fn build_coordinate_arrays(
             let scale_y = pixel_scale[1];
 
             let lons: Vec<f64> = (0..image_width)
-                .map(|x| tie_wx + (x as f64 - tie_px) * scale_x)
+                .map(|x| tie_wx + (x as f64 + center - tie_px) * scale_x)
                 .collect();
             let lats: Vec<f64> = (0..image_height)
-                .map(|y| tie_wy - (y as f64 - tie_py) * scale_y)
+                .map(|y| tie_wy - (y as f64 + center - tie_py) * scale_y)
                 .collect();
 
             let lon_array = NdArray::try_new_from_vec_in_mem(
@@ -249,8 +235,8 @@ fn build_coordinate_arrays(
     // Model transformation matrix (4×4 affine, row-major).
     // Only supported for rectilinear (non-rotated) grids where the off-diagonal
     // terms b (transform[1]) and e (transform[4]) are zero.
-    // lon[x] = a * x + d
-    // lat[y] = f * y + h
+    // lon[x] = a * (x + center) + d
+    // lat[y] = f * (y + center) + h
     if let Some(transform) = ifd.model_transformation() {
         if transform.len() >= 16 {
             let a = transform[0];
@@ -261,8 +247,12 @@ fn build_coordinate_arrays(
             let h = transform[7];
 
             if b.abs() < 1e-10 && e.abs() < 1e-10 {
-                let lons: Vec<f64> = (0..image_width).map(|x| a * x as f64 + d).collect();
-                let lats: Vec<f64> = (0..image_height).map(|y| f_coeff * y as f64 + h).collect();
+                let lons: Vec<f64> = (0..image_width)
+                    .map(|x| a * (x as f64 + center) + d)
+                    .collect();
+                let lats: Vec<f64> = (0..image_height)
+                    .map(|y| f_coeff * (y as f64 + center) + h)
+                    .collect();
 
                 let lon_array = NdArray::try_new_from_vec_in_mem(
                     lons,
@@ -284,236 +274,118 @@ fn build_coordinate_arrays(
     Ok(None)
 }
 
-/// Build one lazy [`TiffTileBackend`] per band for a tiled GeoTIFF.
+/// The raster offset from a tiepoint to a pixel center, from `GTRasterTypeGeoKey`.
 ///
-/// No tile data is fetched here. Each backend records the tile geometry and
-/// reports [`chunk_shape`] = `[tile_height, tile_width]` so that callers
-/// stream data one tile row at a time.
-fn read_pixel_bands(
-    ifd: Arc<ImageFileDirectory>,
-    reader: &ObjectStoreAsyncReader,
-    nodata_value: Option<f64>,
-) -> anyhow::Result<Vec<Arc<dyn NdArrayD>>> {
-    let image_width = ifd.image_width() as usize;
-    let image_height = ifd.image_height() as usize;
-    let tile_width = ifd
-        .tile_width()
-        .ok_or_else(|| anyhow::anyhow!("tiled TIFF IFD is missing TileWidth"))?
-        as usize;
-    let tile_height = ifd
-        .tile_height()
-        .ok_or_else(|| anyhow::anyhow!("tiled TIFF IFD is missing TileLength"))?
-        as usize;
-
-    let n_bands = ifd.samples_per_pixel() as usize;
-    let is_planar = ifd.planar_configuration() == PlanarConfiguration::Planar;
-
-    let bits_per_sample = ifd.bits_per_sample().first().copied().unwrap_or(8) as usize;
-    let sample_format = ifd
-        .sample_format()
-        .first()
-        .copied()
-        .unwrap_or(SampleFormat::Uint);
-
-    macro_rules! make_backends {
-        ($T:ty, $nodata:expr) => {{
-            (0..n_bands)
-                .map(|band_idx| -> anyhow::Result<Arc<dyn NdArrayD>> {
-                    let backend = TiffTileBackend::<$T> {
-                        reader: reader.clone(),
-                        ifd: Arc::clone(&ifd),
-                        image_width,
-                        image_height,
-                        tile_width,
-                        tile_height,
-                        band_config: BandConfig {
-                            band_index: band_idx,
-                            n_bands,
-                            planar: is_planar,
-                        },
-                        fill_value: $nodata,
-                    };
-                    let nd = NdArray::new_with_backend(backend)?;
-                    Ok(Arc::new(nd) as Arc<dyn NdArrayD>)
-                })
-                .collect::<anyhow::Result<Vec<Arc<dyn NdArrayD>>>>()
-        }};
-    }
-
-    match (sample_format, bits_per_sample) {
-        (SampleFormat::Float, 32) => make_backends!(f32, nodata_value.map(|v| v as f32)),
-        (SampleFormat::Float, 64) => make_backends!(f64, nodata_value),
-        (SampleFormat::Uint, 8) => make_backends!(u8, nodata_value.map(|v| v as u8)),
-        (SampleFormat::Uint, 16) => make_backends!(u16, nodata_value.map(|v| v as u16)),
-        (SampleFormat::Uint, 32) => make_backends!(u32, nodata_value.map(|v| v as u32)),
-        (SampleFormat::Uint, 64) => make_backends!(u64, nodata_value.map(|v| v as u64)),
-        (SampleFormat::Int, 8) => make_backends!(i8, nodata_value.map(|v| v as i8)),
-        (SampleFormat::Int, 16) => make_backends!(i16, nodata_value.map(|v| v as i16)),
-        (SampleFormat::Int, 32) => make_backends!(i32, nodata_value.map(|v| v as i32)),
-        (SampleFormat::Int, 64) => make_backends!(i64, nodata_value.map(|v| v as i64)),
-        _ => anyhow::bail!(
-            "Unsupported tiled TIFF format: {sample_format:?} / {bits_per_sample} bits per sample"
-        ),
+/// Returns 0.5 for PixelIsArea (1), and 0 for PixelIsPoint (2). GeoTIFF makes
+/// PixelIsArea the default, so a missing or unknown key also gives 0.5.
+fn pixel_center_offset(ifd: &ImageFileDirectory) -> f64 {
+    const PIXEL_IS_AREA: u16 = 1;
+    const PIXEL_IS_POINT: u16 = 2;
+    match ifd.geo_key_directory().and_then(|keys| keys.raster_type) {
+        Some(PIXEL_IS_POINT) => 0.0,
+        Some(PIXEL_IS_AREA) | None => 0.5,
+        Some(other) => {
+            tracing::warn!(raster_type = other, "unknown GTRasterTypeGeoKey, using PixelIsArea");
+            0.5
+        }
     }
 }
 
-/// Fetch and decode every strip for `ifd`, then assemble one `NdArray` per band.
+/// Read the IFDs and return the full-resolution image and the byte order.
 ///
-/// Only little-endian TIFFs are supported. Each strip is decompressed with the
-/// compression method declared by the IFD (e.g. LZW, Deflate) via `async-tiff`'s
-/// [`DecoderRegistry`] before the pixel bytes are interpreted.
-async fn read_pixel_bands_stripped(
-    ifd: &ImageFileDirectory,
+/// `async-tiff` panics on some malformed IFDs. The panic becomes an error here,
+/// so a bad file fails its query and not the whole server task.
+async fn read_image_ifd(
     reader: &ObjectStoreAsyncReader,
-    nodata_value: Option<f64>,
-) -> anyhow::Result<Vec<Arc<dyn NdArrayD>>> {
-    let strip_offsets = ifd
-        .strip_offsets()
-        .ok_or_else(|| anyhow::anyhow!("IFD has no strip offsets"))?;
-    let strip_byte_counts = ifd
-        .strip_byte_counts()
-        .ok_or_else(|| anyhow::anyhow!("IFD has no strip byte counts"))?;
-
-    anyhow::ensure!(
-        strip_offsets.len() == strip_byte_counts.len(),
-        "strip offsets and byte counts length mismatch ({} vs {})",
-        strip_offsets.len(),
-        strip_byte_counts.len(),
-    );
-
-    let image_width = ifd.image_width() as usize;
-    let image_height = ifd.image_height() as usize;
-    let n_bands = ifd.samples_per_pixel() as usize;
-    let bits_per_sample = ifd.bits_per_sample().first().copied().unwrap_or(8) as usize;
-    let sample_format = ifd
-        .sample_format()
-        .first()
-        .copied()
-        .unwrap_or(SampleFormat::Uint);
-    let is_planar = ifd.planar_configuration() == PlanarConfiguration::Planar;
-
-    // A predictor is a reversible transform applied before compression. We don't yet
-    // reverse it here, so reject anything other than "no predictor" rather than emit
-    // silently wrong pixels.
-    let predictor = ifd.predictor().unwrap_or(Predictor::None);
-    anyhow::ensure!(
-        predictor == Predictor::None,
-        "Unsupported predictor {predictor:?} for stripped TIFF (only Predictor::None is supported)"
-    );
-
-    // Look up a decoder for the IFD's compression method. The default registry covers
-    // None, LZW, Deflate, JPEG and ZSTD.
-    let compression = ifd.compression();
-    let registry = DecoderRegistry::default();
-    let decoder = registry.as_ref().get(&compression).ok_or_else(|| {
-        anyhow::anyhow!("Unsupported TIFF compression {compression:?} for stripped layout")
-    })?;
-    let photometric = ifd.photometric_interpretation();
-    let jpeg_tables = ifd.jpeg_tables();
-
-    // Decompress each strip and concatenate into one contiguous, little-endian byte buffer.
-    let total: u64 = strip_byte_counts.iter().sum();
-    let mut raw: Vec<u8> = Vec::with_capacity(total as usize);
-    for (&offset, &count) in strip_offsets.iter().zip(strip_byte_counts.iter()) {
-        let bytes = reader
-            .get_bytes(offset..offset + count)
+) -> anyhow::Result<(ImageFileDirectory, Endianness)> {
+    let cached_reader = ReadaheadMetadataCache::new(reader.clone());
+    let read = async {
+        let mut metadata_reader = TiffMetadataReader::try_open(&cached_reader)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to read strip at offset {offset}: {e}"))?;
-        let decoded = decoder
-            .decode_tile(
-                bytes,
-                photometric,
-                jpeg_tables,
-                n_bands as u16,
-                bits_per_sample as u16,
-                None,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to decompress strip at offset {offset} ({compression:?}): {e}")
-            })?;
-        raw.extend_from_slice(&decoded);
-    }
-
-    // Decode raw bytes as little-endian `$T`, then assemble into per-band 2-D buffers.
-    macro_rules! decode_strips {
-        ($T:ty, $N:expr) => {{
-            let values: Vec<$T> = raw
-                .chunks_exact($N)
-                .map(|chunk| {
-                    // `chunks_exact($N)` yields slices of exactly `$N` bytes, so
-                    // the array conversion is infallible.
-                    let arr: [u8; $N] = chunk
-                        .try_into()
-                        .expect("chunks_exact yields slices of exactly $N bytes");
-                    <$T>::from_le_bytes(arr)
-                })
-                .collect();
-
-            let mut band_bufs: Vec<Vec<$T>> = (0..n_bands)
-                .map(|_| vec![<$T as Default>::default(); image_height * image_width])
-                .collect();
-
-            if !is_planar {
-                // Chunky: samples interleaved as px0_b0 px0_b1 … px1_b0 …
-                for (i, v) in values.into_iter().enumerate() {
-                    let band = i % n_bands;
-                    let pixel = i / n_bands;
-                    let row = pixel / image_width;
-                    let col = pixel % image_width;
-                    if row < image_height {
-                        band_bufs[band][row * image_width + col] = v;
-                    }
-                }
-            } else {
-                // Planar: all of band 0, then all of band 1, …
-                let plane_size = image_height * image_width;
-                for (i, v) in values.into_iter().enumerate() {
-                    let band = i / plane_size;
-                    let pixel = i % plane_size;
-                    if band < n_bands {
-                        band_bufs[band][pixel] = v;
-                    }
-                }
-            }
-
-            band_bufs
-                .into_iter()
-                .map(|buf| -> anyhow::Result<Arc<dyn NdArrayD>> {
-                    let nd = NdArray::try_new_from_vec_in_mem(
-                        buf,
-                        vec![image_height, image_width],
-                        vec!["y".to_string(), "x".to_string()],
-                        nodata_value.map(|v| v as $T),
-                    )?;
-                    Ok(Arc::new(nd) as Arc<dyn NdArrayD>)
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?
-        }};
-    }
-
-    let bands = match (sample_format, bits_per_sample) {
-        (SampleFormat::Uint, 8) => decode_strips!(u8, 1),
-        (SampleFormat::Uint, 16) => decode_strips!(u16, 2),
-        (SampleFormat::Uint, 32) => decode_strips!(u32, 4),
-        (SampleFormat::Uint, 64) => decode_strips!(u64, 8),
-        (SampleFormat::Int, 8) => decode_strips!(i8, 1),
-        (SampleFormat::Int, 16) => decode_strips!(i16, 2),
-        (SampleFormat::Int, 32) => decode_strips!(i32, 4),
-        (SampleFormat::Int, 64) => decode_strips!(i64, 8),
-        (SampleFormat::Float, 32) => decode_strips!(f32, 4),
-        (SampleFormat::Float, 64) => decode_strips!(f64, 8),
-        _ => anyhow::bail!(
-            "Unsupported stripped TIFF format: {sample_format:?} / {bits_per_sample} bits per sample"
-        ),
+            .map_err(|e| anyhow::anyhow!("Failed to open TIFF metadata: {e}"))?;
+        let endianness = metadata_reader.endianness();
+        let ifds = metadata_reader
+            .read_all_ifds(&cached_reader)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read TIFF metadata IFDs: {e}"))?;
+        Ok::<_, anyhow::Error>((ifds, endianness))
     };
+    let (ifds, endianness) = AssertUnwindSafe(read).catch_unwind().await.map_err(|panic| {
+        let reason = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown cause".to_string());
+        anyhow::anyhow!("Failed to read TIFF metadata IFDs: malformed IFD ({reason})")
+    })??;
 
-    Ok(bands)
+    // NewSubfileType bit 0 marks an overview and bit 2 marks a mask. Skip both.
+    let is_full_image = |ifd: &ImageFileDirectory| ifd.new_subfile_type().unwrap_or(0) & 0b101 == 0;
+    let index = ifds.iter().position(is_full_image).unwrap_or(0);
+    let ifd = ifds
+        .into_iter()
+        .nth(index)
+        .ok_or_else(|| anyhow::anyhow!("TIFF contains no image file directories (IFDs)."))?;
+    Ok((ifd, endianness))
+}
+
+/// Build one lazy band array per sample of the image.
+///
+/// No pixel data is fetched here. All bands share one [`TiffImage`], so the
+/// bands of a pixel-interleaved image fetch and decode each block one time.
+fn read_pixel_bands(
+    layout: BlockLayout,
+    reader: &ObjectStoreAsyncReader,
+    nodata: Option<&str>,
+) -> anyhow::Result<Vec<Arc<dyn NdArrayD>>> {
+    fn make_bands<T: TiffSample>(
+        layout: BlockLayout,
+        reader: &ObjectStoreAsyncReader,
+        nodata: Option<&str>,
+    ) -> anyhow::Result<Vec<Arc<dyn NdArrayD>>> {
+        let fill_value = nodata.and_then(|text| {
+            let value = T::parse_nodata(text);
+            if value.is_none() {
+                tracing::warn!(value = %text, "ignoring GDAL_NODATA value that the band type cannot hold");
+            }
+            value
+        });
+        let n_bands = layout.n_bands;
+        let image = Arc::new(TiffImage::<T>::new(reader.clone(), layout)?);
+        (0..n_bands)
+            .map(|band| -> anyhow::Result<Arc<dyn NdArrayD>> {
+                let backend = TiffBandBackend {
+                    image: Arc::clone(&image),
+                    band,
+                    fill_value,
+                };
+                Ok(Arc::new(NdArray::new_with_backend(backend)?) as Arc<dyn NdArrayD>)
+            })
+            .collect()
+    }
+
+    match (layout.sample_format, layout.bits_per_sample) {
+        (SampleFormat::Float, 32) => make_bands::<f32>(layout, reader, nodata),
+        (SampleFormat::Float, 64) => make_bands::<f64>(layout, reader, nodata),
+        (SampleFormat::Uint, 8) => make_bands::<u8>(layout, reader, nodata),
+        (SampleFormat::Uint, 16) => make_bands::<u16>(layout, reader, nodata),
+        (SampleFormat::Uint, 32) => make_bands::<u32>(layout, reader, nodata),
+        (SampleFormat::Uint, 64) => make_bands::<u64>(layout, reader, nodata),
+        (SampleFormat::Int, 8) => make_bands::<i8>(layout, reader, nodata),
+        (SampleFormat::Int, 16) => make_bands::<i16>(layout, reader, nodata),
+        (SampleFormat::Int, 32) => make_bands::<i32>(layout, reader, nodata),
+        (SampleFormat::Int, 64) => make_bands::<i64>(layout, reader, nodata),
+        (sample_format, bits) => anyhow::bail!(
+            "Unsupported TIFF format: {sample_format:?} / {bits} bits per sample"
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use beacon_nd_array::NdArray;
+    use beacon_nd_array::array::subset::ArraySubset;
     use object_store::memory::InMemory;
 
     const TEST_TIF_BYTES: &[u8] = include_bytes!("../test-files/test.tif");
@@ -544,6 +416,202 @@ mod tests {
             .downcast_ref::<NdArray<u16>>()
             .unwrap_or_else(|| panic!("array '{name}' has unexpected type"));
         nd.clone_into_raw_vec().await[0]
+    }
+
+    // Fixtures from `test-files/gen_block_fixtures.py`. Each pixel follows a formula.
+    const SPARSE_TILED: &[u8] = include_bytes!("../test-files/sparse_tiled_i16.tif");
+    const SPARSE_TILED_BIGTIFF: &[u8] =
+        include_bytes!("../test-files/sparse_tiled_bigtiff_i16.tif");
+    const SPARSE_TILED_NO_NODATA: &[u8] =
+        include_bytes!("../test-files/sparse_tiled_no_nodata_i16.tif");
+    const SPARSE_STRIPPED: &[u8] = include_bytes!("../test-files/sparse_stripped_i16.tif");
+    const PLANAR_PARTLY_SPARSE: &[u8] =
+        include_bytes!("../test-files/planar_partly_sparse_u8.tif");
+    const BIG_ENDIAN_PREDICTOR_TILED: &[u8] =
+        include_bytes!("../test-files/big_endian_predictor_tiled_u16.tif");
+    const FLOAT_PREDICTOR_STRIPPED: &[u8] =
+        include_bytes!("../test-files/float_predictor_stripped_f32.tif");
+    const INT_PREDICTOR_STRIPPED: &[u8] =
+        include_bytes!("../test-files/int_predictor_stripped_i32.tif");
+    const PACKBITS_TILED: &[u8] = include_bytes!("../test-files/packbits_tiled_u16.tif");
+    const PIXEL_IS_AREA: &[u8] = include_bytes!("../test-files/pixel_is_area.tif");
+    const PIXEL_IS_POINT: &[u8] = include_bytes!("../test-files/pixel_is_point.tif");
+
+    async fn open_fixture(bytes: &'static [u8]) -> anyhow::Result<AnyDataset> {
+        let store = Arc::new(InMemory::new());
+        let path = Path::from("tests/fixture.tif");
+        store
+            .put(&path, bytes::Bytes::from_static(bytes).into())
+            .await
+            .unwrap();
+        open_dataset(store, path).await
+    }
+
+    fn band<T: beacon_nd_array::datatypes::NdArrayType>(
+        dataset: &AnyDataset,
+        index: usize,
+    ) -> NdArray<T> {
+        dataset
+            .get_array(&format!("band.{index}"))
+            .unwrap_or_else(|| panic!("missing band.{index}"))
+            .as_any()
+            .downcast_ref::<NdArray<T>>()
+            .expect("band has an unexpected type")
+            .clone()
+    }
+
+    /// Compare every value of a `width` x `height` grid with `expected(row, col)`.
+    fn assert_grid<T: PartialEq + std::fmt::Debug>(
+        values: &[T],
+        width: usize,
+        height: usize,
+        expected: impl Fn(usize, usize) -> T,
+    ) {
+        assert_eq!(values.len(), width * height);
+        for row in 0..height {
+            for col in 0..width {
+                let want = expected(row, col);
+                assert_eq!(values[row * width + col], want, "pixel (row {row}, col {col})");
+            }
+        }
+    }
+
+    /// Tiles (0,0) and (2,1) of the sparse fixtures hold data. The other tiles are sparse.
+    fn sparse_tiled_value(row: usize, col: usize, fill: i16) -> i16 {
+        match (row / 16, col / 16) {
+            (0, 0) => 7,
+            (1, 2) => 5,
+            _ => fill,
+        }
+    }
+
+    #[tokio::test]
+    async fn sparse_tiles_read_as_nodata() {
+        for fixture in [SPARSE_TILED, SPARSE_TILED_BIGTIFF] {
+            let dataset = open_fixture(fixture).await.unwrap();
+            let band = band::<i16>(&dataset, 0);
+            assert_eq!(band.fill_value().await, Some(-32767));
+            assert_grid(&band.clone_into_raw_vec().await, 64, 64, |r, c| {
+                sparse_tiled_value(r, c, -32767)
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn sparse_tiles_read_as_zero_without_nodata() {
+        let dataset = open_fixture(SPARSE_TILED_NO_NODATA).await.unwrap();
+        let band = band::<i16>(&dataset, 0);
+        assert_eq!(band.fill_value().await, None);
+        assert_grid(&band.clone_into_raw_vec().await, 64, 64, |r, c| {
+            sparse_tiled_value(r, c, 0)
+        });
+    }
+
+    #[tokio::test]
+    async fn subset_across_sparse_and_full_tiles() {
+        let dataset = open_fixture(SPARSE_TILED).await.unwrap();
+        let subset = band::<i16>(&dataset, 0)
+            .subset(ArraySubset::new(vec![10, 12], vec![20, 30]))
+            .await
+            .unwrap();
+        assert_grid(&subset.clone_into_raw_vec().await, 30, 20, |r, c| {
+            sparse_tiled_value(r + 10, c + 12, -32767)
+        });
+    }
+
+    #[tokio::test]
+    async fn sparse_strips_read_as_nodata() {
+        let dataset = open_fixture(SPARSE_STRIPPED).await.unwrap();
+        let band = band::<i16>(&dataset, 0);
+        assert_eq!(band.fill_value().await, Some(-1));
+        assert_grid(&band.clone_into_raw_vec().await, 64, 64, |r, _| {
+            if (8..16).contains(&r) { 3 } else { -1 }
+        });
+    }
+
+    #[tokio::test]
+    async fn planar_band_reads_when_another_band_is_sparse() {
+        let dataset = open_fixture(PLANAR_PARTLY_SPARSE).await.unwrap();
+        let first = band::<u8>(&dataset, 0).clone_into_raw_vec().await;
+        assert_grid(&first, 32, 32, |r, c| ((r * 100 + c) % 200) as u8);
+        let second = band::<u8>(&dataset, 1).clone_into_raw_vec().await;
+        assert_grid(&second, 32, 32, |r, c| if r < 16 && c >= 16 { 9 } else { 255 });
+    }
+
+    #[tokio::test]
+    async fn big_endian_tiles_with_predictor_and_edge_tiles() {
+        let dataset = open_fixture(BIG_ENDIAN_PREDICTOR_TILED).await.unwrap();
+        let values = band::<u16>(&dataset, 0).clone_into_raw_vec().await;
+        assert_grid(&values, 50, 37, |r, c| (r * 100 + c) as u16);
+    }
+
+    #[tokio::test]
+    async fn packbits_tiles() {
+        let dataset = open_fixture(PACKBITS_TILED).await.unwrap();
+        let values = band::<u16>(&dataset, 0).clone_into_raw_vec().await;
+        assert_grid(&values, 50, 37, |r, c| (r * 100 + c) as u16);
+    }
+
+    #[tokio::test]
+    async fn float_predictor_strips_with_short_last_strip() {
+        let dataset = open_fixture(FLOAT_PREDICTOR_STRIPPED).await.unwrap();
+        for index in 0..3 {
+            let values = band::<f32>(&dataset, index).clone_into_raw_vec().await;
+            assert_grid(&values, 20, 37, |r, c| (r * 100 + c + index * 10000) as f32 / 4.0);
+        }
+        // The last strip holds rows 32..37 only.
+        let tail = band::<f32>(&dataset, 2)
+            .subset(ArraySubset::new(vec![30, 5], vec![7, 10]))
+            .await
+            .unwrap()
+            .clone_into_raw_vec()
+            .await;
+        assert_grid(&tail, 10, 7, |r, c| ((r + 30) * 100 + c + 5 + 20000) as f32 / 4.0);
+    }
+
+    #[tokio::test]
+    async fn horizontal_predictor_strips() {
+        let dataset = open_fixture(INT_PREDICTOR_STRIPPED).await.unwrap();
+        let values = band::<i32>(&dataset, 0).clone_into_raw_vec().await;
+        assert_grid(&values, 33, 21, |r, c| (r * 100 + c) as i32 - 1000);
+    }
+
+    async fn coordinates(dataset: &AnyDataset) -> (Vec<f64>, Vec<f64>) {
+        let read = |name: &str| {
+            dataset
+                .get_array(name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .as_any()
+                .downcast_ref::<NdArray<f64>>()
+                .expect("coordinates are f64")
+                .clone()
+        };
+        let lon = read("geo.lon").clone_into_raw_vec().await;
+        let lat = read("geo.lat").clone_into_raw_vec().await;
+        (lon, lat)
+    }
+
+    /// Issue #525: both raster types give the pixel center, the same as CF and `read_netcdf`.
+    #[tokio::test]
+    async fn coordinates_are_pixel_centers_for_both_raster_types() {
+        for fixture in [PIXEL_IS_AREA, PIXEL_IS_POINT] {
+            let dataset = open_fixture(fixture).await.unwrap();
+            let (lon, lat) = coordinates(&dataset).await;
+            assert_eq!(lon, vec![0.5, 1.5, 2.5, 3.5]);
+            assert_eq!(lat, vec![2.5, 1.5, 0.5]);
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_file_is_an_error() {
+        for length in [8, 64, 200, 400] {
+            let bytes: &'static [u8] = &SPARSE_TILED[..length];
+            let result = async {
+                let dataset = open_fixture(bytes).await?;
+                band::<i16>(&dataset, 0).subset(ArraySubset::new(vec![0, 0], vec![64, 64])).await
+            };
+            assert!(result.await.is_err(), "a file cut at {length} bytes must fail");
+        }
     }
 
     #[tokio::test]
@@ -698,19 +766,19 @@ mod tests {
         assert_eq!(lat.dimensions(), vec!["y"]);
         let lats = lat.clone_into_raw_vec().await;
         assert_eq!(lats.len(), 380);
-        // ModelTransformationTag: lat[y] = 0.04166667002172143 * y + 30.16666666498914
+        // ModelTransformationTag, PixelIsArea: lat[y] = 0.04166667002172143 * (y + 0.5) + 30.16666666498914
         assert!(
-            (lats[0] - 30.166_666_664_989_14).abs() < 1e-8,
+            (lats[0] - 30.1875).abs() < 1e-8,
             "lat[0]={}",
             lats[0]
         );
         assert!(
-            (lats[1] - 30.208_333_335_010_863).abs() < 1e-8,
+            (lats[1] - 30.229_166_670_021_723).abs() < 1e-8,
             "lat[1]={}",
             lats[1]
         );
         assert!(
-            (lats[379] - 45.958_334_603_221_566).abs() < 1e-8,
+            (lats[379] - 45.979_167_938_232_42).abs() < 1e-8,
             "lat[379]={}",
             lats[379]
         );
@@ -725,19 +793,19 @@ mod tests {
         assert_eq!(lon.dimensions(), vec!["x"]);
         let lons = lon.clone_into_raw_vec().await;
         assert_eq!(lons.len(), 1287);
-        // ModelTransformationTag: lon[x] = 0.0416666671610546 * x + -17.312499364464315
+        // ModelTransformationTag, PixelIsArea: lon[x] = 0.0416666671610546 * (x + 0.5) + -17.312499364464315
         assert!(
-            (lons[0] - -17.312_499_364_464_315).abs() < 1e-8,
+            (lons[0] - -17.291_666_030_883_79).abs() < 1e-8,
             "lon[0]={}",
             lons[0]
         );
         assert!(
-            (lons[1] - -17.270_832_697_303_263).abs() < 1e-8,
+            (lons[1] - -17.249_999_363_722_733).abs() < 1e-8,
             "lon[1]={}",
             lons[1]
         );
         assert!(
-            (lons[1286] - 36.270_834_604_651_895).abs() < 1e-8,
+            (lons[1286] - 36.291_667_938_232_42).abs() < 1e-8,
             "lon[1286]={}",
             lons[1286]
         );

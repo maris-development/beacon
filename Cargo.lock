@@ -1663,6 +1663,7 @@ dependencies = [
  "datafusion 53.1.0",
  "futures",
  "indexmap 2.14.0",
+ "moka",
  "ndarray 0.17.2",
  "object_store 0.13.2",
  "serde",

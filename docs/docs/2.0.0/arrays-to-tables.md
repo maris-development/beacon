@@ -110,6 +110,39 @@ SELECT time, lat, lon, sst FROM read_netcdf('sst/*.nc');
 
 Projection pushdown then reads only those variables from storage.
 
+## A projection can change the row count
+
+Beacon builds the grid from the columns that a query uses. The select list, the `WHERE` clause and
+the aggregates all count. When no used column spans the full grid, the grid gets smaller, and so
+does the row count. Take `sst(time, lat, lon)` with 2 × 3 × 4 = 24 rows:
+
+| Query | Rows | Grid |
+|---|---|---|
+| `SELECT count(*) FROM t` | 24 | `(time, lat, lon)` |
+| `SELECT count(sst) FROM t` | 24 | `(time, lat, lon)` |
+| `SELECT count(lat) FROM t` | 3 | `(lat)` |
+| `SELECT count(*) FROM t WHERE lat > -90` | 3 | `(lat)` |
+| `SELECT count(*) FROM t WHERE "sst.units" = 'K'` | 1 | a scalar |
+
+Thus a filter on a coordinate or on an attribute changes the count, although it keeps every
+value. To count the rows of the full grid, use a column that spans the grid in the same query, for
+example in a second aggregate:
+
+```sql
+SELECT count(*), max(sst) FROM t WHERE lat > -90;
+```
+
+Coordinates that together span the grid also keep it. `WHERE lat > -90 AND lon > -180 AND
+time > '2024-01-01'` uses all three axes of `sst`. A subquery does not help: the optimizer removes
+a column that the outer query does not use.
+
+To read a coordinate vector alone, name its dimension in the `dimensions` argument. The grid is then
+explicit:
+
+```sql
+SELECT lat FROM read_netcdf(['sst/2024-01.nc'], ['lat']);
+```
+
 ## The `dimensions` argument
 
 Every nd reader takes an optional second argument: the list of dimensions to read.
