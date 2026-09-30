@@ -32,7 +32,7 @@ ui-deps: ## Install JS workspace dependencies
 
 # Depends on ui-deps because the workspace symlinks in node_modules encode the
 # absolute path of each workspace. Moving or renaming a client directory leaves
-# them dangling, and the SPA then fails to resolve `@beacon/client` — which
+# them dangling, and the SPA then fails to resolve `@maris-development/beacon-client` — which
 # surfaces as a wall of unrelated-looking implicit-any errors from tsc. `npm
 # install` is idempotent and relinks them.
 ui: ui-deps ## Build the admin web UI (SDK first, then the SPA) into $(WEB_DIR)

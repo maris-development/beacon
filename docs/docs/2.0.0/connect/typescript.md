@@ -1,10 +1,10 @@
 ---
-description: "@beacon/client is a TypeScript SDK for Beacon. Run SQL or the JSON query DSL from Node.js or the browser. Build queries with a fluent builder."
+description: "@maris-development/beacon-client is a TypeScript SDK for Beacon. Run SQL or the JSON query DSL from Node.js or the browser. Build queries with a fluent builder."
 ---
 
 # Beacon TypeScript SDK
 
-`@beacon/client` is a TypeScript and JavaScript SDK for a Beacon server. It runs
+`@maris-development/beacon-client` is a TypeScript and JavaScript SDK for a Beacon server. It runs
 in **Node.js 18 and later** and in the **browser**. It uses the global `fetch`.
 It runs SQL and the [JSON query DSL](/docs/2.0.0/api/querying/json). It
 decodes the zstd-compressed Arrow IPC results of Beacon into plain JS row
@@ -16,7 +16,7 @@ The SDK lives in the Beacon repository, under
 ## Install
 
 ```bash
-npm install @beacon/client
+npm install @maris-development/beacon-client
 ```
 
 The SDK has two normal dependencies. `apache-arrow` decodes the result. `fzstd`
@@ -27,7 +27,7 @@ fzstd codec with `apache-arrow`. The results therefore decode at once.
 ## Quick start
 
 ```ts
-import { BeaconClient } from "@beacon/client";
+import { BeaconClient } from "@maris-development/beacon-client";
 
 const beacon = new BeaconClient({ url: "http://localhost:5001" });
 
@@ -60,7 +60,7 @@ operator. A predicate therefore uses a method, as in `col("d").gte(0)`. It does
 not use `d >= 0`. The rest reads like the method syntax of EF Core.
 
 ```ts
-import { column, func, col } from "@beacon/client";
+import { column, func, col } from "@maris-development/beacon-client";
 
 const { rows } = await beacon
   .from({ netcdf: { paths: ["argo.nc"] } })       // or .fromNetcdf("argo.nc"), .fromTable("t")
@@ -108,7 +108,7 @@ Beacon serves each endpoint a second time below `/admin`. Set `apiPrefix` to sen
 each call through that prefix:
 
 ```ts
-import { ADMIN_API_PREFIX, BeaconClient } from "@beacon/client";
+import { ADMIN_API_PREFIX, BeaconClient } from "@maris-development/beacon-client";
 
 const beacon = new BeaconClient({
   url: "http://localhost:5001",

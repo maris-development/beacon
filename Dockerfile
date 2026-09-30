@@ -45,7 +45,7 @@ COPY rust-toolchain.toml /
 RUN cargo build --release -p beacon-server --features jemalloc,spatial-proj
 
 # Build the admin web UI (Vite SPA) from the JS client workspace. The SDK
-# (@beacon/client) must be built before the web app, which imports from its dist.
+# (@maris-development/beacon-client) must be built before the web app, which imports from its dist.
 FROM node:20-slim AS webui
 WORKDIR /beacon-clients
 COPY beacon-clients/package.json beacon-clients/package-lock.json ./
