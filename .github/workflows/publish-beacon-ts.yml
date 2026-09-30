@@ -1,6 +1,7 @@
 name: Publish beacon-ts
 
-# Publishes the `@maris-development/beacon-client` TypeScript package to npm.
+# Publishes the `@maris-development/beacon-client` TypeScript package to npm. It authenticates with
+# npm trusted publishing (OIDC), so the repository holds no npm token.
 #
 # Release candidates: a pre-release tag (v2.0.0-rc.1) publishes under a matching npm dist-tag
 # (`rc`) rather than `latest`, so `npm i @maris-development/beacon-client` keeps resolving to the
@@ -35,7 +36,7 @@ jobs:
       url: https://www.npmjs.com/package/@maris-development/beacon-client
     permissions:
       contents: read
-      id-token: write # provenance attestation
+      id-token: write # OIDC token for npm trusted publishing and provenance
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,7 +44,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Trusted publishing needs npm 11.5.1 or later, which Node 24 ships.
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
@@ -89,5 +91,4 @@ jobs:
       - name: Publish to npm
         run: npm publish --provenance --access public --tag "$NPM_TAG"
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ steps.version.outputs.npm_tag }}

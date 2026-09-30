@@ -17,7 +17,7 @@ use beacon_core::{AuthIdentity, TableReference};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
-use crate::result::{run_sql_rows, run_sql_to_json, MAX_ROWS};
+use crate::result::{run_sql_to_json, MAX_ROWS};
 
 /// The tables in beacon's own schema that `identity` is entitled to see, sorted.
 ///
@@ -57,23 +57,21 @@ async fn list_table_names(
 
 /// A table's extensions, or the empty set when it has none (or is unreadable).
 ///
-/// Replaces `Runtime::get_table_extensions`. `SHOW EXTENSIONS` returns one row
-/// holding the same JSON document the typed accessor used to deserialize, so the
-/// mapping back to [`TableExtensions`] is exact.
+/// Not `SHOW EXTENSIONS`: that statement is super-user only, and MCP never runs
+/// as the super-user. [`Runtime::table_extensions`] applies the read gate of the
+/// table instead.
 async fn table_extensions(
     runtime: &Arc<Runtime>,
     table: &str,
     identity: &AuthIdentity,
 ) -> TableExtensions {
-    let sql = format!("SHOW EXTENSIONS FOR {}", quote_ident(table));
-    let Ok(rows) = run_sql_rows(runtime, sql, identity.clone()).await else {
-        return TableExtensions::default();
-    };
-    rows.first()
-        .and_then(|row| row.as_object()?.values().next())
-        .and_then(Value::as_str)
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default()
+    runtime
+        .table_extensions(TableReference::bare(table.to_string()), identity)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(table, %error, "no readable extensions");
+            TableExtensions::default()
+        })
 }
 
 /// A table's Arrow schema, or `None` when the table is unknown (or `identity`

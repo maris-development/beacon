@@ -17,7 +17,7 @@ use beacon_core::extensions::TableExtensions;
 use beacon_core::AuthIdentity;
 use serde_json::Value;
 
-use super::sql::{query_rows, quote_ident, quote_literal, rows_from_batches, str_field};
+use super::sql::{query_rows, quote_literal, rows_from_batches, str_field};
 use super::Server;
 
 /// The tables `identity` may see in beacon's own schema, sorted.
@@ -78,27 +78,17 @@ pub(crate) async fn table_schema(
     }
 }
 
-/// A table's extensions. `SHOW EXTENSIONS` emits the same JSON document the typed
-/// accessor used to deserialize, so the mapping back is exact. Errors when the
-/// table is not registered.
+/// A table's extensions, for any caller who may read the table. Errors when the
+/// table is not registered or `identity` may not read it.
 pub(crate) async fn table_extensions(
     server: &Arc<Server>,
     table: &str,
     identity: AuthIdentity,
 ) -> anyhow::Result<TableExtensions> {
-    let rows = query_rows(
-        server,
-        format!("SHOW EXTENSIONS FOR {}", quote_ident(table)),
-        identity,
-    )
-    .await?;
-
-    let document = rows
-        .first()
-        .and_then(|row| row.as_object()?.values().next())
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
-    Ok(serde_json::from_str(document).unwrap_or_default())
+    server
+        .runtime()
+        .table_extensions(datafusion::sql::TableReference::bare(table), &identity)
+        .await
 }
 
 /// One entry of the catalog listing: a table and where it lives.

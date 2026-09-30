@@ -23,13 +23,62 @@ use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 pub use server::BeaconMcpServer;
 
 /// Build the MCP streamable-HTTP tower service, ready to mount in an axum router
-/// (e.g. `Router::route_service("/mcp", beacon_mcp::streamable_http_service(rt))`).
+/// (e.g. `Router::route_service("/mcp", beacon_mcp::streamable_http_service(rt, &[]))`).
+///
+/// # Arguments
+///
+/// * `runtime` - The runtime that runs every tool call.
+/// * `allowed_hosts` - `Host` values accepted in addition to the loopback hosts,
+///   as `host` or `host:port`. An entry `*` accepts every host.
 pub fn streamable_http_service(
     runtime: Arc<Runtime>,
+    allowed_hosts: &[String],
 ) -> StreamableHttpService<BeaconMcpServer, LocalSessionManager> {
     StreamableHttpService::new(
         move || Ok(BeaconMcpServer::new(runtime.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        http_config(allowed_hosts),
     )
+}
+
+/// The transport config: rmcp accepts only loopback hosts by default, against DNS
+/// rebinding, so a public name must be listed.
+fn http_config(allowed_hosts: &[String]) -> StreamableHttpServerConfig {
+    let mut config = StreamableHttpServerConfig::default();
+    if allowed_hosts.iter().any(|host| host == "*") {
+        // An empty list switches the check off in rmcp.
+        config = config.disable_allowed_hosts();
+    } else {
+        config.allowed_hosts.extend(allowed_hosts.iter().cloned());
+    }
+    config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_keeps_only_the_loopback_hosts() {
+        let config = http_config(&[]);
+
+        assert_eq!(config.allowed_hosts, ["localhost", "127.0.0.1", "::1"]);
+    }
+
+    #[test]
+    fn listed_hosts_join_the_loopback_hosts() {
+        let config = http_config(&["beacon.example.org".to_string()]);
+
+        assert_eq!(
+            config.allowed_hosts,
+            ["localhost", "127.0.0.1", "::1", "beacon.example.org"]
+        );
+    }
+
+    #[test]
+    fn wildcard_switches_the_host_check_off() {
+        let config = http_config(&["a.example.org".to_string(), "*".to_string()]);
+
+        assert!(config.allowed_hosts.is_empty());
+    }
 }

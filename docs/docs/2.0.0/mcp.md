@@ -22,12 +22,18 @@ Beacon mounts the endpoint by default. These environment variables control it:
 | Variable | Default | Effect |
 |---|---|---|
 | `BEACON_MCP_ENABLED` | `true` | Mount `/mcp`. Set `false`, `0` or `off` to switch it off. |
+| `BEACON_MCP_ALLOWED_HOSTS` | empty | Extra `Host` values for `/mcp`, comma-separated, such as `beacon.example.org`. Set `*` to accept every host. |
 | `BEACON_AUTH_ANONYMOUS_ENABLED` | `true` | Beacon maps a request without credentials to the anonymous principal. |
 | `BEACON_AUTH_ENFORCE` | `false` | Beacon applies the read grants of each role at query time. |
 
 The defaults keep `/mcp` on and open. Access is anonymous and read-only. To restrict access, set
 `BEACON_AUTH_ENFORCE=true` and `BEACON_AUTH_ANONYMOUS_ENABLED=false`. Then give each agent a
 credential. See [Authenticate an agent](#authenticate-an-agent).
+
+`/mcp` accepts only the loopback hosts `localhost`, `127.0.0.1` and `::1`. This check stops DNS
+rebinding attacks. A server with a public name refuses a request with
+`403 Forbidden: Host header is not allowed`. Add the public name to `BEACON_MCP_ALLOWED_HOSTS`.
+Behind a trusted reverse proxy, you can set `*`.
 
 ## Tools
 
@@ -79,7 +85,8 @@ SET EXTENSION 'preset' FOR obs TO '{
 ```
 
 Use `SHOW EXTENSIONS FOR obs` to read the extensions. Use `DROP EXTENSION 'mcp' FOR obs` to delete
-one.
+one. These statements need the super-user. The MCP tools and `GET /api/table-extensions` show the
+extensions to every caller who can read the table.
 
 ### Fields → the MCP `Tool` standard
 
