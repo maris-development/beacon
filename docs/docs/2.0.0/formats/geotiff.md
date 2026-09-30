@@ -32,6 +32,42 @@ SELECT * FROM read_tiff('rasters/*.tif') LIMIT 0;
 Beacon supports raster data in GeoTIFF and Cloud-Optimized GeoTIFF (COG) format. A COG file works
 well over S3. Beacon sends range requests and reads only the tiles that it needs.
 
+### Pixel coordinates
+
+The `geo.lon` and `geo.lat` columns give the center of each pixel. This agrees with CF and with
+`read_netcdf`. Beacon reads the raster type of the file. A PixelIsArea file stores the corner of
+the first pixel, so Beacon adds half a pixel. A PixelIsPoint file stores the center, so Beacon adds
+nothing. A file with no raster type is a PixelIsArea file.
+
+### Row count
+
+A raster reads as one row for each pixel, but only when the query uses a band column or both
+`geo.lon` and `geo.lat`. `geo.lon` alone spans the image width, and a tag column such as
+`image.width` is a scalar. So `SELECT count(*) FROM read_tiff('dem.tif') WHERE "geo.lon" > 5`
+counts columns of pixels, not pixels. Add a band column to count pixels:
+
+```sql
+SELECT count(*), max("band.0") FROM read_tiff('dem.tif') WHERE "geo.lon" > 5
+```
+
+See [A projection can change the row count](/docs/2.0.0/arrays-to-tables#a-projection-can-change-the-row-count).
+
+### Supported layouts
+
+Beacon reads tiled and stripped files. It reads classic TIFF and BigTIFF, in both byte orders.
+A band can be an 8, 16, 32 or 64 bit integer, or a 32 or 64 bit float.
+
+Beacon decodes these compression types: none, PackBits, LZW, Deflate, JPEG and ZSTD. It also
+decodes the horizontal predictor and the floating point predictor. A file with another compression,
+such as LERC, LZMA or WebP, gives an error that names the file.
+
+Beacon reads the full-resolution image. It skips overviews and masks. A pixel that only a GDAL mask
+band hides keeps its value. Set a nodata value to hide such pixels.
+
+A sparse file has blocks with no data. GDAL writes such a file with `SPARSE_OK=TRUE`. Beacon reads
+no bytes for a sparse block. Each pixel of that block gets the nodata value, so the query shows
+`NULL`. If the file has no nodata value, each pixel gets 0.
+
 ### Tag attributes
 
 A GeoTIFF file carries TIFF tags and GeoTIFF metadata such as `nodata`, `crs` and `scale`. Beacon

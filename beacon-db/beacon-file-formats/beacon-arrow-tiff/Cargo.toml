@@ -13,6 +13,7 @@ serde = { workspace = true }
 tracing = { workspace = true }
 indexmap = { workspace = true }
 bytes = { workspace = true }
+moka = { workspace = true }
 
 arrow = { workspace = true }
 datafusion = { workspace = true }

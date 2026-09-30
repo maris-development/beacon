@@ -16,16 +16,17 @@ pub async fn fetch_schema(
     object_store: Arc<dyn ObjectStore>,
     object: ObjectMeta,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
+    let location = object.location.clone();
     let dataset = open_dataset(object_store, object).await.map_err(|e| {
         datafusion::error::DataFusionError::Execution(format!(
-            "Failed to open TIFF dataset for schema inference: {e}"
+            "Failed to open TIFF dataset {location} for schema inference: {e}"
         ))
     })?;
 
     let schema =
         beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(
-                "Failed to derive Arrow schema from TIFF dataset: {e}"
+                "Failed to derive Arrow schema from TIFF dataset {location}: {e}"
             ))
         })?;
 
