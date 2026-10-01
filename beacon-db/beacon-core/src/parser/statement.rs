@@ -165,6 +165,14 @@ pub enum AuthStatement {
         /// When true, removes a matching deny rule rather than a grant rule.
         deny: bool,
     },
+    /// `ALTER ROLE <role> SET <key> = <value>`. The key is lowercase.
+    SetRoleSetting {
+        role: String,
+        key: String,
+        value: String,
+    },
+    /// `ALTER ROLE <role> RESET <key>`. The key is lowercase.
+    ResetRoleSetting { role: String, key: String },
 }
 
 impl Display for AuthStatement {
@@ -206,6 +214,13 @@ impl Display for AuthStatement {
                     write!(f, " ON {target}")?;
                 }
                 write!(f, " FROM ROLE {role}")
+            }
+            AuthStatement::SetRoleSetting { role, key, value } => {
+                let value = escape_sql_literal(value);
+                write!(f, "ALTER ROLE {role} SET {key} = '{value}'")
+            }
+            AuthStatement::ResetRoleSetting { role, key } => {
+                write!(f, "ALTER ROLE {role} RESET {key}")
             }
         }
     }

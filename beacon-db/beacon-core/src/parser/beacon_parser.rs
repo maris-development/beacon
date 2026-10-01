@@ -807,6 +807,8 @@ impl<'a> BeaconParser<'a> {
             self.parse_deny()?
         } else if self.word_at(0, "REVOKE") {
             self.parse_revoke()?
+        } else if self.word_at(0, "ALTER") && self.word_at(1, "ROLE") {
+            self.parse_alter_role()?
         } else {
             return Ok(None);
         };
@@ -942,6 +944,50 @@ impl<'a> BeaconParser<'a> {
             role,
             deny,
         }))
+    }
+
+    /// Parse: ALTER ROLE <role> SET <key> { = | TO } <value>
+    ///      | ALTER ROLE <role> RESET <key>
+    ///
+    /// The key is free and may hold dots, such as `wms.max_tiles`.
+    fn parse_alter_role(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // ALTER
+        self.df_parser.parser.next_token(); // ROLE
+        let role = self.parse_name()?;
+        let set = self.word_at(0, "SET");
+        if !set && !self.word_at(0, "RESET") {
+            let token = self.df_parser.parser.peek_token().token;
+            return Err(DataFusionError::Plan(format!(
+                "expected SET or RESET after ALTER ROLE {role}, found {token}"
+            )));
+        }
+        self.df_parser.parser.next_token(); // SET or RESET
+        let key = self.parse_setting_key()?;
+        if !set {
+            return Ok(BeaconStatement::Auth(AuthStatement::ResetRoleSetting { role, key }));
+        }
+        if !self.df_parser.parser.consume_token(&Token::Eq) {
+            self.expect_word("TO")?;
+        }
+        let value = self.parse_string_value()?;
+        Ok(BeaconStatement::Auth(AuthStatement::SetRoleSetting { role, key, value }))
+    }
+
+    /// Reads a role setting key: dotted identifier parts, joined with `.` and in lowercase.
+    fn parse_setting_key(&mut self) -> Result<String> {
+        let name = self
+            .df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let key = name
+            .0
+            .iter()
+            .map(|part| part.as_ident().map(|ident| ident.value.clone()))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| DataFusionError::Plan(format!("invalid role setting key {name}")))?
+            .join(".");
+        beacon_auth::normalize_setting_key(&key).map_err(|e| DataFusionError::Plan(e.to_string()))
     }
 
     /// Parse `<privilege> [ON <target>]`, where `<target>` is `TABLE <name>`, `PATH '<pattern>'`,
@@ -1153,8 +1199,47 @@ mod tests {
             "GRANT ROLE reader TO USER alice",
             "GRANT SELECT ON PATH 'argo/*' TO ROLE reader",
             "DENY SELECT ON TABLE observations TO ROLE reader",
+            "ALTER ROLE reader SET max_rows = '30000'",
+            "ALTER ROLE reader RESET max_rows",
+            "ALTER ROLE reader SET wms.max_tiles = 'it''s 50'",
         ] {
             assert_eq!(parse_auth(sql).to_string(), sql);
+        }
+    }
+
+    #[test]
+    fn parse_alter_role_settings() {
+        for sql in [
+            "ALTER ROLE reader SET max_rows = 30000",
+            "ALTER ROLE reader SET MAX_ROWS TO '30000'",
+        ] {
+            match parse_auth(sql) {
+                AuthStatement::SetRoleSetting { role, key, value } => {
+                    assert_eq!(role, "reader");
+                    assert_eq!(key, "max_rows");
+                    assert_eq!(value, "30000");
+                }
+                other => panic!("unexpected for `{sql}`: {other:?}"),
+            }
+        }
+        match parse_auth("ALTER ROLE reader SET WMS.Max_Tiles = 'gold tier'") {
+            AuthStatement::SetRoleSetting { key, value, .. } => {
+                assert_eq!(key, "wms.max_tiles");
+                assert_eq!(value, "gold tier");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(matches!(
+            parse_auth("ALTER ROLE reader RESET max_rows"),
+            AuthStatement::ResetRoleSetting { role, key } if role == "reader" && key == "max_rows"
+        ));
+        for (sql, message) in [
+            ("ALTER ROLE reader SET \"bad key\" = 1", "invalid role setting key"),
+            ("ALTER ROLE reader RENAME TO writer", "expected SET or RESET"),
+            ("ALTER ROLE reader SET max_rows 1", "expected `TO`"),
+        ] {
+            let error = BeaconParser::new(sql).unwrap().parse_statement().unwrap_err();
+            assert!(error.to_string().contains(message), "{sql}: {error}");
         }
     }
 

@@ -312,6 +312,27 @@ impl AuthContext {
         self.role_provider.revoke(role, rule, is_deny).await
     }
 
+    /// Sets the setting `key` of `role` to `value`, e.g.
+    /// `ALTER ROLE r SET wms.max_tiles = 500`. Any key is allowed; see
+    /// [`crate::normalize_setting`].
+    pub async fn set_role_setting(&self, role: &str, key: &str, value: &str) -> anyhow::Result<()> {
+        self.role_provider.set_setting(role, key, value).await
+    }
+
+    pub async fn reset_role_setting(&self, role: &str, key: &str) -> anyhow::Result<()> {
+        self.role_provider.reset_setting(role, key).await
+    }
+
+    /// The value of the setting `key` on `role`. See [`RoleProvider::setting`].
+    pub fn role_setting(&self, role: &str, key: &str) -> Option<String> {
+        self.role_provider.setting(role, key)
+    }
+
+    /// The values of the setting `key` on each of `roles`. See [`RoleProvider::settings_for`].
+    pub fn role_settings_for(&self, roles: &[String], key: &str) -> Vec<(String, String)> {
+        self.role_provider.settings_for(roles, key)
+    }
+
     /// Rejects any non-`SELECT` privilege: roles can only grant read access.
     fn ensure_read_only(rule: &PrivilegeRule) -> anyhow::Result<()> {
         if rule.privilege != Privilege::Select {

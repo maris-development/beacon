@@ -130,6 +130,9 @@ pub struct AuthRoleView {
     pub name: String,
     pub grants: Vec<AuthRuleView>,
     pub denies: Vec<AuthRuleView>,
+    /// The role's key-value settings, e.g. `wms.max_tiles`. Set with `ALTER ROLE … SET`.
+    #[serde(default)]
+    pub settings: std::collections::BTreeMap<String, String>,
 }
 
 impl From<Role> for AuthRoleView {
@@ -149,6 +152,7 @@ impl From<Role> for AuthRoleView {
         Self {
             grants: to_sorted(&role.grants),
             denies: to_sorted(&role.denies),
+            settings: role.settings.clone(),
             name: role.name,
         }
     }
