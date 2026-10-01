@@ -26,6 +26,6 @@ pub use oidc::{OidcAuthProvider, OidcConfig};
 pub use password::{hash_password, verify_password};
 pub use provider::{AuthProvider, Authenticated, StoredUser, UserDirectory, UserRecord};
 pub use role::{
-    decode_target, encode_target, rule_kind, ConcreteTarget, Privilege, PrivilegeRule,
-    PrivilegeTarget, Role, RoleProvider, RoleStore,
+    decode_target, encode_target, normalize_setting, normalize_setting_key, rule_kind,
+    ConcreteTarget, Privilege, PrivilegeRule, PrivilegeTarget, Role, RoleProvider, RoleStore,
 };

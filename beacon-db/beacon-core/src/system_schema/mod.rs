@@ -20,7 +20,7 @@
 //! Reads of this schema — like reads of `information_schema` — are
 //! **super-user-only, unconditionally** (see [`is_metadata_schema`] and
 //! `statement_plan::authz`). It describes the instance rather than holding user
-//! data: `users`/`roles` are the auth directory, `query_metrics` carries the
+//! data: `users`/`roles`/`role_settings` are the auth directory, `query_metrics` carries the
 //! text and plans of queries other users ran, and `information_schema` names
 //! every table in every catalog. Regular callers enumerate the catalog through
 //! [`Runtime::visible_tables`](crate::runtime::Runtime::visible_tables), which
@@ -95,7 +95,14 @@ impl SystemSchemaProvider {
             "users".to_string(),
             Arc::new(auth::users_table(auth.clone())),
         );
-        tables.insert("roles".to_string(), Arc::new(auth::roles_table(auth)));
+        tables.insert(
+            "roles".to_string(),
+            Arc::new(auth::roles_table(auth.clone())),
+        );
+        tables.insert(
+            "role_settings".to_string(),
+            Arc::new(auth::role_settings_table(auth)),
+        );
         // The handle is late-filled, so these read whatever the subsystem has
         // at query time -- including nothing, when it never started.
         tables.insert(

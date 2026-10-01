@@ -1,4 +1,5 @@
-//! `beacon.system.users` and `beacon.system.roles` — the auth directory as SQL.
+//! `beacon.system.users`, `beacon.system.roles` and `beacon.system.role_settings` — the auth
+//! directory as SQL.
 //!
 //! Authentication itself is not expressible as SQL: verifying a credential is
 //! what *produces* the identity a query runs as, so it necessarily precedes any
@@ -39,6 +40,16 @@ fn roles_schema() -> SchemaRef {
         // JSON arrays of privilege rules, rendered through their `Display`.
         Field::new("grants", DataType::Utf8, false),
         Field::new("denies", DataType::Utf8, false),
+        // JSON object of the role's settings, by key.
+        Field::new("settings", DataType::Utf8, false),
+    ]))
+}
+
+fn role_settings_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("role_name", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
+        Field::new("value", DataType::Utf8, false),
     ]))
 }
 
@@ -80,17 +91,53 @@ pub(super) fn roles_table(auth: Arc<beacon_auth::AuthContext>) -> SystemTable {
             let names: Vec<&str> = roles.iter().map(|r| r.name.as_str()).collect();
             let grants: Vec<String> = roles.iter().map(|r| rules_json(&r.grants)).collect();
             let denies: Vec<String> = roles.iter().map(|r| rules_json(&r.denies)).collect();
+            let settings: Vec<String> = roles.iter().map(settings_json).collect();
 
             let columns: Vec<ArrayRef> = vec![
                 Arc::new(StringArray::from(names)),
                 Arc::new(StringArray::from(grants)),
                 Arc::new(StringArray::from(denies)),
+                Arc::new(StringArray::from(settings)),
             ];
             Ok(RecordBatch::try_new(roles_schema(), columns)?) as DFResult<RecordBatch>
         })
     });
 
     SystemTable::new(roles_schema(), snapshot)
+}
+
+/// `beacon.system.role_settings` — one row for each key-value setting of a role, set with
+/// `ALTER ROLE <role> SET <key> = <value>`.
+pub(super) fn role_settings_table(auth: Arc<beacon_auth::AuthContext>) -> SystemTable {
+    let snapshot: Snapshot = Arc::new(move || {
+        let auth = auth.clone();
+        Box::pin(async move {
+            // Roles come sorted by name and settings by key, so the scan is deterministic.
+            let roles = auth.list_roles();
+            let rows: Vec<(&str, &str, &str)> = roles
+                .iter()
+                .flat_map(|role| {
+                    role.settings
+                        .iter()
+                        .map(|(key, value)| (role.name.as_str(), key.as_str(), value.as_str()))
+                })
+                .collect();
+
+            let columns: Vec<ArrayRef> = vec![
+                Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.0))),
+                Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.1))),
+                Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.2))),
+            ];
+            Ok(RecordBatch::try_new(role_settings_schema(), columns)?) as DFResult<RecordBatch>
+        })
+    });
+
+    SystemTable::new(role_settings_schema(), snapshot)
+}
+
+/// Render the settings of a role as a JSON object, e.g. `{"wms.max_tiles":"500"}`.
+fn settings_json(role: &beacon_auth::Role) -> String {
+    serde_json::to_string(&role.settings).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Render a rule set as a sorted JSON array of
