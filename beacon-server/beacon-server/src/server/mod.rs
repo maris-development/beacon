@@ -23,7 +23,6 @@ pub mod uploads;
 use std::sync::Arc;
 
 use anyhow::Context;
-use beacon_core::query_cpu::CpuBudget;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
 use beacon_core::settings::{SqlSettings, SqlStreamCoalesceSettings};
@@ -282,7 +281,6 @@ async fn build_runtime(
         // builder takes bytes. Passing it through unconverted yields an 8 KB
         // query pool, which fails the first ORDER BY that needs to sort.
         .with_vm_memory_limit(config.runtime.vm_memory_size.saturating_mul(1024 * 1024))
-        .with_query_cpu_budget(CpuBudget::from_millis(config.runtime.query_cpu_limit_ms))
         .with_crawler(config.crawler.clone())
         .with_file_stats(config.file_stats.clone())
         .with_netcdf_config(config.netcdf.clone())

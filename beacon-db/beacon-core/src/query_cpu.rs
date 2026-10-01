@@ -73,58 +73,22 @@ impl CpuBudget {
     }
 }
 
-/// Selects the [`CpuBudget`] for a query from the identity that runs it.
-///
-/// The runtime calls the policy once for each query, so a policy can read live
-/// data, such as a quota table or the tier of an API key. A closure
-/// `Fn(&AuthIdentity) -> CpuBudget` is also a policy.
-pub trait CpuBudgetPolicy: Send + Sync {
-    fn budget_for(&self, identity: &AuthIdentity) -> CpuBudget;
-}
-
-impl<F> CpuBudgetPolicy for F
-where
-    F: Fn(&AuthIdentity) -> CpuBudget + Send + Sync,
-{
-    fn budget_for(&self, identity: &AuthIdentity) -> CpuBudget {
-        self(identity)
-    }
-}
-
-/// The default policy. It reads the budget from the roles of the identity.
+/// The [`CpuBudget`] of a query that `identity` runs.
 ///
 /// 1. A super-user has no limit.
-/// 2. Else the `query_cpu_limit_ms` setting of the roles applies, set with
-///    `ALTER ROLE <role> SET query_cpu_limit_ms = <n>`. The most generous role
-///    wins, and `0` means no limit.
-/// 3. Else [`Self::default_budget`] applies.
+/// 2. Else the `query_cpu_limit_ms` setting of the identity's roles applies, set
+///    with `ALTER ROLE <role> SET query_cpu_limit_ms = <n>`. The most generous
+///    role wins, and `0` means no limit.
+/// 3. Else there is no limit.
 ///
-/// The policy reads the live roles, so an `ALTER ROLE` applies from the next
-/// query.
-pub struct RoleCpuBudgetPolicy {
-    auth: Arc<AuthContext>,
-    default_budget: CpuBudget,
-}
-
-impl RoleCpuBudgetPolicy {
-    pub fn new(auth: Arc<AuthContext>, default_budget: CpuBudget) -> Self {
-        Self {
-            auth,
-            default_budget,
-        }
+/// The roles are read live, so an `ALTER ROLE` applies from the next query.
+pub fn budget_for(auth: &AuthContext, identity: &AuthIdentity) -> CpuBudget {
+    if identity.is_super_user {
+        return CpuBudget::Unlimited;
     }
-}
-
-impl CpuBudgetPolicy for RoleCpuBudgetPolicy {
-    fn budget_for(&self, identity: &AuthIdentity) -> CpuBudget {
-        if identity.is_super_user {
-            return CpuBudget::Unlimited;
-        }
-        match self.auth.query_cpu_limit_ms(&identity.roles) {
-            Some(millis) => CpuBudget::from_millis(millis),
-            None => self.default_budget,
-        }
-    }
+    auth.query_cpu_limit_ms(&identity.roles)
+        .map(CpuBudget::from_millis)
+        .unwrap_or_default()
 }
 
 /// The CPU time one query has used, and the budget it runs under.
@@ -561,10 +525,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_role_policy_reads_the_role_setting() {
+    async fn the_budget_comes_from_the_role_setting() {
         use beacon_auth::{BasicAuthProvider, QUERY_CPU_LIMIT_MS};
 
-        let auth = Arc::new(AuthContext::new(Arc::new(BasicAuthProvider::new())));
+        let auth = AuthContext::new(Arc::new(BasicAuthProvider::new()));
         for role in ["analyst", "free", "plain"] {
             auth.create_role(role).await.unwrap();
         }
@@ -573,51 +537,25 @@ mod tests {
             .await
             .unwrap();
         auth.set_role_setting("free", setting, "0").await.unwrap();
-
-        let default = CpuBudget::Limited(Duration::from_secs(5));
-        let policy = RoleCpuBudgetPolicy::new(auth.clone(), default);
+        let budget = |roles: &[&str]| budget_for(&auth, &identity_with(roles));
         let limited = |secs| CpuBudget::Limited(Duration::from_secs(secs));
 
         assert_eq!(
-            policy.budget_for(&AuthIdentity::system()),
+            budget_for(&auth, &AuthIdentity::system()),
             CpuBudget::Unlimited
         );
-        assert_eq!(policy.budget_for(&identity_with(&["analyst"])), limited(60));
-        assert_eq!(
-            policy.budget_for(&identity_with(&["analyst", "free"])),
-            CpuBudget::Unlimited
-        );
-        assert_eq!(policy.budget_for(&identity_with(&["plain"])), default);
-        assert_eq!(policy.budget_for(&AuthIdentity::empty()), default);
+        assert_eq!(budget(&["analyst"]), limited(60));
+        assert_eq!(budget(&["analyst", "free"]), CpuBudget::Unlimited);
+        assert_eq!(budget(&["plain"]), CpuBudget::Unlimited);
+        assert_eq!(budget(&[]), CpuBudget::Unlimited);
 
-        // The policy reads the live role, so a change applies to the next query.
+        // The roles are read live, so a change applies to the next query.
         auth.set_role_setting("analyst", setting, "1000")
             .await
             .unwrap();
-        assert_eq!(policy.budget_for(&identity_with(&["analyst"])), limited(1));
+        assert_eq!(budget(&["analyst"]), limited(1));
         auth.reset_role_setting("analyst", setting).await.unwrap();
-        assert_eq!(policy.budget_for(&identity_with(&["analyst"])), default);
-    }
-
-    #[test]
-    fn a_closure_is_a_policy() {
-        let policy = |identity: &AuthIdentity| {
-            if identity.roles.iter().any(|role| role == "premium") {
-                CpuBudget::Limited(Duration::from_secs(60))
-            } else {
-                CpuBudget::Limited(Duration::from_secs(1))
-            }
-        };
-        let mut premium = AuthIdentity::empty();
-        premium.roles.push("premium".to_string());
-        assert_eq!(
-            policy.budget_for(&premium),
-            CpuBudget::Limited(Duration::from_secs(60))
-        );
-        assert_eq!(
-            policy.budget_for(&AuthIdentity::empty()),
-            CpuBudget::Limited(Duration::from_secs(1))
-        );
+        assert_eq!(budget(&["analyst"]), CpuBudget::Unlimited);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

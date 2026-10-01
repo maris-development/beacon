@@ -10,7 +10,7 @@ use futures::TryStreamExt;
 
 use crate::{
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
-    query_cpu::{CpuBudget, CpuBudgetPolicy, QueryCpuMeter},
+    query_cpu::QueryCpuMeter,
     query_executor::QueryExecutor,
     query_metrics_store::QueryMetricsStore,
     query_result::{ArrowOutputStream, QueryOutput, QueryResult},
@@ -60,9 +60,6 @@ pub struct Runtime {
 
     /// tmp directory for storing temporary files (e.g. for query output)
     pub(crate) tmp_dir: PathBuf,
-
-    /// Selects the CPU budget of each query from the identity that runs it.
-    pub(crate) cpu_budget_policy: Arc<dyn CpuBudgetPolicy>,
 }
 
 impl Runtime {
@@ -122,32 +119,17 @@ impl Runtime {
     /// with one, the result is written to a temporary file in that format and
     /// returned as a file download.
     ///
-    /// The CPU budget of the query comes from the runtime's
-    /// [`CpuBudgetPolicy`]. Use [`Self::run_query_with_cpu_budget`] to set it
-    /// for one call.
+    /// The CPU budget of the query comes from the `query_cpu_limit_ms` setting
+    /// of the caller's roles; see [`crate::query_cpu::budget_for`]. It covers
+    /// planning and execution. A query that goes over it fails with a "CPU
+    /// budget" error.
     #[tracing::instrument(skip(self, query, identity))]
     pub async fn run_query(
         &self,
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<QueryResult> {
-        let budget = self.cpu_budget_policy.budget_for(&identity);
-        self.run_query_with_cpu_budget(query, identity, budget).await
-    }
-
-    /// [`Self::run_query`] with a CPU budget that replaces the policy's budget.
-    ///
-    /// For a transport that knows the allowance of its caller, such as the
-    /// tier of an API key. The budget covers planning and execution. A query
-    /// that goes over it fails with a "CPU budget" error.
-    #[tracing::instrument(skip(self, query, identity))]
-    pub async fn run_query_with_cpu_budget(
-        &self,
-        query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
-        budget: CpuBudget,
-    ) -> anyhow::Result<QueryResult> {
-        let meter = QueryCpuMeter::new(budget);
+        let meter = QueryCpuMeter::new(crate::query_cpu::budget_for(&self.auth, &identity));
         // Planning reads metadata too, so the whole query moves to the executor.
         let runtime = self.clone();
         let metered = meter.meter_future({
@@ -624,7 +606,7 @@ impl Runtime {
         identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<String> {
         // The plan runs in full, so the CPU budget of `run_query` applies.
-        let meter = QueryCpuMeter::new(self.cpu_budget_policy.budget_for(&identity));
+        let meter = QueryCpuMeter::new(crate::query_cpu::budget_for(&self.auth, &identity));
         let runtime = self.clone();
         let metered = meter.meter_future({
             let meter = meter.clone();

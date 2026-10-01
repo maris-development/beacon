@@ -1,13 +1,12 @@
-//! The `query_cpu_limit_ms` role setting, end to end: SQL sets it, the default
-//! CPU policy applies it to the users of the role, and it survives a restart.
+//! The `query_cpu_limit_ms` role setting, end to end: SQL sets it, the runtime
+//! applies it to the users of the role, and it survives a restart. Without it,
+//! a query has no CPU limit.
 //! The generic key-value behavior is in `role_settings.rs`.
 
 mod common;
 
-use beacon_core::query_cpu::CpuBudget;
 use beacon_core::{AuthIdentity, Credential};
 use common::{restartable_runtime, runtime_with, TestRuntime};
-use std::time::Duration;
 
 /// A query that needs far more than 1 ms of CPU time.
 const BUSY_SQL: &str = "SELECT count(*) FROM generate_series(1, 20000000) AS t(v) WHERE v % 7 = 3";
@@ -79,22 +78,26 @@ async fn a_role_setting_limits_its_users_and_survives_a_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_role_setting_replaces_the_default_budget() {
-    let tiny = CpuBudget::Limited(Duration::from_micros(1));
-    let rt = runtime_with("role-cpu-default", move |builder| {
-        builder.with_query_cpu_budget(tiny)
-    })
-    .await;
+async fn the_most_generous_role_wins_and_no_role_means_no_limit() {
+    let rt = runtime_with("role-cpu-roles", |builder| builder).await;
+    rt.sql("CREATE ROLE tight").await;
     rt.sql("CREATE ROLE premium").await;
+    rt.sql("ALTER ROLE tight SET query_cpu_limit_ms = 1").await;
     rt.sql("ALTER ROLE premium SET query_cpu_limit_ms TO 0")
         .await;
-    let paying = user(&rt, "paying", Some("premium")).await;
+    let limited = user(&rt, "limited", Some("tight")).await;
+    user(&rt, "paying", Some("tight")).await;
+    rt.sql("GRANT ROLE premium TO USER paying").await;
+    let paying = login(&rt, "paying").await;
     let plain = user(&rt, "plain", None).await;
 
+    assert_over_budget(&rt, limited).await;
     rt.try_sql_as(BUSY_SQL, paying)
         .await
-        .expect("0 on the role means no limit");
-    assert_over_budget(&rt, plain).await;
+        .expect("0 on one role beats the limit of the other");
+    rt.try_sql_as(BUSY_SQL, plain)
+        .await
+        .expect("a user without a limiting role has no limit");
     rt.try_sql(BUSY_SQL)
         .await
         .expect("the super-user has no limit");

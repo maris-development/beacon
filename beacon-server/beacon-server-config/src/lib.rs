@@ -103,9 +103,6 @@ pub struct ServerConfig {
 pub struct RuntimeConfig {
     /// Query memory pool size, in **megabytes** (the runtime builder takes bytes).
     pub vm_memory_size: usize,
-    /// CPU budget of one query of a non-super-user, in milliseconds. `0` means
-    /// no limit. Super-users have no limit. From `BEACON_QUERY_CPU_LIMIT_MS`.
-    pub query_cpu_limit_ms: u64,
     pub enable_sys_info: bool,
     pub batch_size: usize,
     /// The rule for every schema merge, built from `BEACON_TYPE_WIDENING_STRATEGY`
@@ -332,9 +329,6 @@ struct RawConfig {
     /// Query memory pool size, in **megabytes**.
     #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "8192")]
     vm_memory_size: usize,
-    /// CPU budget of one query, in milliseconds. `0` means no limit.
-    #[envconfig(from = "BEACON_QUERY_CPU_LIMIT_MS", default = "0")]
-    query_cpu_limit_ms: u64,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     default_table: String,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "true")]
@@ -649,7 +643,6 @@ impl From<RawConfig> for Config {
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
-                query_cpu_limit_ms: raw.query_cpu_limit_ms,
                 enable_sys_info: raw.enable_sys_info,
                 batch_size: raw.beacon_batch_size,
                 type_widening: type_widening(
