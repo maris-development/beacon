@@ -28,4 +28,5 @@ pub use provider::{AuthProvider, Authenticated, StoredUser, UserDirectory, UserR
 pub use role::{
     decode_target, encode_target, normalize_setting, normalize_setting_key, rule_kind,
     ConcreteTarget, Privilege, PrivilegeRule, PrivilegeTarget, Role, RoleProvider, RoleStore,
+    QUERY_CPU_LIMIT_MS,
 };

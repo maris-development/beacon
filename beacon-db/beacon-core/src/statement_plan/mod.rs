@@ -571,7 +571,7 @@ pub(crate) async fn execute_statement_plan(
     session_ctx: &Arc<SessionContext>,
     plan: LogicalPlan,
 ) -> anyhow::Result<SendableRecordBatchStream> {
-    let (stream, _physical_plan) = execute_statement_plan_tracked(session_ctx, plan).await?;
+    let (stream, _physical_plan) = execute_statement_plan_tracked(session_ctx, plan, None).await?;
     Ok(stream)
 }
 
@@ -581,9 +581,13 @@ pub(crate) async fn execute_statement_plan(
 /// per-node metrics are populated as the returned stream drains, so the same
 /// `Arc` read after the stream ends carries the runtime metrics. `None` for
 /// `Statement` plans, which never get a physical plan.
+///
+/// With a `cpu_meter`, every node of the physical plan counts its CPU time
+/// against that meter, and the returned plan is the metered one.
 pub(crate) async fn execute_statement_plan_tracked(
     session_ctx: &Arc<SessionContext>,
     plan: LogicalPlan,
+    cpu_meter: Option<&Arc<crate::query_cpu::QueryCpuMeter>>,
 ) -> anyhow::Result<(
     SendableRecordBatchStream,
     Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
@@ -612,7 +616,10 @@ pub(crate) async fn execute_statement_plan_tracked(
         ));
     }
 
-    let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
+    let mut physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
+    if let Some(meter) = cpu_meter {
+        physical_plan = crate::query_cpu::meter_plan(physical_plan, meter);
+    }
     // Batches arrive in completion order, so a multi-partition plan returns its
     // rows in an arrangement that can differ run to run. Beacon used to merge
     // them in partition-index order to avoid that, which cost far more than it

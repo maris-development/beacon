@@ -1835,6 +1835,7 @@ dependencies = [
  "glob",
  "iceberg",
  "iceberg-datafusion",
+ "libc",
  "ndarray 0.17.2",
  "num_cpus",
  "object_store 0.13.2",
