@@ -119,6 +119,9 @@ pub enum ConcreteTarget {
 /// The role setting that holds the CPU budget of one query, in milliseconds. `0` means no limit.
 pub const QUERY_CPU_LIMIT_MS: &str = "query_cpu_limit_ms";
 
+/// The role setting that holds the most rows one query may output. `0` means no limit.
+pub const QUERY_OUTPUT_ROW_LIMIT: &str = "query_output_row_limit";
+
 /// The longest key a role setting can have.
 const MAX_SETTING_KEY_LEN: usize = 64;
 
@@ -131,19 +134,22 @@ const MAX_SETTING_KEY_LEN: usize = 64;
 pub fn normalize_setting(key: &str, value: &str) -> anyhow::Result<(String, String)> {
     let key = normalize_setting_key(key)?;
     let value = match key.as_str() {
-        QUERY_CPU_LIMIT_MS => value
-            .trim()
-            .parse::<u64>()
-            .map(|millis| millis.to_string())
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "{QUERY_CPU_LIMIT_MS} takes a whole number of milliseconds (0 = no limit), \
-                     got '{value}'"
-                )
-            })?,
+        QUERY_CPU_LIMIT_MS => normalize_limit(&key, value, "milliseconds")?,
+        QUERY_OUTPUT_ROW_LIMIT => normalize_limit(&key, value, "rows")?,
         _ => value.to_string(),
     };
     Ok((key, value))
+}
+
+/// Checks the value of a limit setting: a whole number, where `0` means no limit.
+fn normalize_limit(key: &str, value: &str, unit: &str) -> anyhow::Result<String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map(|limit| limit.to_string())
+        .map_err(|_| {
+            anyhow::anyhow!("{key} takes a whole number of {unit} (0 = no limit), got '{value}'")
+        })
 }
 
 /// Checks a role setting key and returns it in lowercase.
@@ -413,11 +419,23 @@ impl RoleProvider {
     }
 
     /// The query CPU limit, in milliseconds, that `roles` give. `None` when no role sets one.
+    /// See [`Self::most_generous_limit`].
+    pub fn query_cpu_limit_ms(&self, roles: &[String]) -> Option<u64> {
+        self.most_generous_limit(roles, QUERY_CPU_LIMIT_MS)
+    }
+
+    /// The most rows one query may output that `roles` give. `None` when no role sets one.
+    /// See [`Self::most_generous_limit`].
+    pub fn query_output_row_limit(&self, roles: &[String]) -> Option<u64> {
+        self.most_generous_limit(roles, QUERY_OUTPUT_ROW_LIMIT)
+    }
+
+    /// The limit setting `key` that `roles` give, or `None` when no role sets it.
     ///
     /// The most generous role wins, as roles add access. `0` means no limit, so it beats every
     /// number.
-    pub fn query_cpu_limit_ms(&self, roles: &[String]) -> Option<u64> {
-        self.settings_for(roles, QUERY_CPU_LIMIT_MS)
+    fn most_generous_limit(&self, roles: &[String], key: &str) -> Option<u64> {
+        self.settings_for(roles, key)
             .into_iter()
             .filter_map(|(_, value)| value.parse::<u64>().ok())
             .reduce(|best, limit| {
@@ -1271,6 +1289,36 @@ mod tests {
         assert_eq!(provider.query_cpu_limit_ms(&roles(&["plain"])), None);
         assert_eq!(provider.query_cpu_limit_ms(&roles(&["plain", "small"])), Some(1000));
         assert_eq!(provider.query_cpu_limit_ms(&roles(&["ghost"])), None);
+    }
+
+    #[test]
+    fn the_row_limit_takes_whole_rows() {
+        assert_eq!(normalize_setting(QUERY_OUTPUT_ROW_LIMIT, "1000000").unwrap().1, "1000000");
+        let error = normalize_setting(QUERY_OUTPUT_ROW_LIMIT, "1M").unwrap_err();
+        assert!(error.to_string().contains("whole number of rows"), "{error}");
+    }
+
+    /// The row limit and the CPU limit are separate keys with the same rule.
+    #[tokio::test]
+    async fn the_most_generous_role_sets_the_row_limit() {
+        let provider = RoleProvider::new();
+        for name in ["small", "large", "free"] {
+            provider.create_role(name).await.unwrap();
+        }
+        provider.set_setting("small", QUERY_OUTPUT_ROW_LIMIT, "1000").await.unwrap();
+        provider.set_setting("large", QUERY_OUTPUT_ROW_LIMIT, "1000000").await.unwrap();
+        provider.set_setting("free", QUERY_OUTPUT_ROW_LIMIT, "0").await.unwrap();
+        provider.set_setting("small", QUERY_CPU_LIMIT_MS, "5").await.unwrap();
+        let roles = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(provider.query_output_row_limit(&roles(&["small"])), Some(1000));
+        assert_eq!(
+            provider.query_output_row_limit(&roles(&["small", "large"])),
+            Some(1_000_000)
+        );
+        assert_eq!(provider.query_output_row_limit(&roles(&["large", "free"])), Some(0));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["large"])), None);
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["small"])), Some(5));
     }
 
     #[tokio::test]

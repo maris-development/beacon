@@ -200,7 +200,7 @@ impl Runtime {
                     output,
                     query_id,
                     query_json,
-                    &identity.username,
+                    &identity,
                     cpu_meter,
                 )
                 .await
@@ -210,7 +210,7 @@ impl Runtime {
                     plan,
                     query_id,
                     query_json,
-                    &identity.username,
+                    &identity,
                     cpu_meter,
                 )
                 .await
@@ -225,10 +225,11 @@ impl Runtime {
         plan: datafusion::logical_expr::LogicalPlan,
         query_id: uuid::Uuid,
         query_json: serde_json::Value,
-        username: &str,
+        identity: &beacon_auth::AuthIdentity,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
-        let metrics = MetricsTracker::new(query_json, query_id, username);
+        let output_row_limit = crate::query_row_limit::row_limit_for(&self.auth, identity);
+        let metrics = MetricsTracker::new(query_json, query_id, &identity.username);
         metrics.set_cpu_meter(cpu_meter.clone());
         metrics.set_logical_plan(&plan);
         // Record the optimized logical plan alongside the parsed one. `optimize`
@@ -241,6 +242,7 @@ impl Runtime {
             &self.session_ctx,
             plan,
             Some(&cpu_meter),
+            output_row_limit,
         )
         .await?;
         // The physical plan's per-node metrics fill in as the stream drains, and the
@@ -268,9 +270,10 @@ impl Runtime {
         output: crate::query::output::Output,
         query_id: uuid::Uuid,
         query_json: serde_json::Value,
-        username: &str,
+        identity: &beacon_auth::AuthIdentity,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
+        let output_row_limit = crate::query_row_limit::row_limit_for(&self.auth, identity);
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         //
@@ -289,7 +292,7 @@ impl Runtime {
             )
             .await?;
 
-        let metrics = MetricsTracker::new(query_json, query_id, username);
+        let metrics = MetricsTracker::new(query_json, query_id, &identity.username);
         metrics.set_cpu_meter(cpu_meter.clone());
         metrics.set_logical_plan(&copy_plan);
         if let Ok(optimized) = self.session_ctx.state().optimize(&copy_plan) {
@@ -299,6 +302,7 @@ impl Runtime {
             &self.session_ctx,
             copy_plan,
             Some(&cpu_meter),
+            output_row_limit,
         )
         .await?;
         if let Some(physical_plan) = physical_plan {

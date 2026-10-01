@@ -339,6 +339,12 @@ impl AuthContext {
         self.role_provider.query_cpu_limit_ms(roles)
     }
 
+    /// The most rows one query may output that `roles` give, or `None` when no role sets one.
+    /// See [`RoleProvider::query_output_row_limit`].
+    pub fn query_output_row_limit(&self, roles: &[String]) -> Option<u64> {
+        self.role_provider.query_output_row_limit(roles)
+    }
+
     /// Rejects any non-`SELECT` privilege: roles can only grant read access.
     fn ensure_read_only(rule: &PrivilegeRule) -> anyhow::Result<()> {
         if rule.privilege != Privilege::Select {

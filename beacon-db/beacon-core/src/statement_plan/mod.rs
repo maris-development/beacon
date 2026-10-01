@@ -571,7 +571,8 @@ pub(crate) async fn execute_statement_plan(
     session_ctx: &Arc<SessionContext>,
     plan: LogicalPlan,
 ) -> anyhow::Result<SendableRecordBatchStream> {
-    let (stream, _physical_plan) = execute_statement_plan_tracked(session_ctx, plan, None).await?;
+    let (stream, _physical_plan) =
+        execute_statement_plan_tracked(session_ctx, plan, None, None).await?;
     Ok(stream)
 }
 
@@ -583,11 +584,13 @@ pub(crate) async fn execute_statement_plan(
 /// `Statement` plans, which never get a physical plan.
 ///
 /// With a `cpu_meter`, every node of the physical plan counts its CPU time
-/// against that meter, and the returned plan is the metered one.
+/// against that meter, and the returned plan is the metered one. With an
+/// `output_row_limit`, the query fails when it outputs more rows.
 pub(crate) async fn execute_statement_plan_tracked(
     session_ctx: &Arc<SessionContext>,
     plan: LogicalPlan,
     cpu_meter: Option<&Arc<crate::query_cpu::QueryCpuMeter>>,
+    output_row_limit: Option<u64>,
 ) -> anyhow::Result<(
     SendableRecordBatchStream,
     Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
@@ -617,6 +620,9 @@ pub(crate) async fn execute_statement_plan_tracked(
     }
 
     let mut physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
+    if let Some(limit) = output_row_limit {
+        physical_plan = crate::query_row_limit::limit_output(physical_plan, limit)?;
+    }
     if let Some(meter) = cpu_meter {
         physical_plan = crate::query_cpu::meter_plan(physical_plan, meter);
     }
