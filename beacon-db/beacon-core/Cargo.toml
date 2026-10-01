@@ -82,6 +82,10 @@ beacon-sql-databases = { path = "../beacon-sql-databases" }
 beacon-redb-store = { path = "../beacon-redb-store" }
 beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
 
+# Reads the thread CPU clock for the per-query CPU budget.
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
 [dev-dependencies]
 # Writes the Atlas fixtures the read tests read; the atlas writer takes ndarray
 # views, and Beacon itself never writes a collection.

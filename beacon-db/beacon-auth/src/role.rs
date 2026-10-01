@@ -116,6 +116,9 @@ pub enum ConcreteTarget {
     Path(String),
 }
 
+/// The role setting that holds the CPU budget of one query, in milliseconds. `0` means no limit.
+pub const QUERY_CPU_LIMIT_MS: &str = "query_cpu_limit_ms";
+
 /// The longest key a role setting can have.
 const MAX_SETTING_KEY_LEN: usize = 64;
 
@@ -123,10 +126,24 @@ const MAX_SETTING_KEY_LEN: usize = 64;
 ///
 /// A key is free: any name of ASCII letters, digits, `_` and `.`, such as `wms.max_tiles`. The
 /// key is stored in lowercase, so `ALTER ROLE r SET Max_Rows` and `max_rows` are the same key.
-/// The value is stored as given.
+/// A key that Beacon reads itself, such as [`QUERY_CPU_LIMIT_MS`], also has its value checked.
+/// All other values are stored as given.
 pub fn normalize_setting(key: &str, value: &str) -> anyhow::Result<(String, String)> {
     let key = normalize_setting_key(key)?;
-    Ok((key, value.to_string()))
+    let value = match key.as_str() {
+        QUERY_CPU_LIMIT_MS => value
+            .trim()
+            .parse::<u64>()
+            .map(|millis| millis.to_string())
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "{QUERY_CPU_LIMIT_MS} takes a whole number of milliseconds (0 = no limit), \
+                     got '{value}'"
+                )
+            })?,
+        _ => value.to_string(),
+    };
+    Ok((key, value))
 }
 
 /// Checks a role setting key and returns it in lowercase.
@@ -393,6 +410,23 @@ impl RoleProvider {
                 Some((role.name.clone(), value.clone()))
             })
             .collect()
+    }
+
+    /// The query CPU limit, in milliseconds, that `roles` give. `None` when no role sets one.
+    ///
+    /// The most generous role wins, as roles add access. `0` means no limit, so it beats every
+    /// number.
+    pub fn query_cpu_limit_ms(&self, roles: &[String]) -> Option<u64> {
+        self.settings_for(roles, QUERY_CPU_LIMIT_MS)
+            .into_iter()
+            .filter_map(|(_, value)| value.parse::<u64>().ok())
+            .reduce(|best, limit| {
+                if best == 0 || limit == 0 {
+                    0
+                } else {
+                    best.max(limit)
+                }
+            })
     }
 
     fn assert_role_exists(&self, role: &str) -> anyhow::Result<()> {
@@ -1208,6 +1242,35 @@ mod tests {
             normalize_setting("tier", " Gold ").unwrap(),
             ("tier".to_string(), " Gold ".to_string())
         );
+    }
+
+    #[test]
+    fn the_cpu_limit_takes_whole_milliseconds() {
+        assert_eq!(normalize_setting("QUERY_CPU_LIMIT_MS", " 30000 ").unwrap().1, "30000");
+        assert_eq!(normalize_setting(QUERY_CPU_LIMIT_MS, "0").unwrap().1, "0");
+        for bad in ["-1", "1.5", "30s", ""] {
+            assert!(normalize_setting(QUERY_CPU_LIMIT_MS, bad).is_err(), "accepted '{bad}'");
+        }
+    }
+
+    /// The most generous role wins, and `0` (no limit) beats every number.
+    #[tokio::test]
+    async fn the_most_generous_role_sets_the_cpu_limit() {
+        let provider = RoleProvider::new();
+        for name in ["small", "large", "free", "plain"] {
+            provider.create_role(name).await.unwrap();
+        }
+        provider.set_setting("small", QUERY_CPU_LIMIT_MS, "1000").await.unwrap();
+        provider.set_setting("large", QUERY_CPU_LIMIT_MS, "60000").await.unwrap();
+        provider.set_setting("free", QUERY_CPU_LIMIT_MS, "0").await.unwrap();
+        let roles = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["small"])), Some(1000));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["small", "large"])), Some(60000));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["large", "free"])), Some(0));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["plain"])), None);
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["plain", "small"])), Some(1000));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["ghost"])), None);
     }
 
     #[tokio::test]

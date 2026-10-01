@@ -34,6 +34,10 @@ pub struct ConsolidatedMetrics {
     pub file_paths: Vec<String>,
     /// Total execution time in milliseconds.
     pub execution_time_ms: u64,
+    /// CPU time the query used for planning and execution, in milliseconds.
+    /// `None` when the query was not metered.
+    #[serde(default)]
+    pub cpu_time_ms: Option<u64>,
     /// The original query as JSON.
     pub query: serde_json::Value,
     /// Unique identifier for the query.
@@ -70,6 +74,7 @@ pub struct MetricsTracker {
     pub optimized_logical_plan: Arc<Mutex<Option<LogicalPlan>>>,
     pub file_paths: Arc<Mutex<Vec<String>>>,
     pub physical_plan: Arc<RwLock<Option<Arc<dyn ExecutionPlan>>>>,
+    pub cpu_meter: Mutex<Option<Arc<crate::query_cpu::QueryCpuMeter>>>,
 }
 
 impl MetricsTracker {
@@ -100,6 +105,7 @@ impl MetricsTracker {
             parsed_logical_plan: Arc::new(Mutex::new(None)),
             optimized_logical_plan: Arc::new(Mutex::new(None)),
             physical_plan: Arc::new(RwLock::new(None)),
+            cpu_meter: Mutex::new(None),
         })
     }
 
@@ -116,6 +122,11 @@ impl MetricsTracker {
     /// Set the physical execution plan.
     pub fn set_physical_plan(&self, plan: Arc<dyn ExecutionPlan>) {
         *self.physical_plan.write() = Some(plan);
+    }
+
+    /// Set the meter that counts the CPU time of the query.
+    pub fn set_cpu_meter(&self, meter: Arc<crate::query_cpu::QueryCpuMeter>) {
+        *self.cpu_meter.lock() = Some(meter);
     }
 
     /// Add to the count of input rows.
@@ -193,6 +204,11 @@ impl MetricsTracker {
                 .map(|plan| collect_metrics_json(plan.as_ref()))
                 .unwrap_or_default(),
             execution_time_ms: self.start_time.elapsed().as_millis() as u64,
+            cpu_time_ms: self
+                .cpu_meter
+                .lock()
+                .as_ref()
+                .map(|meter| meter.used().as_millis() as u64),
         }
     }
 }
@@ -240,7 +256,7 @@ fn collect_scan_totals(plan: &dyn ExecutionPlan, totals: &mut ScanTotals) {
         .and_then(|metrics| metrics.sum_by_name("bytes_scanned"))
         .map(|value| value.as_usize() as u64);
 
-    let files: Vec<&object_store::ObjectMeta> = plan
+    let files: Vec<&object_store::ObjectMeta> = crate::query_cpu::unwrap_metered(plan)
         .as_any()
         .downcast_ref::<DataSourceExec>()
         .and_then(|exec| exec.data_source().as_any().downcast_ref::<FileScanConfig>())

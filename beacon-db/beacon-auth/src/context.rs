@@ -333,6 +333,12 @@ impl AuthContext {
         self.role_provider.settings_for(roles, key)
     }
 
+    /// The query CPU limit, in milliseconds, that `roles` give, or `None` when no role sets one.
+    /// See [`RoleProvider::query_cpu_limit_ms`].
+    pub fn query_cpu_limit_ms(&self, roles: &[String]) -> Option<u64> {
+        self.role_provider.query_cpu_limit_ms(roles)
+    }
+
     /// Rejects any non-`SELECT` privilege: roles can only grant read access.
     fn ensure_read_only(rule: &PrivilegeRule) -> anyhow::Result<()> {
         if rule.privilege != Privilege::Select {

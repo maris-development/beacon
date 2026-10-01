@@ -194,6 +194,13 @@ impl QueryMetricsStore {
             return;
         }
         let query_id = metrics.query_id;
+        // The table has no CPU time column yet, so the log carries it.
+        tracing::debug!(
+            %query_id,
+            cpu_time_ms = ?metrics.cpu_time_ms,
+            execution_time_ms = metrics.execution_time_ms,
+            "query finished"
+        );
         if let Err(error) = self.insert(metrics).await {
             tracing::warn!(%query_id, ?error, "failed to record query metrics");
         }

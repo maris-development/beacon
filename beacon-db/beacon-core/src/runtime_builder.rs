@@ -111,6 +111,13 @@ pub struct RuntimeBuilder {
     pub read_only: bool,
 
     pub type_widening: Option<Arc<dyn ArrowTypeWideningStrategy>>,
+
+    /// Selects the CPU budget of each query. `None` => a
+    /// [`RoleCpuBudgetPolicy`](crate::query_cpu::RoleCpuBudgetPolicy) with
+    /// [`Self::query_cpu_budget`] as its default.
+    pub cpu_budget_policy: Option<Arc<dyn crate::query_cpu::CpuBudgetPolicy>>,
+    /// The CPU budget of a query when no role sets one. Defaults to no limit.
+    pub query_cpu_budget: crate::query_cpu::CpuBudget,
 }
 
 impl RuntimeBuilder {
@@ -262,6 +269,28 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Selects the CPU budget of each query with `policy`, in place of the role
+    /// settings.
+    ///
+    /// The runtime calls the policy once for each query, with the identity
+    /// that runs it. A closure `Fn(&AuthIdentity) -> CpuBudget` is a policy.
+    /// To also use the role settings, read them with
+    /// [`AuthContext::query_cpu_limit_ms`].
+    pub fn with_cpu_budget_policy(
+        mut self,
+        policy: Arc<dyn crate::query_cpu::CpuBudgetPolicy>,
+    ) -> Self {
+        self.cpu_budget_policy = Some(policy);
+        self
+    }
+
+    /// Gives each query of a non-super-user the CPU budget `budget` when none of
+    /// the user's roles sets `query_cpu_limit_ms`. Super-users have no limit.
+    pub fn with_query_cpu_budget(mut self, budget: crate::query_cpu::CpuBudget) -> Self {
+        self.query_cpu_budget = budget;
+        self
+    }
+
     /// Set what a schema merge does with a column that no type holds.
     ///
     /// The default is [`TypeConflict::Fail`], which refuses such a table. Take
@@ -392,6 +421,13 @@ impl RuntimeBuilder {
         // before their `TempObject` could delete them. The happy path is RAII.
         crate::query::temp_object::sweep_stale_outputs(&tmp_dir);
 
+        let cpu_budget_policy = self.cpu_budget_policy.unwrap_or_else(|| {
+            Arc::new(crate::query_cpu::RoleCpuBudgetPolicy::new(
+                auth_context.clone(),
+                self.query_cpu_budget,
+            ))
+        });
+
         Ok(Runtime {
             executor: QueryExecutor::new(runtime_handle),
             session_ctx,
@@ -402,6 +438,7 @@ impl RuntimeBuilder {
             file_stats,
 
             tmp_dir,
+            cpu_budget_policy,
         })
     }
 }
