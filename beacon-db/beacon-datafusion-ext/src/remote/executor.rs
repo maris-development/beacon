@@ -6,14 +6,19 @@
 
 use std::sync::Arc;
 
+use arrow::array::Int64Array;
 use arrow::datatypes::SchemaRef;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use async_trait::async_trait;
 use datafusion::common::Statistics;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::LogicalPlan;
+use datafusion::physical_expr::utils::conjunction_opt;
+use datafusion::physical_plan::filter::batch_filter;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{PhysicalExpr, SendableRecordBatchStream};
 use datafusion::sql::unparser::dialect::{DefaultDialect, Dialect};
+use datafusion_federation::schema_cast::record_convert::try_cast_to;
 use datafusion_federation::sql::SQLExecutor;
 use futures::TryStreamExt;
 
@@ -22,6 +27,33 @@ use super::connection::RemoteConnection;
 /// Maps any displayable error into a DataFusion external error.
 fn remote_err<E: std::fmt::Display>(error: E) -> DataFusionError {
     DataFusionError::External(format!("remote beacon: {error}").into())
+}
+
+/// Apply a pushed-down predicate to one remote batch.
+///
+/// The predicate is bound to the federated scan's schema. A remote batch can carry other
+/// types, so cast it to that schema first.
+fn filter_batch(
+    batch: RecordBatch,
+    schema: &SchemaRef,
+    predicate: &Arc<dyn PhysicalExpr>,
+) -> DFResult<RecordBatch> {
+    let batch = try_cast_to(batch, Arc::clone(schema))
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    batch_filter(&batch, predicate)
+}
+
+/// Turn a remote `count(*)` batch into a batch with no columns and that many rows.
+fn rows_without_columns(counts: &RecordBatch, schema: &SchemaRef) -> DFResult<RecordBatch> {
+    let counts = counts
+        .columns()
+        .first()
+        .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+        .ok_or_else(|| remote_err("the row count query did not return an Int64 count"))?;
+    let rows = counts.iter().flatten().sum::<i64>();
+    let rows = usize::try_from(rows).map_err(remote_err)?;
+    let options = RecordBatchOptions::new().with_row_count(Some(rows));
+    Ok(RecordBatch::try_new_with_options(Arc::clone(schema), vec![], &options)?)
 }
 
 /// Executes federated SQL against a remote Beacon over Flight SQL.
@@ -75,14 +107,24 @@ impl SQLExecutor for BeaconFlightSqlExecutor {
         Arc::new(DefaultDialect {})
     }
 
+    /// `filters` come from physical filter pushdown. The federated scan reports them as
+    /// handled, so DataFusion drops the `FilterExec` above it. This stream must apply them.
     fn execute(
         &self,
         query: &str,
         schema: SchemaRef,
-        _filters: &[Arc<dyn PhysicalExpr>],
+        filters: &[Arc<dyn PhysicalExpr>],
     ) -> DFResult<SendableRecordBatchStream> {
         let connection = self.connection.clone();
-        let query = query.to_string();
+        let rows_only = schema.fields().is_empty();
+        let query = if rows_only {
+            // A remote Beacon returns no rows for a result with no columns, so ask for the row count.
+            format!("SELECT count(*) FROM ({query}) AS beacon_rows")
+        } else {
+            query.to_string()
+        };
+        let predicate = conjunction_opt(filters.iter().cloned());
+        let output_schema = Arc::clone(&schema);
 
         // Defer all async Flight work into the stream's first poll so `execute`
         // never blocks and needs no runtime handle — the same async→sync bridge
@@ -101,7 +143,19 @@ impl SQLExecutor for BeaconFlightSqlExecutor {
             let record_stream = client.do_get(ticket).await.map_err(remote_err)?;
             Ok::<_, DataFusionError>(record_stream.map_err(remote_err))
         })
-        .try_flatten();
+        .try_flatten()
+        .and_then(move |batch| {
+            let batch = if rows_only {
+                rows_without_columns(&batch, &output_schema)
+            } else {
+                Ok(batch)
+            };
+            let filtered = batch.and_then(|batch| match &predicate {
+                Some(predicate) => filter_batch(batch, &output_schema, predicate),
+                None => Ok(batch),
+            });
+            futures::future::ready(filtered)
+        });
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
@@ -144,6 +198,21 @@ mod tests {
         // ...and two different remotes never do.
         let b = executor("http://host-b:50051");
         assert_ne!(a.compute_context(), b.compute_context());
+    }
+
+    #[test]
+    /// A scan with no columns must keep its rows. The remote sends a count, and the
+    /// executor turns it into a batch with no columns and that many rows.
+    fn a_remote_count_becomes_rows_without_columns() {
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let counts = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("count(*)", DataType::Int64, false)])),
+            vec![Arc::new(Int64Array::from(vec![10]))],
+        )
+        .unwrap();
+        let rows = rows_without_columns(&counts, &Arc::new(Schema::empty())).unwrap();
+        assert_eq!((rows.num_rows(), rows.num_columns()), (10, 0));
     }
 
     #[tokio::test]
