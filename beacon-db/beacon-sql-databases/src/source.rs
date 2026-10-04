@@ -22,7 +22,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use beacon_datafusion_ext::remote::geometry_literals_to_calls;
+use beacon_datafusion_ext::remote::{geometry_literals_to_calls, project_aliased_subqueries};
 use datafusion::sql::TableReference;
 use datafusion_federation::sql::{AstAnalyzer, LogicalOptimizer, SQLTable, SqlQueryRewriter};
 
@@ -68,22 +68,29 @@ impl SQLTable for BeaconSqlTable {
         self.inner.schema()
     }
 
-    /// The engine's own rewrite, preceded by the geometry-constant repair where the engine
-    /// understands a PostGIS constructor.
+    /// The engine's own rewrite, preceded by the repairs for plan shapes the SQL unparser
+    /// renders wrong.
+    ///
+    /// An aliased subquery must stay a derived table, or the alias hides the table name that
+    /// its filter uses (see [`project_aliased_subqueries`]). Every engine needs this repair.
     ///
     /// A constant `ST_GeomFromText('...')` folds to an Arrow union or struct at plan time, and
     /// the SQL unparser has no syntax for either, so `plan_to_sql` stops with `Unsupported
-    /// scalar`. Rebuilding the call first lets the predicate reach a PostGIS database whole. See
+    /// scalar`. Where the engine understands a PostGIS constructor, rebuilding the call first
+    /// lets the predicate reach the database whole. See
     /// [`SqlEngine::rebuilds_geometry_constants`] for why the other engines keep the error.
     ///
     /// [`SqlEngine::rebuilds_geometry_constants`]: crate::SqlEngine::rebuilds_geometry_constants
     fn logical_optimizer(&self) -> Option<LogicalOptimizer> {
         let mut inner = self.inner.logical_optimizer();
-        if !self.definition.engine.rebuilds_geometry_constants() {
-            return inner;
-        }
+        let rebuild_geometry = self.definition.engine.rebuilds_geometry_constants();
         Some(Box::new(move |plan| {
-            let plan = geometry_literals_to_calls(plan)?;
+            let plan = if rebuild_geometry {
+                geometry_literals_to_calls(plan)?
+            } else {
+                plan
+            };
+            let plan = project_aliased_subqueries(plan)?;
             match inner.as_mut() {
                 Some(next) => next(plan),
                 None => Ok(plan),
@@ -187,17 +194,42 @@ pub(crate) mod tests {
         );
     }
 
-    /// Every other engine keeps whatever the wrapped table supplies, which here is nothing.
-    #[cfg(feature = "mysql")]
+    /// Every engine keeps an aliased filter a derived table, so the filter keeps the table name
+    /// that it uses.
     #[test]
-    fn a_mysql_table_only_delegates() {
+    fn every_engine_keeps_an_aliased_filter_a_derived_table() {
+        use datafusion::logical_expr::{col, lit, table_scan, LogicalPlan};
+
         let schema = test_schema();
-        let wrapped =
-            BeaconSqlTable::new(remote_table(schema), definition_for(crate::SqlEngine::MySql));
-        assert!(
-            wrapped.logical_optimizer().is_none(),
-            "MySQL must not receive a PostGIS constructor call"
-        );
+        let plan = table_scan(Some("companies"), &schema, None)
+            .and_then(|plan| plan.filter(col("id").lt(lit(2i64))))
+            .and_then(|plan| plan.alias("c"))
+            .and_then(|plan| plan.build())
+            .expect("the aliased filter should build");
+
+        for engine in [
+            #[cfg(feature = "postgres")]
+            crate::SqlEngine::Postgres,
+            #[cfg(feature = "mysql")]
+            crate::SqlEngine::MySql,
+            #[cfg(feature = "odbc")]
+            crate::SqlEngine::Odbc,
+        ] {
+            let wrapped = BeaconSqlTable::new(remote_table(schema.clone()), definition_for(engine));
+            let mut optimizer = wrapped
+                .logical_optimizer()
+                .expect("every engine repairs aliased subqueries");
+            let LogicalPlan::SubqueryAlias(alias) =
+                optimizer(plan.clone()).expect("the repair should succeed")
+            else {
+                panic!("the alias must stay the root for {engine:?}");
+            };
+            assert!(
+                matches!(alias.input.as_ref(), LogicalPlan::Projection(_)),
+                "{engine:?} must project under the alias:\n{}",
+                alias.input
+            );
+        }
     }
 
     /// The wrapper must report the *remote* table reference (and schema) of the

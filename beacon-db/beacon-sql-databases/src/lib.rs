@@ -20,6 +20,7 @@
 //! (a variant + feature + `STORED AS` keyword).
 
 mod definition;
+mod executor;
 mod options;
 mod secret;
 mod source;
