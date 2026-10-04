@@ -6,6 +6,8 @@ pub mod file_stats;
 pub mod metrics;
 pub mod parser;
 pub mod query;
+pub mod query_cpu;
+pub mod query_row_limit;
 pub mod query_executor;
 pub(crate) mod query_metrics_store;
 pub mod query_result;

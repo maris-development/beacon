@@ -95,7 +95,7 @@ pub(crate) async fn list_roles(
 ) -> Json<Vec<AuthRoleView>> {
     let rows = query_rows(
         &state,
-        "SELECT role_name, grants, denies FROM beacon.system.roles ORDER BY role_name",
+        "SELECT role_name, grants, denies, settings FROM beacon.system.roles ORDER BY role_name",
         identity,
     )
     .await
@@ -107,6 +107,7 @@ pub(crate) async fn list_roles(
                 name: str_field(row, "role_name").to_string(),
                 grants: rules(row, "grants"),
                 denies: rules(row, "denies"),
+                settings: serde_json::from_str(str_field(row, "settings")).unwrap_or_default(),
             })
             .collect(),
     )

@@ -382,9 +382,9 @@ mod tests {
             .downcast_ref::<arrow::array::Float64Array>()
             .expect("geo.lat should be Float64");
         assert!(lat_col.len() > 0);
-        // First value: lat[0] = 0.04166667002172143 * 0 + 30.16666666498914
+        // First value is a pixel center: lat[0] = 0.04166667002172143 * 0.5 + 30.16666666498914
         assert!(
-            (lat_col.value(0) - 30.166_666_664_989_14).abs() < 1e-6,
+            (lat_col.value(0) - 30.1875).abs() < 1e-6,
             "lat[0]={}",
             lat_col.value(0)
         );
@@ -402,9 +402,9 @@ mod tests {
             .downcast_ref::<arrow::array::Float64Array>()
             .expect("geo.lon should be Float64");
         assert!(lon_col.len() > 0);
-        // First value: lon[0] = 0.0416666671610546 * 0 + -17.312499364464315
+        // First value is a pixel center: lon[0] = 0.0416666671610546 * 0.5 + -17.312499364464315
         assert!(
-            (lon_col.value(0) - -17.312_499_364_464_315).abs() < 1e-6,
+            (lon_col.value(0) - -17.291_666_030_883_79).abs() < 1e-6,
             "lon[0]={}",
             lon_col.value(0)
         );
@@ -586,12 +586,17 @@ mod tests {
     /// Register the bundled `test.tif` as a DataFusion table backed by
     /// [`TiffFormat`] + `ListingTable` over the local filesystem.
     async fn register_example(ctx: &datafusion::prelude::SessionContext) {
+        register_fixture(ctx, "test.tif").await;
+    }
+
+    /// Register the fixture `test-files/<name>` as the table `tiff_t`.
+    async fn register_fixture(ctx: &datafusion::prelude::SessionContext, name: &str) {
         use datafusion::datasource::file_format::FileFormat;
         use datafusion::datasource::listing::{
             ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
         };
 
-        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/test-files/test.tif");
+        let file = format!("{}/test-files/{name}", env!("CARGO_MANIFEST_DIR"));
         let table_path = ListingTableUrl::parse(format!("file://{file}")).unwrap();
         let format: Arc<dyn FileFormat> = Arc::new(TiffFormat::new(Default::default()));
         let listing_options = ListingOptions::new(format).with_file_extension("tif");
@@ -602,6 +607,31 @@ mod tests {
             .unwrap();
         let table = ListingTable::try_new(config).unwrap();
         ctx.register_table("tiff_t", Arc::new(table)).unwrap();
+    }
+
+    /// Issue #523: a sparse tile must read as nodata and not fail the query.
+    #[tokio::test]
+    async fn sparse_tiles_count_through_datafusion() {
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_fixture(&ctx, "sparse_tiled_i16.tif").await;
+
+        let batches = ctx
+            .sql("SELECT count(*), count(\"band.0\") FROM tiff_t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let count = |column: usize| {
+            batches[0]
+                .column(column)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("count is Int64")
+                .value(0)
+        };
+        // 64x64 pixels. Two 16x16 tiles hold data, and the sparse tiles read as NULL.
+        assert_eq!((count(0), count(1)), (64 * 64, 2 * 16 * 16));
     }
 
     #[tokio::test]

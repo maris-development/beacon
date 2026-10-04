@@ -1,7 +1,7 @@
 //! Beacon-owned authorization model: roles, privileges, and the deny-wins evaluator.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Display,
     str::FromStr,
     sync::Arc,
@@ -116,12 +116,67 @@ pub enum ConcreteTarget {
     Path(String),
 }
 
-/// A named role holding a set of grant and deny rules.
+/// The role setting that holds the CPU budget of one query, in milliseconds. `0` means no limit.
+pub const QUERY_CPU_LIMIT_MS: &str = "query_cpu_limit_ms";
+
+/// The role setting that holds the most rows one query may output. `0` means no limit.
+pub const QUERY_OUTPUT_ROW_LIMIT: &str = "query_output_row_limit";
+
+/// The longest key a role setting can have.
+const MAX_SETTING_KEY_LEN: usize = 64;
+
+/// Checks a role setting and returns the key and value to store.
+///
+/// A key is free: any name of ASCII letters, digits, `_` and `.`, such as `wms.max_tiles`. The
+/// key is stored in lowercase, so `ALTER ROLE r SET Max_Rows` and `max_rows` are the same key.
+/// A key that Beacon reads itself, such as [`QUERY_CPU_LIMIT_MS`], also has its value checked.
+/// All other values are stored as given.
+pub fn normalize_setting(key: &str, value: &str) -> anyhow::Result<(String, String)> {
+    let key = normalize_setting_key(key)?;
+    let value = match key.as_str() {
+        QUERY_CPU_LIMIT_MS => normalize_limit(&key, value, "milliseconds")?,
+        QUERY_OUTPUT_ROW_LIMIT => normalize_limit(&key, value, "rows")?,
+        _ => value.to_string(),
+    };
+    Ok((key, value))
+}
+
+/// Checks the value of a limit setting: a whole number, where `0` means no limit.
+fn normalize_limit(key: &str, value: &str, unit: &str) -> anyhow::Result<String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map(|limit| limit.to_string())
+        .map_err(|_| {
+            anyhow::anyhow!("{key} takes a whole number of {unit} (0 = no limit), got '{value}'")
+        })
+}
+
+/// Checks a role setting key and returns it in lowercase.
+pub fn normalize_setting_key(key: &str) -> anyhow::Result<String> {
+    let valid = !key.is_empty()
+        && key.len() <= MAX_SETTING_KEY_LEN
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    if !valid {
+        anyhow::bail!(
+            "invalid role setting key '{key}': use 1 to {MAX_SETTING_KEY_LEN} ASCII letters, \
+             digits, '_' or '.'"
+        );
+    }
+    Ok(key.to_ascii_lowercase())
+}
+
+/// A named role holding a set of grant and deny rules, and its settings.
 #[derive(Debug, Clone, Default)]
 pub struct Role {
     pub name: String,
     pub grants: HashSet<PrivilegeRule>,
     pub denies: HashSet<PrivilegeRule>,
+    /// Key-value settings, set with `ALTER ROLE <role> SET <key> = <value>`. Keys and values
+    /// are in the form [`normalize_setting`] returns.
+    pub settings: BTreeMap<String, String>,
 }
 
 impl Role {
@@ -130,6 +185,7 @@ impl Role {
             name: name.into(),
             grants: HashSet::new(),
             denies: HashSet::new(),
+            settings: BTreeMap::new(),
         }
     }
 }
@@ -156,6 +212,9 @@ pub trait RoleStore: std::fmt::Debug + Send + Sync {
         is_deny: bool,
         rule: &PrivilegeRule,
     ) -> anyhow::Result<()>;
+    /// Stores `value` for the setting `key`, and replaces an earlier value.
+    async fn persist_set_setting(&self, role: &str, key: &str, value: &str) -> anyhow::Result<()>;
+    async fn persist_reset_setting(&self, role: &str, key: &str) -> anyhow::Result<()>;
 }
 
 /// In-memory registry of roles, with interior mutability for SQL-driven management.
@@ -300,6 +359,92 @@ impl RoleProvider {
                 entry.grants.remove(rule);
             }
         })
+    }
+
+    /// Sets the setting `key` of `role` to `value`, and replaces an earlier value.
+    pub async fn set_setting(&self, role: &str, key: &str, value: &str) -> anyhow::Result<()> {
+        let (key, value) = normalize_setting(key, value)?;
+        let _write = self.write_lock.lock().await;
+        self.assert_role_exists(role)?;
+        if let Some(store) = &self.persistence {
+            store.persist_set_setting(role, &key, &value).await?;
+        }
+        self.with_role(role, |entry| {
+            entry.settings.insert(key, value);
+        })
+    }
+
+    /// Removes the setting `key` from `role`. Fails when the role does not hold it, so a typo
+    /// does not look like a change.
+    pub async fn reset_setting(&self, role: &str, key: &str) -> anyhow::Result<()> {
+        let key = normalize_setting_key(key)?;
+        let _write = self.write_lock.lock().await;
+        self.assert_role_exists(role)?;
+        let held = self
+            .roles
+            .read()
+            .get(role)
+            .is_some_and(|entry| entry.settings.contains_key(&key));
+        if !held {
+            anyhow::bail!("role '{role}' has no setting '{key}' to reset");
+        }
+        if let Some(store) = &self.persistence {
+            store.persist_reset_setting(role, &key).await?;
+        }
+        self.with_role(role, |entry| {
+            entry.settings.remove(&key);
+        })
+    }
+
+    /// The value of the setting `key` on `role`, or `None` when the role does not hold it.
+    pub fn setting(&self, role: &str, key: &str) -> Option<String> {
+        let key = key.to_ascii_lowercase();
+        self.roles.read().get(role)?.settings.get(&key).cloned()
+    }
+
+    /// The values of the setting `key` on each of `roles` that holds it, as `(role, value)`.
+    ///
+    /// For a caller that combines the values of all roles of a user by its own rule.
+    pub fn settings_for(&self, roles: &[String], key: &str) -> Vec<(String, String)> {
+        let key = key.to_ascii_lowercase();
+        let registry = self.roles.read();
+        roles
+            .iter()
+            .filter_map(|name| registry.get(name))
+            .filter_map(|role| {
+                let value = role.settings.get(&key)?;
+                Some((role.name.clone(), value.clone()))
+            })
+            .collect()
+    }
+
+    /// The query CPU limit, in milliseconds, that `roles` give. `None` when no role sets one.
+    /// See [`Self::most_generous_limit`].
+    pub fn query_cpu_limit_ms(&self, roles: &[String]) -> Option<u64> {
+        self.most_generous_limit(roles, QUERY_CPU_LIMIT_MS)
+    }
+
+    /// The most rows one query may output that `roles` give. `None` when no role sets one.
+    /// See [`Self::most_generous_limit`].
+    pub fn query_output_row_limit(&self, roles: &[String]) -> Option<u64> {
+        self.most_generous_limit(roles, QUERY_OUTPUT_ROW_LIMIT)
+    }
+
+    /// The limit setting `key` that `roles` give, or `None` when no role sets it.
+    ///
+    /// The most generous role wins, as roles add access. `0` means no limit, so it beats every
+    /// number.
+    fn most_generous_limit(&self, roles: &[String], key: &str) -> Option<u64> {
+        self.settings_for(roles, key)
+            .into_iter()
+            .filter_map(|(_, value)| value.parse::<u64>().ok())
+            .reduce(|best, limit| {
+                if best == 0 || limit == 0 {
+                    0
+                } else {
+                    best.max(limit)
+                }
+            })
     }
 
     fn assert_role_exists(&self, role: &str) -> anyhow::Result<()> {
@@ -880,6 +1025,25 @@ mod tests {
             }
             Ok(())
         }
+        async fn persist_set_setting(
+            &self,
+            role: &str,
+            key: &str,
+            value: &str,
+        ) -> anyhow::Result<()> {
+            self.check()?;
+            let mut roles = self.roles.write();
+            let entry = roles.get_mut(role).expect("role exists");
+            entry.settings.insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+        async fn persist_reset_setting(&self, role: &str, key: &str) -> anyhow::Result<()> {
+            self.check()?;
+            let mut roles = self.roles.write();
+            let entry = roles.get_mut(role).expect("role exists");
+            entry.settings.remove(key);
+            Ok(())
+        }
     }
 
     /// Every mutation is written through, and a provider rebuilt from the store
@@ -1083,5 +1247,150 @@ mod tests {
             assert_eq!(decode_target(target_type, target_value).unwrap(), target);
         }
         assert!(decode_target("bogus", String::new()).is_err());
+    }
+
+    #[test]
+    fn a_setting_key_is_free_but_checked() {
+        assert_eq!(normalize_setting_key("WMS.Max_Tiles").unwrap(), "wms.max_tiles");
+        for bad in ["", "has space", "semi;colon", "quote'", &"k".repeat(65)] {
+            assert!(normalize_setting_key(bad).is_err(), "accepted '{bad}'");
+        }
+        // The value is stored as given.
+        assert_eq!(
+            normalize_setting("tier", " Gold ").unwrap(),
+            ("tier".to_string(), " Gold ".to_string())
+        );
+    }
+
+    #[test]
+    fn the_cpu_limit_takes_whole_milliseconds() {
+        assert_eq!(normalize_setting("QUERY_CPU_LIMIT_MS", " 30000 ").unwrap().1, "30000");
+        assert_eq!(normalize_setting(QUERY_CPU_LIMIT_MS, "0").unwrap().1, "0");
+        for bad in ["-1", "1.5", "30s", ""] {
+            assert!(normalize_setting(QUERY_CPU_LIMIT_MS, bad).is_err(), "accepted '{bad}'");
+        }
+    }
+
+    /// The most generous role wins, and `0` (no limit) beats every number.
+    #[tokio::test]
+    async fn the_most_generous_role_sets_the_cpu_limit() {
+        let provider = RoleProvider::new();
+        for name in ["small", "large", "free", "plain"] {
+            provider.create_role(name).await.unwrap();
+        }
+        provider.set_setting("small", QUERY_CPU_LIMIT_MS, "1000").await.unwrap();
+        provider.set_setting("large", QUERY_CPU_LIMIT_MS, "60000").await.unwrap();
+        provider.set_setting("free", QUERY_CPU_LIMIT_MS, "0").await.unwrap();
+        let roles = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["small"])), Some(1000));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["small", "large"])), Some(60000));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["large", "free"])), Some(0));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["plain"])), None);
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["plain", "small"])), Some(1000));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["ghost"])), None);
+    }
+
+    #[test]
+    fn the_row_limit_takes_whole_rows() {
+        assert_eq!(normalize_setting(QUERY_OUTPUT_ROW_LIMIT, "1000000").unwrap().1, "1000000");
+        let error = normalize_setting(QUERY_OUTPUT_ROW_LIMIT, "1M").unwrap_err();
+        assert!(error.to_string().contains("whole number of rows"), "{error}");
+    }
+
+    /// The row limit and the CPU limit are separate keys with the same rule.
+    #[tokio::test]
+    async fn the_most_generous_role_sets_the_row_limit() {
+        let provider = RoleProvider::new();
+        for name in ["small", "large", "free"] {
+            provider.create_role(name).await.unwrap();
+        }
+        provider.set_setting("small", QUERY_OUTPUT_ROW_LIMIT, "1000").await.unwrap();
+        provider.set_setting("large", QUERY_OUTPUT_ROW_LIMIT, "1000000").await.unwrap();
+        provider.set_setting("free", QUERY_OUTPUT_ROW_LIMIT, "0").await.unwrap();
+        provider.set_setting("small", QUERY_CPU_LIMIT_MS, "5").await.unwrap();
+        let roles = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(provider.query_output_row_limit(&roles(&["small"])), Some(1000));
+        assert_eq!(
+            provider.query_output_row_limit(&roles(&["small", "large"])),
+            Some(1_000_000)
+        );
+        assert_eq!(provider.query_output_row_limit(&roles(&["large", "free"])), Some(0));
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["large"])), None);
+        assert_eq!(provider.query_cpu_limit_ms(&roles(&["small"])), Some(5));
+    }
+
+    #[tokio::test]
+    async fn any_key_reads_back_by_role() {
+        let provider = RoleProvider::new();
+        for name in ["gold", "silver", "plain"] {
+            provider.create_role(name).await.unwrap();
+        }
+        provider.set_setting("gold", "WMS.Max_Tiles", "500").await.unwrap();
+        provider.set_setting("silver", "wms.max_tiles", "50").await.unwrap();
+
+        assert_eq!(provider.setting("gold", "wms.max_tiles").as_deref(), Some("500"));
+        assert_eq!(provider.setting("gold", "WMS.MAX_TILES").as_deref(), Some("500"));
+        assert_eq!(provider.setting("plain", "wms.max_tiles"), None);
+        assert_eq!(provider.setting("ghost", "wms.max_tiles"), None);
+
+        let roles = ["plain", "silver", "gold"].map(String::from);
+        assert_eq!(
+            provider.settings_for(&roles, "wms.max_tiles"),
+            vec![
+                ("silver".to_string(), "50".to_string()),
+                ("gold".to_string(), "500".to_string())
+            ]
+        );
+        let listed = provider.list_roles();
+        let gold = listed.iter().find(|role| role.name == "gold").unwrap();
+        assert_eq!(gold.settings.get("wms.max_tiles").map(String::as_str), Some("500"));
+    }
+
+    #[tokio::test]
+    async fn a_setting_replaces_resets_and_goes_with_its_role() {
+        let provider = RoleProvider::new();
+        provider.create_role("reader").await.unwrap();
+
+        assert!(provider.set_setting("ghost", "tier", "gold").await.is_err());
+        assert!(provider.set_setting("reader", "bad key", "gold").await.is_err());
+        provider.set_setting("reader", "tier", "silver").await.unwrap();
+        provider.set_setting("reader", "tier", "gold").await.unwrap();
+        assert_eq!(provider.setting("reader", "tier").as_deref(), Some("gold"));
+
+        provider.reset_setting("reader", "Tier").await.unwrap();
+        assert_eq!(provider.setting("reader", "tier"), None);
+        let again = provider.reset_setting("reader", "tier").await;
+        assert!(again.is_err_and(|e| e.to_string().contains("no setting 'tier'")));
+
+        provider.set_setting("reader", "tier", "gold").await.unwrap();
+        provider.drop_role("reader").await.unwrap();
+        provider.create_role("reader").await.unwrap();
+        assert_eq!(provider.setting("reader", "tier"), None);
+    }
+
+    #[tokio::test]
+    async fn settings_write_through_and_rehydrate() {
+        let durable = Arc::new(RecordingStore::default());
+        let provider = RoleProvider::with_store(durable.clone());
+        provider.create_role("reader").await.unwrap();
+        provider.set_setting("reader", "max_rows", "2500").await.unwrap();
+        provider.set_setting("reader", "Tier", "gold").await.unwrap();
+
+        let reloaded = RoleProvider::with_persistence(durable.clone()).await.unwrap();
+        assert_eq!(reloaded.setting("reader", "max_rows").as_deref(), Some("2500"));
+        assert_eq!(reloaded.setting("reader", "tier").as_deref(), Some("gold"));
+
+        durable.fail_next(true);
+        assert!(provider.set_setting("reader", "max_rows", "1").await.is_err());
+        assert!(provider.reset_setting("reader", "tier").await.is_err());
+        durable.fail_next(false);
+        assert_eq!(
+            provider.setting("reader", "max_rows").as_deref(),
+            Some("2500"),
+            "a failed persist must not change memory"
+        );
+        assert_eq!(provider.setting("reader", "tier").as_deref(), Some("gold"));
     }
 }

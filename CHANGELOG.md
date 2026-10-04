@@ -33,6 +33,29 @@ tag. Releases before 2.0.0 are recorded in the
 - `ArrowTypeWidening` has a `settings` field, and the two built-in strategies have a `cast` field.
   An embedded build that writes `DefaultArrowTypeWidening { on_conflict }` must add the field or use
   `DefaultArrowTypeWidening::new().with_cast(..)`.
+- **Breaking: `geo.lon` and `geo.lat` of a GeoTIFF are pixel centers.** For a PixelIsArea file,
+  the default raster type, `read_tiff` gave the top-left corner of each pixel. For a PixelIsPoint
+  file it gave the center. The reader now reads `GTRasterTypeGeoKey` and gives the center for both
+  types, the same as CF and `read_netcdf`. The values of a PixelIsArea file move by half a pixel,
+  to the south-east for a north-up image. Queries on existing TIFF tables return the new values,
+  and a filter on these columns can select other pixels. Data that you copied from a TIFF before
+  this change keeps the corner values.
+  ([#525](https://github.com/maris-development/beacon/issues/525))
+
+### Fixed
+
+- **`read_tiff` reads sparse GeoTIFFs.** GDAL writes a block with no data as offset 0 and byte
+  count 0 (`SPARSE_OK=TRUE`). Beacon asked the object store for that empty range, and the query
+  failed. Beacon now reads no bytes for a sparse tile or strip, and its pixels get the nodata value
+  (or 0). ([#523](https://github.com/maris-development/beacon/issues/523))
+- **The GeoTIFF reader is more stable.** A stripped file reads its strips on demand, and not the
+  full file on each open. Stripped files now decode the horizontal and the floating point
+  predictor, and big-endian samples. A planar band reads only its own blocks. A nodata value that
+  the band type cannot hold is ignored, and not cast to a wrong value. A malformed IFD gives a
+  query error, and not a panic. Overview and mask IFDs are skipped.
+- **`read_tiff` reads PackBits files.** PackBits is the run-length compression of baseline TIFF.
+  A file with a compression that Beacon cannot decode, or a broken file, now gives an error that
+  names the file. Before, a glob failed without a clue which file was the cause.
 
 ## [2.0.0] — 2026-09-29
 

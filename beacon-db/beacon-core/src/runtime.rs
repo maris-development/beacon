@@ -10,6 +10,7 @@ use futures::TryStreamExt;
 
 use crate::{
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
+    query_cpu::QueryCpuMeter,
     query_executor::QueryExecutor,
     query_metrics_store::QueryMetricsStore,
     query_result::{ArrowOutputStream, QueryOutput, QueryResult},
@@ -117,17 +118,25 @@ impl Runtime {
     /// format the result is streamed (metrics recorded as the client drains);
     /// with one, the result is written to a temporary file in that format and
     /// returned as a file download.
+    ///
+    /// The CPU budget of the query comes from the `query_cpu_limit_ms` setting
+    /// of the caller's roles; see [`crate::query_cpu::budget_for`]. It covers
+    /// planning and execution. A query that goes over it fails with a "CPU
+    /// budget" error.
     #[tracing::instrument(skip(self, query, identity))]
     pub async fn run_query(
         &self,
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<QueryResult> {
+        let meter = QueryCpuMeter::new(crate::query_cpu::budget_for(&self.auth, &identity));
         // Planning reads metadata too, so the whole query moves to the executor.
         let runtime = self.clone();
-        self.executor
-            .run(async move { runtime.run_query_on_executor(query, identity).await })
-            .await
+        let metered = meter.meter_future({
+            let meter = meter.clone();
+            async move { runtime.run_query_on_executor(query, identity, meter).await }
+        });
+        self.executor.run(metered).await
     }
 
     /// [`Self::run_query`], on the query executor.
@@ -135,6 +144,7 @@ impl Runtime {
         &self,
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
+        cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
         let query_id = uuid::Uuid::new_v4();
         let query_json = serde_json::to_value(&query)?;
@@ -185,12 +195,25 @@ impl Runtime {
                          (e.g. SELECT); this statement produces no result set to export"
                     );
                 }
-                self.run_query_to_file(plan, output, query_id, query_json, &identity.username)
-                    .await
+                self.run_query_to_file(
+                    plan,
+                    output,
+                    query_id,
+                    query_json,
+                    &identity,
+                    cpu_meter,
+                )
+                .await
             }
             None => {
-                self.run_query_to_stream(plan, query_id, query_json, &identity.username)
-                    .await
+                self.run_query_to_stream(
+                    plan,
+                    query_id,
+                    query_json,
+                    &identity,
+                    cpu_meter,
+                )
+                .await
             }
         }
     }
@@ -202,9 +225,12 @@ impl Runtime {
         plan: datafusion::logical_expr::LogicalPlan,
         query_id: uuid::Uuid,
         query_json: serde_json::Value,
-        username: &str,
+        identity: &beacon_auth::AuthIdentity,
+        cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
-        let metrics = MetricsTracker::new(query_json, query_id, username);
+        let output_row_limit = crate::query_row_limit::row_limit_for(&self.auth, identity);
+        let metrics = MetricsTracker::new(query_json, query_id, &identity.username);
+        metrics.set_cpu_meter(cpu_meter.clone());
         metrics.set_logical_plan(&plan);
         // Record the optimized logical plan alongside the parsed one. `optimize`
         // errors for `Statement` plans (`SET ...`), which have nothing to
@@ -212,8 +238,13 @@ impl Runtime {
         if let Ok(optimized) = self.session_ctx.state().optimize(&plan) {
             metrics.set_optimized_logical_plan(&optimized);
         }
-        let (stream, physical_plan) =
-            crate::statement_plan::execute_statement_plan_tracked(&self.session_ctx, plan).await?;
+        let (stream, physical_plan) = crate::statement_plan::execute_statement_plan_tracked(
+            &self.session_ctx,
+            plan,
+            Some(&cpu_meter),
+            output_row_limit,
+        )
+        .await?;
         // The physical plan's per-node metrics fill in as the stream drains, and the
         // stream consolidates when it ends — so registering the plan here is what
         // makes `node_metrics` non-empty in `beacon.system.query_metrics`.
@@ -239,8 +270,10 @@ impl Runtime {
         output: crate::query::output::Output,
         query_id: uuid::Uuid,
         query_json: serde_json::Value,
-        username: &str,
+        identity: &beacon_auth::AuthIdentity,
+        cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
+        let output_row_limit = crate::query_row_limit::row_limit_for(&self.auth, identity);
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         //
@@ -259,14 +292,19 @@ impl Runtime {
             )
             .await?;
 
-        let metrics = MetricsTracker::new(query_json, query_id, username);
+        let metrics = MetricsTracker::new(query_json, query_id, &identity.username);
+        metrics.set_cpu_meter(cpu_meter.clone());
         metrics.set_logical_plan(&copy_plan);
         if let Ok(optimized) = self.session_ctx.state().optimize(&copy_plan) {
             metrics.set_optimized_logical_plan(&optimized);
         }
-        let (mut stream, physical_plan) =
-            crate::statement_plan::execute_statement_plan_tracked(&self.session_ctx, copy_plan)
-                .await?;
+        let (mut stream, physical_plan) = crate::statement_plan::execute_statement_plan_tracked(
+            &self.session_ctx,
+            copy_plan,
+            Some(&cpu_meter),
+            output_row_limit,
+        )
+        .await?;
         if let Some(physical_plan) = physical_plan {
             metrics.set_physical_plan(physical_plan);
         }
@@ -571,14 +609,18 @@ impl Runtime {
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<String> {
+        // The plan runs in full, so the CPU budget of `run_query` applies.
+        let meter = QueryCpuMeter::new(crate::query_cpu::budget_for(&self.auth, &identity));
         let runtime = self.clone();
-        self.executor
-            .run(async move {
+        let metered = meter.meter_future({
+            let meter = meter.clone();
+            async move {
                 runtime
-                    .explain_analyze_query_on_executor(query, identity)
+                    .explain_analyze_query_on_executor(query, identity, meter)
                     .await
-            })
-            .await
+            }
+        });
+        self.executor.run(metered).await
     }
 
     /// [`Self::explain_analyze_query`], on the query executor.
@@ -586,6 +628,7 @@ impl Runtime {
         &self,
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
+        cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<String> {
         let plan = self.lower_query(query.inner).await?;
         crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
@@ -606,6 +649,7 @@ impl Runtime {
         // Keep the `Arc` so per-node metrics can be read once the stream drains.
         // `execute_statement_plan` discards the plan, so create/execute are inlined.
         let physical_plan = self.session_ctx.state().create_physical_plan(&plan).await?;
+        let physical_plan = crate::query_cpu::meter_plan(physical_plan, &cpu_meter);
         let mut stream = datafusion::physical_plan::execute_stream(
             physical_plan.clone(),
             self.session_ctx.task_ctx(),

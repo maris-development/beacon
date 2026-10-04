@@ -53,5 +53,9 @@ pub(crate) async fn apply_auth_statement(
             auth.revoke(role, &PrivilegeRule::new(*privilege, target.clone()), *deny)
                 .await
         }
+        AuthStatement::SetRoleSetting { role, key, value } => {
+            auth.set_role_setting(role, key, value).await
+        }
+        AuthStatement::ResetRoleSetting { role, key } => auth.reset_role_setting(role, key).await,
     }
 }

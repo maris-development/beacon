@@ -9,6 +9,7 @@
 //! - `__beacon_user_roles(username, role)`
 //! - `__beacon_roles(name)`
 //! - `__beacon_role_rules(role, kind, privilege, target_type, target_value)`  (`kind` ∈ grant|deny)
+//! - `__beacon_role_settings(role, key, value)`  (one row for each `ALTER ROLE … SET`)
 //!
 //! # Reaching the session without a cycle
 //!
@@ -34,8 +35,8 @@ use std::{
 use arrow::{array::Array, record_batch::RecordBatch};
 use async_trait::async_trait;
 use beacon_auth::{
-    decode_target, encode_target, hash_password, rule_kind, Privilege, PrivilegeRule, Role,
-    RoleStore, StoredUser, UserDirectory, UserRecord,
+    decode_target, encode_target, hash_password, normalize_setting, rule_kind, Privilege,
+    PrivilegeRule, Role, RoleStore, StoredUser, UserDirectory, UserRecord,
 };
 use datafusion::{prelude::SessionContext, sql::parser::DFParserBuilder};
 use futures::TryStreamExt;
@@ -43,13 +44,14 @@ use futures::TryStreamExt;
 use crate::parser::beacon_parser::unquoted_table_rule_name;
 use crate::statement_plan::SessionCell;
 
-// The four internal tables. Their names are under `beacon_datafusion_ext::table_ext`'s
+// The internal tables. Their names are under `beacon_datafusion_ext::table_ext`'s
 // `INTERNAL_TABLE_PREFIX`, which is what hides them from user-facing catalog listings and gates them
 // to the super-user (see `statement_plan::authz`).
 const USERS_TABLE: &str = "__beacon_users";
 const USER_ROLES_TABLE: &str = "__beacon_user_roles";
 const ROLES_TABLE: &str = "__beacon_roles";
 const ROLE_RULES_TABLE: &str = "__beacon_role_rules";
+const ROLE_SETTINGS_TABLE: &str = "__beacon_role_settings";
 
 /// SQL-managed durable backend for auth state, addressing the internal managed tables through the
 /// runtime session. Implements both [`UserDirectory`] and [`RoleStore`]: the in-memory working
@@ -125,7 +127,7 @@ impl TablesAuthStore {
         Ok(batches)
     }
 
-    /// Creates the four internal tables if they do not already exist. `CREATE TABLE IF NOT EXISTS`
+    /// Creates the internal tables if they do not already exist. `CREATE TABLE IF NOT EXISTS`
     /// is idempotent, so this is safe to run on every start (the tables are rebuilt from their
     /// persisted definitions by `init_tables` before this runs).
     pub(crate) async fn ensure_tables(&self) -> anyhow::Result<()> {
@@ -138,6 +140,12 @@ impl TablesAuthStore {
             format!(
                 "CREATE TABLE IF NOT EXISTS {ROLE_RULES_TABLE} \
                  (role VARCHAR, kind VARCHAR, privilege VARCHAR, target_type VARCHAR, target_value VARCHAR)"
+            ),
+            // A table of its own, so a database from before role settings needs no migration.
+            // `key` is a keyword in a column list, so it is quoted everywhere.
+            format!(
+                "CREATE TABLE IF NOT EXISTS {ROLE_SETTINGS_TABLE} \
+                 (role VARCHAR, \"key\" VARCHAR, value VARCHAR)"
             ),
         ] {
             self.run(ddl).await?;
@@ -349,6 +357,30 @@ impl RoleStore for TablesAuthStore {
             }
         }
 
+        let setting_rows = self
+            .run(format!("SELECT role, \"key\", value FROM {ROLE_SETTINGS_TABLE}"))
+            .await?;
+        for batch in &setting_rows {
+            for row in 0..batch.num_rows() {
+                let role = string_at(batch.column(0).as_ref(), row)?;
+                let key = string_at(batch.column(1).as_ref(), row)?;
+                let value = string_at(batch.column(2).as_ref(), row)?;
+                // A row that fails the check is skipped, not fatal: the other roles still load.
+                match normalize_setting(&key, &value) {
+                    Ok((key, value)) => {
+                        roles
+                            .entry(role.clone())
+                            .or_insert_with(|| Role::new(role))
+                            .settings
+                            .insert(key, value);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%role, %key, %value, ?error, "skipped a role setting");
+                    }
+                }
+            }
+        }
+
         Ok(roles)
     }
 
@@ -367,6 +399,10 @@ impl RoleStore for TablesAuthStore {
             .await?;
         self.run(format!(
             "DELETE FROM {ROLE_RULES_TABLE} WHERE role = '{name}'"
+        ))
+        .await?;
+        self.run(format!(
+            "DELETE FROM {ROLE_SETTINGS_TABLE} WHERE role = '{name}'"
         ))
         .await?;
         Ok(())
@@ -408,6 +444,28 @@ impl RoleStore for TablesAuthStore {
             quote_literal(&rule.privilege.to_string()),
             quote_literal(target_type),
             quote_literal(&target_value),
+        ))
+        .await?;
+        Ok(())
+    }
+
+    async fn persist_set_setting(&self, role: &str, key: &str, value: &str) -> anyhow::Result<()> {
+        self.persist_reset_setting(role, key).await?;
+        self.run(format!(
+            "INSERT INTO {ROLE_SETTINGS_TABLE} (role, \"key\", value) VALUES ('{}', '{}', '{}')",
+            quote_literal(role),
+            quote_literal(key),
+            quote_literal(value),
+        ))
+        .await?;
+        Ok(())
+    }
+
+    async fn persist_reset_setting(&self, role: &str, key: &str) -> anyhow::Result<()> {
+        self.run(format!(
+            "DELETE FROM {ROLE_SETTINGS_TABLE} WHERE role = '{}' AND \"key\" = '{}'",
+            quote_literal(role),
+            quote_literal(key),
         ))
         .await?;
         Ok(())
