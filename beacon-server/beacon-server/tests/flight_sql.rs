@@ -1061,3 +1061,38 @@ async fn prepared_update_inserts_rows() {
     run_sql_rows(runtime, &format!("DROP TABLE {table}")).await;
     server.handle.abort();
 }
+
+/// A prepare describes a statement. It must not run a write.
+#[tokio::test(flavor = "multi_thread")]
+async fn preparing_an_insert_writes_nothing() {
+    let server = spawn_server(false).await;
+    let runtime = server.harness.server.runtime();
+
+    let table = format!("prep_{}", uuid::Uuid::new_v4().simple());
+    run_sql_rows(runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+
+    let mut client = client(server.addr).await;
+    client
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+    let prepared = client
+        .prepare(format!("INSERT INTO {table} VALUES (7), (8)"), None)
+        .await
+        .unwrap();
+    // Time for a write that the prepare started to land.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    prepared.close().await.unwrap();
+
+    let rows = run_sql_rows(runtime, &format!("SELECT count(*) FROM {table}")).await;
+    let count = rows[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(count, 0, "a prepare must not insert rows");
+
+    run_sql_rows(runtime, &format!("DROP TABLE {table}")).await;
+    server.handle.abort();
+}
