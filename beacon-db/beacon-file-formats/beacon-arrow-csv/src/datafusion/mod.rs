@@ -20,7 +20,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::type_widening::{TypeWideningOverrides, label_by_object, widening_for};
 
 pub const DEFAULT_CSV_EXTENSION: &str = "csv";
 pub const DEFAULT_TSV_EXTENSION: &str = "tsv";
@@ -59,7 +59,10 @@ impl FileFormatFactory for CsvFormatFactory {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(DEFAULT_INFER_RECORDS);
 
-        Ok(Arc::new(CsvFormat::new(delimiter, infer_records)))
+        Ok(Arc::new(
+            CsvFormat::new(delimiter, infer_records)
+                .with_type_widening(TypeWideningOverrides::from_options(format_options)?),
+        ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
@@ -115,6 +118,14 @@ impl FileFormatFactoryExt for CsvFormatFactory {
                 .finish(),
         )
     }
+
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        format
+            .as_any()
+            .downcast_ref::<CsvFormat>()
+            .map(|format| format.type_widening)
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug)]
@@ -122,6 +133,8 @@ pub struct CsvFormat {
     inner_format: datafusion::datasource::file_format::csv::CsvFormat,
     /// How many records inference reads.
     infer_records: usize,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 impl CsvFormat {
@@ -131,7 +144,14 @@ impl CsvFormat {
                 .with_delimiter(delimiter)
                 .with_schema_infer_max_rec(infer_records),
             infer_records,
+            type_widening: TypeWideningOverrides::default(),
         }
+    }
+
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
     }
 
     /// The field separator this format reads with.
@@ -192,10 +212,10 @@ impl FileFormat for CsvFormat {
             .try_collect::<Vec<_>>()
             .await?;
 
-        // The rule of the session decides the result for a column that two
+        // The rule of the table decides the result for a column that two
         // files describe differently. Each schema names its file, so a refused
         // column names both files.
-        session_widening(state)
+        widening_for(state, &self.type_widening)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -237,8 +257,8 @@ impl FileFormat for CsvFormat {
         );
         // The listing table built the source, so it already carries any
         // projection the optimizer pushed down. Keep it and restate the options.
-        // The merge rule of the session decides which casts read null.
-        let type_widening = Arc::clone(&session_widening(state).strategy);
+        // The merge rule of the table decides which casts read null.
+        let type_widening = Arc::clone(&widening_for(state, &self.type_widening).strategy);
         let source: Arc<dyn FileSource> =
             match conf.file_source.as_any().downcast_ref::<BeaconCsvSource>() {
                 Some(source) => Arc::new(
@@ -449,6 +469,40 @@ mod tests {
             .await
             .expect("comma parse should still succeed");
         assert_eq!(schema.fields().len(), 1);
+    }
+
+    /// The options of a table set its merge rule, and a bad value fails the table.
+    #[test]
+    fn the_table_options_set_the_merge_rule() {
+        use beacon_datafusion_ext::type_widening::{CastMode, TypeConflict};
+
+        let options = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let state = SessionContext::new().state();
+        let format = CsvFormatFactory
+            .create(
+                &state,
+                &options(&[
+                    ("delimiter", ";"),
+                    ("type_widening_on_conflict", "keep_first"),
+                    ("format.type_widening_cast", "strict"),
+                ]),
+            )
+            .unwrap();
+        let overrides = CsvFormatFactory.type_widening_overrides(format.as_ref());
+        assert_eq!(overrides.on_conflict, Some(TypeConflict::KeepFirst));
+        assert_eq!(overrides.cast, Some(CastMode::Strict));
+        assert_eq!(overrides.strategy, None);
+
+        let error = CsvFormatFactory
+            .create(&state, &options(&[("type_widening_cast", "loose")]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
     }
 
     /// Compression must be reflected in the written extension so that COPY TO

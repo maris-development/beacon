@@ -9,7 +9,8 @@ use datafusion::{
     prelude::{Expr, SessionContext},
 };
 
-use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_common::table_function::{split_options_arg, BeaconTableFunctionImpl};
+use beacon_datafusion_ext::type_widening::{widening_for, TypeWideningOverrides};
 
 pub struct ReadOdvAsciiFunc {
     runtime_handle: tokio::runtime::Handle,
@@ -58,6 +59,7 @@ impl TableFunctionImpl for ReadOdvAsciiFunc {
         &self,
         args: &[Expr],
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        let (args, options) = split_options_arg(args, "read_odv_ascii")?;
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
@@ -81,12 +83,21 @@ impl TableFunctionImpl for ReadOdvAsciiFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        let file_format = OdvFormat::new();
+        let overrides = TypeWideningOverrides::from_options(&options)?;
+        let file_format = OdvFormat::new().with_type_widening(overrides);
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                FastObjectTable::try_new(&session_ctx.state(), Arc::new(file_format), listing_urls)
-                    .await
+                // ODV registers no format factory, so the table takes the rule here.
+                let state = session_ctx.state();
+                let widening = widening_for(&state, &overrides);
+                FastObjectTable::try_new_with_widening(
+                    &state,
+                    Arc::new(file_format),
+                    listing_urls,
+                    widening.strategy.as_ref(),
+                )
+                .await
             })
         })?;
 

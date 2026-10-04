@@ -10,6 +10,30 @@ tag. Releases before 2.0.0 are recorded in the
 
 ## [Unreleased]
 
+### Added
+
+- **Each table sets its own type widening rule.** `CREATE EXTERNAL TABLE ... OPTIONS` takes three
+  keys: `type_widening_strategy`, `type_widening_on_conflict` and `type_widening_cast`. A key that
+  the table does not set takes the server default. A `read_*` function takes the same keys in a
+  struct as its last argument, for example
+  `read_parquet('a/*.parquet', {'type_widening_cast': 'lenient'})`. An unknown value is an error.
+  See [type widening keys](docs/docs/2.0.0/sql/create-external-table.md#type-widening-keys).
+- **`BEACON_TYPE_WIDENING_CAST` sets the cast apart from the conflict setting.** `strict` gives an
+  error for a value that the column type cannot hold. `lenient` reads it as `NULL`. Empty, the
+  default, follows `BEACON_TYPE_WIDENING_ON_CONFLICT` as before.
+- **Parquet tables apply the lenient cast.** A Parquet scan cast every file strictly, also under
+  `keep_first`. It now casts with the rule of its table, as the other formats do.
+
+### Changed
+
+- **Breaking: an nd array casts with the rule of its table.** A NetCDF, HDF5, Zarr, Atlas or
+  GeoTIFF array always read a value that did not cast as `NULL`. It now follows the cast of the
+  table, so under the default rule such a value is an error. Set `BEACON_TYPE_WIDENING_CAST=lenient`,
+  or the `type_widening_cast` key on a table, to keep the old behavior.
+- `ArrowTypeWidening` has a `settings` field, and the two built-in strategies have a `cast` field.
+  An embedded build that writes `DefaultArrowTypeWidening { on_conflict }` must add the field or use
+  `DefaultArrowTypeWidening::new().with_cast(..)`.
+
 ## [2.0.0] — 2026-09-29
 
 Beacon 2.0.0 is the first stable release of the 2.0 line. NetCDF, HDF5, Zarr, Atlas, BBF and

@@ -15,8 +15,9 @@ pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::CrawlerConfig;
 pub use beacon_common::FileStatsConfig;
-pub use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, TypeConflict};
-use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, NumpyArrowTypeWidening};
+pub use beacon_datafusion_ext::type_widening::{
+    ArrowTypeWideningStrategy, CastMode, StrategyKind, TypeConflict, TypeWideningSettings,
+};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -105,11 +106,12 @@ pub struct RuntimeConfig {
     pub vm_memory_size: usize,
     pub enable_sys_info: bool,
     pub batch_size: usize,
-    /// The rule for every schema merge, built from `BEACON_TYPE_WIDENING_STRATEGY`
-    /// and `BEACON_TYPE_WIDENING_ON_CONFLICT` by [`type_widening`]. `default`
-    /// widens inside one family and refuses the rest. `numpy` promotes as
-    /// `numpy.result_type` does.
-    pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    /// The rule for every schema merge, built from `BEACON_TYPE_WIDENING_STRATEGY`,
+    /// `BEACON_TYPE_WIDENING_ON_CONFLICT` and `BEACON_TYPE_WIDENING_CAST` by
+    /// [`type_widening`]. `default` widens inside one family and refuses the
+    /// rest. `numpy` promotes as `numpy.result_type` does. A table can replace
+    /// each part with its own `type_widening_*` option.
+    pub type_widening: TypeWideningSettings,
 }
 
 #[derive(Debug, Clone)]
@@ -447,6 +449,15 @@ struct RawConfig {
     #[envconfig(from = "BEACON_TYPE_WIDENING_STRATEGY", default = "default")]
     type_widening_strategy: String,
 
+    /// What a scan does with a value that the table type cannot hold.
+    ///
+    /// `strict` gives an error. `lenient` reads the value as null. A pair that
+    /// the merge widens, such as `Int32` into `Int64`, always casts strictly.
+    /// Empty, the default, follows `BEACON_TYPE_WIDENING_ON_CONFLICT`:
+    /// `keep_first` gives `lenient`, and `fail` gives `strict`.
+    #[envconfig(from = "BEACON_TYPE_WIDENING_CAST", default = "")]
+    type_widening_cast: String,
+
     /// Root directory for Beacon's local data (datasets, tables, tmp, etc.).
     #[envconfig(from = "BEACON_DATA_DIR", default = "./data")]
     data_dir: String,
@@ -648,6 +659,7 @@ impl From<RawConfig> for Config {
                 type_widening: type_widening(
                     &raw.type_widening_strategy,
                     &raw.type_widening_on_conflict,
+                    &raw.type_widening_cast,
                 ),
             },
             sql: SqlConfig {
@@ -969,13 +981,14 @@ fn create_dir(path: &Path) -> Result<()> {
     })
 }
 
-/// The merge rule that `BEACON_TYPE_WIDENING_STRATEGY` and
-/// `BEACON_TYPE_WIDENING_ON_CONFLICT` name.
+/// The merge rule that `BEACON_TYPE_WIDENING_STRATEGY`,
+/// `BEACON_TYPE_WIDENING_ON_CONFLICT` and `BEACON_TYPE_WIDENING_CAST` name.
 ///
 /// An unknown name reads as the rule a server ran before the variable existed:
-/// `default` for the strategy, and `fail` for the setting. A server that cannot
-/// start over a typo is worse than one that names the column.
-fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWideningStrategy> {
+/// `default` for the strategy, `fail` for the setting, and the default of the
+/// setting for the cast. A server that cannot start over a typo is worse than
+/// one that names the column.
+fn type_widening(strategy: &str, on_conflict: &str, cast: &str) -> TypeWideningSettings {
     let on_conflict = TypeConflict::parse(on_conflict).unwrap_or_else(|value| {
         tracing::warn!(
             "BEACON_TYPE_WIDENING_ON_CONFLICT names no setting: '{value}'. \
@@ -983,16 +996,28 @@ fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWidening
         );
         TypeConflict::Fail
     });
-    match strategy.trim().to_ascii_lowercase().as_str() {
-        "default" | "" => Arc::new(DefaultArrowTypeWidening { on_conflict }),
-        "numpy" => Arc::new(NumpyArrowTypeWidening { on_conflict }),
-        other => {
-            tracing::warn!(
-                "BEACON_TYPE_WIDENING_STRATEGY names no strategy: '{other}'. \
-                 The strategies are 'default' and 'numpy'. Taking 'default'."
-            );
-            Arc::new(DefaultArrowTypeWidening { on_conflict })
-        }
+    let strategy = StrategyKind::parse(strategy).unwrap_or_else(|other| {
+        tracing::warn!(
+            "BEACON_TYPE_WIDENING_STRATEGY names no strategy: '{other}'. \
+             The strategies are 'default' and 'numpy'. Taking 'default'."
+        );
+        StrategyKind::Default
+    });
+    let cast = match cast.trim() {
+        "" => None,
+        value => CastMode::parse(value)
+            .inspect_err(|other| {
+                tracing::warn!(
+                    "BEACON_TYPE_WIDENING_CAST names no cast: '{other}'. \
+                     The casts are 'strict' and 'lenient'. Following the setting."
+                );
+            })
+            .ok(),
+    };
+    TypeWideningSettings {
+        strategy,
+        on_conflict,
+        cast,
     }
 }
 
@@ -1023,28 +1048,43 @@ mod tests {
         Config::from(raw(vars).expect("config should parse"))
     }
 
-    /// `BEACON_TYPE_WIDENING_STRATEGY` names the merge rule, and
-    /// `BEACON_TYPE_WIDENING_ON_CONFLICT` its setting. An unknown name reads as
-    /// the rule a server ran before the variable existed.
+    /// `BEACON_TYPE_WIDENING_STRATEGY` names the merge rule,
+    /// `BEACON_TYPE_WIDENING_ON_CONFLICT` its setting and
+    /// `BEACON_TYPE_WIDENING_CAST` its cast. An unknown name reads as the rule a
+    /// server ran before the variable existed.
     #[test]
     fn type_widening_variables_build_the_rule_and_fall_back() {
-        let rule = |vars: &[(&str, &str)]| format!("{:?}", config(vars).runtime.type_widening);
+        let rule =
+            |vars: &[(&str, &str)]| format!("{:?}", config(vars).runtime.type_widening.build());
 
-        assert_eq!(rule(&[]), "DefaultArrowTypeWidening { on_conflict: Fail }");
+        assert_eq!(
+            rule(&[]),
+            "DefaultArrowTypeWidening { on_conflict: Fail, cast: Strict }"
+        );
         assert_eq!(
             rule(&[
                 ("BEACON_TYPE_WIDENING_STRATEGY", "numpy"),
                 ("BEACON_TYPE_WIDENING_ON_CONFLICT", "keep_first"),
             ]),
-            "NumpyArrowTypeWidening { on_conflict: KeepFirst }"
+            "NumpyArrowTypeWidening { on_conflict: KeepFirst, cast: Lenient }"
+        );
+        assert_eq!(
+            rule(&[
+                ("BEACON_TYPE_WIDENING_ON_CONFLICT", "keep_first"),
+                ("BEACON_TYPE_WIDENING_CAST", "strict"),
+            ]),
+            "DefaultArrowTypeWidening { on_conflict: KeepFirst, cast: Strict }"
         );
         assert_eq!(
             rule(&[
                 ("BEACON_TYPE_WIDENING_STRATEGY", "polars"),
                 ("BEACON_TYPE_WIDENING_ON_CONFLICT", "widen"),
+                ("BEACON_TYPE_WIDENING_CAST", "loose"),
             ]),
-            "DefaultArrowTypeWidening { on_conflict: Fail }"
+            "DefaultArrowTypeWidening { on_conflict: Fail, cast: Strict }"
         );
+        // The process keeps the unset cast, so a table with `keep_first` reads leniently.
+        assert_eq!(config(&[]).runtime.type_widening.cast, None);
     }
 
     /// Both runtimes have a default size, and neither accepts zero threads:

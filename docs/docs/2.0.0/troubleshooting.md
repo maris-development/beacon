@@ -158,6 +158,32 @@ those pairs. A number beside a timestamp stays a conflict under both strategies,
 `BEACON_TYPE_WIDENING_ON_CONFLICT` settles it. See
 [Configuration](/docs/2.0.0/server/configuration#query-engine).
 
+Each setting can also apply to one table only:
+
+```sql
+CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
+OPTIONS ('type_widening_on_conflict' 'keep_first')
+```
+
+See [type widening keys](/docs/2.0.0/sql/create-external-table#type-widening-keys).
+
+### An array cell does not cast
+
+A NetCDF, HDF5, Zarr, Atlas or GeoTIFF collection can store one array as text in one dataset and as
+numbers in another. Under the default rule, a cell that does not parse is a cast error, and the
+query stops.
+
+Read such a cell as `NULL` for the full server, or for one table:
+
+```bash
+BEACON_TYPE_WIDENING_CAST=lenient
+```
+
+```sql
+CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
+OPTIONS ('type_widening_cast' 'lenient')
+```
+
 ### New files do not appear
 
 Beacon does not watch storage. It reads no filesystem events and no S3 events. Register a

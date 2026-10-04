@@ -24,6 +24,7 @@ use datafusion::{
         metrics::ExecutionPlanMetricsSet,
     },
 };
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use futures::{stream::BoxStream, FutureExt};
 use object_store::ObjectMeta;
 
@@ -41,9 +42,12 @@ pub struct TiffSource {
     /// The scan's file queue, when it is planned morsel-driven. See
     /// [`morsel_scan`].
     morsel: Option<Arc<MorselSource>>,
+    /// The merge rule of the table. It decides how a value casts onto the table type.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl TiffSource {
+    /// A source that casts with the strict default merge rule.
     pub fn new(table_schema: TableSchema) -> Self {
         Self {
             schema_adapter_factory: None,
@@ -53,7 +57,14 @@ impl TiffSource {
             predicate: None,
             projection: None,
             morsel: None,
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
+    }
+
+    /// The same source, with the merge rule of the table.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = strategy;
+        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -83,6 +94,7 @@ impl FileSource for TiffSource {
             partition,
             self.morsel.clone(),
             base_config.table_partition_cols().clone(),
+            Arc::clone(&self.type_widening),
         )))
     }
 
@@ -210,6 +222,8 @@ struct TiffOpener {
     /// The table's `PARTITIONED BY` columns, nd-encoded as the scan carries
     /// them. A file's values for them travel on its `PartitionedFile`.
     partition_fields: Vec<FieldRef>,
+    /// The merge rule of the table.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 /// How one GeoTIFF becomes a planned [`FileRead`].
@@ -223,6 +237,8 @@ struct TiffRasters {
     metrics: ReadMetrics,
     /// The table's `PARTITIONED BY` columns. Each file brings its own values.
     partition_fields: Vec<FieldRef>,
+    /// The merge rule of the table.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl std::fmt::Debug for TiffRasters {
@@ -251,12 +267,14 @@ impl OpenFile for TiffRasters {
             self.predicate.clone(),
             FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
             Some(&self.metrics),
+            Arc::clone(&self.type_widening),
         )
         .await
     }
 }
 
 impl TiffOpener {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
@@ -266,6 +284,7 @@ impl TiffOpener {
         partition: usize,
         morsel: Option<Arc<MorselSource>>,
         partition_fields: Vec<FieldRef>,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> Self {
         // Once per partition, not once per file: every call registers four
         // counters into the scan's one metrics set, behind a mutex.
@@ -277,6 +296,7 @@ impl TiffOpener {
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
             partition_fields: partition_fields.clone(),
+            type_widening: Arc::clone(&type_widening),
         });
 
         Self {
@@ -289,6 +309,7 @@ impl TiffOpener {
             morsel,
             rasters,
             partition_fields,
+            type_widening,
         }
     }
 
@@ -298,6 +319,7 @@ impl TiffOpener {
     /// spreads objects across the partitions, so each file is one partition's
     /// alone. The planning below is the same one a shared file gets — see
     /// [`FileRead::plan`].
+    #[allow(clippy::too_many_arguments)]
     async fn read(
         object: ObjectMeta,
         object_store: Arc<dyn object_store::ObjectStore>,
@@ -306,6 +328,7 @@ impl TiffOpener {
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ReadMetrics,
         partitions: FilePartitions,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(object_store, object.clone())
             .await
@@ -323,6 +346,7 @@ impl TiffOpener {
             predicate,
             partitions,
             Some(&metrics),
+            type_widening,
         )
         .await?;
 
@@ -354,6 +378,7 @@ impl FileOpener for TiffOpener {
             self.predicate.clone(),
             self.read_metrics.clone(),
             partitions,
+            Arc::clone(&self.type_widening),
         )
         .boxed())
     }

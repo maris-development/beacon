@@ -47,7 +47,7 @@ pub struct BBFSource {
     /// read and the expressions `ProjectionOpener` applies on top of them.
     projection: Option<SplitProjection>,
     /// The rule that merged the table schema. It decides which casts read
-    /// null. The format sets it from the session when it plans.
+    /// null. The format sets it from the table when it plans.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
@@ -68,7 +68,7 @@ impl BBFSource {
         }
     }
 
-    /// The same source, with the merge rule of the session.
+    /// The same source, with the merge rule of the table.
     pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
         self.type_widening = strategy;
         self

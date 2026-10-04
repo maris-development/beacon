@@ -15,7 +15,7 @@ use beacon_arrow_netcdf::datafusion::{statistics, NetCDFFormatFactory, NetcdfFor
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::type_widening::{label_by_object, widening_for, TypeWideningOverrides};
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
@@ -54,6 +54,8 @@ struct EffectiveOptions {
     /// Skip a file that does not fit `read_dimensions`, instead of failing.
     skip_unbroadcastable: bool,
     read: ReadOptions,
+    /// The parts of the merge rule that the table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 /// A `FileFormat` factory for HDF5 files.
@@ -141,6 +143,7 @@ impl Hdf5FormatFactory {
                 unify_phony_dimensions: self.config.unify_phony_dimensions,
                 convention: self.config.convention,
             },
+            type_widening: TypeWideningOverrides::from_options(format_options)?,
         };
 
         if let Some(value) = format_option(format_options, "read_dimensions") {
@@ -184,6 +187,7 @@ impl Hdf5FormatFactory {
             // `create_for_analysis` clears it first, so a query computes
             // nothing.
             enable_statistics: options.enable_statistics,
+            type_widening: options.type_widening,
             writer,
         }
     }
@@ -227,6 +231,7 @@ impl FileFormatFactory for Hdf5FormatFactory {
                 unify_phony_dimensions: self.config.unify_phony_dimensions,
                 convention: self.config.convention,
             },
+            type_widening: TypeWideningOverrides::default(),
         };
         Arc::new(self.build_format(options, self.inner.default()))
     }
@@ -305,6 +310,14 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
         self.get_ext()
     }
 
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        match format.as_any().downcast_ref::<Hdf5Format>() {
+            Some(hdf5) => hdf5.type_widening,
+            // netcdf-c reads this one. Ask the factory that built it.
+            None => self.inner.type_widening_overrides(format),
+        }
+    }
+
     /// HDF5 opts into the schema cache on its reader alone.
     ///
     /// The reader is in the fingerprint through the format's own type: this
@@ -350,11 +363,19 @@ pub struct Hdf5Format {
     read: ReadOptions,
     /// Whether to generate per-file statistics during planning.
     enable_statistics: bool,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
     /// The format every write goes to. Always netcdf-c.
     writer: Arc<dyn FileFormat>,
 }
 
 impl Hdf5Format {
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
+    }
+
     /// Whether this format generates per-file statistics during planning.
     pub fn statistics_enabled(&self) -> bool {
         self.enable_statistics
@@ -449,10 +470,10 @@ impl FileFormat for Hdf5Format {
         if schemas.is_empty() {
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
-        // The rule of the session decides the result for a column that two
+        // The rule of the table decides the result for a column that two
         // files describe differently. Each schema names its file, so a refused
         // column names both files.
-        session_widening(state)
+        widening_for(state, &self.type_widening)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 exec_datafusion_err!(
@@ -505,7 +526,7 @@ impl FileFormat for Hdf5Format {
 
     async fn create_physical_plan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
@@ -531,7 +552,10 @@ impl FileFormat for Hdf5Format {
         let projection = conf.file_source().projection().cloned();
         let source = Hdf5Source::new(self.read_dimensions.clone(), self.read, table_schema)
             .with_skip_unbroadcastable(self.skip_unbroadcastable)
-            .with_projection(projection);
+            .with_projection(projection)
+            .with_type_widening(Arc::clone(
+                &widening_for(state, &self.type_widening).strategy,
+            ));
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -640,6 +664,40 @@ mod tests {
         assert_eq!(paths, vec!["a.h5".to_string(), "b.hdf5".to_string()]);
         // Each discovered dataset is tagged with this factory's format name.
         assert!(discovered.iter().all(|d| d.format == "hdf5"));
+    }
+
+    // ── The merge rule ─────────────────────────────────────────────────
+
+    /// The options of a table set its merge rule on both readers, and a bad
+    /// value is an error.
+    #[test]
+    fn the_table_options_set_the_merge_rule() {
+        use beacon_datafusion_ext::type_widening::TypeConflict;
+
+        let ctx = session();
+        for use_rust_reader in [true, false] {
+            let f = factory(
+                "hdf5",
+                Hdf5Config {
+                    use_rust_reader,
+                    ..Hdf5Config::default()
+                },
+            );
+            let options = HashMap::from([(
+                "type_widening_on_conflict".to_string(),
+                "keep_first".to_string(),
+            )]);
+            let format = f.create(&ctx.state(), &options).unwrap();
+            assert_eq!(
+                f.type_widening_overrides(format.as_ref()).on_conflict,
+                Some(TypeConflict::KeepFirst),
+                "use_rust_reader = {use_rust_reader}"
+            );
+
+            let options = HashMap::from([("type_widening_cast".to_string(), "loose".to_string())]);
+            let error = f.create(&ctx.state(), &options).unwrap_err().to_string();
+            assert!(error.contains("type_widening_cast"), "{error}");
+        }
     }
 
     // ── The backend ────────────────────────────────────────────────────

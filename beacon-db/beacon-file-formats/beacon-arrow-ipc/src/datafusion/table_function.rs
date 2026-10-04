@@ -6,7 +6,8 @@ use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
-use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_common::table_function::{BeaconTableFunctionImpl, split_options_arg};
+use beacon_datafusion_ext::type_widening::TypeWideningOverrides;
 
 pub struct ReadArrowFunc {
     // Session Reference
@@ -56,6 +57,7 @@ impl TableFunctionImpl for ReadArrowFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let (args, options) = split_options_arg(args, "read_arrow")?;
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
@@ -78,7 +80,8 @@ impl TableFunctionImpl for ReadArrowFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        let file_format = ArrowFormat::default();
+        let file_format = ArrowFormat::default()
+            .with_type_widening(TypeWideningOverrides::from_options(&options)?);
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

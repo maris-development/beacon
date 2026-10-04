@@ -21,7 +21,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::type_widening::{TypeWideningOverrides, label_by_object, widening_for};
 
 pub const DEFAULT_ARROW_EXTENSION: &str = "arrow";
 
@@ -32,9 +32,11 @@ impl FileFormatFactory for ArrowFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(ArrowFormat::new()))
+        Ok(Arc::new(ArrowFormat::new().with_type_widening(
+            TypeWideningOverrides::from_options(format_options)?,
+        )))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
@@ -58,6 +60,14 @@ impl FileFormatFactoryExt for ArrowFormatFactory {
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
         format.as_any().downcast_ref::<ArrowFormat>()?;
         Some(SchemaOptions::new("arrow").finish())
+    }
+
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        format
+            .as_any()
+            .downcast_ref::<ArrowFormat>()
+            .map(|format| format.type_widening)
+            .unwrap_or_default()
     }
 
     fn discover_datasets(
@@ -94,13 +104,22 @@ impl FileFormatFactoryExt for ArrowFormatFactory {
 #[derive(Debug)]
 pub struct ArrowFormat {
     inner_format: datafusion::datasource::file_format::arrow::ArrowFormat,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 impl ArrowFormat {
     pub fn new() -> Self {
         Self {
             inner_format: datafusion::datasource::file_format::arrow::ArrowFormat,
+            type_widening: TypeWideningOverrides::default(),
         }
+    }
+
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
     }
 }
 
@@ -113,7 +132,7 @@ impl Default for ArrowFormat {
 #[async_trait::async_trait]
 impl FileFormat for ArrowFormat {
     fn as_any(&self) -> &dyn Any {
-        self.inner_format.as_any()
+        self
     }
 
     fn compression_type(&self) -> Option<FileCompressionType> {
@@ -152,10 +171,10 @@ impl FileFormat for ArrowFormat {
             .try_collect::<Vec<_>>()
             .await?;
 
-        // The rule of the session decides the result for a column that two
+        // The rule of the table decides the result for a column that two
         // files describe differently. Each schema names its file, so a refused
         // column names both files.
-        session_widening(state)
+        widening_for(state, &self.type_widening)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -213,10 +232,11 @@ impl FileFormat for ArrowFormat {
         // The optimizer may have pushed a projection into the source the inner
         // format built. Carry it over, or the scan reads every column.
         let pushed_down = conf.file_source.projection().cloned();
+        let widening = widening_for(state, &self.type_widening);
         let source = Arc::new(
             BeaconArrowSource::new(container, table_schema)
                 .with_projection(pushed_down.as_ref())
-                .with_type_widening(Arc::clone(&session_widening(state).strategy)),
+                .with_type_widening(Arc::clone(&widening.strategy)),
         );
 
         let config = FileScanConfigBuilder::from(conf)
@@ -465,6 +485,44 @@ mod tests {
             result.is_err(),
             "unexpected success: the 64-byte magic padding issue may have been fixed"
         );
+    }
+
+    /// The options of a table set its merge rule, and a bad value fails the table.
+    #[test]
+    fn the_table_options_set_the_merge_rule() {
+        use beacon_datafusion_ext::type_widening::{CastMode, TypeConflict};
+
+        let options = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let state = SessionContext::new().state();
+        let format = ArrowFormatFactory
+            .create(
+                &state,
+                &options(&[
+                    ("type_widening_on_conflict", "keep_first"),
+                    ("format.type_widening_cast", "strict"),
+                ]),
+            )
+            .unwrap();
+        let overrides = ArrowFormatFactory.type_widening_overrides(format.as_ref());
+        assert_eq!(overrides.on_conflict, Some(TypeConflict::KeepFirst));
+        assert_eq!(overrides.cast, Some(CastMode::Strict));
+        assert!(
+            ArrowFormatFactory
+                .schema_options_fingerprint(format.as_ref())
+                .is_some(),
+            "the format downcasts to itself"
+        );
+
+        let error = ArrowFormatFactory
+            .create(&state, &options(&[("type_widening_cast", "loose")]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
     }
 
     /// The Arrow IPC format is uncompressed at the container level; the written

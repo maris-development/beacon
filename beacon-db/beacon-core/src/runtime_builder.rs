@@ -29,7 +29,7 @@ use beacon_datafusion_ext::{
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
     type_widening::{
-        ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening, TypeConflict,
+        ArrowTypeWidening, ArrowTypeWideningStrategy, TypeConflict, TypeWideningSettings,
     },
 };
 use beacon_functions::register_functions;
@@ -111,6 +111,9 @@ pub struct RuntimeBuilder {
     pub read_only: bool,
 
     pub type_widening: Option<Arc<dyn ArrowTypeWideningStrategy>>,
+    /// The process rule as data. A table resolves its own keys against it.
+    /// `type_widening` wins when both are set.
+    pub type_widening_settings: Option<TypeWideningSettings>,
 }
 
 impl RuntimeBuilder {
@@ -257,8 +260,24 @@ impl RuntimeBuilder {
     /// It unions the fields that agree and refuses the rest.
     /// [`NumpyArrowTypeWidening`](beacon_datafusion_ext::type_widening::NumpyArrowTypeWidening)
     /// promotes as `numpy.result_type` does.
+    ///
+    /// A table that sets its own `type_widening_*` options resolves them
+    /// against the default settings, not against this strategy. Take
+    /// [`with_type_widening_settings`](Self::with_type_widening_settings) to
+    /// give tables a base. The last of the two calls wins.
     pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
         self.type_widening = Some(strategy);
+        self.type_widening_settings = None;
+        self
+    }
+
+    /// Set the rule for every schema merge in this runtime, as settings. A
+    /// table resolves each `type_widening_*` option that it does not set from
+    /// these settings. The last of this call and
+    /// [`with_type_widening`](Self::with_type_widening) wins.
+    pub fn with_type_widening_settings(mut self, settings: TypeWideningSettings) -> Self {
+        self.type_widening_settings = Some(settings);
+        self.type_widening = None;
         self
     }
 
@@ -271,7 +290,10 @@ impl RuntimeBuilder {
     /// This replaces the rule of [`with_type_widening`](Self::with_type_widening),
     /// so call one or the other.
     pub fn with_type_conflict(self, on_conflict: TypeConflict) -> Self {
-        self.with_type_widening(Arc::new(DefaultArrowTypeWidening { on_conflict }))
+        self.with_type_widening_settings(TypeWideningSettings {
+            on_conflict,
+            ..Default::default()
+        })
     }
 
     pub fn with_tmp_dir_path(mut self, path: PathBuf) -> Self {
@@ -932,12 +954,12 @@ fn build_session_config(
         // the files behind one URL. `FastObjectTable` merges the URLs behind one
         // table. A session without `RuntimeBuilder` gets the same rule from
         // `ArrowTypeWidening::default_extension`.
-        .with_extension(Arc::new(ArrowTypeWidening::new(
-            builder
-                .type_widening
-                .clone()
-                .unwrap_or_else(|| Arc::new(DefaultArrowTypeWidening::new())),
-        )))
+        .with_extension(Arc::new(match &builder.type_widening {
+            Some(strategy) => ArrowTypeWidening::new(Arc::clone(strategy)),
+            None => ArrowTypeWidening::from_settings(
+                builder.type_widening_settings.unwrap_or_default(),
+            ),
+        }))
         // Resolves user-supplied dataset paths (a `LOCATION`, a `read_*` argument)
         // to object-store URLs and to native reader paths. Configured against the
         // default datasets store when one is set, otherwise dynamic (schemed paths

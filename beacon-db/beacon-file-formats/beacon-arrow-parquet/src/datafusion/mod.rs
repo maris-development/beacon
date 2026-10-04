@@ -19,7 +19,8 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{FileFormatFactoryExt, SchemaOptions};
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::scan_adapt::cast_adapter_factory;
+use beacon_datafusion_ext::type_widening::{TypeWideningOverrides, label_by_object, widening_for};
 
 #[derive(Debug)]
 pub struct ParquetFormatFactory;
@@ -34,9 +35,11 @@ impl FileFormatFactory for ParquetFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(ParquetFormat::new()))
+        Ok(Arc::new(ParquetFormat::new().with_type_widening(
+            TypeWideningOverrides::from_options(format_options)?,
+        )))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
@@ -58,6 +61,14 @@ impl FileFormatFactoryExt for ParquetFormatFactory {
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
         format.as_any().downcast_ref::<ParquetFormat>()?;
         Some(SchemaOptions::new("parquet").finish())
+    }
+
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        format
+            .as_any()
+            .downcast_ref::<ParquetFormat>()
+            .map(|format| format.type_widening)
+            .unwrap_or_default()
     }
 
     fn discover_datasets(
@@ -85,6 +96,8 @@ impl FileFormatFactoryExt for ParquetFormatFactory {
 #[derive(Debug)]
 pub struct ParquetFormat {
     inner: datafusion::datasource::file_format::parquet::ParquetFormat,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 impl ParquetFormat {
@@ -94,7 +107,14 @@ impl ParquetFormat {
                 .with_enable_pruning(true)
                 .with_skip_metadata(true)
                 .with_force_view_types(false),
+            type_widening: TypeWideningOverrides::default(),
         }
+    }
+
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
     }
 }
 
@@ -141,10 +161,10 @@ impl FileFormat for ParquetFormat {
             .try_collect::<Vec<_>>()
             .await?;
 
-        // The rule of the session decides the result for a column that two
+        // The rule of the table decides the result for a column that two
         // files describe differently. Each schema names its file, so a refused
         // column names both files.
-        session_widening(state)
+        widening_for(state, &self.type_widening)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -171,8 +191,13 @@ impl FileFormat for ParquetFormat {
     async fn create_physical_plan(
         &self,
         state: &dyn Session,
-        conf: FileScanConfig,
+        mut conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // The DataFusion source then casts with the rule of the table.
+        if conf.expr_adapter_factory.is_none() {
+            let widening = widening_for(state, &self.type_widening);
+            conf.expr_adapter_factory = Some(cast_adapter_factory(Arc::clone(&widening.strategy)));
+        }
         self.inner.create_physical_plan(state, conf).await
     }
 
@@ -365,6 +390,82 @@ mod tests {
             .expect("agreeing files merge");
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(names, vec!["value", "other"]);
+    }
+
+    /// Read `memory:///mix/` as a table with `options`.
+    async fn read_mix(
+        ctx: &SessionContext,
+        options: &[(&str, &str)],
+    ) -> datafusion::error::Result<Vec<RecordBatch>> {
+        use datafusion::datasource::listing::{
+            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+        };
+
+        let options = options
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let format = ParquetFormatFactory.create(&ctx.state(), &options)?;
+        let url = ListingTableUrl::parse("memory:///mix/")?;
+        let listing = ListingOptions::new(format).with_file_extension(".parquet");
+        let schema = listing.infer_schema(&ctx.state(), &url).await?;
+        let config = ListingTableConfig::new(url)
+            .with_listing_options(listing)
+            .with_schema(schema);
+        ctx.read_table(Arc::new(ListingTable::try_new(config)?))?
+            .collect()
+            .await
+    }
+
+    /// The options of a table set its merge rule and its cast.
+    #[tokio::test]
+    async fn the_table_options_set_the_merge_and_the_cast() {
+        let store = Arc::new(InMemory::new());
+        put_parquet(
+            &store,
+            &Path::from("mix/a.parquet"),
+            Field::new("v", DataType::Int64, true),
+            Arc::new(Int64Array::from(vec![1])),
+        )
+        .await;
+        put_parquet(
+            &store,
+            &Path::from("mix/b.parquet"),
+            Field::new("v", DataType::Utf8, true),
+            Arc::new(arrow::array::StringArray::from(vec!["2", "abc"])),
+        )
+        .await;
+        let ctx = SessionContext::new();
+        let url = datafusion::execution::object_store::ObjectStoreUrl::parse("memory://").unwrap();
+        ctx.register_object_store(url.as_ref(), store);
+
+        let error = read_mix(&ctx, &[]).await.unwrap_err().to_string();
+        assert!(error.contains("Incompatible types"), "{error}");
+
+        let batches = read_mix(&ctx, &[("type_widening_on_conflict", "keep_first")])
+            .await
+            .expect("keep_first casts leniently when no one sets the cast");
+        let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        let nulls: usize = batches.iter().map(|batch| batch.column(0).null_count()).sum();
+        assert_eq!((rows, nulls), (3, 1), "'abc' reads null");
+
+        let error = read_mix(
+            &ctx,
+            &[
+                ("type_widening_on_conflict", "keep_first"),
+                ("format.type_widening_cast", "strict"),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.to_lowercase().contains("abc"), "{error}");
+
+        let error = read_mix(&ctx, &[("type_widening_cast", "loose")])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
     }
 
     /// `force_view_types(false)` is deliberate: string columns must come back as

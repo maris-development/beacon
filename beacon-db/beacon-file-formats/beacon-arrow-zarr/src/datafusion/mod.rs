@@ -12,7 +12,7 @@ use beacon_datafusion_ext::format_ext::{
     DatasetMetadata, FileFormatFactoryExt, SchemaOptions, SchemaUnit, units_over_stores,
 };
 use beacon_datafusion_ext::format_options::format_option;
-use beacon_datafusion_ext::type_widening::{LabeledSchema, session_widening};
+use beacon_datafusion_ext::type_widening::{LabeledSchema, TypeWideningOverrides, widening_for};
 use datafusion::{
     catalog::Session,
     common::{GetExt, Statistics},
@@ -117,7 +117,8 @@ impl FileFormatFactory for ZarrFormatFactory {
         Ok(Arc::new(
             ZarrFormat::new(read_dimensions)
                 .with_skip_unbroadcastable(skip_unbroadcastable)
-                .with_enable_statistics(false),
+                .with_enable_statistics(false)
+                .with_type_widening(TypeWideningOverrides::from_options(format_options)?),
         ))
     }
 
@@ -144,12 +145,27 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
     /// left out of this first pass to keep the key simple: a `read_zarr` that
     /// names dimensions derives its schema, exactly as it did before the cache
     /// existed. The default read is cached.
+    ///
+    /// The rule of the table is in the key, because one store merges its leaf
+    /// groups with it.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
         let format = format.as_any().downcast_ref::<ZarrFormat>()?;
         if format.has_storage() || format.read_dimensions.is_some() {
             return None;
         }
-        Some(SchemaOptions::new("zarr").finish())
+        Some(
+            SchemaOptions::new("zarr")
+                .strs(format.type_widening.fingerprint_parts())
+                .finish(),
+        )
+    }
+
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        format
+            .as_any()
+            .downcast_ref::<ZarrFormat>()
+            .map(|format| format.type_widening)
+            .unwrap_or_default()
     }
 
     /// One schema per store, not per object.
@@ -234,6 +250,8 @@ pub struct ZarrFormat {
     /// Defaults to [`ZarrConfig::default`]'s value, so a format built without a
     /// runtime config — `read_zarr()` builds one — behaves the same as a table.
     enable_statistics: bool,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 impl Default for ZarrFormat {
@@ -251,7 +269,14 @@ impl ZarrFormat {
             skip_unbroadcastable: false,
             storage: None,
             enable_statistics: ZarrConfig::default().enable_statistics,
+            type_widening: TypeWideningOverrides::default(),
         }
+    }
+
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
     }
 
     /// The same format, skipping the groups that cannot broadcast when `skip`.
@@ -338,7 +363,7 @@ impl FileFormat for ZarrFormat {
         let storage = self.storage(store.clone());
         // One rule for both merges. The first merge covers the leaf groups in
         // one store. The second merge covers the stores of this table.
-        let widening = session_widening(state);
+        let widening = widening_for(state, &self.type_widening);
         let mut schemas = Vec::new();
         for object in verified_objects {
             let zarr_path = ZarrPath::new_from_object_meta(object.clone()).map_err(|e| {
@@ -368,7 +393,7 @@ impl FileFormat for ZarrFormat {
             ));
         }
 
-        // The rule of the session decides the result for a column that two
+        // The rule of the table decides the result for a column that two
         // stores describe differently.
         widening.merge_schemas(&schemas).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(
@@ -465,7 +490,10 @@ impl FileFormat for ZarrFormat {
         let mut source = ZarrSource::new(table_schema)
             .with_read_dimensions(self.read_dimensions.clone())
             .with_skip_unbroadcastable(self.skip_unbroadcastable)
-            .with_projection(projection);
+            .with_projection(projection)
+            .with_type_widening(Arc::clone(
+                &widening_for(state, &self.type_widening).strategy,
+            ));
         if let Some(storage) = &self.storage {
             source = source.with_storage(storage.clone());
         }
@@ -561,6 +589,58 @@ mod tests {
             .unwrap();
         let table = ListingTable::try_new(config).unwrap();
         ctx.register_table("gridded", Arc::new(table)).unwrap();
+    }
+
+    // ── The merge rule of the table ────────────────────────────────────
+
+    fn options(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// The options of a table set its merge rule, and a bad value is an error.
+    #[test]
+    fn the_table_options_set_the_merge_rule() {
+        use beacon_datafusion_ext::format_ext::FileFormatFactoryExt as _;
+        use beacon_datafusion_ext::type_widening::TypeConflict;
+
+        let state = SessionContext::new().state();
+        let factory = ZarrFormatFactory::new(ZarrConfig::default());
+        let format = factory
+            .create(&state, &options(&[("type_widening_on_conflict", "keep_first")]))
+            .unwrap();
+        assert_eq!(
+            factory.type_widening_overrides(format.as_ref()).on_conflict,
+            Some(TypeConflict::KeepFirst)
+        );
+
+        let error = factory
+            .create(&state, &options(&[("type_widening_cast", "loose")]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
+    }
+
+    /// One store merges its leaf groups with the rule, so two rules never share
+    /// a cached schema.
+    #[test]
+    fn two_rules_give_two_fingerprints() {
+        use beacon_datafusion_ext::format_ext::FileFormatFactoryExt as _;
+
+        let state = SessionContext::new().state();
+        let factory = ZarrFormatFactory::new(ZarrConfig::default());
+        let fingerprint = |pairs: &[(&str, &str)]| {
+            let format = factory.create(&state, &options(pairs)).unwrap();
+            factory.schema_options_fingerprint(format.as_ref()).unwrap()
+        };
+        let none = fingerprint(&[]);
+        let keep_first = fingerprint(&[("type_widening_on_conflict", "keep_first")]);
+        let lenient = fingerprint(&[("type_widening_cast", "lenient")]);
+        assert_ne!(none, keep_first);
+        assert_ne!(none, lenient);
+        assert_ne!(keep_first, lenient);
     }
 
     // ── The predicate reaches the scan ─────────────────────────────────

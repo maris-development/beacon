@@ -66,7 +66,8 @@ impl BeaconTableFunctionImpl for ReadHdf5Func {
     fn description(&self) -> Option<String> {
         Some(
             "Reads HDF5 files from specified glob paths. A NetCDF-4 file is HDF5, and plain HDF5 \
-             whose datasets fit the array data model is read too."
+             whose datasets fit the array data model is read too. An optional last argument, \
+             a struct such as {'type_widening_cast': 'lenient'}, holds table options."
                 .to_string(),
         )
     }
@@ -114,7 +115,9 @@ impl TableFunctionImpl for ReadHdf5Func {
         let Some(hdf5_factory) = hdf5_factory else {
             return netcdf_c();
         };
-        if !hdf5_factory.uses_rust_reader(&HashMap::new())? {
+        let (args, struct_options) =
+            beacon_common::table_function::split_options_arg(args, "read_hdf5")?;
+        if !hdf5_factory.uses_rust_reader(&struct_options)? {
             return netcdf_c();
         }
 
@@ -143,8 +146,9 @@ impl TableFunctionImpl for ReadHdf5Func {
         // the table function shares the runtime's configured format. Per-call
         // settings (read dimensions, the convention) are passed as table
         // options. No native root: this reader reads through the object store,
-        // so an s3, gs or az path works.
-        let mut format_options: HashMap<String, String> = HashMap::new();
+        // so an s3, gs or az path works. A positional argument wins over a
+        // struct key that it repeats.
+        let mut format_options: HashMap<String, String> = struct_options;
         if !dimensions.is_empty() {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));
         }

@@ -25,6 +25,7 @@ use datafusion::{
         metrics::ExecutionPlanMetricsSet,
     },
 };
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use futures::{stream::BoxStream, FutureExt};
 use object_store::ObjectMeta;
 
@@ -52,9 +53,12 @@ pub struct NetCDFSource {
     /// files are all in here, so the openers read whatever the queue hands them.
     /// `None` means the groups are the file list, as DataFusion planned them.
     morsel: Option<Arc<MorselSource>>,
+    /// The merge rule of the table. It decides how a value casts onto the table type.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl NetCDFSource {
+    /// A source that casts with the strict default merge rule.
     pub fn new(
         access: FileAccess,
         read_dimensions: Option<Vec<String>>,
@@ -70,7 +74,14 @@ impl NetCDFSource {
             predicate: None,
             projection: None,
             morsel: None,
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
+    }
+
+    /// The same source, with the merge rule of the table.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = strategy;
+        self
     }
 
     /// The same source, skipping the files that cannot broadcast when `skip`.
@@ -115,6 +126,7 @@ impl FileSource for NetCDFSource {
             object_store,
             self.morsel.clone(),
             base_config.table_partition_cols().clone(),
+            Arc::clone(&self.type_widening),
         )))
     }
 
@@ -264,6 +276,8 @@ struct NetCDFOpener {
     /// The table's `PARTITIONED BY` columns, nd-encoded as the scan carries
     /// them. A file's values for them travel on its `PartitionedFile`.
     partition_fields: Vec<FieldRef>,
+    /// The merge rule of the table.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl NetCDFOpener {
@@ -280,6 +294,7 @@ impl NetCDFOpener {
         object_store: Arc<dyn object_store::ObjectStore>,
         morsel: Option<Arc<MorselSource>>,
         partition_fields: Vec<FieldRef>,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> Self {
         let read_metrics = ReadMetrics::new(&metrics, partition);
         let files = Arc::new(NetCDFFiles {
@@ -292,6 +307,7 @@ impl NetCDFOpener {
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
             partition_fields: partition_fields.clone(),
+            type_widening: Arc::clone(&type_widening),
         });
 
         Self {
@@ -307,6 +323,7 @@ impl NetCDFOpener {
             access,
             object_store,
             partition_fields,
+            type_widening,
         }
     }
 
@@ -332,6 +349,7 @@ impl NetCDFOpener {
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         partitions: FilePartitions,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
@@ -348,6 +366,7 @@ impl NetCDFOpener {
                 predicate,
                 partitions,
                 Some(&planning),
+                type_widening,
             )
             .await
         };
@@ -407,6 +426,8 @@ struct NetCDFFiles {
     metrics: ReadMetrics,
     /// The table's `PARTITIONED BY` columns. Each file brings its own values.
     partition_fields: Vec<FieldRef>,
+    /// The merge rule of the table.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl std::fmt::Debug for NetCDFFiles {
@@ -442,6 +463,7 @@ impl OpenFile for NetCDFFiles {
             self.predicate.clone(),
             FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
             Some(&self.metrics),
+            Arc::clone(&self.type_widening),
         )
         .await
     }
@@ -489,6 +511,7 @@ impl FileOpener for NetCDFOpener {
             metrics,
             self.predicate.clone(),
             partitions,
+            Arc::clone(&self.type_widening),
         )
         .boxed())
     }

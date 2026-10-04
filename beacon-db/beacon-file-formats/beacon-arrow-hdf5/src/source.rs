@@ -39,6 +39,7 @@ use datafusion::{
         metrics::ExecutionPlanMetricsSet,
     },
 };
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use futures::{stream::BoxStream, FutureExt};
 use object_store::{ObjectMeta, ObjectStore};
 
@@ -61,9 +62,12 @@ pub struct Hdf5Source {
     /// The scan's file queue, when it is planned morsel-driven. See
     /// [`morsel_scan`].
     morsel: Option<Arc<MorselSource>>,
+    /// The merge rule of the table. It decides how a value casts onto the table type.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl Hdf5Source {
+    /// A source that casts with the strict default merge rule.
     pub fn new(
         read_dimensions: Option<Vec<String>>,
         read_options: ReadOptions,
@@ -80,7 +84,14 @@ impl Hdf5Source {
             predicate: None,
             projection: None,
             morsel: None,
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
+    }
+
+    /// The same source, with the merge rule of the table.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = strategy;
+        self
     }
 
     /// The same source, skipping the files that cannot broadcast when `skip`.
@@ -119,6 +130,7 @@ impl FileSource for Hdf5Source {
             object_store,
             self.morsel.clone(),
             base_config.table_partition_cols().clone(),
+            Arc::clone(&self.type_widening),
         )))
     }
 
@@ -280,6 +292,8 @@ struct Hdf5Opener {
     /// The table's `PARTITIONED BY` columns, nd-encoded as the scan carries
     /// them. A file's values for them travel on its `PartitionedFile`.
     partition_fields: Vec<FieldRef>,
+    /// The merge rule of the table.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 /// How one HDF5 file becomes a planned [`FileRead`].
@@ -296,6 +310,8 @@ struct Hdf5Files {
     metrics: ReadMetrics,
     /// The table's `PARTITIONED BY` columns. Each file brings its own values.
     partition_fields: Vec<FieldRef>,
+    /// The merge rule of the table.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl std::fmt::Debug for Hdf5Files {
@@ -327,6 +343,7 @@ impl OpenFile for Hdf5Files {
             self.predicate.clone(),
             FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
             Some(&self.metrics),
+            Arc::clone(&self.type_widening),
         )
         .await
     }
@@ -347,6 +364,7 @@ impl Hdf5Opener {
         object_store: Arc<dyn ObjectStore>,
         morsel: Option<Arc<MorselSource>>,
         partition_fields: Vec<FieldRef>,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> Self {
         let read_metrics = ReadMetrics::new(&metrics, partition);
         let files = Arc::new(Hdf5Files {
@@ -359,6 +377,7 @@ impl Hdf5Opener {
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
             partition_fields: partition_fields.clone(),
+            type_widening: Arc::clone(&type_widening),
         });
 
         Self {
@@ -374,6 +393,7 @@ impl Hdf5Opener {
             partition,
             object_store,
             partition_fields,
+            type_widening,
         }
     }
 
@@ -400,6 +420,7 @@ impl Hdf5Opener {
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         partitions: FilePartitions,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
@@ -422,6 +443,7 @@ impl Hdf5Opener {
                 predicate,
                 partitions,
                 Some(&planning),
+                type_widening,
             )
             .await
         };
@@ -501,6 +523,7 @@ impl FileOpener for Hdf5Opener {
             metrics,
             self.predicate.clone(),
             partitions,
+            Arc::clone(&self.type_widening),
         )
         .boxed())
     }

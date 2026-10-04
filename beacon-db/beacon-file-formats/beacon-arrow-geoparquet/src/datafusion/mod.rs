@@ -3,7 +3,7 @@ use std::{any::Any, fmt::Debug, sync::Arc};
 use arrow::datatypes::SchemaRef;
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::type_widening::{TypeWideningOverrides, label_by_object, widening_for};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{ColumnStatistics, GetExt, Statistics, exec_datafusion_err},
@@ -63,9 +63,12 @@ impl FileFormatFactory for GeoParquetFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(GeoParquetFormat::new(self.options.clone())))
+        Ok(Arc::new(
+            GeoParquetFormat::new(self.options.clone())
+                .with_type_widening(TypeWideningOverrides::from_options(format_options)?),
+        ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
@@ -97,6 +100,14 @@ impl FileFormatFactoryExt for GeoParquetFormatFactory {
         )
     }
 
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        format
+            .as_any()
+            .downcast_ref::<GeoParquetFormat>()
+            .map(|format| format.type_widening)
+            .unwrap_or_default()
+    }
+
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
@@ -122,11 +133,22 @@ impl FileFormatFactoryExt for GeoParquetFormatFactory {
 #[derive(Debug, Clone)]
 pub struct GeoParquetFormat {
     pub options: GeoParquetOptions,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 impl GeoParquetFormat {
     pub fn new(options: GeoParquetOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            type_widening: TypeWideningOverrides::default(),
+        }
+    }
+
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
     }
 }
 
@@ -172,10 +194,10 @@ impl FileFormat for GeoParquetFormat {
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
 
-        // The rule of the session decides the result for a column that two
+        // The rule of the table decides the result for a column that two
         // files describe differently. Each schema names its file, so a refused
         // column names both files.
-        let super_schema = session_widening(state)
+        let super_schema = widening_for(state, &self.type_widening)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 exec_datafusion_err!("Failed to merge the schemas of the GeoParquet files: {}", e)
@@ -219,9 +241,10 @@ impl FileFormat for GeoParquetFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
+        let widening = widening_for(state, &self.type_widening);
         let source = GeoParquetSource::new(table_schema)
             .with_projection(projection)
-            .with_type_widening(Arc::clone(&session_widening(state).strategy));
+            .with_type_widening(Arc::clone(&widening.strategy));
 
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -815,6 +838,40 @@ mod tests {
 
         assert_eq!(paths, vec!["a.geoparquet", "nested/b.geoparquet"]);
         assert!(discovered.iter().all(|d| d.format == "geoparquet"));
+    }
+
+    /// The options of a table set its merge rule, and a bad value fails the table.
+    #[test]
+    fn the_table_options_set_the_merge_rule() {
+        use beacon_datafusion_ext::type_widening::{CastMode, TypeConflict};
+        use datafusion::prelude::SessionContext;
+
+        let options = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let state = SessionContext::new().state();
+        let factory = <GeoParquetFormatFactory as Default>::default();
+        let format = factory
+            .create(
+                &state,
+                &options(&[
+                    ("type_widening_on_conflict", "keep_first"),
+                    ("format.type_widening_cast", "strict"),
+                ]),
+            )
+            .unwrap();
+        let overrides = factory.type_widening_overrides(format.as_ref());
+        assert_eq!(overrides.on_conflict, Some(TypeConflict::KeepFirst));
+        assert_eq!(overrides.cast, Some(CastMode::Strict));
+
+        let error = factory
+            .create(&state, &options(&[("type_widening_cast", "loose")]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
     }
 
     #[tokio::test]

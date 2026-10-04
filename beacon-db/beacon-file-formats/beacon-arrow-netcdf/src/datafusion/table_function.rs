@@ -58,7 +58,8 @@ impl BeaconTableFunctionImpl for ReadNetCDFFunc {
         Some(
             "Reads NetCDF files from specified glob paths. The optional second argument lists \
              the dimensions to read. The optional third argument, a boolean, skips a file that \
-             does not fit that list instead of failing the query."
+             does not fit that list instead of failing the query. An optional last argument, \
+             a struct such as {'type_widening_cast': 'lenient'}, holds table options."
                 .to_string(),
         )
     }
@@ -92,11 +93,16 @@ impl ReadNetCDFFunc {
     /// netCDF format has a backend of its own, and it may be the Rust one, so a
     /// caller that has already resolved a reader has to name it rather than
     /// inherit whatever netCDF is set to.
+    ///
+    /// A trailing struct in `args` adds table options too. `extra_options` and
+    /// the positional arguments win over a key it repeats.
     pub fn call_with_options(
         &self,
         args: &[datafusion::prelude::Expr],
         extra_options: HashMap<String, String>,
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let (args, struct_options) =
+            beacon_common::table_function::split_options_arg(args, &self.name)?;
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
@@ -139,7 +145,8 @@ impl ReadNetCDFFunc {
         // Build the file format from the factory registered on the session, so
         // the table function shares the runtime's configured format and reader.
         // Per-call settings (read dimensions) are passed as table options.
-        let mut format_options: HashMap<String, String> = extra_options;
+        let mut format_options: HashMap<String, String> = struct_options;
+        format_options.extend(extra_options);
         if !dimensions.is_empty() {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));
         }

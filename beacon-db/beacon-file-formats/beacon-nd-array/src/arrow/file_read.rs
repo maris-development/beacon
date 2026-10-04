@@ -7,7 +7,7 @@ use crossbeam::queue::ArrayQueue;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_expr::PhysicalExpr;
 use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
-use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
+use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use datafusion::physical_expr_adapter::BatchAdapter;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
@@ -392,6 +392,11 @@ impl FileRead {
     /// values for them. They are in the file's path rather than in the file, so
     /// they are appended to its batches here — see [`FilePartitions`]. Pass
     /// [`FilePartitions::none`] for an unpartitioned table.
+    ///
+    /// `type_widening` is the rule of the table. It decides whether a value
+    /// that the table type cannot hold, such as text in a numeric array, reads
+    /// as null or is an error. Pass `DefaultArrowTypeWidening::new()` for the
+    /// strict default when no table gives a rule.
     pub async fn plan(
         dataset: AnyDataset,
         projected_schema: SchemaRef,
@@ -399,6 +404,7 @@ impl FileRead {
         predicate: Option<Arc<dyn PhysicalExpr>>,
         partitions: FilePartitions,
         metrics: Option<&ReadMetrics>,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> Result<Arc<Self>> {
         let dataset_schema: SchemaRef = Arc::new(
             crate::arrow::schema::any_dataset_to_arrow_schema(&dataset).map_err(|e| {
@@ -480,12 +486,9 @@ impl FileRead {
             let source_schema: SchemaRef = Arc::new(Schema::new(source_fields));
 
             let partition_columns = partitions.scalar_columns(&projected_schema)?;
-            // Every column here is nd-encoded, and an nd column casts leniently
-            // under every merge rule. The strict rule stands in for the one the
-            // session holds, because the adapter never asks it.
-            let adapter =
-                batch_adapter_factory(projected_schema, Arc::new(DefaultArrowTypeWidening::new()))
-                    .make_adapter(&source_schema)?;
+            // The rule of the table decides if an nd value that its type cannot hold reads null.
+            let adapter = batch_adapter_factory(projected_schema, type_widening)
+                .make_adapter(&source_schema)?;
             (
                 Output::Columns {
                     adapter: Arc::new(adapter),
@@ -697,6 +700,11 @@ mod tests {
     /// this is the shortest way to a real [`FileRead`] with a filled queue.
     fn no_columns() -> SchemaRef {
         Arc::new(Schema::empty())
+    }
+
+    /// The strict default rule.
+    fn strict() -> Arc<dyn ArrowTypeWideningStrategy> {
+        Arc::new(beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening::new())
     }
 
     /// A dataset of `rows` values on one dimension.
@@ -1223,6 +1231,7 @@ mod tests {
             None,
             FilePartitions::none(),
             None,
+            strict(),
         )
         .await
         .expect("a file without the column is planned, not rejected");
@@ -1268,12 +1277,57 @@ mod tests {
             None,
             FilePartitions::none(),
             None,
+            strict(),
         )
         .await
         .expect("a count is planned");
 
         assert!(planned.remaining() > 0, "a count has work to do");
         assert_eq!(drain_flat(planned.stream(None)).await, ROWS);
+    }
+
+    /// Text in a numeric nd array follows the cast of the table rule.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn text_in_a_numeric_array_follows_the_cast_of_the_rule() {
+        use arrow::datatypes::{DataType, Field};
+        use beacon_datafusion_ext::type_widening::{CastMode, DefaultArrowTypeWidening};
+
+        async fn read(rule: Arc<dyn ArrowTypeWideningStrategy>) -> Result<Vec<RecordBatch>> {
+            let text = NdArray::<String>::try_new_from_vec_in_mem(
+                vec!["1.5".to_string(), "abc".to_string()],
+                vec![2],
+                vec!["row".to_string()],
+                None,
+            )
+            .unwrap();
+            let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
+            arrays.insert("value".to_string(), Arc::new(text));
+            let dataset = AnyDataset::Regular(Dataset::new("text".to_string(), arrays).await);
+            let wanted: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+                &Schema::new(vec![Field::new("value", DataType::Float64, true)]),
+            ));
+            let planned =
+                FileRead::plan(dataset, wanted, 16, None, FilePartitions::none(), None, rule)
+                    .await?;
+            planned.stream(None).try_collect().await
+        }
+
+        let lenient = Arc::new(DefaultArrowTypeWidening::new().with_cast(CastMode::Lenient));
+        let batches = read(lenient).await.expect("a lenient rule reads 'abc' as null");
+        let mut nulls = 0;
+        let mut rows = 0;
+        for batch in &batches {
+            let flat = beacon_datafusion_ext::nd::decode_nd_record_batch(batch)
+                .unwrap()
+                .materialize()
+                .unwrap();
+            rows += flat.num_rows();
+            nulls += flat.column(0).null_count();
+        }
+        assert_eq!((rows, nulls), (2, 1), "'abc' reads null");
+
+        let error = read(strict()).await.expect_err("the strict rule refuses 'abc'");
+        assert!(error.to_string().to_lowercase().contains("abc"), "{error}");
     }
 
     /// More partitions than subsets is not an error. The surplus find the queue

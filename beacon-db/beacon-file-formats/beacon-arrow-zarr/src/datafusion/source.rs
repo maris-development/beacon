@@ -31,6 +31,7 @@ use datafusion::{
         metrics::ExecutionPlanMetricsSet,
     },
 };
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use futures::{FutureExt, stream::BoxStream};
 use object_store::ObjectStore;
 use zarrs::group::Group;
@@ -73,9 +74,12 @@ pub struct ZarrSource {
     /// The scan's group queue, when it is planned morsel-driven. See
     /// [`morsel_scan`].
     morsel: Option<Arc<MorselSource>>,
+    /// The merge rule of the table. It decides how a value casts onto the table type.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl ZarrSource {
+    /// A source that casts with the strict default merge rule.
     pub fn new(table_schema: TableSchema) -> Self {
         Self {
             schema_adapter_factory: None,
@@ -88,7 +92,14 @@ impl ZarrSource {
             projection: None,
             storage: None,
             morsel: None,
+            type_widening: Arc::new(DefaultArrowTypeWidening::new()),
         }
+    }
+
+    /// The same source, with the merge rule of the table.
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = strategy;
+        self
     }
 
     /// The same source, skipping the groups that cannot broadcast when `skip`.
@@ -150,6 +161,7 @@ impl FileSource for ZarrSource {
                 batch_size: self.batch_size,
                 predicate: self.predicate.clone(),
                 metrics: read_metrics.clone(),
+                type_widening: Arc::clone(&self.type_widening),
             }),
             morsel: self.morsel.clone(),
             storage,
@@ -160,6 +172,7 @@ impl FileSource for ZarrSource {
             skip_unbroadcastable: self.skip_unbroadcastable,
             read_metrics,
             partition,
+            type_widening: Arc::clone(&self.type_widening),
         }))
     }
 
@@ -313,6 +326,8 @@ struct ZarrOpener {
     morsel: Option<Arc<MorselSource>>,
     /// How one group is opened, for the queue to call.
     groups: Arc<dyn OpenFile>,
+    /// The merge rule of the table.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 /// How one Zarr group becomes a planned [`FileRead`].
@@ -327,6 +342,8 @@ struct ZarrGroups {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
+    /// The merge rule of the table.
+    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl std::fmt::Debug for ZarrGroups {
@@ -365,6 +382,7 @@ impl OpenFile for ZarrGroups {
             self.predicate.clone(),
             FilePartitions::none(),
             Some(&self.metrics),
+            Arc::clone(&self.type_widening),
         )
         .await
     }
@@ -418,6 +436,7 @@ impl ZarrOpener {
         batch_size: usize,
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
@@ -435,6 +454,7 @@ impl ZarrOpener {
                 predicate,
                 FilePartitions::none(),
                 Some(&planning),
+                type_widening,
             )
             .await
         };
@@ -479,6 +499,7 @@ impl FileOpener for ZarrOpener {
             self.batch_size,
             metrics,
             self.predicate.clone(),
+            Arc::clone(&self.type_widening),
         )
         .boxed())
     }

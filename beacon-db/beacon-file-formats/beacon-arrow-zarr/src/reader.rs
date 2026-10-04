@@ -33,11 +33,11 @@ pub use beacon_nd_array::dataset::{project_read_dimensions, project_read_dimensi
 /// repository session in the same way.
 ///
 /// `widening` decides the result for a column that two leaf groups describe
-/// differently. The caller passes the rule of the session. See
-/// [`session_widening`]. One store then merges by the rule that the stores of a
+/// differently. The caller passes the rule of the table. See
+/// [`widening_for`]. One store then merges by the rule that the stores of a
 /// table and the files of every other format use.
 ///
-/// [`session_widening`]: beacon_datafusion_ext::type_widening::session_widening
+/// [`widening_for`]: beacon_datafusion_ext::type_widening::widening_for
 pub async fn schema_from_group_path(
     storage: Arc<dyn AsyncReadableListableStorageTraits>,
     group_path: &str,

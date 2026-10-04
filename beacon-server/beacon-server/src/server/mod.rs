@@ -304,7 +304,7 @@ async fn build_runtime(
         builder = builder.with_nd_pipeline();
     }
     // The rule for every schema merge in this process.
-    builder = builder.with_type_widening(config.runtime.type_widening.clone());
+    builder = builder.with_type_widening_settings(config.runtime.type_widening);
     if config.auth.anonymous_enabled {
         builder = builder.with_anonymous_user(ANONYMOUS_USERNAME);
     }

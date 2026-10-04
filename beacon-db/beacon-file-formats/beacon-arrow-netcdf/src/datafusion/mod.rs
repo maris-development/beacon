@@ -6,7 +6,7 @@ use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::type_widening::{label_by_object, widening_for, TypeWideningOverrides};
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
@@ -198,13 +198,17 @@ impl FileFormatFactory for NetCDFFormatFactory {
         // statistics whatever it says.
         self.statistics_wanted(format_options)?;
         let use_rust_reader = self.uses_rust_reader(format_options)?;
+        let type_widening = TypeWideningOverrides::from_options(format_options)?;
 
-        Ok(Arc::new(self.build_format(
-            options,
-            // A query never computes statistics. See `create_for_analysis`.
-            false,
-            access_for(use_rust_reader),
-        )))
+        Ok(Arc::new(
+            self.build_format(
+                options,
+                // A query never computes statistics. See `create_for_analysis`.
+                false,
+                access_for(use_rust_reader),
+            )
+            .with_type_widening(type_widening),
+        ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
@@ -315,6 +319,14 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         self.get_ext()
     }
 
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        format
+            .as_any()
+            .downcast_ref::<NetcdfFormat>()
+            .map(|format| format.type_widening)
+            .unwrap_or_default()
+    }
+
     fn file_extensions(&self) -> Vec<String> {
         NETCDF_EXTENSIONS.map(String::from).to_vec()
     }
@@ -368,6 +380,8 @@ pub struct NetcdfFormat {
     output_dir: PathBuf,
     /// How this table reaches its files, and which reader opens them.
     pub access: FileAccess,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 impl NetcdfFormat {
@@ -378,7 +392,14 @@ impl NetcdfFormat {
             enable_statistics: false,
             output_dir: std::env::temp_dir(),
             access: FileAccess::default(),
+            type_widening: TypeWideningOverrides::default(),
         }
+    }
+
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
     }
 
     /// Set how this format reaches its files.
@@ -470,10 +491,10 @@ impl FileFormat for NetcdfFormat {
             // Return a default empty schema
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
-        // The rule of the session decides the result for a column that two
+        // The rule of the table decides the result for a column that two
         // files describe differently. Each schema names its file, so a refused
         // column names both files.
-        session_widening(state)
+        widening_for(state, &self.type_widening)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 exec_datafusion_err!(
@@ -538,7 +559,7 @@ impl FileFormat for NetcdfFormat {
 
     async fn create_physical_plan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
@@ -568,7 +589,10 @@ impl FileFormat for NetcdfFormat {
             table_schema,
         )
         .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
-        .with_projection(projection);
+        .with_projection(projection)
+        .with_type_widening(Arc::clone(
+            &widening_for(state, &self.type_widening).strategy,
+        ));
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -741,6 +765,25 @@ mod reader_backend_tests {
             .with_default_features()
             .build();
         SessionContext::new_with_state(state)
+    }
+
+    /// The options of a table set its merge rule, and a bad value is an error.
+    #[test]
+    fn the_table_options_set_the_merge_rule() {
+        use beacon_datafusion_ext::type_widening::TypeConflict;
+
+        let state = SessionContext::new().state();
+        let options = HashMap::from([(
+            "type_widening_on_conflict".to_string(),
+            "keep_first".to_string(),
+        )]);
+        let format = factory().create(&state, &options).unwrap();
+        let overrides = factory().type_widening_overrides(format.as_ref());
+        assert_eq!(overrides.on_conflict, Some(TypeConflict::KeepFirst));
+
+        let options = HashMap::from([("type_widening_cast".to_string(), "loose".to_string())]);
+        let error = factory().create(&state, &options).unwrap_err().to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
     }
 
     /// Register one bundled test file as a table read on `backend`.

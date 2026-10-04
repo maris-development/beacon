@@ -118,6 +118,64 @@ async fn read_csv_scans_filters_and_projects() {
     );
 }
 
+/// A struct as the last argument sets the type widening rule of one call.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_function_takes_its_type_widening_rule_from_a_struct() {
+    let rt = seeded("read-csv-widening").await;
+    write_file(&rt.datasets_dir().join("m/a.csv"), "v\n1\n2\n");
+    write_file(&rt.datasets_dir().join("m/b.csv"), "v\nabc\n");
+
+    let error = rt
+        .try_sql("SELECT count(v) FROM read_csv('m/*.csv')")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Incompatible types"), "{error}");
+
+    assert_eq!(
+        scalar_i64(
+            &rt.sql(
+                "SELECT count(v) FROM read_csv('m/*.csv', {'type_widening_on_conflict': 'keep_first'})"
+            )
+            .await
+        ),
+        2,
+        "'abc' reads null under the lenient cast"
+    );
+
+    let error = rt
+        .try_sql("SELECT * FROM read_csv('r/one.csv', {'type_widening_cast': 'loose'})")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("type_widening_cast"), "{error}");
+}
+
+/// `OPTIONS` sets the type widening rule of one table.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_table_takes_its_type_widening_rule_from_its_options() {
+    let rt = seeded("table-widening").await;
+    write_file(&rt.datasets_dir().join("m/a.csv"), "v\n1\n2\n");
+    write_file(&rt.datasets_dir().join("m/b.csv"), "v\nabc\n");
+
+    rt.sql(
+        "CREATE EXTERNAL TABLE mixed STORED AS CSV LOCATION 'm/*.csv' \
+         OPTIONS ('type_widening_on_conflict' 'keep_first')",
+    )
+    .await;
+    assert_eq!(scalar_i64(&rt.sql("SELECT count(v) FROM mixed").await), 2);
+
+    let error = rt
+        .try_sql(
+            "CREATE EXTERNAL TABLE refused STORED AS CSV LOCATION 'm/*.csv' \
+             OPTIONS ('type_widening_strategy' 'polars')",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("type_widening_strategy"), "{error}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn read_csv_glob_merges_matching_files() {
     let rt = seeded("read-csv-glob").await;
