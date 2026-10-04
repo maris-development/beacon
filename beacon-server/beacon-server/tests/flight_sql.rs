@@ -469,6 +469,218 @@ async fn attach_uses_a_stored_beacon_secret() {
     server.handle.abort();
 }
 
+/// A loopback remote with an `obs` table (`depth` 0 to 9), attached as `lake` by a local
+/// embedded database that also holds a one-row local table `one`.
+struct AttachedLake {
+    server: FlightHarness,
+    local: beacon_core::embedded::Database,
+    obs: String,
+}
+
+impl AttachedLake {
+    async fn new() -> Self {
+        use beacon_core::embedded::{Database, DbPath, OpenOptions};
+
+        let server = spawn_server(true).await;
+        let port = server.addr.port();
+        let runtime = server.harness.server.runtime();
+
+        let obs = format!("obs_{}", uuid::Uuid::new_v4().simple());
+        run_sql_rows(runtime, &format!("CREATE TABLE {obs} (depth BIGINT, val DOUBLE)")).await;
+        let rows = (0..10)
+            .map(|depth| format!("({depth}, {depth}.5)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        run_sql_rows(runtime, &format!("INSERT INTO {obs} VALUES {rows}")).await;
+
+        let local = Database::open(DbPath::Memory, OpenOptions::default())
+            .await
+            .expect("open local embedded database");
+        run_local(&local, &format!("ATTACH 'beacon://127.0.0.1:{port}' AS lake")).await;
+        run_local(&local, "CREATE TABLE one (k BIGINT)").await;
+        run_local(&local, "INSERT INTO one VALUES (1)").await;
+
+        Self { server, local, obs }
+    }
+
+    /// The fully qualified name of the attached remote table.
+    fn remote(&self) -> String {
+        format!("lake.public.{}", self.obs)
+    }
+
+    /// Run `sql` locally; fail with the query error when it does not run.
+    async fn rows(&self, sql: &str) -> Vec<arrow::array::RecordBatch> {
+        self.local
+            .sql(sql.to_string(), beacon_core::AuthIdentity::local())
+            .await
+            .unwrap_or_else(|error| panic!("`{sql}` should run: {error:#}"))
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap_or_else(|error| panic!("`{sql}` should stream: {error:#}"))
+    }
+
+    async fn row_count(&self, sql: &str) -> usize {
+        self.rows(sql).await.iter().map(|batch| batch.num_rows()).sum()
+    }
+
+    /// Run a `count(*)` query and return the count.
+    async fn count(&self, sql: &str) -> i64 {
+        let batches = self.rows(sql).await;
+        batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("count is Int64")
+            .value(0)
+    }
+
+    /// Run `sql` with a CSV output format and return the file contents.
+    async fn csv(&self, sql: &str) -> String {
+        use beacon_core::query_result::QueryOutput;
+
+        let mut query = beacon_core::query::Query::sql(sql.to_string());
+        query.output = Some(
+            serde_json::from_value(serde_json::json!({ "format": "csv" })).expect("valid output"),
+        );
+        let result = self
+            .local
+            .run_query(query, beacon_core::AuthIdentity::local())
+            .await
+            .unwrap_or_else(|error| panic!("`{sql}` with CSV output should run: {error:#}"));
+        match result.query_output {
+            QueryOutput::File(file) => {
+                std::fs::read_to_string(file.path()).expect("read the CSV output file")
+            }
+            QueryOutput::Stream(_) => panic!("an output format should yield a file"),
+        }
+    }
+
+    async fn drop(self) {
+        run_sql_rows(self.server.harness.server.runtime(), &format!("DROP TABLE {}", self.obs))
+            .await;
+        self.server.handle.abort();
+    }
+}
+
+/// A join with a local table must keep the filter on the remote table. The remote side
+/// becomes a federated scan below the join, and the filter above it must still apply.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filter_on_a_remote_table_holds_across_a_join_with_a_local_table() {
+    let lake = AttachedLake::new().await;
+    let remote = lake.remote();
+
+    assert_eq!(lake.count(&format!("SELECT count(*) FROM {remote} WHERE depth < 2")).await, 2);
+    assert_eq!(
+        lake.count(&format!("SELECT count(*) FROM {remote} o CROSS JOIN one")).await,
+        10,
+        "a remote scan with no columns must still count its rows"
+    );
+    assert_eq!(
+        lake.count(&format!(
+            "SELECT count(*) FROM {remote} o CROSS JOIN one WHERE o.depth < 2"
+        ))
+        .await,
+        2,
+        "a cross join with a one-row table must not change the filtered count"
+    );
+    assert_eq!(
+        lake.count(&format!(
+            "SELECT count(*) FROM {remote} o JOIN one ON one.k = 1 WHERE o.depth < 2"
+        ))
+        .await,
+        2,
+        "an inner join with a one-row table must not change the filtered count"
+    );
+    assert_eq!(
+        lake.row_count(&format!(
+            "SELECT o.depth, one.k FROM {remote} o CROSS JOIN one WHERE o.depth < 2"
+        ))
+        .await,
+        2
+    );
+
+    let subquery = format!(
+        "SELECT count(*) FROM (SELECT * FROM {remote} WHERE depth < 2) o CROSS JOIN one"
+    );
+    assert_eq!(lake.count(&subquery).await, 2);
+
+    // The filter goes to the remote with the scan, above the join and in a subquery.
+    for sql in [
+        format!("SELECT count(*) FROM {remote} o CROSS JOIN one WHERE o.depth < 2"),
+        format!("SELECT count(*) FROM {remote} o JOIN one ON one.k = 1 WHERE o.depth < 2"),
+        subquery,
+    ] {
+        let explain = lake.rows(&format!("EXPLAIN {sql}")).await;
+        let explain = arrow::util::pretty::pretty_format_batches(&explain).unwrap().to_string();
+        let remote_sql = explain
+            .lines()
+            .find(|line| line.contains("VirtualExecutionPlan"))
+            .unwrap_or_else(|| panic!("`{sql}` should scan the remote:\n{explain}"));
+        assert!(
+            remote_sql.contains("depth < 2"),
+            "the remote SQL for `{sql}` should hold the filter:\n{remote_sql}"
+        );
+    }
+
+    lake.drop().await;
+}
+
+/// A remote table read with no filter, aggregate or limit is a bare scan. It must still go
+/// to the remote, for all columns and for one column.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_scan_of_a_remote_table_returns_every_row() {
+    let lake = AttachedLake::new().await;
+    let remote = lake.remote();
+
+    assert_eq!(lake.row_count(&format!("SELECT * FROM {remote}")).await, 10);
+    assert_eq!(lake.row_count(&format!("SELECT depth FROM {remote}")).await, 10);
+    assert_eq!(lake.row_count(&format!("SELECT * FROM {remote} WHERE true")).await, 10);
+
+    lake.drop().await;
+}
+
+/// A remote result can go to a file and into a local table. `COPY`, `INSERT` and
+/// `CREATE TABLE AS` stay local, and only their query input goes to the remote.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remote_result_writes_to_a_file_and_to_a_local_table() {
+    let lake = AttachedLake::new().await;
+    let remote = lake.remote();
+
+    let csv = lake.csv(&format!("SELECT * FROM {remote} WHERE depth < 2")).await;
+    assert_eq!(csv.lines().count(), 3, "a header and two rows: {csv}");
+    let csv = lake.csv(&format!("SELECT * FROM {remote}")).await;
+    assert_eq!(csv.lines().count(), 11, "a header and ten rows: {csv}");
+
+    lake.rows(&format!("CREATE TABLE shallow AS SELECT * FROM {remote} WHERE depth < 3"))
+        .await;
+    assert_eq!(lake.count("SELECT count(*) FROM shallow").await, 3);
+
+    lake.rows(&format!("INSERT INTO shallow SELECT * FROM {remote} WHERE depth = 9"))
+        .await;
+    assert_eq!(lake.count("SELECT count(*) FROM shallow").await, 4);
+
+    lake.drop().await;
+}
+
+/// An outer filter on the alias of a filtered remote subquery must reach the remote as
+/// valid SQL.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_outer_filter_on_a_filtered_remote_subquery_runs() {
+    let lake = AttachedLake::new().await;
+    let remote = lake.remote();
+
+    let sql = format!(
+        "SELECT count(*) FROM (SELECT * FROM {remote} WHERE depth < 2) w WHERE w.depth < 1"
+    );
+    assert_eq!(lake.count(&sql).await, 1);
+    let csv = lake.csv(&sql).await;
+    assert_eq!(csv.lines().nth(1), Some("1"), "the count row: {csv}");
+
+    lake.drop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn handshake_execute_and_metadata_work() {
     let server = spawn_server(false).await;

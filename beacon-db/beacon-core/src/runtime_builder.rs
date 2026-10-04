@@ -886,11 +886,11 @@ fn build_session_state(
     // schema lookup per column, which is quadratic on a scan of 100k+ columns.
     let mut optimizer_rules: Vec<Arc<dyn OptimizerRule + Send + Sync>> =
         vec![Arc::new(OptimizeProjections::new())];
-    // This is DataFusion's default logical rule set with `FederationOptimizerRule`
+    // This is DataFusion's default logical rule set with `BeaconFederationRule`
     // inserted, so replacing the defaults with it is intentional: sub-plans rooted
     // at remote tables get pushed down. The matching `FederatedPlanner` lives in
     // `BeaconQueryPlanner`'s extension planners.
-    optimizer_rules.extend(datafusion_federation::default_optimizer_rules());
+    optimizer_rules.extend(beacon_datafusion_ext::remote::federation_optimizer_rules());
 
     let mut state_builder = SessionStateBuilder::new()
         .with_config(session_config)
