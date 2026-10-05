@@ -293,15 +293,21 @@ async fn granted_reader_lists_only_readable_tables_with_their_comments() {
     assert!(secret.get("columns").is_none(), "secret must not be described: {secret}");
 }
 
+/// `GET /api/table-extensions` stays for older clients: every table reads as a
+/// table without extensions.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_table_extensions_route_is_gone() {
-    let (router, _harness, _admin) = router_with(config(false)).await;
+async fn the_table_extensions_route_returns_no_extensions() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    commented_table(&router, &admin, "obs").await;
+    let get = |uri: &'static str| Request::builder().uri(uri).body(Body::empty()).unwrap();
 
-    let request = Request::builder()
-        .uri("/api/table-extensions?table_name=obs")
-        .body(Body::empty())
-        .unwrap();
-    let res = router.clone().oneshot(request).await.unwrap();
+    let res = router.clone().oneshot(get("/api/table-extensions?table_name=obs")).await.unwrap();
+    let status = res.status();
+    let body: Value = serde_json::from_slice(&to_bytes(res.into_body(), usize::MAX).await.unwrap())
+        .unwrap_or(Value::Null);
+    let missing = router.clone().oneshot(get("/api/table-extensions?table_name=nope")).await.unwrap();
 
-    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body, json!({}));
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }

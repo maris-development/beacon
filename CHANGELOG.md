@@ -36,8 +36,9 @@ tag. Releases before 2.0.0 are recorded in the
 ### Removed
 
 - **Breaking: table extensions are removed.** `SET EXTENSION`, `DROP EXTENSION`, `SHOW EXTENSIONS`,
-  the `mcp` and `preset` extensions, `PUT` and `DELETE /api/admin/table-extensions/{table}` and
-  `GET /api/table-extensions` no longer exist. Beacon ignores existing `extensions.json` files.
+  the `mcp` and `preset` extensions, and `PUT` and `DELETE /api/admin/table-extensions/{table}` no
+  longer exist. `GET /api/table-extensions` stays for older clients. It is deprecated and returns
+  `{}` for each table. Beacon ignores existing `extensions.json` files.
   Use `COMMENT ON` for descriptions, and a view for a preset:
   `CREATE VIEW obs_shallow AS SELECT * FROM obs WHERE depth <= 10`.
 
