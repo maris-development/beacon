@@ -43,6 +43,26 @@ fn filter_batch(
     batch_filter(&batch, predicate)
 }
 
+/// Apply the `filters` that a federated scan receives in [`SQLExecutor::execute`] to its stream.
+///
+/// `datafusion-federation` reports every filter from physical filter pushdown as handled, so
+/// DataFusion drops the `FilterExec` above the federated scan. Every executor must apply them.
+/// `schema` is the federated scan's schema, which the filters are bound to.
+pub fn apply_pushed_filters(
+    stream: SendableRecordBatchStream,
+    schema: SchemaRef,
+    filters: &[Arc<dyn PhysicalExpr>],
+) -> SendableRecordBatchStream {
+    let Some(predicate) = conjunction_opt(filters.iter().cloned()) else {
+        return stream;
+    };
+    let batch_schema = Arc::clone(&schema);
+    let filtered = stream.and_then(move |batch| {
+        futures::future::ready(filter_batch(batch, &batch_schema, &predicate))
+    });
+    Box::pin(RecordBatchStreamAdapter::new(schema, filtered))
+}
+
 /// Turn a remote `count(*)` batch into a batch with no columns and that many rows.
 fn rows_without_columns(counts: &RecordBatch, schema: &SchemaRef) -> DFResult<RecordBatch> {
     let counts = counts
@@ -107,8 +127,7 @@ impl SQLExecutor for BeaconFlightSqlExecutor {
         Arc::new(DefaultDialect {})
     }
 
-    /// `filters` come from physical filter pushdown. The federated scan reports them as
-    /// handled, so DataFusion drops the `FilterExec` above it. This stream must apply them.
+    /// `filters` come from physical filter pushdown. See [`apply_pushed_filters`].
     fn execute(
         &self,
         query: &str,
@@ -123,7 +142,6 @@ impl SQLExecutor for BeaconFlightSqlExecutor {
         } else {
             query.to_string()
         };
-        let predicate = conjunction_opt(filters.iter().cloned());
         let output_schema = Arc::clone(&schema);
 
         // Defer all async Flight work into the stream's first poll so `execute`
@@ -145,19 +163,15 @@ impl SQLExecutor for BeaconFlightSqlExecutor {
         })
         .try_flatten()
         .and_then(move |batch| {
-            let batch = if rows_only {
+            futures::future::ready(if rows_only {
                 rows_without_columns(&batch, &output_schema)
             } else {
                 Ok(batch)
-            };
-            let filtered = batch.and_then(|batch| match &predicate {
-                Some(predicate) => filter_batch(batch, &output_schema, predicate),
-                None => Ok(batch),
-            });
-            futures::future::ready(filtered)
+            })
         });
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        let stream = Box::pin(RecordBatchStreamAdapter::new(Arc::clone(&schema), stream));
+        Ok(apply_pushed_filters(stream, schema, filters))
     }
 
     async fn table_names(&self) -> DFResult<Vec<String>> {

@@ -2230,6 +2230,7 @@ dependencies = [
  "datafusion 53.1.0",
  "datafusion-federation",
  "datafusion-table-providers",
+ "futures",
  "odbc-api 24.1.1",
  "secrecy",
  "serde",

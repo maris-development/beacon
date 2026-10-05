@@ -137,6 +137,16 @@ The plan shows a federated scan node in place of a local table scan. Beacon push
 two tables on the **same** database connection down. A join between a database table and a local
 table runs locally. The same holds for a join across two different connections.
 
+A `WHERE` filter on the database table still goes to the database. Only the matching rows come back
+for the join:
+
+```sql
+SELECT o.id, c.name
+FROM orders o
+JOIN local_customers c ON o.customer_id = c.id
+WHERE o.status = 'shipped';
+```
+
 ## Schema handling
 
 Beacon reads the schema of the table from the database at creation time. It then pins the schema into
