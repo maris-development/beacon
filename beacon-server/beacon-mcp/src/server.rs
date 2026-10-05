@@ -12,26 +12,44 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer};
 
+use crate::catalog::Caller;
+use crate::guide::{GuideConfig, ServerAddress};
+
+/// Sent in `initialize`. Some clients hide or cut it, so `get_guide` holds the full text.
+const INSTRUCTIONS: &str = "Beacon is a SQL engine for scientific data. It reads NetCDF, Zarr, \
+    Parquet and other files in place. Call `get_guide` once: it explains how Beacon turns arrays \
+    into rows and how to get the data in a script. Call `list_tables` to find the tables, and \
+    `describe_table` before you write SQL for a table. `run_sql` is a read-only preview of 1000 \
+    rows or fewer. Use `export_query` for a large result. Put double quotes around a name with \
+    upper case or a dot, such as \"Temperature\" or \"temperature.units\".";
+
 /// MCP server backed by a beacon [`Runtime`]. Cloned per session by the
-/// transport; the runtime handle is shared.
+/// transport; the runtime handle and the guide settings are shared.
 #[derive(Clone)]
 pub struct BeaconMcpServer {
     runtime: Arc<Runtime>,
+    guide_config: Arc<GuideConfig>,
 }
 
 impl BeaconMcpServer {
-    pub fn new(runtime: Arc<Runtime>) -> Self {
-        Self { runtime }
+    /// Create a server.
+    ///
+    /// # Arguments
+    ///
+    /// * `runtime` - The runtime that runs every tool call.
+    /// * `guide_config` - The server settings that `get_guide` shows.
+    pub fn new(runtime: Arc<Runtime>, guide_config: Arc<GuideConfig>) -> Self {
+        Self {
+            runtime,
+            guide_config,
+        }
     }
 }
 
 impl ServerHandler for BeaconMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Beacon server. Call `list_tables` to discover tables and what they hold, \
-             `describe_table` for a table's columns and what each one means, `run_sql` \
-             for a read-only SQL preview (SELECT only), and `export_query` for large results.",
-        )
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(INSTRUCTIONS)
     }
 
     async fn list_tools(
@@ -48,8 +66,14 @@ impl ServerHandler for BeaconMcpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let args = request.arguments.unwrap_or_default();
-        let identity = identity_from_context(&context);
-        match crate::catalog::dispatch(&self.runtime, request.name.as_ref(), args, identity).await {
+        let parts = context.extensions.get::<http::request::Parts>();
+        let caller = Caller {
+            identity: identity_from_parts(parts),
+            address: parts.and_then(ServerAddress::from_parts),
+        };
+        let name = request.name.as_ref();
+        match crate::catalog::dispatch(&self.runtime, &self.guide_config, name, args, caller).await
+        {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             // Surface tool failures as an error result (not a protocol error) so
             // the model can read and react to the message.
@@ -67,10 +91,8 @@ impl ServerHandler for BeaconMcpServer {
 /// `is_super_user` cleared, so the query planner rejects any DDL/DML regardless
 /// of the caller's privileges. The caller's `roles` are preserved so per-user
 /// read grants (RBAC) still apply.
-fn identity_from_context(context: &RequestContext<RoleServer>) -> AuthIdentity {
-    let mut identity = context
-        .extensions
-        .get::<http::request::Parts>()
+fn identity_from_parts(parts: Option<&http::request::Parts>) -> AuthIdentity {
+    let mut identity = parts
         .and_then(|parts| parts.extensions.get::<AuthIdentity>().cloned())
         .unwrap_or_else(AuthIdentity::empty);
     identity.is_super_user = false;

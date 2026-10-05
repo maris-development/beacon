@@ -1,7 +1,7 @@
 //! The MCP tool catalog and the dispatch of tool calls.
 //!
-//! The tool set is fixed: `list_tables`, `describe_table`, `run_sql` and
-//! `export_query`. A table needs no MCP configuration. The agent sees every table
+//! The tool set is fixed: `get_guide`, `list_tables`, `describe_table`, `run_sql`
+//! and `export_query`. A table needs no MCP configuration. The agent sees every table
 //! that the caller may read, and it learns what each table and column means from
 //! their comments (`COMMENT ON`), which arrive as Arrow schema metadata.
 
@@ -15,7 +15,14 @@ use beacon_core::{AuthIdentity, TableReference};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
+use crate::guide::{self, GuideConfig, ServerAddress};
 use crate::result::run_sql_to_json;
+
+/// The caller of a tool, and the address at which it reaches this server.
+pub struct Caller {
+    pub identity: AuthIdentity,
+    pub address: Option<ServerAddress>,
+}
 
 /// The tables in beacon's own schema that `identity` is entitled to see, sorted.
 ///
@@ -69,6 +76,7 @@ async fn table_schema(
 /// The fixed tool list.
 pub fn tools() -> Vec<Tool> {
     vec![
+        get_guide_tool(),
         list_tables_tool(),
         describe_table_tool(),
         run_sql_tool(),
@@ -79,11 +87,14 @@ pub fn tools() -> Vec<Tool> {
 /// Route a tool call to its handler.
 pub async fn dispatch(
     runtime: &Arc<Runtime>,
+    guide_config: &GuideConfig,
     name: &str,
     args: Map<String, Value>,
-    identity: AuthIdentity,
+    caller: Caller,
 ) -> anyhow::Result<String> {
+    let Caller { identity, address } = caller;
     match name {
+        "get_guide" => Ok(guide::render(guide_config, address.as_ref())),
         "list_tables" => list_tables_json(runtime, &identity).await,
         "describe_table" => describe_table_json(runtime, &args, &identity).await,
         "run_sql" => {
@@ -93,7 +104,9 @@ pub async fn dispatch(
                 .ok_or_else(|| anyhow::anyhow!("missing required 'sql' argument"))?;
             run_sql_to_json(runtime, sql.to_string(), identity).await
         }
-        "export_query" => export_query_recipe(&args),
+        "export_query" => {
+            export_query_recipe(&args, &guide::beacon_url(guide_config, address.as_ref()))
+        }
         other => anyhow::bail!("unknown tool '{other}'"),
     }
 }
@@ -112,6 +125,16 @@ fn object_schema(props: Value, required: &[&str]) -> Map<String, Value> {
 /// clients know it never mutates state. Every beacon MCP tool is read-only.
 fn read_only(tool: Tool) -> Tool {
     tool.with_annotations(ToolAnnotations::new().read_only(true))
+}
+
+fn get_guide_tool() -> Tool {
+    read_only(Tool::new(
+        "get_guide",
+        "Return the guide of this Beacon server: how Beacon turns files and arrays into tables, \
+         how to write a query, and how to get the data in a script (HTTP, Python). Call it once \
+         before your first query.",
+        object_schema(json!({}), &[]),
+    ))
 }
 
 fn list_tables_tool() -> Tool {
@@ -174,7 +197,7 @@ fn export_query_tool() -> Tool {
 /// model-context text, so we never stream the (potentially huge) file through the
 /// model: instead we return the exact `/api/query` request and a Python snippet
 /// the agent can drop into a script, which fetches the Parquet/Arrow/CSV directly.
-fn export_query_recipe(args: &Map<String, Value>) -> anyhow::Result<String> {
+fn export_query_recipe(args: &Map<String, Value>, beacon_url: &str) -> anyhow::Result<String> {
     let sql = args
         .get("sql")
         .and_then(Value::as_str)
@@ -205,7 +228,7 @@ fn export_query_recipe(args: &Map<String, Value>) -> anyhow::Result<String> {
     };
     let python = [
         imports.to_string(),
-        "BEACON_URL = \"http://localhost:5001\"  # your beacon host".to_string(),
+        format!("BEACON_URL = \"{beacon_url}\""),
         "AUTH = \"Bearer <token>\"  # or \"Basic <base64 user:pass>\"; omit header if anonymous".to_string(),
         format!(
             "resp = requests.post(f\"{{BEACON_URL}}/api/query\", headers={{\"Authorization\": AUTH}}, json={body_py})"
@@ -217,7 +240,7 @@ fn export_query_recipe(args: &Map<String, Value>) -> anyhow::Result<String> {
     .join("\n");
 
     let recipe = json!({
-        "note": "This does not run the query. POST `request.body` to <BEACON_URL>/api/query; the response body IS the file. Send the same Authorization you use for MCP (Basic/Bearer), or omit it for anonymous access.",
+        "note": format!("This does not run the query. POST `request.body` to {beacon_url}/api/query; the response body IS the file. Send the same Authorization you use for MCP (Basic/Bearer), or omit it for anonymous access."),
         "format": format,
         "request": {
             "method": "POST",
@@ -304,20 +327,21 @@ mod tests {
         let mut args = Map::new();
         args.insert("sql".into(), Value::String("SELECT * FROM obs".into()));
         args.insert("format".into(), Value::String("parquet".into()));
-        let out = export_query_recipe(&args).unwrap();
+        let out = export_query_recipe(&args, "https://beacon.example.org").unwrap();
         assert!(out.contains("/api/query"), "recipe should reference the query endpoint");
+        assert!(out.contains(r#"BEACON_URL = \"https://beacon.example.org\""#), "{out}");
         assert!(out.contains("read_parquet"), "parquet snippet should use read_parquet");
         assert!(out.contains("\"format\": \"parquet\""));
 
         // WITH (CTE) is allowed; default format is parquet.
         let mut cte = Map::new();
         cte.insert("sql".into(), Value::String("WITH x AS (SELECT 1) SELECT * FROM x".into()));
-        assert!(export_query_recipe(&cte).unwrap().contains("read_parquet"));
+        assert!(export_query_recipe(&cte, "http://localhost").unwrap().contains("read_parquet"));
 
         // Non-SELECT is rejected (MCP is read-only).
         let mut bad = Map::new();
         bad.insert("sql".into(), Value::String("DELETE FROM obs".into()));
-        assert!(export_query_recipe(&bad).is_err());
+        assert!(export_query_recipe(&bad, "http://localhost").is_err());
     }
 
     #[test]
@@ -325,7 +349,10 @@ mod tests {
         let tools = tools();
 
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
-        assert_eq!(names, ["list_tables", "describe_table", "run_sql", "export_query"]);
+        assert_eq!(
+            names,
+            ["get_guide", "list_tables", "describe_table", "run_sql", "export_query"]
+        );
         for tool in &tools {
             let hint = tool.annotations.as_ref().and_then(|a| a.read_only_hint);
             assert_eq!(hint, Some(true), "{} must be read-only", tool.name);
