@@ -4,7 +4,7 @@
 //! - `/api/query` (SQL + JSON, stream and file output, the `sql.enable` gate),
 //! - `/api/parse-query`, `/api/query/available-columns`,
 //! - the table-discovery endpoints (`/api/tables`, `/api/catalogs`,
-//!   `/api/tables-with-schema`, `/api/table-schema`, `/api/table-extensions`,
+//!   `/api/tables-with-schema`, `/api/table-schema`,
 //!   `/api/default-table[-schema]`),
 //! - the dataset-discovery endpoints (`/api/datasets`, `/api/list-datasets`,
 //!   `/api/dataset-schema`, `/api/total-datasets`).
@@ -566,8 +566,26 @@ async fn table_discovery_endpoints_reflect_a_created_table() {
     // Unknown table → 404.
     let missing = send(&router, get("/api/table-schema?table_name=nope", None)).await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
-    // (`/api/table-extensions` reads via `SHOW EXTENSIONS`, which is super-user
-    // gated, so it is exercised with admin auth in `admin_endpoints_http`.)
+}
+
+/// `/api/table-schema` carries the comments as Arrow schema and field metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_carries_the_comments() {
+    let (router, harness, _cfg) = app(config(false)).await;
+    seed(harness.server.runtime(), "CREATE TABLE obs (id BIGINT, name VARCHAR)").await;
+    seed(harness.server.runtime(), "COMMENT ON TABLE obs IS 'observations'").await;
+    seed(harness.server.runtime(), "COMMENT ON COLUMN obs.name IS 'platform name'").await;
+
+    let schema = json(&send(&router, get("/api/table-schema?table_name=obs", None)).await.body);
+
+    assert_eq!(schema["metadata"]["comment"], "observations", "{schema}");
+    let name = schema["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["name"] == "name")
+        .expect("name field");
+    assert_eq!(name["metadata"]["comment"], "platform name", "{schema}");
 }
 
 /// The catalog listing is per-caller: the super-user browses the whole

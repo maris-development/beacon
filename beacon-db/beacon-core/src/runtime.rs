@@ -19,8 +19,8 @@ use crate::{
 /// Beacon's single execution layer.
 ///
 /// The interface is deliberately narrow: authenticate a caller, then run a query.
-/// Most of what a consumer wants to know — extensions, crawlers, the tables in a
-/// schema — is reachable as SQL (`SHOW EXTENSIONS`, `SHOW CRAWLERS`, a scan), so
+/// Most of what a consumer wants to know — comments, crawlers, the tables in a
+/// schema — is reachable as SQL (`beacon.system.comments`, `SHOW CRAWLERS`, a scan), so
 /// they ask for it in a query and map the resulting `RecordBatch`es into their
 /// own types rather than calling a typed accessor per thing.
 ///
@@ -334,8 +334,12 @@ impl Runtime {
     /// whole read path to resolve, and for an N-dimensional table whose variables
     /// cannot be broadcast onto a common shape that fails — so a zero-row query
     /// errors on a table whose schema is perfectly well defined. Asking the
-    /// provider skips planning entirely, costs no I/O, and answers for every table
+    /// provider skips planning entirely, reads no data, and answers for every table
     /// a scan could not.
+    ///
+    /// The schema carries the table's comments (`COMMENT ON`) as `comment`
+    /// metadata; see [`TableComments::apply`](crate::comments::TableComments::apply).
+    /// To get them, Beacon reads the small `comments.json` sidecar of the table.
     ///
     /// Authorization matches the read path in
     /// [`authorize_logical_plan`](crate::statement_plan::authorize_logical_plan):
@@ -398,29 +402,14 @@ impl Runtime {
             )
             .await?;
         }
-        Ok(provider.schema())
-    }
-
-    /// A registered table's extensions (`mcp`, `preset`), for any caller who may
-    /// read the table.
-    ///
-    /// `SHOW EXTENSIONS` stays super-user only, like every beacon statement. A
-    /// transport that serves a regular caller, such as the MCP server, reads the
-    /// extensions here instead. The gate is the one of [`Self::table_arrow_schema`]:
-    /// extensions describe the table, so they need the same access as its schema.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the table does not resolve, when `identity` may not
-    /// read it, or when the stored extensions are not valid.
-    pub async fn table_extensions(
-        &self,
-        table: impl Into<datafusion::sql::TableReference>,
-        identity: &beacon_auth::AuthIdentity,
-    ) -> anyhow::Result<crate::extensions::TableExtensions> {
-        let table: datafusion::sql::TableReference = table.into();
-        self.table_arrow_schema(table.clone(), identity).await?;
-        crate::extensions::get_table_extensions(&self.session_ctx, &table.to_string()).await
+        // Unreadable comments must not hide the schema; `COMMENT ON` reports the error.
+        let comments = crate::comments::load_comments(&self.session_ctx, &table)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%table, %error, "ignored unreadable table comments");
+                crate::comments::TableComments::default()
+            });
+        Ok(Arc::new(comments.apply(&provider.schema())))
     }
 
     /// The catalog and schema an unqualified table name resolves against.
@@ -698,15 +687,6 @@ impl Runtime {
             BeaconStatement::ShowCrawlers => Ok(crate::statement_plan::show_crawlers_plan()),
             BeaconStatement::AnalyzeFiles(statement) => {
                 Ok(crate::statement_plan::analyze_files_plan(statement))
-            }
-            BeaconStatement::SetExtension(statement) => {
-                Ok(crate::statement_plan::set_extension_plan(statement))
-            }
-            BeaconStatement::DropExtension(statement) => {
-                Ok(crate::statement_plan::drop_extension_plan(statement))
-            }
-            BeaconStatement::ShowExtensions(statement) => {
-                Ok(crate::statement_plan::show_extensions_plan(statement))
             }
             BeaconStatement::CreateIndex(statement) => {
                 Ok(crate::statement_plan::create_index_plan(statement))
@@ -993,76 +973,6 @@ mod client_query_tests {
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 2, "json query should return the two inserted rows");
         assert_eq!(batches[0].num_columns(), 2);
-    }
-
-    /// `SET EXTENSION` / `SHOW EXTENSIONS` / `DROP EXTENSION` round-trip end to
-    /// end, and an extension referencing a missing column is rejected.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn table_extensions_sql_round_trip() {
-        let rt = test_runtime().await;
-        let runtime = &rt.runtime;
-
-        run_sql(runtime, "CREATE TABLE ext (lat BIGINT, depth BIGINT)").await;
-
-        // `SHOW EXTENSIONS` is the only way to read extensions back — there is no
-        // typed accessor on the runtime.
-        async fn show_extensions(runtime: &Runtime) -> serde_json::Value {
-            let batches = runtime
-                .run_query(
-                    crate::query::Query::sql("SHOW EXTENSIONS FOR ext".to_string()),
-                    beacon_auth::AuthIdentity::system(),
-                )
-                .await
-                .expect("show extensions should run")
-                .into_record_stream()
-                .expect("streamed result")
-                .try_collect::<Vec<_>>()
-                .await
-                .expect("stream should drain");
-            let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-            assert_eq!(rows, 1, "SHOW EXTENSIONS returns one row");
-            let json = batches[0]
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .expect("extensions column is Utf8")
-                .value(0);
-            serde_json::from_str(json).expect("extensions column should be JSON")
-        }
-
-        run_sql(
-            runtime,
-            "SET EXTENSION 'preset' FOR ext TO '{\"presets\":[{\"name\":\"shallow\",\"filters\":[{\"column\":\"depth\",\"op\":\"<=\",\"value\":10}]}]}'",
-        )
-        .await;
-
-        let extensions = show_extensions(runtime).await;
-        assert_eq!(
-            extensions
-                .pointer("/preset/presets/0/name")
-                .and_then(|name| name.as_str()),
-            Some("shallow"),
-            "SHOW output should include the preset: {extensions}"
-        );
-
-        // An extension over a non-existent column is rejected by validation.
-        let rejected = try_run_sql(
-            runtime,
-            "SET EXTENSION 'preset' FOR ext TO '{\"presets\":[{\"name\":\"x\",\"filters\":[{\"column\":\"ghost\",\"op\":\"=\",\"value\":1}]}]}'",
-        )
-        .await;
-        assert!(
-            rejected.is_err(),
-            "preset over a missing column should be rejected"
-        );
-
-        // DROP removes it; the document becomes empty.
-        run_sql(runtime, "DROP EXTENSION 'preset' FOR ext").await;
-        let extensions = show_extensions(runtime).await;
-        assert!(
-            extensions.get("preset").is_none(),
-            "dropping the only extension leaves an empty document, got: {extensions}"
-        );
     }
 
     /// A query with an `output` format is written to a file and returned as a

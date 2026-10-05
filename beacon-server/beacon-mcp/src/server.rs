@@ -28,24 +28,18 @@ impl BeaconMcpServer {
 impl ServerHandler for BeaconMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Beacon server. Call `list_tables` to discover tables, \
-             `describe_table` for a table's schema and available presets, the \
-             per-table tools to query curated datasets (optionally via a named \
-             preset), and `run_sql` for read-only SQL (SELECT only).",
+            "Beacon server. Call `list_tables` to discover tables and what they hold, \
+             `describe_table` for a table's columns and what each one means, `run_sql` \
+             for a read-only SQL preview (SELECT only), and `export_query` for large results.",
         )
     }
 
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        // The catalog is now built with SQL, so listing tools runs as the caller
-        // rather than with implicit full access.
-        let tools = crate::catalog::build_tools(&self.runtime, identity_from_context(&context))
-            .await
-            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
-        Ok(ListToolsResult::with_all_items(tools))
+        Ok(ListToolsResult::with_all_items(crate::catalog::tools()))
     }
 
     async fn call_tool(

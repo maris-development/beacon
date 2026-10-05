@@ -10,6 +10,15 @@ tag. Releases before 2.0.0 are recorded in the
 
 ## [Unreleased]
 
+### Added
+
+- **Table and column comments.** `COMMENT ON TABLE t IS '...'` and `COMMENT ON COLUMN t.c IS '...'`
+  store a free-text comment. `IS NULL` deletes it. Beacon puts the comment into the Arrow schema
+  under the metadata key `comment`, so `/api/table-schema` and Flight SQL show it.
+  `beacon.system.comments` lists every comment. `GET`, `PUT` and `DELETE
+  /api/admin/table-comments/{table}` manage the comments of one table. A comment follows `ALTER
+  TABLE ... RENAME COLUMN` and `DROP COLUMN`, and `DROP TABLE` deletes it.
+
 ### Changed
 
 - **Breaking: `geo.lon` and `geo.lat` of a GeoTIFF are pixel centers.** For a PixelIsArea file,
@@ -20,6 +29,17 @@ tag. Releases before 2.0.0 are recorded in the
   and a filter on these columns can select other pixels. Data that you copied from a TIFF before
   this change keeps the corner values.
   ([#525](https://github.com/maris-development/beacon/issues/525))
+- **The MCP server has four fixed tools.** It no longer makes one tool for each table. An agent sees
+  every table that its identity can read. `list_tables` and `describe_table` show the table and
+  column comments.
+
+### Removed
+
+- **Breaking: table extensions are removed.** `SET EXTENSION`, `DROP EXTENSION`, `SHOW EXTENSIONS`,
+  the `mcp` and `preset` extensions, `PUT` and `DELETE /api/admin/table-extensions/{table}` and
+  `GET /api/table-extensions` no longer exist. Beacon ignores existing `extensions.json` files.
+  Use `COMMENT ON` for descriptions, and a view for a preset:
+  `CREATE VIEW obs_shallow AS SELECT * FROM obs WHERE depth <= 10`.
 
 ### Fixed
 

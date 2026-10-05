@@ -1,9 +1,8 @@
 //! HTTP integration tests for the MCP endpoint (`/mcp`), driven through the real
 //! router with `tower::ServiceExt::oneshot`:
 //! - the `Host` check: loopback always, plus `BEACON_MCP_ALLOWED_HOSTS`,
-//! - a table with an enabled `mcp` extension becomes a tool for a caller who is
-//!   not the super-user (anonymous, and a granted reader under enforcement),
-//! - `GET /api/table-extensions` answers the same callers.
+//! - the fixed tool list, and the table and column comments that `list_tables`
+//!   and `describe_table` show to a caller who is not the super-user.
 
 mod common;
 
@@ -152,24 +151,38 @@ async fn admin_sql(router: &Router, admin: &str, sql: &str) {
     );
 }
 
-/// Create the managed table `name` and give it an enabled `mcp` extension.
-async fn table_with_mcp(router: &Router, admin: &str, name: &str) {
-    admin_sql(
-        router,
-        admin,
-        &format!("CREATE TABLE {name} (id BIGINT, depth DOUBLE)"),
-    )
-    .await;
-    let extension = json!({
-        "enabled": true,
-        "exposed_columns": [{"name": "depth", "description": "depth in meters"}]
+
+/// Call the tool `name` and parse its text result as JSON. An error text that is
+/// not JSON comes back as a JSON string.
+async fn call_tool(router: &Router, auth: Option<&str>, name: &str, arguments: Value) -> Value {
+    let (status, session) = initialize(router, "localhost", auth).await;
+    assert_eq!(status, StatusCode::OK);
+    let call = json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
     });
-    admin_sql(
-        router,
-        admin,
-        &format!("SET EXTENSION 'mcp' FOR {name} TO '{extension}'"),
-    )
-    .await;
+    let res = router
+        .clone()
+        .oneshot(mcp_request("localhost", session.as_deref(), auth, call))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let reply = read_response(res.into_body(), 3).await;
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no text content in: {reply}"));
+    serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
+}
+
+/// Create the managed table `name` with a table comment and a column comment.
+async fn commented_table(router: &Router, admin: &str, name: &str) {
+    for sql in [
+        format!("CREATE TABLE {name} (id BIGINT, depth DOUBLE)"),
+        format!("COMMENT ON TABLE {name} IS 'about {name}'"),
+        format!("COMMENT ON COLUMN {name}.depth IS 'depth in meters'"),
+    ] {
+        admin_sql(router, admin, &sql).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -219,48 +232,76 @@ async fn mcp_accepts_every_host_with_a_wildcard() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn anonymous_caller_gets_a_tool_for_a_table_with_an_mcp_extension() {
+async fn tools_list_is_the_four_generic_tools() {
     let (router, _harness, admin) = router_with(config(false)).await;
-    table_with_mcp(&router, &admin, "obs").await;
+    commented_table(&router, &admin, "obs").await;
 
     let tools = tool_names(&router, None).await;
 
-    assert!(tools.contains(&"query_obs".to_string()), "tools: {tools:?}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn granted_reader_gets_only_the_tools_of_readable_tables() {
-    let (router, _harness, admin) = router_with(config(true)).await;
-    table_with_mcp(&router, &admin, "obs").await;
-    table_with_mcp(&router, &admin, "secret").await;
-    admin_sql(&router, &admin, "CREATE USER alice WITH PASSWORD 'pw'").await;
-    admin_sql(&router, &admin, "CREATE ROLE reader").await;
-    admin_sql(&router, &admin, "GRANT SELECT ON TABLE obs TO ROLE reader").await;
-    admin_sql(&router, &admin, "GRANT ROLE reader TO USER alice").await;
-
-    let tools = tool_names(&router, Some(&basic("alice", "pw"))).await;
-
-    assert!(tools.contains(&"query_obs".to_string()), "tools: {tools:?}");
-    assert!(
-        !tools.contains(&"query_secret".to_string()),
-        "tools: {tools:?}"
+    assert_eq!(
+        tools,
+        ["list_tables", "describe_table", "run_sql", "export_query"],
+        "a table adds no tool of its own"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn anonymous_caller_reads_table_extensions_over_rest() {
+async fn describe_table_shows_the_comments() {
     let (router, _harness, admin) = router_with(config(false)).await;
-    table_with_mcp(&router, &admin, "obs").await;
+    commented_table(&router, &admin, "obs").await;
+
+    let described = call_tool(&router, None, "describe_table", json!({"table_name": "obs"})).await;
+
+    assert_eq!(described["description"], "about obs", "{described}");
+    let columns = described["columns"].as_array().expect("columns");
+    let depth = columns
+        .iter()
+        .find(|column| column["name"] == "depth")
+        .expect("depth column");
+    let id = columns
+        .iter()
+        .find(|column| column["name"] == "id")
+        .expect("id column");
+    assert_eq!(depth["description"], "depth in meters", "{described}");
+    assert_eq!(id["description"], Value::Null, "{described}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn granted_reader_lists_only_readable_tables_with_their_comments() {
+    let (router, _harness, admin) = router_with(config(true)).await;
+    commented_table(&router, &admin, "obs").await;
+    commented_table(&router, &admin, "secret").await;
+    for sql in [
+        "CREATE USER alice WITH PASSWORD 'pw'",
+        "CREATE ROLE reader",
+        "GRANT SELECT ON TABLE obs TO ROLE reader",
+        "GRANT ROLE reader TO USER alice",
+    ] {
+        admin_sql(&router, &admin, sql).await;
+    }
+    let alice = basic("alice", "pw");
+
+    let listed = call_tool(&router, Some(&alice), "list_tables", json!({})).await;
+    let secret = call_tool(&router, Some(&alice), "describe_table", json!({"table_name": "secret"}))
+        .await;
+
+    assert_eq!(
+        listed,
+        json!([{"name": "obs", "description": "about obs"}]),
+        "an ungranted table must not show"
+    );
+    assert!(secret.get("columns").is_none(), "secret must not be described: {secret}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_table_extensions_route_is_gone() {
+    let (router, _harness, _admin) = router_with(config(false)).await;
 
     let request = Request::builder()
         .uri("/api/table-extensions?table_name=obs")
         .body(Body::empty())
         .unwrap();
     let res = router.clone().oneshot(request).await.unwrap();
-    let status = res.status();
-    let body: Value = serde_json::from_slice(&to_bytes(res.into_body(), usize::MAX).await.unwrap())
-        .unwrap_or(Value::Null);
 
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["mcp"]["enabled"], true, "body: {body}");
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

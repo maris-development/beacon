@@ -214,19 +214,21 @@ async fn a_materialized_view_keeps_one_name_over_a_restart() {
     assert_missing(rt.try_sql("SELECT * FROM myview").await, "myview");
 }
 
-/// The table-extension statements share the lookup that the admin `table-config`
-/// endpoint uses, and it lowercased the name too.
+/// `COMMENT ON` reaches a mixed-case table and column, and never a lowercased one.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_extension_statements_reach_a_mixed_case_table() {
-    let rt = runtime("case-extensions").await;
+async fn comment_on_reaches_a_mixed_case_table() {
+    let rt = runtime("case-comments").await;
     write_obs(&rt);
     rt.sql("CREATE EXTERNAL TABLE MyTable STORED AS CSV LOCATION 'obs.csv'")
         .await;
 
-    rt.sql("SET EXTENSION 'preset' FOR MyTable TO '{\"presets\":[]}'")
+    rt.sql("COMMENT ON TABLE MyTable IS 'observations'").await;
+    rt.sql("COMMENT ON COLUMN MyTable.Depth IS 'meters'").await;
+    let rows = rt
+        .sql("SELECT table_name, column_name FROM beacon.system.comments")
         .await;
-    assert_eq!(total_rows(&rt.sql("SHOW EXTENSIONS FOR MyTable").await), 1);
 
-    rt.sql("DROP EXTENSION 'preset' FOR MyTable").await;
-    assert!(rt.try_sql("SHOW EXTENSIONS FOR mytable").await.is_err());
+    assert_eq!(total_rows(&rows), 2);
+    assert_eq!(column_strings(&rows, 0), vec!["MyTable", "MyTable"]);
+    assert!(rt.try_sql("COMMENT ON TABLE mytable IS 'x'").await.is_err());
 }

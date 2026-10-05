@@ -288,7 +288,7 @@ export class BeaconClient {
    * @deprecated Table configuration is no longer served: a table's stored
    * definition is engine bookkeeping, not an API contract. The endpoint is still
    * routed (admin-only) and answers `{ message }` explaining as much. Use
-   * `tableSchema()` for columns and `SHOW EXTENSIONS FOR <table>` for extensions.
+   * `tableSchema()` for columns and their comments.
    */
   tableConfig<T = unknown>(tableName: string): Promise<T> {
     return this.http.fetchJson<T>("GET", "/api/admin/table-config", {

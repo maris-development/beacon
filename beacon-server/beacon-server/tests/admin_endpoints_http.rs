@@ -4,7 +4,7 @@
 //! - crawlers (`create` / `list` / `get` / `run` / `drop`),
 //! - external tables (`/api/admin/external-tables`),
 //! - table definitions (`/api/admin/table-definition`),
-//! - table extensions (`PUT`/`DELETE /api/admin/table-extensions/{table}`),
+//! - table comments (`GET`/`PUT`/`DELETE /api/admin/table-comments/{table}`),
 //! - the chunked-upload abort path.
 //!
 //! Every one of these is super-user-only; the gate is spot-checked here and
@@ -356,14 +356,13 @@ async fn table_definition_returns_the_create_statement() {
 }
 
 // --------------------------------------------------------------------------
-// Table extensions
+// Table comments
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_extensions_set_get_and_clear() {
+async fn table_comments_get_put_and_delete() {
     let (router, harness, cfg) = app(config(false)).await;
     let admin = admin(&cfg);
-    // A managed table to attach the extensions to.
     harness.server
         .runtime()
         .run_query(
@@ -372,34 +371,66 @@ async fn table_extensions_set_get_and_clear() {
         )
         .await
         .expect("create table");
+    let uri = "/api/admin/table-comments/obs";
 
-    // Initially, no extensions: an empty document.
-    let empty = json(&send(&router, req("GET", "/api/table-extensions?table_name=obs", Some(&admin), Body::empty())).await.body);
-    assert!(empty.get("mcp").is_none(), "no mcp extension initially, got: {empty}");
+    let empty = json(&send(&router, req("GET", uri, Some(&admin), Body::empty())).await.body);
+    let first = send(
+        &router,
+        json_req("PUT", uri, json!({ "table": "observations", "columns": { "id": "row id", "name": "o'brien" } }), Some(&admin)),
+    )
+    .await;
+    let replaced = send(
+        &router,
+        json_req("PUT", uri, json!({ "columns": { "name": "platform" } }), Some(&admin)),
+    )
+    .await;
+    let got = json(&send(&router, req("GET", uri, Some(&admin), Body::empty())).await.body);
+    let deleted = send(&router, req("DELETE", uri, Some(&admin), Body::empty())).await;
+    let after = json(&send(&router, req("GET", uri, Some(&admin), Body::empty())).await.body);
 
-    // Set an MCP descriptor exposing an existing column.
-    let set = send(
+    assert_eq!(empty, json!({}));
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(replaced.status, StatusCode::OK);
+    assert_eq!(
+        got,
+        json!({ "columns": { "name": "platform" } }),
+        "PUT replaces the whole document"
+    );
+    assert_eq!(deleted.status, StatusCode::OK);
+    assert_eq!(after, json!({}));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_comments_reject_an_unknown_column_or_table() {
+    let (router, harness, cfg) = app(config(false)).await;
+    let admin = admin(&cfg);
+    harness.server
+        .runtime()
+        .run_query(
+            beacon_core::query::Query::sql("CREATE TABLE obs (id BIGINT)".to_string()),
+            beacon_core::AuthIdentity::system(),
+        )
+        .await
+        .expect("create table");
+
+    let ghost = send(
         &router,
         json_req(
             "PUT",
-            "/api/admin/table-extensions/obs",
-            json!({ "mcp": { "enabled": true, "tool_name": "obs_tool", "description": "obs", "exposed_columns": ["id"] } }),
+            "/api/admin/table-comments/obs",
+            json!({ "table": "kept out", "columns": { "ghost": "x" } }),
             Some(&admin),
         ),
     )
     .await;
-    assert_eq!(set.status, StatusCode::OK, "setting extensions should succeed");
+    let got = json(&send(&router, req("GET", "/api/admin/table-comments/obs", Some(&admin), Body::empty())).await.body);
+    let missing = send(&router, req("GET", "/api/admin/table-comments/nope", Some(&admin), Body::empty())).await;
+    let anonymous = send(&router, req("GET", "/api/admin/table-comments/obs", None, Body::empty())).await;
 
-    // GET reflects it.
-    let got = json(&send(&router, req("GET", "/api/table-extensions?table_name=obs", Some(&admin), Body::empty())).await.body);
-    assert_eq!(got["mcp"]["tool_name"], "obs_tool");
-    assert_eq!(got["mcp"]["enabled"], true);
-
-    // DELETE clears everything.
-    let cleared = send(&router, req("DELETE", "/api/admin/table-extensions/obs", Some(&admin), Body::empty())).await;
-    assert_eq!(cleared.status, StatusCode::OK);
-    let after = json(&send(&router, req("GET", "/api/table-extensions?table_name=obs", Some(&admin), Body::empty())).await.body);
-    assert!(after.get("mcp").is_none(), "extensions should be cleared, got: {after}");
+    assert_eq!(ghost.status, StatusCode::BAD_REQUEST);
+    assert_eq!(got, json!({}), "a rejected PUT changes nothing");
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
 }
 
 // --------------------------------------------------------------------------

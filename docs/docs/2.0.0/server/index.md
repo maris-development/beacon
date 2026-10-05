@@ -51,8 +51,8 @@ Before this, [deploy the node](/docs/2.0.0/getting-started) and
 2. **Inspect the schemas** through the API. You then know the available columns.
 3. **Query a dataset or a table** with SQL or with the JSON query DSL.
 <!-- MCP is unreleased. Restore on release:
-4. **Serve it to AI agents**, optional. Enable the `mcp` extension of a table. The agents then query
-   the catalog over MCP. See [MCP Server](/docs/2.0.0/mcp).
+4. **Serve it to AI agents**, optional. Add comments to your tables. The agents then query the
+   catalog over MCP. See [MCP Server](/docs/2.0.0/mcp).
 -->
 
 For the full detail, see the [SQL query docs](/docs/2.0.0/api/querying/sql) and the
@@ -68,21 +68,16 @@ control stay the same. Beacon serves the tables as **read-only** tools over the 
 Protocol. An agent finds your tables, inspects their schemas and runs `SELECT` queries. You deploy
 no extra service.
 
-You enable each table with its `mcp` [extension](/docs/2.0.0/server/extensions). An agent
-therefore sees only the tables and columns that you choose:
+An agent sees every table that its identity can read. [Comments](/docs/2.0.0/sql/comment-on) tell
+the agent what each table and column holds:
 
 ```sql
-SET EXTENSION 'mcp' FOR obs TO '{
-  "enabled": true,
-  "title": "Ocean observations",
-  "description": "Argo float profiles: temperature and salinity by location, depth and time.",
-  "exposed_columns": ["lat", "lon", "depth", "temperature"]
-}';
+COMMENT ON TABLE obs IS 'Argo float profiles: temperature and salinity by location, depth and time.';
+COMMENT ON COLUMN obs.depth IS 'Measurement depth in meters';
 ```
 
-Each enabled table becomes its own tool. The tool covers the exposed columns only. Beacon also gives
-the generic tools `list_tables`, `describe_table` and `run_sql`. The same identity and role grants
-control the access. See [Access control](/docs/2.0.0/security/access-control).
+Beacon gives the tools `list_tables`, `describe_table`, `run_sql` and `export_query`. The same
+identity and role grants control the access. See [Access control](/docs/2.0.0/security/access-control).
 
 The full [MCP Server guide](/docs/2.0.0/mcp) shows how to connect a client, how to restrict
 authentication and how to serve a large result. An agent runs ordinary Beacon SQL. The

@@ -27,6 +27,7 @@
 //! returns only what their roles grant.
 
 mod auth;
+mod comments;
 mod file_stats;
 mod table;
 
@@ -112,6 +113,10 @@ impl SystemSchemaProvider {
         tables.insert(
             "file_stats_segments".to_string(),
             Arc::new(file_stats::segments_table(file_stats)),
+        );
+        tables.insert(
+            "comments".to_string(),
+            Arc::new(comments::comments_table(session.clone())),
         );
         Self { tables, session }
     }

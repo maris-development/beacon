@@ -245,7 +245,7 @@ export default defineConfig({
                 { text: 'Views', link: '/docs/2.0.0/server/view' },
                 { text: 'Materialized Views', link: '/docs/2.0.0/sql/create-materialized-view' },
                 { text: 'Crawlers', link: '/docs/2.0.0/server/crawlers' },
-                { text: 'Extensions', link: '/docs/2.0.0/server/extensions' },
+                { text: 'Comments', link: '/docs/2.0.0/sql/comment-on' },
               ]
             },
             {
@@ -276,6 +276,7 @@ export default defineConfig({
             { text: 'CREATE EXTERNAL TABLE', link: '/docs/2.0.0/sql/create-external-table' },
             { text: 'CREATE VIEW', link: '/docs/2.0.0/sql/create-view' },
             { text: 'CREATE MATERIALIZED VIEW', link: '/docs/2.0.0/sql/create-materialized-view' },
+            { text: 'COMMENT ON', link: '/docs/2.0.0/sql/comment-on' },
             { text: 'Remote Tables & ATTACH', link: '/docs/2.0.0/sql/remote-tables' },
             { text: 'CREATE SECRET', link: '/docs/2.0.0/sql/secrets' },
             { text: 'SUMMARIZE', link: '/docs/2.0.0/sql/summarize' },

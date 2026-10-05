@@ -7,7 +7,6 @@ use ::axum::{
     http::StatusCode,
     Extension, Json,
 };
-use beacon_core::extensions::TableExtensions;
 use beacon_core::AuthIdentity;
 use crate::server::{catalog, Server};
 use utoipa::{IntoParams, ToSchema};
@@ -233,49 +232,6 @@ pub(crate) async fn list_table_schema(
         None => {
             tracing::error!("Error listing table schema: table not found");
             Err((StatusCode::NOT_FOUND, format!("Table {table} not found")))
-        }
-    }
-}
-
-/// Query parameters for [`list_table_extensions`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
-pub struct ListTableExtensionsQuery {
-    /// Name of the registered table whose extensions to return.
-    pub table_name: String,
-}
-
-/// Returns the downstream extensions (query presets) attached to
-/// the named table, or 404 if the table is not registered. A table with no
-/// extensions returns an empty object.
-#[tracing::instrument(level = "info", skip(state))]
-#[utoipa::path(
-    tag = "tables",
-    get,
-    path = "/api/table-extensions",
-    params(ListTableExtensionsQuery),
-    responses(
-        (status = 200, description = "The table's extensions", body = TableExtensions),
-        (status = 404, description = "Table not found"),
-    ),
-    security(
-        (),
-        ("basic-auth" = []),
-        ("bearer" = [])
-    )
-)]
-pub(crate) async fn list_table_extensions(
-    State(state): State<Arc<Server>>,
-    Extension(identity): Extension<AuthIdentity>,
-    Query(query): Query<ListTableExtensionsQuery>,
-) -> Result<Json<TableExtensions>, (StatusCode, String)> {
-    match catalog::table_extensions(&state, &query.table_name, identity).await {
-        Ok(extensions) => Ok(Json(extensions)),
-        Err(error) => {
-            tracing::error!(?error, "error listing table extensions");
-            Err((
-                StatusCode::NOT_FOUND,
-                format!("Table {} not found", query.table_name),
-            ))
         }
     }
 }
