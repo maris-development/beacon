@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
@@ -6,7 +5,7 @@ use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
-use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_common::table_function::{BeaconTableFunctionImpl, split_options_arg};
 
 use crate::datafusion::BBF_FORMAT_NAME;
 
@@ -70,6 +69,7 @@ impl TableFunctionImpl for ReadBBFFunc {
                     "read_bbf: the listing factory is not registered on the session".to_string(),
                 )
             })?;
+        let (args, format_options) = split_options_arg(args, "read_bbf")?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_bbf")?;
 
         tracing::debug!("read_bbf glob paths: {:?}", glob_paths);
@@ -82,8 +82,6 @@ impl TableFunctionImpl for ReadBBFFunc {
 
         // Build the file format from the factory registered on the session, so the
         // table function shares the runtime's configured format.
-        let format_options: HashMap<String, String> = HashMap::new();
-
         let factory = state
             .get_file_format_factory(BBF_FORMAT_NAME)
             .ok_or_else(|| {

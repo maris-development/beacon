@@ -6,7 +6,8 @@ use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
-use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_common::table_function::{BeaconTableFunctionImpl, split_options_arg};
+use beacon_datafusion_ext::type_widening::TypeWideningOverrides;
 
 pub struct ReadGeoParquetFunc {
     // Session Reference
@@ -59,6 +60,7 @@ impl TableFunctionImpl for ReadGeoParquetFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let (args, options) = split_options_arg(args, "read_geoparquet")?;
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
@@ -87,7 +89,8 @@ impl TableFunctionImpl for ReadGeoParquetFunc {
         let file_format = GeoParquetFormat::new(GeoParquetOptions {
             longitude_column: None,
             latitude_column: None,
-        });
+        })
+        .with_type_widening(TypeWideningOverrides::from_options(&options)?);
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

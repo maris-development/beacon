@@ -12,6 +12,7 @@ use datafusion::{
 };
 
 use crate::listing_factory::ListingFactory;
+use crate::type_widening::{ArrowTypeWidening, TypeWideningOverrides, widening_for};
 
 pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     /// The datasets among `objects`.
@@ -134,6 +135,16 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     /// stored entry.
     fn schema_options_fingerprint(&self, _format: &dyn FileFormat) -> Option<u64> {
         None
+    }
+
+    /// The parts of the merge rule that `format` sets from its options. See
+    /// [`options`](crate::type_widening::options).
+    ///
+    /// Code that merges schemas for a format, such as the schema cache and
+    /// `FastObjectTable`, reads the rule here. The default sets no part, so the
+    /// format merges with the rule of the session.
+    fn type_widening_overrides(&self, _format: &dyn FileFormat) -> TypeWideningOverrides {
+        TypeWideningOverrides::default()
     }
 
     /// Which listed objects this format derives a schema from, and what each
@@ -339,6 +350,16 @@ pub fn try_file_format_factory_ext(
         .get()?
         .get(key)
         .cloned()
+}
+
+/// The merge rule of `format`: the rule of `session`, with each part that the
+/// options of `format` set replaced. A format without a registered factory
+/// takes the rule of the session.
+pub fn format_widening(session: &dyn Session, format: &dyn FileFormat) -> Arc<ArrowTypeWidening> {
+    let overrides = try_file_format_factory_ext(session, &format.get_ext())
+        .map(|factory| factory.type_widening_overrides(format))
+        .unwrap_or_default();
+    widening_for(session, &overrides)
 }
 
 /// Beacon's [`FileFormatFactoryExt`] factories, keyed by the format names and file

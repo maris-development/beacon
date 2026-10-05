@@ -174,6 +174,37 @@ validates it and then reads the server setting alone. See the format page of eac
 | `REMOTE` | `tls` | [Remote Tables](/docs/2.0.0/data-sources/remote-tables#options) |
 | `PARQUET`, `GEOPARQUET`, `ARROW`, `TIFF`, `BBF` | None | |
 
+Every file format in the table also reads the [type widening keys](#type-widening-keys).
+
+### Type widening keys
+
+The files of one table can type a column in two ways. Three keys set the rule for this table:
+
+| Key | Values | Server default |
+| --- | ------ | -------------- |
+| `type_widening_strategy` | `default`, `numpy` | `BEACON_TYPE_WIDENING_STRATEGY` |
+| `type_widening_on_conflict` | `fail`, `keep_first` | `BEACON_TYPE_WIDENING_ON_CONFLICT` |
+| `type_widening_cast` | `strict`, `lenient` | `BEACON_TYPE_WIDENING_CAST` |
+
+```sql
+CREATE EXTERNAL TABLE argo
+STORED AS NC
+LOCATION 'argo/**/*.nc'
+OPTIONS ('type_widening_on_conflict' 'keep_first', 'type_widening_cast' 'strict')
+```
+
+- A key that the table does not set takes the server default.
+- `type_widening_cast` without a value follows `type_widening_on_conflict`. `keep_first` gives
+  `lenient`, and `fail` gives `strict`.
+- `strict` gives an error for a value that the column type cannot hold. `lenient` reads that value
+  as `NULL`.
+- A pair that the strategy widens, such as `Int32` into `Int64`, always casts strictly.
+- An unknown value is an error. The error names the key and the permitted values.
+
+The [Configuration](/docs/2.0.0/server/configuration#query-engine) page explains each strategy and
+setting. A `read_*` function takes the same keys. See
+[Read Files](/docs/2.0.0/sql/table-functions#options).
+
 ## `DROP TABLE`
 
 `DROP TABLE` removes a table from the catalog. Beacon does not delete the files.

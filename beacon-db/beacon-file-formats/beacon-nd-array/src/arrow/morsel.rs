@@ -549,6 +549,7 @@ mod tests {
                 None,
                 crate::arrow::partition::FilePartitions::none(),
                 None,
+                Arc::new(beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening::new()),
             )
             .await
         }

@@ -57,7 +57,7 @@ use futures::{StreamExt, TryStreamExt, future};
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::format_ext::{FileFormatFactoryExt, SchemaUnit, try_file_format_factory_ext};
-use crate::type_widening::{ArrowTypeWidening, LabeledSchema, label_by_object, session_widening};
+use crate::type_widening::{ArrowTypeWidening, LabeledSchema, label_by_object, widening_for};
 
 /// One schema per URL, cached where the cache can answer.
 ///
@@ -252,7 +252,10 @@ impl CachedInference {
             .map(|unit| objects[unit.source].clone())
             .collect();
         merge_in_listing_order(
-            &session_widening(state),
+            &widening_for(
+                state,
+                &self.factory.type_widening_overrides(options.format.as_ref()),
+            ),
             &label_by_object(&sources, &resolved),
         )
     }

@@ -14,28 +14,37 @@ use arrow_schema::{ArrowError, DataType, SchemaRef};
 use super::common::{
     self, Resolved, StatedTypes, finer_unit, incompatible_types, integer_join, wider, zone_join,
 };
-use super::{ArrowTypeWideningStrategy, LabeledSchema, TypeConflict};
+use super::{ArrowTypeWideningStrategy, CastMode, LabeledSchema, TypeConflict};
 
 /// Merges the schemas of a table with the rules of the [module docs](self).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DefaultArrowTypeWidening {
     /// What the merge does with a column that no type holds.
     pub on_conflict: TypeConflict,
+    /// What the scan does with a value that the table type cannot hold.
+    pub cast: CastMode,
 }
 
 impl DefaultArrowTypeWidening {
-    /// The rule that refuses such a column.
+    /// The rule that refuses such a column and casts strictly.
     pub const fn new() -> Self {
         Self {
             on_conflict: TypeConflict::Fail,
+            cast: CastMode::Strict,
         }
     }
 
-    /// The rule that keeps its first type.
+    /// The rule that keeps its first type and casts leniently.
     pub const fn keeping_first_type() -> Self {
         Self {
             on_conflict: TypeConflict::KeepFirst,
+            cast: CastMode::Lenient,
         }
+    }
+
+    /// The same rule with `cast`.
+    pub const fn with_cast(self, cast: CastMode) -> Self {
+        Self { cast, ..self }
     }
 }
 
@@ -56,10 +65,8 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
     }
 
     fn casts_leniently(&self, source: &DataType, target: &DataType) -> bool {
-        // A pair the join widens reached the scan on its own. Any other pair
-        // got there through the setting.
-        self.on_conflict == TypeConflict::KeepFirst
-            && super_type(source, target).as_ref() != Some(target)
+        // A pair the join widens keeps a strict cast, so an overflow is told.
+        self.cast == CastMode::Lenient && super_type(source, target).as_ref() != Some(target)
     }
 }
 
@@ -317,10 +324,16 @@ mod tests {
             ),
         ];
 
+        let strict_keep_first = keeping_first().with_cast(CastMode::Strict);
+        let lenient_fail = failing().with_cast(CastMode::Lenient);
         for (source, target) in lenient.iter().chain(strict.iter()) {
             assert!(
                 !failing().casts_leniently(source, target),
                 "{source:?} into {target:?} under Fail"
+            );
+            assert!(
+                !strict_keep_first.casts_leniently(source, target),
+                "{source:?} into {target:?} under a strict KeepFirst"
             );
         }
         for (source, target) in &lenient {
@@ -328,11 +341,19 @@ mod tests {
                 keeping_first().casts_leniently(source, target),
                 "{source:?} into {target:?} under KeepFirst"
             );
+            assert!(
+                lenient_fail.casts_leniently(source, target),
+                "{source:?} into {target:?} under a lenient Fail"
+            );
         }
         for (source, target) in &strict {
             assert!(
                 !keeping_first().casts_leniently(source, target),
                 "{source:?} into {target:?} under KeepFirst"
+            );
+            assert!(
+                !lenient_fail.casts_leniently(source, target),
+                "{source:?} into {target:?} under a lenient Fail"
             );
         }
         assert_eq!(failing().on_conflict(), TypeConflict::Fail);

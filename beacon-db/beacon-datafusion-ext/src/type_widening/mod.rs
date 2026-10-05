@@ -20,9 +20,11 @@ use object_store::ObjectMeta;
 mod common;
 pub mod default;
 pub mod numpy;
+pub mod options;
 
 pub use default::DefaultArrowTypeWidening;
 pub use numpy::NumpyArrowTypeWidening;
+pub use options::{CastMode, StrategyKind, TypeWideningOverrides, TypeWideningSettings};
 
 use crate::scan_adapt::AdaptingOpener;
 
@@ -79,16 +81,32 @@ pub fn label_by_object(objects: &[ObjectMeta], schemas: &[SchemaRef]) -> Vec<Lab
 /// The merge rule of a session.
 pub struct ArrowTypeWidening {
     pub strategy: Arc<dyn ArrowTypeWideningStrategy>,
+    /// The settings that built `strategy`. `None` for a strategy of the
+    /// embedder's own. A table that sets its own keys then resolves them
+    /// against the default settings.
+    pub settings: Option<TypeWideningSettings>,
 }
 
 impl ArrowTypeWidening {
+    /// A rule of the embedder's own.
     pub fn new(strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
-        Self { strategy }
+        Self {
+            strategy,
+            settings: None,
+        }
+    }
+
+    /// The rule that `settings` name.
+    pub fn from_settings(settings: TypeWideningSettings) -> Self {
+        Self {
+            strategy: settings.build(),
+            settings: Some(settings),
+        }
     }
 
     /// The rule for a session that registers none.
     pub fn default_extension() -> Arc<Self> {
-        Arc::new(Self::new(Arc::new(DefaultArrowTypeWidening::new())))
+        Arc::new(Self::from_settings(TypeWideningSettings::default()))
     }
 
     /// Merge `schemas` into one. An order-independent strategy merges the
@@ -131,6 +149,22 @@ pub fn session_widening(session: &dyn Session) -> Arc<ArrowTypeWidening> {
         .unwrap_or_else(ArrowTypeWidening::default_extension)
 }
 
+/// The merge rule of one table: the rule of `session`, with each part that
+/// `overrides` sets replaced. See [`options`].
+pub fn widening_for(
+    session: &dyn Session,
+    overrides: &TypeWideningOverrides,
+) -> Arc<ArrowTypeWidening> {
+    let process = session_widening(session);
+    if overrides.is_empty() {
+        return process;
+    }
+    let settings = process.settings.unwrap_or_default();
+    Arc::new(ArrowTypeWidening::from_settings(
+        settings.with_overrides(overrides),
+    ))
+}
+
 /// The rule a merge applies.
 pub trait ArrowTypeWideningStrategy: std::fmt::Debug + Send + Sync {
     /// Merge `schemas` into one, in the order given. Report both sources for a
@@ -150,7 +184,8 @@ pub trait ArrowTypeWideningStrategy: std::fmt::Debug + Send + Sync {
 
     /// Whether a file column of `source` may read null where a table column of
     /// `target` cannot hold its value. `false` gives a strict cast, and such a
-    /// value is an error.
+    /// value is an error. The built-in strategies answer `true` under
+    /// [`CastMode::Lenient`] for a pair that their rules do not widen.
     fn casts_leniently(&self, source: &DataType, target: &DataType) -> bool {
         let _ = (source, target);
         false
@@ -158,7 +193,7 @@ pub trait ArrowTypeWideningStrategy: std::fmt::Debug + Send + Sync {
 }
 
 /// What the merge does with a column that no type holds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum TypeConflict {
     /// Refuse the merge. The error names the column, both types and both
     /// sources.
@@ -309,6 +344,46 @@ mod tests {
             );
         }
         assert_eq!(TypeConflict::parse("widen"), Err("widen".to_string()));
+    }
+
+    #[test]
+    fn a_table_resolves_its_keys_against_the_session() {
+        use datafusion::execution::SessionStateBuilder;
+        use datafusion::prelude::SessionConfig;
+
+        let process = TypeWideningSettings {
+            strategy: StrategyKind::Numpy,
+            ..Default::default()
+        };
+        let state = SessionStateBuilder::new()
+            .with_config(
+                SessionConfig::new()
+                    .with_extension(Arc::new(ArrowTypeWidening::from_settings(process))),
+            )
+            .build();
+
+        let none = widening_for(&state, &TypeWideningOverrides::default());
+        assert_eq!(none.settings, Some(process), "no key keeps the session rule");
+
+        let keep_first = TypeWideningOverrides {
+            on_conflict: Some(TypeConflict::KeepFirst),
+            ..Default::default()
+        };
+        assert_eq!(
+            format!("{:?}", widening_for(&state, &keep_first).strategy),
+            "NumpyArrowTypeWidening { on_conflict: KeepFirst, cast: Lenient }"
+        );
+
+        // A custom strategy has no settings, so a key resolves against the defaults.
+        let custom = SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_extension(Arc::new(ArrowTypeWidening::new(
+                Arc::new(NumpyArrowTypeWidening::new()),
+            ))))
+            .build();
+        assert_eq!(
+            format!("{:?}", widening_for(&custom, &keep_first).strategy),
+            "DefaultArrowTypeWidening { on_conflict: KeepFirst, cast: Lenient }"
+        );
     }
 
     #[test]

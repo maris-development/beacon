@@ -78,7 +78,7 @@ pub struct BeaconCsvSource {
     metrics: ExecutionPlanMetricsSet,
     /// The rule that merged the table schema. It decides which casts read
     /// null, and whether the parser reads every column as text. The format
-    /// sets it from the session when it plans. See the [module docs](self).
+    /// sets it from the table when it plans. See the [module docs](self).
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
@@ -96,7 +96,7 @@ impl BeaconCsvSource {
         }
     }
 
-    /// The same source, with the merge rule of the session.
+    /// The same source, with the merge rule of the table.
     pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
         self.type_widening = strategy;
         self

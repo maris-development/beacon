@@ -6,7 +6,8 @@ use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
-use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_common::table_function::{split_options_arg, BeaconTableFunctionImpl};
+use beacon_datafusion_ext::type_widening::TypeWideningOverrides;
 
 pub struct ReadTiffFunc {
     runtime_handle: tokio::runtime::Handle,
@@ -34,7 +35,11 @@ impl BeaconTableFunctionImpl for ReadTiffFunc {
     }
 
     fn description(&self) -> Option<String> {
-        Some("Reads TIFF files from specified glob paths.".to_string())
+        Some(
+            "Reads TIFF files from specified glob paths. An optional last argument, a struct \
+             such as {'type_widening_cast': 'lenient'}, holds table options."
+                .to_string(),
+        )
     }
 
     fn name(&self) -> String {
@@ -67,6 +72,7 @@ impl TableFunctionImpl for ReadTiffFunc {
                     "ListingFactory extension not found in session state"
                 )
             })?;
+        let (args, options) = split_options_arg(args, "read_tiff")?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_tiff")?;
 
         let mut listing_urls = vec![];
@@ -74,7 +80,8 @@ impl TableFunctionImpl for ReadTiffFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        let file_format = TiffFormat::new(Default::default());
+        let file_format = TiffFormat::new(Default::default())
+            .with_type_widening(TypeWideningOverrides::from_options(&options)?);
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

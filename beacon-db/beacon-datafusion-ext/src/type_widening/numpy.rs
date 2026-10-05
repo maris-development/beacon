@@ -16,28 +16,37 @@ use arrow_schema::{ArrowError, DataType, SchemaRef, TimeUnit};
 use super::common::{
     self, Resolved, StatedTypes, finer_unit, incompatible_types, integer_join, wider, zone_join,
 };
-use super::{ArrowTypeWideningStrategy, LabeledSchema, TypeConflict};
+use super::{ArrowTypeWideningStrategy, CastMode, LabeledSchema, TypeConflict};
 
 /// Merges the schemas of a table with the rules of the [module docs](self).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NumpyArrowTypeWidening {
     /// What the merge does with a column that no type holds.
     pub on_conflict: TypeConflict,
+    /// What the scan does with a value that the table type cannot hold.
+    pub cast: CastMode,
 }
 
 impl NumpyArrowTypeWidening {
-    /// The rule that refuses such a column.
+    /// The rule that refuses such a column and casts strictly.
     pub const fn new() -> Self {
         Self {
             on_conflict: TypeConflict::Fail,
+            cast: CastMode::Strict,
         }
     }
 
-    /// The rule that keeps its first type.
+    /// The rule that keeps its first type and casts leniently.
     pub const fn keeping_first_type() -> Self {
         Self {
             on_conflict: TypeConflict::KeepFirst,
+            cast: CastMode::Lenient,
         }
+    }
+
+    /// The same rule with `cast`.
+    pub const fn with_cast(self, cast: CastMode) -> Self {
+        Self { cast, ..self }
     }
 }
 
@@ -58,8 +67,8 @@ impl ArrowTypeWideningStrategy for NumpyArrowTypeWidening {
     }
 
     fn casts_leniently(&self, source: &DataType, target: &DataType) -> bool {
-        // Two families never promote, so only the setting put them in one column.
-        self.on_conflict == TypeConflict::KeepFirst && Family::of(source) != Family::of(target)
+        // Two families never promote, so a pair inside one family keeps a strict cast.
+        self.cast == CastMode::Lenient && Family::of(source) != Family::of(target)
     }
 }
 
@@ -904,6 +913,16 @@ mod tests {
                     .casts_leniently(&DataType::Int32, &DataType::Utf8)
             );
         }
+        assert!(
+            !NumpyArrowTypeWidening::keeping_first_type()
+                .with_cast(CastMode::Strict)
+                .casts_leniently(&DataType::Date32, &DataType::Int64)
+        );
+        assert!(
+            NumpyArrowTypeWidening::new()
+                .with_cast(CastMode::Lenient)
+                .casts_leniently(&DataType::Date32, &DataType::Int64)
+        );
         assert!(
             !NumpyArrowTypeWidening::new().casts_leniently(&DataType::Date32, &DataType::Int64)
         );

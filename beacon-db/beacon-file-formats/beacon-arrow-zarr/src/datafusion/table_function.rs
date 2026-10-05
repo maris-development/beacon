@@ -9,7 +9,8 @@ use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
-use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_common::table_function::{BeaconTableFunctionImpl, split_options_arg};
+use beacon_datafusion_ext::type_widening::{TypeWideningOverrides, widening_for};
 
 pub struct ReadZarrFunc {
     // Session Reference
@@ -41,7 +42,8 @@ impl BeaconTableFunctionImpl for ReadZarrFunc {
         Some(
             "Reads Zarr stores from specified glob paths. The optional second argument lists the \
              dimensions to read. The optional third argument, a boolean, skips a group that \
-             does not fit that list instead of failing the query."
+             does not fit that list instead of failing the query. An optional last argument, \
+             a struct such as {'type_widening_cast': 'lenient'}, holds table options."
                 .to_string(),
         )
     }
@@ -84,6 +86,7 @@ impl TableFunctionImpl for ReadZarrFunc {
                     "ListingFactory extension not found in session state"
                 )
             })?;
+        let (args, options) = split_options_arg(args, "read_zarr")?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_zarr")?;
 
         // Optional second argument: an explicit list of dimensions to read.
@@ -111,13 +114,22 @@ impl TableFunctionImpl for ReadZarrFunc {
         // Predicate pushdown is handled automatically by the shared engine, so
         // no manual statistics/column selection is needed.
         let read_dimensions = (!dimensions.is_empty()).then_some(dimensions);
-        let file_format =
-            ZarrFormat::new(read_dimensions).with_skip_unbroadcastable(skip_unbroadcastable);
+        let type_widening = TypeWideningOverrides::from_options(&options)?;
+        let file_format = ZarrFormat::new(read_dimensions)
+            .with_skip_unbroadcastable(skip_unbroadcastable)
+            .with_type_widening(type_widening);
+        // The format answers to `zarr.json`, a key the factory registry does not hold, so name the rule.
+        let widening = widening_for(&state, &type_widening);
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                FastObjectTable::try_new(&session_ctx.state(), Arc::new(file_format), listing_urls)
-                    .await
+                FastObjectTable::try_new_with_widening(
+                    &session_ctx.state(),
+                    Arc::new(file_format),
+                    listing_urls,
+                    widening.strategy.as_ref(),
+                )
+                .await
             })
         })?;
 

@@ -1,7 +1,7 @@
 use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::type_widening::{label_by_object, widening_for, TypeWideningOverrides};
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{Column, DFSchema, GetExt, Statistics},
@@ -57,15 +57,14 @@ impl FileFormatFactory for OdvFileFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        match self.options {
-            Some(ref options) => {
-                let format = OdvFormat::new_with_options(options.clone());
-                Ok(Arc::new(format) as Arc<dyn FileFormat>)
-            }
-            None => Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>),
-        }
+        let format = match self.options {
+            Some(ref options) => OdvFormat::new_with_options(options.clone()),
+            None => OdvFormat::new(),
+        };
+        let type_widening = TypeWideningOverrides::from_options(format_options)?;
+        Ok(Arc::new(format.with_type_widening(type_widening)) as Arc<dyn FileFormat>)
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
@@ -81,6 +80,8 @@ impl FileFormatFactory for OdvFileFormatFactory {
 pub struct OdvFormat {
     options: Option<OdvOptions>,
     file_compression_type: FileCompressionType,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 impl OdvFormat {
@@ -88,13 +89,26 @@ impl OdvFormat {
         OdvFormat {
             options: None,
             file_compression_type: FileCompressionType::UNCOMPRESSED,
+            type_widening: TypeWideningOverrides::default(),
         }
     }
     pub fn new_with_options(options: OdvOptions) -> Self {
         OdvFormat {
             options: Some(options),
             file_compression_type: FileCompressionType::UNCOMPRESSED,
+            type_widening: TypeWideningOverrides::default(),
         }
+    }
+
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
+    }
+
+    /// The parts of the merge rule that this table sets.
+    pub fn type_widening(&self) -> TypeWideningOverrides {
+        self.type_widening
     }
 
     pub fn with_file_compression_type(mut self, compression: FileCompressionType) -> Self {
@@ -195,10 +209,10 @@ impl FileFormat for OdvFormat {
             .try_collect()
             .await?;
 
-        // The rule of the session decides the result for a column that two
+        // The rule of the table decides the result for a column that two
         // files describe differently. Each schema names its file, so a refused
         // column names both files.
-        session_widening(state)
+        widening_for(state, &self.type_widening)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -230,9 +244,10 @@ impl FileFormat for OdvFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
+        let widening = widening_for(state, &self.type_widening);
         let source = OdvSource::new(table_schema)
             .with_projection(projection)
-            .with_type_widening(Arc::clone(&session_widening(state).strategy));
+            .with_type_widening(Arc::clone(&widening.strategy));
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -290,3 +305,46 @@ impl FileFormat for OdvFormat {
 
 pub mod table_function;
 pub use table_function::ReadOdvAsciiFunc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beacon_datafusion_ext::type_widening::{CastMode, TypeConflict};
+    use datafusion::prelude::SessionContext;
+
+    fn options(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// The options of a table set its merge rule, and a bad value fails the table.
+    #[test]
+    fn the_table_options_set_the_merge_rule() {
+        let state = SessionContext::new().state();
+        let factory = OdvFileFormatFactory::new(None);
+        let format = factory
+            .create(
+                &state,
+                &options(&[
+                    ("type_widening_on_conflict", "keep_first"),
+                    ("format.type_widening_cast", "strict"),
+                ]),
+            )
+            .unwrap();
+        let overrides = format
+            .as_any()
+            .downcast_ref::<OdvFormat>()
+            .expect("an ODV format")
+            .type_widening();
+        assert_eq!(overrides.on_conflict, Some(TypeConflict::KeepFirst));
+        assert_eq!(overrides.cast, Some(CastMode::Strict));
+
+        let error = factory
+            .create(&state, &options(&[("type_widening_cast", "loose")]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
+    }
+}

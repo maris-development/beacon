@@ -1,15 +1,17 @@
 //! `read_atlas(paths)`, `read_atlas(paths, dimensions)` and
-//! `read_atlas(paths, dimensions, skip_unbroadcastable)`.
+//! `read_atlas(paths, dimensions, skip_unbroadcastable)`. Each form takes an
+//! optional last struct of table options.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::table_function::{
-    BeaconTableFunctionImpl, parse_bool_arg, parse_dimensions_arg,
+    BeaconTableFunctionImpl, parse_bool_arg, parse_dimensions_arg, split_options_arg,
 };
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_datafusion_ext::type_widening::{TypeWideningOverrides, widening_for};
 use datafusion::{
     catalog::{TableFunctionImpl, TableProvider},
     common::plan_datafusion_err,
@@ -51,7 +53,8 @@ impl BeaconTableFunctionImpl for ReadAtlasFunc {
              through a glob such as '**/data.atlas'. The optional second argument lists the \
              dimensions to read, and an array survives only when the list holds every one of its \
              own. The optional third argument, a boolean, skips a dataset whose columns fit no \
-             one grid instead of failing the query."
+             one grid instead of failing the query. An optional last argument, a struct such as \
+             {'type_widening_cast': 'lenient'}, holds table options."
                 .to_string(),
         )
     }
@@ -79,8 +82,11 @@ impl BeaconTableFunctionImpl for ReadAtlasFunc {
 
 impl TableFunctionImpl for ReadAtlasFunc {
     fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
+        let (args, struct_options) = split_options_arg(args, "read_atlas")?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_atlas")?;
-        let format_options = format_options_from_args(args)?;
+        // A positional argument wins over a struct key that it repeats.
+        let mut format_options = struct_options;
+        format_options.extend(format_options_from_args(args)?);
 
         tracing::debug!("read_atlas glob paths: {glob_paths:?}");
 
@@ -106,10 +112,19 @@ impl TableFunctionImpl for ReadAtlasFunc {
             plan_datafusion_err!("read_atlas: the atlas file format is not registered")
         })?;
         let file_format = factory.create(&state, &format_options)?;
+        // The format answers to `data.atlas`, a key the factory registry does not hold, so name the rule.
+        let overrides = TypeWideningOverrides::from_options(&format_options)?;
+        let widening = widening_for(&state, &overrides);
 
         let table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async {
-                FastObjectTable::try_new(&session_ctx.state(), file_format, listing_urls).await
+                FastObjectTable::try_new_with_widening(
+                    &session_ctx.state(),
+                    file_format,
+                    listing_urls,
+                    widening.strategy.as_ref(),
+                )
+                .await
             })
         })?;
 

@@ -15,38 +15,30 @@
 //! then fails on the first batch, and `LIMIT 0` still succeeds, because it reads
 //! no batch.
 //!
-//! # A column the merge could not join
+//! # A value the table type cannot hold
 //!
 //! [`TypeConflict::KeepFirst`] lets the merge settle a column that two files
-//! type in two families. The table then reports the type of the first file, and
-//! a file of the other family holds values that type cannot hold. The scan asks
-//! the strategy that merged the schema, through [`casts_leniently`], which
-//! casts may read such a value as null:
+//! type in two families. A schema that a statement declares can also be
+//! narrower than a file. The scan asks the strategy of the table, through
+//! [`casts_leniently`], which casts may read such a value as null:
 //!
 //! - A value the type cannot hold reads as null. `Utf8` "abc" to `Float64`
 //!   gives null, not an error.
 //! - A type no cast reaches reads as null for the whole file. A list beside a
 //!   number is one such pair.
 //!
-//! The strategy answers `true` for a pair its rules do not widen, because only
-//! the setting lets such a pair reach a scan. A pair the rules widen, such as
-//! `Int32` into `Int64`, keeps a strict cast under either setting.
+//! The built-in strategies answer `true` under [`CastMode::Lenient`] for a pair
+//! their rules do not widen. A pair the rules widen, such as `Int32` into
+//! `Int64`, keeps a strict cast, so an overflow is still an error. An nd column
+//! follows the same rule: its cast lands on the `values` list inside the
+//! `beacon.nd` struct.
 //!
-//! Every format captures the strategy of the session when it plans, because
+//! Every format captures the strategy of its table when it plans, because
 //! DataFusion hands a `FileSource` no session when it opens a file. A source
 //! built without a session takes the strict default rule.
 //!
-//! # An nd column
-//!
-//! An nd column reads leniently under every strategy. Its
-//! cast lands on the `values` list inside the `beacon.nd` struct, and one
-//! collection of a million datasets may store an array as text where another
-//! stores numbers. One cell that does not parse would otherwise fail the whole
-//! scan, and no single dataset is worth a collection.
-//!
-//! Every other cast stays strict, and a value it cannot hold is an error.
-//!
 //! [`TypeConflict::KeepFirst`]: crate::type_widening::TypeConflict::KeepFirst
+//! [`CastMode::Lenient`]: crate::type_widening::CastMode::Lenient
 //! [`casts_leniently`]: crate::type_widening::ArrowTypeWideningStrategy::casts_leniently
 
 use std::sync::Arc;
@@ -68,28 +60,23 @@ use datafusion::physical_expr_adapter::{
 };
 use futures::StreamExt;
 
-use crate::nd::is_nd_encoded;
+use crate::nd::encoding::{is_nd_encoded, nd_value_type};
 use crate::type_widening::ArrowTypeWideningStrategy;
 
 /// Whether a cast of a file column of `source` onto `target` may read a value
-/// the type cannot hold as null.
-///
-/// Two cases qualify.
-///
-/// A pair the strategy did not widen. The sources state two families, so no
-/// value of the other family is a value of this one, and only
-/// `TypeConflict::KeepFirst` let the pair reach the scan. The strategy answers.
-///
-/// An nd column. Its cast lands on the `values` list inside the `beacon.nd`
-/// struct, and a collection of a million datasets may store one array as text
-/// where another stores numbers. One cell that does not parse must not fail the
-/// whole scan, because no single dataset is worth the collection.
+/// the type cannot hold as null. The strategy of the table answers.
 fn casts_leniently(
     target: &Field,
     source: &DataType,
     strategy: &dyn ArrowTypeWideningStrategy,
 ) -> bool {
-    is_nd_encoded(target) || strategy.casts_leniently(source, target.data_type())
+    // An nd cast lands on the values inside the struct, so the value types decide.
+    if is_nd_encoded(target)
+        && let (Ok(source), Ok(target)) = (nd_value_type(source), nd_value_type(target.data_type()))
+    {
+        return strategy.casts_leniently(&source, &target);
+    }
+    strategy.casts_leniently(source, target.data_type())
 }
 
 /// Where one column of the target schema comes from.
@@ -304,6 +291,14 @@ pub fn batch_adapter_factory(
 ) -> BatchAdapterFactory {
     BatchAdapterFactory::new(target)
         .with_adapter_factory(Arc::new(LenientCastAdapterFactory { strategy }))
+}
+
+/// The expression adapter that `batch_adapter_factory` uses, for a format that
+/// scans through a DataFusion source. Set it on `FileScanConfig`.
+pub fn cast_adapter_factory(
+    strategy: Arc<dyn ArrowTypeWideningStrategy>,
+) -> Arc<dyn PhysicalExprAdapterFactory> {
+    Arc::new(LenientCastAdapterFactory { strategy })
 }
 
 /// Builds [`LenientCastAdapter`] for one file.

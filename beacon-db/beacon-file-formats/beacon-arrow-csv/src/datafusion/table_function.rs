@@ -11,7 +11,8 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_common::table_function::{BeaconTableFunctionImpl, split_options_arg};
+use beacon_datafusion_ext::type_widening::TypeWideningOverrides;
 
 pub struct ReadCsvFunc {
     // Session Reference
@@ -71,6 +72,7 @@ impl TableFunctionImpl for ReadCsvFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let (args, options) = split_options_arg(args, "read_csv")?;
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
@@ -123,7 +125,8 @@ impl TableFunctionImpl for ReadCsvFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        let file_format = CsvFormat::new(delimiter, infer_records);
+        let file_format = CsvFormat::new(delimiter, infer_records)
+            .with_type_widening(TypeWideningOverrides::from_options(&options)?);
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

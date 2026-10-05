@@ -5,7 +5,8 @@ use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use datafusion::{catalog::TableFunctionImpl, prelude::SessionContext};
 
-use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_common::table_function::{BeaconTableFunctionImpl, split_options_arg};
+use beacon_datafusion_ext::type_widening::TypeWideningOverrides;
 
 pub struct ReadParquetFunc {
     // Session Reference
@@ -55,6 +56,7 @@ impl TableFunctionImpl for ReadParquetFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let (args, options) = split_options_arg(args, "read_parquet")?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_parquet")?;
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
@@ -77,7 +79,8 @@ impl TableFunctionImpl for ReadParquetFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        let file_format = ParquetFormat::default();
+        let file_format = ParquetFormat::default()
+            .with_type_widening(TypeWideningOverrides::from_options(&options)?);
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 FastObjectTable::try_new(&session_ctx.state(), Arc::new(file_format), listing_urls)

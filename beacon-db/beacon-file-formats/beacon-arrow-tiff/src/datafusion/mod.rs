@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::type_widening::{label_by_object, widening_for, TypeWideningOverrides};
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
@@ -39,9 +39,12 @@ impl FileFormatFactory for TiffFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(TiffFormat::new(self.options.clone())))
+        Ok(Arc::new(
+            TiffFormat::new(self.options.clone())
+                .with_type_widening(TypeWideningOverrides::from_options(format_options)?),
+        ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
@@ -88,6 +91,14 @@ impl FileFormatFactoryExt for TiffFormatFactory {
         self.get_ext()
     }
 
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        format
+            .as_any()
+            .downcast_ref::<TiffFormat>()
+            .map(|format| format.type_widening)
+            .unwrap_or_default()
+    }
+
     fn file_extensions(&self) -> Vec<String> {
         vec![TIFF_EXTENSION.to_string(), TIF_EXTENSION.to_string()]
     }
@@ -96,11 +107,22 @@ impl FileFormatFactoryExt for TiffFormatFactory {
 #[derive(Debug, Clone)]
 pub struct TiffFormat {
     pub options: TiffOptions,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 impl TiffFormat {
     pub fn new(options: TiffOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            type_widening: TypeWideningOverrides::default(),
+        }
+    }
+
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
     }
 }
 
@@ -153,10 +175,10 @@ impl FileFormat for TiffFormat {
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
 
-        // The rule of the session decides the result for a column that two
+        // The rule of the table decides the result for a column that two
         // files describe differently. Each schema names its file, so a refused
         // column names both files.
-        session_widening(state)
+        widening_for(state, &self.type_widening)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 exec_datafusion_err!(
@@ -178,7 +200,7 @@ impl FileFormat for TiffFormat {
 
     async fn create_physical_plan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
@@ -200,7 +222,11 @@ impl FileFormat for TiffFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = TiffSource::new(table_schema).with_projection(projection);
+        let source = TiffSource::new(table_schema)
+            .with_projection(projection)
+            .with_type_widening(Arc::clone(
+                &widening_for(state, &self.type_widening).strategy,
+            ));
 
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -528,6 +554,31 @@ mod tests {
             full.num_rows()
         );
         assert!(full.num_rows() > 0, "predicate should keep some rows");
+    }
+
+    // ── The merge rule of the table ────────────────────────────────────
+
+    /// The options of a table set its merge rule, and a bad value is an error.
+    #[test]
+    fn the_table_options_set_the_merge_rule() {
+        use beacon_datafusion_ext::type_widening::TypeConflict;
+        use std::collections::HashMap;
+
+        let state = datafusion::prelude::SessionContext::new().state();
+        let factory = TiffFormatFactory::new(Default::default());
+        let options = HashMap::from([(
+            "type_widening_on_conflict".to_string(),
+            "keep_first".to_string(),
+        )]);
+        let format = factory.create(&state, &options).unwrap();
+        assert_eq!(
+            factory.type_widening_overrides(format.as_ref()).on_conflict,
+            Some(TypeConflict::KeepFirst)
+        );
+
+        let options = HashMap::from([("type_widening_cast".to_string(), "loose".to_string())]);
+        let error = factory.create(&state, &options).unwrap_err().to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
     }
 
     // ── End-to-end via SessionContext (projection + predicate pushdown) ──

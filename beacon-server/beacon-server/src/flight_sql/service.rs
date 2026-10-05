@@ -423,10 +423,10 @@ impl FlightSqlService for BeaconFlightSqlService {
         let auth = self.authenticator.authorize_request(&request).await?;
         let empty_schema = encode_schema(&Schema::empty())?;
 
-        // DDL statements have no result schema and must not be executed here — executing to
-        // infer the schema would cause a double-execution when do_put_prepared_statement_update
-        // runs the statement for real (e.g. CREATE EXTERNAL TABLE would be created twice).
-        let dataset_schema = if is_ddl(&query.query) {
+        // A write must not run here. The query executor starts a plan before its stream is
+        // read, so a prepared INSERT would write once here and again in
+        // do_put_prepared_statement_update.
+        let dataset_schema = if is_write(&query.query) {
             empty_schema.clone()
         } else {
             let stream = self
@@ -461,12 +461,15 @@ impl FlightSqlService for BeaconFlightSqlService {
     }
 }
 
-fn is_ddl(sql: &str) -> bool {
+/// Whether `sql` is DDL or DML, which has no result set to describe.
+fn is_write(sql: &str) -> bool {
     let upper = sql.trim_start().to_ascii_uppercase();
-    upper.starts_with("CREATE ")
-        || upper.starts_with("DROP ")
-        || upper.starts_with("ALTER ")
-        || upper.starts_with("TRUNCATE ")
+    [
+        "CREATE ", "DROP ", "ALTER ", "TRUNCATE ", "INSERT ", "UPDATE ", "DELETE ", "MERGE ",
+        "COPY ",
+    ]
+    .iter()
+    .any(|keyword| upper.starts_with(keyword))
 }
 
 /// Builds the Flight SQL tonic service for embedding in a caller-managed server
@@ -506,4 +509,28 @@ pub async fn serve(server: Arc<crate::server::Server>) -> anyhow::Result<()> {
         .context("Flight SQL server failed")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_write;
+
+    #[test]
+    fn a_prepare_runs_no_write() {
+        for sql in [
+            "INSERT INTO t VALUES (1)",
+            "  insert into t select 1",
+            "UPDATE t SET a = 1",
+            "DELETE FROM t",
+            "MERGE INTO t USING s ON true WHEN MATCHED THEN DELETE",
+            "COPY t TO 'x.parquet'",
+            "CREATE TABLE t (a INT)",
+            "DROP TABLE t",
+        ] {
+            assert!(is_write(sql), "{sql}");
+        }
+        for sql in ["SELECT 1", "WITH x AS (SELECT 1) SELECT * FROM x", "SHOW TABLES"] {
+            assert!(!is_write(sql), "{sql}");
+        }
+    }
 }

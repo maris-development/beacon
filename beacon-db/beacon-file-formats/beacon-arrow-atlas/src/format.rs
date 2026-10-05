@@ -16,7 +16,9 @@ use beacon_datafusion_ext::format_ext::{
 };
 use beacon_datafusion_ext::format_options::{format_option, parse_bool_option};
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, LabeledSchema, session_widening};
+use beacon_datafusion_ext::type_widening::{
+    ArrowTypeWidening, LabeledSchema, TypeWideningOverrides, widening_for,
+};
 use datafusion::{
     catalog::Session,
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -59,9 +61,15 @@ impl AtlasFormatFactory {
         }
     }
 
-    /// A format on `options`, over the shared cache.
-    fn format(&self, options: AtlasOptions) -> Arc<dyn FileFormat> {
-        Arc::new(AtlasFormat::with_cache(options, self.cache.clone()))
+    /// A format on `options` and the merge rule parts `type_widening`, over the shared cache.
+    fn format(
+        &self,
+        options: AtlasOptions,
+        type_widening: TypeWideningOverrides,
+    ) -> Arc<dyn FileFormat> {
+        Arc::new(
+            AtlasFormat::with_cache(options, self.cache.clone()).with_type_widening(type_widening),
+        )
     }
 }
 
@@ -92,11 +100,14 @@ impl FileFormatFactory for AtlasFormatFactory {
         if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
             options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
         }
-        Ok(self.format(options))
+        Ok(self.format(
+            options,
+            TypeWideningOverrides::from_options(format_options)?,
+        ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        self.format(self.options.clone())
+        self.format(self.options.clone(), TypeWideningOverrides::default())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -133,26 +144,44 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
 
     /// Atlas opts into the schema cache for a collection read whole.
     ///
+    /// The rule of the table is in the key, because one collection merges its
+    /// datasets with it.
+    ///
     /// TODO(#367): also cache a dimension-projected read.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
         let format = format.as_any().downcast_ref::<AtlasFormat>()?;
         if format.options.read_dimensions.is_some() {
             return None;
         }
-        Some(SchemaOptions::new(ATLAS_FORMAT).finish())
+        Some(
+            SchemaOptions::new(ATLAS_FORMAT)
+                .strs(format.type_widening.fingerprint_parts())
+                .finish(),
+        )
     }
 
-    /// The plain format. Atlas measures no column.
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        format
+            .as_any()
+            .downcast_ref::<AtlasFormat>()
+            .map(|format| format.type_widening)
+            .unwrap_or_default()
+    }
+
+    /// The plain format, on the merge rule of the table. Atlas measures no column.
     ///
     /// See [`AtlasFormat::infer_stats`].
     fn create_for_analysis(
         &self,
         _state: &dyn Session,
-        _format_options: &HashMap<String, String>,
+        format_options: &HashMap<String, String>,
         _url: &ListingTableUrl,
         _listing: &ListingFactory,
     ) -> Result<Arc<dyn FileFormat>> {
-        Ok(self.format(AtlasOptions::default()))
+        Ok(self.format(
+            AtlasOptions::default(),
+            TypeWideningOverrides::from_options(format_options)?,
+        ))
     }
 }
 
@@ -161,6 +190,8 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
 pub struct AtlasFormat {
     pub options: AtlasOptions,
     cache: AtlasReaderCache,
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
 }
 
 impl Default for AtlasFormat {
@@ -178,7 +209,17 @@ impl AtlasFormat {
 
     /// A format that opens its collections through `cache`.
     pub fn with_cache(options: AtlasOptions, cache: AtlasReaderCache) -> Self {
-        Self { options, cache }
+        Self {
+            options,
+            cache,
+            type_widening: TypeWideningOverrides::default(),
+        }
+    }
+
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
     }
 
     /// The Arrow schema of the collection at `marker`, labeled by its path.
@@ -257,7 +298,7 @@ impl FileFormat for AtlasFormat {
         }
 
         // One rule for both merges: datasets inside a collection, and collections of this table.
-        let widening = session_widening(state);
+        let widening = widening_for(state, &self.type_widening);
 
         // `buffered` keeps the listing order, so the merge names the same
         // collection first however the opens complete.
@@ -330,7 +371,9 @@ impl FileFormat for AtlasFormat {
         let source = self
             .source(table_schema)
             .with_projection(projection)
-            .with_type_widening(Arc::clone(&session_widening(state).strategy))
+            .with_type_widening(Arc::clone(
+                &widening_for(state, &self.type_widening).strategy,
+            ))
             .with_cancellation(query_cancellation(state));
         // Fail at plan time, so the user sees the error before the scan runs.
         source.require_projection()?;
@@ -610,6 +653,50 @@ mod scan_tests {
             .expect_err("not a boolean")
             .to_string();
         assert!(error.contains("skip_unbroadcastable"), "{error}");
+    }
+
+    /// The options of a table set its merge rule, and a bad value is an error.
+    #[test]
+    fn the_factory_reads_the_merge_rule() {
+        use beacon_datafusion_ext::type_widening::TypeConflict;
+
+        let factory = AtlasFormatFactory::new(AtlasOptions::default());
+        let state = SessionContext::new().state();
+        let options = HashMap::from([(
+            "type_widening_on_conflict".to_string(),
+            "keep_first".to_string(),
+        )]);
+        let format = factory.create(&state, &options).unwrap();
+        assert_eq!(
+            factory.type_widening_overrides(format.as_ref()).on_conflict,
+            Some(TypeConflict::KeepFirst)
+        );
+
+        let options = HashMap::from([("type_widening_cast".to_string(), "loose".to_string())]);
+        let error = factory.create(&state, &options).unwrap_err().to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
+    }
+
+    /// One collection merges its datasets with the rule, so two rules never
+    /// share a cached schema.
+    #[test]
+    fn two_rules_give_two_fingerprints() {
+        let factory = AtlasFormatFactory::new(AtlasOptions::default());
+        let state = SessionContext::new().state();
+        let fingerprint = |pairs: &[(&str, &str)]| {
+            let options = pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
+            let format = factory.create(&state, &options).unwrap();
+            factory.schema_options_fingerprint(format.as_ref()).unwrap()
+        };
+        let none = fingerprint(&[]);
+        let keep_first = fingerprint(&[("type_widening_on_conflict", "keep_first")]);
+        let numpy = fingerprint(&[("type_widening_strategy", "numpy")]);
+        assert_ne!(none, keep_first);
+        assert_ne!(none, numpy);
+        assert_ne!(keep_first, numpy);
     }
 
     /// Every format a factory builds opens through the factory's one cache,

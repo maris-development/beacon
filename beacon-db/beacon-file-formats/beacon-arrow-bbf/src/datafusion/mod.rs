@@ -7,7 +7,7 @@ use beacon_binary_format::{
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::nd::{encoded_schema, exec::nd_scan_plan};
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::type_widening::{TypeWideningOverrides, label_by_object, widening_for};
 use datafusion::{
     catalog::Session,
     common::{GetExt, Statistics},
@@ -29,8 +29,8 @@ pub mod stream_share;
 
 pub const BBF_FORMAT_NAME: &str = "bbf";
 
-/// Builds the BBF format. The format has no options: a file carries its own
-/// schema, and the nd pipeline decides the shape of a batch.
+/// Builds the BBF format. The only options are the merge rule keys: a file
+/// carries its own schema, and the nd pipeline decides the shape of a batch.
 #[derive(Clone, Debug, Default)]
 pub struct BBFFormatFactory;
 
@@ -44,9 +44,11 @@ impl FileFormatFactory for BBFFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &HashMap<String, String>,
+        format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(BBFFormat))
+        Ok(Arc::new(BBFFormat::default().with_type_widening(
+            TypeWideningOverrides::from_options(format_options)?,
+        )))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -54,16 +56,24 @@ impl FileFormatFactory for BBFFormatFactory {
     }
 
     fn default(&self) -> std::sync::Arc<dyn FileFormat> {
-        std::sync::Arc::new(BBFFormat)
+        std::sync::Arc::new(BBFFormat::default())
     }
 }
 
 impl FileFormatFactoryExt for BBFFormatFactory {
     /// BBF opts into the schema cache on its name alone. A file carries its own
-    /// schema, and the format has no options.
+    /// schema, and no option of the format changes it.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
         format.as_any().downcast_ref::<BBFFormat>()?;
         Some(SchemaOptions::new("bbf").finish())
+    }
+
+    fn type_widening_overrides(&self, format: &dyn FileFormat) -> TypeWideningOverrides {
+        format
+            .as_any()
+            .downcast_ref::<BBFFormat>()
+            .map(|format| format.type_widening)
+            .unwrap_or_default()
     }
 
     fn discover_datasets(
@@ -89,7 +99,18 @@ impl FileFormatFactoryExt for BBFFormatFactory {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct BBFFormat;
+pub struct BBFFormat {
+    /// The parts of the merge rule that this table sets.
+    type_widening: TypeWideningOverrides,
+}
+
+impl BBFFormat {
+    /// The same format with the merge rule parts of its table.
+    pub fn with_type_widening(mut self, type_widening: TypeWideningOverrides) -> Self {
+        self.type_widening = type_widening;
+        self
+    }
+}
 
 #[async_trait::async_trait]
 impl FileFormat for BBFFormat {
@@ -141,9 +162,9 @@ impl FileFormat for BBFFormat {
             .try_collect::<Vec<_>>()
             .await?;
 
-        // Merge & widen types across all files, using the session's type widening
-        // rules. Each schema names its file, so a refused column names both files.
-        session_widening(state)
+        // Merge & widen types across all files, using the type widening rules of
+        // the table. Each schema names its file, so a refused column names both files.
+        widening_for(state, &self.type_widening)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -183,9 +204,10 @@ impl FileFormat for BBFFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source. Rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
+        let widening = widening_for(state, &self.type_widening);
         let source = BBFSource::new(table_schema)
             .with_projection(projection)
-            .with_type_widening(Arc::clone(&session_widening(state).strategy));
+            .with_type_widening(Arc::clone(&widening.strategy));
         // Keep the token a caller set on the incoming source.
         if let Some(incoming) = conf.file_source().as_any().downcast_ref::<BBFSource>() {
             source.set_cancellation_token(incoming.cancellation_token());
@@ -303,8 +325,9 @@ mod tests {
     use object_store::path::Path;
     use object_store::{ObjectStoreExt, PutPayload};
 
-    /// The format has no options. A key a user writes is ignored, so an old
-    /// `CREATE EXTERNAL TABLE` that names one keeps working.
+    /// The format has no options but the merge rule keys. Another key a user
+    /// writes is ignored, so an old `CREATE EXTERNAL TABLE` that names one keeps
+    /// working.
     #[test]
     fn create_ignores_options() {
         let ctx = SessionContext::new();
@@ -313,6 +336,32 @@ mod tests {
             .create(&ctx.state(), &opts)
             .expect("an unknown option must not fail");
         assert!(format.as_any().downcast_ref::<BBFFormat>().is_some());
+    }
+
+    /// The options of a table set its merge rule, and a bad value fails the table.
+    #[test]
+    fn the_table_options_set_the_merge_rule() {
+        use beacon_datafusion_ext::type_widening::{CastMode, TypeConflict};
+
+        let state = SessionContext::new().state();
+        let opts = HashMap::from([
+            ("type_widening_on_conflict", "keep_first"),
+            ("format.type_widening_cast", "strict"),
+        ])
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let format = BBFFormatFactory.create(&state, &opts).unwrap();
+        let overrides = BBFFormatFactory.type_widening_overrides(format.as_ref());
+        assert_eq!(overrides.on_conflict, Some(TypeConflict::KeepFirst));
+        assert_eq!(overrides.cast, Some(CastMode::Strict));
+
+        let opts = HashMap::from([("type_widening_cast".to_string(), "loose".to_string())]);
+        let error = BBFFormatFactory
+            .create(&state, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("type_widening_cast"), "{error}");
     }
 
     /// Only `.bbf` objects are BBF datasets; anything else in the listing must be
@@ -345,7 +394,7 @@ mod tests {
     /// always `bbf` no matter what compression the caller asks about.
     #[test]
     fn extension_is_always_bbf() {
-        let format = BBFFormat;
+        let format = BBFFormat::default();
         assert_eq!(format.get_ext(), "bbf");
         assert_eq!(format.compression_type(), None);
         assert_eq!(
@@ -366,7 +415,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = store;
 
         let ctx = SessionContext::new();
-        let schema = BBFFormat
+        let schema = BBFFormat::default()
             .infer_schema(&ctx.state(), &object_store, &[meta])
             .await
             .expect("real BBF file should infer");
@@ -395,7 +444,7 @@ mod tests {
 
         let ctx = SessionContext::new();
         assert!(
-            BBFFormat
+            BBFFormat::default()
                 .infer_schema(&ctx.state(), &object_store, &[meta])
                 .await
                 .is_err()
@@ -412,7 +461,7 @@ mod tests {
             arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int32, true),
             arrow::datatypes::Field::new("b", arrow::datatypes::DataType::Int32, true),
         ]));
-        let format = BBFFormat;
+        let format = BBFFormat::default();
         let source = format.file_source(TableSchema::from_file_schema(schema));
         let conf = FileScanConfigBuilder::new(ObjectStoreUrl::parse("file://")?, source)
             .with_projection_indices(Some(indices))?
@@ -455,7 +504,7 @@ mod tests {
             arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int32, true),
             arrow::datatypes::Field::new("b", arrow::datatypes::DataType::Int32, true),
         ]));
-        let format = BBFFormat;
+        let format = BBFFormat::default();
         let source = format.file_source(TableSchema::from_file_schema(schema));
         let token = CancellationToken::new();
         source
@@ -506,7 +555,7 @@ mod tests {
         // The whole directory, so a test can add a second file beside the fixture.
         let url = ListingTableUrl::parse(dir.to_str().expect("utf8 path")).expect("listing url");
         let options =
-            ListingOptions::new(Arc::new(BBFFormat)).with_file_extension("bbf");
+            ListingOptions::new(Arc::new(BBFFormat::default())).with_file_extension("bbf");
         let config = ListingTableConfig::new(url)
             .with_listing_options(options)
             .infer_schema(&ctx.state())
@@ -603,7 +652,7 @@ mod tests {
             arrow::datatypes::DataType::Utf8,
             false,
         ));
-        let format = BBFFormat;
+        let format = BBFFormat::default();
         let source = format.file_source(TableSchema::new(schema, vec![partition]));
         let conf = FileScanConfigBuilder::new(ObjectStoreUrl::parse("file://").unwrap(), source)
             .with_projection_indices(Some(vec![1]))

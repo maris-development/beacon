@@ -22,6 +22,22 @@ SELECT * FROM read_netcdf(['argo/**/*.nc', 'wod/**/*.nc'])
 The `glob_paths` argument of every signature below accepts both forms: one string or a list of
 strings.
 
+## Options
+
+A function on a file format takes an options struct as its last argument. The struct holds the
+[type widening keys](/docs/2.0.0/sql/create-external-table#type-widening-keys):
+
+```sql
+SELECT * FROM read_parquet('profiles/*.parquet', {'type_widening_strategy': 'numpy'})
+
+SELECT * FROM read_netcdf('argo/**/*.nc', ['time', 'pressure'], {'type_widening_cast': 'lenient'})
+```
+
+- Each value is a string. Write `'true'`, not `true`.
+- The struct comes after the positional arguments.
+- The keys set the rule for this call. A key that the call does not set takes the server default.
+- Use the positional arguments for the other options of a format, such as the CSV delimiter.
+
 ## `read_netcdf`
 
 ```text

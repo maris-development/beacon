@@ -5,6 +5,8 @@
 //! crate can host its own `read_*` table function without depending on
 //! `beacon-functions` (which depends on the format crates).
 
+use std::collections::HashMap;
+
 use arrow::datatypes::Field;
 use datafusion::{
     catalog::TableFunctionImpl,
@@ -100,6 +102,43 @@ pub fn parse_dimensions_arg(
     }
 }
 
+/// Split the arguments of a `read_*` call into the positional arguments and
+/// the options.
+///
+/// A struct as the last argument holds the options, for example
+/// `{'type_widening_cast': 'lenient'}`. Its keys are the keys of
+/// `CREATE EXTERNAL TABLE ... OPTIONS`, and each value must be a string. Without
+/// such a struct, all arguments are positional and the options are empty.
+pub fn split_options_arg<'a>(
+    args: &'a [Expr],
+    fn_name: &str,
+) -> datafusion::error::Result<(&'a [Expr], HashMap<String, String>)> {
+    let Some((Expr::Literal(ScalarValue::Struct(options), _), positional)) = args.split_last()
+    else {
+        return Ok((args, HashMap::new()));
+    };
+    if arrow::array::Array::len(options.as_ref()) != 1 {
+        return plan_err!("{fn_name} options must be one struct value");
+    }
+    let mut parsed = HashMap::with_capacity(options.num_columns());
+    for (field, column) in options.fields().iter().zip(options.columns()) {
+        let value = ScalarValue::try_from_array(column, 0)?;
+        let text = match &value {
+            ScalarValue::Utf8(Some(text))
+            | ScalarValue::LargeUtf8(Some(text))
+            | ScalarValue::Utf8View(Some(text)) => text.clone(),
+            _ => {
+                return plan_err!(
+                    "{fn_name} option '{}' must be a string, got {value:?}",
+                    field.name()
+                );
+            }
+        };
+        parsed.insert(field.name().to_ascii_lowercase(), text);
+    }
+    Ok((positional, parsed))
+}
+
 /// Parse an optional boolean argument. `None` and a `NULL` both mean "unset".
 pub fn parse_bool_arg(
     args: &[Expr],
@@ -118,7 +157,7 @@ pub fn parse_bool_arg(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bool_arg, parse_dimensions_arg, parse_glob_paths_arg};
+    use super::{parse_bool_arg, parse_dimensions_arg, parse_glob_paths_arg, split_options_arg};
     use datafusion::prelude::Expr;
     use datafusion::scalar::ScalarValue;
 
@@ -322,5 +361,47 @@ mod tests {
     fn wrong_type_errors() {
         let expr = Expr::Literal(ScalarValue::Int64(Some(42)), None);
         assert!(parse_glob_paths_arg(&[expr], "read_parquet").is_err());
+    }
+
+    fn options(pairs: &[(&str, ScalarValue)]) -> Expr {
+        use arrow::datatypes::Field;
+        use datafusion::common::scalar::ScalarStructBuilder;
+
+        let mut builder = ScalarStructBuilder::new();
+        for (name, value) in pairs {
+            builder = builder.with_scalar(Field::new(*name, value.data_type(), true), value.clone());
+        }
+        Expr::Literal(builder.build().unwrap(), None)
+    }
+
+    #[test]
+    fn a_trailing_struct_holds_the_options() {
+        let args = [
+            paths(),
+            options(&[
+                ("type_widening_cast", ScalarValue::Utf8(Some("lenient".into()))),
+                ("Delimiter", ScalarValue::Utf8View(Some(";".into()))),
+            ]),
+        ];
+        let (positional, parsed) = split_options_arg(&args, "read_csv").unwrap();
+        assert_eq!(positional, &args[..1]);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed["type_widening_cast"], "lenient");
+        assert_eq!(parsed["delimiter"], ";", "a key reads in lowercase");
+    }
+
+    #[test]
+    fn no_struct_gives_no_options() {
+        let args = [paths(), dims(&["time"])];
+        let (positional, parsed) = split_options_arg(&args, "read_netcdf").unwrap();
+        assert_eq!(positional.len(), 2);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn an_option_that_is_not_a_string_errors() {
+        let args = [paths(), options(&[("type_widening_cast", ScalarValue::Int64(Some(1)))])];
+        let error = split_options_arg(&args, "read_parquet").unwrap_err().to_string();
+        assert!(error.contains("type_widening_cast") && error.contains("string"), "{error}");
     }
 }

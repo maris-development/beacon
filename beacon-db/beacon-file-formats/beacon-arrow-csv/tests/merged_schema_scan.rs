@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use arrow::array::Array;
 use arrow::datatypes::DataType;
-use beacon_arrow_csv::datafusion::CsvFormat;
+use beacon_arrow_csv::datafusion::{CsvFormat, CsvFormatFactory};
 use beacon_datafusion_ext::type_widening::{
     ArrowTypeWidening, DefaultArrowTypeWidening, NumpyArrowTypeWidening,
 };
@@ -339,6 +339,66 @@ async fn a_column_of_two_families_reads_null_under_the_setting() {
     assert_eq!(rows, 4, "both files contribute their rows");
     let nulls: usize = batches.iter().map(|b| b.column(0).null_count()).sum();
     assert_eq!(nulls, 2, "the two strings read as null");
+}
+
+/// Read every CSV file in `dir` as a table with `options`.
+async fn read_with_options(
+    dir: &std::path::Path,
+    options: &[(&str, &str)],
+) -> datafusion::error::Result<Vec<arrow::record_batch::RecordBatch>> {
+    use datafusion::datasource::file_format::FileFormatFactory;
+
+    let ctx = SessionContext::new();
+    let options = options
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    let format = CsvFormatFactory.create(&ctx.state(), &options)?;
+    let url = ListingTableUrl::parse(format!("file://{}/", dir.display()))?;
+    let listing = ListingOptions::new(format).with_file_extension(".csv");
+    let schema = listing.infer_schema(&ctx.state(), &url).await?;
+    let config = ListingTableConfig::new(url)
+        .with_listing_options(listing)
+        .with_schema(schema);
+    ctx.read_table(Arc::new(ListingTable::try_new(config)?))?
+        .collect()
+        .await
+}
+
+/// The options of a table set its merge rule and its cast.
+#[tokio::test]
+async fn the_table_options_set_the_merge_and_the_cast() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.csv"), "v\n1.5\n2.5\n").expect("write a");
+    std::fs::write(dir.path().join("b.csv"), "v\n2\nabc\n").expect("write b");
+
+    let error = read_with_options(dir.path(), &[]).await.unwrap_err();
+    assert!(error.to_string().contains("Incompatible types"), "{error}");
+
+    let batches = read_with_options(dir.path(), &[("type_widening_on_conflict", "keep_first")])
+        .await
+        .expect("keep_first casts leniently when no one sets the cast");
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let nulls: usize = batches.iter().map(|b| b.column(0).null_count()).sum();
+    assert_eq!((rows, nulls), (4, 1), "'abc' reads null");
+
+    let error = read_with_options(
+        dir.path(),
+        &[
+            ("type_widening_on_conflict", "keep_first"),
+            ("format.type_widening_cast", "strict"),
+        ],
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.to_lowercase().contains("abc"), "{error}");
+
+    let error = read_with_options(dir.path(), &[("type_widening_cast", "loose")])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("type_widening_cast"), "{error}");
 }
 
 /// The numpy method promotes a number beside a string to the string, as

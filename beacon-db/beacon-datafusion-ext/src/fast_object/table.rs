@@ -29,7 +29,8 @@ use datafusion::{
 };
 
 use super::prune::{Pruning, prune_plan};
-use crate::type_widening::{ArrowTypeWideningStrategy, session_widening};
+use crate::format_ext::format_widening;
+use crate::type_widening::ArrowTypeWideningStrategy;
 
 /// A table over objects. It is a listing table that prunes before it scans.
 ///
@@ -44,15 +45,16 @@ pub struct FastObjectTable {
 impl FastObjectTable {
     /// Build a table over `urls`. Read the schema of each URL and merge them.
     ///
-    /// The session decides the result for a column that two files describe
-    /// differently. A caller that needs one rule for every session uses
-    /// [`try_new_with_widening`](Self::try_new_with_widening).
+    /// The rule of `format` decides the result for a column that two files
+    /// describe differently: the rule of the session, with the parts that the
+    /// options of the format set. A caller that needs one rule for every
+    /// session uses [`try_new_with_widening`](Self::try_new_with_widening).
     pub async fn try_new(
         state: &SessionState,
         format: Arc<dyn FileFormat>,
         urls: Vec<ListingTableUrl>,
     ) -> Result<Self, DataFusionError> {
-        let widening = session_widening(state);
+        let widening = format_widening(state, format.as_ref());
         Self::try_new_with_widening(state, format, urls, widening.strategy.as_ref()).await
     }
 
