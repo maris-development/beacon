@@ -20,6 +20,7 @@ use secrecy::SecretString;
 
 use beacon_datafusion_ext::table_ext::TableDefinition;
 
+use crate::executor::filtering_federation;
 use crate::options::build_pool_params;
 use crate::secret::EncryptedSecret;
 use crate::source::BeaconSqlTable;
@@ -134,12 +135,12 @@ impl TableDefinition for SqlDatabaseTableDefinition {
         let mut pinned = self.clone();
         pinned.schema = sql_source.table.schema();
 
-        // Keep the federation provider/executor; swap the inner table for one that
-        // carries our definition while delegating the remote table reference.
+        // Swap the inner table for one that carries our definition while delegating
+        // the remote table reference. The executor must also apply pushed-down filters.
         let table: Arc<dyn SQLTable> =
             Arc::new(BeaconSqlTable::new(Arc::clone(&sql_source.table), pinned));
         let source = Arc::new(SQLTableSource::new_with_table(
-            Arc::clone(&sql_source.provider),
+            filtering_federation(&sql_source.provider),
             table,
         ));
         Ok(Arc::new(FederatedTableProviderAdaptor::new(source)))
