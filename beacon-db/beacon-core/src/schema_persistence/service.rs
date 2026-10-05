@@ -10,6 +10,13 @@ use datafusion::{
 };
 use futures::StreamExt;
 
+/// The file name of the comments sidecar in a table directory.
+const COMMENTS_FILE: &str = "comments.json";
+
+fn comments_path(table_name: &str) -> object_store::path::Path {
+    object_store::path::Path::from(format!("{table_name}/{COMMENTS_FILE}"))
+}
+
 #[derive(Clone)]
 pub struct SchemaPersistenceService {
     session_context: Arc<SessionContext>,
@@ -37,47 +44,45 @@ impl SchemaPersistenceService {
             .await
     }
 
-    /// Persist a table's extensions sidecar to `db://<name>/extensions.json`.
+    /// Persist a table's comments sidecar to `db://<name>/comments.json`.
     ///
-    /// Extensions are stored separately from `table.json` so they apply to every
-    /// table type uniformly and can be edited without rebuilding the provider.
-    pub async fn persist_table_extensions_json(
+    /// Comments are stored separately from `table.json` so they apply to every
+    /// table type and can change without a rebuild of the provider.
+    pub async fn persist_table_comments_json(
         &self,
         table_name: &str,
-        extensions_json: String,
+        comments_json: String,
     ) -> datafusion::error::Result<()> {
-        let path = object_store::path::Path::from(format!("{}/extensions.json", table_name));
         let table_object_store = self.table_object_store(table_name)?;
         table_object_store
-            .put(&path, extensions_json.into_bytes().into())
+            .put(&comments_path(table_name), comments_json.into_bytes().into())
             .await
             .map_err(|error| {
                 DataFusionError::Plan(format!(
-                    "Failed to store table extensions for table {}: {}",
+                    "Failed to store comments for table {}: {}",
                     table_name, error
                 ))
             })?;
         Ok(())
     }
 
-    /// Load a table's extensions sidecar, or `None` if it has none.
-    pub async fn load_table_extensions_json(
+    /// Load a table's comments sidecar, or `None` if it has none.
+    pub async fn load_table_comments_json(
         &self,
         table_name: &str,
     ) -> datafusion::error::Result<Option<String>> {
-        let path = object_store::path::Path::from(format!("{}/extensions.json", table_name));
         let table_object_store = self.table_object_store(table_name)?;
-        match table_object_store.get(&path).await {
+        match table_object_store.get(&comments_path(table_name)).await {
             Ok(result) => {
                 let bytes = result.bytes().await.map_err(|error| {
                     DataFusionError::Plan(format!(
-                        "Failed to read table extensions for table {}: {}",
+                        "Failed to read comments for table {}: {}",
                         table_name, error
                     ))
                 })?;
                 let text = String::from_utf8(bytes.to_vec()).map_err(|error| {
                     DataFusionError::Plan(format!(
-                        "Table extensions for table {} are not valid UTF-8: {}",
+                        "Comments for table {} are not valid UTF-8: {}",
                         table_name, error
                     ))
                 })?;
@@ -85,26 +90,44 @@ impl SchemaPersistenceService {
             }
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(error) => Err(DataFusionError::Plan(format!(
-                "Failed to load table extensions for table {}: {}",
+                "Failed to load comments for table {}: {}",
                 table_name, error
             ))),
         }
     }
 
-    /// Remove a table's extensions sidecar. A missing sidecar is not an error.
-    pub async fn remove_table_extensions_json(
+    /// Remove a table's comments sidecar. A missing sidecar is not an error.
+    pub async fn remove_table_comments_json(
         &self,
         table_name: &str,
     ) -> datafusion::error::Result<()> {
-        let path = object_store::path::Path::from(format!("{}/extensions.json", table_name));
         let table_object_store = self.table_object_store(table_name)?;
-        match table_object_store.delete(&path).await {
+        match table_object_store.delete(&comments_path(table_name)).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(error) => Err(DataFusionError::Plan(format!(
-                "Failed to remove table extensions for table {}: {}",
+                "Failed to remove comments for table {}: {}",
                 table_name, error
             ))),
         }
+    }
+
+    /// Every comments sidecar in the store, as `(table name, JSON)` pairs.
+    pub async fn list_table_comments_json(
+        &self,
+    ) -> datafusion::error::Result<Vec<(String, String)>> {
+        let store = self.table_object_store(COMMENTS_FILE)?;
+        // Table folders are top-level, so one level avoids a walk of all data files.
+        let folders = store.list_with_delimiter(None).await.map_err(|error| {
+            DataFusionError::Plan(format!("Failed to list table comments: {error}"))
+        })?;
+        let mut sidecars = Vec::new();
+        for folder in folders.common_prefixes {
+            let table_name = folder.as_ref().to_string();
+            if let Some(json) = self.load_table_comments_json(&table_name).await? {
+                sidecars.push((table_name, json));
+            }
+        }
+        Ok(sidecars)
     }
 
     /// Resolve the object store backing `db://` table definitions.
@@ -331,53 +354,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extensions_sidecar_round_trip_and_cleanup() {
+    async fn comments_sidecar_round_trip_and_cleanup() {
         let (service, _ctx, table_store, _url) = test_service();
 
         // Missing sidecar reads as None.
         assert!(service
-            .load_table_extensions_json("obs")
+            .load_table_comments_json("obs")
             .await
             .expect("load should succeed")
             .is_none());
 
         // Persist then load returns the stored JSON.
-        let payload = r#"{"mcp":{"enabled":true}}"#.to_string();
+        let payload = r#"{"version":1,"table":"t"}"#.to_string();
         service
-            .persist_table_extensions_json("obs", payload.clone())
+            .persist_table_comments_json("obs", payload.clone())
             .await
             .expect("persist should succeed");
         assert_eq!(
             service
-                .load_table_extensions_json("obs")
+                .load_table_comments_json("obs")
                 .await
                 .expect("load should succeed")
                 .as_deref(),
             Some(payload.as_str())
         );
         assert!(table_store
-            .get(&Path::from("obs/extensions.json"))
+            .get(&Path::from("obs/comments.json"))
             .await
             .is_ok());
+        assert_eq!(
+            service
+                .list_table_comments_json()
+                .await
+                .expect("list should succeed"),
+            vec![("obs".to_string(), payload.clone())]
+        );
 
         // Explicit removal clears it (and is a no-op when already absent).
         service
-            .remove_table_extensions_json("obs")
+            .remove_table_comments_json("obs")
             .await
             .expect("remove should succeed");
         assert!(service
-            .load_table_extensions_json("obs")
+            .load_table_comments_json("obs")
             .await
             .expect("load should succeed")
             .is_none());
         service
-            .remove_table_extensions_json("obs")
+            .remove_table_comments_json("obs")
             .await
             .expect("removing an absent sidecar is not an error");
 
         // Dropping the whole table directory removes the sidecar too.
         service
-            .persist_table_extensions_json("obs", payload)
+            .persist_table_comments_json("obs", payload)
             .await
             .expect("persist should succeed");
         service
@@ -385,7 +415,7 @@ mod tests {
             .await
             .expect("table removal should succeed");
         assert!(service
-            .load_table_extensions_json("obs")
+            .load_table_comments_json("obs")
             .await
             .expect("load should succeed")
             .is_none());

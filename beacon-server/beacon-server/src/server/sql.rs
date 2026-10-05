@@ -34,7 +34,7 @@ pub(crate) fn rows_from_batches(batches: &[RecordBatch]) -> anyhow::Result<Vec<V
 }
 
 /// Run `sql` as `identity`, discarding any rows. For statements executed for
-/// their effect (DDL, `SET EXTENSION`, `RUN CRAWLER`).
+/// their effect (DDL, `COMMENT ON`, `RUN CRAWLER`).
 pub(crate) async fn execute(
     server: &Arc<Server>,
     sql: impl Into<String>,

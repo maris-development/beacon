@@ -779,9 +779,27 @@ pub(crate) async fn alter_table(
     beacon_lance::alter_table(&warehouse, &definition.location, &changes).await?;
 
     let fresh = definition.build_provider(session.clone()).await?;
-    session.register_table(table_ref, fresh)?;
+    session.register_table(table_ref.clone(), fresh)?;
 
-    Ok(())
+    use crate::comments::ColumnChange;
+    let column_changes: Vec<ColumnChange> = changes
+        .iter()
+        .filter_map(|change| match change {
+            beacon_lance::SchemaChange::RenameColumn { from, to } => Some(ColumnChange::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            }),
+            beacon_lance::SchemaChange::DropColumn { name } => {
+                Some(ColumnChange::Drop(name.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    crate::comments::alter_columns(session, &table_ref, &column_changes)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("the schema change is applied, but the comment update failed: {error}")
+        })
 }
 
 /// Fetch the runtime-scoped Lance warehouse from the session config extensions.

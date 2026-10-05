@@ -1,30 +1,28 @@
-//! Generates the MCP tool catalog from the runtime and dispatches tool calls.
+//! The MCP tool catalog and the dispatch of tool calls.
 //!
-//! Three generic tools are always present (`list_tables`, `describe_table`,
-//! `run_sql`). In addition, every table whose `mcp` extension is enabled becomes
-//! its own tool whose input schema is derived from the extension metadata
-//! (exposed columns + named presets).
+//! The tool set is fixed: `list_tables`, `describe_table`, `run_sql` and
+//! `export_query`. A table needs no MCP configuration. The agent sees every table
+//! that the caller may read, and it learns what each table and column means from
+//! their comments (`COMMENT ON`), which arrive as Arrow schema metadata.
 
 use std::sync::Arc;
 
 use arrow::array::AsArray;
-use arrow::datatypes::{Field, SchemaRef};
-use beacon_core::extensions::{
-    McpExtension, PresetExtension, PresetFilter, PresetOp, TableExtensions,
-};
+use arrow::datatypes::{Field, Schema, SchemaRef};
+use beacon_core::comments::COMMENT_METADATA_KEY;
 use beacon_core::runtime::Runtime;
 use beacon_core::{AuthIdentity, TableReference};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
-use crate::result::{run_sql_to_json, MAX_ROWS};
+use crate::result::run_sql_to_json;
 
 /// The tables in beacon's own schema that `identity` is entitled to see, sorted.
 ///
-/// Replaces `Runtime::list_tables`. The enumeration cannot be run as `identity`
-/// — `information_schema` is super-user-only — so it goes through
-/// `Runtime::visible_tables`, which reads the catalog as the engine and returns
-/// only the tables that identity's roles grant `Select` on.
+/// The enumeration cannot be run as `identity` — `information_schema` is
+/// super-user-only — so it goes through `Runtime::visible_tables`, which reads
+/// the catalog as the engine and returns only the tables that identity's roles
+/// grant `Select` on.
 async fn list_table_names(
     runtime: &Arc<Runtime>,
     identity: &AuthIdentity,
@@ -55,32 +53,8 @@ async fn list_table_names(
     Ok(names)
 }
 
-/// A table's extensions, or the empty set when it has none (or is unreadable).
-///
-/// Not `SHOW EXTENSIONS`: that statement is super-user only, and MCP never runs
-/// as the super-user. [`Runtime::table_extensions`] applies the read gate of the
-/// table instead.
-async fn table_extensions(
-    runtime: &Arc<Runtime>,
-    table: &str,
-    identity: &AuthIdentity,
-) -> TableExtensions {
-    runtime
-        .table_extensions(TableReference::bare(table.to_string()), identity)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::debug!(table, %error, "no readable extensions");
-            TableExtensions::default()
-        })
-}
-
-/// A table's Arrow schema, or `None` when the table is unknown (or `identity`
-/// may not read it).
-///
-/// Replaces `Runtime::list_table_schema_view`. Taken from the table provider
-/// rather than `information_schema.columns` — that schema is super-user-only, and
-/// the provider answers with the real Arrow types and field metadata under the
-/// same authorization a scan of the table would face.
+/// A table's Arrow schema with its comments, or `None` when the table is
+/// unknown (or `identity` may not read it).
 async fn table_schema(
     runtime: &Arc<Runtime>,
     table: &str,
@@ -92,33 +66,14 @@ async fn table_schema(
         .ok()
 }
 
-/// Build the full tool list: generic tools + per-table tools from extensions.
-pub async fn build_tools(
-    runtime: &Arc<Runtime>,
-    identity: AuthIdentity,
-) -> anyhow::Result<Vec<Tool>> {
-    let mut tools = vec![
+/// The fixed tool list.
+pub fn tools() -> Vec<Tool> {
+    vec![
         list_tables_tool(),
         describe_table_tool(),
         run_sql_tool(),
         export_query_tool(),
-    ];
-    for table in list_table_names(runtime, &identity).await? {
-        let ext = table_extensions(runtime, &table, &identity).await;
-        if ext.mcp.as_ref().is_some_and(|mcp| mcp.enabled) {
-            tools.push(
-                table_tool(
-                    runtime,
-                    &table,
-                    &ext.mcp.unwrap(),
-                    ext.preset.as_ref(),
-                    &identity,
-                )
-                .await,
-            );
-        }
-    }
-    Ok(tools)
+    ]
 }
 
 /// Route a tool call to its handler.
@@ -139,11 +94,9 @@ pub async fn dispatch(
             run_sql_to_json(runtime, sql.to_string(), identity).await
         }
         "export_query" => export_query_recipe(&args),
-        other => run_table_tool(runtime, other, &args, identity).await,
+        other => anyhow::bail!("unknown tool '{other}'"),
     }
 }
-
-// ---- generic tools -------------------------------------------------------
 
 fn object_schema(props: Value, required: &[&str]) -> Map<String, Value> {
     let mut schema = Map::new();
@@ -164,7 +117,7 @@ fn read_only(tool: Tool) -> Tool {
 fn list_tables_tool() -> Tool {
     read_only(Tool::new(
         "list_tables",
-        "List the tables registered in beacon, with their MCP exposure status.",
+        "List the tables you can read, each with its description.",
         object_schema(json!({}), &[]),
     ))
 }
@@ -172,7 +125,8 @@ fn list_tables_tool() -> Tool {
 fn describe_table_tool() -> Tool {
     read_only(Tool::new(
         "describe_table",
-        "Return a table's column schema and its attached extensions (MCP descriptor, presets).",
+        "Return a table's description and its columns, each with name, data type, \
+         nullability and description. Call it before you write SQL for a table.",
         object_schema(
             json!({ "table_name": { "type": "string", "description": "Name of the table." } }),
             &["table_name"],
@@ -285,12 +239,10 @@ async fn list_tables_json(
 ) -> anyhow::Result<String> {
     let mut out = Vec::new();
     for table in list_table_names(runtime, identity).await? {
-        let ext = table_extensions(runtime, &table, identity).await;
-        out.push(json!({
-            "name": table,
-            "mcp_enabled": ext.mcp.as_ref().map(|m| m.enabled).unwrap_or(false),
-            "description": ext.mcp.as_ref().and_then(|m| m.description.clone()),
-        }));
+        let description = table_schema(runtime, &table, identity)
+            .await
+            .and_then(|schema| table_description(&schema));
+        out.push(json!({ "name": table, "description": description }));
     }
     Ok(serde_json::to_string_pretty(&out)?)
 }
@@ -307,347 +259,45 @@ async fn describe_table_json(
     let schema = table_schema(runtime, table, identity)
         .await
         .ok_or_else(|| anyhow::anyhow!("table '{table}' not found"))?;
-    let ext = table_extensions(runtime, table, identity).await;
-    // Merge schema types with per-column descriptions, scoped to the exposed
-    // columns (or all columns when none are curated).
-    let columns: Vec<Value> = resolve_columns(&schema, ext.mcp.as_ref())
+    let columns: Vec<Value> = schema
+        .fields()
         .iter()
-        .map(|c| {
+        .map(|field| {
             json!({
-                "name": c.name,
-                "data_type": c.data_type,
-                "nullable": c.nullable,
-                "description": c.description,
+                "name": field.name(),
+                // Arrow renders its own types (`Float64`, `Timestamp(Nanosecond, None)`).
+                "data_type": field.data_type().to_string(),
+                "nullable": field.is_nullable(),
+                "description": column_description(field),
             })
         })
         .collect();
-    Ok(serde_json::to_string_pretty(
-        &json!({ "name": table, "columns": columns, "extensions": ext }),
-    )?)
+    Ok(serde_json::to_string_pretty(&json!({
+        "name": table,
+        "description": table_description(&schema),
+        "columns": columns,
+    }))?)
 }
 
-/// A column resolved for the model: its schema type merged with any description.
-struct ResolvedColumn {
-    name: String,
-    data_type: String,
-    nullable: bool,
-    description: Option<String>,
+/// The table comment, from the schema metadata.
+fn table_description(schema: &Schema) -> Option<String> {
+    schema.metadata().get(COMMENT_METADATA_KEY).cloned()
 }
 
-/// Merge the table schema with the mcp extension's per-column descriptions.
-/// Scoped to `exposed_columns` (in that order) when set, otherwise every column.
-/// A column's description comes from the extension entry, falling back to the
-/// Arrow field's `description`/`comment` metadata when present.
-fn resolve_columns(schema: &SchemaRef, mcp: Option<&McpExtension>) -> Vec<ResolvedColumn> {
-    let resolved = |field: &Field, name: String, description: Option<String>| ResolvedColumn {
-        name,
-        // Arrow renders its own types (`Float64`, `Timestamp(Nanosecond, None)`).
-        data_type: field.data_type().to_string(),
-        nullable: field.is_nullable(),
-        description,
-    };
-
-    match mcp.and_then(|m| m.exposed_columns.as_ref()) {
-        Some(cols) => {
-            let by_name: std::collections::HashMap<&str, &Field> = schema
-                .fields()
-                .iter()
-                .map(|f| (f.name().as_str(), f.as_ref()))
-                .collect();
-            cols.iter()
-                .filter_map(|c| {
-                    let field = by_name.get(c.name())?;
-                    let description = c
-                        .description()
-                        .map(String::from)
-                        .or_else(|| field_description(field));
-                    Some(resolved(field, c.name().to_string(), description))
-                })
-                .collect()
-        }
-        None => schema
-            .fields()
-            .iter()
-            .map(|f| resolved(f, f.name().clone(), field_description(f)))
-            .collect(),
-    }
-}
-
-/// A column description carried in the Arrow field metadata, if any.
-fn field_description(field: &Field) -> Option<String> {
+/// The column comment, with a fallback to native `description` field metadata.
+fn column_description(field: &Field) -> Option<String> {
     field
         .metadata()
-        .get("description")
-        .or_else(|| field.metadata().get("comment"))
+        .get(COMMENT_METADATA_KEY)
+        .or_else(|| field.metadata().get("description"))
         .cloned()
-}
-
-// ---- per-table tools -----------------------------------------------------
-
-fn default_tool_name(table: &str) -> String {
-    // Sanitize to MCP-safe characters so a table name with dots/spaces still
-    // yields a valid tool name (see `beacon_core::extensions::is_valid_tool_name`).
-    let sanitized: String = table
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-        .collect();
-    let mut name = format!("query_{sanitized}");
-    name.truncate(64);
-    name
-}
-
-/// Render a table's advisory guard rails to a compact `key: value; …` string for
-/// the tool description. Beacon does not interpret these — they are hints for the
-/// agent. Returns `None` when there are no guard rails.
-fn guardrails_text(mcp: &McpExtension) -> Option<String> {
-    let guardrails = mcp.guardrails.as_ref()?;
-    if guardrails.is_empty() {
-        return None;
-    }
-    let rendered = guardrails
-        .iter()
-        .map(|(key, value)| {
-            let value = value
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| value.to_string());
-            format!("{key}: {value}")
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    Some(rendered)
-}
-
-async fn table_tool(
-    runtime: &Arc<Runtime>,
-    table: &str,
-    mcp: &McpExtension,
-    preset: Option<&PresetExtension>,
-    identity: &AuthIdentity,
-) -> Tool {
-    let name = mcp
-        .tool_name
-        .clone()
-        .unwrap_or_else(|| default_tool_name(table));
-    let mut description = mcp
-        .description
-        .clone()
-        .unwrap_or_else(|| format!("Query the '{table}' table."));
-    // Surface any advisory guard rails to the model as text (beacon does not
-    // enforce them; they are hints the agent is expected to respect).
-    if let Some(text) = guardrails_text(mcp) {
-        description.push_str("\n\nGuard rails (advisory): ");
-        description.push_str(&text);
-    }
-
-    // Merge the table schema (types) with the extension's per-column descriptions,
-    // scoped to `exposed_columns` when set, or all columns otherwise, so the model
-    // sees name + data type + meaning for every queryable column.
-    let resolved = match table_schema(runtime, table, identity).await {
-        Some(schema) => resolve_columns(&schema, Some(mcp)),
-        None => Vec::new(),
-    };
-    let column_names: Vec<String> = resolved.iter().map(|c| c.name.clone()).collect();
-    let glossary: Vec<String> = resolved
-        .iter()
-        .map(|c| match &c.description {
-            Some(desc) => format!("{} ({}): {}", c.name, c.data_type, desc),
-            None => format!("{} ({})", c.name, c.data_type),
-        })
-        .collect();
-    let select_description = if glossary.is_empty() {
-        "Columns to return. Omit for all columns.".to_string()
-    } else {
-        format!(
-            "Columns to return, each shown as name (type): meaning. Omit for all. {}.",
-            glossary.join("; ")
-        )
-    };
-    let preset_names: Vec<String> = preset
-        .map(|p| p.presets.iter().map(|x| x.name.clone()).collect())
-        .unwrap_or_default();
-
-    let mut props = Map::new();
-    if !column_names.is_empty() {
-        props.insert(
-            "select".into(),
-            json!({
-                "type": "array",
-                "items": { "type": "string", "enum": column_names },
-                "description": select_description
-            }),
-        );
-    }
-    if !preset_names.is_empty() {
-        props.insert(
-            "preset".into(),
-            json!({
-                "type": "string",
-                "enum": preset_names,
-                "description": "Apply a predefined, named filter set."
-            }),
-        );
-    }
-    props.insert(
-        "limit".into(),
-        json!({ "type": "integer", "description": "Maximum rows to return (default 100)." }),
-    );
-
-    let mut tool = read_only(Tool::new(
-        name,
-        description,
-        object_schema(Value::Object(props), &[]),
-    ));
-    if let Some(title) = mcp.title.clone() {
-        tool = tool.with_title(title);
-    }
-    tool
-}
-
-async fn run_table_tool(
-    runtime: &Arc<Runtime>,
-    tool_name: &str,
-    args: &Map<String, Value>,
-    identity: AuthIdentity,
-) -> anyhow::Result<String> {
-    for table in list_table_names(runtime, &identity).await? {
-        let ext = table_extensions(runtime, &table, &identity).await;
-        let Some(mcp) = ext.mcp.as_ref().filter(|m| m.enabled) else {
-            continue;
-        };
-        let name = mcp
-            .tool_name
-            .clone()
-            .unwrap_or_else(|| default_tool_name(&table));
-        if name != tool_name {
-            continue;
-        }
-        let sql = build_table_sql(&table, mcp, ext.preset.as_ref(), args)?;
-        return run_sql_to_json(runtime, sql, identity).await;
-    }
-    anyhow::bail!("unknown tool '{tool_name}'")
-}
-
-/// Build a `SELECT` for a per-table tool from its args, expanding a chosen preset
-/// into `WHERE` clauses. Identifiers are quoted and values rendered as literals.
-fn build_table_sql(
-    table: &str,
-    mcp: &McpExtension,
-    preset: Option<&PresetExtension>,
-    args: &Map<String, Value>,
-) -> anyhow::Result<String> {
-    let exposed = mcp.exposed_column_names();
-
-    let select = match args.get("select").and_then(Value::as_array) {
-        Some(arr) if !arr.is_empty() => {
-            let cols: Vec<String> = arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-            if let Some(exp) = &exposed {
-                for col in &cols {
-                    anyhow::ensure!(
-                        exp.contains(&col.as_str()),
-                        "column '{col}' is not exposed by this tool"
-                    );
-                }
-            }
-            cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ")
-        }
-        _ => default_select(exposed.as_deref()),
-    };
-
-    let mut clauses = Vec::new();
-    if let Some(name) = args.get("preset").and_then(Value::as_str) {
-        let preset = preset
-            .and_then(|p| p.presets.iter().find(|x| x.name == name))
-            .ok_or_else(|| anyhow::anyhow!("unknown preset '{name}'"))?;
-        for filter in &preset.filters {
-            clauses.push(render_filter(filter)?);
-        }
-    }
-
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(100)
-        .min(MAX_ROWS as u64);
-
-    let mut sql = format!("SELECT {select} FROM {}", quote_ident(table));
-    if !clauses.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&clauses.join(" AND "));
-    }
-    sql.push_str(&format!(" LIMIT {limit}"));
-    Ok(sql)
-}
-
-fn default_select(exposed: Option<&[&str]>) -> String {
-    match exposed {
-        Some(cols) if !cols.is_empty() => {
-            cols.iter().map(|&c| quote_ident(c)).collect::<Vec<_>>().join(", ")
-        }
-        _ => "*".to_string(),
-    }
-}
-
-/// Render a stored preset filter into a SQL boolean expression.
-fn render_filter(filter: &PresetFilter) -> anyhow::Result<String> {
-    let col = quote_ident(&filter.column);
-    match filter.op {
-        PresetOp::Between => {
-            let arr = filter
-                .value
-                .as_array()
-                .filter(|a| a.len() == 2)
-                .ok_or_else(|| anyhow::anyhow!("'between' requires a two-element array"))?;
-            Ok(format!(
-                "{col} BETWEEN {} AND {}",
-                render_scalar(&arr[0])?,
-                render_scalar(&arr[1])?
-            ))
-        }
-        PresetOp::In => {
-            let arr = filter
-                .value
-                .as_array()
-                .filter(|a| !a.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("'in' requires a non-empty array"))?;
-            let vals = arr.iter().map(render_scalar).collect::<anyhow::Result<Vec<_>>>()?;
-            Ok(format!("{col} IN ({})", vals.join(", ")))
-        }
-        op => Ok(format!("{col} {} {}", op.as_sql(), render_scalar(&filter.value)?)),
-    }
-}
-
-fn render_scalar(value: &Value) -> anyhow::Result<String> {
-    Ok(match value {
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Bool(b) => if *b { "TRUE".into() } else { "FALSE".into() },
-        Value::Null => "NULL".into(),
-        other => anyhow::bail!("unsupported filter value: {other}"),
-    })
-}
-
-/// Quote a SQL identifier, escaping embedded double quotes.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn preset(name: &str, filters: Vec<PresetFilter>) -> PresetExtension {
-        PresetExtension {
-            presets: vec![beacon_core::extensions::Preset {
-                name: name.to_string(),
-                description: None,
-                filters,
-            }],
-        }
-    }
+    use arrow::datatypes::DataType;
+    use std::collections::HashMap;
 
     #[test]
     fn export_query_recipe_builds_fetch_and_guards_writes() {
@@ -670,334 +320,46 @@ mod tests {
         assert!(export_query_recipe(&bad).is_err());
     }
 
-    /// An Arrow field of the named type — the tests only use `Float64`/`Int64`,
-    /// so the type is parsed from the two names rather than a full type parser.
-    fn field(name: &str, data_type: &str) -> Field {
-        let data_type = match data_type {
-            "Float64" => arrow::datatypes::DataType::Float64,
-            "Int64" => arrow::datatypes::DataType::Int64,
-            other => panic!("unhandled test data type: {other}"),
-        };
-        Field::new(name, data_type, true)
-    }
-
-    fn schema_of(fields: Vec<Field>) -> SchemaRef {
-        Arc::new(arrow::datatypes::Schema::new(fields))
-    }
-
     #[test]
-    fn resolve_columns_merges_types_and_descriptions() {
-        use beacon_core::extensions::{ColumnDoc, ExposedColumn};
-        let schema = schema_of(vec![
-            field("lat", "Float64"),
-            field("depth", "Float64"),
-            field("x", "Int64"),
-        ]);
+    fn the_tool_list_is_fixed_and_read_only() {
+        let tools = tools();
 
-        // No exposed_columns -> all columns, types included, no descriptions.
-        let all = resolve_columns(&schema, Some(&mcp(None)));
-        assert_eq!(all.len(), 3);
-        assert_eq!((all[0].name.as_str(), all[0].data_type.as_str()), ("lat", "Float64"));
-
-        // Exposed subset (in order), merging schema type + entry description.
-        let ext = McpExtension {
-            enabled: true,
-            tool_name: None,
-            title: None,
-            description: None,
-            exposed_columns: Some(vec![
-                ExposedColumn::Documented(ColumnDoc {
-                    name: "depth".into(),
-                    description: Some("meters".into()),
-                }),
-                ExposedColumn::Name("lat".into()),
-            ]),
-            guardrails: None,
-        };
-        let cols = resolve_columns(&schema, Some(&ext));
-        assert_eq!(cols.len(), 2);
-        assert_eq!(
-            (cols[0].name.as_str(), cols[0].data_type.as_str(), cols[0].description.as_deref()),
-            ("depth", "Float64", Some("meters"))
-        );
-        assert_eq!((cols[1].name.as_str(), cols[1].description.as_deref()), ("lat", None));
-    }
-
-    fn mcp(cols: Option<Vec<&str>>) -> McpExtension {
-        McpExtension {
-            enabled: true,
-            tool_name: None,
-            description: None,
-            title: None,
-            exposed_columns: cols.map(|c| {
-                c.into_iter()
-                    .map(|s| beacon_core::extensions::ExposedColumn::Name(s.to_string()))
-                    .collect()
-            }),
-            guardrails: None,
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
+        assert_eq!(names, ["list_tables", "describe_table", "run_sql", "export_query"]);
+        for tool in &tools {
+            let hint = tool.annotations.as_ref().and_then(|a| a.read_only_hint);
+            assert_eq!(hint, Some(true), "{} must be read-only", tool.name);
         }
     }
 
-    #[test]
-    fn guardrails_render_as_advisory_text() {
-        assert_eq!(guardrails_text(&mcp(None)), None);
-        let mut ext = mcp(None);
-        let mut g = std::collections::BTreeMap::new();
-        g.insert("recommended_row_limit".to_string(), serde_json::json!(10000));
-        g.insert("note".to_string(), serde_json::json!("filter by time first"));
-        ext.guardrails = Some(g);
-        // Rendered as `key: value` pairs (BTreeMap => deterministic key order).
-        assert_eq!(
-            guardrails_text(&ext).as_deref(),
-            Some("note: filter by time first; recommended_row_limit: 10000")
-        );
+    fn field_with(metadata: &[(&str, &str)]) -> Field {
+        Field::new("depth", DataType::Float64, true).with_metadata(
+            metadata
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<HashMap<_, _>>(),
+        )
     }
 
     #[test]
-    fn builds_select_with_preset_between() {
-        let p = preset(
-            "shallow",
-            vec![PresetFilter {
-                column: "depth".into(),
-                op: PresetOp::Between,
-                value: serde_json::json!([0, 10]),
-            }],
-        );
-        let mut args = Map::new();
-        args.insert("preset".into(), Value::String("shallow".into()));
-        let sql = build_table_sql("obs", &mcp(Some(vec!["lat", "depth"])), Some(&p), &args).unwrap();
-        assert_eq!(
-            sql,
-            r#"SELECT "lat", "depth" FROM "obs" WHERE "depth" BETWEEN 0 AND 10 LIMIT 100"#
-        );
+    fn a_column_comment_wins_over_native_description() {
+        let both = field_with(&[("comment", "beacon"), ("description", "native")]);
+        let native = field_with(&[("description", "native")]);
+        let none = field_with(&[]);
+
+        assert_eq!(column_description(&both).as_deref(), Some("beacon"));
+        assert_eq!(column_description(&native).as_deref(), Some("native"));
+        assert_eq!(column_description(&none), None);
     }
 
     #[test]
-    fn rejects_unexposed_select_column() {
-        let mut args = Map::new();
-        args.insert("select".into(), serde_json::json!(["ghost"]));
-        let err = build_table_sql("obs", &mcp(Some(vec!["lat"])), None, &args).unwrap_err();
-        assert!(err.to_string().contains("not exposed"), "{err}");
-    }
+    fn the_table_description_is_the_schema_comment() {
+        let schema = Schema::new(vec![field_with(&[])]).with_metadata(HashMap::from([(
+            "comment".to_string(),
+            "profiles".to_string(),
+        )]));
 
-    #[test]
-    fn unknown_preset_errors() {
-        let mut args = Map::new();
-        args.insert("preset".into(), Value::String("nope".into()));
-        let err = build_table_sql("obs", &mcp(None), None, &args).unwrap_err();
-        assert!(err.to_string().contains("unknown preset"), "{err}");
-    }
-
-    #[test]
-    fn in_and_string_values_are_escaped() {
-        let f = PresetFilter {
-            column: "basin".into(),
-            op: PresetOp::In,
-            value: serde_json::json!(["a'b", "c"]),
-        };
-        assert_eq!(render_filter(&f).unwrap(), r#""basin" IN ('a''b', 'c')"#);
-    }
-
-    #[test]
-    fn default_select_is_star_without_exposed() {
-        let sql = build_table_sql("obs", &mcp(None), None, &Map::new()).unwrap();
-        assert_eq!(sql, r#"SELECT * FROM "obs" LIMIT 100"#);
-    }
-
-    // ---- default tool-name derivation -----------------------------------
-
-    #[test]
-    fn default_tool_name_prefixes_and_sanitizes() {
-        assert_eq!(default_tool_name("obs"), "query_obs");
-        // Dots, spaces and other non-MCP-safe characters become '_'; '-' and '_'
-        // are kept (they are valid MCP tool-name characters).
-        assert_eq!(default_tool_name("schema.my table"), "query_schema_my_table");
-        assert_eq!(default_tool_name("keep-_ok"), "query_keep-_ok");
-    }
-
-    #[test]
-    fn default_tool_name_is_truncated_to_64_chars() {
-        let name = default_tool_name(&"a".repeat(200));
-        assert_eq!(name.len(), 64);
-        assert!(name.starts_with("query_aaaa"));
-        // The result is still a valid MCP tool name.
-        assert!(beacon_core::extensions::is_valid_tool_name(&name));
-    }
-
-    /// A custom `tool_name` from the extension is used verbatim; only when it is
-    /// absent do we derive `query_<table>`. (These are the two branches
-    /// `table_tool`/`run_table_tool` pick between.)
-    #[test]
-    fn custom_tool_name_overrides_the_default() {
-        let mut ext = mcp(None);
-        ext.tool_name = Some("ocean_obs".to_string());
-        let chosen = ext
-            .tool_name
-            .clone()
-            .unwrap_or_else(|| default_tool_name("obs"));
-        assert_eq!(chosen, "ocean_obs");
-
-        let plain = mcp(None)
-            .tool_name
-            .clone()
-            .unwrap_or_else(|| default_tool_name("obs"));
-        assert_eq!(plain, "query_obs");
-    }
-
-    // ---- filter / scalar rendering --------------------------------------
-
-    #[test]
-    fn render_filter_covers_simple_comparison_ops() {
-        let f = |op| PresetFilter {
-            column: "depth".into(),
-            op,
-            value: serde_json::json!(10),
-        };
-        assert_eq!(render_filter(&f(PresetOp::Eq)).unwrap(), r#""depth" = 10"#);
-        assert_eq!(render_filter(&f(PresetOp::Ne)).unwrap(), r#""depth" != 10"#);
-        assert_eq!(render_filter(&f(PresetOp::Lt)).unwrap(), r#""depth" < 10"#);
-        assert_eq!(render_filter(&f(PresetOp::Lte)).unwrap(), r#""depth" <= 10"#);
-        assert_eq!(render_filter(&f(PresetOp::Gt)).unwrap(), r#""depth" > 10"#);
-        assert_eq!(render_filter(&f(PresetOp::Gte)).unwrap(), r#""depth" >= 10"#);
-    }
-
-    #[test]
-    fn render_filter_between_requires_a_two_element_array() {
-        let bad = PresetFilter {
-            column: "d".into(),
-            op: PresetOp::Between,
-            value: serde_json::json!([1, 2, 3]),
-        };
-        assert!(render_filter(&bad).unwrap_err().to_string().contains("two-element"));
-
-        let scalar = PresetFilter {
-            column: "d".into(),
-            op: PresetOp::Between,
-            value: serde_json::json!(1),
-        };
-        assert!(render_filter(&scalar).is_err());
-    }
-
-    #[test]
-    fn render_filter_in_requires_a_non_empty_array() {
-        let empty = PresetFilter {
-            column: "d".into(),
-            op: PresetOp::In,
-            value: serde_json::json!([]),
-        };
-        assert!(render_filter(&empty).unwrap_err().to_string().contains("non-empty"));
-    }
-
-    /// Column identifiers are always double-quoted with embedded quotes escaped,
-    /// so a crafted column name can't break out of the identifier.
-    #[test]
-    fn render_filter_quotes_and_escapes_column_identifiers() {
-        let f = PresetFilter {
-            column: r#"we"ird"#.into(),
-            op: PresetOp::Eq,
-            value: serde_json::json!(true),
-        };
-        assert_eq!(render_filter(&f).unwrap(), r#""we""ird" = TRUE"#);
-    }
-
-    #[test]
-    fn render_scalar_renders_each_json_type_and_rejects_nested() {
-        assert_eq!(render_scalar(&serde_json::json!(42)).unwrap(), "42");
-        assert_eq!(render_scalar(&serde_json::json!(1.5)).unwrap(), "1.5");
-        assert_eq!(render_scalar(&serde_json::json!(true)).unwrap(), "TRUE");
-        assert_eq!(render_scalar(&serde_json::json!(false)).unwrap(), "FALSE");
-        assert_eq!(render_scalar(&Value::Null).unwrap(), "NULL");
-        // Single quotes are doubled to avoid SQL-injection via preset values.
-        assert_eq!(
-            render_scalar(&serde_json::json!("a'b")).unwrap(),
-            "'a''b'"
-        );
-        // Arrays / objects are not valid scalar filter values.
-        assert!(render_scalar(&serde_json::json!([1, 2])).is_err());
-        assert!(render_scalar(&serde_json::json!({"x": 1})).is_err());
-    }
-
-    // ---- build_table_sql: select, limit, multi-filter --------------------
-
-    #[test]
-    fn explicit_select_is_quoted_and_limit_defaults_to_100() {
-        let mut args = Map::new();
-        args.insert("select".into(), serde_json::json!(["lat", "depth"]));
-        let sql = build_table_sql("obs", &mcp(Some(vec!["lat", "depth"])), None, &args).unwrap();
-        assert_eq!(sql, r#"SELECT "lat", "depth" FROM "obs" LIMIT 100"#);
-    }
-
-    #[test]
-    fn limit_is_honored_and_clamped_to_max_rows() {
-        let mut args = Map::new();
-        args.insert("limit".into(), serde_json::json!(5));
-        let sql = build_table_sql("obs", &mcp(None), None, &args).unwrap();
-        assert!(sql.ends_with("LIMIT 5"), "{sql}");
-
-        // A caller-supplied limit larger than the hard cap is clamped.
-        let mut big = Map::new();
-        big.insert("limit".into(), serde_json::json!(10_000_000u64));
-        let sql = build_table_sql("obs", &mcp(None), None, &big).unwrap();
-        assert!(sql.ends_with(&format!("LIMIT {MAX_ROWS}")), "{sql}");
-    }
-
-    #[test]
-    fn default_select_uses_exposed_columns_when_curated() {
-        // With exposed columns and no explicit `select`, the default projection is
-        // the curated set (not `*`), so unexposed columns never leak.
-        let sql = build_table_sql("obs", &mcp(Some(vec!["lat", "lon"])), None, &Map::new()).unwrap();
-        assert_eq!(sql, r#"SELECT "lat", "lon" FROM "obs" LIMIT 100"#);
-    }
-
-    #[test]
-    fn multiple_preset_filters_are_joined_with_and() {
-        let p = preset(
-            "band",
-            vec![
-                PresetFilter {
-                    column: "depth".into(),
-                    op: PresetOp::Gte,
-                    value: serde_json::json!(0),
-                },
-                PresetFilter {
-                    column: "depth".into(),
-                    op: PresetOp::Lte,
-                    value: serde_json::json!(10),
-                },
-            ],
-        );
-        let mut args = Map::new();
-        args.insert("preset".into(), Value::String("band".into()));
-        let sql = build_table_sql("obs", &mcp(None), Some(&p), &args).unwrap();
-        assert_eq!(
-            sql,
-            r#"SELECT * FROM "obs" WHERE "depth" >= 0 AND "depth" <= 10 LIMIT 100"#
-        );
-    }
-
-    // ---- resolve_columns edge cases -------------------------------------
-
-    /// An exposed column that does not exist in the schema is silently skipped
-    /// (filter_map), so a stale extension can't crash `describe_table`.
-    #[test]
-    fn resolve_columns_skips_exposed_columns_missing_from_schema() {
-        let schema = schema_of(vec![field("lat", "Float64")]);
-        let cols = resolve_columns(&schema, Some(&mcp(Some(vec!["lat", "ghost"]))));
-        assert_eq!(cols.len(), 1);
-        assert_eq!(cols[0].name, "lat");
-    }
-
-    /// When no per-column description is curated, the Arrow field metadata's
-    /// `description` (then `comment`) is used as a fallback.
-    #[test]
-    fn resolve_columns_falls_back_to_field_metadata_description() {
-        let with_desc = field("lat", "Float64")
-            .with_metadata([("description".to_string(), "latitude".to_string())].into());
-        let with_comment = field("lon", "Float64")
-            .with_metadata([("comment".to_string(), "longitude".to_string())].into());
-        let schema = schema_of(vec![with_desc, with_comment]);
-        let cols = resolve_columns(&schema, None);
-        assert_eq!(cols[0].description.as_deref(), Some("latitude"));
-        assert_eq!(cols[1].description.as_deref(), Some("longitude"));
+        assert_eq!(table_description(&schema).as_deref(), Some("profiles"));
+        assert_eq!(table_description(&Schema::empty()), None);
     }
 }

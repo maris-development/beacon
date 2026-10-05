@@ -1,5 +1,5 @@
 ---
-description: Beacon has a built-in MCP server. AI agents discover tables and run read-only queries over the Model Context Protocol, with per-table tools and per-user auth.
+description: Beacon has a built-in MCP server. AI agents discover tables and run read-only queries over the Model Context Protocol, with table comments as context and per-user auth.
 # Unreleased: kept out of the local search index. Also listed in
 # .vitepress/config.mts UNRELEASED_PAGES (sitemap + noindex). Remove both to release.
 search: false
@@ -12,8 +12,8 @@ discover your tables through it. They then run **read-only** queries over the Mo
 Protocol. The server uses the streamable-HTTP transport at `POST/GET/DELETE /mcp`. It runs next to
 the REST API.
 
-Beacon generates the tool set from your data. It gives a few generic tools. It adds one tool for
-each table with an enabled `mcp` extension.
+Beacon gives four fixed tools. An agent sees every table that its identity can read. The
+[comments](/docs/2.0.0/sql/comment-on) on your tables and columns tell the agent what the data holds.
 
 ## Enable and configure
 
@@ -37,90 +37,51 @@ Behind a trusted reverse proxy, you can set `*`.
 
 ## Tools
 
-Beacon builds this list on every `tools/list` call:
+`tools/list` always returns the same four tools:
 
-- **`list_tables`**: returns the registered tables and their MCP status.
-- **`describe_table`**: returns one row per column with `name`, `data_type`, `nullable` and
-  `description`. It returns the `exposed_columns` if you set them. If not, it returns all columns.
-  It also returns the extensions of the table.
+- **`list_tables`**: returns each table that the caller can read, with its table comment as
+  `description`.
+- **`describe_table`**: returns the table comment as `description`, and one row per column with
+  `name`, `data_type`, `nullable` and `description`. The column `description` is the column comment.
+  If the column has no comment, Beacon uses the `description` metadata of the file format.
 - **`run_sql`**: runs a read-only `SELECT` and returns JSON rows. It is a **bounded preview** with a
   limit of 1000 rows. Beacon truncates a larger result and points you to `export_query`.
 - **`export_query`**: for **large** results. It returns a recipe: an `/api/query` request and a
   Python snippet. The recipe reads the result as a Parquet, Arrow or CSV file. See
   [Large results](#large-results).
-- **one tool for each table** with an enabled `mcp` extension. Beacon builds the tool from the
-  extension. The tool takes `select`, limited to the exposed columns. It takes `preset`, an enum of
-  the named filter sets of the table. It also takes `limit`.
 
 The MCP interface is **read-only**. Every tool call runs without super-user privileges. The planner
-therefore rejects `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `SET EXTENSION` and every other DDL or DML
+therefore rejects `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `COMMENT ON` and every other DDL or DML
 statement. This holds for every caller. Each tool carries `annotations.readOnlyHint: true`.
 
-## Expose a table to MCP
+## Make a table ready for MCP
 
-A table becomes an MCP tool when you enable its
-`mcp` [extension](/docs/2.0.0/server/extensions). Set the extension with SQL
-(`SET EXTENSION`) or with the admin REST API. The optional `preset` extension adds named filter
-sets.
+A table is ready for MCP when two conditions are true:
 
-```sql
-SET EXTENSION 'mcp' FOR obs TO '{
-  "enabled": true,
-  "tool_name": "query_obs",
-  "title": "Ocean observations",
-  "description": "Argo float profiles: temperature and salinity by location, depth and time.",
-  "exposed_columns": [
-    {"name": "lat",   "description": "latitude in decimal degrees"},
-    {"name": "depth", "description": "measurement depth in meters"},
-    "temperature"
-  ]
-}';
-
-SET EXTENSION 'preset' FOR obs TO '{
-  "presets": [
-    {"name": "shallow", "description": "Surface layer",
-     "filters": [{"column": "depth", "op": "<=", "value": 10}]}
-  ]
-}';
-```
-
-Use `SHOW EXTENSIONS FOR obs` to read the extensions. Use `DROP EXTENSION 'mcp' FOR obs` to delete
-one. These statements need the super-user. The MCP tools and `GET /api/table-extensions` show the
-extensions to every caller who can read the table.
-
-### Fields → the MCP `Tool` standard
-
-| Extension field | MCP `Tool` | Notes |
-|---|---|---|
-| `tool_name` | `name` | Beacon accepts 1 to 64 characters from `[A-Za-z0-9_-]`. Beacon cleans the default name, `query_<table>`. |
-| `title` | `title` | A label for a human reader. |
-| `description` | `description` | What the **table** means. |
-| `exposed_columns` | `inputSchema` | Limits `select`. The column descriptions go into the tool help and into `describe_table`. |
-|-| `annotations.readOnlyHint` | Always `true`. |
-
-An `exposed_columns` entry is a bare name such as `"lat"`. It can also be an object with `name` and
-`description`. Beacon adds the column descriptions to the `select` help of the tool.
-`describe_table` also returns them. The model then knows what each field means. Beacon parses the
-payload strictly. It rejects unknown keys and invalid operators.
-
-### Advisory guard rails
-
-The `mcp` descriptor can hold a free-form `guardrails` map. The map takes any key and value pair.
-Beacon adds the map to the description of the tool. `describe_table` also returns it. Beacon does
-**not** enforce the map. Use it to guide the model:
+1. The identity of the agent can read the table. See [Authenticate an agent](#authenticate-an-agent).
+2. The table and its columns have comments. The agent reads them to write correct SQL.
 
 ```sql
-SET EXTENSION 'mcp' FOR obs TO '{
-  "enabled": true,
-  "guardrails": {
-    "recommended_row_limit": 10000,
-    "note": "Always filter by time range; use export_query for full extracts."
-  }
-}';
+COMMENT ON TABLE obs IS 'Argo float profiles: temperature and salinity by location, depth and time.';
+COMMENT ON COLUMN obs.lat IS 'Latitude in decimal degrees';
+COMMENT ON COLUMN obs.depth IS 'Measurement depth in meters';
 ```
 
-Beacon allows any key. The values are hints only. The built-in `run_sql` preview limit controls the
-result size. See the next section.
+See [COMMENT ON](/docs/2.0.0/sql/comment-on) for the full syntax.
+
+Standard SQL replaces the per-table settings of earlier builds:
+
+| Goal | Use |
+|---|---|
+| Hide a table from the agent | Do not grant `SELECT` on the table to the role of the agent. |
+| Show only some columns | Create a view with those columns. Comment the view. |
+| A named filter set | Create a view with a `WHERE` clause. Comment the view. |
+| A hint for the agent | Write the hint in the table comment, for example "Filter by time first." |
+
+```sql
+CREATE VIEW obs_shallow AS SELECT lat, lon, depth, temperature FROM obs WHERE depth <= 10;
+COMMENT ON TABLE obs_shallow IS 'Surface layer only. Filter by time first.';
+```
 
 ## Large results
 
@@ -281,13 +242,10 @@ metrics and access control.
 
 - **Transport**: an `rmcp` streamable-HTTP service at `/mcp`. The `BEACON_MCP_ENABLED` flag controls
   it. It uses the same identity middleware as the client API.
-- **`tools/list`**: Beacon builds the list on every call. It returns the generic tools and one tool
-  for each enabled table. It reads the `mcp` and `preset` extensions. A new table appears without a
-  restart.
+- **`tools/list`**: returns the four fixed tools. It reads no table.
 - **`tools/call`**: Beacon resolves the identity of the caller. It then **clears super-user**,
-  because MCP is read-only. `run_sql` and the table tools build a `SELECT` and run it.
-  `export_query` returns a recipe. `describe_table` and `list_tables` read the catalog. A table tool
-  expands the chosen `preset` into a `WHERE` clause with safe values. The model never sends raw SQL
-  through a table tool.
+  because MCP is read-only. `run_sql` runs the `SELECT` of the agent. `export_query` returns a
+  recipe. `list_tables` and `describe_table` read the catalog and the Arrow schema of each table,
+  which carries the comments. A new table or comment shows without a restart.
 - **Results**: Beacon limits the rows and returns them as JSON tool content. Beacon returns an error
   as an MCP tool error with `isError: true`. The model can then react.

@@ -5,6 +5,7 @@
 //! beacon execution plans directly. Only a few are rewritten here:
 //!
 //! - `ALTER TABLE` — DataFusion cannot plan it, so it is built from the AST.
+//! - `COMMENT ON` — the same: DataFusion parses it but cannot plan it.
 //! - `DELETE`/`UPDATE` — lowered to a copy-on-write [`ReplaceTableContentsNode`].
 //!   This must happen *before* optimization: the surviving/updated rows are
 //!   derived from the predicate, which the optimizer may otherwise push into the
@@ -28,14 +29,15 @@ use datafusion::{
         parser::Statement as DFStatement,
         planner::object_name_to_table_reference,
         sqlparser::ast::{
-            AlterTableOperation, ObjectName, ShowCreateObject, Statement as SqlAstStatement,
+            AlterTableOperation, CommentObject, ObjectName, ShowCreateObject,
+            Statement as SqlAstStatement,
         },
     },
 };
 
 use super::logical::{
-    AlterTableNode, AlterTableSpec, CreateManagedTableNode, Keyed, Mutation,
-    ReplaceTableContentsNode, ShowCreateTableNode,
+    AlterTableNode, AlterTableSpec, CommentOnNode, CommentTarget, CreateManagedTableNode, Keyed,
+    Mutation, ReplaceTableContentsNode, ShowCreateTableNode,
 };
 
 /// Render a DataFusion `Expr` back to a SQL string (best-effort). Used to derive
@@ -103,6 +105,20 @@ pub(crate) async fn lower_df_statement(
                 let table = object_name_to_table_reference(obj_name.clone(), normalize)?;
                 return Ok(extension(Arc::new(ShowCreateTableNode { table })));
             }
+            // DataFusion parses `COMMENT ON` but cannot plan it.
+            SqlAstStatement::Comment {
+                object_type,
+                object_name,
+                comment,
+                if_exists,
+            } => {
+                let target = comment_target(object_type, object_name)?;
+                return Ok(extension(Arc::new(CommentOnNode {
+                    target,
+                    comment: comment.clone(),
+                    if_exists: *if_exists,
+                })));
+            }
             _ => {}
         }
     }
@@ -166,6 +182,35 @@ fn rewrite_logical_plan(plan: LogicalPlan) -> anyhow::Result<LogicalPlan> {
 
 fn extension(node: Arc<dyn datafusion::logical_expr::UserDefinedLogicalNode>) -> LogicalPlan {
     LogicalPlan::Extension(Extension { node })
+}
+
+/// The table or column that a `COMMENT ON` statement names. Names keep their case.
+fn comment_target(object_type: &CommentObject, name: &ObjectName) -> anyhow::Result<CommentTarget> {
+    match object_type {
+        // Views take `COMMENT ON TABLE` too: the parser has no `COMMENT ON VIEW`.
+        CommentObject::Table => Ok(CommentTarget::Table(
+            crate::table_name::object_name_table_reference(name),
+        )),
+        CommentObject::Column => {
+            let mut parts = name.0.clone();
+            anyhow::ensure!(
+                parts.len() >= 2,
+                "COMMENT ON COLUMN needs <table>.<column>, but got '{name}'"
+            );
+            let column = parts.pop().expect("at least two parts");
+            let column = match column.as_ident() {
+                Some(ident) => ident.value.clone(),
+                None => column.to_string(),
+            };
+            Ok(CommentTarget::Column {
+                table: crate::table_name::object_name_table_reference(&ObjectName(parts)),
+                column,
+            })
+        }
+        other => anyhow::bail!(
+            "COMMENT ON {other} is not supported; use COMMENT ON TABLE or COMMENT ON COLUMN"
+        ),
+    }
 }
 
 fn alter_table_plan(name: ObjectName, operations: Vec<AlterTableOperation>) -> LogicalPlan {

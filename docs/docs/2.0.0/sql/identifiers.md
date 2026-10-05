@@ -68,7 +68,7 @@ SELECT TEMP AS Celsius FROM MyTable ORDER BY celsius   -- Schema error: No field
 ## Every statement follows the rule
 
 `DROP TABLE`, `ALTER TABLE`, `INSERT`, `UPDATE`, `DELETE`, `REFRESH`, `CREATE INDEX` and
-`SET EXTENSION` all name the table the same way as `SELECT`:
+`COMMENT ON` all name the table the same way as `SELECT`:
 
 ```sql
 DROP TABLE mytable   -- Table 'mytable' does not exist

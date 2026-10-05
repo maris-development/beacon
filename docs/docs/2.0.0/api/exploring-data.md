@@ -178,9 +178,8 @@ The endpoint still exists, for an admin only. It answers `200` with a notice:
 { "message": "Table configuration is no longer supported. ..." }
 ```
 
-Use `GET /api/table-schema` for the columns of a table. Use `SHOW EXTENSIONS FOR <table>` through
-`/api/query` for its extensions. Use `GET /api/admin/table-definition` for the statement that
-created it.
+Use `GET /api/table-schema` for the columns of a table and their comments. Use
+`GET /api/admin/table-definition` for the statement that created it.
 :::
 
 ### Table definition

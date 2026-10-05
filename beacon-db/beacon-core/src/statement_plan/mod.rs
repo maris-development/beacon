@@ -36,8 +36,8 @@ use datafusion::{
 use crate::parser::statement::{
     AttachStatement, AuthStatement, CompactTableStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
-    DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
-    AnalyzeFilesStatement, RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
+    DropIndexStatement, DropSecretStatement, RefreshStatement,
+    AnalyzeFilesStatement, RunCrawlerStatement, ShowIndexesStatement,
     SummarizeStatement,
 };
 
@@ -484,34 +484,6 @@ fn normalize_secret_option_key(key: &str) -> String {
 pub(crate) fn show_crawlers_plan() -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::ShowCrawlersNode),
-    })
-}
-
-/// Build the logical plan for `SET EXTENSION '<kind>' FOR <table> TO '<json>'`.
-pub(crate) fn set_extension_plan(statement: SetExtensionStatement) -> LogicalPlan {
-    LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::SetExtensionNode::new(
-            statement.kind,
-            object_name_value(&statement.table),
-            statement.json,
-        )),
-    })
-}
-
-/// Build the logical plan for `DROP EXTENSION '<kind>' FOR <table>`.
-pub(crate) fn drop_extension_plan(statement: DropExtensionStatement) -> LogicalPlan {
-    LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::DropExtensionNode::new(
-            statement.kind,
-            object_name_value(&statement.table),
-        )),
-    })
-}
-
-/// Build the logical plan for `SHOW EXTENSIONS FOR <table>`.
-pub(crate) fn show_extensions_plan(statement: ShowExtensionsStatement) -> LogicalPlan {
-    LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::ShowExtensionsNode::new(object_name_value(&statement.table))),
     })
 }
 

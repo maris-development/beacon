@@ -23,7 +23,6 @@ use datafusion::{
     },
 };
 
-use crate::extensions::show_extensions_arrow_schema;
 
 /// Shared empty schema returned by beacon's side-effecting statement nodes,
 /// which produce no rows. `schema()` must return a reference, so the schema is
@@ -1118,33 +1117,28 @@ impl UserDefinedLogicalNodeCore for AlterTableNode {
     }
 }
 
-fn show_extensions_df_schema() -> &'static DFSchemaRef {
-    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        Arc::new(
-            DFSchema::try_from(show_extensions_arrow_schema().as_ref().clone())
-                .expect("SHOW EXTENSIONS schema is valid"),
-        )
-    })
+/// The object a `COMMENT ON` statement targets.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) enum CommentTarget {
+    Table(TableReference),
+    Column {
+        table: TableReference,
+        column: String,
+    },
 }
 
-/// Logical node for `SET EXTENSION '<kind>' FOR <table> TO '<json>'`.
+/// Logical node for `COMMENT ON TABLE | COLUMN <name> IS '<text>' | NULL`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
-pub(crate) struct SetExtensionNode {
-    pub(crate) kind: String,
-    pub(crate) table: String,
-    pub(crate) json: String,
+pub(crate) struct CommentOnNode {
+    pub(crate) target: CommentTarget,
+    /// The new comment, or `None` to remove it.
+    pub(crate) comment: Option<String>,
+    pub(crate) if_exists: bool,
 }
 
-impl SetExtensionNode {
-    pub(crate) fn new(kind: String, table: String, json: String) -> Self {
-        Self { kind, table, json }
-    }
-}
-
-impl UserDefinedLogicalNodeCore for SetExtensionNode {
+impl UserDefinedLogicalNodeCore for CommentOnNode {
     fn name(&self) -> &str {
-        "SetExtension"
+        "CommentOn"
     }
     fn inputs(&self) -> Vec<&LogicalPlan> {
         vec![]
@@ -1156,85 +1150,18 @@ impl UserDefinedLogicalNodeCore for SetExtensionNode {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "SetExtension: table={} kind={}", self.table, self.kind)
+        match &self.target {
+            CommentTarget::Table(table) => write!(f, "CommentOn: table={table}"),
+            CommentTarget::Column { table, column } => {
+                write!(f, "CommentOn: table={table} column={column}")
+            }
+        }
     }
     fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
         Ok(Self {
-            kind: self.kind.clone(),
-            table: self.table.clone(),
-            json: self.json.clone(),
-        })
-    }
-}
-
-/// Logical node for `DROP EXTENSION '<kind>' FOR <table>`.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
-pub(crate) struct DropExtensionNode {
-    pub(crate) kind: String,
-    pub(crate) table: String,
-}
-
-impl DropExtensionNode {
-    pub(crate) fn new(kind: String, table: String) -> Self {
-        Self { kind, table }
-    }
-}
-
-impl UserDefinedLogicalNodeCore for DropExtensionNode {
-    fn name(&self) -> &str {
-        "DropExtension"
-    }
-    fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![]
-    }
-    fn schema(&self) -> &DFSchemaRef {
-        empty_schema()
-    }
-    fn expressions(&self) -> Vec<Expr> {
-        vec![]
-    }
-    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "DropExtension: table={} kind={}", self.table, self.kind)
-    }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self {
-            kind: self.kind.clone(),
-            table: self.table.clone(),
-        })
-    }
-}
-
-/// Logical node for `SHOW EXTENSIONS FOR <table>`. Produces one JSON row.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
-pub(crate) struct ShowExtensionsNode {
-    pub(crate) table: String,
-}
-
-impl ShowExtensionsNode {
-    pub(crate) fn new(table: String) -> Self {
-        Self { table }
-    }
-}
-
-impl UserDefinedLogicalNodeCore for ShowExtensionsNode {
-    fn name(&self) -> &str {
-        "ShowExtensions"
-    }
-    fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![]
-    }
-    fn schema(&self) -> &DFSchemaRef {
-        show_extensions_df_schema()
-    }
-    fn expressions(&self) -> Vec<Expr> {
-        vec![]
-    }
-    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "ShowExtensions: table={}", self.table)
-    }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self {
-            table: self.table.clone(),
+            target: self.target.clone(),
+            comment: self.comment.clone(),
+            if_exists: self.if_exists,
         })
     }
 }
