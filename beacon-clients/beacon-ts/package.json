@@ -1,6 +1,6 @@
 {
   "name": "@maris-development/beacon-client",
-  "version": "2.0.0",
+  "version": "2.0.1-rc.1",
   "description": "Isomorphic TypeScript SDK for managing and querying a Beacon instance.",
   "license": "Apache-2.0",
   "repository": {
