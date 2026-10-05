@@ -107,6 +107,16 @@ JOIN remote_stations m ON p.station_id = m.id;
 A join between a remote table and a **local** table runs locally. The same holds for a join across
 two *different* remote servers. Beacon fetches the remote rows and joins them on this server.
 
+A `WHERE` filter on the remote table still goes to the remote server. Only the matching rows come
+back for the join:
+
+```sql
+SELECT p.id, s.station_name
+FROM remote_profiles p
+JOIN local_stations s ON p.station_id = s.id
+WHERE p.depth < 10;
+```
+
 ## Schema handling
 
 Beacon reads the schema of a remote table from the remote server **once, at creation time**. It then
