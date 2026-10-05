@@ -204,9 +204,9 @@ async fn a_path_grant_covers_only_the_files_it_names() {
     .await;
 }
 
-/// A path deny also holds when the files are read through a table or a view.
+/// A table read needs only the table grant: a path deny on its files applies to read functions.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_path_deny_holds_for_a_table_and_a_view_over_the_path() {
+async fn a_path_deny_does_not_apply_to_a_table_or_a_view_over_the_path() {
     let rt = enforced_runtime("reach-table").await;
     let root = unique("reach");
     place_dataset(rt.datasets_dir(), &format!("{root}/secret/s.parquet"));
@@ -229,8 +229,25 @@ async fn a_path_deny_holds_for_a_table_and_a_view_over_the_path() {
     )
     .await;
 
-    assert_denied(&rt, &format!("SELECT * FROM {table}"), &carol).await;
-    assert_denied(&rt, &format!("SELECT * FROM {view}"), &carol).await;
+    assert_allowed(&rt, &format!("SELECT * FROM {table}"), &carol).await;
+    assert_allowed(&rt, &format!("SELECT * FROM {view}"), &carol).await;
+    assert_denied(
+        &rt,
+        &format!("SELECT * FROM read_parquet('{root}/secret/s.parquet')"),
+        &carol,
+    )
+    .await;
+
+    let dave = reader(
+        &rt,
+        &[
+            "GRANT SELECT TO ROLE {r}",
+            &format!("DENY SELECT ON TABLE {table} TO ROLE {{r}}"),
+        ],
+    )
+    .await;
+    assert_denied(&rt, &format!("SELECT * FROM {table}"), &dave).await;
+    assert_denied(&rt, &format!("SELECT * FROM {view}"), &dave).await;
 }
 
 /// A table rule matches however it spells the name: bare, with the schema, or with the catalog.

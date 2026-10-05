@@ -391,17 +391,6 @@ impl Runtime {
             .table_provider(table.clone())
             .await
             .map_err(|e| anyhow::anyhow!("table '{table}' could not be resolved: {e}"))?;
-        if self.auth_enforce && !identity.is_super_user {
-            // A path deny on one of the table's files also hides its schema.
-            crate::statement_plan::authorize_table_read(
-                &table,
-                provider.as_ref(),
-                &self.session_ctx,
-                &self.auth,
-                identity,
-            )
-            .await?;
-        }
         // Unreadable comments must not hide the schema; `COMMENT ON` reports the error.
         let comments = crate::comments::load_comments(&self.session_ctx, &table)
             .await

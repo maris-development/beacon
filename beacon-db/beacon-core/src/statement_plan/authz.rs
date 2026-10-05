@@ -99,25 +99,6 @@ pub(crate) async fn authorize_logical_plan(
     Ok(())
 }
 
-/// Authorizes a read of the registered table `name`, served by `provider`, for `identity`.
-///
-/// The table-level half of [`authorize_logical_plan`], for a caller that reads a table without a
-/// plan, such as a schema request. The caller has already applied the super-user gates.
-pub(crate) async fn authorize_table_read(
-    reference: &TableReference,
-    provider: &dyn TableProvider,
-    session_ctx: &SessionContext,
-    auth: &AuthContext,
-    identity: &AuthIdentity,
-) -> anyhow::Result<()> {
-    let read = ScanRead::Table {
-        name: reference.table().to_string(),
-        targets: table_targets(reference, session_ctx),
-        locations: provider_locations(provider).unwrap_or_default(),
-    };
-    ReadChecker::new(session_ctx, auth, identity).check(&read).await
-}
-
 /// Every spelling of `reference` that a table rule can use: `catalog.schema.table` always,
 /// `schema.table` in the default catalog, and `table` in the default schema.
 ///
@@ -154,12 +135,10 @@ fn plan_describes(plan: &LogicalPlan) -> bool {
 
 /// What one table scan reads, as the check sees it.
 enum ScanRead {
-    /// A registered table: its name for messages, the spellings a rule can use, and the
-    /// locations of its files (empty when it has no files).
+    /// A registered table: its name for messages, and the spellings a rule can use.
     Table {
         name: String,
         targets: Vec<ConcreteTarget>,
-        locations: Vec<Location>,
     },
     /// An ad-hoc read of files: a `read_*` table function or a JSON-query file source.
     Files(Vec<Location>),
@@ -188,11 +167,7 @@ impl Location {
 
 /// Resolves what a table scan reads.
 fn scan_read(scan: &TableScan, session_ctx: &SessionContext) -> ScanRead {
-    let provider = source_as_provider(&scan.source).ok();
-    let locations = provider
-        .as_ref()
-        .and_then(|provider| provider_locations(provider.as_ref()));
-
+    // A table read needs the table grant only; path rules apply to reads of files.
     if session_ctx
         .table_exist(scan.table_name.clone())
         .unwrap_or(false)
@@ -200,9 +175,11 @@ fn scan_read(scan: &TableScan, session_ctx: &SessionContext) -> ScanRead {
         return ScanRead::Table {
             name: scan.table_name.table().to_string(),
             targets: table_targets(&scan.table_name, session_ctx),
-            locations: locations.unwrap_or_default(),
         };
     }
+    let locations = source_as_provider(&scan.source)
+        .ok()
+        .and_then(|provider| provider_locations(provider.as_ref()));
     match locations {
         Some(locations) => ScanRead::Files(locations),
         None => ScanRead::Unknown(scan.table_name.to_string()),
@@ -274,8 +251,6 @@ struct ReadChecker<'a> {
     session_ctx: &'a SessionContext,
     auth: &'a AuthContext,
     identity: &'a AuthIdentity,
-    /// Whether a role of the caller denies a path, so a table's files need a look.
-    denies_paths: bool,
     /// The tables a role of the caller denies, whose files a path read must not reach.
     denied_tables: Vec<String>,
 }
@@ -289,9 +264,6 @@ impl<'a> ReadChecker<'a> {
             .flat_map(|role| role.denies.into_iter())
             .filter(|rule| matches!(rule.privilege, Privilege::Select | Privilege::All))
             .collect();
-        let denies_paths = denies
-            .iter()
-            .any(|rule| matches!(rule.target, Some(PrivilegeTarget::Path(_))));
         let denied_tables = denies
             .iter()
             .filter_map(|rule| match &rule.target {
@@ -303,7 +275,6 @@ impl<'a> ReadChecker<'a> {
             session_ctx,
             auth,
             identity,
-            denies_paths,
             denied_tables,
         }
     }
@@ -313,21 +284,12 @@ impl<'a> ReadChecker<'a> {
             ScanRead::Unknown(name) => anyhow::bail!(
                 "permission denied: SELECT on '{name}': its files cannot be checked"
             ),
-            ScanRead::Table {
-                name,
-                targets,
-                locations,
-            } => {
+            ScanRead::Table { name, targets } => {
                 if !self
                     .auth
                     .is_allowed_any(&self.identity.roles, Privilege::Select, targets)
                 {
                     anyhow::bail!("permission denied: SELECT on table '{name}'");
-                }
-                if self.denies_paths {
-                    for file in self.files(locations).await? {
-                        self.refuse_denied(&ConcreteTarget::Path(file.to_string()))?;
-                    }
                 }
                 Ok(())
             }
