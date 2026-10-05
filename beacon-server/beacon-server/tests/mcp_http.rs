@@ -261,6 +261,22 @@ async fn get_guide_shows_the_address_of_the_request() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn export_query_uses_the_address_of_the_request() {
+    let (router, _harness, _admin) = router_with(config(false)).await;
+
+    let recipe = call_tool(
+        &router,
+        None,
+        "export_query",
+        json!({"sql": "SELECT 1", "format": "csv"}),
+    )
+    .await;
+
+    let python = recipe["python"].as_str().expect("a python snippet");
+    assert!(python.contains("BEACON_URL = \"http://localhost\""), "{python}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn describe_table_shows_the_comments() {
     let (router, _harness, admin) = router_with(config(false)).await;
     commented_table(&router, &admin, "obs").await;
