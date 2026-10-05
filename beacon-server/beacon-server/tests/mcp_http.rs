@@ -232,7 +232,7 @@ async fn mcp_accepts_every_host_with_a_wildcard() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tools_list_is_the_four_generic_tools() {
+async fn tools_list_is_the_five_generic_tools() {
     let (router, _harness, admin) = router_with(config(false)).await;
     commented_table(&router, &admin, "obs").await;
 
@@ -240,9 +240,24 @@ async fn tools_list_is_the_four_generic_tools() {
 
     assert_eq!(
         tools,
-        ["list_tables", "describe_table", "run_sql", "export_query"],
+        ["get_guide", "list_tables", "describe_table", "run_sql", "export_query"],
         "a table adds no tool of its own"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_guide_shows_the_address_of_the_request() {
+    let mut config = config(false);
+    config.flight_sql.enable = true;
+    config.flight_sql.allow_anonymous = true;
+    config.flight_sql.port = 32011;
+    let (router, _harness, _admin) = router_with(config).await;
+
+    let guide = call_tool(&router, None, "get_guide", json!({})).await;
+
+    let guide = guide.as_str().expect("the guide is Markdown text");
+    assert!(guide.contains("Client(\"http://localhost\")"), "{guide}");
+    assert!(guide.contains("beacon://localhost:32011/<table>"), "{guide}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
