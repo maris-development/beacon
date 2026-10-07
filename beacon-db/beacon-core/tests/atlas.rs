@@ -155,6 +155,39 @@ async fn an_external_table_survives_a_restart() {
     );
 }
 
+/// A declared column list is a subset the user chose, so `SELECT *` reads it,
+/// also after a restart. A table that infers its columns refuses `SELECT *`.
+#[tokio::test(flavor = "multi_thread")]
+async fn select_star_reads_a_table_with_declared_columns() {
+    let rt = common::restartable_runtime("atlas-declared", |builder| builder).await;
+    write_collection(&rt.datasets_dir().join("obs"), 3).await;
+
+    rt.sql("CREATE EXTERNAL TABLE inferred STORED AS ATLAS LOCATION 'obs/data.atlas'")
+        .await;
+    let error = rt
+        .try_sql("SELECT * FROM inferred")
+        .await
+        .expect_err("every inferred column names no grid")
+        .to_string();
+    assert!(error.contains("column list"), "{error}");
+
+    rt.sql(
+        r#"CREATE EXTERNAL TABLE obs (temperature FLOAT, ".platform" VARCHAR)
+           STORED AS ATLAS LOCATION 'obs/data.atlas'"#,
+    )
+    .await;
+    let batches = rt.sql("SELECT * FROM obs").await;
+    assert_eq!(total_rows(&batches), 12, "three datasets of four rows");
+    assert_eq!(batches[0].num_columns(), 2, "the declared columns only");
+
+    let rt = rt.restart().await;
+    assert_eq!(
+        total_rows(&rt.sql("SELECT * FROM obs").await),
+        12,
+        "the declared columns must come back after a restart"
+    );
+}
+
 /// The dimensions argument narrows what a read returns, as it does for the
 /// other nd formats.
 #[tokio::test(flavor = "multi_thread")]

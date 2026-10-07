@@ -154,6 +154,17 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
     ) -> Result<Arc<dyn FileFormat>> {
         Ok(self.format(AtlasOptions::default()))
     }
+
+    /// The same format, with a scan of every declared column allowed.
+    fn with_declared_columns(&self, format: Arc<dyn FileFormat>) -> Arc<dyn FileFormat> {
+        match format.as_any().downcast_ref::<AtlasFormat>() {
+            Some(atlas) => Arc::new(AtlasFormat {
+                declared_columns: true,
+                ..atlas.clone()
+            }),
+            None => format,
+        }
+    }
 }
 
 /// Reads one table's worth of Atlas collections.
@@ -161,6 +172,8 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
 pub struct AtlasFormat {
     pub options: AtlasOptions,
     cache: AtlasReaderCache,
+    /// The user declared the table's columns, so a scan may read all of them.
+    declared_columns: bool,
 }
 
 impl Default for AtlasFormat {
@@ -178,7 +191,11 @@ impl AtlasFormat {
 
     /// A format that opens its collections through `cache`.
     pub fn with_cache(options: AtlasOptions, cache: AtlasReaderCache) -> Self {
-        Self { options, cache }
+        Self {
+            options,
+            cache,
+            declared_columns: false,
+        }
     }
 
     /// The Arrow schema of the collection at `marker`, labeled by its path.
@@ -214,6 +231,7 @@ impl AtlasFormat {
             self.cache.clone(),
         )
         .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
+        .with_declared_columns(self.declared_columns)
     }
 }
 
@@ -382,6 +400,17 @@ mod scan_tests {
         partitions: usize,
         options: AtlasOptions,
     ) -> (SessionContext, Arc<ListingTable>) {
+        table_on(dir, partitions, Arc::new(AtlasFormat::new(options)), &[]).await
+    }
+
+    /// [`table`], on `format`, with `columns` declared as the table's columns,
+    /// as `CREATE EXTERNAL TABLE t (...)` does. No column infers them.
+    async fn table_on(
+        dir: &Path,
+        partitions: usize,
+        format: Arc<dyn FileFormat>,
+        columns: &[&str],
+    ) -> (SessionContext, Arc<ListingTable>) {
         // The collections sit in subdirectories, which a listing skips by default.
         let config = SessionConfig::new()
             .with_target_partitions(partitions)
@@ -391,14 +420,22 @@ mod scan_tests {
             );
         let ctx = SessionContext::new_with_config(config);
         let url = ListingTableUrl::parse(format!("{}/", dir.display())).unwrap();
-        let options = ListingOptions::new(Arc::new(AtlasFormat::new(options)))
+        let options = ListingOptions::new(format)
             .with_file_extension(ATLAS_MARKER)
             .with_collect_stat(false);
-        let config = ListingTableConfig::new(url)
+        let mut config = ListingTableConfig::new(url)
             .with_listing_options(options)
             .infer_schema(&ctx.state())
             .await
             .unwrap();
+        if !columns.is_empty() {
+            let inferred = config.file_schema.clone().unwrap();
+            let indices: Vec<usize> = columns
+                .iter()
+                .map(|name| inferred.index_of(name).unwrap())
+                .collect();
+            config = config.with_schema(Arc::new(inferred.project(&indices).unwrap()));
+        }
         (ctx, Arc::new(ListingTable::try_new(config).unwrap()))
     }
 
@@ -524,6 +561,38 @@ mod scan_tests {
             .unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 4, "one column names one grid");
+    }
+
+    /// `SELECT *` reads a table with declared columns, as the user chose the
+    /// subset. `count(*)` names no column, so it still fails.
+    #[tokio::test]
+    async fn select_star_reads_the_declared_columns() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::two_grids(tmp.path()).await;
+        let format = AtlasFormatFactory::new(AtlasOptions::default())
+            .with_declared_columns(Arc::new(AtlasFormat::default()));
+        let (ctx, table) = table_on(tmp.path(), 1, format, &["temperature"]).await;
+        ctx.register_table("mixed", table).unwrap();
+
+        let batches = ctx
+            .sql("SELECT * FROM mixed")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 4, "the declared column names one grid");
+        assert_eq!(batches[0].num_columns(), 1, "the declared column only");
+
+        let error = ctx
+            .sql("SELECT count(*) FROM mixed")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .expect_err("no column, no grid");
+        assert!(error.to_string().contains("column list"), "{error}");
     }
 
     /// Two named columns on two grids pass the column-list rule and fail at
