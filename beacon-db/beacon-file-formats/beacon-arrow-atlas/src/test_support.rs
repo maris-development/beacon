@@ -456,3 +456,41 @@ pub async fn declared_unwritten(dir: &Path) {
 
     writer.finish().await.expect("finish the collection");
 }
+
+/// Two profiles whose arrays differ in length, as in a CF profile file.
+/// `cast`: longitude: Float64[station=1]=[-3], temperature: Float64[depth=4]
+/// = [10, 11, fill, 12] with fill -999, so 1 null in 4 rows.
+/// `blank`: longitude [-3], temperature all fill, so 4 nulls in 4 rows.
+pub async fn profiles(dir: &Path) {
+    let writer = AtlasWriter::create_path(dir, WriterConfig::default())
+        .await
+        .expect("create the collection");
+
+    for (name, temperature) in [
+        ("cast", [10.0f64, 11.0, -999.0, 12.0]),
+        ("blank", [-999.0; 4]),
+    ] {
+        let mut ds = writer.add_dataset(name).await.expect("add the profile");
+        ds.define_array::<f64>("longitude", vec!["station".into()], vec![1], None, None)
+            .await
+            .expect("define longitude");
+        ds.define_array::<f64>(
+            "temperature",
+            vec!["depth".into()],
+            vec![4],
+            None,
+            Some(FillValue::Float(-999.0)),
+        )
+        .await
+        .expect("define temperature");
+        ds.write_array("longitude", vec![0], arr1(&[-3.0f64]).into_dyn().view())
+            .await
+            .expect("write longitude");
+        ds.write_array("temperature", vec![0], arr1(&temperature).into_dyn().view())
+            .await
+            .expect("write temperature");
+        ds.finish().await.expect("finish the profile");
+    }
+
+    writer.finish().await.expect("finish the collection");
+}
