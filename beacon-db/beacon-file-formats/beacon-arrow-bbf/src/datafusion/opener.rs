@@ -429,7 +429,7 @@ mod opener_tests {
         let object_store: Arc<dyn ObjectStore> = store;
 
         let ctx = SessionContext::new();
-        let table_schema = crate::datafusion::BBFFormat
+        let table_schema = crate::datafusion::BBFFormat::default()
             .infer_schema(&ctx.state(), &object_store, std::slice::from_ref(&meta))
             .await
             .expect("schema");
@@ -498,7 +498,7 @@ mod opener_tests {
         let object_store: Arc<dyn ObjectStore> = store;
 
         let ctx = SessionContext::new();
-        let table_schema = crate::datafusion::BBFFormat
+        let table_schema = crate::datafusion::BBFFormat::default()
             .infer_schema(&ctx.state(), &object_store, std::slice::from_ref(&meta))
             .await
             .expect("schema");
@@ -627,7 +627,7 @@ mod opener_tests {
         let object_store: Arc<dyn ObjectStore> = store;
 
         let ctx = SessionContext::new();
-        let table_schema = crate::datafusion::BBFFormat
+        let table_schema = crate::datafusion::BBFFormat::default()
             .infer_schema(&ctx.state(), &object_store, std::slice::from_ref(&meta))
             .await
             .expect("schema");
