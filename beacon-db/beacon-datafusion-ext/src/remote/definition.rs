@@ -120,14 +120,18 @@ impl SQLTable for BeaconRemoteSqlTable {
         Arc::clone(&self.schema)
     }
 
-    /// Geometry constants fold to Arrow unions and structs, which the SQL unparser cannot render.
-    /// Rebuild them as constructor calls before this sub-plan becomes SQL for the remote.
+    /// Repair the plan shapes that the SQL unparser renders wrong, before this sub-plan becomes
+    /// SQL for the remote. Geometry constants fold to Arrow unions and structs, which the
+    /// unparser cannot render, so rebuild them as constructor calls. An aliased subquery must
+    /// stay a derived table (see [`super::project_aliased_subqueries`]).
     ///
     /// Federation calls this inside `final_sql()`, on the federated sub-plan, right before
     /// `plan_to_statement`. The `SQLExecutor` hook of the same name runs on the wrapping
     /// `LogicalPlan::Extension` node instead, and never reaches the geometry constant.
     fn logical_optimizer(&self) -> Option<LogicalOptimizer> {
-        Some(Box::new(super::geometry_literals_to_calls))
+        Some(Box::new(|plan| {
+            super::project_aliased_subqueries(super::geometry_literals_to_calls(plan)?)
+        }))
     }
 }
 

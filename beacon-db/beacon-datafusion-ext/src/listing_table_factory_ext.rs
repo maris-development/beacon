@@ -55,12 +55,19 @@ impl TableProviderFactory for ListingTableFactoryExt {
             state,
             cmd.file_type.to_lowercase().as_str(),
         ) {
-            Some(factory) => factory.create_with_native_root(
-                state,
-                &cmd.options,
-                &listing_table_url,
-                &listing_factory,
-            )?,
+            Some(factory) => {
+                let format = factory.create_with_native_root(
+                    state,
+                    &cmd.options,
+                    &listing_table_url,
+                    &listing_factory,
+                )?;
+                if schema_inferred {
+                    format
+                } else {
+                    factory.with_declared_columns(format)
+                }
+            }
             None => file_format_factory.create(session_state, &cmd.options)?,
         };
 

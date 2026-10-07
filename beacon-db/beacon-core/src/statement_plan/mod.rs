@@ -37,12 +37,12 @@ use datafusion::{
 use crate::parser::statement::{
     AttachStatement, AuthStatement, CompactTableStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
-    DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
-    AnalyzeFilesStatement, RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
+    DropIndexStatement, DropSecretStatement, RefreshStatement,
+    AnalyzeFilesStatement, RunCrawlerStatement, ShowIndexesStatement,
     SummarizeStatement,
 };
 
-pub(crate) use authz::{authorize_logical_plan, authorize_table_read, table_targets};
+pub(crate) use authz::{authorize_logical_plan, table_targets};
 pub(crate) use stream_coalescer::CoalesceSqlStream;
 pub(crate) use lower::lower_df_statement;
 pub(crate) use operations::authorize_operations;
@@ -486,34 +486,6 @@ fn normalize_secret_option_key(key: &str) -> String {
 pub(crate) fn show_crawlers_plan() -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::ShowCrawlersNode),
-    })
-}
-
-/// Build the logical plan for `SET EXTENSION '<kind>' FOR <table> TO '<json>'`.
-pub(crate) fn set_extension_plan(statement: SetExtensionStatement) -> LogicalPlan {
-    LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::SetExtensionNode::new(
-            statement.kind,
-            object_name_value(&statement.table),
-            statement.json,
-        )),
-    })
-}
-
-/// Build the logical plan for `DROP EXTENSION '<kind>' FOR <table>`.
-pub(crate) fn drop_extension_plan(statement: DropExtensionStatement) -> LogicalPlan {
-    LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::DropExtensionNode::new(
-            statement.kind,
-            object_name_value(&statement.table),
-        )),
-    })
-}
-
-/// Build the logical plan for `SHOW EXTENSIONS FOR <table>`.
-pub(crate) fn show_extensions_plan(statement: ShowExtensionsStatement) -> LogicalPlan {
-    LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::ShowExtensionsNode::new(object_name_value(&statement.table))),
     })
 }
 

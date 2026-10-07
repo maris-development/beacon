@@ -106,6 +106,15 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
         self.create_with_native_root(state, format_options, url, listing)
     }
 
+    /// `format` for an external table whose columns the user declared.
+    ///
+    /// A declared column list is a projection the user chose, so a format
+    /// that refuses a scan of every column can accept it here. The default
+    /// returns `format` unchanged.
+    fn with_declared_columns(&self, format: Arc<dyn FileFormat>) -> Arc<dyn FileFormat> {
+        format
+    }
+
     /// A fingerprint over every part of `format` that changes the schema of one
     /// object.
     ///

@@ -2,10 +2,8 @@
 //!
 //! Exposes beacon as an MCP server over the streamable-HTTP transport so MCP
 //! clients (e.g. Claude) can discover tables and run read-only queries. The tool
-//! surface is generated from the runtime: a few generic tools plus one tool per
-//! table that opts in via its `mcp` table extension (see
-//! [`beacon_core::extensions`]). Presets declared on a table become a typed
-//! `preset` parameter that expands to the stored filters.
+//! surface is fixed. The agent learns what each table and column means from
+//! their comments (`COMMENT ON`, see [`beacon_core::comments`]).
 //!
 //! All execution flows through [`beacon_core::runtime::Runtime::run_query`] as a
 //! non-super-user, so only read-only `SELECT`s are permitted.

@@ -13,7 +13,6 @@
 use std::sync::Arc;
 
 use crate::api::DatasetInfo;
-use beacon_core::extensions::TableExtensions;
 use beacon_core::AuthIdentity;
 use serde_json::Value;
 
@@ -76,19 +75,6 @@ pub(crate) async fn table_schema(
         // contract for that is `None` (→ 404), not a 500.
         Err(_) => Ok(None),
     }
-}
-
-/// A table's extensions, for any caller who may read the table. Errors when the
-/// table is not registered or `identity` may not read it.
-pub(crate) async fn table_extensions(
-    server: &Arc<Server>,
-    table: &str,
-    identity: AuthIdentity,
-) -> anyhow::Result<TableExtensions> {
-    server
-        .runtime()
-        .table_extensions(datafusion::sql::TableReference::bare(table), &identity)
-        .await
 }
 
 /// One entry of the catalog listing: a table and where it lives.

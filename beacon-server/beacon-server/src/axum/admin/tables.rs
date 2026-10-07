@@ -133,8 +133,8 @@ pub(crate) async fn list_table_config(
     Json(DeprecationNotice::new(
         "Table configuration is no longer supported. A table's definition is \
          engine bookkeeping rather than an API contract; use SQL to inspect a \
-         table (its schema through GET /api/table-schema, its extensions through \
-         SHOW EXTENSIONS FOR <table>, its create statement through \
+         table (its schema and comments through GET /api/table-schema, \
+         its create statement through \
          GET /api/admin/table-definition).",
     ))
 }

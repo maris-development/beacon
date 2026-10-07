@@ -482,12 +482,19 @@ impl TableDefinition for ExternalTableDefinition {
             &session_state,
             self.file_type.as_str(),
         ) {
-            Some(factory) => factory.create_with_native_root(
-                &session_state,
-                &format_options,
-                &listing_table_url,
-                &listing_factory,
-            )?,
+            Some(factory) => {
+                let format = factory.create_with_native_root(
+                    &session_state,
+                    &format_options,
+                    &listing_table_url,
+                    &listing_factory,
+                )?;
+                if provided_schema.is_some() {
+                    factory.with_declared_columns(format)
+                } else {
+                    format
+                }
+            }
             None => file_format_factory.create(&session_state, &format_options)?,
         };
 

@@ -9,9 +9,9 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod auth;
 mod check;
+mod comments;
 mod crawlers;
 mod datasets;
-mod extensions;
 mod external_tables;
 mod tables;
 
@@ -57,8 +57,9 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Server>>, utoipa::openapi::Ope
         .routes(routes!(auth::list_users))
         .routes(routes!(auth::list_roles))
         .routes(routes!(
-            extensions::set_table_extensions,
-            extensions::delete_table_extensions
+            comments::get_table_comments,
+            comments::set_table_comments,
+            comments::delete_table_comments
         ))
         .split_for_parts();
 

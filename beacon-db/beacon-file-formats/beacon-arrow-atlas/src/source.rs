@@ -45,6 +45,8 @@ pub struct AtlasSource {
     read_dimensions: Option<Vec<String>>,
     /// Skip a dataset whose columns fit no one grid, instead of failing.
     skip_unbroadcastable: bool,
+    /// The user declared the table's columns, so a scan may read all of them.
+    declared_columns: bool,
     /// The projection the scan pushed down, split into the columns to read
     /// and the rest, which `ProjectionOpener` applies above the adapter.
     projection: SplitProjection,
@@ -73,6 +75,7 @@ impl AtlasSource {
             predicate: None,
             read_dimensions,
             skip_unbroadcastable: false,
+            declared_columns: false,
             cache,
             queues: Arc::new(CollectionQueues::new()),
             type_widening: Arc::new(DefaultArrowTypeWidening::new()),
@@ -83,6 +86,14 @@ impl AtlasSource {
     /// The same source, skipping the datasets that cannot broadcast when `skip`.
     pub fn with_skip_unbroadcastable(mut self, skip: bool) -> Self {
         self.skip_unbroadcastable = skip;
+        self
+    }
+
+    /// The same source, allowed to read every column when `declared`.
+    ///
+    /// A declared column list is a subset the user chose, so it names a grid.
+    pub fn with_declared_columns(mut self, declared: bool) -> Self {
+        self.declared_columns = declared;
         self
     }
 
@@ -113,10 +124,12 @@ impl AtlasSource {
 
     /// Refuse a scan that does not select a subset of the table's columns, as
     /// BBF does. A dataset flattens on the dimensions of the columns read, so
-    /// every column and no column both name no grid.
+    /// every column and no column both name no grid. A table with declared
+    /// columns may read all of them.
     pub fn require_projection(&self) -> Result<()> {
         let selected = self.projection.file_indices.len();
-        if selected == 0 || selected >= self.table_schema.file_schema().fields().len() {
+        let every_column = selected >= self.table_schema.file_schema().fields().len();
+        if selected == 0 || (every_column && !self.declared_columns) {
             return plan_err!("{PROJECTION_REQUIRED}");
         }
         Ok(())
@@ -124,7 +137,8 @@ impl AtlasSource {
 }
 
 const PROJECTION_REQUIRED: &str = "Atlas scan needs a column list. SELECT * and count(*) are not \
-    allowed. The reader flattens n-dimensional columns on the dimensions of the selected columns.";
+    allowed. The reader flattens n-dimensional columns on the dimensions of the selected columns. \
+    SELECT * is allowed on an external table with declared columns.";
 
 impl FileSource for AtlasSource {
     /// The opener of one partition: the atlas opener, wrapped so every batch
