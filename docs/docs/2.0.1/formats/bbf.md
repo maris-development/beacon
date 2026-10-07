@@ -20,6 +20,8 @@ A BBF query must name its columns. `SELECT *` and `SELECT count(*)` fail at plan
 flattens each n-dimensional column on the dimensions of the selected columns. A scan of every
 column flattens on every dimension, and a scan of no column has no dimensions, so Beacon refuses
 both. Count over a named column: `SELECT count(time) FROM read_bbf('bbf/**/*.bbf')`.
+`SELECT *` works on an external table that [declares its columns](#as-an-external-table), because
+you chose that subset.
 
 ## Inspect the schema
 
@@ -51,6 +53,18 @@ large collection much faster.
 CREATE EXTERNAL TABLE my_table
 STORED AS BBF
 LOCATION 'path/to/files';
+```
+
+Declare a column list to read a subset of the files. Give each column the type that the files
+store. `SELECT *` then reads only those columns. `SELECT count(*)` still fails, because it selects
+no column:
+
+```sql
+CREATE EXTERNAL TABLE my_subset (depth FLOAT, temperature FLOAT)
+STORED AS BBF
+LOCATION 'path/to/files';
+
+SELECT * FROM my_subset;
 ```
 
 See [Create External Tables](/docs/2.0.1/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.1/data-sources/) for the

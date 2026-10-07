@@ -36,6 +36,8 @@ An Atlas query must name its columns. `SELECT *` and `SELECT count(*)` fail at p
 reader flattens each dataset on the dimensions of the selected columns. A scan of every column
 flattens on every dimension, and a scan of no column has no dimensions, so Beacon refuses both.
 Count over a named column: `SELECT count(time) FROM read_atlas('collections/sensor/data.atlas')`.
+`SELECT *` works on an external table that [declares its columns](#declare-the-columns), because
+you chose that subset.
 
 ## Inspect the schema
 
@@ -86,8 +88,8 @@ What Beacon does with that:
   fetched.
 - **A query names its columns.** A dataset flattens on the dimensions of the columns it reads. A
   query must select a subset of the columns, so `SELECT *` and `SELECT count(*)` fail at plan
-  time. A query whose columns sit on more than one grid in a dataset names no grid to flatten
-  onto, so it fails at the open. Name fewer columns, or pass the `dimensions` argument:
+  time. A table with declared columns allows `SELECT *`. A query whose columns sit on more than
+  one grid in a dataset names no grid to flatten onto, so it fails at the open. Name fewer columns, or pass the `dimensions` argument:
   `read_atlas(paths, ['time', 'latitude', 'longitude'])` reads the selected columns on that grid
   and the rest as null. Pass `skip_unbroadcastable` to skip such a dataset and read the rest:
   `read_atlas(paths, [], true)`.
@@ -199,6 +201,21 @@ LOCATION 'collections/*/data.atlas'
 
 See [Create External Tables](/docs/2.0.1/data-sources/external-tables) for the full DDL. See
 [Data Sources](/docs/2.0.1/data-sources/) for the full read model.
+
+### Declare the columns
+
+Declare a column list to read a subset of the collection. `SELECT *` then reads only those columns:
+
+```sql
+CREATE EXTERNAL TABLE sensor_obs (temperature FLOAT, ".platform" VARCHAR)
+STORED AS ATLAS
+LOCATION 'collections/sensor/data.atlas';
+
+SELECT * FROM sensor_obs;
+```
+
+`SELECT count(*)` still fails, because it selects no column. Declared columns on more than one
+grid fail at the open. Set `read_dimensions` to name the grid.
 
 ### `OPTIONS`
 
