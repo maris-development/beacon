@@ -37,9 +37,10 @@
 //!
 //! A dataset flattens on the dimensions of the columns it reads. A scan must
 //! select a subset of the table's columns, as BBF does: `SELECT *` and
-//! `COUNT(*)` fail at plan time. A dataset whose columns read sit on more
-//! than one grid fails at the open, unless `read_atlas(paths, dimensions)`
-//! names the grid.
+//! `COUNT(*)` fail at plan time. An external table with declared columns
+//! allows `SELECT *`, as the user chose the subset. A dataset whose columns
+//! read sit on more than one grid fails at the open, unless
+//! `read_atlas(paths, dimensions)` names the grid.
 //!
 //! # Cancellation
 //!

@@ -49,6 +49,8 @@ pub struct BBFSource {
     /// The rule that merged the table schema. It decides which casts read
     /// null. The format sets it from the session when it plans.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    /// The user declared the table's columns, so a scan may read all of them.
+    declared_columns: bool,
 }
 
 impl BBFSource {
@@ -65,7 +67,16 @@ impl BBFSource {
             global_metrics,
             projection: None,
             type_widening: Arc::new(DefaultArrowTypeWidening::new()),
+            declared_columns: false,
         }
+    }
+
+    /// The same source, allowed to read every column when `declared`.
+    ///
+    /// A declared column list is a subset the user chose, so it names a grid.
+    pub fn with_declared_columns(mut self, declared: bool) -> Self {
+        self.declared_columns = declared;
+        self
     }
 
     /// The same source, with the merge rule of the session.
@@ -104,19 +115,22 @@ impl BBFSource {
     /// Refuses a scan that does not select a subset of the table columns.
     ///
     /// The reader flattens each nd column on the dimensions of the selected
-    /// columns. A scan of every column flattens on every dimension.
+    /// columns. A scan of every column flattens on every dimension. A table
+    /// with declared columns may read all of them.
     ///
     /// # Errors
     ///
     /// Returns a plan error when the source has no projection, when the
-    /// projection names no column, or when it names every column of the table.
+    /// projection names no column, or when it names every column of a table
+    /// without declared columns.
     pub fn require_projection(&self) -> datafusion::error::Result<()> {
         let Some(projection) = &self.projection else {
             return plan_err!("{PROJECTION_REQUIRED}");
         };
         // `file_indices` holds each file column once, in table order.
         let selected = projection.file_indices.len();
-        if selected == 0 || selected >= self.table_schema.file_schema().fields().len() {
+        let every_column = selected >= self.table_schema.file_schema().fields().len();
+        if selected == 0 || (every_column && !self.declared_columns) {
             return plan_err!("{PROJECTION_REQUIRED}");
         }
         Ok(())
@@ -124,7 +138,8 @@ impl BBFSource {
 }
 
 const PROJECTION_REQUIRED: &str = "BBF scan needs a column list. SELECT * and count(*) are not \
-    allowed. The reader flattens n-dimensional columns on the dimensions of the selected columns.";
+    allowed. The reader flattens n-dimensional columns on the dimensions of the selected columns. \
+    SELECT * is allowed on an external table with declared columns.";
 
 /// `schema` with every `beacon.nd` field unwrapped to its value type.
 ///
