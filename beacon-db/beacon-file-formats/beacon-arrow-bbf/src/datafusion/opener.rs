@@ -13,6 +13,7 @@ use beacon_binary_format::{
     object_store::ArrowBBFObjectReader,
     reader::async_reader::{AsyncBBFReader, AsyncPruningIndexReader},
 };
+use beacon_datafusion_ext::container_counts::ContainerCounts;
 use beacon_datafusion_ext::nd::{
     Dimension, Dimensions, NdArrowArray, NdRecordBatch, encode_nd_record_batch, infer_target,
 };
@@ -247,6 +248,8 @@ struct BBFPruningStatistics {
     table_schema: HashMap<String, arrow::datatypes::DataType>,
     num_containers: usize,
     column_statistics: HashMap<String, ZeroAccessor<CombinedColumnStatistics>>,
+    /// One row count per container for all columns. See [`ContainerCounts`].
+    counts: ContainerCounts,
 }
 
 impl BBFPruningStatistics {
@@ -256,7 +259,7 @@ impl BBFPruningStatistics {
         file_schema: &Schema,
         table_schema: &Schema,
     ) -> datafusion::error::Result<Self> {
-        let file_columns = file_schema
+        let file_columns: HashSet<String> = file_schema
             .fields()
             .iter()
             .map(|f| f.name().clone())
@@ -271,6 +274,9 @@ impl BBFPruningStatistics {
         let num_containers = pruning_index_reader.num_containers();
         let approx_expected_columns =
             datafusion::physical_expr::utils::collect_columns(predicate.orig_expr());
+        let names_absent_column = approx_expected_columns
+            .iter()
+            .any(|column| !file_columns.contains(column.name()));
         // Load the combined statistics for each approx expected column
         let mut column_statistics = HashMap::new();
 
@@ -288,11 +294,24 @@ impl BBFPruningStatistics {
             }
         }
 
+        let mut row_counts: Vec<arrow::array::ArrayRef> = column_statistics
+            .values()
+            .map(|stats| stats.as_ref().row_count())
+            .collect();
+        if names_absent_column {
+            // The index records a missing column as 1 null in 1 row.
+            row_counts.push(Arc::new(arrow::array::UInt64Array::from(
+                vec![1u64; num_containers],
+            )));
+        }
+        let counts = ContainerCounts::new(num_containers, &row_counts);
+
         Ok(Self {
             file_columns,
             num_containers,
             column_statistics,
             table_schema,
+            counts,
         })
     }
 }
@@ -360,36 +379,20 @@ impl PruningStatistics for BBFPruningStatistics {
     }
 
     fn null_counts(&self, column: &Column) -> Option<arrow::array::ArrayRef> {
-        // Check if the column exists in the file
         if !self.file_columns.contains(&column.name) {
-            // Return 1 so it equals the row counts as the column will only contains nulls
-            return Some(Arc::new(arrow::array::UInt64Array::from(
-                vec![1; self.num_containers],
-            )));
+            // A column the file lacks is null in every container.
+            return Some(self.counts.all_null());
         }
 
-        if let Some(stats) = self.column_statistics.get(&column.name) {
-            let null_counts = stats.as_ref().null_count();
-            return Some(null_counts);
-        }
-
-        None
+        let stats = self.column_statistics.get(&column.name)?.as_ref();
+        self.counts
+            .null_counts(&stats.null_count(), &stats.row_count())
     }
 
-    fn row_counts(&self, column: &Column) -> Option<arrow::array::ArrayRef> {
-        if !self.file_columns.contains(&column.name) {
-            // Return 1 so it equals the row counts as the column will only contains nulls
-            return Some(Arc::new(arrow::array::UInt64Array::from(
-                vec![1; self.num_containers],
-            )));
-        }
-
-        if let Some(stats) = self.column_statistics.get(&column.name) {
-            let row_counts = stats.as_ref().row_count();
-            return Some(row_counts);
-        }
-
-        None
+    // DataFusion keeps the first row count it asks for and uses it for every
+    // column, so the answer must not depend on `column`.
+    fn row_counts(&self, _column: &Column) -> Option<arrow::array::ArrayRef> {
+        Some(self.counts.row_counts())
     }
 
     fn contained(
