@@ -30,6 +30,7 @@ use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::scalar::ScalarValue;
 
+use crate::container_counts::ContainerCounts;
 use crate::segment::ColumnStats;
 use crate::store::FileStatsStore;
 use crate::types::FileId;
@@ -39,6 +40,8 @@ use crate::types::FileId;
 pub struct FileStatsPruningStatistics {
     rows: usize,
     columns: HashMap<String, PackedColumn>,
+    /// One row count per file for all columns. See [`ContainerCounts`].
+    counts: ContainerCounts,
 }
 
 struct PackedColumn {
@@ -71,11 +74,14 @@ impl PruningStatistics for FileStatsPruningStatistics {
     }
 
     fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
-        self.columns.get(column.name()).map(|c| c.null_count.clone())
+        let c = self.columns.get(column.name())?;
+        self.counts.null_counts(&c.null_count, &c.row_count)
     }
 
-    fn row_counts(&self, column: &Column) -> Option<ArrayRef> {
-        self.columns.get(column.name()).map(|c| c.row_count.clone())
+    // DataFusion keeps the first row count it asks for and uses it for every
+    // column, so the answer must not depend on `column`.
+    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        Some(self.counts.row_counts())
     }
 
     /// Not answerable from a min/max range, so the predicate falls back to the
@@ -215,9 +221,11 @@ async fn try_prune(
         return Ok(None);
     }
 
+    let counts = ContainerCounts::new(candidates.len(), columns.values().map(|c| &c.row_count));
     let statistics = FileStatsPruningStatistics {
         rows: candidates.len(),
         columns,
+        counts,
     };
     let Ok(mask) = pruning_predicate.prune(&statistics) else {
         return Ok(None);

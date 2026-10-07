@@ -46,6 +46,7 @@
 //!    makes every segment match every query, and the skip stops working.
 
 pub mod collector;
+pub mod container_counts;
 pub mod error;
 pub mod manifest;
 #[cfg(feature = "datafusion")]
