@@ -111,8 +111,8 @@ each scan and matches each file against the rules:
 - **A read that reaches one denied file fails as a whole.** Beacon does not drop the file from
   the result. With the deny on `argo/restricted/*` above, `read_netcdf('argo/**/*.nc')` fails.
   Read the allowed folders by name instead.
-- **A read of a table** needs a grant on the table. A path deny that matches one of its files
-  also stops the read, through a view as well.
+- **A read of a table** needs a grant on the table only. Path rules do not apply to a table or to
+  a view. They apply to the read functions and to file sources in a query.
 - **A deny matches a path in any case.** A disk that ignores case reads `SECRET/x` from
   `secret/x`, so a deny on `secret/**` also stops `SECRET/x`. A grant matches in its own case.
 - **A source whose files Beacon cannot see is refused.** The `*_schema` table functions and
