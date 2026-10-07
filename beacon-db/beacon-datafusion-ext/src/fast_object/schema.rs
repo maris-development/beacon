@@ -143,20 +143,8 @@ async fn empty_listing_error(
     options: &ListingOptions,
     url: &ListingTableUrl,
 ) -> Option<DataFusionError> {
-    let store = state.runtime_env().object_store(url).ok()?;
-    // One page of the listing answers this. A collection of 100000 files costs the
-    // same as a collection of one.
-    let mut objects = Box::pin(
-        url.list_all_files(state, store.as_ref(), &options.file_extension)
-            .await
-            .ok()?
-            .try_filter(|object| future::ready(object.size > 0)),
-    );
-    match objects.next().await {
-        Some(Ok(_)) => None,
-        // A listing that fails is not an empty listing.
-        Some(Err(_)) => None,
-        None => Some(exec_datafusion_err!(
+    lists_no_file(state, options, url).await.then(|| {
+        exec_datafusion_err!(
             "no file matched '{}'{}",
             // `as_str` gives the prefix alone: a glob is parsed off the path and
             // held beside it, so a caller who mistyped `obs/*.parquet` would be
@@ -169,8 +157,32 @@ async fn empty_listing_error(
                 "" => String::new(),
                 extension => format!(" (this reader reads a '{extension}' file)"),
             }
-        )),
-    }
+        )
+    })
+}
+
+/// `true` when `url` lists no object with data.
+///
+/// `false` when the listing itself fails: a listing that fails is not an empty
+/// listing.
+pub(crate) async fn lists_no_file(
+    state: &dyn Session,
+    options: &ListingOptions,
+    url: &ListingTableUrl,
+) -> bool {
+    let Ok(store) = state.runtime_env().object_store(url) else {
+        return false;
+    };
+    // One page of the listing answers this. A collection of 100000 files costs the
+    // same as a collection of one.
+    let Ok(objects) = url
+        .list_all_files(state, store.as_ref(), &options.file_extension)
+        .await
+    else {
+        return false;
+    };
+    let mut objects = Box::pin(objects.try_filter(|object| future::ready(object.size > 0)));
+    objects.next().await.is_none()
 }
 
 /// The cache, and the format identity its entries are keyed under.
