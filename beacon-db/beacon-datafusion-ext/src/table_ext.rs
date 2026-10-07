@@ -83,6 +83,11 @@ pub struct ExternalTableRebuild {
 /// When the schema is inferred and the location currently lists no files the
 /// schema falls back to empty, so a table whose objects are all deleted reports
 /// an empty schema rather than failing.
+///
+/// # Errors
+///
+/// Returns the inference error when the location lists files the format
+/// cannot read a schema from.
 pub(crate) async fn build_listing_table(
     session: &dyn Session,
     spec: &ExternalTableRebuild,
@@ -102,6 +107,15 @@ pub(crate) async fn build_listing_table(
         {
             Ok(schema) => schema,
             Err(error) => {
+                if !crate::fast_object::schema::lists_no_file(
+                    session,
+                    &spec.options,
+                    &spec.listing_table_url,
+                )
+                .await
+                {
+                    return Err(error);
+                }
                 tracing::debug!(%error, "no objects to infer external table schema from; using empty schema");
                 Arc::new(Schema::empty())
             }

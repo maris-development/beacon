@@ -67,6 +67,44 @@ async fn parquet_external_table_reads_the_fixture() {
     assert_eq!(total_rows(&one), 1);
 }
 
+/// A file the format cannot read fails the CREATE. It does not give a table
+/// with no columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_external_table_reports_a_schema_it_cannot_read() {
+    let rt = runtime("ext-bad-schema").await;
+    write_file(&rt.datasets_dir().join("bad/data.parquet"), "not parquet");
+
+    let error = rt
+        .try_sql("CREATE EXTERNAL TABLE bad STORED AS PARQUET LOCATION 'bad/'")
+        .await
+        .expect_err("an unreadable file has no schema");
+
+    assert!(!error.to_string().contains("no file matched"), "{error}");
+    assert!(
+        rt.try_sql("SELECT * FROM bad").await.is_err(),
+        "the failed CREATE registers no table"
+    );
+}
+
+/// A location with no file gives a table with no columns, as files can arrive
+/// later.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_external_table_over_an_empty_folder_has_no_columns() {
+    let rt = runtime("ext-empty-folder").await;
+    std::fs::create_dir_all(rt.datasets_dir().join("empty")).unwrap();
+
+    rt.sql("CREATE EXTERNAL TABLE empty STORED AS PARQUET LOCATION 'empty/'")
+        .await;
+
+    assert_eq!(
+        scalar_i64(
+            &rt.sql("SELECT count(*) FROM information_schema.columns WHERE table_name = 'empty'")
+                .await
+        ),
+        0
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dropped_external_table_is_gone_and_the_name_is_reusable() {
     let rt = runtime("ext-drop").await;
