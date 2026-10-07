@@ -46,7 +46,7 @@ impl FileFormatFactory for BBFFormatFactory {
         _state: &dyn Session,
         _format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(BBFFormat))
+        Ok(Arc::new(BBFFormat::default()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -54,7 +54,7 @@ impl FileFormatFactory for BBFFormatFactory {
     }
 
     fn default(&self) -> std::sync::Arc<dyn FileFormat> {
-        std::sync::Arc::new(BBFFormat)
+        std::sync::Arc::new(BBFFormat::default())
     }
 }
 
@@ -86,10 +86,23 @@ impl FileFormatFactoryExt for BBFFormatFactory {
     fn file_format_name(&self) -> String {
         self.get_ext()
     }
+
+    /// The same format, with a scan of every declared column allowed.
+    fn with_declared_columns(&self, format: Arc<dyn FileFormat>) -> Arc<dyn FileFormat> {
+        match format.as_any().downcast_ref::<BBFFormat>() {
+            Some(_) => Arc::new(BBFFormat {
+                declared_columns: true,
+            }),
+            None => format,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct BBFFormat;
+pub struct BBFFormat {
+    /// The user declared the table's columns, so a scan may read all of them.
+    declared_columns: bool,
+}
 
 #[async_trait::async_trait]
 impl FileFormat for BBFFormat {
@@ -184,6 +197,7 @@ impl FileFormat for BBFFormat {
         // source. Rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = BBFSource::new(table_schema)
+            .with_declared_columns(self.declared_columns)
             .with_projection(projection)
             .with_type_widening(Arc::clone(&session_widening(state).strategy));
         // Keep the token a caller set on the incoming source.
@@ -202,7 +216,7 @@ impl FileFormat for BBFFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(BBFSource::new(table_schema))
+        Arc::new(BBFSource::new(table_schema).with_declared_columns(self.declared_columns))
     }
 }
 
@@ -345,7 +359,7 @@ mod tests {
     /// always `bbf` no matter what compression the caller asks about.
     #[test]
     fn extension_is_always_bbf() {
-        let format = BBFFormat;
+        let format = BBFFormat::default();
         assert_eq!(format.get_ext(), "bbf");
         assert_eq!(format.compression_type(), None);
         assert_eq!(
@@ -366,7 +380,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = store;
 
         let ctx = SessionContext::new();
-        let schema = BBFFormat
+        let schema = BBFFormat::default()
             .infer_schema(&ctx.state(), &object_store, &[meta])
             .await
             .expect("real BBF file should infer");
@@ -395,7 +409,7 @@ mod tests {
 
         let ctx = SessionContext::new();
         assert!(
-            BBFFormat
+            BBFFormat::default()
                 .infer_schema(&ctx.state(), &object_store, &[meta])
                 .await
                 .is_err()
@@ -403,6 +417,7 @@ mod tests {
     }
 
     async fn plan_with_projection(
+        format: &dyn FileFormat,
         indices: Vec<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         use datafusion::datasource::table_schema::TableSchema;
@@ -412,7 +427,6 @@ mod tests {
             arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int32, true),
             arrow::datatypes::Field::new("b", arrow::datatypes::DataType::Int32, true),
         ]));
-        let format = BBFFormat;
         let source = format.file_source(TableSchema::from_file_schema(schema));
         let conf = FileScanConfigBuilder::new(ObjectStoreUrl::parse("file://")?, source)
             .with_projection_indices(Some(indices))?
@@ -425,7 +439,7 @@ mod tests {
     /// `SELECT *` must fail when the query is planned, not when it runs.
     #[tokio::test]
     async fn create_physical_plan_refuses_a_projection_of_every_column() {
-        let err = plan_with_projection(vec![0, 1])
+        let err = plan_with_projection(&BBFFormat::default(), vec![0, 1])
             .await
             .expect_err("plan must fail");
         assert!(
@@ -438,9 +452,23 @@ mod tests {
     /// A column list that leaves out a column plans.
     #[tokio::test]
     async fn create_physical_plan_accepts_a_projection_of_some_columns() {
-        plan_with_projection(vec![1])
+        plan_with_projection(&BBFFormat::default(), vec![1])
             .await
             .expect("subset projection plans");
+    }
+
+    /// A table with declared columns plans a projection of all of them. A
+    /// projection of no column still fails.
+    #[tokio::test]
+    async fn create_physical_plan_accepts_every_declared_column() {
+        let format = BBFFormatFactory.with_declared_columns(Arc::new(BBFFormat::default()));
+
+        plan_with_projection(format.as_ref(), vec![0, 1])
+            .await
+            .expect("every declared column plans");
+        plan_with_projection(format.as_ref(), vec![])
+            .await
+            .expect_err("no column, no grid");
     }
 
     /// The format rebuilds the source when it plans. The token set on the
@@ -455,7 +483,7 @@ mod tests {
             arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int32, true),
             arrow::datatypes::Field::new("b", arrow::datatypes::DataType::Int32, true),
         ]));
-        let format = BBFFormat;
+        let format = BBFFormat::default();
         let source = format.file_source(TableSchema::from_file_schema(schema));
         let token = CancellationToken::new();
         source
@@ -497,6 +525,15 @@ mod tests {
     /// Registers the fixture as table `t` on a fresh session, so a test can run
     /// SQL through the planner the way a user does.
     async fn session_with_fixture(dir: &std::path::Path) -> SessionContext {
+        session_with_declared_fixture(dir, &[]).await
+    }
+
+    /// [`session_with_fixture`], with `columns` declared as the table's
+    /// columns, as `CREATE EXTERNAL TABLE t (...)` does. No column infers them.
+    async fn session_with_declared_fixture(
+        dir: &std::path::Path,
+        columns: &[&str],
+    ) -> SessionContext {
         use datafusion::datasource::listing::{
             ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
         };
@@ -505,13 +542,26 @@ mod tests {
         let ctx = SessionContext::new();
         // The whole directory, so a test can add a second file beside the fixture.
         let url = ListingTableUrl::parse(dir.to_str().expect("utf8 path")).expect("listing url");
-        let options =
-            ListingOptions::new(Arc::new(BBFFormat)).with_file_extension("bbf");
-        let config = ListingTableConfig::new(url)
+        let format: Arc<dyn FileFormat> = Arc::new(BBFFormat::default());
+        let format = if columns.is_empty() {
+            format
+        } else {
+            BBFFormatFactory.with_declared_columns(format)
+        };
+        let options = ListingOptions::new(format).with_file_extension("bbf");
+        let mut config = ListingTableConfig::new(url)
             .with_listing_options(options)
             .infer_schema(&ctx.state())
             .await
             .expect("infer schema");
+        if !columns.is_empty() {
+            let inferred = config.file_schema.clone().expect("inferred schema");
+            let indices: Vec<usize> = columns
+                .iter()
+                .map(|name| inferred.index_of(name).expect("a fixture column"))
+                .collect();
+            config = config.with_schema(Arc::new(inferred.project(&indices).expect("project")));
+        }
         let table = ListingTable::try_new(config).expect("listing table");
         ctx.register_table("t", Arc::new(table)).expect("register");
         ctx
@@ -532,6 +582,26 @@ mod tests {
             .await
             .expect_err("SELECT * must not plan");
         assert!(err.to_string().contains("column list"), "{err}");
+    }
+
+    /// `SELECT *` reads a table with declared columns: those columns, on the
+    /// rows of every entry.
+    #[tokio::test]
+    async fn sql_select_star_reads_the_declared_columns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = session_with_declared_fixture(dir.path(), &["ints"]).await;
+
+        let batches = ctx
+            .sql("SELECT * FROM t")
+            .await
+            .expect("plan")
+            .collect()
+            .await
+            .expect("collect");
+
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 5, "3 rows from entry_a + 2 rows from entry_b");
+        assert_eq!(batches[0].num_columns(), 1, "the declared column only");
     }
 
     /// A column list reads the rows of every entry.
@@ -578,7 +648,9 @@ mod tests {
     /// and not in the opener.
     #[tokio::test]
     async fn create_physical_plan_wraps_the_scan_in_the_nd_spine() {
-        let plan = plan_with_projection(vec![1]).await.expect("plan");
+        let plan = plan_with_projection(&BBFFormat::default(), vec![1])
+            .await
+            .expect("plan");
         let shown = datafusion::physical_plan::displayable(plan.as_ref())
             .indent(false)
             .to_string();
@@ -603,7 +675,7 @@ mod tests {
             arrow::datatypes::DataType::Utf8,
             false,
         ));
-        let format = BBFFormat;
+        let format = BBFFormat::default();
         let source = format.file_source(TableSchema::new(schema, vec![partition]));
         let conf = FileScanConfigBuilder::new(ObjectStoreUrl::parse("file://").unwrap(), source)
             .with_projection_indices(Some(vec![1]))
