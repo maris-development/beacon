@@ -1,6 +1,6 @@
 # Changelog
 
-> **Release posts:** [Upgrade from 1.8.0 to 2.0.0](/docs/2.0.0/upgrade) · [What's new in 1.8.0](/docs/changelog/release-1.8.0) · [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
+> **Release posts:** [Upgrade from 1.8.0 to 2.0.0](/docs/2.0.1/upgrade) · [What's new in 1.8.0](/docs/changelog/release-1.8.0) · [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
 
 All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
@@ -10,7 +10,7 @@ changes), and **Fixed** (bug fixes).
 
 Beacon 2.0.0 is a major release. A 1.8.0 server does not upgrade in place. A 2.0.0 server does not
 read the table definitions of a 1.8.0 server, so create your tables again. Read
-[Upgrade from 1.8.0](/docs/2.0.0/upgrade) before you change the image tag. The
+[Upgrade from 1.8.0](/docs/2.0.1/upgrade) before you change the image tag. The
 [full changelog](https://github.com/maris-development/beacon/blob/main/CHANGELOG.md) lists each
 change.
 
@@ -18,18 +18,18 @@ change.
 
 - **N-dimensional execution.** NetCDF, HDF5, Zarr, Atlas, BBF and GeoTIFF read through an nd
   pipeline. A `WHERE` filter and a projection run before the broadcast. See
-  [How it works](/docs/2.0.0/how-it-works).
+  [How it works](/docs/2.0.1/how-it-works).
 - **A single-file database.** One `beacon.db` file holds the catalog, the managed tables and the
-  users. See [Storage internals](/docs/2.0.0/internals/storage).
+  users. See [Storage internals](/docs/2.0.1/internals/storage).
 - **File statistics.** Beacon records the column ranges of each file. A query skips each file that
-  holds no match. See [File statistics](/docs/2.0.0/internals/file-statistics).
-- **New readers.** Read [Iceberg](/docs/2.0.0/formats/iceberg) tables and
-  [Icechunk](/docs/2.0.0/formats/icechunk) repositories. Pure-Rust readers read
-  [netCDF](/docs/2.0.0/formats/netcdf) and [HDF5](/docs/2.0.0/formats/hdf5).
+  holds no match. See [File statistics](/docs/2.0.1/internals/file-statistics).
+- **New readers.** Read [Iceberg](/docs/2.0.1/formats/iceberg) tables and
+  [Icechunk](/docs/2.0.1/formats/icechunk) repositories. Pure-Rust readers read
+  [netCDF](/docs/2.0.1/formats/netcdf) and [HDF5](/docs/2.0.1/formats/hdf5).
 - **123 spatial functions with PostGIS names.** See
-  [Spatial Functions](/docs/2.0.0/sql/spatial-functions).
+  [Spatial Functions](/docs/2.0.1/sql/spatial-functions).
 - **Secrets and remote catalogs.** `CREATE SECRET` holds credentials. `ATTACH` queries another
-  Beacon server. See [ATTACH](/docs/2.0.0/data-sources/attach).
+  Beacon server. See [ATTACH](/docs/2.0.1/data-sources/attach).
 - **An embedded engine.** `pip install beacondb` runs the engine in your Python process.
 
 ### Changed
