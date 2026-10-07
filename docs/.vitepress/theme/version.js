@@ -7,7 +7,7 @@
 //
 // This is the newest *stable* version, not the newest folder: a pre-release
 // folder never becomes the target of `/docs/latest` or the 404 fallback.
-export const LATEST_VERSION = '2.0.0'
+export const LATEST_VERSION = '2.0.1'
 
 // Landing page for the version, used when someone hits `/docs/latest` with no
 // sub-path. There is no `docs/<version>/index.md`, so this must be a real page.

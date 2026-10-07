@@ -4,37 +4,28 @@ import { withBase } from 'vitepress'
 import { LATEST_VERSION, LATEST_ENTRY } from '../version.js'
 
 // GitHub Pages serves 404.html for any unknown path, which lets this component
-// act as a catch-all rewrite for the `/docs/latest/...` alias:
-//   /docs/latest/data-lake  ->  /docs/<LATEST_VERSION>/data-lake
-// It also sends a retired pre-release path to its release:
-//   /docs/2.0.0-rc6/sql/  ->  /docs/2.0.0/sql/
+// send these paths to the same page in LATEST_VERSION:
+//   /docs/latest/data-lake    ->  /docs/<LATEST_VERSION>/data-lake
+//   /docs/2.0.0-rc6/sql/      ->  /docs/<LATEST_VERSION>/sql/
+//   /docs/2.0.0/introduction  ->  /docs/<LATEST_VERSION>/introduction
+// Version paths redirect only when the folder is gone and the major matches.
 // Anything else renders the normal 404.
-// Version of the redirect target, or null on a real 404.
-const redirecting = ref(null)
+const redirecting = ref(false)
 
 onMounted(() => {
   const base = withBase('/')                       // e.g. "/beacon/"
-  const prefix = `${base}docs/latest`
   const path = window.location.pathname
   const suffix = window.location.search + window.location.hash
 
-  // A release renames its pre-release folder, so the old folder is gone.
-  const retired = path
-    .slice(base.length)
-    .match(/^docs\/(\d+\.\d+\.\d+)-[^/]+(?:\/(.*))?$/)
-  if (retired) {
-    redirecting.value = retired[1]
-    window.location.replace(`${base}docs/${retired[1]}/${retired[2] || LATEST_ENTRY}${suffix}`)
-    return
-  }
+  const match = path.slice(base.length).match(/^docs\/(latest|(\d+)\.\d+\.\d+[^/]*)(?:\/(.*))?$/)
+  if (!match) return
+  const [, version, major, sub] = match
+  // A missing page inside LATEST_VERSION stays a 404, so the redirect cannot loop.
+  const sameMajor = major === LATEST_VERSION.split('.')[0] && version !== LATEST_VERSION
+  if (version !== 'latest' && !sameMajor) return
 
-  if (path !== prefix && !path.startsWith(`${prefix}/`)) return
-
-  const sub = path.slice(prefix.length).replace(/^\//, '')
-  const target = `${base}docs/${LATEST_VERSION}/${sub || LATEST_ENTRY}` + suffix
-
-  redirecting.value = LATEST_VERSION
-  window.location.replace(target)
+  redirecting.value = true
+  window.location.replace(`${base}docs/${LATEST_VERSION}/${sub || LATEST_ENTRY}${suffix}`)
 })
 
 const home = withBase('/')
@@ -43,7 +34,7 @@ const home = withBase('/')
 <template>
   <div class="nf">
     <template v-if="redirecting">
-      <p class="nf-lead">Redirecting to the Beacon {{ redirecting }} documentation…</p>
+      <p class="nf-lead">Redirecting to the Beacon {{ LATEST_VERSION }} documentation…</p>
     </template>
     <template v-else>
       <p class="nf-code">404</p>
