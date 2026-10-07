@@ -9,6 +9,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, UInt64Array, new_null_array};
 use arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use atlas::{ArrayFile, Attr, StatValue};
+use beacon_datafusion_ext::container_counts::ContainerCounts;
 use datafusion::common::Column;
 use datafusion::common::pruning::PruningStatistics;
 use datafusion::physical_expr::PhysicalExpr;
@@ -92,6 +93,19 @@ struct StatColumn {
 struct PruningIndex {
     rows: usize,
     columns: HashMap<String, StatColumn>,
+    /// One row count per dataset for all columns. See [`ContainerCounts`].
+    counts: ContainerCounts,
+}
+
+impl PruningIndex {
+    fn new(rows: usize, columns: HashMap<String, StatColumn>) -> Self {
+        let counts = ContainerCounts::new(rows, columns.values().map(|c| &c.row_count));
+        Self {
+            rows,
+            columns,
+            counts,
+        }
+    }
 }
 
 impl PruningStatistics for PruningIndex {
@@ -104,15 +118,14 @@ impl PruningStatistics for PruningIndex {
     }
 
     fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
-        self.columns
-            .get(column.name())
-            .map(|c| Arc::clone(&c.null_count))
+        let c = self.columns.get(column.name())?;
+        self.counts.null_counts(&c.null_count, &c.row_count)
     }
 
-    fn row_counts(&self, column: &Column) -> Option<ArrayRef> {
-        self.columns
-            .get(column.name())
-            .map(|c| Arc::clone(&c.row_count))
+    // DataFusion keeps the first row count it asks for and uses it for every
+    // column, so the answer must not depend on `column`.
+    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        Some(self.counts.row_counts())
     }
 
     fn num_containers(&self) -> usize {
@@ -158,10 +171,7 @@ fn build_index(
         columns.insert(column.clone(), packed);
     }
 
-    Some(PruningIndex {
-        rows: names.len(),
-        columns,
-    })
+    Some(PruningIndex::new(names.len(), columns))
 }
 
 /// Whether the pivot should stop at `row`. Looked at every
@@ -323,7 +333,7 @@ mod tests {
     use atlas::Atlas;
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{
-        BinaryExpr, Column as ColumnExpr, IsNullExpr, Literal,
+        BinaryExpr, Column as ColumnExpr, IsNotNullExpr, IsNullExpr, Literal,
     };
 
     use super::*;
@@ -630,6 +640,92 @@ mod tests {
         assert_eq!(survivors, vec!["d"]);
     }
 
+    /// The `profiles` schema, and `left AND right` over it.
+    fn profile_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("longitude", DataType::Float64, true),
+            Field::new("temperature", DataType::Float64, true),
+        ]))
+    }
+
+    fn and(left: Arc<dyn PhysicalExpr>, right: Arc<dyn PhysicalExpr>) -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(left, Operator::And, right))
+    }
+
+    /// DataFusion takes one row count per dataset for every column. `longitude`
+    /// holds 1 value and `temperature` 4 with 1 null, so the 1 null must not
+    /// read as "all null" against the row count of `longitude`.
+    #[tokio::test]
+    async fn is_not_null_keeps_a_column_longer_than_the_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::profiles(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+        let is_not_null: Arc<dyn PhysicalExpr> = Arc::new(IsNotNullExpr::new(Arc::new(
+            ColumnExpr::new("temperature", 1),
+        )));
+
+        let survivors = kept(
+            &atlas,
+            and(
+                binary(
+                    "longitude",
+                    Operator::GtEq,
+                    ScalarValue::Float64(Some(-5.0)),
+                ),
+                is_not_null,
+            ),
+            profile_schema(),
+        )
+        .await;
+
+        assert_eq!(
+            survivors,
+            vec!["cast"],
+            "`blank` is all null, `cast` is not"
+        );
+    }
+
+    /// The same mix-up hits the all-null guard DataFusion puts on a range.
+    #[tokio::test]
+    async fn a_range_keeps_a_column_longer_than_the_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        test_support::profiles(tmp.path()).await;
+        let atlas = test_support::open(tmp.path()).await;
+        let temperature_above = |value: f64| {
+            Arc::new(BinaryExpr::new(
+                Arc::new(ColumnExpr::new("temperature", 1)),
+                Operator::Gt,
+                Arc::new(Literal::new(ScalarValue::Float64(Some(value)))),
+            )) as Arc<dyn PhysicalExpr>
+        };
+        let longitude = || {
+            binary(
+                "longitude",
+                Operator::GtEq,
+                ScalarValue::Float64(Some(-5.0)),
+            )
+        };
+
+        let survivors = kept(
+            &atlas,
+            and(longitude(), temperature_above(11.0)),
+            profile_schema(),
+        )
+        .await;
+        assert_eq!(survivors, vec!["cast"]);
+
+        let survivors = kept(
+            &atlas,
+            and(longitude(), temperature_above(12.0)),
+            profile_schema(),
+        )
+        .await;
+        assert!(
+            survivors.is_empty(),
+            "12 is the largest value: {survivors:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_collection_with_no_datasets_prunes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -699,9 +795,9 @@ mod tests {
         let counts: UInt64Array = (0..ROWS).map(|_| Some(0u64)).collect();
         let rows: UInt64Array = (0..ROWS).map(|_| Some(1u64)).collect();
 
-        let index = PruningIndex {
-            rows: ROWS,
-            columns: HashMap::from([(
+        let index = PruningIndex::new(
+            ROWS,
+            HashMap::from([(
                 "temperature".to_string(),
                 StatColumn {
                     min: Arc::new(mins),
@@ -710,7 +806,7 @@ mod tests {
                     row_count: Arc::new(rows),
                 },
             )]),
-        };
+        );
 
         let pruning = PruningPredicate::try_new(
             binary(

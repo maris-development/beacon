@@ -2,6 +2,7 @@ pub mod analyzer_rules;
 pub mod big_page_list;
 pub mod cancel;
 pub mod consts;
+pub use beacon_file_stats::container_counts;
 pub mod fast_object;
 pub mod format_ext;
 pub mod format_options;
