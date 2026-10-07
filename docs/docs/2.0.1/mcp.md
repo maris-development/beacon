@@ -63,16 +63,9 @@ Every Beacon server gives an agent the same guide. The agent needs no table to r
 - The `initialize` response holds short instructions. They name the tools and the rules for names
   with upper case or a dot.
 - The `get_guide` tool returns the full guide. It tells how Beacon turns files and arrays into rows,
-  how to write a fast query, and how to get the data with HTTP or the `beacon-api` Python package.
+  how to write a fast query, and how to use the `beacon-api` Python package.
 
-The guide shows the address of the server in its examples. Beacon reads the address from the MCP
-request: `X-Forwarded-Proto` and `X-Forwarded-Host` first, then `Host`. It adds the base path of the
-server. The `export_query` recipe uses the same address.
-
-The guide also shows a [`beacondb`](/docs/2.0.1/data-sources/remote-tables) recipe when Flight SQL
-is on and `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS=true`. The recipe makes a remote table to this server
-in an embedded `beacondb` engine. It uses the host of the request and `BEACON_FLIGHT_SQL_PORT`.
-Behind a proxy that maps the Flight SQL port to another port, the recipe shows the wrong port.
+The guide is general. It names no server address and no table.
 
 ## Make a table ready for MCP
 

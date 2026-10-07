@@ -36,24 +36,21 @@ DataFusion SQL.
 The MCP tools are read-only. Beacon rejects `CREATE`, `INSERT`, `COMMENT ON` and every other
 statement that changes data.
 
-## Get the data in a script
+## Use Beacon from Python
 
-The address of this server is `{beacon_url}`. Send the same credential that you use for MCP. A
-request without credentials is anonymous and read-only.
-
-HTTP: send `POST {beacon_url}/api/query` with a JSON body. `output.format` is `parquet`, `csv`,
-`netcdf` or `arrow`:
-
-```json
-{ "sql": "SELECT ...", "output": { "format": "parquet" } }
-```
-
-Python, with the `beacon-api` package:
+The `beacon-api` package is the Python client of Beacon:
 
 ```python
 # pip install beacon-api
 from beacon_api import Client
 
-client = Client("{beacon_url}")  # or basic_auth=("user", "pass"), or jwt_token="..."
-df = client.sql_query("SELECT ...").to_pandas_dataframe()
+client = Client("https://<your-beacon-host>")  # or basic_auth=("user", "pass"), or jwt_token="..."
+
+tables = client.list_tables()  # name -> table, with its description
+query = client.sql_query("SELECT ... FROM <table> WHERE ...")
+df = query.to_pandas_dataframe()  # or to_xarray_dataset()
+query.to_parquet("result.parquet")  # also to_csv() and to_netcdf()
 ```
+
+A request without credentials is anonymous and read-only. The SDK documentation is at
+https://maris-development.github.io/beacon-py/latest/.

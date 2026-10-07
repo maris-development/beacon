@@ -19,26 +19,22 @@ use beacon_core::runtime::Runtime;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 
-pub use guide::GuideConfig;
 pub use server::BeaconMcpServer;
 
 /// Build the MCP streamable-HTTP tower service, ready to mount in an axum router
-/// (e.g. `Router::route_service("/mcp", streamable_http_service(rt, &[], GuideConfig::default()))`).
+/// (e.g. `Router::route_service("/mcp", beacon_mcp::streamable_http_service(rt, &[]))`).
 ///
 /// # Arguments
 ///
 /// * `runtime` - The runtime that runs every tool call.
 /// * `allowed_hosts` - `Host` values accepted in addition to the loopback hosts,
 ///   as `host` or `host:port`. An entry `*` accepts every host.
-/// * `guide_config` - The server settings that the `get_guide` tool shows.
 pub fn streamable_http_service(
     runtime: Arc<Runtime>,
     allowed_hosts: &[String],
-    guide_config: GuideConfig,
 ) -> StreamableHttpService<BeaconMcpServer, LocalSessionManager> {
-    let guide_config = Arc::new(guide_config);
     StreamableHttpService::new(
-        move || Ok(BeaconMcpServer::new(runtime.clone(), guide_config.clone())),
+        move || Ok(BeaconMcpServer::new(runtime.clone())),
         Arc::new(LocalSessionManager::default()),
         http_config(allowed_hosts),
     )

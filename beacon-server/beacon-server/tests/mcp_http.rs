@@ -246,22 +246,18 @@ async fn tools_list_is_the_five_generic_tools() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn get_guide_shows_the_address_of_the_request() {
-    let mut config = config(false);
-    config.flight_sql.enable = true;
-    config.flight_sql.allow_anonymous = true;
-    config.flight_sql.port = 32011;
-    let (router, _harness, _admin) = router_with(config).await;
+async fn get_guide_returns_the_guide() {
+    let (router, _harness, _admin) = router_with(config(false)).await;
 
     let guide = call_tool(&router, None, "get_guide", json!({})).await;
 
     let guide = guide.as_str().expect("the guide is Markdown text");
-    assert!(guide.contains("Client(\"http://localhost\")"), "{guide}");
-    assert!(guide.contains("beacon://localhost:32011/<table>"), "{guide}");
+    assert!(guide.starts_with("# Beacon guide"), "{guide}");
+    assert!(guide.contains("pip install beacon-api"), "{guide}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn export_query_uses_the_address_of_the_request() {
+async fn export_query_returns_a_recipe_with_a_url_placeholder() {
     let (router, _harness, _admin) = router_with(config(false)).await;
 
     let recipe = call_tool(
@@ -273,7 +269,7 @@ async fn export_query_uses_the_address_of_the_request() {
     .await;
 
     let python = recipe["python"].as_str().expect("a python snippet");
-    assert!(python.contains("BEACON_URL = \"http://localhost\""), "{python}");
+    assert!(python.contains("BEACON_URL = \"<BEACON_URL>\""), "{python}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

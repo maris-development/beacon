@@ -19,10 +19,9 @@ tag. Releases before 2.0.0 are recorded in the
   /api/admin/table-comments/{table}` manage the comments of one table. A comment follows `ALTER
   TABLE ... RENAME COLUMN` and `DROP COLUMN`, and `DROP TABLE` deletes it.
 - **A built-in guide for MCP agents.** The `get_guide` tool tells an agent how Beacon turns files
-  into rows, how to write a fast query, and how to get the data with HTTP or `beacon-api`. With
-  anonymous Flight SQL on, it adds a `beacondb` remote-table recipe. The examples show the address
-  of the server from the request. The `initialize` instructions point to the guide.
-  `export_query` uses the same address and no longer shows `http://localhost:5001`.
+  into rows, how to write a fast query, and how to use the `beacon-api` Python package. The
+  `initialize` instructions point to the guide. The `export_query` snippet shows a `<BEACON_URL>`
+  placeholder, not `http://localhost:5001`.
 
 ### Changed
 

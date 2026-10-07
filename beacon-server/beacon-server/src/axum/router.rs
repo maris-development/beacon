@@ -105,14 +105,6 @@ pub fn setup_router(
                 beacon_mcp::streamable_http_service(
                     beacon_runtime.runtime().clone(),
                     &config.mcp.allowed_hosts,
-                    beacon_mcp::GuideConfig {
-                        base_path: base_path.clone(),
-                        // A beacondb remote table connects anonymously, so the guide
-                        // offers it only when Flight SQL accepts that.
-                        anonymous_flight_sql_port: (config.flight_sql.enable
-                            && config.flight_sql.allow_anonymous)
-                            .then_some(config.flight_sql.port),
-                    },
                 ),
             )
             .layer(::axum::middleware::from_fn_with_state(
