@@ -54,9 +54,9 @@ const Layout = {
             // Banner above the content on pre-release docs pages; the component
             // renders nothing on every other version.
             'doc-before': () => h(PreReleaseNotice),
-            // Doubles as the `/docs/latest/...` catch-all: GitHub Pages serves
-            // 404.html for unknown paths, so this rewrites the alias client-side
-            // before falling back to a normal 404.
+            // Doubles as the catch-all for `/docs/latest/...` and retired version
+            // folders: GitHub Pages serves 404.html for unknown paths, so this
+            // redirects client-side before falling back to a normal 404.
             'not-found': () => h(NotFound)
         })
     }
