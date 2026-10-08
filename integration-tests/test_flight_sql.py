@@ -2,7 +2,7 @@
 
 The container already publishes the Flight SQL port (32011); this exercises it
 over ADBC. Beacon's Flight authorizer accepts an ``Authorization: Basic`` header
-on the handshake and issues a bearer token the driver reuses, so admin
+(with or without base64 padding) on the handshake and issues a bearer token the driver reuses, so admin
 credentials map to a super-user exactly like the HTTP path. Anonymous access is
 off by default, so an unauthenticated client is rejected.
 
@@ -50,9 +50,24 @@ def _connect(uri: str, auth: bool = True):
 def test_flight_select_constant(flight_uri):
     conn = _connect(flight_uri)
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT 1 AS one")
-        assert cur.fetchone()[0] == 1
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 AS one")
+            assert cur.fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_flight_handshake_username_password(flight_uri):
+    """The ADBC handshake sends `user:pass` as base64 without padding."""
+    # "admin:securepassword" has 20 bytes, so its padded base64 ends in "=".
+    conn = flight_dbapi.connect(
+        flight_uri,
+        db_kwargs={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 AS one")
+            assert cur.fetchone()[0] == 1
     finally:
         conn.close()
 
@@ -61,9 +76,9 @@ def test_flight_query_parquet(flight_uri, sample_data):
     """Flight SQL hits the same runtime and datasets as the HTTP transport."""
     conn = _connect(flight_uri)
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT count(*) AS n FROM read_parquet(['obs/*.parquet'])")
-        assert cur.fetchone()[0] == sample_data["total"]
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM read_parquet(['obs/*.parquet'])")
+            assert cur.fetchone()[0] == sample_data["total"]
     finally:
         conn.close()
 
@@ -71,11 +86,11 @@ def test_flight_query_parquet(flight_uri, sample_data):
 def test_flight_returns_arrow(flight_uri, sample_data):
     conn = _connect(flight_uri)
     try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT platform, temperature FROM read_parquet(['obs/*.parquet']) LIMIT 10"
-        )
-        table = cur.fetch_arrow_table()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT platform, temperature FROM read_parquet(['obs/*.parquet']) LIMIT 10"
+            )
+            table = cur.fetch_arrow_table()
         assert table.num_rows == 10
         assert set(table.column_names) == {"platform", "temperature"}
     finally:
