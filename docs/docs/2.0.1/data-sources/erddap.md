@@ -77,6 +77,25 @@ Beacon does not send `LIMIT` to ERDDAP. Beacon applies `LIMIT` itself.
 - A query without filters reads every row of the selected columns.
 - Use filters to make large datasets smaller.
 
+## Speed up repeated queries
+
+Each query on an ERDDAP table sends a new request to the server.
+For repeated queries, keep a local Parquet copy in a [materialized view](/docs/2.0.1/sql/create-materialized-view).
+
+```sql
+CREATE MATERIALIZED VIEW bottles_local AS
+  SELECT cruise_id, ship, time, temperature0
+  FROM bottles
+  WHERE time >= TIMESTAMP '2002-01-01T00:00:00Z';
+
+REFRESH bottles_local;
+```
+
+- Beacon sends the filter of the view to ERDDAP. Use a filter to copy only the rows that you need.
+- A query on the view reads the local Parquet file. It sends no request to ERDDAP.
+- On the view, `LIMIT` and filters skip data in the local file.
+- `REFRESH` reads the dataset from ERDDAP again and replaces the copy.
+
 ## Limits
 
 - Beacon supports tabledap datasets only. A griddap dataset URL gives an error.
