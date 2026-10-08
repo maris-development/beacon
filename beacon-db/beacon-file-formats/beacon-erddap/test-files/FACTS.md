@@ -13,6 +13,7 @@ Recorded 2026-10-08 from `https://coastwatch.pfeg.noaa.gov/erddap` (ERDDAP 2.31.
 ## tabledap parquet
 
 - Row count of `tabledap.parquet`: 62.
+- `tabledap_all.parquet` holds all 25 variables in info order, for the same window: 62 rows. All variables other than `cruise_id`, `ship`, `cast`, `bottle_posn` and `time` are Float32. Null counts: `chl_a_total` 16, `chl_a_10um` 57, `phaeo_total` 16, `phaeo_10um` 57, `PO4`, `N_N`, `NO3`, `Si`, `NO2`, `NH4` 12 each, `par` 62. No other column has nulls.
 - Arrow type of each column: `cruise_id` Utf8, `ship` Utf8, `cast` Int32, `longitude` Float32, `latitude` Float32, `time` Timestamp(Millisecond, UTC), `bottle_posn` Int32, `temperature0` Float32.
 - Time is a Parquet INT64 timestamp (isAdjustedToUTC, milliseconds). It is not a float64 of epoch seconds.
 - The info type of `time` is `double`. The info type of `cast` is `short`. The info type of `bottle_posn` is `byte`. The parquet writer widens `short` and `byte` to Int32.

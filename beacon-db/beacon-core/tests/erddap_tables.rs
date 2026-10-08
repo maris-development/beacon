@@ -20,6 +20,12 @@ async fn tabledap_server() -> FixtureServer {
             beacon_erddap::fixture::test_file("no_results.txt"),
         )
         .with_query("cruise_id=\"none\""),
+        // A request that names a variable outside the 8-column fixture gets all 25.
+        Route::file(
+            &format!("/erddap/tabledap/{T}.parquet"),
+            "tabledap_all.parquet",
+        )
+        .with_query("chl_a_total"),
         Route::file(&format!("/erddap/tabledap/{T}.parquet"), "tabledap.parquet"),
     ])
     .await
@@ -59,6 +65,107 @@ async fn tabledap_select_projects_and_counts() {
     );
     let request = last_data_request(&server);
     assert!(request.ends_with(".parquet?cruise_id"), "{request}");
+}
+
+/// Every variable of `erdGlobecBottle`, in info order.
+const ALL_VARIABLES: &str = "cruise_id,ship,cast,longitude,latitude,time,bottle_posn,\
+chl_a_total,chl_a_10um,phaeo_total,phaeo_10um,sal00,sal11,temperature0,temperature1,\
+fluor_v,xmiss_v,PO4,N_N,NO3,Si,NO2,NH4,oxygen,par";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tabledap_select_star_reads_every_variable() {
+    use arrow::datatypes::{DataType, TimeUnit};
+
+    let rt = common::runtime("erddap-select-star").await;
+    let server = tabledap_server().await;
+    create(&rt, &server, "bottles").await;
+
+    let batches = rt.sql("SELECT * FROM bottles").await;
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 62);
+    let schema = batches[0].schema();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(names, ALL_VARIABLES.split(',').collect::<Vec<_>>());
+    assert_eq!(
+        schema.field_with_name("time").unwrap().data_type(),
+        &DataType::Timestamp(TimeUnit::Nanosecond, None)
+    );
+    // The info types win over the parquet types: `cast` is `short`.
+    assert_eq!(
+        schema.field_with_name("cast").unwrap().data_type(),
+        &DataType::Int16
+    );
+
+    let request = last_data_request(&server);
+    assert!(
+        request.ends_with(&format!(".parquet?{ALL_VARIABLES}")),
+        "{request}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tabledap_select_star_keeps_missing_values_null() {
+    let rt = common::runtime("erddap-select-star-nulls").await;
+    let server = tabledap_server().await;
+    create(&rt, &server, "bottles").await;
+
+    let rows = |batches: Vec<arrow::record_batch::RecordBatch>| {
+        batches.iter().map(|b| b.num_rows()).sum::<usize>()
+    };
+    let missing = rt
+        .sql("SELECT * FROM bottles WHERE chl_a_total IS NULL")
+        .await;
+    assert_eq!(rows(missing), 16);
+    assert!(last_data_request(&server).contains("&chl_a_total=NaN"));
+
+    let present = rt
+        .sql("SELECT * FROM bottles WHERE chl_a_total IS NOT NULL")
+        .await;
+    assert_eq!(rows(present), 46);
+    assert!(last_data_request(&server).contains("&chl_a_total!=NaN"));
+
+    // `par` has no value in any row of the window.
+    let counts = rt
+        .sql("SELECT count(par), count(chl_a_total) FROM bottles")
+        .await;
+    let count = |column: usize| {
+        counts[0]
+            .column(column)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("an Int64 count")
+            .value(0)
+    };
+    assert_eq!((count(0), count(1)), (0, 46));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn materialized_view_copies_select_star() {
+    let rt = common::runtime("erddap-select-star-view").await;
+    let server = tabledap_server().await;
+    create(&rt, &server, "bottles").await;
+
+    rt.sql("CREATE MATERIALIZED VIEW bottles_local AS SELECT * FROM bottles")
+        .await;
+    let after_create = server.requests().len();
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(*) FROM bottles_local").await),
+        62
+    );
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(chl_a_total) FROM bottles_local").await),
+        46
+    );
+    assert_eq!(
+        server.requests().len(),
+        after_create,
+        "a view read uses the local copy"
+    );
+
+    rt.sql("REFRESH bottles_local").await;
+    assert!(
+        server.requests().len() > after_create,
+        "a refresh reads ERDDAP again"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

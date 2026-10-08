@@ -8,6 +8,9 @@ cd "$(dirname "$0")"
 curl -sf "$S/info/$T/index.json" -o tabledap_info.json
 # One cruise day keeps the fixture small; adjust the window if it returns no rows.
 curl -sf "$S/tabledap/$T.parquet?cruise_id,ship,cast,longitude,latitude,time,bottle_posn,temperature0&time%3E=2002-05-30T00:00:00Z&time%3C=2002-05-31T00:00:00Z" -o tabledap.parquet
+# Every variable of the dataset, in info order, for SELECT * tests.
+ALL=cruise_id,ship,cast,longitude,latitude,time,bottle_posn,chl_a_total,chl_a_10um,phaeo_total,phaeo_10um,sal00,sal11,temperature0,temperature1,fluor_v,xmiss_v,PO4,N_N,NO3,Si,NO2,NH4,oxygen,par
+curl -sf "$S/tabledap/$T.parquet?$ALL&time%3E=2002-05-30T00:00:00Z&time%3C=2002-05-31T00:00:00Z" -o tabledap_all.parquet
 curl -sf "$S/info/$G/index.json" -o griddap_info.json
 curl -sf "$S/griddap/$G.nc?sst%5B0:0%5D%5B0:0%5D%5B0:0%5D" -o griddap_sample.nc
 for axis in time latitude longitude; do
