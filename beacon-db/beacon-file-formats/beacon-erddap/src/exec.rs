@@ -113,7 +113,7 @@ impl ExecutionPlan for ErddapExec {
             match client.download(&url, ".parquet").await? {
                 // No matching rows is an empty partition.
                 None => Ok(futures::stream::empty().boxed()),
-                Some(file) => crate::tabledap::decode_parquet(file, target, batch_size).await,
+                Some(file) => crate::tabledap::decode_parquet(&url, file, target, batch_size).await,
             }
         })
         .try_flatten();

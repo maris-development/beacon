@@ -347,16 +347,26 @@ fn nan_to_null(column: ArrayRef) -> Result<ArrayRef> {
 }
 
 /// Stream the parquet file, conformed to `target`. The file lives until the stream ends.
+///
+/// `url` is the request that gave the file; errors name it.
 pub async fn decode_parquet(
+    url: &str,
     file: tempfile::NamedTempFile,
     target: SchemaRef,
     batch_size: usize,
 ) -> Result<BoxStream<'static, Result<RecordBatch>>> {
+    let not_parquet = |e: parquet::errors::ParquetError| {
+        DataFusionError::Execution(format!(
+            "ERDDAP response from {url} is not a parquet file: {e}"
+        ))
+    };
     let handle = tokio::fs::File::open(file.path()).await?;
     let stream = parquet::arrow::ParquetRecordBatchStreamBuilder::new(handle)
-        .await?
+        .await
+        .map_err(not_parquet)?
         .with_batch_size(batch_size)
-        .build()?;
+        .build()
+        .map_err(not_parquet)?;
     Ok(stream
         .map(move |batch| {
             let _keep = &file;
@@ -674,12 +684,13 @@ mod decode_tests {
                 )
                 .unwrap(),
         );
-        let batches: Vec<RecordBatch> = decode_parquet(file, target.clone(), 8192)
-            .await
-            .unwrap()
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> =
+            decode_parquet("http://h/t.parquet", file, target.clone(), 8192)
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert!(rows > 0);
         assert!(batches.iter().all(|b| b.schema() == target));
@@ -689,5 +700,23 @@ mod decode_tests {
             .unwrap()
             .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
         assert_eq!(time.value(0), first_ms * 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn a_non_parquet_response_names_the_url() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "<html>Service Unavailable</html>").unwrap();
+        let url = "http://h/erddap/tabledap/t.parquet?a";
+        let err = decode_parquet(url, file, Arc::new(Schema::empty()), 8192)
+            .await
+            .err()
+            .expect("an error")
+            .to_string();
+        assert!(
+            err.contains(&format!(
+                "ERDDAP response from {url} is not a parquet file: "
+            )),
+            "{err}"
+        );
     }
 }
