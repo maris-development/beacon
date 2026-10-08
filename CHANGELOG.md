@@ -10,6 +10,11 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ## [Unreleased]
 
+### Added
+
+- **ERDDAP tables.** `CREATE EXTERNAL TABLE t STORED AS ERDDAP LOCATION 'https://host/erddap/tabledap/<id>'`
+  reads an ERDDAP tabledap dataset. Beacon sends filters and columns to ERDDAP.
+
 ## [2.0.1] — 2026-10-08
 
 Beacon 2.0.1 adds table and column comments, role settings, and per-role limits on the CPU time

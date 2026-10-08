@@ -4,7 +4,7 @@
 mod common;
 
 use beacon_erddap::fixture::{FixtureServer, Route};
-use common::{scalar_i64, TestRuntime};
+use common::{TestRuntime, scalar_i64};
 
 const T: &str = "erdGlobecBottle";
 
@@ -199,4 +199,31 @@ async fn explain_shows_the_request_url() {
     .to_string();
     assert!(plan.contains("ErddapExec"), "{plan}");
     assert!(plan.contains(&format!("{T}.parquet?cruise_id")), "{plan}");
+}
+
+/// Reads a real ERDDAP server. Run with `--ignored` when the network is up.
+/// `BEACON_ERDDAP_URL` and `BEACON_ERDDAP_TABLEDAP_ID` point it at another server and dataset.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn live_coastwatch_tabledap() {
+    let base = std::env::var("BEACON_ERDDAP_URL")
+        .unwrap_or_else(|_| "https://coastwatch.pfeg.noaa.gov/erddap".to_string());
+    let custom_id = std::env::var("BEACON_ERDDAP_TABLEDAP_ID").ok();
+    let id = custom_id.as_deref().unwrap_or(T);
+    let rt = common::runtime("erddap-live").await;
+    rt.sql(&format!(
+        "CREATE EXTERNAL TABLE live_t STORED AS ERDDAP LOCATION '{base}/tabledap/{id}'"
+    ))
+    .await;
+    // The time window fits the default dataset only.
+    let filter = if custom_id.is_none() {
+        " WHERE time >= TIMESTAMP '2002-05-30T00:00:00Z' AND time < TIMESTAMP '2002-05-31T00:00:00Z'"
+    } else {
+        ""
+    };
+    let n = scalar_i64(
+        &rt.sql(&format!("SELECT count(*) FROM live_t{filter}"))
+            .await,
+    );
+    assert!(n > 0, "no rows from {base}/tabledap/{id}");
 }
