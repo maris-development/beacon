@@ -7,7 +7,9 @@
 
 pub mod client;
 pub mod encode;
+pub mod exec;
 pub mod fixture;
+pub mod griddap;
 pub mod info;
 pub mod location;
 pub mod options;

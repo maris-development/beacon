@@ -1,9 +1,18 @@
 //! tabledap: SQL filters as ERDDAP constraints, the request query, and the parquet decode.
 
-use arrow::datatypes::{DataType, Schema};
+use std::sync::Arc;
+
+use arrow::array::{
+    Array, ArrayRef, AsArray, BooleanArray, RecordBatch, RecordBatchOptions,
+    TimestampNanosecondArray,
+};
+use arrow::compute::{CastOptions, cast_with_options, nullif};
+use arrow::datatypes::{DataType, Float32Type, Float64Type, Schema, SchemaRef, TimeUnit};
 use datafusion::common::ScalarValue;
+use datafusion::error::{DataFusionError, Result};
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{Between, BinaryExpr, Cast, Expr, Like, Operator};
+use futures::stream::{BoxStream, StreamExt};
 
 use crate::encode::{
     LiteralValue, erddap_string, iso_millis, java_regex_literal, like_to_regex, literal_value,
@@ -272,6 +281,90 @@ fn nan_test(schema: &Schema, inner: &Expr, op: &str) -> Option<Vec<String>> {
     Some(vec![format!("{column}{op}NaN")])
 }
 
+/// Shape an ERDDAP parquet batch to the pinned table schema.
+pub fn conform(batch: &RecordBatch, target: &SchemaRef) -> Result<RecordBatch> {
+    // Out-of-range values fail instead of becoming null.
+    let strict = CastOptions {
+        safe: false,
+        ..Default::default()
+    };
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(target.fields().len());
+    for field in target.fields() {
+        let source = batch.column_by_name(field.name()).ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "ERDDAP response has no column '{}'; the dataset changed, re-create the table",
+                field.name()
+            ))
+        })?;
+        let column = match (source.data_type(), field.data_type()) {
+            (s, DataType::Timestamp(TimeUnit::Nanosecond, None)) if s.is_numeric() => {
+                let seconds = cast_with_options(source, &DataType::Float64, &strict)?;
+                let nanos: TimestampNanosecondArray = seconds
+                    .as_primitive::<Float64Type>()
+                    .iter()
+                    .map(|v| {
+                        v.filter(|v| v.is_finite())
+                            .map(|v| (v * 1e9).round() as i64)
+                    })
+                    .collect();
+                Arc::new(nanos) as ArrayRef
+            }
+            (s, t) if s == t => source.clone(),
+            _ => cast_with_options(source, field.data_type(), &strict).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "ERDDAP column '{}' cannot be read as {}: {e}; re-create the table",
+                    field.name(),
+                    field.data_type()
+                ))
+            })?,
+        };
+        columns.push(nan_to_null(column)?);
+    }
+    let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+    Ok(RecordBatch::try_new_with_options(
+        target.clone(),
+        columns,
+        &options,
+    )?)
+}
+
+/// ERDDAP writes missing floats as NaN; SQL needs null.
+fn nan_to_null(column: ArrayRef) -> Result<ArrayRef> {
+    let mask: BooleanArray = match column.data_type() {
+        DataType::Float32 => column
+            .as_primitive::<Float32Type>()
+            .iter()
+            .map(|v| Some(v.is_some_and(f32::is_nan)))
+            .collect(),
+        DataType::Float64 => column
+            .as_primitive::<Float64Type>()
+            .iter()
+            .map(|v| Some(v.is_some_and(f64::is_nan)))
+            .collect(),
+        _ => return Ok(column),
+    };
+    Ok(nullif(&column, &mask)?)
+}
+
+/// Stream the parquet file, conformed to `target`. The file lives until the stream ends.
+pub async fn decode_parquet(
+    file: tempfile::NamedTempFile,
+    target: SchemaRef,
+    batch_size: usize,
+) -> Result<BoxStream<'static, Result<RecordBatch>>> {
+    let handle = tokio::fs::File::open(file.path()).await?;
+    let stream = parquet::arrow::ParquetRecordBatchStreamBuilder::new(handle)
+        .await?
+        .with_batch_size(batch_size)
+        .build()?;
+    Ok(stream
+        .map(move |batch| {
+            let _keep = &file;
+            conform(&batch?, &target)
+        })
+        .boxed())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +561,133 @@ mod tests {
             &["time>=2020-01-01T00:00:00Z".into()],
         );
         assert_eq!(q, "ship,time&time%3E%3D2020-01-01T00%3A00%3A00Z");
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+    use arrow::array::{Float32Array, Float64Array, Int32Array};
+    use arrow::datatypes::Field;
+    use futures::TryStreamExt;
+
+    #[test]
+    fn conform_converts_epoch_seconds_and_nan() {
+        let source = RecordBatch::try_from_iter(vec![
+            (
+                "time",
+                Arc::new(Float64Array::from(vec![Some(1.5), None, Some(f64::NAN)])) as _,
+            ),
+            (
+                "temp",
+                Arc::new(Float32Array::from(vec![1.0, f32::NAN, 2.0])) as _,
+            ),
+        ])
+        .unwrap();
+        let target = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Float32, true),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+        ]));
+        let out = conform(&source, &target).unwrap();
+        let time = out
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .unwrap();
+        assert_eq!(time.value(0), 1_500_000_000);
+        assert!(time.is_null(1) && time.is_null(2));
+        assert!(out.column(0).is_null(1), "NaN is missing in ERDDAP");
+    }
+
+    #[test]
+    fn conform_names_a_missing_column() {
+        let source =
+            RecordBatch::try_from_iter(vec![("a", Arc::new(Float64Array::from(vec![1.0])) as _)])
+                .unwrap();
+        let target = Arc::new(Schema::new(vec![Field::new("b", DataType::Float64, true)]));
+        let err = conform(&source, &target).unwrap_err().to_string();
+        assert!(err.contains("'b'") && err.contains("re-create"), "{err}");
+    }
+
+    #[test]
+    fn conform_keeps_the_row_count_for_no_columns() {
+        let source = RecordBatch::try_from_iter(vec![(
+            "a",
+            Arc::new(Float64Array::from(vec![1.0, 2.0])) as _,
+        )])
+        .unwrap();
+        let out = conform(&source, &Arc::new(Schema::empty())).unwrap();
+        assert_eq!(out.num_rows(), 2);
+    }
+
+    #[test]
+    fn conform_errors_on_integer_overflow() {
+        let source = RecordBatch::try_from_iter(vec![(
+            "n",
+            Arc::new(Int32Array::from(vec![1, 70_000])) as _,
+        )])
+        .unwrap();
+        let target = Arc::new(Schema::new(vec![Field::new("n", DataType::Int16, true)]));
+        let err = conform(&source, &target).unwrap_err().to_string();
+        assert!(err.contains("'n'") && err.contains("re-create"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn decodes_the_recorded_parquet() {
+        let info =
+            crate::DatasetInfo::parse(&crate::fixture::test_file("tabledap_info.json")).unwrap();
+        let schema = info.tabledap_schema().unwrap();
+        // Only the columns the fixture request asked for.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), crate::fixture::test_file("tabledap.parquet")).unwrap();
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            std::fs::File::open(file.path()).unwrap(),
+        )
+        .unwrap();
+        let names: Vec<String> = reader
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        // The first recorded time value in milliseconds, read from the file itself.
+        let first_ms = {
+            let mut batches = reader.build().unwrap();
+            let batch = batches.next().unwrap().unwrap();
+            batch
+                .column_by_name("time")
+                .unwrap()
+                .as_primitive::<arrow::datatypes::TimestampMillisecondType>()
+                .value(0)
+        };
+        let target = Arc::new(
+            schema
+                .project(
+                    &names
+                        .iter()
+                        .map(|n| schema.index_of(n).unwrap())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+        );
+        let batches: Vec<RecordBatch> = decode_parquet(file, target.clone(), 8192)
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert!(rows > 0);
+        assert!(batches.iter().all(|b| b.schema() == target));
+        // The cast keeps the UTC instant.
+        let time = batches[0]
+            .column_by_name("time")
+            .unwrap()
+            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+        assert_eq!(time.value(0), first_ms * 1_000_000);
     }
 }
