@@ -6,12 +6,10 @@ edition = "2024"
 rust-version.workspace = true
 
 [dependencies]
-beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 
 arrow = { workspace = true }
 datafusion = { workspace = true }
-object_store = { workspace = true }
 parquet = { workspace = true }
 
 anyhow = { workspace = true }

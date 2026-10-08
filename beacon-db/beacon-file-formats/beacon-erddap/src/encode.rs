@@ -104,17 +104,6 @@ pub fn literal_value(value: &ScalarValue) -> Option<LiteralValue> {
     }
 }
 
-/// A numeric or timestamp literal as f64; timestamps in epoch seconds.
-pub fn literal_f64(value: &ScalarValue) -> Option<f64> {
-    if let Some(nanos) = timestamp_nanos(value) {
-        return Some(nanos as f64 / 1e9);
-    }
-    match literal_value(value)? {
-        LiteralValue::Number(n) => n.parse().ok(),
-        _ => None,
-    }
-}
-
 /// `ms` epoch milliseconds as ISO 8601 UTC with a `Z` suffix; `.SSS` only when nonzero.
 pub fn iso_millis(ms: i64) -> Option<String> {
     let time = DateTime::from_timestamp_millis(ms)?;
@@ -203,10 +192,6 @@ mod tests {
         assert_eq!(
             literal_value(&ScalarValue::Utf8(Some("x".into()))),
             Some(LiteralValue::Text("x".into()))
-        );
-        assert_eq!(
-            literal_f64(&ScalarValue::TimestampSecond(Some(60), None)),
-            Some(60.0)
         );
     }
 }
