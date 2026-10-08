@@ -227,3 +227,115 @@ async fn live_coastwatch_tabledap() {
     );
     assert!(n > 0, "no rows from {base}/tabledap/{id}");
 }
+
+/// The request URLs of the ERDDAP scan in the plan of `sql`.
+async fn request_urls(rt: &common::TestRuntime, sql: &str) -> String {
+    let plan = arrow::util::pretty::pretty_format_batches(&rt.sql(&format!("EXPLAIN {sql}")).await)
+        .unwrap()
+        .to_string();
+    let start = plan.find("urls=[").expect("an ErddapExec in the plan") + "urls=[".len();
+    let end = start + plan[start..].find(']').unwrap();
+    plan[start..end].to_string()
+}
+
+/// Reads `beaconTest` from the local Docker ERDDAP in `beacon-erddap/docker`. Run with `--ignored`
+/// and `BEACON_ERDDAP_URL=http://localhost:8089/erddap` after `docker compose up`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn local_erddap_pushdown_matches_expected() {
+    let Ok(base) = std::env::var("BEACON_ERDDAP_URL") else {
+        eprintln!("skipped: set BEACON_ERDDAP_URL to the local ERDDAP");
+        return;
+    };
+    let rt = common::runtime("erddap-local").await;
+    rt.sql(&format!(
+        "CREATE EXTERNAL TABLE t STORED AS ERDDAP LOCATION '{base}/tabledap/beaconTest'"
+    ))
+    .await;
+    let cases: &[(&str, i64)] = &[
+        // All 18 data rows of beacon_test.csv.
+        ("TRUE", 18),
+        // Only `St "A"`: f32 7.794 widens to 7.79400015, above the f64 literal.
+        ("temp > 7.794", 1),
+        // Only `back\slash`: f32 0.7 widens to 0.69999999, below the f64 literal.
+        ("temp < 0.7", 1),
+        // Only `St A` has no temp.
+        ("temp IS NULL", 1),
+        ("temp IS NOT NULL", 17),
+        // Three rows have depth 10, and `ab` has no depth.
+        ("depth <> 10", 14),
+        // Depth 20 is on two rows; 40, 60 and 140 are on one row each.
+        ("depth IN (20, 40, 60, 140)", 5),
+        // Only `ab`.
+        ("depth IS NULL", 1),
+        ("station = 'St \"A\"'", 1),
+        ("station = 'back\\slash'", 1),
+        // Metacharacters match only themselves, so `aXb|c` stays out.
+        ("station IN ('a.b|c', 'St \"A\"', 'back\\slash', 'none')", 3),
+        // Only `a.b|c`: the `.` is literal in LIKE.
+        ("station LIKE 'a.%'", 1),
+        // The empty station field is null in the parquet response.
+        ("station IS NULL", 1),
+        // Only the first of the two rows 1 ms apart.
+        ("time = TIMESTAMP '2020-01-01T00:00:00.123Z'", 1),
+        // No row is at this sub-millisecond instant.
+        ("time = TIMESTAMP '2020-01-01T00:00:00.1235Z'", 0),
+        // The row 1 ms earlier and the 1969 row.
+        ("time < TIMESTAMP '2020-01-01T00:00:00.124Z'", 2),
+        // The later 1 ms row, 2020-01-02 and 2020-01-03.
+        (
+            "time BETWEEN TIMESTAMP '2020-01-01T00:00:00.124Z' \
+             AND TIMESTAMP '2020-01-03T00:00:00Z'",
+            3,
+        ),
+        // Only the 1969 row.
+        ("time < TIMESTAMP '1970-01-01T00:00:00Z'", 1),
+    ];
+    for &(predicate, expected) in cases {
+        let pushed_sql = format!("SELECT count(*) FROM t WHERE {predicate}");
+        // A filter does not move below a limit, so ERDDAP returns all rows here.
+        let local_sql =
+            format!("SELECT count(*) FROM (SELECT * FROM t LIMIT 1000) AS l WHERE {predicate}");
+        let pushed = scalar_i64(&rt.sql(&pushed_sql).await);
+        let local = scalar_i64(&rt.sql(&local_sql).await);
+        let url = request_urls(&rt, &pushed_sql).await;
+        eprintln!("{predicate} | expected {expected} | pushed {pushed} | local {local} | {url}");
+        assert!(
+            !request_urls(&rt, &local_sql).await.contains('&'),
+            "the local query sends no constraint"
+        );
+        assert_eq!(local, expected, "local filter: {predicate}");
+        assert_eq!(pushed, expected, "pushdown: {predicate} -> {url}");
+    }
+
+    let limited = "SELECT count(*) FROM (SELECT * FROM t LIMIT 3) AS l";
+    let url = request_urls(&rt, limited).await;
+    eprintln!("LIMIT 3 | expected 3 | {url}");
+    assert_eq!(scalar_i64(&rt.sql(limited).await), 3);
+    assert!(!url.contains("orderBy"), "{url}");
+
+    let rows = rt.sql("SELECT station, time FROM t ORDER BY time").await;
+    assert_eq!(common::total_rows(&rows), 18);
+    let stations = common::column_strings(&rows, 0);
+    assert_eq!(stations[..3], ["back\\slash", "St \"A\"", "a.b|c"]);
+    let times: Vec<i64> = rows
+        .iter()
+        .flat_map(|b| {
+            b.column(1)
+                .as_any()
+                .downcast_ref::<arrow::array::TimestampNanosecondArray>()
+                .expect("a nanosecond time column")
+                .values()
+                .to_vec()
+        })
+        .collect();
+    // 1969-07-20T20:17:40Z, then 2020-01-01T00:00:00.123Z and .124Z.
+    assert_eq!(
+        times[..3],
+        [
+            -14_182_940_000_000_000,
+            1_577_836_800_123_000_000,
+            1_577_836_800_124_000_000
+        ]
+    );
+}
