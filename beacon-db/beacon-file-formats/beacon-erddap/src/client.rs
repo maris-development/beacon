@@ -148,8 +148,17 @@ fn http_error(url: &str, status: u16, body: &[u8]) -> ErddapError {
 fn erddap_message(body: &str) -> Option<String> {
     if let Some(start) = body.find("message=\"") {
         let rest = &body[start + "message=\"".len()..];
-        if let Some(end) = rest.find("\";") {
-            return Some(rest[..end].to_string());
+        // Scan to the closing `";`; `\"` and `\\` are escapes inside the message.
+        let mut message = String::new();
+        let mut chars = rest.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if matches!(chars.peek(), Some('"' | '\\')) => {
+                    message.push(chars.next().unwrap());
+                }
+                '"' if chars.peek() == Some(&';') => return Some(message),
+                _ => message.push(c),
+            }
         }
     }
     let trimmed = body.trim();
@@ -211,6 +220,10 @@ mod tests {
         assert!(err.contains("500"), "{err}");
         assert!(err.contains(&url), "{err}");
         assert!(!err.contains("Error {"), "the message is parsed out: {err}");
+        assert!(
+            err.contains("Unrecognized variable=\"no_such_variable\""),
+            "the message is unescaped: {err}"
+        );
     }
 
     #[test]
@@ -220,6 +233,8 @@ mod tests {
             erddap_message(body).as_deref(),
             Some("Not Found: Your query produced no matching results.")
         );
+        let escaped = "Error {\n    message=\"a \\\"q\\\"; b\\\\c\\\";\";\n}\n";
+        assert_eq!(erddap_message(escaped).as_deref(), Some("a \"q\"; b\\c\";"));
         assert_eq!(erddap_message("plain text").as_deref(), Some("plain text"));
     }
 }
