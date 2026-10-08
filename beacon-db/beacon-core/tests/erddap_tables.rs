@@ -291,6 +291,10 @@ async fn local_erddap_pushdown_matches_expected() {
         ),
         // Only `ab`.
         ("depth IS NULL", 1, "depth&depth=NaN"),
+        // A fractional bound on an integer column rounds outwards: depth 20 to 140.
+        ("depth > 19.5", 14, "depth&depth>=19"),
+        // Depth 10 on three rows and depth 20 on two rows.
+        ("depth < 20.5", 5, "depth&depth<=21"),
         ("station = 'St \"A\"'", 1, r#"station&station="St \"A\"""#),
         (
             "station = 'back\\slash'",
