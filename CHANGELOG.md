@@ -13,7 +13,8 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 ### Added
 
 - **ERDDAP tables.** `CREATE EXTERNAL TABLE t STORED AS ERDDAP LOCATION 'https://host/erddap/tabledap/<id>'`
-  reads an ERDDAP tabledap dataset. Beacon sends filters and columns to ERDDAP.
+  reads an ERDDAP tabledap dataset. Beacon sends filters and columns to ERDDAP. The ERDDAP
+  attributes are table and column metadata, and `title`, `long_name` and `units` give the comments.
 
 ## [2.0.1] — 2026-10-08
 

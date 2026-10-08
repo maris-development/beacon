@@ -36,6 +36,18 @@ CREATE EXTERNAL TABLE bottles STORED AS ERDDAP
 - A variable with the units `seconds since 1970-01-01T00:00:00Z` is a timestamp column.
 - Beacon reads an ERDDAP NaN value as `NULL`.
 
+## Attributes and comments
+
+Beacon keeps the ERDDAP attributes in the [table schema](/docs/2.0.1/sql/comment-on#read-the-comments).
+
+- The global attributes are the metadata of the table, for example `title`, `summary` and `license`.
+- The attributes of a variable are the metadata of its column, for example `units`, `standard_name` and `actual_range`.
+- The `title` attribute is the comment of the table.
+- The `long_name` and `units` attributes give the comment of a column, for example `Sea Water Temperature (degree_C)`. A time column shows no units.
+- An ERDDAP attribute with the name `comment` has the key `erddap_comment`.
+- A [`COMMENT ON`](/docs/2.0.1/sql/comment-on) statement replaces the comment from ERDDAP. The attributes do not change.
+- `beacon.system.comments` shows only the comments from `COMMENT ON`. It does not show the comments from ERDDAP.
+
 ## Pushdown
 
 Beacon sends the column list and filters to ERDDAP.

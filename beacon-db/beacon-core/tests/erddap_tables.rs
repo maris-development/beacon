@@ -139,6 +139,58 @@ async fn tabledap_select_star_keeps_missing_values_null() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn erddap_attributes_become_metadata_and_comments() {
+    let rt = common::restartable_runtime("erddap-attributes", |b| b).await;
+    let server = tabledap_server().await;
+    create(&rt, &server, "bottles").await;
+
+    let schema = rt
+        .runtime
+        .table_arrow_schema("bottles", &rt.admin().await)
+        .await
+        .unwrap();
+    assert_eq!(
+        schema.metadata().get("comment").map(String::as_str),
+        Some("GLOBEC NEP Rosette Bottle Data (2002)")
+    );
+    assert!(schema.metadata().contains_key("summary"));
+    let temperature = schema.field_with_name("temperature0").unwrap().metadata();
+    assert_eq!(
+        temperature.get("comment").map(String::as_str),
+        Some("Sea Water Temperature from T0 Sensor (degree_C)")
+    );
+    assert_eq!(
+        temperature.get("standard_name").map(String::as_str),
+        Some("sea_water_temperature")
+    );
+
+    // A user comment overrides the ERDDAP one; the attributes stay.
+    rt.sql("COMMENT ON COLUMN bottles.temperature0 IS 'T0 in Celsius'")
+        .await;
+    let rt = rt.restart().await;
+    let schema = rt
+        .runtime
+        .table_arrow_schema("bottles", &rt.admin().await)
+        .await
+        .unwrap();
+    let temperature = schema.field_with_name("temperature0").unwrap().metadata();
+    assert_eq!(
+        temperature.get("comment").map(String::as_str),
+        Some("T0 in Celsius")
+    );
+    assert_eq!(
+        temperature.get("units").map(String::as_str),
+        Some("degree_C")
+    );
+
+    // Queries work over the annotated schema.
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT count(temperature0) FROM bottles").await),
+        62
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn materialized_view_copies_select_star() {
     let rt = common::runtime("erddap-select-star-view").await;
     let server = tabledap_server().await;
