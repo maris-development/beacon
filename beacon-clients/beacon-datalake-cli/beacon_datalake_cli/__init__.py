@@ -5,4 +5,9 @@ tables/datasets/schemas, render results as tables, and export to
 CSV / Parquet / Arrow IPC / NetCDF (and the other server formats).
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("beacon-datalake-cli")
+except PackageNotFoundError:  # A source tree on sys.path with no install has no metadata.
+    __version__ = "0+unknown"

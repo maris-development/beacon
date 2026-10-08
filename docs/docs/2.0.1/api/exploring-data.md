@@ -135,6 +135,9 @@ can read. See [Access control](/docs/2.0.1/security/access-control).
 GET /api/table-schema?table_name=default
 ```
 
+The schema holds the table and column comments under the metadata key `comment`. See
+[COMMENT ON](/docs/2.0.1/sql/comment-on#read-the-comments).
+
 Beacon resolves the table in the default catalog and schema. Add `catalog` and `schema` for a table
 in another place:
 

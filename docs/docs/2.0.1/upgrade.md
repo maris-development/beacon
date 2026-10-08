@@ -1,5 +1,5 @@
 ---
-description: Move a Beacon 1.8.0 server to 2.0.0. The catalog, the settings, the SQL and the clients that change, and what to do for each one.
+description: Move a Beacon 1.8.0 server to 2.0. The catalog, the settings, the SQL and the clients that change, and what to do for each one.
 ---
 
 # Upgrade from 1.8.0
@@ -9,16 +9,16 @@ and what to do for it. The [changelog](/docs/changelog/) lists all the changes.
 
 ## What does not move
 
-A 2.0.0 server keeps its state in one file, `tables/beacon.db`, below `BEACON_DATA_DIR`. That file
+A 2.0 server keeps its state in one file, `tables/beacon.db`, below `BEACON_DATA_DIR`. That file
 holds the catalog, the managed table data, and the users, roles and grants.
 
-A 2.0.0 server does not read the state of a 1.8.0 server:
+A 2.0 server does not read the state of a 1.8.0 server:
 
 - The table definitions in the `tables/` directory.
 - The rows of the managed tables.
 - The users in `users/directory.db`.
 
-Your data files do not change. A 2.0.0 server reads them in place, from the same datasets store.
+Your data files do not change. A 2.0 server reads them in place, from the same datasets store.
 
 ## Before you start
 
@@ -32,9 +32,9 @@ Your data files do not change. A 2.0.0 server reads them in place, from the same
 `GET /api/admin/table-config?table_name=<name>` on the 1.8.0 server shows the configuration of a
 table. Use it if you did not save a statement.
 
-## Start the 2.0.0 server
+## Start the 2.0.1 server
 
-1. Change the image tag to `ghcr.io/maris-development/beacon:v2.0.0`.
+1. Change the image tag to `ghcr.io/maris-development/beacon:v2.0.1`.
 2. Mount an empty directory at `/beacon/data/tables`. Keep the 1.8.0 directory as a backup.
 3. Change the settings. See [Settings](#settings).
 4. Start the server.
@@ -47,13 +47,13 @@ table. Use it if you did not save a statement.
 
 ### A new name
 
-| 1.8.0 | 2.0.0 | Note |
+| 1.8.0 | 2.0 | Note |
 | --- | --- | --- |
 | `BEACON_S3_DATA_LAKE` | `BEACON_S3_DATASETS` | The old name still works. Beacon logs a warning at startup. |
 
 ### New defaults
 
-These settings are new in 2.0.0. Their defaults change how Beacon reads your files.
+These settings are new in 2.0. Their defaults change how Beacon reads your files.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
@@ -63,7 +63,7 @@ These settings are new in 2.0.0. Their defaults change how Beacon reads your fil
 
 See [Configuration](/docs/2.0.1/server/configuration) for each new setting.
 
-### Settings that 2.0.0 does not read
+### Settings that 2.0 does not read
 
 Beacon ignores these settings. It does not stop with an error. Delete them from your configuration.
 
@@ -94,7 +94,7 @@ both statements replaced the old table with no warning.
 
 ### Spatial functions
 
-2.0.0 does not have `st_within_point` and `st_geojson_as_wkt`. A query that calls one of them fails.
+2.0 does not have `st_within_point` and `st_geojson_as_wkt`. A query that calls one of them fails.
 Use the PostGIS functions:
 
 ```sql
@@ -102,7 +102,7 @@ Use the PostGIS functions:
 st_within_point('<wkt>', lon, lat)
 st_geojson_as_wkt('<geojson>')
 
--- 2.0.0
+-- 2.0
 ST_Within(ST_Point(lon, lat), ST_GeomFromText('<wkt>'))
 ST_GeomFromGeoJSON('<geojson>')
 ```
@@ -114,16 +114,18 @@ The GeoJSON filter of the JSON query does not change. See
 
 - A `LOCATION` names the container file: `LOCATION 'obs/data.atlas'`, or a glob such as
   `'obs/**/data.atlas'`.
-- 2.0.0 reads only a collection from Atlas 0.17 or later. Write an older collection again with
+- 2.0 reads only a collection from Atlas 0.17 or later. Write an older collection again with
   `atlas create`.
 - A dataset attribute is a column with a dot in front, such as `".platform"`.
 - A query must name its columns. `SELECT *` and `count(*)` fail. Count a named column instead.
+  `SELECT *` works on an external table that declares its columns.
 
 See [Atlas](/docs/2.0.1/formats/atlas).
 
 ### BBF files
 
-A query must name its columns. `SELECT *` and `count(*)` fail. Count a named column instead. See
+A query must name its columns. `SELECT *` and `count(*)` fail. Count a named column instead.
+`SELECT *` works on an external table that declares its columns. See
 [BBF](/docs/2.0.1/formats/bbf).
 
 ### `list_datasets`

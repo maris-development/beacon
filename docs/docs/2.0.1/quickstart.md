@@ -19,10 +19,10 @@ docker run -d --name beacon -p 5001:5001 \
   -e BEACON_ADMIN_USERNAME=admin \
   -e BEACON_ADMIN_PASSWORD=securepassword \
   -v ./datasets:/beacon/data/datasets \
-  ghcr.io/maris-development/beacon:v2.0.0
+  ghcr.io/maris-development/beacon:v2.0.1
 ```
 
-The tag `v2.0.0` is the release that this documentation describes.
+The tag `v2.0.1` is the release that this documentation describes.
 
 Copy supported files into `./datasets`. Supported files include `.parquet`, `.nc`, `.zarr` and
 `.csv`. Beacon finds them automatically. You register nothing first.

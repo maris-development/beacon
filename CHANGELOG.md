@@ -4,14 +4,37 @@ Notable changes to Beacon. Format based on [Keep a Changelog](https://keepachang
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Every artifact in this repository — the `beacon-server` image, the `beacondb` Python package,
-`beacon-datalake-cli`, and `@beacon/client` — shares one version and is released from a single `v*`
-tag. Releases before 2.0.0 are recorded in the
+`beacon-datalake-cli`, and `@maris-development/beacon-client` — shares one version and is
+released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 [GitHub releases](https://github.com/maris-development/beacon/releases).
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-10-08
+
+Beacon 2.0.1 adds table and column comments, role settings, and per-role limits on the CPU time
+and the output rows of a query. It fixes wrong results from federated tables and from
+`IS NOT NULL` filters on n-dimensional datasets. Two changes can break a setup: the GeoTIFF
+coordinates move to the pixel centers, and table extensions are removed. A 2.0.0 server upgrades
+in place.
+
 ### Added
 
+- **Role settings.** `ALTER ROLE r SET key = value` and `ALTER ROLE r RESET key` store key-value
+  settings on a role. Only the super-user runs them. `beacon.system.role_settings`, the `settings`
+  column of `beacon.system.roles` and `GET /api/admin/auth/roles` show them. `DROP ROLE` deletes
+  the settings of the role. ([#529](https://github.com/maris-development/beacon/pull/529))
+- **A CPU limit for each query.** `ALTER ROLE r SET query_cpu_limit_ms = 30000` stops a query of
+  that role when it uses more CPU time. The super-user has no limit. When two roles of a user set
+  a limit, the larger one wins, and `0` means no limit. Beacon counts CPU time on Linux and macOS
+  only. ([#530](https://github.com/maris-development/beacon/pull/530))
+- **An output row limit for each query.** `ALTER ROLE r SET query_output_row_limit = 1000000`
+  makes a query fail when it outputs more rows. It does not return part of the result. The rules
+  are the same as for the CPU limit.
+  ([#532](https://github.com/maris-development/beacon/pull/532))
+- **`SELECT *` on Atlas and BBF tables with declared columns.** An external table that declares
+  its columns now accepts `SELECT *`. A table that infers its columns still refuses it, and
+  `count(*)` still fails. ([#549](https://github.com/maris-development/beacon/pull/549))
 - **Table and column comments.** `COMMENT ON TABLE t IS '...'` and `COMMENT ON COLUMN t.c IS '...'`
   store a free-text comment. `IS NULL` deletes it. Beacon puts the comment into the Arrow schema
   under the metadata key `comment`, so `/api/table-schema` and Flight SQL show it.
@@ -29,15 +52,21 @@ tag. Releases before 2.0.0 are recorded in the
   and a filter on these columns can select other pixels. Data that you copied from a TIFF before
   this change keeps the corner values.
   ([#525](https://github.com/maris-development/beacon/issues/525))
-- **The MCP server has four fixed tools.** It no longer makes one tool for each table. An agent sees
-  every table that its identity can read. `list_tables` and `describe_table` show the table and
-  column comments.
+- **A read of a table checks only the table grant.** A read of a named table or a view no longer
+  applies the path rules of a role to the files of the table. A path deny no longer stops a
+  `SELECT` on a granted table. Path rules still apply to the `read_*` functions, the `*_schema`
+  functions, `list_datasets` and the file sources of a JSON query.
+  ([#547](https://github.com/maris-development/beacon/pull/547))
+- **`CREATE EXTERNAL TABLE` reports schema errors.** A schema that Beacon cannot read, or two
+  types that do not merge, now make the statement fail with the cause. Before, the table got no
+  columns. At startup, Beacon skips a stored table with such an error and logs it. `REFRESH`
+  returns the error and keeps the last good schema. A location with no file still gives a table
+  with no columns. ([#555](https://github.com/maris-development/beacon/pull/555))
 
 ### Removed
 
 - **Breaking: table extensions are removed.** `SET EXTENSION`, `DROP EXTENSION`, `SHOW EXTENSIONS`,
-  the `mcp` and `preset` extensions, and `PUT` and `DELETE /api/admin/table-extensions/{table}` no
-  longer exist. `GET /api/table-extensions` stays for older clients. It is deprecated and returns
+  every extension, and `PUT` and `DELETE /api/admin/table-extensions/{table}` no longer exist. `GET /api/table-extensions` stays for older clients. It is deprecated and returns
   `{}` for each table. Beacon ignores existing `extensions.json` files.
   Use `COMMENT ON` for descriptions, and a view for a preset:
   `CREATE VIEW obs_shallow AS SELECT * FROM obs WHERE depth <= 10`.
@@ -56,6 +85,24 @@ tag. Releases before 2.0.0 are recorded in the
 - **`read_tiff` reads PackBits files.** PackBits is the run-length compression of baseline TIFF.
   A file with a compression that Beacon cannot decode, or a broken file, now gives an error that
   names the file. Before, a glob failed without a clue which file was the cause.
+- **`IS NOT NULL` on an n-dimensional column keeps every dataset with data.** File pruning used
+  the row count of the first column for all columns, and dropped datasets that hold matches. A
+  count with the filter now agrees with a count without it.
+  ([#548](https://github.com/maris-development/beacon/pull/548))
+- **Federated SQL-database tables apply every `WHERE` filter.** A Postgres, MySQL or ODBC table
+  could lose a pushed filter and return wrong rows with no error.
+  ([#541](https://github.com/maris-development/beacon/pull/541))
+- **Remote Beacon tables return correct results.** The executor applies pushed filters, a bare
+  `SELECT *` is federated, `COPY`, `INSERT` and `CREATE TABLE AS` stay local, an aliased subquery
+  keeps its alias, and a query with no columns returns the correct row count.
+  ([#538](https://github.com/maris-development/beacon/pull/538))
+- **`DROP TABLE` clears the Lance caches.** A new table with the name of a dropped indexed table
+  failed `COMPACT`. `INSERT`, `UPDATE` and `DELETE` on a dropped table now fail.
+  ([#527](https://github.com/maris-development/beacon/pull/527))
+- **The Flight SQL handshake accepts ADBC credentials.** ADBC and other Go clients send `Basic`
+  credentials as base64 without padding, and Beacon refused two of three credential lengths.
+  The HTTP API also accepts base64 without padding.
+  ([#556](https://github.com/maris-development/beacon/issues/556))
 
 ## [2.0.0] — 2026-09-29
 
@@ -742,6 +789,7 @@ over MCP.
 - One handle per database file: the container is held under an exclusive lock, so
   `read_only=True` is a per-connection guarantee, not multi-process concurrency.
 
-[Unreleased]: https://github.com/maris-development/beacon/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/maris-development/beacon/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/maris-development/beacon/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/maris-development/beacon/compare/v2.0.0-rc1...v2.0.0
 [2.0.0-rc.1]: https://github.com/maris-development/beacon/compare/v1.8.0...v2.0.0-rc1

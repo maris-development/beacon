@@ -58,7 +58,7 @@ Arrow Flight SQL listens on port `32011` by default. With Docker Compose, publis
 ```yaml
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:v2.0.0
+        image: ghcr.io/maris-development/beacon:v2.0.1
         ports:
             - "5001:5001"   # HTTP API
             - "32011:32011" # Arrow Flight SQL  # [!code ++]

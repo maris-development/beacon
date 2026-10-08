@@ -40,10 +40,10 @@ docker run -d \
   -e BEACON_ADMIN_PASSWORD=securepassword \
   -v ./datasets:/beacon/data/datasets \
   -v ./tables:/beacon/data/tables \
-  ghcr.io/maris-development/beacon:v2.0.0
+  ghcr.io/maris-development/beacon:v2.0.1
 ```
 
-The tag `v2.0.0` is the release that this documentation describes.
+The tag `v2.0.1` is the release that this documentation describes.
 
 Beacon now serves on <http://localhost:5001>. That page is the home page. It shows the server
 version. It links to the admin UI, the Swagger UI, the API reference, the OpenAPI document, the
@@ -99,13 +99,13 @@ docker run -d \
     -v ./datasets:/beacon/data/datasets \
     -v ./tables:/beacon/data/tables \
     -v ./logs:/beacon/logs \
-    ghcr.io/maris-development/beacon:v2.0.0
+    ghcr.io/maris-development/beacon:v2.0.1
 ```
 
 ```yaml [docker-compose.yml]
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:v2.0.0
+        image: ghcr.io/maris-development/beacon:v2.0.1
         container_name: beacon
         restart: unless-stopped
         ports:
@@ -171,13 +171,13 @@ docker run -d \
     -e BEACON_S3_DATASETS=true \
     -v ./tables:/beacon/data/tables \
     -v ./logs:/beacon/logs \
-    ghcr.io/maris-development/beacon:v2.0.0
+    ghcr.io/maris-development/beacon:v2.0.1
 ```
 
 ```yaml [docker-compose.yml]
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:v2.0.0
+        image: ghcr.io/maris-development/beacon:v2.0.1
         container_name: beacon
         restart: unless-stopped
         ports:

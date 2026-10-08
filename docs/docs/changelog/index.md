@@ -1,10 +1,54 @@
 # Changelog
 
-> **Release posts:** [Upgrade from 1.8.0 to 2.0.0](/docs/2.0.1/upgrade) · [What's new in 1.8.0](/docs/changelog/release-1.8.0) · [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
+> **Release posts:** [Upgrade from 1.8.0 to 2.0](/docs/2.0.1/upgrade) · [What's new in 1.8.0](/docs/changelog/release-1.8.0) · [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
 
 All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
 changes), and **Fixed** (bug fixes).
+
+## v2.0.1 — 2026-10-08
+
+Beacon 2.0.1 is a patch release of the 2.0 line. A 2.0.0 server upgrades in place: change the image
+tag to `v2.0.1`. Two changes can break a setup. Read the GeoTIFF and the table extensions items
+below first. The
+[full changelog](https://github.com/maris-development/beacon/blob/main/CHANGELOG.md) lists each
+change.
+
+### Added
+
+- **Table and column comments.** `COMMENT ON TABLE` and `COMMENT ON COLUMN` add metadata, such as
+  a description, a unit or a source. The table schema shows it over HTTP and Flight SQL. See
+  [COMMENT ON](/docs/2.0.1/sql/comment-on).
+- **Role settings and query limits.** `ALTER ROLE ... SET` stores a setting on a role.
+  `query_cpu_limit_ms` limits the CPU time of a query, and `query_output_row_limit` limits its
+  output rows. See [Query limits](/docs/2.0.1/security/access-control#query-limits).
+- **`SELECT *` on Atlas and BBF tables with declared columns.** See
+  [Atlas](/docs/2.0.1/formats/atlas) and [BBF](/docs/2.0.1/formats/bbf).
+
+### Changed
+
+- **Breaking: GeoTIFF coordinates are pixel centers.** `geo.lon` and `geo.lat` of a PixelIsArea
+  file move by half a pixel. See [GeoTIFF](/docs/2.0.1/formats/geotiff).
+- **A read of a table checks only the table grant.** Path rules apply to the read functions only.
+  See [How Beacon checks a read](/docs/2.0.1/security/access-control#how-beacon-checks-a-read).
+- **`CREATE EXTERNAL TABLE` reports schema errors.** A schema that Beacon cannot read makes the
+  statement fail. Before, the table got no columns.
+
+### Removed
+
+- **Breaking: table extensions.** `SET EXTENSION`, `DROP EXTENSION` and `SHOW EXTENSIONS` are
+  removed. Use [`COMMENT ON`](/docs/2.0.1/sql/comment-on) for metadata and a view for a preset.
+
+### Fixed
+
+- **`IS NOT NULL` on an n-dimensional column** no longer drops datasets that hold matches.
+- **Federated Postgres, MySQL, ODBC and remote Beacon tables** apply every pushed `WHERE` filter.
+  Before, a query could return wrong rows with no error.
+- **Remote Beacon tables** federate a bare `SELECT *`, keep `COPY` and `INSERT` local, and keep
+  the alias of a subquery.
+- **`read_tiff`** reads sparse, stripped and PackBits GeoTIFFs.
+- **`DROP TABLE`** clears the Lance caches, so a new table with the same name works.
+- **The Flight SQL handshake** accepts the `username` and `password` of ADBC clients.
 
 ## v2.0.0 — 2026-09-29
 
