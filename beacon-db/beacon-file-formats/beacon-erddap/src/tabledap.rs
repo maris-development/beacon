@@ -179,6 +179,15 @@ fn comparison(
     value: &ScalarValue,
 ) -> Option<Vec<String>> {
     let kind = column_kind(schema, column)?;
+    if kind == Kind::Integer
+        && let Some(LiteralValue::Number(n)) = literal_value(value)
+    {
+        let wide = matches!(
+            schema.field_with_name(column).ok()?.data_type(),
+            DataType::Int64 | DataType::UInt64
+        );
+        return integer_comparison(column, wide, op, value, &n);
+    }
     // ERDDAP compares floats and times inexactly, so strict bounds become inclusive and `!=` stays local.
     let inexact = matches!(kind, Kind::Float | Kind::Time);
     let symbol = match op {
@@ -196,12 +205,47 @@ fn comparison(
         (Kind::Text, LiteralValue::Text(s)) if matches!(op, Operator::Eq | Operator::NotEq) => {
             Some(vec![format!("{column}{symbol}{}", erddap_string(&s))])
         }
-        (Kind::Integer | Kind::Float, LiteralValue::Number(n)) => {
-            Some(vec![format!("{column}{symbol}{n}")])
-        }
+        (Kind::Float, LiteralValue::Number(n)) => Some(vec![format!("{column}{symbol}{n}")]),
         (Kind::Time, LiteralValue::Time(_)) => time_comparison(column, op, value),
         _ => None,
     }
+}
+
+/// An integer column against the number `text`, rounded to keep a superset.
+///
+/// `wide` marks an Int64 or UInt64 column.
+fn integer_comparison(
+    column: &str,
+    wide: bool,
+    op: Operator,
+    value: &ScalarValue,
+    text: &str,
+) -> Option<Vec<String>> {
+    let fraction = match value {
+        ScalarValue::Float32(Some(v)) => Some(f64::from(*v)),
+        ScalarValue::Float64(Some(v)) => Some(*v),
+        _ => None,
+    }
+    .filter(|v| v.fract() != 0.0);
+    // Adding 0.0 turns -0 into 0.
+    let whole = |v: f64| (v + 0.0).to_string();
+    let (symbol, bound) = match (op, fraction) {
+        (Operator::Gt | Operator::GtEq, Some(v)) => (">=", whole(v.floor())),
+        (Operator::Lt | Operator::LtEq, Some(v)) => ("<=", whole(v.ceil())),
+        (_, Some(_)) => return None,
+        // ERDDAP may compare 64-bit integers as doubles, which merge neighbors above 2^53.
+        (Operator::NotEq, None) if wide => return None,
+        (Operator::Gt, None) if wide => (">=", text.to_string()),
+        (Operator::Lt, None) if wide => ("<=", text.to_string()),
+        (Operator::Eq, None) => ("=", text.to_string()),
+        (Operator::NotEq, None) => ("!=", text.to_string()),
+        (Operator::Lt, None) => ("<", text.to_string()),
+        (Operator::LtEq, None) => ("<=", text.to_string()),
+        (Operator::Gt, None) => (">", text.to_string()),
+        (Operator::GtEq, None) => (">=", text.to_string()),
+        _ => return None,
+    };
+    Some(vec![format!("{column}{symbol}{bound}")])
 }
 
 /// A time comparison at the whole-millisecond precision ERDDAP uses, rounded to keep a superset.
@@ -222,7 +266,21 @@ fn time_comparison(column: &str, op: Operator, value: &ScalarValue) -> Option<Ve
     }
 }
 
+/// The most items an IN list can have and still be pushed.
+const MAX_IN_LIST_ITEMS: usize = 100;
+/// The longest IN list constraint that is pushed; a longer URL risks HTTP 414.
+const MAX_IN_LIST_CHARS: usize = 2000;
+
 fn in_list(schema: &Schema, column: &str, list: &[Expr]) -> Option<Vec<String>> {
+    if list.len() > MAX_IN_LIST_ITEMS {
+        return None;
+    }
+    let constraints = in_list_constraints(schema, column, list)?;
+    let chars: usize = constraints.iter().map(|c| c.chars().count()).sum();
+    (chars <= MAX_IN_LIST_CHARS).then_some(constraints)
+}
+
+fn in_list_constraints(schema: &Schema, column: &str, list: &[Expr]) -> Option<Vec<String>> {
     let values: Vec<LiteralValue> = list
         .iter()
         .map(|e| match e {
@@ -392,11 +450,74 @@ mod tests {
                 DataType::Timestamp(TimeUnit::Nanosecond, None),
                 true,
             ),
+            Field::new("id", DataType::Int64, true),
+            Field::new("count", DataType::UInt64, true),
         ])
     }
 
     fn t(expr: Expr) -> Option<Vec<String>> {
         translate(&expr, &schema())
+    }
+
+    #[test]
+    fn fractional_literals_on_integers_round_outwards() {
+        let depth = || cast(col("depth"), DataType::Float64);
+        assert_eq!(t(depth().gt(lit(19.5))), Some(vec!["depth>=19".into()]));
+        assert_eq!(t(depth().gt_eq(lit(19.5))), Some(vec!["depth>=19".into()]));
+        assert_eq!(t(depth().lt(lit(19.5))), Some(vec!["depth<=20".into()]));
+        assert_eq!(t(depth().lt_eq(lit(19.5))), Some(vec!["depth<=20".into()]));
+        assert_eq!(t(depth().gt(lit(-19.5))), Some(vec!["depth>=-20".into()]));
+        assert_eq!(t(depth().lt(lit(-0.5))), Some(vec!["depth<=0".into()]));
+        assert_eq!(t(depth().eq(lit(19.5))), None);
+        assert_eq!(t(depth().not_eq(lit(19.5))), None);
+        // An integral float literal keeps the exact operator.
+        assert_eq!(t(depth().gt(lit(19.0))), Some(vec!["depth>19".into()]));
+        assert_eq!(t(depth().eq(lit(19.0))), Some(vec!["depth=19".into()]));
+        assert_eq!(
+            t(depth().between(lit(1.5), lit(3.5))),
+            Some(vec!["depth>=1".into(), "depth<=4".into()])
+        );
+        assert_eq!(
+            t(depth().in_list(vec![lit(2.5), lit(7.5)], false)),
+            Some(vec!["depth>=2".into(), "depth<=8".into()])
+        );
+    }
+
+    #[test]
+    fn wide_integers_use_inclusive_bounds() {
+        let big = 9_007_199_254_740_993_i64;
+        assert_eq!(
+            t(col("id").gt(lit(big))),
+            Some(vec!["id>=9007199254740993".into()])
+        );
+        assert_eq!(t(col("id").lt(lit(5_i64))), Some(vec!["id<=5".into()]));
+        assert_eq!(t(col("id").gt_eq(lit(5_i64))), Some(vec!["id>=5".into()]));
+        assert_eq!(t(col("id").eq(lit(5_i64))), Some(vec!["id=5".into()]));
+        assert_eq!(t(col("id").not_eq(lit(5_i64))), None);
+        assert_eq!(
+            t(col("count").gt(lit(5_u64))),
+            Some(vec!["count>=5".into()])
+        );
+        assert_eq!(t(col("count").not_eq(lit(5_u64))), None);
+        assert_eq!(
+            t(cast(col("id"), DataType::Float64).lt(lit(2.5))),
+            None,
+            "Int64 to Float64 is not a lossless cast"
+        );
+    }
+
+    #[test]
+    fn long_in_lists_are_not_pushed() {
+        let names = |n: usize| (0..n).map(|i| lit(format!("s{i}"))).collect::<Vec<_>>();
+        assert!(t(col("ship").in_list(names(100), false)).is_some());
+        assert_eq!(t(col("ship").in_list(names(101), false)), None);
+        let numbers = (0..101).map(lit).collect::<Vec<_>>();
+        assert_eq!(t(col("depth").in_list(numbers, false)), None);
+        // 30 values of 70 characters: fewer than 100 items, but over 2000 characters.
+        let long = (0..30)
+            .map(|i| lit(format!("{i:0>70}")))
+            .collect::<Vec<_>>();
+        assert_eq!(t(col("ship").in_list(long, false)), None);
     }
 
     #[test]
@@ -485,7 +606,7 @@ mod tests {
         );
         assert_eq!(
             t(cast(col("depth"), DataType::Float64).lt(lit(2.5))),
-            Some(vec!["depth<2.5".into()])
+            Some(vec!["depth<=3".into()])
         );
     }
 
