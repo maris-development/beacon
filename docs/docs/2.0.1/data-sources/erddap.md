@@ -40,11 +40,12 @@ CREATE EXTERNAL TABLE bottles STORED AS ERDDAP
 
 Beacon sends the column list and filters to ERDDAP.
 Beacon applies each filter again to the rows that ERDDAP returns.
-Beacon applies `LIMIT` itself.
+Beacon does not send `LIMIT` to ERDDAP. Beacon applies `LIMIT` itself.
 
 | SQL | ERDDAP request |
 |---|---|
-| `col = 1` on numbers and times | `&col=1` |
+| `col = 1` on numbers | `&col=1` |
+| `col = TIMESTAMP '2020-01-01 00:00:00'` on times | `&col=2020-01-01T00:00:00Z` |
 | `col <> 1` on integers | `&col!=1` |
 | `col < 1`, `col <= 1`, `col > 1`, `col >= 1` on integers | `&col<1`, `&col<=1`, `&col>1`, `&col>=1` |
 | `col BETWEEN 1 AND 5` on numbers and times | `&col>=1&col<=5` |
@@ -56,15 +57,31 @@ Beacon applies `LIMIT` itself.
 | `col IS NULL`, `col IS NOT NULL` on numbers and times | `&col=NaN`, `&col!=NaN` |
 
 - On float and time columns, Beacon sends `>` as `>=` and `<` as `<=`. Beacon does not send `<>`.
-- Beacon rounds time values to whole milliseconds.
+- On 64-bit integer columns, Beacon sends `>` as `>=` and `<` as `<=`. Beacon does not send `<>`.
+  ERDDAP can compare these values as doubles.
+- On integer columns, Beacon rounds a number that is not a whole number.
   It rounds a lower bound down and an upper bound up.
+  Beacon does not send `=` or `<>` with this number.
+  For example, `depth > 19.5` becomes `&depth>=19`.
+- Beacon sends a time as an ISO 8601 UTC value with whole milliseconds.
+  It rounds a lower bound down and an upper bound up.
+  An `=` with a time that is not a whole millisecond becomes a `>=` and `<=` pair.
+- Beacon does not send an `IN` list with more than 100 values or more than 2000 characters.
 - `LIKE` becomes a regular expression that also matches line breaks.
 - Beacon does not send `OR`, string ranges, functions or comparisons between columns. Beacon applies these filters itself.
+
+## Response size
+
+- Beacon downloads the full ERDDAP response before it reads the first row.
+- `LIMIT` does not make the request smaller.
+- A query without filters reads every row of the selected columns.
+- Use filters to make large datasets smaller.
 
 ## Limits
 
 - Beacon supports tabledap datasets only. A griddap dataset URL gives an error.
 - Beacon supports public ERDDAP servers only. Beacon sends no credentials.
+- A `LOCATION` with a user name or a password gives an error.
 - Beacon does not retry a failed request.
 - A query is one request.
 - `EXPLAIN` shows the request URL.

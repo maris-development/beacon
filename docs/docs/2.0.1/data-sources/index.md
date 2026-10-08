@@ -15,6 +15,7 @@ at a path or a connection. Then query it with SQL. Beacon can also own the data.
 | A named set of files | `CREATE EXTERNAL TABLE` | [External Tables](/docs/2.0.1/data-sources/external-tables) |
 | Postgres, MySQL, ODBC | federated external tables | [SQL Databases](/docs/2.0.1/data-sources/sql-databases) |
 | One table on another Beacon | `STORED AS REMOTE` | [Remote Tables](/docs/2.0.1/data-sources/remote-tables) |
+| A tabledap dataset on an ERDDAP server | `STORED AS ERDDAP` | [ERDDAP](/docs/2.0.1/data-sources/erddap) |
 | A whole remote Beacon catalog | `ATTACH` | [ATTACH](/docs/2.0.1/data-sources/attach) |
 | Data that Beacon owns and can change | managed tables in `beacon.db` | [Storage internals](/docs/2.0.1/internals/storage) |
 
