@@ -8,7 +8,9 @@ const EXPECTED: &str = "ERDDAP LOCATION must be 'http(s)://host/erddap/tabledap/
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
+    /// Tabular data; Beacon reads this service.
     Tabledap,
+    /// Gridded data; a table on this service is rejected for now.
     Griddap,
 }
 
@@ -27,7 +29,9 @@ impl Protocol {
 pub struct ErddapLocation {
     /// The ERDDAP base URL, e.g. `https://host/erddap`, with no trailing slash.
     pub server: String,
+    /// The service in the URL path.
     pub protocol: Protocol,
+    /// The dataset ID, with no file extension.
     pub dataset_id: String,
 }
 
@@ -38,6 +42,11 @@ impl ErddapLocation {
     pub fn parse(location: &str) -> anyhow::Result<Self> {
         let url =
             url::Url::parse(location).map_err(|e| anyhow!("{EXPECTED}, got '{location}' ({e})"))?;
+        // Checked first, so that no later error repeats the credentials.
+        ensure!(
+            url.username().is_empty() && url.password().is_none(),
+            "ERDDAP LOCATION must not contain credentials; Beacon supports public ERDDAP servers only"
+        );
         ensure!(
             matches!(url.scheme(), "http" | "https"),
             "{EXPECTED}, got '{location}'"
@@ -144,6 +153,23 @@ mod tests {
         ] {
             let err = ErddapLocation::parse(bad).unwrap_err().to_string();
             assert!(err.contains("/tabledap/<datasetID>"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_credentials() {
+        for bad in [
+            "https://user:secret@h/erddap/tabledap/x",
+            "https://user@h/erddap/tabledap/x",
+            "https://:secret@h/erddap/tabledap/x",
+        ] {
+            let err = ErddapLocation::parse(bad).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                "ERDDAP LOCATION must not contain credentials; Beacon supports public ERDDAP servers only",
+                "{bad}"
+            );
+            assert!(!err.contains("secret"), "{bad}: {err}");
         }
     }
 }
