@@ -33,12 +33,12 @@ pub enum ErddapError {
         secs: u64,
     },
     /// The request failed before a response arrived, or the body broke off.
-    #[error("ERDDAP request {url} failed")]
+    #[error("ERDDAP request {url} failed: {cause}")]
     Transport {
         /// The request URL.
         url: String,
-        /// The underlying error.
-        source: reqwest::Error,
+        /// The error and its causes, joined by `: `.
+        cause: String,
     },
     /// The temp file could not be written.
     #[error("ERDDAP response could not be written to a temp file: {0}")]
@@ -129,10 +129,22 @@ impl ErddapClient {
         } else {
             ErddapError::Transport {
                 url: url.to_string(),
-                source: error,
+                cause: error_chain(&error),
             }
         }
     }
+}
+
+/// The text of `error` followed by the text of each cause.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        text.push_str(": ");
+        text.push_str(&next.to_string());
+        cause = next.source();
+    }
+    text
 }
 
 fn http_error(url: &str, status: u16, body: &[u8]) -> ErddapError {
@@ -191,6 +203,21 @@ mod tests {
         let path = file.path().to_path_buf();
         drop(file);
         assert!(!path.exists(), "the temp file is removed on drop");
+    }
+
+    #[tokio::test]
+    async fn transport_errors_keep_their_cause() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let client = ErddapClient::new(Duration::from_secs(5)).unwrap();
+        let url = format!("http://127.0.0.1:{port}/erddap/info/t/index.json");
+        let error = client.get_bytes(&url).await.unwrap_err();
+        let text = error.to_string();
+        let cause = text.split_once("failed: ").map(|(_, c)| c).unwrap_or("");
+        assert!(!cause.trim().is_empty(), "{text}");
+        let wrapped: datafusion::error::DataFusionError = error.into();
+        assert!(wrapped.to_string().contains(cause), "{wrapped}");
     }
 
     #[tokio::test]

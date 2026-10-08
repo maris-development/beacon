@@ -44,16 +44,20 @@ Beacon applies `LIMIT` itself.
 
 | SQL | ERDDAP request |
 |---|---|
-| `col = 1`, `<>`, `<`, `<=`, `>`, `>=` on integers | `&col=1` |
-| `col = 'x'`, `col <> 'x'` on strings | `&col="x"` |
+| `col = 1` on numbers and times | `&col=1` |
+| `col <> 1` on integers | `&col!=1` |
+| `col < 1`, `col <= 1`, `col > 1`, `col >= 1` on integers | `&col<1`, `&col<=1`, `&col>1`, `&col>=1` |
+| `col BETWEEN 1 AND 5` on numbers and times | `&col>=1&col<=5` |
+| `col = 'x'` on strings | `&col="x"` |
+| `col <> 'x'` on strings | `&col!="x"` |
 | `col IN ('a', 'b')` on strings | `&col=~"a\|b"` |
 | `col IN (1, 5)` on numbers | `&col>=1&col<=5` |
 | `col LIKE 'ab%'` | `&col=~"(?s)ab.*"` |
 | `col IS NULL`, `col IS NOT NULL` on numbers and times | `&col=NaN`, `&col!=NaN` |
 
-- The first row also applies to float and time columns, with two changes.
-  Beacon sends `>` as `>=` and `<` as `<=`. Beacon does not send `<>`.
+- On float and time columns, Beacon sends `>` as `>=` and `<` as `<=`. Beacon does not send `<>`.
 - Beacon rounds time values to whole milliseconds.
+  It rounds a lower bound down and an upper bound up.
 - `LIKE` becomes a regular expression that also matches line breaks.
 - Beacon does not send `OR`, string ranges, functions or comparisons between columns. Beacon applies these filters itself.
 
