@@ -12,7 +12,7 @@ Run this command from the repository root:
 docker compose -f beacon-db/beacon-file-formats/beacon-erddap/docker/docker-compose.yml up -d
 ```
 
-The server uses host port 8089.
+The server uses host port 8089 on 127.0.0.1 only.
 
 ## Wait for the server
 

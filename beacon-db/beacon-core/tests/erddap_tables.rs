@@ -238,6 +238,23 @@ async fn request_urls(rt: &common::TestRuntime, sql: &str) -> String {
     plan[start..end].to_string()
 }
 
+/// `s` with each `%XX` escape decoded.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).expect("a hex escape"));
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("UTF-8")
+}
+
 /// Reads `beaconTest` from the local Docker ERDDAP in `beacon-erddap/docker`. Run with `--ignored`
 /// and `BEACON_ERDDAP_URL=http://localhost:8089/erddap` after `docker compose up`.
 #[tokio::test(flavor = "multi_thread")]
@@ -252,46 +269,77 @@ async fn local_erddap_pushdown_matches_expected() {
         "CREATE EXTERNAL TABLE t STORED AS ERDDAP LOCATION '{base}/tabledap/beaconTest'"
     ))
     .await;
-    let cases: &[(&str, i64)] = &[
+    // Each case: the predicate, the expected count, and the decoded query after `?`.
+    // A query with no `&` sends no constraint.
+    let cases: &[(&str, i64, &str)] = &[
         // All 18 data rows of beacon_test.csv.
-        ("TRUE", 18),
+        ("TRUE", 18, "station"),
         // Only `St "A"`: f32 7.794 widens to 7.79400015, above the f64 literal.
-        ("temp > 7.794", 1),
+        ("temp > 7.794", 1, "temp&temp>=7.794"),
         // Only `back\slash`: f32 0.7 widens to 0.69999999, below the f64 literal.
-        ("temp < 0.7", 1),
+        ("temp < 0.7", 1, "temp&temp<=0.7"),
         // Only `St A` has no temp.
-        ("temp IS NULL", 1),
-        ("temp IS NOT NULL", 17),
+        ("temp IS NULL", 1, "temp&temp=NaN"),
+        ("temp IS NOT NULL", 17, "temp&temp!=NaN"),
         // Three rows have depth 10, and `ab` has no depth.
-        ("depth <> 10", 14),
+        ("depth <> 10", 14, "depth&depth!=10"),
         // Depth 20 is on two rows; 40, 60 and 140 are on one row each.
-        ("depth IN (20, 40, 60, 140)", 5),
+        (
+            "depth IN (20, 40, 60, 140)",
+            5,
+            "depth&depth>=20&depth<=140",
+        ),
         // Only `ab`.
-        ("depth IS NULL", 1),
-        ("station = 'St \"A\"'", 1),
-        ("station = 'back\\slash'", 1),
+        ("depth IS NULL", 1, "depth&depth=NaN"),
+        ("station = 'St \"A\"'", 1, r#"station&station="St \"A\"""#),
+        (
+            "station = 'back\\slash'",
+            1,
+            r#"station&station="back\\slash""#,
+        ),
         // Metacharacters match only themselves, so `aXb|c` stays out.
-        ("station IN ('a.b|c', 'St \"A\"', 'back\\slash', 'none')", 3),
+        (
+            "station IN ('a.b|c', 'St \"A\"', 'back\\slash', 'none')",
+            3,
+            r#"station&station=~"a\\.b\\|c|St \"A\"|back\\\\slash|none""#,
+        ),
         // Only `a.b|c`: the `.` is literal in LIKE.
-        ("station LIKE 'a.%'", 1),
-        // The empty station field is null in the parquet response.
-        ("station IS NULL", 1),
+        ("station LIKE 'a.%'", 1, r#"station&station=~"(?s)a\\..*""#),
+        // The empty station field is null in the parquet response. Text nulls stay local.
+        ("station IS NULL", 1, "station"),
         // Only the first of the two rows 1 ms apart.
-        ("time = TIMESTAMP '2020-01-01T00:00:00.123Z'", 1),
+        (
+            "time = TIMESTAMP '2020-01-01T00:00:00.123Z'",
+            1,
+            "time&time=2020-01-01T00:00:00.123Z",
+        ),
         // No row is at this sub-millisecond instant.
-        ("time = TIMESTAMP '2020-01-01T00:00:00.1235Z'", 0),
+        (
+            "time = TIMESTAMP '2020-01-01T00:00:00.1235Z'",
+            0,
+            "time&time>=2020-01-01T00:00:00.123Z&time<=2020-01-01T00:00:00.124Z",
+        ),
         // The row 1 ms earlier and the 1969 row.
-        ("time < TIMESTAMP '2020-01-01T00:00:00.124Z'", 2),
+        (
+            "time < TIMESTAMP '2020-01-01T00:00:00.124Z'",
+            2,
+            "time&time<=2020-01-01T00:00:00.124Z",
+        ),
         // The later 1 ms row, 2020-01-02 and 2020-01-03.
         (
             "time BETWEEN TIMESTAMP '2020-01-01T00:00:00.124Z' \
              AND TIMESTAMP '2020-01-03T00:00:00Z'",
             3,
+            "time&time>=2020-01-01T00:00:00.124Z&time<=2020-01-03T00:00:00Z",
         ),
         // Only the 1969 row.
-        ("time < TIMESTAMP '1970-01-01T00:00:00Z'", 1),
+        (
+            "time < TIMESTAMP '1970-01-01T00:00:00Z'",
+            1,
+            "time&time<=1970-01-01T00:00:00Z",
+        ),
     ];
-    for &(predicate, expected) in cases {
+    for &(predicate, expected, query) in cases {
         let pushed_sql = format!("SELECT count(*) FROM t WHERE {predicate}");
         // A filter does not move below a limit, so ERDDAP returns all rows here.
         let local_sql =
@@ -300,6 +348,8 @@ async fn local_erddap_pushdown_matches_expected() {
         let local = scalar_i64(&rt.sql(&local_sql).await);
         let url = request_urls(&rt, &pushed_sql).await;
         eprintln!("{predicate} | expected {expected} | pushed {pushed} | local {local} | {url}");
+        let sent = percent_decode(url.split_once(".parquet?").expect("a query").1);
+        assert_eq!(sent, query, "request of: {predicate}");
         assert!(
             !request_urls(&rt, &local_sql).await.contains('&'),
             "the local query sends no constraint"

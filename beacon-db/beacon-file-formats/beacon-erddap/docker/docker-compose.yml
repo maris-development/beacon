@@ -6,7 +6,7 @@ services:
     # ERDDAP 2.31.1. Parquet output needs ERDDAP 2.23 or newer.
     image: axiom/docker-erddap:v2.31.1
     ports:
-      - "8089:8080"
+      - "127.0.0.1:8089:8080"
     environment:
       ERDDAP_baseUrl: http://localhost:8089
       ERDDAP_baseHttpsUrl: http://localhost:8089
