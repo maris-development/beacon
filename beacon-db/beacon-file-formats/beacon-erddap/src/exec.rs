@@ -1,4 +1,4 @@
-//! `ErddapExec`: one ERDDAP request per partition, decoded as parquet or netCDF.
+//! `ErddapExec`: one tabledap `.parquet` request per partition.
 
 use std::any::Any;
 use std::fmt;
@@ -20,33 +20,22 @@ use futures::{StreamExt, TryStreamExt};
 
 use crate::client::ErddapClient;
 
-/// How a response is read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Decoder {
-    /// tabledap `.parquet`, conformed to the pinned schema.
-    Parquet,
-    /// griddap `.nc`, emitted nd-encoded for the nd spine above.
-    Netcdf,
-}
-
-/// Runs one ERDDAP request per partition and decodes the response.
+/// Runs one ERDDAP request per partition and decodes the parquet response.
 #[derive(Debug)]
 pub struct ErddapExec {
     client: Arc<ErddapClient>,
     urls: Vec<String>,
     schema: SchemaRef,
-    decoder: Decoder,
     limit: Option<usize>,
     properties: Arc<PlanProperties>,
 }
 
 impl ErddapExec {
-    /// Build the plan. `schema` is the output schema; for `Netcdf` it is the nd-encoded schema.
+    /// Build the plan. Each response is conformed to `schema`, the output schema.
     pub fn new(
         client: Arc<ErddapClient>,
         urls: Vec<String>,
         schema: SchemaRef,
-        decoder: Decoder,
         limit: Option<usize>,
     ) -> Self {
         let properties = Arc::new(PlanProperties::new(
@@ -59,7 +48,6 @@ impl ErddapExec {
             client,
             urls,
             schema,
-            decoder,
             limit,
             properties,
         }
@@ -75,8 +63,7 @@ impl DisplayAs for ErddapExec {
     fn fmt_as(&self, _format: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "ErddapExec: decoder={:?}, partitions={}, urls=[{}]",
-            self.decoder,
+            "ErddapExec: partitions={}, urls=[{}]",
             self.urls.len(),
             self.urls.join(", ")
         )
@@ -120,25 +107,13 @@ impl ExecutionPlan for ErddapExec {
             )));
         };
         let client = self.client.clone();
-        let decoder = self.decoder;
         let batch_size = context.session_config().batch_size();
         let target = schema.clone();
         let batches = futures::stream::once(async move {
-            let suffix = match decoder {
-                Decoder::Parquet => ".parquet",
-                Decoder::Netcdf => ".nc",
-            };
-            match client.download(&url, suffix).await? {
+            match client.download(&url, ".parquet").await? {
                 // No matching rows is an empty partition.
                 None => Ok(futures::stream::empty().boxed()),
-                Some(file) => match decoder {
-                    Decoder::Parquet => {
-                        crate::tabledap::decode_parquet(file, target, batch_size).await
-                    }
-                    Decoder::Netcdf => {
-                        crate::griddap::decode_netcdf(file, target, batch_size).await
-                    }
-                },
+                Some(file) => crate::tabledap::decode_parquet(file, target, batch_size).await,
             }
         })
         .try_flatten();
@@ -195,7 +170,6 @@ mod tests {
             client.clone(),
             vec![format!("{}/tabledap/t.parquet?empty", server.erddap_url())],
             Arc::new(arrow::datatypes::Schema::empty()),
-            Decoder::Parquet,
             None,
         );
         let batches: Vec<_> = empty
@@ -216,7 +190,6 @@ mod tests {
             client,
             vec![format!("{}/tabledap/t.parquet?all", server.erddap_url())],
             Arc::new(arrow::datatypes::Schema::empty()),
-            Decoder::Parquet,
             Some(3),
         );
         let batches: Vec<_> = limited

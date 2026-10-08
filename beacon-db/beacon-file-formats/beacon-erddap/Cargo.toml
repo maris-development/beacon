@@ -6,10 +6,8 @@ edition = "2024"
 rust-version.workspace = true
 
 [dependencies]
-beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
-beacon-nd-array = { path = "../beacon-nd-array" }
 
 arrow = { workspace = true }
 datafusion = { workspace = true }
