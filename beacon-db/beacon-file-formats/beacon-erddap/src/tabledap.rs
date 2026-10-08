@@ -6,7 +6,8 @@ use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{Between, BinaryExpr, Cast, Expr, Like, Operator};
 
 use crate::encode::{
-    LiteralValue, erddap_string, java_regex_literal, like_to_regex, literal_value, query_part,
+    LiteralValue, erddap_string, iso_millis, java_regex_literal, like_to_regex, literal_value,
+    query_part, timestamp_nanos,
 };
 
 /// The constraints `expr` becomes, or `None` when it cannot be pushed.
@@ -15,11 +16,15 @@ use crate::encode::{
 pub fn translate(expr: &Expr, schema: &Schema) -> Option<Vec<String>> {
     match expr {
         Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
-            if let (Some(column), Expr::Literal(value, _)) = (column_name(left), right.as_ref()) {
-                return comparison(schema, column, *op, value).map(|c| vec![c]);
+            if let (Some(column), Expr::Literal(value, _)) =
+                (column_name(left, schema), right.as_ref())
+            {
+                return comparison(schema, column, *op, value);
             }
-            if let (Expr::Literal(value, _), Some(column)) = (left.as_ref(), column_name(right)) {
-                return comparison(schema, column, op.swap()?, value).map(|c| vec![c]);
+            if let (Expr::Literal(value, _), Some(column)) =
+                (left.as_ref(), column_name(right, schema))
+            {
+                return comparison(schema, column, op.swap()?, value);
             }
             None
         }
@@ -29,21 +34,20 @@ pub fn translate(expr: &Expr, schema: &Schema) -> Option<Vec<String>> {
             low,
             high,
         }) => {
-            let column = column_name(expr)?;
+            let column = column_name(expr, schema)?;
             let (Expr::Literal(low, _), Expr::Literal(high, _)) = (low.as_ref(), high.as_ref())
             else {
                 return None;
             };
-            Some(vec![
-                comparison(schema, column, Operator::GtEq, low)?,
-                comparison(schema, column, Operator::LtEq, high)?,
-            ])
+            let mut constraints = comparison(schema, column, Operator::GtEq, low)?;
+            constraints.extend(comparison(schema, column, Operator::LtEq, high)?);
+            Some(constraints)
         }
         Expr::InList(InList {
             expr,
             list,
             negated: false,
-        }) => in_list(schema, column_name(expr)?, list),
+        }) => in_list(schema, column_name(expr, schema)?, list),
         Expr::Like(Like {
             negated: false,
             expr,
@@ -51,8 +55,8 @@ pub fn translate(expr: &Expr, schema: &Schema) -> Option<Vec<String>> {
             escape_char: None,
             case_insensitive: false,
         }) => {
-            let column = column_name(expr)?;
-            if !is_string(schema, column)? {
+            let column = column_name(expr, schema)?;
+            if column_kind(schema, column)? != Kind::Text {
                 return None;
             }
             let Expr::Literal(value, _) = pattern.as_ref() else {
@@ -86,44 +90,125 @@ pub fn request_query(vars: &[String], constraints: &[String]) -> String {
     query
 }
 
-/// A column, also behind a numeric widening cast that DataFusion adds in coercion.
-fn column_name(expr: &Expr) -> Option<&str> {
+/// How a column compares in ERDDAP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Text,
+    Integer,
+    Float,
+    Time,
+}
+
+/// A column, also behind a lossless numeric widening cast that DataFusion adds in coercion.
+fn column_name<'a>(expr: &'a Expr, schema: &Schema) -> Option<&'a str> {
     match expr {
         Expr::Column(column) => Some(column.name.as_str()),
-        Expr::Cast(Cast { expr, data_type }) if data_type.is_numeric() => match expr.as_ref() {
-            Expr::Column(column) => Some(column.name.as_str()),
+        Expr::Cast(Cast { expr, data_type }) => {
+            let Expr::Column(column) = expr.as_ref() else {
+                return None;
+            };
+            let source = schema.field_with_name(&column.name).ok()?.data_type();
+            is_lossless_widening(source, data_type).then_some(column.name.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// True when every value of `from` keeps its numeric value in `to`.
+fn is_lossless_widening(from: &DataType, to: &DataType) -> bool {
+    use DataType::*;
+    fn bits(t: &DataType) -> Option<(bool, u32)> {
+        match t {
+            Int8 => Some((true, 8)),
+            Int16 => Some((true, 16)),
+            Int32 => Some((true, 32)),
+            Int64 => Some((true, 64)),
+            UInt8 => Some((false, 8)),
+            UInt16 => Some((false, 16)),
+            UInt32 => Some((false, 32)),
+            UInt64 => Some((false, 64)),
             _ => None,
+        }
+    }
+    match (bits(from), bits(to)) {
+        (Some((from_signed, from_bits)), Some((to_signed, to_bits))) => {
+            if from_signed == to_signed {
+                to_bits >= from_bits
+            } else {
+                !from_signed && to_signed && to_bits > from_bits
+            }
+        }
+        (Some((_, from_bits)), None) => match to {
+            Float64 => from_bits <= 32,
+            Float32 => from_bits <= 16,
+            _ => false,
         },
-        _ => None,
+        (None, _) => matches!(
+            (from, to),
+            (Float16, Float16 | Float32 | Float64)
+                | (Float32, Float32 | Float64)
+                | (Float64, Float64)
+        ),
     }
 }
 
-/// `Some(true)` for a string column, `Some(false)` for numeric or time, `None` otherwise.
-fn is_string(schema: &Schema, column: &str) -> Option<bool> {
+/// The comparison kind of `column`, or `None` for an unsupported type.
+fn column_kind(schema: &Schema, column: &str) -> Option<Kind> {
     match schema.field_with_name(column).ok()?.data_type() {
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Some(true),
-        t if t.is_numeric() || matches!(t, DataType::Timestamp(_, _)) => Some(false),
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Some(Kind::Text),
+        DataType::Timestamp(_, _) => Some(Kind::Time),
+        DataType::Float16 | DataType::Float32 | DataType::Float64 => Some(Kind::Float),
+        t if t.is_numeric() => Some(Kind::Integer),
         _ => None,
     }
 }
 
-fn comparison(schema: &Schema, column: &str, op: Operator, value: &ScalarValue) -> Option<String> {
+fn comparison(
+    schema: &Schema,
+    column: &str,
+    op: Operator,
+    value: &ScalarValue,
+) -> Option<Vec<String>> {
+    let kind = column_kind(schema, column)?;
+    // ERDDAP compares floats and times inexactly, so strict bounds become inclusive and `!=` stays local.
+    let inexact = matches!(kind, Kind::Float | Kind::Time);
     let symbol = match op {
         Operator::Eq => "=",
-        Operator::NotEq => "!=",
+        Operator::NotEq if !inexact => "!=",
+        Operator::Lt if inexact => "<=",
         Operator::Lt => "<",
         Operator::LtEq => "<=",
+        Operator::Gt if inexact => ">=",
         Operator::Gt => ">",
         Operator::GtEq => ">=",
         _ => return None,
     };
-    match (is_string(schema, column)?, literal_value(value)?) {
-        (true, LiteralValue::Text(s)) if matches!(op, Operator::Eq | Operator::NotEq) => {
-            Some(format!("{column}{symbol}{}", erddap_string(&s)))
+    match (kind, literal_value(value)?) {
+        (Kind::Text, LiteralValue::Text(s)) if matches!(op, Operator::Eq | Operator::NotEq) => {
+            Some(vec![format!("{column}{symbol}{}", erddap_string(&s))])
         }
-        (false, LiteralValue::Number(n)) | (false, LiteralValue::Time(n)) => {
-            Some(format!("{column}{symbol}{n}"))
+        (Kind::Integer | Kind::Float, LiteralValue::Number(n)) => {
+            Some(vec![format!("{column}{symbol}{n}")])
         }
+        (Kind::Time, LiteralValue::Time(_)) => time_comparison(column, op, value),
+        _ => None,
+    }
+}
+
+/// A time comparison at the whole-millisecond precision ERDDAP uses, rounded to keep a superset.
+fn time_comparison(column: &str, op: Operator, value: &ScalarValue) -> Option<Vec<String>> {
+    let nanos = timestamp_nanos(value)?;
+    let floor = nanos.div_euclid(1_000_000);
+    let exact = nanos.rem_euclid(1_000_000) == 0;
+    let ceil = if exact { floor } else { floor.checked_add(1)? };
+    match op {
+        Operator::Gt | Operator::GtEq => Some(vec![format!("{column}>={}", iso_millis(floor)?)]),
+        Operator::Lt | Operator::LtEq => Some(vec![format!("{column}<={}", iso_millis(ceil)?)]),
+        Operator::Eq if exact => Some(vec![format!("{column}={}", iso_millis(floor)?)]),
+        Operator::Eq => Some(vec![
+            format!("{column}>={}", iso_millis(floor)?),
+            format!("{column}<={}", iso_millis(ceil)?),
+        ]),
         _ => None,
     }
 }
@@ -139,7 +224,7 @@ fn in_list(schema: &Schema, column: &str, list: &[Expr]) -> Option<Vec<String>> 
     if values.is_empty() {
         return None;
     }
-    if is_string(schema, column)? {
+    if column_kind(schema, column)? == Kind::Text {
         let alternatives: Vec<String> = values
             .iter()
             .map(|v| match v {
@@ -160,19 +245,28 @@ fn in_list(schema: &Schema, column: &str, list: &[Expr]) -> Option<Vec<String>> 
             _ => None,
         })
         .collect();
-    let by_order =
-        |a: &&ScalarValue, b: &&ScalarValue| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-    let min = scalars.iter().copied().min_by(by_order)?;
-    let max = scalars.iter().copied().max_by(by_order)?;
-    Some(vec![
-        comparison(schema, column, Operator::GtEq, min)?,
-        comparison(schema, column, Operator::LtEq, max)?,
-    ])
+    // Mixed types or unordered values give no safe range.
+    let data_type = scalars.first()?.data_type();
+    if scalars.iter().any(|s| s.data_type() != data_type) {
+        return None;
+    }
+    let (mut min, mut max) = (scalars[0], scalars[0]);
+    for &s in &scalars[1..] {
+        if s.partial_cmp(min)?.is_lt() {
+            min = s;
+        }
+        if s.partial_cmp(max)?.is_gt() {
+            max = s;
+        }
+    }
+    let mut constraints = comparison(schema, column, Operator::GtEq, min)?;
+    constraints.extend(comparison(schema, column, Operator::LtEq, max)?);
+    Some(constraints)
 }
 
 fn nan_test(schema: &Schema, inner: &Expr, op: &str) -> Option<Vec<String>> {
-    let column = column_name(inner)?;
-    if is_string(schema, column)? {
+    let column = column_name(inner, schema)?;
+    if column_kind(schema, column)? == Kind::Text {
         return None;
     }
     Some(vec![format!("{column}{op}NaN")])
@@ -212,7 +306,7 @@ mod tests {
         );
         assert_eq!(
             t(cast(col("temp"), DataType::Float64).gt(lit(1.5))),
-            Some(vec!["temp>1.5".into()])
+            Some(vec!["temp>=1.5".into()])
         );
     }
 
@@ -258,7 +352,7 @@ mod tests {
     fn like_and_nulls_and_between() {
         assert_eq!(
             t(col("ship").like(lit("Ne%"))),
-            Some(vec![r#"ship=~"Ne.*""#.into()])
+            Some(vec![r#"ship=~"(?s)Ne.*""#.into()])
         );
         assert_eq!(t(col("ship").ilike(lit("ne%"))), None);
         assert_eq!(t(col("temp").is_null()), Some(vec!["temp=NaN".into()]));
@@ -267,6 +361,95 @@ mod tests {
         assert_eq!(
             t(col("depth").between(lit(1), lit(3))),
             Some(vec!["depth>=1".into(), "depth<=3".into()])
+        );
+    }
+
+    fn ts_ns(nanos: i64) -> Expr {
+        lit(ScalarValue::TimestampNanosecond(Some(nanos), None))
+    }
+
+    #[test]
+    fn narrowing_and_non_numeric_casts_are_not_pushed() {
+        assert_eq!(t(cast(col("temp"), DataType::Int32).eq(lit(7))), None);
+        assert_eq!(t(cast(col("depth"), DataType::Int16).gt(lit(1))), None);
+        assert_eq!(
+            t(cast(col("time"), DataType::Int64).gt(lit(1_577_836_800_000_000_000_i64))),
+            None
+        );
+        assert_eq!(
+            t(cast(col("depth"), DataType::Int64).gt(lit(5_i64))),
+            Some(vec!["depth>5".into()])
+        );
+        assert_eq!(
+            t(cast(col("depth"), DataType::Float64).lt(lit(2.5))),
+            Some(vec!["depth<2.5".into()])
+        );
+    }
+
+    #[test]
+    fn literal_kind_must_match_column_kind() {
+        assert_eq!(t(col("depth").gt(ts_ns(0))), None);
+        assert_eq!(t(col("time").gt(lit(5))), None);
+        assert_eq!(t(col("ship").eq(lit(5))), None);
+    }
+
+    #[test]
+    fn float_and_time_bounds_stay_inclusive() {
+        assert_eq!(t(col("temp").gt(lit(1.5))), Some(vec!["temp>=1.5".into()]));
+        assert_eq!(t(col("temp").lt(lit(1.5))), Some(vec!["temp<=1.5".into()]));
+        assert_eq!(t(col("temp").eq(lit(1.5))), Some(vec!["temp=1.5".into()]));
+        assert_eq!(t(col("temp").not_eq(lit(1.5))), None);
+        assert_eq!(
+            t(col("time").lt(ts_ns(1_577_836_800_000_000_000))),
+            Some(vec!["time<=2020-01-01T00:00:00Z".into()])
+        );
+        assert_eq!(t(col("time").not_eq(ts_ns(0))), None);
+    }
+
+    #[test]
+    fn sub_millisecond_times_round_outwards() {
+        let base = 1_577_836_800_000_000_000;
+        // 00:00:00.0005
+        let half_ms = base + 500_000;
+        assert_eq!(
+            t(col("time").gt_eq(ts_ns(half_ms))),
+            Some(vec!["time>=2020-01-01T00:00:00Z".into()])
+        );
+        assert_eq!(
+            t(col("time").lt(ts_ns(half_ms))),
+            Some(vec!["time<=2020-01-01T00:00:00.001Z".into()])
+        );
+        assert_eq!(
+            t(col("time").eq(ts_ns(half_ms))),
+            Some(vec![
+                "time>=2020-01-01T00:00:00Z".into(),
+                "time<=2020-01-01T00:00:00.001Z".into()
+            ])
+        );
+        assert_eq!(
+            t(col("time").eq(ts_ns(base + 2_000_000))),
+            Some(vec!["time=2020-01-01T00:00:00.002Z".into()])
+        );
+        // One nanosecond before 1970: floor is -1 ms, ceil is 0.
+        assert_eq!(
+            t(col("time").gt_eq(ts_ns(-1))),
+            Some(vec!["time>=1969-12-31T23:59:59.999Z".into()])
+        );
+        assert_eq!(
+            t(col("time").lt_eq(ts_ns(-1))),
+            Some(vec!["time<=1970-01-01T00:00:00Z".into()])
+        );
+    }
+
+    #[test]
+    fn mixed_type_in_lists_are_not_pushed() {
+        assert_eq!(
+            t(col("depth").in_list(vec![lit(1_i32), lit(9_i64)], false)),
+            None
+        );
+        assert_eq!(
+            t(col("depth").in_list(vec![lit(1_i64), lit(9_i64)], false)),
+            Some(vec!["depth>=1".into(), "depth<=9".into()])
         );
     }
 

@@ -52,7 +52,8 @@ pub fn java_regex_literal(s: &str) -> String {
 
 /// A SQL LIKE pattern as a full-match Java regex. `None` when it uses a backslash escape.
 pub fn like_to_regex(pattern: &str) -> Option<String> {
-    let mut out = String::with_capacity(pattern.len());
+    // `(?s)` lets `.` match line terminators, as SQL wildcards do.
+    let mut out = String::from("(?s)");
     for c in pattern.chars() {
         match c {
             '\\' => return None,
@@ -114,7 +115,14 @@ pub fn literal_f64(value: &ScalarValue) -> Option<f64> {
     }
 }
 
-fn timestamp_nanos(value: &ScalarValue) -> Option<i64> {
+/// `ms` epoch milliseconds as ISO 8601 UTC with a `Z` suffix; `.SSS` only when nonzero.
+pub fn iso_millis(ms: i64) -> Option<String> {
+    let time = DateTime::from_timestamp_millis(ms)?;
+    Some(time.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+}
+
+/// A timestamp literal as epoch nanoseconds, or `None` for other or null values.
+pub fn timestamp_nanos(value: &ScalarValue) -> Option<i64> {
     use ScalarValue::*;
     match value {
         TimestampSecond(Some(v), _) => v.checked_mul(1_000_000_000),
@@ -152,9 +160,18 @@ mod tests {
 
     #[test]
     fn like_becomes_a_full_match_regex() {
-        assert_eq!(like_to_regex("ab%c_").as_deref(), Some("ab.*c."));
-        assert_eq!(like_to_regex("a.b%").as_deref(), Some(r"a\.b.*"));
+        assert_eq!(like_to_regex("ab%c_").as_deref(), Some("(?s)ab.*c."));
+        assert_eq!(like_to_regex("a.b%").as_deref(), Some(r"(?s)a\.b.*"));
         assert_eq!(like_to_regex(r"a\%"), None);
+    }
+
+    #[test]
+    fn formats_millisecond_times() {
+        assert_eq!(
+            iso_millis(1_577_836_800_000).as_deref(),
+            Some("2020-01-01T00:00:00Z")
+        );
+        assert_eq!(iso_millis(-1).as_deref(), Some("1969-12-31T23:59:59.999Z"));
     }
 
     #[test]
