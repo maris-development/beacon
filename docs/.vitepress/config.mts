@@ -9,11 +9,8 @@ const DESCRIPTION =
 // Pages that are written but not released yet. They still build (so the team can
 // review them via their direct URL), but they are kept out of the sidebar, the
 // local search index, the sitemap, and search engines. To release one: delete it
-// from this list, drop its `search: false` frontmatter, and uncomment the
-// sidebar entries marked "MCP is unreleased" below.
-const UNRELEASED_PAGES = [
-  'docs/2.0.1/mcp.md'
-]
+// from this list, drop its `search: false` frontmatter, and add its sidebar entry.
+const UNRELEASED_PAGES: string[] = []
 
 const isUnreleased = (relativePath: string) =>
   UNRELEASED_PAGES.includes(relativePath)
@@ -523,9 +520,7 @@ export default defineConfig({
                 }
               ]
             },
-            // Table Extensions / "Serve to AI Agents (MCP)" were added to the 1.8.0
-            // folder after the 1.8.0 release; the folder is now pinned to the
-            // v1.8.0 tag, so those pages no longer exist here. They live in 2.0.1.
+            // The folder is pinned to the v1.8.0 tag, so pages added after that release are not here.
           ]
         },
         {
@@ -791,8 +786,6 @@ export default defineConfig({
             },
           ]
         },
-        // No MCP entry here: MCP shipped after the 1.8.0 release, and this folder
-        // is pinned to the v1.8.0 tag. The MCP docs live in 2.0.1 (unreleased).
         {
           text: 'Connect',
           collapsed: true,

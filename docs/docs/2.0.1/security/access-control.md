@@ -72,7 +72,6 @@ The internal `__beacon_*` tables need the super-user too. Another principal gets
 `permission denied` on a read. This also holds for `SHOW TABLES`, because
 DataFusion rewrites that statement onto `information_schema.tables`.
 
-<!-- MCP is unreleased. On release, add "and the MCP `list_tables` tool" to the list below. -->
 Beacon builds a catalog listing for those principals instead. `GET /api/tables`,
 `GET /api/catalogs` and the metadata commands of Flight SQL read the catalog as the engine. They return only what the
 caller can see. They show no metadata schema and no internal table. With
@@ -170,6 +169,47 @@ instead of a *grant*:
 REVOKE SELECT ON TABLE observations FROM ROLE reader;
 REVOKE DENY SELECT ON PATH 'argo/restricted/*' FROM ROLE reader;
 ```
+
+### Role settings
+
+A role can hold key-value settings. Set a value with `SET`, and delete it with `RESET`:
+
+```sql
+ALTER ROLE reader SET query_cpu_limit_ms = 30000;
+ALTER ROLE reader SET tier TO 'gold';
+ALTER ROLE reader RESET tier;
+
+SELECT role_name, key, value FROM beacon.system.role_settings;
+```
+
+A key has ASCII letters, digits, `_` and `.`, and is 64 characters or less. Beacon stores the key
+in lowercase and the value as you write it. `DROP ROLE` deletes the settings of the role. The
+`settings` column of `beacon.system.roles` and `GET /api/admin/auth/roles` also show them.
+
+### Query limits
+
+Two role settings limit each query of a user:
+
+| Setting | Limit | Error when a query goes above it |
+| ------- | ----- | -------------------------------- |
+| `query_cpu_limit_ms` | CPU time of one query, in milliseconds | `query exceeded its CPU budget` |
+| `query_output_row_limit` | Rows that one query outputs | `query output exceeds its row limit of N rows` |
+
+Beacon finds the limit of a query with these rules:
+
+1. The super-user has no limit.
+2. Else the setting of the user's roles applies. When two roles set it, the larger limit wins.
+   `0` means no limit, so a role with `0` removes the limit.
+3. Else the query has no limit. This is the default.
+
+An `ALTER ROLE` applies from the next query. Give the limits to the `anonymous` user's roles to
+limit requests without credentials.
+
+- **The CPU limit** counts the CPU time of planning and of every task of the query.
+  `EXPLAIN ANALYZE` uses the same limit. Beacon counts CPU time on Linux and macOS only. On
+  Windows, the CPU limit does not apply.
+- **The row limit** counts output rows, not scanned rows. A query above the limit fails. It does
+  not return part of the result. For `COPY ... TO`, the file never holds more rows than the limit.
 
 ### Anonymous access
 

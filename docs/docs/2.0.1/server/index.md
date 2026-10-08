@@ -39,48 +39,12 @@ Before this, [deploy the node](/docs/2.0.1/getting-started) and
   therefore see the available columns before you write a query.
 - **Pushdown and partitions**: Beacon pushes filters and projections down. This reduces the I/O and
   makes a query over large data faster.
-<!-- MCP is unreleased. Restore on release:
-- **MCP server**: give your tables to AI agents such as Claude, as read-only tools over the Model
-  Context Protocol. The agents find the tables and run `SELECT` queries. See
-  [MCP Server](/docs/2.0.1/mcp).
--->
 
 ## How it works at a glance
 
 1. **Register or copy the datasets** into the configured data directories or object store.
 2. **Inspect the schemas** through the API. You then know the available columns.
 3. **Query a dataset or a table** with SQL or with the JSON query DSL.
-<!-- MCP is unreleased. Restore on release:
-4. **Serve it to AI agents**, optional. Add comments to your tables. The agents then query the
-   catalog over MCP. See [MCP Server](/docs/2.0.1/mcp).
--->
 
 For the full detail, see the [SQL query docs](/docs/2.0.1/api/querying/sql) and the
 [JSON query docs](/docs/2.0.1/api/querying/json).
-
-<!-- MCP is unreleased. Restore this whole section on release:
-
-## Serve your tables to AI agents (MCP)
-
-Register your datasets and tables first. Beacon can then give them to AI agents such as Claude and
-GitHub Copilot. It uses its built-in [MCP Server](/docs/2.0.1/mcp). The catalog and the access
-control stay the same. Beacon serves the tables as **read-only** tools over the Model Context
-Protocol. An agent finds your tables, inspects their schemas and runs `SELECT` queries. You deploy
-no extra service.
-
-An agent sees every table that its identity can read. [Comments](/docs/2.0.1/sql/comment-on) tell
-the agent what each table and column holds:
-
-```sql
-COMMENT ON TABLE obs IS 'Argo float profiles: temperature and salinity by location, depth and time.';
-COMMENT ON COLUMN obs.depth IS 'Measurement depth in meters';
-```
-
-Beacon gives the tools `list_tables`, `describe_table`, `run_sql` and `export_query`. The same
-identity and role grants control the access. See [Access control](/docs/2.0.1/security/access-control).
-
-The full [MCP Server guide](/docs/2.0.1/mcp) shows how to connect a client, how to restrict
-authentication and how to serve a large result. An agent runs ordinary Beacon SQL. The
-[SQL Guide](/docs/2.0.1/sql/) gives the full dialect.
-
--->

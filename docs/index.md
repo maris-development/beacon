@@ -37,10 +37,10 @@ Point a server at your archive. Connect a client. Write queries.
 <div class="dgrid">
   <a class="dcard" href="docs/2.0.1/introduction">
     <span class="dcard-head">
-      <span class="dcard-title mono">2.0.0</span>
+      <span class="dcard-title mono">2.0.1</span>
       <span class="dcard-tag is-stable">Stable</span>
     </span>
-    <span class="dcard-body">Read this for a 2.0.0 server. This is the current release.</span>
+    <span class="dcard-body">Read this for a 2.0.1 server. This is the current release.</span>
     <span class="dcard-cta is-primary">Read the docs <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
   </a>
   <a class="dcard" href="docs/1.8.0/introduction">
@@ -61,7 +61,7 @@ Point a server at your archive. Connect a client. Write queries.
   </a>
 </div>
 
-Beacon 2.0.0 is the current release. A 1.8.0 server does not upgrade in place. Read
+Beacon 2.0.1 is the current release. A 1.8.0 server does not upgrade in place. Read
 [Upgrade from 1.8.0](/docs/2.0.1/upgrade) before you change the image tag.
 
 ## Common tasks

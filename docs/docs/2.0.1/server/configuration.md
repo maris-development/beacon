@@ -187,13 +187,13 @@ docker run -d \
     --name beacon \
     -p 5001:5001 \
     -v ./logs:/beacon/logs \
-    ghcr.io/maris-development/beacon:v2.0.0
+    ghcr.io/maris-development/beacon:v2.0.1
 ```
 
 ```yaml [docker-compose.yml]
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:v2.0.0
+        image: ghcr.io/maris-development/beacon:v2.0.1
         container_name: beacon
         ports:
             - "5001:5001"
