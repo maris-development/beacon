@@ -61,9 +61,16 @@ pub struct ErddapClient {
 impl ErddapClient {
     /// Build a client. `request_timeout` caps the whole request, body included.
     pub fn new(request_timeout: Duration) -> anyhow::Result<Self> {
+        Self::with_connect_timeout(request_timeout, CONNECT_TIMEOUT)
+    }
+
+    fn with_connect_timeout(
+        request_timeout: Duration,
+        connect_timeout: Duration,
+    ) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("Beacon/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(CONNECT_TIMEOUT)
+            .connect_timeout(connect_timeout)
             .timeout(request_timeout)
             .build()?;
         Ok(Self {
@@ -102,7 +109,7 @@ impl ErddapClient {
             .prefix("beacon-erddap-")
             .suffix(suffix)
             .tempfile()?;
-        let mut out = tokio::fs::File::create(file.path()).await?;
+        let mut out = tokio::fs::File::from_std(file.reopen()?);
         let mut body = response.bytes_stream();
         while let Some(chunk) = body.next().await {
             out.write_all(&chunk.map_err(|e| self.map(url, e))?).await?;
@@ -121,7 +128,13 @@ impl ErddapClient {
     }
 
     fn map(&self, url: &str, error: reqwest::Error) -> ErddapError {
-        if error.is_timeout() {
+        // A connect timeout is also a timeout, but a longer request timeout does not help.
+        if error.is_connect() {
+            ErddapError::Transport {
+                url: url.to_string(),
+                cause: format!("connection failed: {}", error_chain(&error.without_url())),
+            }
+        } else if error.is_timeout() {
             ErddapError::Timeout {
                 url: url.to_string(),
                 secs: self.timeout_secs,
@@ -129,7 +142,7 @@ impl ErddapClient {
         } else {
             ErddapError::Transport {
                 url: url.to_string(),
-                cause: error_chain(&error),
+                cause: error_chain(&error.without_url()),
             }
         }
     }
@@ -218,6 +231,34 @@ mod tests {
         assert!(!cause.trim().is_empty(), "{text}");
         let wrapped: datafusion::error::DataFusionError = error.into();
         assert!(wrapped.to_string().contains(cause), "{wrapped}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_names_the_url_once() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let client = ErddapClient::new(Duration::from_secs(5)).unwrap();
+        let url = format!("http://127.0.0.1:{port}/erddap/info/t/index.json");
+        let error = client.get_bytes(&url).await.unwrap_err();
+        assert!(matches!(error, ErddapError::Transport { .. }), "{error:?}");
+        let text = error.to_string();
+        assert!(text.contains("connection failed"), "{text}");
+        assert_eq!(text.matches(&url).count(), 1, "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_connect_timeout_is_not_a_request_timeout() {
+        let client =
+            ErddapClient::with_connect_timeout(Duration::from_secs(5), Duration::from_millis(200))
+                .unwrap();
+        // A non-routable address: the connect times out or the network is unreachable.
+        let url = "http://10.255.255.1:81/erddap/info/t/index.json";
+        let error = client.get_bytes(url).await.unwrap_err();
+        assert!(matches!(error, ErddapError::Transport { .. }), "{error:?}");
+        let text = error.to_string();
+        assert!(text.contains("connection failed"), "{text}");
+        assert!(!text.contains("request_timeout_secs"), "{text}");
     }
 
     #[tokio::test]
