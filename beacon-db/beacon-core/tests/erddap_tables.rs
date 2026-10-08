@@ -57,6 +57,8 @@ async fn tabledap_select_projects_and_counts() {
         scalar_i64(&rt.sql("SELECT count(*) FROM bottles").await),
         62
     );
+    let request = last_data_request(&server);
+    assert!(request.ends_with(".parquet?cruise_id"), "{request}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

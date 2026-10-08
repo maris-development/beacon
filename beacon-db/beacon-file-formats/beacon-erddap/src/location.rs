@@ -2,8 +2,7 @@
 
 use anyhow::{anyhow, ensure};
 
-const EXPECTED: &str = "ERDDAP LOCATION must be 'http(s)://host/erddap/tabledap/<datasetID>' \
-                        or 'http(s)://host/erddap/griddap/<datasetID>'";
+const EXPECTED: &str = "ERDDAP LOCATION must be 'http(s)://host/erddap/tabledap/<datasetID>'";
 
 /// The ERDDAP service a dataset is served by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

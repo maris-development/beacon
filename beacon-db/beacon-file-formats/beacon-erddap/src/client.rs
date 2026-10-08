@@ -33,7 +33,7 @@ pub enum ErddapError {
         secs: u64,
     },
     /// The request failed before a response arrived, or the body broke off.
-    #[error("ERDDAP request {url} failed: {source}")]
+    #[error("ERDDAP request {url} failed")]
     Transport {
         /// The request URL.
         url: String,

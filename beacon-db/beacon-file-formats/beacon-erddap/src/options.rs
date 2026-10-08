@@ -4,11 +4,9 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail};
 
-/// Parsed table options. Valid keys: `max_cells_per_request`, `request_timeout_secs`.
+/// Parsed table options. Valid key: `request_timeout_secs`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ErddapOptions {
-    /// griddap: the maximum grid cells in one `.nc` request.
-    pub max_cells_per_request: u64,
     /// The timeout of each HTTP request.
     pub request_timeout_secs: u64,
 }
@@ -16,7 +14,6 @@ pub struct ErddapOptions {
 impl Default for ErddapOptions {
     fn default() -> Self {
         Self {
-            max_cells_per_request: 10_000_000,
             request_timeout_secs: 600,
         }
     }
@@ -29,11 +26,10 @@ impl ErddapOptions {
         for (key, value) in options {
             let key = key.strip_prefix("format.").unwrap_or(key);
             let slot = match key {
-                "max_cells_per_request" => &mut parsed.max_cells_per_request,
                 "request_timeout_secs" => &mut parsed.request_timeout_secs,
-                other => bail!(
-                    "unknown ERDDAP option '{other}'; valid options: max_cells_per_request, request_timeout_secs"
-                ),
+                other => {
+                    bail!("unknown ERDDAP option '{other}'; valid option: request_timeout_secs")
+                }
             };
             let number: u64 = value.trim().parse().map_err(|_| {
                 anyhow!("ERDDAP option '{key}' must be a positive integer, got '{value}'")
@@ -62,18 +58,14 @@ mod tests {
     #[test]
     fn defaults_apply_without_options() {
         let o = ErddapOptions::from_map(&HashMap::new()).unwrap();
-        assert_eq!(o.max_cells_per_request, 10_000_000);
         assert_eq!(o.request_timeout_secs, 600);
     }
 
     #[test]
     fn reads_bare_and_prefixed_keys() {
-        let o = ErddapOptions::from_map(&map(&[
-            ("max_cells_per_request", "5"),
-            ("format.request_timeout_secs", "7"),
-        ]))
-        .unwrap();
-        assert_eq!(o.max_cells_per_request, 5);
+        let o = ErddapOptions::from_map(&map(&[("request_timeout_secs", "5")])).unwrap();
+        assert_eq!(o.request_timeout_secs, 5);
+        let o = ErddapOptions::from_map(&map(&[("format.request_timeout_secs", "7")])).unwrap();
         assert_eq!(o.request_timeout_secs, 7);
     }
 
@@ -85,7 +77,11 @@ mod tests {
                 .to_string()
                 .contains("tls")
         );
-        assert!(ErddapOptions::from_map(&map(&[("max_cells_per_request", "0")])).is_err());
+        let err = ErddapOptions::from_map(&map(&[("max_cells_per_request", "5")]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("valid option: request_timeout_secs"), "{err}");
+        assert!(ErddapOptions::from_map(&map(&[("request_timeout_secs", "0")])).is_err());
         assert!(ErddapOptions::from_map(&map(&[("request_timeout_secs", "ten")])).is_err());
     }
 }

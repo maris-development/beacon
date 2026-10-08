@@ -102,6 +102,10 @@ async fn resolve(
     location: &ErddapLocation,
 ) -> anyhow::Result<ResolvedDataset> {
     let info = DatasetInfo::parse(&client.get_bytes(&location.info_url()).await?)?;
+    anyhow::ensure!(
+        !info.data_variables().is_empty(),
+        "ERDDAP dataset has no data variables"
+    );
     let schema = info.tabledap_schema()?;
     Ok(ResolvedDataset { info, schema })
 }
@@ -187,6 +191,21 @@ mod tests {
             "ERDDAP griddap datasets are not supported yet; use a tabledap dataset URL"
         );
         assert!(server.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_dataset_without_data_variables() {
+        let info = r#"{"table":{"rows":[["dimension","time","","double",""]]}}"#;
+        let server =
+            FixtureServer::start(vec![Route::status("/erddap/info/e/index.json", 200, info)]).await;
+        let err = ErddapTable::try_new(definition(format!("{}/tabledap/e", server.erddap_url())))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ERDDAP dataset has no data variables"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
