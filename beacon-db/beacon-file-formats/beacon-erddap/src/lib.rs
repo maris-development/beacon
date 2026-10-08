@@ -6,10 +6,12 @@
 //! `COPY` target exist for it.
 
 pub mod client;
+pub mod encode;
 pub mod fixture;
 pub mod info;
 pub mod location;
 pub mod options;
+pub mod tabledap;
 
 pub use client::{ErddapClient, ErddapError};
 pub use info::DatasetInfo;
