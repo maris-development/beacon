@@ -37,8 +37,8 @@ impl ErddapLocation {
     ///
     /// A file extension on the dataset ID and a query string are removed.
     pub fn parse(location: &str) -> anyhow::Result<Self> {
-        let url = url::Url::parse(location)
-            .map_err(|e| anyhow!("{EXPECTED}, got '{location}' ({e})"))?;
+        let url =
+            url::Url::parse(location).map_err(|e| anyhow!("{EXPECTED}, got '{location}' ({e})"))?;
         ensure!(
             matches!(url.scheme(), "http" | "https"),
             "{EXPECTED}, got '{location}'"
@@ -51,7 +51,10 @@ impl ErddapLocation {
             .iter()
             .rposition(|s| *s == "tabledap" || *s == "griddap")
             .ok_or_else(|| anyhow!("{EXPECTED}, got '{location}'"))?;
-        ensure!(segments.len() == position + 2, "{EXPECTED}, got '{location}'");
+        ensure!(
+            segments.len() == position + 2,
+            "{EXPECTED}, got '{location}'"
+        );
         let protocol = if segments[position] == "tabledap" {
             Protocol::Tabledap
         } else {
@@ -89,7 +92,11 @@ impl ErddapLocation {
             self.dataset_id,
             extension
         );
-        if query.is_empty() { base } else { format!("{base}?{query}") }
+        if query.is_empty() {
+            base
+        } else {
+            format!("{base}?{query}")
+        }
     }
 }
 
@@ -107,7 +114,8 @@ mod tests {
 
     #[test]
     fn strips_extension_query_and_trailing_slash() {
-        let l = ErddapLocation::parse("http://h:8080/erddap/griddap/erdHadISST.html?sst[0]").unwrap();
+        let l =
+            ErddapLocation::parse("http://h:8080/erddap/griddap/erdHadISST.html?sst[0]").unwrap();
         assert_eq!(l.server, "http://h:8080/erddap");
         assert_eq!(l.protocol, Protocol::Griddap);
         assert_eq!(l.dataset_id, "erdHadISST");
@@ -119,7 +127,10 @@ mod tests {
     fn builds_urls() {
         let l = ErddapLocation::parse("https://h/erddap/griddap/g").unwrap();
         assert_eq!(l.info_url(), "https://h/erddap/info/g/index.json");
-        assert_eq!(l.data_url("nc", "sst%5B0%5D"), "https://h/erddap/griddap/g.nc?sst%5B0%5D");
+        assert_eq!(
+            l.data_url("nc", "sst%5B0%5D"),
+            "https://h/erddap/griddap/g.nc?sst%5B0%5D"
+        );
         assert_eq!(l.data_url("json", ""), "https://h/erddap/griddap/g.json");
     }
 

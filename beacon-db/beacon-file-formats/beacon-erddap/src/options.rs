@@ -35,10 +35,9 @@ impl ErddapOptions {
                     "unknown ERDDAP option '{other}'; valid options: max_cells_per_request, request_timeout_secs"
                 ),
             };
-            let number: u64 = value
-                .trim()
-                .parse()
-                .map_err(|_| anyhow!("ERDDAP option '{key}' must be a positive integer, got '{value}'"))?;
+            let number: u64 = value.trim().parse().map_err(|_| {
+                anyhow!("ERDDAP option '{key}' must be a positive integer, got '{value}'")
+            })?;
             if number == 0 {
                 bail!("ERDDAP option '{key}' must be a positive integer, got '{value}'");
             }
@@ -54,7 +53,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -77,7 +79,12 @@ mod tests {
 
     #[test]
     fn rejects_unknown_zero_and_non_numeric() {
-        assert!(ErddapOptions::from_map(&map(&[("tls", "true")])).unwrap_err().to_string().contains("tls"));
+        assert!(
+            ErddapOptions::from_map(&map(&[("tls", "true")]))
+                .unwrap_err()
+                .to_string()
+                .contains("tls")
+        );
         assert!(ErddapOptions::from_map(&map(&[("max_cells_per_request", "0")])).is_err());
         assert!(ErddapOptions::from_map(&map(&[("request_timeout_secs", "ten")])).is_err());
     }

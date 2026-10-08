@@ -5,8 +5,10 @@
 //! into the ERDDAP request. ERDDAP is not a file format: no `read_*` function and no
 //! `COPY` target exist for it.
 
+pub mod info;
 pub mod location;
 pub mod options;
 
+pub use info::DatasetInfo;
 pub use location::{ErddapLocation, Protocol};
 pub use options::ErddapOptions;
