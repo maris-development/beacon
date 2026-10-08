@@ -1932,6 +1932,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-erddap"
+version = "2.0.1"
+dependencies = [
+ "anyhow",
+ "arrow 58.4.0",
+ "async-trait",
+ "axum",
+ "beacon-arrow-netcdf",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "beacon-nd-array",
+ "bytes",
+ "chrono",
+ "datafusion 53.1.0",
+ "futures",
+ "object_store 0.13.2",
+ "parquet",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "typetag",
+ "url",
+]
+
+[[package]]
 name = "beacon-file-stats"
 version = "2.0.1"
 dependencies = [
