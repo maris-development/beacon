@@ -18,6 +18,7 @@ pub(crate) mod crawler;
 mod definition;
 mod logical;
 mod lower;
+mod operations;
 pub(crate) mod materialized_view;
 mod physical;
 mod query_planner;
@@ -44,6 +45,7 @@ use crate::parser::statement::{
 pub(crate) use authz::{authorize_logical_plan, table_targets};
 pub(crate) use stream_coalescer::CoalesceSqlStream;
 pub(crate) use lower::lower_df_statement;
+pub(crate) use operations::authorize_operations;
 pub(crate) use query_planner::BeaconQueryPlanner;
 
 /// Validate a lowered query plan against the caller's privileges, just before
