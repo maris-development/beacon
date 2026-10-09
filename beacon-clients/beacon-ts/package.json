@@ -42,11 +42,11 @@
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
-    "@types/node": "22.10.2",
+    "@types/node": "22.20.4",
     "openapi-typescript": "7.4.4",
     "tsup": "8.3.5",
     "tsx": "4.19.2",
     "typescript": "5.7.2",
-    "vitest": "2.1.8"
+    "vitest": "5.0.0"
   }
 }
