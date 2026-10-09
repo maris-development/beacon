@@ -1,7 +1,7 @@
 //! The MCP tool catalog and the dispatch of tool calls.
 //!
-//! The tool set is fixed: `list_tables`, `describe_table`, `run_sql` and
-//! `export_query`. A table needs no MCP configuration. The agent sees every table
+//! The tool set is fixed: `get_guide`, `list_tables`, `describe_table`, `run_sql`
+//! and `export_query`. A table needs no MCP configuration. The agent sees every table
 //! that the caller may read, and it learns what each table and column means from
 //! their comments (`COMMENT ON`), which arrive as Arrow schema metadata.
 
@@ -15,6 +15,7 @@ use beacon_core::{AuthIdentity, TableReference};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
+use crate::guide::GUIDE;
 use crate::result::run_sql_to_json;
 
 /// The tables in beacon's own schema that `identity` is entitled to see, sorted.
@@ -69,6 +70,7 @@ async fn table_schema(
 /// The fixed tool list.
 pub fn tools() -> Vec<Tool> {
     vec![
+        get_guide_tool(),
         list_tables_tool(),
         describe_table_tool(),
         run_sql_tool(),
@@ -84,6 +86,7 @@ pub async fn dispatch(
     identity: AuthIdentity,
 ) -> anyhow::Result<String> {
     match name {
+        "get_guide" => Ok(GUIDE.to_string()),
         "list_tables" => list_tables_json(runtime, &identity).await,
         "describe_table" => describe_table_json(runtime, &args, &identity).await,
         "run_sql" => {
@@ -112,6 +115,16 @@ fn object_schema(props: Value, required: &[&str]) -> Map<String, Value> {
 /// clients know it never mutates state. Every beacon MCP tool is read-only.
 fn read_only(tool: Tool) -> Tool {
     tool.with_annotations(ToolAnnotations::new().read_only(true))
+}
+
+fn get_guide_tool() -> Tool {
+    read_only(Tool::new(
+        "get_guide",
+        "Return the Beacon guide: how Beacon turns files and arrays into tables, how to write a \
+         query, and how to use the beacon-api Python client. Call it once before your first \
+         query.",
+        object_schema(json!({}), &[]),
+    ))
 }
 
 fn list_tables_tool() -> Tool {
@@ -205,7 +218,7 @@ fn export_query_recipe(args: &Map<String, Value>) -> anyhow::Result<String> {
     };
     let python = [
         imports.to_string(),
-        "BEACON_URL = \"http://localhost:5001\"  # your beacon host".to_string(),
+        "BEACON_URL = \"<BEACON_URL>\"  # your beacon host".to_string(),
         "AUTH = \"Bearer <token>\"  # or \"Basic <base64 user:pass>\"; omit header if anonymous".to_string(),
         format!(
             "resp = requests.post(f\"{{BEACON_URL}}/api/query\", headers={{\"Authorization\": AUTH}}, json={body_py})"
@@ -306,6 +319,7 @@ mod tests {
         args.insert("format".into(), Value::String("parquet".into()));
         let out = export_query_recipe(&args).unwrap();
         assert!(out.contains("/api/query"), "recipe should reference the query endpoint");
+        assert!(out.contains(r#"BEACON_URL = \"<BEACON_URL>\""#), "{out}");
         assert!(out.contains("read_parquet"), "parquet snippet should use read_parquet");
         assert!(out.contains("\"format\": \"parquet\""));
 
@@ -325,7 +339,10 @@ mod tests {
         let tools = tools();
 
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
-        assert_eq!(names, ["list_tables", "describe_table", "run_sql", "export_query"]);
+        assert_eq!(
+            names,
+            ["get_guide", "list_tables", "describe_table", "run_sql", "export_query"]
+        );
         for tool in &tools {
             let hint = tool.annotations.as_ref().and_then(|a| a.read_only_hint);
             assert_eq!(hint, Some(true), "{} must be read-only", tool.name);

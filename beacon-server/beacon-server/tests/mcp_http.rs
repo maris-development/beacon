@@ -232,7 +232,7 @@ async fn mcp_accepts_every_host_with_a_wildcard() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tools_list_is_the_four_generic_tools() {
+async fn tools_list_is_the_five_generic_tools() {
     let (router, _harness, admin) = router_with(config(false)).await;
     commented_table(&router, &admin, "obs").await;
 
@@ -240,9 +240,36 @@ async fn tools_list_is_the_four_generic_tools() {
 
     assert_eq!(
         tools,
-        ["list_tables", "describe_table", "run_sql", "export_query"],
+        ["get_guide", "list_tables", "describe_table", "run_sql", "export_query"],
         "a table adds no tool of its own"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_guide_returns_the_guide() {
+    let (router, _harness, _admin) = router_with(config(false)).await;
+
+    let guide = call_tool(&router, None, "get_guide", json!({})).await;
+
+    let guide = guide.as_str().expect("the guide is Markdown text");
+    assert!(guide.starts_with("# Beacon guide"), "{guide}");
+    assert!(guide.contains("pip install beacon-api"), "{guide}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn export_query_returns_a_recipe_with_a_url_placeholder() {
+    let (router, _harness, _admin) = router_with(config(false)).await;
+
+    let recipe = call_tool(
+        &router,
+        None,
+        "export_query",
+        json!({"sql": "SELECT 1", "format": "csv"}),
+    )
+    .await;
+
+    let python = recipe["python"].as_str().expect("a python snippet");
+    assert!(python.contains("BEACON_URL = \"<BEACON_URL>\""), "{python}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

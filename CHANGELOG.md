@@ -18,6 +18,10 @@ tag. Releases before 2.0.0 are recorded in the
   `beacon.system.comments` lists every comment. `GET`, `PUT` and `DELETE
   /api/admin/table-comments/{table}` manage the comments of one table. A comment follows `ALTER
   TABLE ... RENAME COLUMN` and `DROP COLUMN`, and `DROP TABLE` deletes it.
+- **A built-in guide for MCP agents.** The `get_guide` tool tells an agent how Beacon turns files
+  into rows, how to write a fast query, and how to use the `beacon-api` Python package. The
+  `initialize` instructions point to the guide. The `export_query` snippet shows a `<BEACON_URL>`
+  placeholder, not `http://localhost:5001`.
 
 ### Changed
 
@@ -29,7 +33,7 @@ tag. Releases before 2.0.0 are recorded in the
   and a filter on these columns can select other pixels. Data that you copied from a TIFF before
   this change keeps the corner values.
   ([#525](https://github.com/maris-development/beacon/issues/525))
-- **The MCP server has four fixed tools.** It no longer makes one tool for each table. An agent sees
+- **The MCP server has five fixed tools.** It no longer makes one tool for each table. An agent sees
   every table that its identity can read. `list_tables` and `describe_table` show the table and
   column comments.
 

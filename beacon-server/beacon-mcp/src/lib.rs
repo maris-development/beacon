@@ -9,6 +9,7 @@
 //! non-super-user, so only read-only `SELECT`s are permitted.
 
 mod catalog;
+mod guide;
 mod result;
 mod server;
 

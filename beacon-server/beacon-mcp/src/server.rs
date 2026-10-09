@@ -12,6 +12,14 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer};
 
+/// Sent in `initialize`. Some clients hide or cut it, so `get_guide` holds the full text.
+const INSTRUCTIONS: &str = "Beacon is a SQL engine for scientific data. It reads NetCDF, Zarr, \
+    Parquet and other files in place. Call `get_guide` once: it explains how Beacon turns arrays \
+    into rows and how to use the beacon-api Python client. Call `list_tables` to find the tables, \
+    and `describe_table` before you write SQL for a table. `run_sql` is a read-only preview of \
+    1000 rows or fewer. Use `export_query` for a large result. Put double quotes around a name \
+    with upper case or a dot, such as \"Temperature\" or \"temperature.units\".";
+
 /// MCP server backed by a beacon [`Runtime`]. Cloned per session by the
 /// transport; the runtime handle is shared.
 #[derive(Clone)]
@@ -27,11 +35,8 @@ impl BeaconMcpServer {
 
 impl ServerHandler for BeaconMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Beacon server. Call `list_tables` to discover tables and what they hold, \
-             `describe_table` for a table's columns and what each one means, `run_sql` \
-             for a read-only SQL preview (SELECT only), and `export_query` for large results.",
-        )
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(INSTRUCTIONS)
     }
 
     async fn list_tools(

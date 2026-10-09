@@ -12,7 +12,7 @@ discover your tables through it. They then run **read-only** queries over the Mo
 Protocol. The server uses the streamable-HTTP transport at `POST/GET/DELETE /mcp`. It runs next to
 the REST API.
 
-Beacon gives four fixed tools. An agent sees every table that its identity can read. The
+Beacon gives five fixed tools. An agent sees every table that its identity can read. The
 [comments](/docs/2.0.1/sql/comment-on) on your tables and columns tell the agent what the data holds.
 
 ## Enable and configure
@@ -37,8 +37,10 @@ Behind a trusted reverse proxy, you can set `*`.
 
 ## Tools
 
-`tools/list` always returns the same four tools:
+`tools/list` always returns the same five tools:
 
+- **`get_guide`**: returns the built-in guide of the server as Markdown. See
+  [The built-in guide](#the-built-in-guide).
 - **`list_tables`**: returns each table that the caller can read, with its table comment as
   `description`.
 - **`describe_table`**: returns the table comment as `description`, and one row per column with
@@ -53,6 +55,17 @@ Behind a trusted reverse proxy, you can set `*`.
 The MCP interface is **read-only**. Every tool call runs without super-user privileges. The planner
 therefore rejects `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `COMMENT ON` and every other DDL or DML
 statement. This holds for every caller. Each tool carries `annotations.readOnlyHint: true`.
+
+## The built-in guide
+
+Every Beacon server gives an agent the same guide. The agent needs no table to read it:
+
+- The `initialize` response holds short instructions. They name the tools and the rules for names
+  with upper case or a dot.
+- The `get_guide` tool returns the full guide. It tells how Beacon turns files and arrays into rows,
+  how to write a fast query, and how to use the `beacon-api` Python package.
+
+The guide is general. It names no server address and no table.
 
 ## Make a table ready for MCP
 
@@ -242,7 +255,7 @@ metrics and access control.
 
 - **Transport**: an `rmcp` streamable-HTTP service at `/mcp`. The `BEACON_MCP_ENABLED` flag controls
   it. It uses the same identity middleware as the client API.
-- **`tools/list`**: returns the four fixed tools. It reads no table.
+- **`tools/list`**: returns the five fixed tools. It reads no table.
 - **`tools/call`**: Beacon resolves the identity of the caller. It then **clears super-user**,
   because MCP is read-only. `run_sql` runs the `SELECT` of the agent. `export_query` returns a
   recipe. `list_tables` and `describe_table` read the catalog and the Arrow schema of each table,
