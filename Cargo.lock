@@ -1816,6 +1816,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-delta",
+ "beacon-erddap",
  "beacon-file-stats",
  "beacon-functions",
  "beacon-iceberg",
@@ -1927,6 +1928,32 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "typetag",
+ "url",
+]
+
+[[package]]
+name = "beacon-erddap"
+version = "2.0.1"
+dependencies = [
+ "anyhow",
+ "arrow 58.4.0",
+ "async-trait",
+ "axum",
+ "beacon-datafusion-ext",
+ "bytes",
+ "chrono",
+ "datafusion 53.1.0",
+ "futures",
+ "parquet",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
  "typetag",
  "url",
 ]

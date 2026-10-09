@@ -266,6 +266,11 @@ pub(crate) async fn create_external_table(
         return create_icechunk_table(session, cmd).await;
     }
 
+    // `STORED AS ERDDAP` reads a remote ERDDAP dataset over HTTP; LOCATION is the dataset URL.
+    if cmd.file_type.eq_ignore_ascii_case("ERDDAP") {
+        return create_erddap_table(session, cmd).await;
+    }
+
     // `STORED AS POSTGRES|MYSQL` registers an external database table backed by a
     // federated connection to the source database, rather than a listing table.
     if let Some(engine) = SqlEngine::from_stored_as(&cmd.file_type) {
@@ -422,6 +427,30 @@ async fn create_icechunk_table(
 
     // `build_provider` reads the schema from the repository; registration
     // persists `table.json` via the TableManager.
+    let provider = definition.build_provider(session.clone()).await?;
+    session.register_table(cmd.name.clone(), provider)?;
+    Ok(())
+}
+
+/// Build and register an ERDDAP table from
+/// `CREATE EXTERNAL TABLE … STORED AS ERDDAP LOCATION 'https://host/erddap/tabledap/<id>'
+/// OPTIONS ('request_timeout_secs' '600')`. The columns come from the dataset.
+async fn create_erddap_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        cmd.schema.fields().is_empty(),
+        "ERDDAP tables take their columns from the dataset; remove the column list"
+    );
+    let definition = beacon_erddap::ErddapTableDefinition {
+        name: cmd.name.to_string(),
+        location: cmd.location.clone(),
+        options: cmd.options.clone(),
+        definition: cmd.definition.clone(),
+        resolved: None,
+    };
+    // `build_provider` reads the dataset info once; the table then persists it pinned.
     let provider = definition.build_provider(session.clone()).await?;
     session.register_table(cmd.name.clone(), provider)?;
     Ok(())
