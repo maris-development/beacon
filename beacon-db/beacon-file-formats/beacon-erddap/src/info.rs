@@ -276,12 +276,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_griddap_axes_in_dimension_order() {
-        let info = DatasetInfo::parse(&fixture("griddap_info.json")).unwrap();
+    fn dimension_rows_are_axes_not_columns() {
+        let json = br#"{"table":{"rows":[
+            ["dimension","time","","double","nValues=2"],
+            ["attribute","time","units","String","seconds since 1970-01-01T00:00:00Z"],
+            ["dimension","latitude","","float","nValues=3"],
+            ["variable","sst","","float",""]
+        ]}}"#;
+        let info = DatasetInfo::parse(json).unwrap();
         let axes: Vec<&str> = info.axes().iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(axes, ["time", "latitude", "longitude"]);
-        assert!(info.variable("sst").is_some());
+        assert_eq!(axes, ["time", "latitude"]);
         assert!(info.axes()[0].is_time());
+        let schema = info.tabledap_schema().unwrap();
+        assert_eq!(schema.fields().len(), 1);
+        assert_eq!(schema.field(0).name(), "sst");
     }
 
     #[test]
