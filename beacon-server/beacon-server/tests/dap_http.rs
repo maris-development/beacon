@@ -202,10 +202,15 @@ async fn the_index_page_links_the_responses() {
     let (router, _harness, admin) = router_with(config(false)).await;
     obs_table(&router, &admin).await;
 
-    let (status, _, body) = get(&router, "/dap/obs", None).await;
+    let (status, headers, body) = get(&router, "/dap/obs", None).await;
     let body = text(body);
 
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["xdods-server"], "dods/3.7");
+    assert!(headers["xopendap-server"]
+        .to_str()
+        .unwrap()
+        .starts_with("beacon/"));
     assert!(
         body.contains("obs.dds")
             && body.contains("obs.das")
@@ -439,4 +444,114 @@ async fn csv_rejects_a_bad_constraint() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(text(body).contains("unknown column"));
+}
+
+/// The ids of the rows in a `.dods` body whose first column is a Float64 id.
+async fn dods_ids(router: &Router, uri: &str) -> Vec<f64> {
+    let (status, _, body) = get(router, uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    decode_dods(&body, "d")
+        .1
+        .into_iter()
+        .map(|row| match row[0] {
+            V::F64(id) => id,
+            ref other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dotted_column_is_served_and_filtered() {
+    let (router, harness, admin) = router_with(config(false)).await;
+    // A managed Lance table rejects a `.` in a column name, so the table is a CSV file.
+    let folder = harness.server.config().data.datasets.join("dotted");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("a.csv"),
+        "id,temp.units
+1,degC
+2,K
+",
+    )
+    .unwrap();
+    admin_sql(
+        &router,
+        &admin,
+        "CREATE EXTERNAL TABLE dotted STORED AS CSV LOCATION 'dotted/'",
+    )
+    .await;
+
+    let (status, _, body) = get(&router, "/dap/dotted.dds", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(text(body).contains("String temp%2Eunits;"));
+
+    // pydap sends a single-encoded name, the same as the DDS shows it.
+    let (status, _, body) = get(
+        &router,
+        "/dap/dotted.dods?id,s%2Etemp%2Eunits&s%2Etemp%2Eunits=%22degC%22",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        decode_dods(&body, "ds").1,
+        vec![vec![V::F64(1.0), V::S("degC".into())]]
+    );
+
+    // The plain name and the double-encoded name resolve to the same column.
+    for uri in [
+        "/dap/dotted.dods?id&temp.units=%22K%22",
+        "/dap/dotted.dods?id&temp%252Eunits=%22K%22",
+    ] {
+        assert_eq!(dods_ids(&router, uri).await, [2.0], "{uri}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nan_row_does_not_match_an_ordering_comparison() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    for sql in [
+        "CREATE TABLE nan_obs (id BIGINT, v DOUBLE)",
+        "INSERT INTO nan_obs VALUES (1, 5.0), (2, CAST('NaN' AS DOUBLE))",
+    ] {
+        admin_sql(&router, &admin, sql).await;
+    }
+
+    for uri in [
+        "/dap/nan_obs.dods?id&v%3E3",
+        "/dap/nan_obs.dods?id&v%3E=3",
+        "/dap/nan_obs.dods?id&v%3C=10",
+        "/dap/nan_obs.dods?id&v%3C10",
+    ] {
+        assert_eq!(dods_ids(&router, uri).await, [1.0], "{uri}");
+    }
+    assert_eq!(dods_ids(&router, "/dap/nan_obs.dods?id&v=NaN").await, [2.0]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mixed_case_table_name_is_found() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    for sql in [
+        "CREATE TABLE \"MixedCase\" (id BIGINT)",
+        "INSERT INTO \"MixedCase\" VALUES (7)",
+    ] {
+        admin_sql(&router, &admin, sql).await;
+    }
+
+    assert_eq!(
+        get(&router, "/dap/MixedCase.dds", None).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(dods_ids(&router, "/dap/MixedCase.dods?id").await, [7.0]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn boolean_and_float32_columns_can_be_filtered() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    assert_eq!(dods_ids(&router, "/dap/obs.dods?id&ok=1").await, [1.0]);
+    assert_eq!(dods_ids(&router, "/dap/obs.dods?id&ok=0").await, [2.0]);
+    assert_eq!(dods_ids(&router, "/dap/obs.dods?id&temp=10.5").await, [1.0]);
+    assert_eq!(dods_ids(&router, "/dap/obs.dods?id&temp%3E5").await, [1.0]);
 }

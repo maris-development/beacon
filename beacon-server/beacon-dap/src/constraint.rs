@@ -112,13 +112,15 @@ fn parse_selection(clause: &str) -> Result<Selection, DapError> {
 }
 
 /// A column name, with or without the `s.` prefix, after the `%XX` decode.
+///
+/// The schema is flat, so a `.` after the prefix belongs to the column name.
 fn parse_name(text: &str) -> Result<String, DapError> {
     let text = text.trim();
     let bare = text
         .strip_prefix(SEQUENCE)
         .and_then(|rest| rest.strip_prefix('.'))
         .unwrap_or(text);
-    if bare.is_empty() || bare.contains(['(', ')', '[', ']', '{', '}', '"', ',', '.']) {
+    if bare.is_empty() || bare.contains(['(', ')', '[', ']', '{', '}', '"', ',']) {
         return Err(DapError::BadRequest(format!(
             "{text:?} is not a column name; functions, index ranges and value lists are not supported"
         )));
@@ -364,6 +366,23 @@ mod tests {
     }
 
     #[test]
+    fn a_dotted_column_name_parses_in_every_form() {
+        assert_eq!(
+            parse("s%2Etemp%2Eunits").unwrap().projection,
+            vec!["temp.units".to_string()]
+        );
+        assert_eq!(
+            parse("temp.units").unwrap().projection,
+            vec!["temp.units".to_string()]
+        );
+        assert_eq!(parse("s.a.b").unwrap().projection, vec!["a.b".to_string()]);
+        assert_eq!(
+            parse("id&s%2Etemp%2Eunits%3E5").unwrap().selections,
+            vec![selection("temp.units", Op::Gt, Value::Number(5.0))]
+        );
+    }
+
+    #[test]
     fn nan_is_a_value() {
         assert_eq!(
             parse("&depth=NaN").unwrap().selections,
@@ -383,7 +402,6 @@ mod tests {
             "&name=\"open",
             "&name=\"a\"b",
             "%FF",
-            "s.a.b",
             "&=3",
         ] {
             assert!(

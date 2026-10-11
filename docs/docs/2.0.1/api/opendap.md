@@ -43,6 +43,7 @@ starts with `&`:
 - A text value has double quotes. A number has none.
 - Compare a time column with seconds since 1970-01-01T00:00:00Z.
 - `x=NaN` and `x!=NaN` work on float columns.
+- A NaN value never matches `<`, `<=`, `>` or `>=`.
 - Selections combine with AND.
 
 Beacon does not support functions such as `orderBy` or `distinct()`, value lists or index ranges.
@@ -71,7 +72,10 @@ looks like a null.
 ## Column names
 
 DAP2 uses `.` to separate levels. Beacon escapes every character outside `A-Z`, `a-z`, `0-9` and
-`_` as `%XX`. For example, the column `temp.units` becomes `temp%2Eunits`.
+`_` as `%XX` in the DDS and the DAS. For example, the column `temp.units` becomes `temp%2Eunits`.
+
+A client can use the escaped name or the plain name in a constraint. Both `temp%2Eunits` and
+`temp.units` select the column `temp.units`.
 
 ## Read a table with pydap
 

@@ -1858,7 +1858,6 @@ dependencies = [
 name = "beacon-dap"
 version = "2.0.1"
 dependencies = [
- "anyhow",
  "arrow 58.4.0",
  "axum",
  "beacon-core",

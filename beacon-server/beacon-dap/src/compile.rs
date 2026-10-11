@@ -1,5 +1,6 @@
 //! Compiles a DAP2 constraint into SQL with positional parameters.
 
+use arrow::datatypes::DataType;
 use datafusion::common::ScalarValue;
 use datafusion::sql::TableReference;
 
@@ -50,7 +51,7 @@ pub fn compile(
         .map(|column| quote_ident(&column.name))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut sql = format!("SELECT {select} FROM {}", table.to_quoted_string());
+    let mut sql = format!("SELECT {select} FROM {}", quoted_table(table));
     let mut params = Vec::new();
     let mut conditions = Vec::new();
     for selection in &constraint.selections {
@@ -66,6 +67,16 @@ pub fn compile(
         params,
         columns,
     })
+}
+
+/// The table reference with every part in double quotes, so a keyword or a mixed-case name works.
+fn quoted_table(table: &TableReference) -> String {
+    [table.catalog(), table.schema(), Some(table.table())]
+        .into_iter()
+        .flatten()
+        .map(quote_ident)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// A SQL identifier in double quotes. A `"` inside the name is doubled.
@@ -137,14 +148,30 @@ fn condition(
                 )));
             }
             params.push(ScalarValue::Float64(Some(*number)));
-            let value = format!("CAST(${} AS DOUBLE)", params.len());
+            let number_type = match column.data_type {
+                // A Float32 column holds REAL values, so a DOUBLE parameter never equals them.
+                DataType::Float16 | DataType::Float32 => "REAL",
+                _ => "DOUBLE",
+            };
+            let value = format!("CAST(${} AS {number_type})", params.len());
             // The filter stays on the native column, so pushdown into the source still works.
             let value = if column.is_time() {
                 format!("to_timestamp({value})")
             } else {
                 value
             };
-            Ok(format!("{ident} {} {value}", sql_operator(selection.op)?))
+            let operator = sql_operator(selection.op)?;
+            if column.data_type == DataType::Boolean {
+                // A Boolean column is an Int32 on the wire, so the number compares with 0 or 1.
+                return Ok(format!("CAST({ident} AS INT) {operator} {value}"));
+            }
+            let comparison = format!("{ident} {operator} {value}");
+            // Arrow orders NaN above every number, but DAP2 says that a NaN comparison is false.
+            if column.is_float() && matches!(selection.op, Op::Lt | Op::Le | Op::Gt | Op::Ge) {
+                Ok(format!("({comparison} AND NOT isnan({ident}))"))
+            } else {
+                Ok(comparison)
+            }
         }
         (Value::Text(_), _) => Err(DapError::BadRequest(format!(
             "column {:?} is numeric, so the value must be a number",
@@ -194,6 +221,7 @@ mod tests {
                 column("depth", DataType::Float64),
                 column("id", DataType::Int64),
                 column("platform", DataType::Utf8),
+                column("ok", DataType::Boolean),
             ],
             omitted: vec!["raw".into()],
             table_comment: None,
@@ -231,7 +259,7 @@ mod tests {
     fn projection_keeps_the_schema_order() {
         let out = compiled(&["platform", "time"], vec![]).unwrap();
 
-        assert_eq!(out.sql, r#"SELECT "time", "platform" FROM argo"#);
+        assert_eq!(out.sql, r#"SELECT "time", "platform" FROM "argo""#);
         assert!(out.params.is_empty());
         let names: Vec<_> = out.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["time", "platform"]);
@@ -243,7 +271,7 @@ mod tests {
 
         assert_eq!(
             out.sql,
-            r#"SELECT "time", "temp", "depth", "id", "platform" FROM argo"#
+            r#"SELECT "time", "temp", "depth", "id", "platform", "ok" FROM "argo""#
         );
     }
 
@@ -260,7 +288,7 @@ mod tests {
 
         assert_eq!(
             out.sql,
-            r#"SELECT "temp" FROM argo WHERE "temp" > CAST($1 AS DOUBLE) AND "platform" = CAST($2 AS VARCHAR)"#
+            r#"SELECT "temp" FROM "argo" WHERE ("temp" > CAST($1 AS REAL) AND NOT isnan("temp")) AND "platform" = CAST($2 AS VARCHAR)"#
         );
         assert_eq!(
             out.params,
@@ -365,8 +393,87 @@ mod tests {
 
         assert_eq!(
             out.sql,
-            r#"SELECT "temp" FROM argo WHERE "depth" > CAST($1 AS DOUBLE)"#
+            r#"SELECT "temp" FROM "argo" WHERE ("depth" > CAST($1 AS DOUBLE) AND NOT isnan("depth"))"#
         );
+    }
+
+    #[test]
+    fn float_comparisons_exclude_nan() {
+        for (op, text) in [(Op::Lt, "<"), (Op::Le, "<="), (Op::Gt, ">"), (Op::Ge, ">=")] {
+            let out =
+                compiled(&["depth"], vec![selection("depth", op, Value::Number(3.0))]).unwrap();
+
+            assert!(
+                out.sql.ends_with(&format!(
+                    r#"WHERE ("depth" {text} CAST($1 AS DOUBLE) AND NOT isnan("depth"))"#
+                )),
+                "{}",
+                out.sql
+            );
+        }
+        let eq = compiled(
+            &["depth"],
+            vec![selection("depth", Op::Eq, Value::Number(3.0))],
+        )
+        .unwrap();
+        let ne = compiled(
+            &["depth"],
+            vec![selection("depth", Op::Ne, Value::Number(3.0))],
+        )
+        .unwrap();
+
+        assert!(
+            eq.sql.ends_with(r#"WHERE "depth" = CAST($1 AS DOUBLE)"#),
+            "{}",
+            eq.sql
+        );
+        assert!(
+            ne.sql.ends_with(r#"WHERE "depth" <> CAST($1 AS DOUBLE)"#),
+            "{}",
+            ne.sql
+        );
+    }
+
+    #[test]
+    fn float32_columns_compare_with_a_real_parameter() {
+        let out = compiled(
+            &["temp"],
+            vec![selection("temp", Op::Eq, Value::Number(10.5))],
+        )
+        .unwrap();
+
+        assert!(
+            out.sql.ends_with(r#"WHERE "temp" = CAST($1 AS REAL)"#),
+            "{}",
+            out.sql
+        );
+        assert_eq!(out.params, vec![ScalarValue::Float64(Some(10.5))]);
+    }
+
+    #[test]
+    fn boolean_columns_compare_as_integers() {
+        let out = compiled(&["ok"], vec![selection("ok", Op::Eq, Value::Number(1.0))]).unwrap();
+
+        assert!(
+            out.sql
+                .ends_with(r#"WHERE CAST("ok" AS INT) = CAST($1 AS DOUBLE)"#),
+            "{}",
+            out.sql
+        );
+    }
+
+    #[test]
+    fn every_part_of_the_table_reference_is_quoted() {
+        let schema = schema();
+        let constraint = Constraint::default();
+
+        let keyword = compile(&TableReference::bare("table"), &schema, &constraint).unwrap();
+        let mixed = compile(&TableReference::bare("ArgoFloats"), &schema, &constraint).unwrap();
+        let full = compile(&TableReference::full("c", "s", "t"), &schema, &constraint).unwrap();
+
+        assert!(keyword.sql.ends_with(r#"FROM "table""#), "{}", keyword.sql);
+        assert!(mixed.sql.ends_with(r#"FROM "ArgoFloats""#), "{}", mixed.sql);
+        assert!(full.sql.ends_with(r#"FROM "c"."s"."t""#), "{}", full.sql);
     }
 
     #[test]
@@ -467,7 +574,7 @@ mod tests {
 
         assert_eq!(
             out.sql,
-            r#"SELECT "a""b" FROM argo WHERE "a""b" > CAST($1 AS DOUBLE)"#
+            r#"SELECT "a""b" FROM "argo" WHERE ("a""b" > CAST($1 AS DOUBLE) AND NOT isnan("a""b"))"#
         );
     }
 

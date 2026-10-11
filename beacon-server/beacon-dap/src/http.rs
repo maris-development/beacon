@@ -17,7 +17,7 @@ use crate::constraint;
 use crate::das::das;
 use crate::dds::dds;
 use crate::error::DapError;
-use crate::headers::dap2_response;
+use crate::headers::{dap2_response, insert_server_headers};
 use crate::types::ServedSchema;
 
 /// The response that a URL suffix asks for.
@@ -92,22 +92,38 @@ async fn dataset(
     result.unwrap_or_else(IntoResponse::into_response)
 }
 
-/// The served schema of `table`. An unknown table and a table without a read grant both
-/// give 404, so a caller cannot find the names of tables that they cannot read.
+/// The served schema of `table`, and the reference that found it. An unknown table and a table
+/// without a read grant both give 404, so a caller cannot find the names of tables that they
+/// cannot read.
 pub(crate) async fn load_schema(
     runtime: &Runtime,
     identity: &AuthIdentity,
     table: &str,
 ) -> Result<(TableReference, ServedSchema), DapError> {
-    let reference = TableReference::from(table);
-    let schema = runtime
-        .table_arrow_schema(reference.clone(), identity)
-        .await
-        .map_err(|error| {
-            tracing::debug!(%table, %error, "DAP2 dataset not served");
-            DapError::NotFound(format!("dataset {table:?} not found"))
-        })?;
-    Ok((reference, ServedSchema::from_arrow(&schema)))
+    // The bare name keeps its case. A name with a `.` or a `"` may also be a qualified name.
+    let mut references = vec![TableReference::bare(table)];
+    if table.contains(['.', '"']) {
+        references.push(TableReference::from(table));
+    }
+    let mut failure = None;
+    for reference in references {
+        match runtime
+            .table_arrow_schema(reference.clone(), identity)
+            .await
+        {
+            Ok(schema) => return Ok((reference, ServedSchema::from_arrow(&schema))),
+            Err(error) => failure = Some(error.to_string()),
+        }
+    }
+    let error = failure.unwrap_or_default();
+    let lower = error.to_lowercase();
+    if lower.contains("permission denied") || lower.contains("could not be resolved") {
+        tracing::debug!(%table, %error, "DAP2 dataset not served");
+    } else {
+        // Other errors can come from a provider that fails for a short time.
+        tracing::warn!(%table, %error, "DAP2 dataset not served");
+    }
+    Err(DapError::NotFound(format!("dataset {table:?} not found")))
 }
 
 async fn index_response(
@@ -121,7 +137,10 @@ async fn index_response(
         .map(|(text, _)| format!("{table}{text}"))
         .collect();
     let body = format!("DAP2 dataset {table}\n\n{}\n", links.join("\n"));
-    Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response())
+    let mut response =
+        ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response();
+    insert_server_headers(response.headers_mut());
+    Ok(response)
 }
 
 async fn dds_response(

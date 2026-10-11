@@ -78,3 +78,37 @@ def test_pydap_time_filter_uses_seconds(client, dap_table):
     rows = list(seq[seq["t"] >= 1704153600].iterdata())
 
     assert _ids(rows) == [2, 3]
+
+
+DOTTED_TABLE = "itest_dap2_dotted"
+
+
+@pytest.fixture(scope="module")
+def dotted_table(client, datasets_dir):
+    # A managed table rejects a `.` in a column name, so the table is a CSV file.
+    (datasets_dir / "itest_dap2_dotted.csv").write_text(
+        "id,temp.units\n1,degC\n2,K\n3,degC\n", encoding="utf-8"
+    )
+    try:
+        client.execute(f"DROP TABLE IF EXISTS {DOTTED_TABLE}", admin=True)
+    except QueryError:
+        pass
+    client.execute(
+        f"CREATE EXTERNAL TABLE {DOTTED_TABLE} STORED AS CSV LOCATION 'itest_dap2_dotted.csv'",
+        admin=True,
+    )
+    yield DOTTED_TABLE
+    try:
+        client.execute(f"DROP TABLE IF EXISTS {DOTTED_TABLE}", admin=True)
+    except QueryError:
+        pass
+
+
+def test_pydap_reads_and_filters_a_dotted_column(client, dotted_table):
+    seq = _sequence(client, dotted_table)
+
+    # pydap shows the DDS name, with the dot escaped as %2E.
+    assert list(seq.keys()) == ["id", "temp%2Eunits"]
+    rows = list(seq[seq["temp%2Eunits"] == "degC"].iterdata())
+
+    assert _ids(rows) == [1, 3]
