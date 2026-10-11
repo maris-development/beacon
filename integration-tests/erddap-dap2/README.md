@@ -5,7 +5,7 @@ This test shows that ERDDAP reads a Beacon table through the dataset type
 
 ## Run the test
 
-1. Start a Beacon server from this branch on port 5001, with anonymous read (the default).
+1. Start a Beacon server that has the DAP2 endpoint. Use port 5001 and anonymous read (the default).
 2. Start ERDDAP:
 
    ```bash
@@ -39,8 +39,8 @@ If Beacon uses another port, change `sourceUrl` in `datasets.xml` too.
 
 ## Record the results
 
-Record these facts in the spec (`docs/superpowers/specs/2026-10-11-dap2-endpoint-design.md`, section 12):
+Record these facts in the pull request or the issue:
 
-- The constraint text that ERDDAP sends. Read it from the Beacon log at debug level, or from
-  the ERDDAP `log.txt`.
+- The constraint text that ERDDAP sends. Start Beacon with `RUST_LOG=info,beacon_dap=debug`.
+  Read the text from the Beacon log, or from the ERDDAP `log.txt`.
 - Whether `sourceUrl` with `user:password@` works against a Beacon table without anonymous read.

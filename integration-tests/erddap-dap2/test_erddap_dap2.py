@@ -44,9 +44,13 @@ def erddap_dataset():
     )
     deadline = time.monotonic() + LOAD_TIMEOUT_S
     while time.monotonic() < deadline:
-        response = requests.get(f"{ERDDAP}/tabledap/{DATASET}.das", timeout=30)
-        if response.status_code == 200:
-            return DATASET
+        try:
+            response = requests.get(f"{ERDDAP}/tabledap/{DATASET}.das", timeout=30)
+            if response.status_code == 200:
+                return DATASET
+        except requests.RequestException:
+            # ERDDAP is not up yet. Poll again.
+            pass
         time.sleep(10)
     pytest.fail(f"ERDDAP did not load {DATASET} in {LOAD_TIMEOUT_S} s; see its log.txt")
 
@@ -61,3 +65,19 @@ def test_erddap_filters_through_beacon(erddap_dataset):
     # Row 0 holds the names and row 1 the units.
     assert rows[0] == ["time", "temp", "platform"]
     assert rows[2:] == [["2024-01-02T00:00:00Z", "6.0", "BUOY"]]
+
+
+def test_beacon_runs_the_filter(erddap_dataset):
+    # ERDDAP applies the constraints again to the source rows, so ask Beacon directly.
+    query = "t,temp,platform&temp%3E5&platform=%22BUOY%22"
+
+    response = requests.get(f"{BEACON}/dap/erddap_obs.dods?{query}", timeout=60)
+
+    assert response.status_code == 200, response.text
+    _, data = response.content.split(b"\nData:\n", 1)
+    row_marker = b"\x5a\x00\x00\x00"
+    end_marker = b"\xa5\x00\x00\x00"
+    # One row marker means that Beacon returned one row.
+    assert data.startswith(row_marker)
+    assert data.endswith(end_marker)
+    assert data.count(row_marker) == 1
