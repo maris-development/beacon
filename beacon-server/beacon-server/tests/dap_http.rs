@@ -207,7 +207,11 @@ async fn the_index_page_links_the_responses() {
 
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body.contains("obs.dds") && body.contains("obs.das") && body.contains("obs.dods"),
+        body.contains("obs.dds")
+            && body.contains("obs.das")
+            && body.contains("obs.dods")
+            && body.contains("obs.csv")
+            && body.contains("obs.nc"),
         "{body}"
     );
 }
@@ -392,4 +396,47 @@ async fn dods_rejects_a_bad_constraint_before_any_data() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(headers["content-description"], "dods-error");
     assert!(text(body).contains("must be a number"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn csv_returns_the_subset_as_a_file() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let (status, headers, body) = get(&router, "/dap/obs.csv?id,platform&depth%3E10", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(headers[header::CONTENT_TYPE], "text/csv");
+    assert!(headers[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .contains("obs.csv"));
+    let body = text(body);
+    assert_eq!(body.lines().collect::<Vec<_>>(), ["id,platform", "2,BUOY"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nc_returns_a_netcdf_file() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let (status, headers, body) = get(&router, "/dap/obs.nc?id,depth", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(headers[header::CONTENT_TYPE], "application/x-netcdf");
+    assert!(
+        body.starts_with(b"\x89HDF\r\n\x1a\n") || body.starts_with(b"CDF"),
+        "not a NetCDF file"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn csv_rejects_a_bad_constraint() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let (status, _, body) = get(&router, "/dap/obs.csv?nope", None).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(text(body).contains("unknown column"));
 }

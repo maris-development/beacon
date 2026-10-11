@@ -16,6 +16,7 @@ pub mod types;
 pub mod xdr;
 
 mod data;
+mod files;
 mod http;
 
 pub use http::{basic_challenge, router};

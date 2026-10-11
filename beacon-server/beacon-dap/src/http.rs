@@ -7,6 +7,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Router};
+use beacon_core::query::output::OutputFormat;
 use beacon_core::runtime::Runtime;
 use beacon_core::AuthIdentity;
 use datafusion::sql::TableReference;
@@ -27,13 +28,17 @@ pub(crate) enum Suffix {
     Dds,
     Das,
     Dods,
+    Csv,
+    Nc,
 }
 
 /// The suffixes, in the order that the index page lists them.
-pub(crate) const SUFFIXES: [(&str, Suffix); 3] = [
+pub(crate) const SUFFIXES: [(&str, Suffix); 5] = [
     (".dds", Suffix::Dds),
     (".das", Suffix::Das),
     (".dods", Suffix::Dods),
+    (".csv", Suffix::Csv),
+    (".nc", Suffix::Nc),
 ];
 
 /// Splits `argo.dds` into the table name and the suffix. Only a known suffix is removed.
@@ -76,6 +81,13 @@ async fn dataset(
         Suffix::Dds => dds_response(&runtime, &identity, table, &query).await,
         Suffix::Das => das_response(&runtime, &identity, table).await,
         Suffix::Dods => crate::data::dods_response(&runtime, identity, table, &query).await,
+        Suffix::Csv => {
+            crate::files::file_response(&runtime, identity, table, &query, OutputFormat::Csv).await
+        }
+        Suffix::Nc => {
+            crate::files::file_response(&runtime, identity, table, &query, OutputFormat::NetCDF)
+                .await
+        }
     };
     result.unwrap_or_else(IntoResponse::into_response)
 }
@@ -150,6 +162,8 @@ mod tests {
         assert_eq!(split_suffix("argo.dds"), ("argo", Suffix::Dds));
         assert_eq!(split_suffix("argo.das"), ("argo", Suffix::Das));
         assert_eq!(split_suffix("argo.dods"), ("argo", Suffix::Dods));
+        assert_eq!(split_suffix("argo.csv"), ("argo", Suffix::Csv));
+        assert_eq!(split_suffix("argo.nc"), ("argo", Suffix::Nc));
         assert_eq!(split_suffix("my.table.dds"), ("my.table", Suffix::Dds));
         assert_eq!(split_suffix("argo"), ("argo", Suffix::Index));
         assert_eq!(
