@@ -1,0 +1,24 @@
+# Local ERDDAP server for the ignored ERDDAP tests in beacon-core. See README.md.
+name: beacon-erddap-test
+
+services:
+  erddap:
+    # ERDDAP 2.31.1. Parquet output needs ERDDAP 2.23 or newer.
+    image: axiom/docker-erddap:v2.31.1
+    ports:
+      - "127.0.0.1:8089:8080"
+    environment:
+      ERDDAP_baseUrl: http://localhost:8089
+      ERDDAP_baseHttpsUrl: http://localhost:8089
+      ERDDAP_flagKeyKey: beacon-erddap-test
+      ERDDAP_emailEverythingTo: nobody@example.com
+      ERDDAP_emailDailyReportsTo: nobody@example.com
+      ERDDAP_emailFromAddress: nobody@example.com
+      ERDDAP_adminEmail: nobody@example.com
+      ERDDAP_adminInstitution: Beacon tests
+      ERDDAP_adminInstitutionUrl: https://github.com/maris-development/beacon
+      ERDDAP_MEMORY: 1G
+    volumes:
+      # A read-only mount in the content directory stops the entrypoint, so use datasets.d.
+      - ./datasets.xml:/datasets.d/beacon_test.xml:ro
+      - ./data:/datasets/beacon:ro

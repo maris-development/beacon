@@ -57,6 +57,7 @@ CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
 | `POSTGRES` | External PostgreSQL table (federated) | [SQL Databases](/docs/2.0.1/data-sources/sql-databases) |
 | `MYSQL` | External MySQL table (federated) | [SQL Databases](/docs/2.0.1/data-sources/sql-databases) |
 | `REMOTE` | A table on another Beacon server | [Remote Tables](/docs/2.0.1/data-sources/remote-tables) |
+| `ERDDAP` | ERDDAP tabledap dataset URL | [ERDDAP](/docs/2.0.1/data-sources/erddap) |
 
 `DELTA` points at an existing
 [Delta Lake](/docs/2.0.1/formats/delta-lake) table directory. It also
@@ -172,6 +173,7 @@ validates it and then reads the server setting alone. See the format page of eac
 | `ICECHUNK` | `branch`, `tag`, `snapshot`, `read_dimensions` | [Icechunk](/docs/2.0.1/formats/icechunk#options) |
 | `POSTGRES`, `MYSQL` | `host`, `port`, `user`, `password`, `database`, `sslmode` | [SQL Databases](/docs/2.0.1/data-sources/sql-databases#options) |
 | `REMOTE` | `tls` | [Remote Tables](/docs/2.0.1/data-sources/remote-tables#options) |
+| `ERDDAP` | `request_timeout_secs` | [ERDDAP](/docs/2.0.1/data-sources/erddap#options) |
 | `PARQUET`, `GEOPARQUET`, `ARROW`, `TIFF`, `BBF` | None | |
 
 ## `DROP TABLE`

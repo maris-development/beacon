@@ -18,6 +18,9 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   reads it, and ERDDAP adds it as an `EDDTableFromDapSequence` dataset. ERDDAP sends no
   credentials, so such a table needs anonymous read. `BEACON_DAP_ENABLED=false` turns the
   endpoint off. ([#563](https://github.com/maris-development/beacon/pull/563))
+- **ERDDAP tables.** `CREATE EXTERNAL TABLE t STORED AS ERDDAP LOCATION 'https://host/erddap/tabledap/<id>'`
+  reads an ERDDAP tabledap dataset. Beacon sends filters and columns to ERDDAP. The ERDDAP
+  attributes are table and column metadata, and `title`, `long_name` and `units` give the comments.
 
 ## [2.0.1] — 2026-10-08
 
