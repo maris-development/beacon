@@ -207,7 +207,189 @@ async fn the_index_page_links_the_responses() {
 
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body.contains("obs.dds") && body.contains("obs.das"),
+        body.contains("obs.dds") && body.contains("obs.das") && body.contains("obs.dods"),
         "{body}"
     );
+}
+
+/// A decoded DAP2 value.
+#[derive(Debug, Clone, PartialEq)]
+enum V {
+    I(i32),
+    F32(f32),
+    F64(f64),
+    S(String),
+}
+
+/// Splits a `.dods` body at `Data:\n` and decodes the rows. `types` gives the DAP2 type of
+/// each column: `i` Int32, `f` Float32, `d` Float64, `s` String.
+fn decode_dods(body: &[u8], types: &str) -> (String, Vec<Vec<V>>) {
+    let marker = b"\nData:\n";
+    let at = body
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("Data: marker");
+    let dds = String::from_utf8(body[..at + 1].to_vec()).unwrap();
+    let mut rest = &body[at + marker.len()..];
+    let mut rows = Vec::new();
+    loop {
+        let (tag, tail) = rest.split_at(4);
+        rest = tail;
+        if tag == [0xA5, 0, 0, 0] {
+            assert!(rest.is_empty(), "bytes after the end marker");
+            break;
+        }
+        assert_eq!(tag, [0x5A, 0, 0, 0], "row marker");
+        let mut row = Vec::new();
+        for kind in types.chars() {
+            let value = match kind {
+                'i' => {
+                    let value = i32::from_be_bytes(rest[..4].try_into().unwrap());
+                    rest = &rest[4..];
+                    V::I(value)
+                }
+                'f' => {
+                    let value = f32::from_be_bytes(rest[..4].try_into().unwrap());
+                    rest = &rest[4..];
+                    V::F32(value)
+                }
+                'd' => {
+                    let value = f64::from_be_bytes(rest[..8].try_into().unwrap());
+                    rest = &rest[8..];
+                    V::F64(value)
+                }
+                's' => {
+                    let length = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+                    let padded = length.div_ceil(4) * 4;
+                    let value = String::from_utf8(rest[4..4 + length].to_vec()).unwrap();
+                    rest = &rest[4 + padded..];
+                    V::S(value)
+                }
+                other => panic!("unknown type {other}"),
+            };
+            row.push(value);
+        }
+        rows.push(row);
+    }
+    (dds, rows)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dods_returns_the_rows_that_match() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let (status, headers, body) = get(&router, "/dap/obs.dods?id,platform&depth%3E10", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(headers["content-description"], "dods-data");
+    assert_eq!(headers[header::CONTENT_TYPE], "application/octet-stream");
+    let (dds, rows) = decode_dods(&body, "ds");
+    assert!(
+        dds.contains("Float64 id;") && dds.contains("String platform;"),
+        "{dds}"
+    );
+    assert_eq!(rows, vec![vec![V::F64(2.0), V::S("BUOY".into())]]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dods_accepts_the_sequence_prefix_and_time_seconds() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    // 1704153600 is 2024-01-02T00:00:00Z. The projection keeps the schema order: id, t.
+    let (status, _, body) = get(&router, "/dap/obs.dods?s.t,s.id&s.t%3E=1704153600", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let (_, rows) = decode_dods(&body, "dd");
+    assert_eq!(rows, vec![vec![V::F64(2.0), V::F64(1_704_153_600.0)]]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dods_regex_is_a_full_match() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let platforms = |uri: &'static str| {
+        let router = router.clone();
+        async move {
+            let (status, _, body) = get(&router, uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            let mut names: Vec<String> = decode_dods(&body, "s")
+                .1
+                .into_iter()
+                .map(|row| match &row[0] {
+                    V::S(name) => name.clone(),
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            names.sort();
+            names
+        }
+    };
+
+    assert_eq!(
+        platforms("/dap/obs.dods?platform&platform=~%22B.*%22").await,
+        ["BUOY"]
+    );
+    assert!(platforms("/dap/obs.dods?platform&platform=~%22UO%22")
+        .await
+        .is_empty());
+    assert_eq!(
+        platforms("/dap/obs.dods?platform&platform=~%22SHIP%7CBUOY%22").await,
+        ["BUOY", "SHIP"]
+    );
+    assert!(
+        platforms("/dap/obs.dods?platform&platform=~%22HIP%7CBUO%22")
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dods_sends_fill_values_for_nulls() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let (status, _, body) = get(
+        &router,
+        "/dap/obs.dods?id,depth,temp,ok,platform&id=3",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let (_, rows) = decode_dods(&body, "ddfis");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row[0], V::F64(3.0));
+    assert!(matches!(row[1], V::F64(value) if value.is_nan()));
+    assert!(matches!(row[2], V::F32(value) if value.is_nan()));
+    assert_eq!(row[3], V::I(i32::MAX));
+    assert_eq!(row[4], V::S(String::new()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dods_with_no_match_is_only_the_end_marker() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let (status, _, body) = get(&router, "/dap/obs.dods?id&id%3E100", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let (_, rows) = decode_dods(&body, "d");
+    assert!(rows.is_empty());
+    assert!(body.ends_with(&[0xA5, 0, 0, 0]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dods_rejects_a_bad_constraint_before_any_data() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let (status, headers, body) = get(&router, "/dap/obs.dods?id&depth%3E%22x%22", None).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(headers["content-description"], "dods-error");
+    assert!(text(body).contains("must be a number"));
 }

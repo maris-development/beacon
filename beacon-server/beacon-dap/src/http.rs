@@ -26,10 +26,15 @@ pub(crate) enum Suffix {
     Index,
     Dds,
     Das,
+    Dods,
 }
 
 /// The suffixes, in the order that the index page lists them.
-pub(crate) const SUFFIXES: [(&str, Suffix); 2] = [(".dds", Suffix::Dds), (".das", Suffix::Das)];
+pub(crate) const SUFFIXES: [(&str, Suffix); 3] = [
+    (".dds", Suffix::Dds),
+    (".das", Suffix::Das),
+    (".dods", Suffix::Dods),
+];
 
 /// Splits `argo.dds` into the table name and the suffix. Only a known suffix is removed.
 pub(crate) fn split_suffix(dataset: &str) -> (&str, Suffix) {
@@ -70,6 +75,7 @@ async fn dataset(
         Suffix::Index => index_response(&runtime, &identity, table).await,
         Suffix::Dds => dds_response(&runtime, &identity, table, &query).await,
         Suffix::Das => das_response(&runtime, &identity, table).await,
+        Suffix::Dods => crate::data::dods_response(&runtime, identity, table, &query).await,
     };
     result.unwrap_or_else(IntoResponse::into_response)
 }
@@ -143,6 +149,7 @@ mod tests {
     fn split_suffix_reads_known_suffixes_from_the_end() {
         assert_eq!(split_suffix("argo.dds"), ("argo", Suffix::Dds));
         assert_eq!(split_suffix("argo.das"), ("argo", Suffix::Das));
+        assert_eq!(split_suffix("argo.dods"), ("argo", Suffix::Dods));
         assert_eq!(split_suffix("my.table.dds"), ("my.table", Suffix::Dds));
         assert_eq!(split_suffix("argo"), ("argo", Suffix::Index));
         assert_eq!(
