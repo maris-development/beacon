@@ -1,0 +1,28 @@
+# ERDDAP that reads a local Beacon table over DAP2 (EDDTableFromDapSequence). See README.md.
+name: beacon-erddap-dap2
+
+services:
+  erddap:
+    image: axiom/docker-erddap:v2.31.1
+    ports:
+      - "127.0.0.1:8090:8080"
+    extra_hosts:
+      # Beacon runs on the host. This name reaches it from the container.
+      - "host.docker.internal:host-gateway"
+    environment:
+      ERDDAP_baseUrl: http://localhost:8090
+      ERDDAP_baseHttpsUrl: http://localhost:8090
+      ERDDAP_flagKeyKey: beacon-erddap-dap2
+      ERDDAP_emailEverythingTo: nobody@example.com
+      ERDDAP_emailDailyReportsTo: nobody@example.com
+      ERDDAP_emailFromAddress: nobody@example.com
+      ERDDAP_adminEmail: nobody@example.com
+      ERDDAP_adminInstitution: Beacon tests
+      ERDDAP_adminInstitutionUrl: https://github.com/maris-development/beacon
+      ERDDAP_MEMORY: 1G
+      # Load datasets often, so a dataset that failed before the table existed loads soon.
+      ERDDAP_loadDatasetsMinMinutes: "1"
+      ERDDAP_loadDatasetsMaxMinutes: "2"
+    volumes:
+      # A read-only mount in the content directory stops the entrypoint, so use datasets.d.
+      - ./datasets.xml:/datasets.d/beacon_dap2.xml:ro
