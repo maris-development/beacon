@@ -40,6 +40,8 @@ pub enum OutputFileKind {
     GeoParquet,
     NetCDF,
     Odv,
+    /// A Zarr store, packed as a zip archive.
+    Zarr,
 }
 
 impl OutputFileKind {
@@ -53,6 +55,7 @@ impl OutputFileKind {
             OutputFileKind::GeoParquet => "application/vnd.apache.parquet",
             OutputFileKind::NetCDF => "application/x-netcdf",
             OutputFileKind::Odv => "application/zip",
+            OutputFileKind::Zarr => "application/zip",
         }
     }
 
@@ -66,6 +69,7 @@ impl OutputFileKind {
             OutputFileKind::GeoParquet => ".parquet",
             OutputFileKind::NetCDF => ".nc",
             OutputFileKind::Odv => ".zip",
+            OutputFileKind::Zarr => ".zarr.zip",
         }
     }
 }

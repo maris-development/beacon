@@ -1695,6 +1695,7 @@ dependencies = [
  "zarrs",
  "zarrs_object_store",
  "zarrs_storage",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -1853,6 +1854,7 @@ dependencies = [
  "url",
  "utoipa",
  "uuid",
+ "zip 2.4.2",
 ]
 
 [[package]]

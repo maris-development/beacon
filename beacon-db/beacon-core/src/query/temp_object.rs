@@ -67,8 +67,9 @@ impl Drop for TempObject {
 /// Best-effort removal of crash-orphaned query-output files under `tmp_dir`.
 ///
 /// [`TempObject`]'s `Drop` handles the happy path; a process crash leaves
-/// `beacon_out_*` files behind. Called once on runtime build. Logs at debug and
-/// never fails the build.
+/// `beacon_out_*` files behind, and the Zarr writer's `beacon_out_*` scratch
+/// directories. Called once on runtime build. Logs at debug and never fails the
+/// build.
 pub fn sweep_stale_outputs(tmp_dir: &Path) {
     let entries = match std::fs::read_dir(tmp_dir) {
         Ok(entries) => entries,
@@ -78,7 +79,13 @@ pub fn sweep_stale_outputs(tmp_dir: &Path) {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("beacon_out_") {
-            match std::fs::remove_file(entry.path()) {
+            let path = entry.path();
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match removed {
                 Ok(()) => tracing::debug!(file = %name, "swept stale query-output file"),
                 Err(error) => {
                     tracing::debug!(file = %name, %error, "failed to sweep stale query-output file")
@@ -134,5 +141,21 @@ mod tests {
 
         assert!(!orphan.exists(), "orphaned output should be swept");
         assert!(keep.exists(), "unrelated files should be left alone");
+    }
+
+    /// A crash during a zipped Zarr write leaves a scratch store directory.
+    #[test]
+    fn sweep_removes_orphaned_scratch_directories() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let scratch = dir.path().join("beacon_out_abc123.zarr");
+        let keep = dir.path().join("datasets");
+        std::fs::create_dir_all(scratch.join("temp/c")).unwrap();
+        std::fs::write(scratch.join("temp/c/0"), b"chunk").unwrap();
+        std::fs::create_dir_all(&keep).unwrap();
+
+        sweep_stale_outputs(dir.path());
+
+        assert!(!scratch.exists(), "orphaned scratch store should be swept");
+        assert!(keep.exists(), "unrelated directories should be left alone");
     }
 }

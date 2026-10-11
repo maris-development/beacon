@@ -17,6 +17,8 @@ def test_infer_format_from_extension():
     assert infer_format_name("o.arrow", None) == "ipc"
     assert infer_format_name("o.nc", None) == "netcdf"
     assert infer_format_name("o.geoparquet", None) == "geoparquet"
+    assert infer_format_name("o.zarr.zip", None) == "zarr"
+    assert infer_format_name("O.ZARR.ZIP", None) == "zarr"
 
 
 def test_infer_format_override_and_alias():
@@ -33,6 +35,7 @@ def test_build_output_format_simple():
     assert build_output_format("csv") == "csv"
     assert build_output_format("parquet") == "parquet"
     assert build_output_format("arrow") == "ipc"
+    assert build_output_format("zarr") == "zarr"
 
 
 def test_build_output_format_structured():

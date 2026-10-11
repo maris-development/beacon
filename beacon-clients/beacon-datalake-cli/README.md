@@ -289,6 +289,7 @@ The format is inferred from the output extension, or set explicitly with
 | `nd_netcdf` | — | N-dimensional NetCDF; requires `--dimension-columns` |
 | `geoparquet` | `.geoparquet` | optional `--lon`/`--lat` |
 | `odv` | `.odv` | Ocean Data View |
+| `zarr` | `.zarr.zip` | Zarr v3 store with one `obs` dimension, as a zip archive |
 
 ### Examples
 
