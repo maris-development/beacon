@@ -1855,6 +1855,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-dap"
+version = "2.0.1"
+dependencies = [
+ "anyhow",
+ "arrow 58.4.0",
+ "axum",
+ "beacon-core",
+ "bytes",
+ "datafusion 53.1.0",
+ "futures",
+ "percent-encoding",
+ "regex",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "beacon-datafusion-ext"
 version = "2.0.1"
 dependencies = [
