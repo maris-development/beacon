@@ -2186,6 +2186,7 @@ dependencies = [
  "axum-streams",
  "base64",
  "beacon-core",
+ "beacon-dap",
  "beacon-datafusion-ext",
  "beacon-mcp",
  "beacon-server-config",

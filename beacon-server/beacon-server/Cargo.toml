@@ -74,6 +74,7 @@ beacon-server-config = { path = "../beacon-server-config" }
 beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
 beacon-mcp = { path = "../beacon-mcp" }
+beacon-dap = { path = "../beacon-dap" }
 
 [dev-dependencies]
 # Tests build runtimes directly via `RuntimeBuilder`, so no test-only feature is
