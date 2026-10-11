@@ -110,11 +110,12 @@ fn condition(
         }
         (Value::Text(text), DapType::String) => {
             if selection.op == Op::Regex {
-                regex::Regex::new(text).map_err(|error| {
+                // `=~` is a full match, the same as ERDDAP.
+                let anchored = format!("^(?:{text})$");
+                regex::Regex::new(&anchored).map_err(|error| {
                     DapError::BadRequest(format!("invalid regular expression {text:?}: {error}"))
                 })?;
-                // `=~` is a full match, the same as ERDDAP.
-                params.push(ScalarValue::Utf8(Some(format!("^(?:{text})$"))));
+                params.push(ScalarValue::Utf8(Some(anchored)));
                 Ok(format!(
                     "regexp_like({ident}, CAST(${} AS VARCHAR))",
                     params.len()
@@ -414,5 +415,73 @@ mod tests {
         let result = compile(&table(), &schema, &Constraint::default());
 
         assert!(error_text(result).contains("no column"));
+    }
+
+    #[test]
+    fn a_regex_is_checked_in_its_anchored_form() {
+        // In verbose mode, `#` starts a comment that swallows the closing `)$`.
+        assert!(error_text(compiled(
+            &["platform"],
+            vec![selection(
+                "platform",
+                Op::Regex,
+                Value::Text("(?x)a #".into())
+            )]
+        ))
+        .contains("invalid regular expression"));
+    }
+
+    #[test]
+    fn a_hostile_text_value_stays_a_parameter() {
+        let out = compiled(
+            &["platform"],
+            vec![selection(
+                "platform",
+                Op::Eq,
+                Value::Text("x' OR 1=1 --".into()),
+            )],
+        )
+        .unwrap();
+
+        assert!(!out.sql.contains("OR 1=1"), "{}", out.sql);
+        assert!(!out.sql.contains('\''), "{}", out.sql);
+        assert_eq!(
+            out.params,
+            vec![ScalarValue::Utf8(Some("x' OR 1=1 --".into()))]
+        );
+    }
+
+    #[test]
+    fn a_column_name_with_a_quote_is_escaped_everywhere() {
+        let schema = ServedSchema {
+            columns: vec![column(r#"a"b"#, DataType::Float64)],
+            omitted: vec![],
+            table_comment: None,
+        };
+        let constraint = Constraint {
+            projection: vec![r#"a"b"#.to_string()],
+            selections: vec![selection(r#"a"b"#, Op::Gt, Value::Number(10.0))],
+        };
+
+        let out = compile(&table(), &schema, &constraint).unwrap();
+
+        assert_eq!(
+            out.sql,
+            r#"SELECT "a""b" FROM argo WHERE "a""b" > CAST($1 AS DOUBLE)"#
+        );
+    }
+
+    #[test]
+    fn selections_on_unknown_or_omitted_columns_are_rejected() {
+        assert!(error_text(compiled(
+            &["temp"],
+            vec![selection("nope", Op::Eq, Value::Number(1.0))]
+        ))
+        .contains("unknown column"));
+        assert!(error_text(compiled(
+            &["temp"],
+            vec![selection("raw", Op::Eq, Value::Number(1.0))]
+        ))
+        .contains("cannot serve"));
     }
 }
