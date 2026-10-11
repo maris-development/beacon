@@ -150,8 +150,13 @@ fn parse_quoted(rest: &str) -> Result<String, DapError> {
     let mut chars = rest.chars();
     while let Some(c) = chars.next() {
         match c {
+            // Only `\"` and `\\` are escapes. Other backslashes stay in the text.
             '\\' => match chars.next() {
-                Some(next) => out.push(next),
+                Some(next @ ('"' | '\\')) => out.push(next),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
                 None => break,
             },
             '"' => {
@@ -171,60 +176,72 @@ fn parse_quoted(rest: &str) -> Result<String, DapError> {
     ))
 }
 
-/// The first operator outside a quoted string: its byte position, its text and its kind.
-fn find_operator(clause: &str) -> Option<(usize, &'static str, Op)> {
-    let mut in_quotes = false;
-    let mut escaped = false;
-    for (position, c) in clause.char_indices() {
-        if in_quotes {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_quotes = false;
-            }
-            continue;
-        }
-        if c == '"' {
-            in_quotes = true;
-            continue;
-        }
-        if let Some((text, op)) = OPERATORS
-            .iter()
-            .find(|(text, _)| clause[position..].starts_with(text))
-        {
-            return Some((position, text, *op));
+/// Walks a clause and yields each character outside quoted strings, with its byte position.
+/// The quote marks are not yielded.
+struct Unquoted<'a> {
+    chars: std::str::CharIndices<'a>,
+    in_quotes: bool,
+    escaped: bool,
+}
+
+impl<'a> Unquoted<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            chars: text.char_indices(),
+            in_quotes: false,
+            escaped: false,
         }
     }
-    None
+}
+
+impl Iterator for Unquoted<'_> {
+    type Item = (usize, char);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (position, c) = self.chars.next()?;
+            if self.in_quotes {
+                // A backslash skips the next character, so `\"` does not close the string.
+                if self.escaped {
+                    self.escaped = false;
+                } else if c == '\\' {
+                    self.escaped = true;
+                } else if c == '"' {
+                    self.in_quotes = false;
+                }
+                continue;
+            }
+            if c == '"' {
+                self.in_quotes = true;
+                continue;
+            }
+            return Some((position, c));
+        }
+    }
+}
+
+/// The first operator outside a quoted string: its byte position, its text and its kind.
+fn find_operator(clause: &str) -> Option<(usize, &'static str, Op)> {
+    Unquoted::new(clause).find_map(|(position, _)| {
+        OPERATORS
+            .iter()
+            .find(|(text, _)| clause[position..].starts_with(text))
+            .map(|(text, op)| (position, *text, *op))
+    })
 }
 
 /// Splits `text` on `separator` outside quoted strings.
 fn split_outside_quotes(text: &str, separator: char) -> Result<Vec<&str>, DapError> {
     let mut parts = Vec::new();
     let mut start = 0;
-    let mut in_quotes = false;
-    let mut escaped = false;
-    for (position, c) in text.char_indices() {
-        if in_quotes {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_quotes = false;
-            }
-            continue;
-        }
-        if c == '"' {
-            in_quotes = true;
-        } else if c == separator {
+    let mut scan = Unquoted::new(text);
+    for (position, c) in scan.by_ref() {
+        if c == separator {
             parts.push(&text[start..position]);
             start = position + c.len_utf8();
         }
     }
-    if in_quotes {
+    if scan.in_quotes {
         return Err(DapError::BadRequest(
             "a quoted string has no closing quote".to_string(),
         ));
@@ -374,5 +391,42 @@ mod tests {
                 "{query} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn an_unknown_escape_keeps_its_backslash() {
+        assert_eq!(
+            parse(r#"&a=~"69\.0""#).unwrap().selections,
+            vec![selection("a", Op::Regex, Value::Text("69\\.0".into()))]
+        );
+        assert_eq!(
+            parse(r#"&a=~"\d+""#).unwrap().selections,
+            vec![selection("a", Op::Regex, Value::Text("\\d+".into()))]
+        );
+    }
+
+    #[test]
+    fn a_double_backslash_is_one_backslash() {
+        assert_eq!(
+            parse(r#"&a="x\\y""#).unwrap().selections,
+            vec![selection("a", Op::Eq, Value::Text("x\\y".into()))]
+        );
+    }
+
+    #[test]
+    fn a_trailing_backslash_leaves_the_quote_open() {
+        assert!(matches!(parse(r#"&a="x\"#), Err(DapError::BadRequest(_))));
+    }
+
+    #[test]
+    fn non_ascii_names_and_values_parse() {
+        assert_eq!(
+            parse(r#"&n="é""#).unwrap().selections,
+            vec![selection("n", Op::Eq, Value::Text("é".into()))]
+        );
+        assert_eq!(
+            parse("&é>1").unwrap().selections,
+            vec![selection("é", Op::Gt, Value::Number(1.0))]
+        );
     }
 }
