@@ -9,6 +9,7 @@ use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
 use beacon_core::AuthIdentity;
 use bytes::{Bytes, BytesMut};
+use futures::stream::Fuse;
 use futures::{stream, Stream, StreamExt};
 
 use crate::compile;
@@ -40,14 +41,15 @@ pub(crate) async fn dods_response(
         )
         .await
         .map_err(|error| DapError::Query(error.to_string()))?;
-    let mut batches = result
+    let batches = result
         .into_record_stream()
         .map_err(|error| DapError::Internal(error.to_string()))?;
 
     // Pull the first batch before the status goes out, as `/api/query` does. An error here
     // still gets a DAP2 error document.
     let mut head = BytesMut::from(format!("{}Data:\n", dds(table, &columns)).as_bytes());
-    match batches.next().await {
+    let (first, batches) = first_batch(batches).await;
+    match first {
         Some(Err(error)) => return Err(DapError::Query(error.to_string())),
         Some(Ok(batch)) => encode_batch(&batch, &dap_types, &mut head)?,
         None => {}
@@ -58,6 +60,18 @@ pub(crate) async fn dods_response(
         "application/octet-stream",
         Body::from_stream(body(head.freeze(), dap_types, batches)),
     ))
+}
+
+/// The first item of `batches`, and the stream to read the rest from.
+///
+/// The returned stream is fused, so nothing polls the result stream again after its end.
+async fn first_batch<S>(batches: S) -> (Option<S::Item>, Fuse<S>)
+where
+    S: Stream + Unpin,
+{
+    let mut batches = batches.fuse();
+    let first = batches.next().await;
+    (first, batches)
 }
 
 /// The body after the first batch: `head`, the rows of each batch in `rest`, then the end
@@ -74,14 +88,17 @@ where
     S: Stream<Item = datafusion::error::Result<RecordBatch>>,
 {
     let rows = rest.map(move |batch| {
-        let batch = batch.map_err(|error| {
-            tracing::warn!(%error, "DAP2 data stream failed after the first batch");
-            std::io::Error::other(error.to_string())
-        })?;
+        let batch = batch.map_err(|error| std::io::Error::other(error.to_string()))?;
         let mut out = BytesMut::new();
         encode_batch(&batch, &dap_types, &mut out)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(out.freeze())
+    });
+    // Both failures end the body early, so one place logs them.
+    let rows = rows.inspect(|chunk| {
+        if let Err(error) = chunk {
+            tracing::warn!(%error, "DAP2 body ended early after the first batch");
+        }
     });
     let end = stream::once(ready(Ok(Bytes::from_static(&END_OF_SEQUENCE))));
     stream::once(ready(Ok(head)))
@@ -142,6 +159,61 @@ mod tests {
         expected.extend([0x5A, 0, 0, 0, 0, 0, 0, 1, 0x5A, 0, 0, 0, 0, 0, 0, 2]);
         expected.extend(END_OF_SEQUENCE);
         assert_eq!(bytes, expected);
+    }
+
+    /// A stream that panics when polled after it returned `None`.
+    struct Strict {
+        items: std::vec::IntoIter<datafusion::error::Result<RecordBatch>>,
+        ended: bool,
+    }
+
+    impl Stream for Strict {
+        type Item = datafusion::error::Result<RecordBatch>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            assert!(!self.ended, "polled after the end of the stream");
+            let item = self.items.next();
+            self.ended = item.is_none();
+            std::task::Poll::Ready(item)
+        }
+    }
+
+    #[test]
+    fn an_empty_result_is_only_the_head_and_the_end_marker() {
+        let rest = stream::iter(Vec::<datafusion::error::Result<RecordBatch>>::new());
+
+        let chunks: Vec<_> = block_on(
+            body(Bytes::from_static(b"HEAD"), vec![DapType::Int32], rest).collect::<Vec<_>>(),
+        );
+
+        let bytes: Vec<u8> = chunks
+            .into_iter()
+            .flat_map(|chunk| chunk.unwrap().to_vec())
+            .collect();
+        let mut expected = b"HEAD".to_vec();
+        expected.extend(END_OF_SEQUENCE);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn an_ended_result_stream_is_not_polled_again() {
+        let strict = Strict {
+            items: Vec::new().into_iter(),
+            ended: false,
+        };
+
+        let chunks: Vec<_> = block_on(async {
+            let (first, rest) = first_batch(strict).await;
+            assert!(first.is_none());
+            body(Bytes::from_static(b"HEAD"), vec![DapType::Int32], rest)
+                .collect::<Vec<_>>()
+                .await
+        });
+
+        assert_eq!(chunks.len(), 2, "head and the end marker");
     }
 
     #[test]
