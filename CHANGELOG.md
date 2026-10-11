@@ -10,6 +10,15 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ## [Unreleased]
 
+### Added
+
+- **OPeNDAP DAP2 endpoint.** `GET /dap/{table}.dds`, `.das` and `.dods` serve each table as a DAP2
+  dataset with one Sequence named `s`. Clients subset it with DAP2 value constraints, and Beacon
+  runs them as SQL under the caller's grants. `.csv` and `.nc` give the subset as a file. pydap
+  reads it, and ERDDAP adds it as an `EDDTableFromDapSequence` dataset. ERDDAP sends no
+  credentials, so such a table needs anonymous read. `BEACON_DAP_ENABLED=false` turns the
+  endpoint off. ([#563](https://github.com/maris-development/beacon/pull/563))
+
 ## [2.0.1] — 2026-10-08
 
 Beacon 2.0.1 adds table and column comments, role settings, and per-role limits on the CPU time
