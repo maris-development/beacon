@@ -5,6 +5,8 @@
 //! [`beacon_core::runtime::Runtime::run_query`] as the caller, so authentication, RBAC and
 //! the CPU budget are the same as on `/api/query`.
 
+pub mod das;
+pub mod dds;
 pub mod error;
 pub mod headers;
 pub mod names;
