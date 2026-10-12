@@ -138,14 +138,6 @@ SQL authenticates with a bearer token. The HTTP API works differently.
 | `BEACON_FLIGHT_SQL_STATEMENT_TTL_SECS` | `300` | Lifetime (seconds) of a server-side statement handle. |
 | `BEACON_FLIGHT_SQL_PREPARED_STATEMENT_TTL_SECS` | `900` | Lifetime (seconds) of a prepared-statement handle. |
 
-## OPeNDAP (DAP2)
-
-Beacon serves each table as a DAP2 dataset under `/dap`. See [OPeNDAP (DAP2)](/docs/2.0.1/api/opendap).
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `BEACON_DAP_ENABLED` | `true` | Serve the DAP2 endpoint. `false`, `0` or `off` turns it off. |
-
 ## Storage and data directories
 
 Beacon keeps all local state under one root directory.
