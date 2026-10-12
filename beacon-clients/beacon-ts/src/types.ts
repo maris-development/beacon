@@ -88,7 +88,14 @@ export type OutputFormat =
   | { odv: Record<string, unknown> };
 
 /** Output formats expressed as a bare string. `arrow` is an alias for `ipc`. */
-export type SimpleOutputFormat = "csv" | "ipc" | "arrow" | "parquet" | "netcdf";
+export type SimpleOutputFormat =
+  | "csv"
+  | "ipc"
+  | "arrow"
+  | "parquet"
+  | "netcdf"
+  /** A Zarr v3 store with one `obs` dimension, returned as a zip archive. */
+  | "zarr";
 
 export interface GeoParquetOptions {
   longitude_column?: string | null;

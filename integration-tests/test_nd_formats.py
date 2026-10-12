@@ -7,8 +7,8 @@ copied into the mounted datasets dir, and exercise:
 * ``read_netcdf`` / ``read_zarr`` table functions (including the explicit
   dimension-projection argument),
 * ``SELECT *`` broadcast-compatible dimension auto-selection, and
-* the flat ``netcdf`` and multi-dimensional ``ndnetcdf`` OUTPUT formats, by
-  round-tripping Beacon's own writer back through ``read_netcdf`` (the datasets
+* the flat ``netcdf``, multi-dimensional ``ndnetcdf`` and flat ``zarr`` OUTPUT formats, by
+  round-tripping Beacon's own writer back through its reader (the datasets
   dir is a host-mounted volume, so a file written on the host is visible to the
   container).
 """
@@ -127,3 +127,26 @@ def test_nd_netcdf_output_roundtrip(client, datasets_dir):
     # 50 unique time values -> 50 cells along the single dimension.
     assert n == 50
     assert "temperature" in client.sql_rows(f"SELECT * FROM read_netcdf(['{rel}']) LIMIT 1")[0]
+
+
+def test_flat_zarr_output_roundtrip(client, datasets_dir):
+    """Flat Zarr output is a zipped store that read_zarr reads again once unpacked."""
+    import io
+    import zipfile
+
+    src = "SELECT temperature, salinity, depth FROM read_parquet(['obs/*.parquet']) LIMIT 100"
+    data = client.query_bytes(src, "zarr")
+    # Zip local file header magic.
+    assert data[:2] == b"PK", data[:8]
+
+    rel = "roundtrip/flat.zarr"
+    dst = datasets_dir / rel
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        archive.extractall(dst)
+
+    back = client.sql_rows(f"SELECT * FROM read_zarr(['{rel}/'])")
+    assert len(back) - 1 == 100
+    assert "temperature" in back[0]

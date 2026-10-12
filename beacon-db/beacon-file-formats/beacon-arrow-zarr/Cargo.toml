@@ -20,11 +20,12 @@ indexmap = { workspace = true }
 tracing = { workspace = true }
 hifitime = {workspace = true}
 futures = { workspace = true }
+tempfile = { workspace = true }
+zip = { workspace = true }
 
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-common = { path = "../../beacon-common" }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 bytes = { workspace = true }

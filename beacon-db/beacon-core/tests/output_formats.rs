@@ -194,3 +194,101 @@ async fn geoparquet_output_does_not_panic_and_is_a_real_parquet_file() {
         "GeoParquet is Parquet underneath — the PAR1 magic must be present"
     );
 }
+
+/// Unpacks a zip archive into `dir` and returns the sorted entry names.
+fn unzip(archive: &std::path::Path, dir: &std::path::Path) -> Vec<String> {
+    let file = std::fs::File::open(archive).expect("the output file should be readable");
+    let mut archive = zip::ZipArchive::new(file).expect("zarr output should be a zip archive");
+    let mut names: Vec<String> = archive.file_names().map(str::to_string).collect();
+    names.sort();
+    archive.extract(dir).expect("the archive should unpack");
+    names
+}
+
+/// The zarr output is a zipped flat store: one 1-D array per column over `obs`.
+/// Unpacked, it reads back through `read_zarr` with the same rows and nulls.
+#[tokio::test(flavor = "multi_thread")]
+async fn zarr_output_is_a_zipped_flat_store_that_reads_back() {
+    let rt = runtime("output-zarr").await;
+    rt.sql("CREATE TABLE obs (id BIGINT, temp DOUBLE, site VARCHAR)")
+        .await;
+    rt.sql("INSERT INTO obs VALUES (1, 10.5, 'a'), (2, NULL, 'b'), (3, 12.5, NULL)")
+        .await;
+
+    let mut query = Query::sql("SELECT id, temp, site FROM obs".to_string());
+    query.output = Some(serde_json::from_value(json!({ "format": "zarr" })).unwrap());
+    let result = rt
+        .runtime
+        .run_query(query, rt.admin().await)
+        .await
+        .expect("a zarr output query should run");
+    let QueryOutput::File(file) = result.query_output else {
+        panic!("an output format should yield a file, not a stream");
+    };
+    assert!(
+        file.path().to_string_lossy().ends_with(".zarr.zip"),
+        "{:?}",
+        file.path()
+    );
+
+    let store = rt.datasets_dir().join("back.zarr");
+    let names = unzip(file.path(), &store);
+    for expected in ["zarr.json", "id/zarr.json", "temp/zarr.json", "site/zarr.json"] {
+        assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
+    }
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.join("temp/zarr.json")).unwrap()).unwrap();
+    assert_eq!(meta["shape"], json!([3]));
+    assert_eq!(meta["dimension_names"], json!(["obs"]));
+
+    // The scratch store directory is gone; only the zip itself remains.
+    let leftovers: Vec<_> = std::fs::read_dir(rt.tmp_dir())
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("beacon_out_"))
+        .map(|entry| entry.file_name())
+        .collect();
+    assert!(leftovers.is_empty(), "scratch directories left: {leftovers:?}");
+
+    let rows = rt
+        .sql("SELECT id, temp, site FROM read_zarr(['back.zarr/']) ORDER BY id")
+        .await;
+    assert_eq!(common::total_rows(&rows), 3);
+    let batch = arrow::compute::concat_batches(&rows[0].schema(), &rows).unwrap();
+    let temp = arrow::compute::cast(batch.column(1), &arrow::datatypes::DataType::Float64).unwrap();
+    let temp = temp
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap();
+    assert_eq!(temp.iter().collect::<Vec<_>>(), vec![Some(10.5), None, Some(12.5)]);
+    let site = arrow::compute::cast(batch.column(2), &arrow::datatypes::DataType::Utf8).unwrap();
+    let site = site
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(site.iter().collect::<Vec<_>>(), vec![Some("a"), Some("b"), None]);
+}
+
+/// `COPY TO ... STORED AS ZARR` writes a plain directory store, not a zip.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_zarr_writes_a_directory_store() {
+    let rt = runtime("copy-zarr").await;
+    rt.sql("CREATE TABLE t (a BIGINT)").await;
+    rt.sql("INSERT INTO t VALUES (1), (2)").await;
+
+    rt.sql("COPY (SELECT a FROM t) TO 'tmp:///copy.zarr' STORED AS ZARR")
+        .await;
+
+    let store = rt.tmp_dir().join("copy.zarr");
+    assert!(store.is_dir(), "expected a directory store at {store:?}");
+    assert!(store.join("zarr.json").is_file(), "root group metadata");
+    assert!(store.join("a/zarr.json").is_file(), "array metadata");
+
+    // A second COPY must not overwrite the store.
+    let err = rt
+        .try_sql("COPY (SELECT a FROM t) TO 'tmp:///copy.zarr' STORED AS ZARR")
+        .await
+        .expect_err("an existing store should not be replaced");
+    assert!(err.to_string().contains("already exists"), "{err}");
+}

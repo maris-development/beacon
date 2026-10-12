@@ -17,5 +17,6 @@ pub mod data_types;
 pub mod datafusion;
 pub mod reader;
 pub mod util;
+pub mod writer;
 
 pub use config::ZarrConfig;

@@ -15,6 +15,7 @@ use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactor
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
+use beacon_arrow_zarr::datafusion::{ZarrFormatFactory, ZARR_EXTENSION};
 use datafusion::catalog::Session;
 use datafusion::prelude::SessionContext;
 use datafusion::{
@@ -114,6 +115,9 @@ pub enum OutputFormat {
     },
     /// Ocean Data View (ODV) archive, configured by [`OdvOptions`].
     Odv(OdvOptions),
+    /// Flat Zarr v3 store: each column is a 1-D array over one `obs`
+    /// dimension. A store is a directory, so it is returned as a zip archive.
+    Zarr,
 }
 
 impl OutputFormat {
@@ -128,6 +132,7 @@ impl OutputFormat {
             OutputFormat::NetCDF => OutputFileKind::NetCDF,
             OutputFormat::NdNetCDF { .. } => OutputFileKind::NetCDF,
             OutputFormat::Odv(_) => OutputFileKind::Odv,
+            OutputFormat::Zarr => OutputFileKind::Zarr,
         }
     }
 
@@ -226,6 +231,32 @@ impl OutputFormat {
             OutputFormat::Odv(options) => Ok(format_as_file_type(Arc::new(
                 OdvFileFormatFactory::new(Some(options.clone())),
             ))),
+            OutputFormat::Zarr => {
+                let registered = session
+                    .state()
+                    .get_file_format_factory(ZARR_EXTENSION)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Zarr format factory not registered under extension '{}'",
+                            ZARR_EXTENSION
+                        )
+                    })?;
+                // The registered factory carries the output directory; clone it to set zipping.
+                let mut factory = registered
+                    .as_any()
+                    .downcast_ref::<ZarrFormatFactory>()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "the format factory under extension '{}' is not the Zarr factory",
+                            ZARR_EXTENSION
+                        )
+                    })?
+                    .clone();
+                // A response carries one file, so the store directory is zipped.
+                factory.write_options.zip_output = true;
+
+                Ok(format_as_file_type(Arc::new(factory)))
+            }
         }
     }
 }

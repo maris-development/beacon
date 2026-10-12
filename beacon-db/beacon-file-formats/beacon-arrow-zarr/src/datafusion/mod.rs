@@ -5,7 +5,7 @@
 //! the scan, and [`ZarrSource`] streams each leaf group through the shared
 //! `beacon-nd-array` engine with predicate pushdown.
 
-use std::{any::Any, sync::Arc};
+use std::{any::Any, path::PathBuf, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{
@@ -19,8 +19,12 @@ use datafusion::{
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
         listing::PartitionedFile,
-        physical_plan::{FileGroup, FileScanConfig, FileScanConfigBuilder, FileSource},
+        physical_plan::{
+            FileGroup, FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource,
+        },
+        sink::DataSinkExec,
     },
+    physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,
 };
 use object_store::{ObjectMeta, ObjectStore};
@@ -30,11 +34,14 @@ use crate::{
     config::ZarrConfig,
     reader::schema_from_group_path,
     util::{ZarrPath, ZarrStorage, is_zarr_v3_metadata, leaf_group_keys, top_level_zarr_meta_v3},
+    writer::ZarrWriteOptions,
 };
 
+pub mod sink;
 pub mod source;
 pub mod statistics;
 
+pub use sink::ZarrSink;
 use source::NOMINAL_GROUP_SIZE;
 pub use source::ZarrSource;
 
@@ -49,24 +56,49 @@ fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> 
     }
 }
 
+/// Extension the zarr format factory is registered under (`STORED AS ZARR`).
+pub const ZARR_EXTENSION: &str = "zarr";
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ZarrFormatFactory {
     pub config: ZarrConfig,
+    /// Local directory that zarr output is written into: the tmp store root.
+    /// `None` makes the formats of this factory read-only.
+    pub output_dir: Option<PathBuf>,
+    /// How formats of this factory write a store.
+    pub write_options: ZarrWriteOptions,
 }
 
 impl std::fmt::Debug for ZarrFormatFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZarrFormatFactory")
             .field("config", &self.config)
+            .field("output_dir", &self.output_dir)
+            .field("write_options", &self.write_options)
             .finish()
     }
 }
 
 impl ZarrFormatFactory {
     pub fn new(config: ZarrConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            output_dir: None,
+            write_options: ZarrWriteOptions::default(),
+        }
+    }
+
+    /// The same factory, writing zarr output into `output_dir`.
+    pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
+        self.output_dir = Some(output_dir);
+        self
+    }
+
+    /// A format with the write side of this factory.
+    fn writable(&self, format: ZarrFormat) -> ZarrFormat {
+        format.with_output(self.output_dir.clone(), self.write_options.clone())
     }
 
     /// Whether this table wants file statistics computed at all.
@@ -87,7 +119,7 @@ impl ZarrFormatFactory {
 
 impl GetExt for ZarrFormatFactory {
     fn get_ext(&self) -> String {
-        "zarr".to_string()
+        ZARR_EXTENSION.to_string()
     }
 }
 
@@ -115,15 +147,17 @@ impl FileFormatFactory for ZarrFormatFactory {
         // statistics whatever it says: see `create_for_analysis`.
         self.statistics_wanted(format_options)?;
         Ok(Arc::new(
-            ZarrFormat::new(read_dimensions)
-                .with_skip_unbroadcastable(skip_unbroadcastable)
-                .with_enable_statistics(false),
+            self.writable(
+                ZarrFormat::new(read_dimensions)
+                    .with_skip_unbroadcastable(skip_unbroadcastable)
+                    .with_enable_statistics(false),
+            ),
         ))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
         // A query never computes statistics. See `create_for_analysis`.
-        Arc::new(ZarrFormat::default().with_enable_statistics(false))
+        Arc::new(self.writable(ZarrFormat::default().with_enable_statistics(false)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -234,6 +268,10 @@ pub struct ZarrFormat {
     /// Defaults to [`ZarrConfig::default`]'s value, so a format built without a
     /// runtime config — `read_zarr()` builds one — behaves the same as a table.
     enable_statistics: bool,
+    /// Local directory that output is written into. `None` rejects writes.
+    output_dir: Option<PathBuf>,
+    /// How a write lays out the store.
+    write_options: ZarrWriteOptions,
 }
 
 impl Default for ZarrFormat {
@@ -251,7 +289,17 @@ impl ZarrFormat {
             skip_unbroadcastable: false,
             storage: None,
             enable_statistics: ZarrConfig::default().enable_statistics,
+            output_dir: None,
+            write_options: ZarrWriteOptions::default(),
         }
+    }
+
+    /// Returns a copy of this format that writes into `output_dir` with
+    /// `options`. A `None` directory makes the format read-only.
+    pub fn with_output(mut self, output_dir: Option<PathBuf>, options: ZarrWriteOptions) -> Self {
+        self.output_dir = output_dir;
+        self.write_options = options;
+        self
     }
 
     /// The same format, skipping the groups that cannot broadcast when `skip`.
@@ -475,6 +523,24 @@ impl FileFormat for ZarrFormat {
             .build();
 
         nd_scan_plan(conf)
+    }
+
+    async fn create_writer_physical_plan(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        _state: &dyn Session,
+        conf: FileSinkConfig,
+        order_requirements: Option<LexRequirement>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // zarrs writes a store through the local filesystem, as netcdf-c does,
+        // so the output goes to the configured tmp store root.
+        let output_dir = self.output_dir.clone().ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "this Zarr format is read-only: it has no output directory".to_string(),
+            )
+        })?;
+        let sink = Arc::new(ZarrSink::new(conf, self.write_options.clone(), output_dir));
+        Ok(Arc::new(DataSinkExec::new(input, sink, order_requirements)))
     }
 
     fn file_source(
