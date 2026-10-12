@@ -253,6 +253,26 @@ deny rule on a path glob that covers the table.
 By design. There is exactly one super-user, and it comes from `BEACON_ADMIN_USERNAME` and
 `BEACON_ADMIN_PASSWORD`. Every user and role created through SQL is read-only.
 
+### The container reports Permission denied on a mounted folder
+
+The log shows `Failed to list table directory: ... Permission denied (os error 13)`. An `ls` of
+`/beacon/data/datasets` in the container also fails. The host folders have mode `777`.
+
+The cause is SELinux, not the file permissions. The host folders have no container label, so SELinux
+blocks the container. Run `getenforce` on the host. The output `Enforcing` tells you that SELinux is
+active.
+
+Add the `:z` flag to each bind mount:
+
+```bash
+-v ./datasets:/beacon/data/datasets:z \
+-v ./tables:/beacon/data/tables:z
+```
+
+Use `:Z` when only one container uses the folders. For a filesystem without labels, such as NFS,
+use `--security-opt label=disable`. Do not add `:z` or `:Z` to a system folder, such as `/home`.
+See the [FAQ](/docs/2.1.0-rc1/faq#the-container-reports-permission-denied-on-a-mounted-folder).
+
 ## Still stuck
 
 - [FAQ](/docs/2.1.0-rc1/faq)

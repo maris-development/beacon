@@ -45,6 +45,13 @@ docker run -d \
 
 The tag `v2.1.0-rc1` is the release that this documentation describes.
 
+::: tip SELinux hosts
+On a host with SELinux, such as Fedora or RHEL, add `:z` to each bind mount. An example is
+`-v ./tables:/beacon/data/tables:z`. Without the flag, Beacon logs `Permission denied` on the
+mounted folders. See
+[Troubleshooting](/docs/2.1.0-rc1/troubleshooting#the-container-reports-permission-denied-on-a-mounted-folder).
+:::
+
 Beacon now serves on <http://localhost:5001>. That page is the home page. It shows the server
 version. It links to the admin UI, the Swagger UI, the API reference, the OpenAPI document, the
 health check and this documentation.
@@ -127,6 +134,12 @@ page. It links to the admin UI and the API docs. Open the
 [admin UI](/docs/2.1.0-rc1/connect/web-admin-ui) at `http://localhost:5001/admin` to explore and
 query. Open `http://localhost:5001/swagger` for the API docs. You can query any file in `./datasets`
 at once.
+
+::: tip SELinux hosts
+On a host with SELinux, add `:z` to each volume, for example `./tables:/beacon/data/tables:z`. This
+also applies to the S3 setup below. See
+[Troubleshooting](/docs/2.1.0-rc1/troubleshooting#the-container-reports-permission-denied-on-a-mounted-folder).
+:::
 
 ::: tip Log files
 The `./logs` volume writes the log files to your machine. Beacon starts one file each day, for
