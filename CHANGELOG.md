@@ -22,6 +22,13 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   reads an ERDDAP tabledap dataset. Beacon sends filters and columns to ERDDAP. The ERDDAP
   attributes are table and column metadata, and `title`, `long_name` and `units` give the comments.
 
+### Fixed
+
+- **A count on a MySQL table works.** `SELECT count(*) FROM t WHERE revenue > 40` reads no column
+  of `t`, so Beacon sent a `SELECT` with an empty select list. MySQL rejected it with a syntax
+  error. Beacon now sends `SELECT 1` for such a `SELECT`, for every SQL database engine.
+  ([#497](https://github.com/maris-development/beacon/issues/497))
+
 ## [2.0.1] — 2026-10-08
 
 Beacon 2.0.1 adds table and column comments, role settings, and per-role limits on the CPU time

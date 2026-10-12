@@ -27,6 +27,7 @@ use datafusion::sql::TableReference;
 use datafusion_federation::sql::{AstAnalyzer, LogicalOptimizer, SQLTable, SqlQueryRewriter};
 
 use crate::definition::SqlDatabaseTableDefinition;
+use crate::select_list::fill_empty_select_lists;
 
 /// A [`SQLTable`] that delegates to the engine's original table while carrying
 /// the [`SqlDatabaseTableDefinition`] it was built from.
@@ -98,8 +99,17 @@ impl SQLTable for BeaconSqlTable {
         }))
     }
 
+    /// The engine's own AST rewrite, followed by a select list for every `SELECT` that has none.
+    /// See [`fill_empty_select_lists`].
     fn ast_analyzer(&self) -> Option<AstAnalyzer> {
-        self.inner.ast_analyzer()
+        let mut inner = self.inner.ast_analyzer();
+        Some(Box::new(move |statement| {
+            let statement = match inner.as_mut() {
+                Some(next) => next(statement)?,
+                None => statement,
+            };
+            fill_empty_select_lists(statement)
+        }))
     }
 
     fn sql_query_rewriter(&self) -> Option<SqlQueryRewriter> {

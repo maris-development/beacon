@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use arrow::array::{RecordBatch, RecordBatchOptions};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use beacon_datafusion_ext::remote::apply_pushed_filters;
@@ -15,11 +16,13 @@ use datafusion::common::Statistics;
 use datafusion::error::Result;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{PhysicalExpr, SendableRecordBatchStream};
 use datafusion::sql::unparser::dialect::Dialect;
 use datafusion_federation::sql::{
     AstAnalyzer, LogicalOptimizer, SQLExecutor, SQLFederationProvider,
 };
+use futures::StreamExt;
 
 /// Build a federation provider that runs `provider`'s executor through [`FilteringSqlExecutor`].
 ///
@@ -71,6 +74,11 @@ impl SQLExecutor for FilteringSqlExecutor {
         filters: &[Arc<dyn PhysicalExpr>],
     ) -> Result<SendableRecordBatchStream> {
         let stream = self.inner.execute(query, Arc::clone(&schema), filters)?;
+        let stream = if schema.fields().is_empty() {
+            drop_columns(stream, Arc::clone(&schema))
+        } else {
+            stream
+        };
         Ok(apply_pushed_filters(stream, schema, filters))
     }
 
@@ -89,6 +97,24 @@ impl SQLExecutor for FilteringSqlExecutor {
     fn metrics(&self) -> Option<MetricsSet> {
         self.inner.metrics()
     }
+}
+
+/// Keep the row count of each batch and drop its columns.
+///
+/// A plan with no column becomes `SELECT 1 FROM ...` (see
+/// [`crate::select_list::fill_empty_select_lists`]). The PostgreSQL and ODBC executors return
+/// that column although `schema` has none.
+fn drop_columns(stream: SendableRecordBatchStream, schema: SchemaRef) -> SendableRecordBatchStream {
+    let output = Arc::clone(&schema);
+    let batches = stream.map(move |batch| {
+        let options = RecordBatchOptions::new().with_row_count(Some(batch?.num_rows()));
+        Ok(RecordBatch::try_new_with_options(
+            Arc::clone(&output),
+            vec![],
+            &options,
+        )?)
+    });
+    Box::pin(RecordBatchStreamAdapter::new(schema, batches))
 }
 
 #[cfg(test)]
@@ -111,7 +137,8 @@ mod tests {
     use futures::TryStreamExt;
 
     /// A database that runs the federated SQL on its own context. Like the
-    /// `datafusion-table-providers` executors, it ignores `filters`.
+    /// `datafusion-table-providers` executors, it ignores `filters`. Like MySQL, it rejects a
+    /// `SELECT` with an empty select list.
     struct InMemoryDatabase {
         context: SessionContext,
     }
@@ -136,6 +163,9 @@ mod tests {
             schema: SchemaRef,
             _filters: &[Arc<dyn PhysicalExpr>],
         ) -> Result<SendableRecordBatchStream> {
+            if query.contains("SELECT FROM") {
+                return datafusion::common::plan_err!("empty select list in {query}");
+            }
             let context = self.context.clone();
             let query = query.to_string();
             let stream =
@@ -237,5 +267,27 @@ mod tests {
             2
         );
         assert_eq!(count(&context, "SELECT count(*) FROM pg_obs").await, 10);
+    }
+
+    /// The server runs `OptimizeProjections` first, so a count reads no column of the database.
+    /// The federated SQL must still have a select list.
+    #[tokio::test]
+    async fn a_count_reads_no_column_and_keeps_its_rows() {
+        let mut rules: Vec<Arc<dyn OptimizerRule + Send + Sync>> = vec![Arc::new(
+            datafusion::optimizer::optimize_projections::OptimizeProjections::new(),
+        )];
+        rules.extend(beacon_datafusion_ext::remote::federation_optimizer_rules());
+        let context = local_context(rules, true);
+
+        // The count goes to the database, over a derived table that projects no column.
+        assert_eq!(
+            count(&context, "SELECT count(*) FROM pg_obs WHERE depth > 4").await,
+            5
+        );
+        // Only the scan goes to the database, and it projects no column.
+        assert_eq!(
+            count(&context, "SELECT count(*) FROM pg_obs o CROSS JOIN one").await,
+            10
+        );
     }
 }
