@@ -29,6 +29,34 @@ Parquet, GeoParquet, CSV, TSV, Arrow IPC, NetCDF, HDF5, Zarr, Icechunk, Atlas, G
 Delta Lake, Apache Iceberg and ODV ASCII. Each format has its own chapter in
 [File Formats](/docs/2.0.1/formats/).
 
+### The container reports Permission denied on a mounted folder
+
+The log shows this error, but the host folders have mode `777`:
+
+```text
+Failed to list table directory: ... /beacon/data/tables: Permission denied (os error 13)
+```
+
+SELinux blocks the container. The host folders have no container label. File permissions do not
+cause this error, because the container runs as root. Run `getenforce` on the host. The output
+`Enforcing` tells you that SELinux is active.
+
+Add the `:z` flag to each bind mount. Docker then gives the folder a label that containers can read:
+
+```bash
+-v ./datasets:/beacon/data/datasets:z \
+-v ./tables:/beacon/data/tables:z
+```
+
+In `docker-compose.yml`, add `:z` to each entry below `volumes`, for example
+`./tables:/beacon/data/tables:z`. Use `:Z` when only one container uses the folders. For a
+filesystem without labels, such as NFS, use `--security-opt label=disable`.
+
+::: warning
+Do not add `:z` or `:Z` to a system folder, such as `/home` or `/usr`. Docker changes the label of
+each file in the folder. Other programs on the host can then lose access.
+:::
+
 ## Read files
 
 ### How do I see what columns and types a file has?
