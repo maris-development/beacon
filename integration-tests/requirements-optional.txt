@@ -6,3 +6,6 @@
 # test_flight_sql.py is skipped automatically when adbc-driver-flightsql is absent.
 adbc-driver-flightsql==1.3.0
 adbc-driver-manager==1.3.0
+#
+# test_dap2.py reads the DAP2 endpoint with pydap. It is skipped when pydap is absent.
+pydap==3.5.11

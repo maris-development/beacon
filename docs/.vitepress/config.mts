@@ -294,6 +294,7 @@ export default defineConfig({
             { text: 'JSON Queries', link: '/docs/2.0.1/api/querying/json' },
             { text: 'Examples', link: '/docs/2.0.1/api/querying/examples' },
             { text: 'Exploring the catalog', link: '/docs/2.0.1/api/exploring-data' },
+            { text: 'OPeNDAP (DAP2)', link: '/docs/2.0.1/api/opendap' },
           ]
         },
         {

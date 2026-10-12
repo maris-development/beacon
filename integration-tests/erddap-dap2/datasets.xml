@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<erddapDatasets>
+<dataset type="EDDTableFromDapSequence" datasetID="beacon_dap2_obs" active="true">
+    <sourceUrl>http://host.docker.internal:5001/dap/erddap_obs</sourceUrl>
+    <reloadEveryNMinutes>10</reloadEveryNMinutes>
+    <outerSequenceName>s</outerSequenceName>
+    <sourceNeedsExpandedFP_EQ>true</sourceNeedsExpandedFP_EQ>
+    <sourceCanConstrainStringEQNE>true</sourceCanConstrainStringEQNE>
+    <sourceCanConstrainStringGTLT>true</sourceCanConstrainStringGTLT>
+    <sourceCanConstrainStringRegex>=~</sourceCanConstrainStringRegex>
+    <skipDapperSpacerRows>false</skipDapperSpacerRows>
+    <addAttributes>
+        <att name="cdm_data_type">Other</att>
+        <att name="infoUrl">https://github.com/maris-development/beacon</att>
+        <att name="institution">Beacon tests</att>
+        <att name="license">[standard]</att>
+        <att name="summary">The Beacon table erddap_obs, read over DAP2.</att>
+        <att name="title">Beacon DAP2 test</att>
+    </addAttributes>
+    <dataVariable>
+        <sourceName>t</sourceName>
+        <destinationName>time</destinationName>
+        <dataType>double</dataType>
+        <addAttributes>
+            <att name="ioos_category">Time</att>
+            <att name="units">seconds since 1970-01-01T00:00:00Z</att>
+        </addAttributes>
+    </dataVariable>
+    <dataVariable>
+        <sourceName>temp</sourceName>
+        <destinationName>temp</destinationName>
+        <dataType>double</dataType>
+        <addAttributes>
+            <att name="ioos_category">Temperature</att>
+            <att name="units">degree_C</att>
+        </addAttributes>
+    </dataVariable>
+    <dataVariable>
+        <sourceName>platform</sourceName>
+        <destinationName>platform</destinationName>
+        <dataType>String</dataType>
+        <addAttributes>
+            <att name="ioos_category">Identifier</att>
+        </addAttributes>
+    </dataVariable>
+</dataset>
+</erddapDatasets>

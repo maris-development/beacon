@@ -89,14 +89,7 @@ pub fn setup_router(
     // rides the same `resolve_identity` middleware as the client API, so MCP tool
     // calls execute under the caller's identity (or the anonymous principal when
     // enabled) and per-user RBAC applies at query time.
-    let mcp_enabled = std::env::var("BEACON_MCP_ENABLED")
-        .map(|v| {
-            !matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "false" | "0" | "off"
-            )
-        })
-        .unwrap_or(true);
+    let mcp_enabled = flag_on(std::env::var("BEACON_MCP_ENABLED").ok().as_deref());
     let mut router = client_router.merge(admin_router).merge(alias_router);
     if mcp_enabled {
         let mcp_router = ::axum::Router::new()
@@ -112,6 +105,20 @@ pub fn setup_router(
                 crate::axum::auth::resolve_identity,
             ));
         router = router.merge(mcp_router);
+    }
+    // DAP2 (OPeNDAP) endpoint, gated by BEACON_DAP_ENABLED (default on). It uses the same
+    // `resolve_identity` middleware, so each request runs as the caller. The outer layer
+    // turns a bare 401 into a DAP2 error with a Basic challenge.
+    if flag_on(std::env::var("BEACON_DAP_ENABLED").ok().as_deref()) {
+        let dap_router = beacon_dap::router::<Arc<Server>>(beacon_runtime.runtime().clone())
+            .layer(::axum::middleware::from_fn_with_state(
+                beacon_runtime.clone(),
+                crate::axum::auth::resolve_identity,
+            ))
+            .layer(::axum::middleware::map_response(
+                beacon_dap::basic_challenge,
+            ));
+        router = router.merge(dap_router);
     }
     // The home page is fixed once the router is built, so it is rendered here and
     // leaked as a constant rather than rebuilt per request.
@@ -180,6 +187,17 @@ pub fn setup_router(
 /// surface. Served on `/api/health` and on its `ADMIN_ALIAS_PREFIX` alias.
 async fn health() -> Response<String> {
     Response::new("Ok".to_string())
+}
+
+/// Whether an on/off environment flag is on. No value means on. `false`, `0` and `off`
+/// (any case) mean off.
+fn flag_on(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off"
+        )
+    })
 }
 
 /// Puts the admin gate on `router`.
@@ -434,4 +452,19 @@ fn build_cors_layer(cors: &beacon_server_config::CorsConfig) -> anyhow::Result<C
     }
 
     Ok(layer.max_age(Duration::from_secs(cors.max_age)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flag_on;
+
+    #[test]
+    fn flags_are_on_by_default_and_accept_off_words() {
+        assert!(flag_on(None));
+        assert!(flag_on(Some("true")));
+        assert!(flag_on(Some("1")));
+        for off in ["false", "0", "off", " OFF "] {
+            assert!(!flag_on(Some(off)), "{off:?}");
+        }
+    }
 }
