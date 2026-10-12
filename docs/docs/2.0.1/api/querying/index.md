@@ -173,28 +173,6 @@ hold ODV attributes, such as the units and the quality flag column. `key_column`
 into ODV stations. `qf_schema` selects the quality flag scheme. You can configure the compression
 and the archive. The response is always a ZIP file.
 
-### Zarr
-
-Writes the result as a Zarr v3 store. Each column becomes a 1-D array on one dimension, `obs`. A
-Zarr store is a directory, so Beacon returns a **ZIP archive** (`.zarr.zip`).
-
-```http
-POST /api/query
-Content-Type: application/json
-
-{
-  "select": ["time", "depth", "temperature"],
-  "output": { "format": "zarr" }
-}
-```
-
-Open the archive with `xarray.open_zarr(zarr.storage.ZipStore("result.zarr.zip", mode="r"))`, or
-unzip it first. A null value is written as the largest value of its type, and the `_FillValue`
-attribute marks that value. A null boolean is written as `false`. The format supports numbers,
-booleans, strings, dates and timestamps.
-
-`COPY ... TO ... STORED AS ZARR` writes the same store as a directory, not as a ZIP archive.
-
 ## Data sources
 
 Most queries use the name of a **registered table**:

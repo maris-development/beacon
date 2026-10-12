@@ -1,5 +1,5 @@
 ---
-description: Write Beacon results to Parquet, CSV, NetCDF, GeoParquet, ODV or Zarr. Stream a large result to disk, or read it with pandas and Arrow.
+description: Write Beacon results to Parquet, CSV, NetCDF, GeoParquet or ODV. Stream a large result to disk, or read it with pandas and Arrow.
 ---
 
 # Export Query Results
@@ -90,7 +90,6 @@ source data change? Do you want a refresh on demand? Then use a
 | N-dimensional NetCDF | `netcdf` with `dimensions` | `to_nd_netcdf()` |
 | Arrow IPC | `ipc` | none |
 | ODV ASCII | `odv` | none |
-| Zarr v3 (ZIP archive) | `zarr` | none |
 
 See [output formats](/docs/2.0.1/api/querying/#output-formats) for the full option set of each
 one.
