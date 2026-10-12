@@ -6,7 +6,7 @@ All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
 changes), and **Fixed** (bug fixes).
 
-## v2.0.1 — 2026-10-08
+## v2.0.1 — 2026-10-08 {#v2-0-1}
 
 Beacon 2.0.1 is a patch release of the 2.0 line. A 2.0.0 server upgrades in place: change the image
 tag to `v2.0.1`. Two changes can break a setup. Read the GeoTIFF and the table extensions items
@@ -50,7 +50,7 @@ change.
 - **`DROP TABLE`** clears the Lance caches, so a new table with the same name works.
 - **The Flight SQL handshake** accepts the `username` and `password` of ADBC clients.
 
-## v2.0.0 — 2026-09-29
+## v2.0.0 — 2026-09-29 {#v2-0-0}
 
 Beacon 2.0.0 is a major release. A 1.8.0 server does not upgrade in place. A 2.0.0 server does not
 read the table definitions of a 1.8.0 server, so create your tables again. Read
@@ -89,7 +89,7 @@ change.
 
 - **`st_within_point` and `st_geojson_as_wkt`.** Use the PostGIS functions, such as `ST_Within`.
 
-## v1.8.0 — 2026-06-27
+## v1.8.0 — 2026-06-27 {#v1-8-0}
 
 ### Added
 
@@ -175,23 +175,23 @@ change.
   an explanatory error instead of failing obscurely.
 - **`super_type` Arrow coercion bugs** surfaced by expanded unit-test coverage.
 
-## v1.7.3 — 2026-06-19
+## v1.7.3 — 2026-06-19 {#v1-7-3}
 
 ### Added
 
 - **GeoParquet read support.** `.geoparquet` files are read with their geometry
   columns decoded to native [GeoArrow](https://geoarrow.org/); query them with
   the `read_geoparquet()` table function or register a `STORED AS GEOPARQUET`
-  external table. See the [GeoParquet SQL chapter](/docs/1.7.3/sql/geoparquet)
-  and the [data-lake GeoParquet chapter](/docs/1.7.3/data-lake/geoparquet).
+  external table. See the [GeoParquet SQL chapter](/docs/1.8.0/sql/geoparquet)
+  and the [data-lake GeoParquet chapter](/docs/1.8.0/data-lake/geoparquet).
 - **Federated remote tables.** `CREATE EXTERNAL TABLE … STORED AS REMOTE` points
   at a table on another Beacon instance over Arrow Flight SQL, pushing filters,
   projected columns, `LIMIT`, and whole joins/aggregates down to the remote so
   only the reduced result set crosses the network. See the
-  [remote-tables SQL chapter](/docs/1.7.3/sql/remote-tables) and the
-  [federation setup chapter](/docs/1.7.3/data-lake/remote-tables).
+  [remote-tables SQL chapter](/docs/1.8.0/sql/remote-tables) and the
+  [federation setup chapter](/docs/1.8.0/data-lake/remote-tables).
 
-## v1.7.2 — 2026-06-16
+## v1.7.2 — 2026-06-16 {#v1-7-2}
 
 ### Changed
 
@@ -206,7 +206,7 @@ change.
   after the query-engine crate consolidation (it referenced crates that no
   longer exist).
 
-## v1.7.1 — 2026-06-15
+## v1.7.1 — 2026-06-15 {#v1-7-1}
 
 ### Changed
 
@@ -222,7 +222,7 @@ change.
 - **Swagger UI / Scalar redirects** now resolve correctly when Beacon is served
   under a non-empty base path (`BEACON_BASE_PATH`).
 
-## v1.7.0 — 2026-06-10
+## v1.7.0 — 2026-06-10 {#v1-7-0}
 
 ### Added
 
@@ -232,7 +232,7 @@ change.
 - **Schema evolution with `ALTER TABLE`** on managed tables — `ADD COLUMN`,
   `DROP COLUMN`, `RENAME COLUMN`, and `ALTER COLUMN ... TYPE` (safe widening
   promotions). Existing rows keep reading correctly: added columns read `NULL`
-  and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.7.3/sql/managed-tables).
+  and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.8.0/sql/managed-tables).
 - **CF `calendar` support.** CF time-unit parsing now honours the optional CF
   `calendar` attribute, so non-Gregorian calendars are interpreted correctly.
 - **SeaDataNet L05 mappings.** New UDFs map SeaDataNet instrument L05 codes for
@@ -255,7 +255,7 @@ change.
   setting — managed tables are now transactional and no longer need background
   refreshes.
 
-## v1.6.1 — 2026-06-04
+## v1.6.1 — 2026-06-04 {#v1-6-1}
 
 ### Added
 
@@ -293,7 +293,7 @@ change.
   originator string, so institution names that themselves contain parentheses
   are mapped to the correct EDMO code.
 
-## v1.6.0 — 2026-05-08
+## v1.6.0 — 2026-05-08 {#v1-6-0}
 
 ### Added
 
@@ -332,7 +332,7 @@ change.
 - **NetCDF scalar attributes.** Attributes stored as a single-element list were
   not read correctly; all scalar attributes are now read properly.
 
-## v1.5.4 — 2026-01-05
+## v1.5.4 — 2026-01-05 {#v1-5-4}
 
 ### Added
 
@@ -352,7 +352,7 @@ change.
 
 - Added querying examples for both SQL and JSON query formats.
 
-## v1.2.0 — 2025-09-01
+## v1.2.0 — 2025-09-01 {#v1-2-0}
 
 ### Added
 
@@ -370,7 +370,7 @@ change.
 - Rewrote file-source reading to support S3.
 - Updated dependencies for the latest Arrow, DataFusion, and GeoParquet.
 
-## v1.0.1 — 2025-05-05
+## v1.0.1 — 2025-05-05 {#v1-0-1}
 
 ### Added
 

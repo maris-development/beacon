@@ -35,6 +35,14 @@ Point a server at your archive. Connect a client. Write queries.
 ## Choose a version
 
 <div class="dgrid">
+  <a class="dcard" href="docs/2.1.0-rc1/introduction">
+    <span class="dcard-head">
+      <span class="dcard-title mono">2.1.0-rc1</span>
+      <span class="dcard-tag">Pre-release</span>
+    </span>
+    <span class="dcard-body">This is the upcoming 2.1 release.</span>
+    <span class="dcard-cta">Read the docs <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
+  </a>
   <a class="dcard" href="docs/2.0.1/introduction">
     <span class="dcard-head">
       <span class="dcard-title mono">2.0.1</span>
@@ -49,14 +57,6 @@ Point a server at your archive. Connect a client. Write queries.
       <span class="dcard-tag">Older</span>
     </span>
     <span class="dcard-body">Read this for a 1.8.0 server.</span>
-    <span class="dcard-cta">Read the docs <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
-  </a>
-  <a class="dcard" href="docs/1.7.3/introduction">
-    <span class="dcard-head">
-      <span class="dcard-title mono">1.7.3</span>
-      <span class="dcard-tag">Older</span>
-    </span>
-    <span class="dcard-body">Read this for a 1.7.3 server.</span>
     <span class="dcard-cta">Read the docs <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></span>
   </a>
 </div>

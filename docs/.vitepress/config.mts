@@ -123,6 +123,11 @@ export default defineConfig({
       {
         text: 'Docs', items: [
           {
+            text: '2.1.0-rc1 (pre-release)',
+            link: '/docs/2.1.0-rc1/introduction',
+            activeMatch: '/docs/2.1.0-rc1/'
+          },
+          {
             text: '2.0.1 (latest)',
             link: '/docs/2.0.1/introduction',
             activeMatch: '/docs/2.0.1/'
@@ -131,11 +136,6 @@ export default defineConfig({
             text: '1.8.0',
             link: '/docs/1.8.0/introduction',
             activeMatch: '/docs/1.8.0/introduction'
-          },
-          {
-            text: '1.7.3',
-            link: '/docs/1.7.3/introduction',
-            activeMatch: '/docs/1.7.3/introduction'
           },
         ]
       },
@@ -152,6 +152,185 @@ export default defineConfig({
     ],
 
     sidebar: {
+      '/docs/2.1.0-rc1/': [
+        {
+          text: 'Overview',
+          items: [
+            { text: 'Introduction', link: '/docs/2.1.0-rc1/introduction' },
+            {
+              text: 'Quick Start',
+              link: '/docs/2.1.0-rc1/quickstart',
+              collapsed: true,
+              items: [
+                { text: 'Deploy a server', link: '/docs/2.1.0-rc1/quickstart#deploy-a-server' },
+                { text: 'Query a server', link: '/docs/2.1.0-rc1/quickstart#query-a-server' },
+              ]
+            },
+            { text: 'Concepts', link: '/docs/2.1.0-rc1/concepts' },
+            { text: 'FAQ', link: '/docs/2.1.0-rc1/faq' },
+            { text: 'Upgrade from 1.8.0', link: '/docs/2.1.0-rc1/upgrade' },
+          ]
+        },
+        {
+          text: 'Deploy & Operate',
+          collapsed: false,
+          items: [
+            {
+              text: 'Getting Started',
+              link: '/docs/2.1.0-rc1/getting-started',
+              collapsed: true,
+              items: [
+                { text: 'Quick Start', link: '/docs/2.1.0-rc1/getting-started#quick-start' },
+                { text: 'Local', link: '/docs/2.1.0-rc1/getting-started#local' },
+                { text: 'S3 / Object Storage', link: '/docs/2.1.0-rc1/getting-started#s3-compatible-object-storage' },
+              ]
+            },
+            { text: 'Configuration', link: '/docs/2.1.0-rc1/server/configuration' },
+            { text: 'Access Control', link: '/docs/2.1.0-rc1/security/access-control' },
+            {
+              text: 'Performance Tuning',
+              link: '/docs/2.1.0-rc1/server/performance-tuning',
+              collapsed: true,
+              items: [
+                { text: 'Query engine', link: '/docs/2.1.0-rc1/server/performance-tuning#beacon-query-engine-settings' },
+                { text: 'File statistics', link: '/docs/2.1.0-rc1/internals/file-statistics' },
+                { text: 'NetCDF', link: '/docs/2.1.0-rc1/server/performance-tuning#netcdf-tuning' },
+                { text: 'HDF5', link: '/docs/2.1.0-rc1/server/performance-tuning#hdf5-pure-rust-reader' },
+                { text: 'Zarr', link: '/docs/2.1.0-rc1/server/performance-tuning#zarr-predicate-pushdown' },
+                { text: 'Atlas', link: '/docs/2.1.0-rc1/server/performance-tuning#atlas-tuning' },
+              ]
+            },
+            { text: 'Storage internals', link: '/docs/2.1.0-rc1/internals/storage' },
+            { text: 'Troubleshooting', link: '/docs/2.1.0-rc1/troubleshooting' },
+          ]
+        },
+        {
+          text: 'Server Setup',
+          collapsed: false,
+          items: [
+            { text: 'Overview', link: '/docs/2.1.0-rc1/server/' },
+            {
+              text: 'Datasets & Formats',
+              link: '/docs/2.1.0-rc1/server/datasets',
+              collapsed: true,
+              items: [
+                { text: 'All formats', link: '/docs/2.1.0-rc1/formats/' },
+                { text: 'Inspect a schema', link: '/docs/2.1.0-rc1/formats/inspect-a-schema' },
+                { text: 'Parquet', link: '/docs/2.1.0-rc1/formats/parquet' },
+                { text: 'GeoParquet', link: '/docs/2.1.0-rc1/formats/geoparquet' },
+                { text: 'CSV / TSV', link: '/docs/2.1.0-rc1/formats/csv' },
+                { text: 'Arrow IPC', link: '/docs/2.1.0-rc1/formats/arrow' },
+                { text: 'NetCDF', link: '/docs/2.1.0-rc1/formats/netcdf' },
+                { text: 'HDF5', link: '/docs/2.1.0-rc1/formats/hdf5' },
+                { text: 'Zarr', link: '/docs/2.1.0-rc1/formats/zarr' },
+                { text: 'Atlas', link: '/docs/2.1.0-rc1/formats/atlas' },
+                { text: 'GeoTIFF / COG', link: '/docs/2.1.0-rc1/formats/geotiff' },
+                { text: 'BBF', link: '/docs/2.1.0-rc1/formats/bbf' },
+                { text: 'Delta Lake', link: '/docs/2.1.0-rc1/formats/delta-lake' },
+                { text: 'Apache Iceberg', link: '/docs/2.1.0-rc1/formats/iceberg' },
+                { text: 'Icechunk', link: '/docs/2.1.0-rc1/formats/icechunk' },
+                { text: 'ODV ASCII', link: '/docs/2.1.0-rc1/formats/odv' },
+              ]
+            },
+            {
+              text: 'Tables & Views',
+              link: '/docs/2.1.0-rc1/data-sources/',
+              collapsed: true,
+              items: [
+                { text: 'External Tables', link: '/docs/2.1.0-rc1/data-sources/external-tables' },
+                { text: 'Managed Tables', link: '/docs/2.1.0-rc1/sql/managed-tables' },
+                { text: 'Views', link: '/docs/2.1.0-rc1/server/view' },
+                { text: 'Materialized Views', link: '/docs/2.1.0-rc1/sql/create-materialized-view' },
+                { text: 'Crawlers', link: '/docs/2.1.0-rc1/server/crawlers' },
+                { text: 'Comments', link: '/docs/2.1.0-rc1/sql/comment-on' },
+              ]
+            },
+            {
+              text: 'Other Sources',
+              collapsed: true,
+              items: [
+                { text: 'Object Storage (S3)', link: '/docs/2.1.0-rc1/data-sources/object-storage' },
+                { text: 'SQL Databases', link: '/docs/2.1.0-rc1/data-sources/sql-databases' },
+                { text: 'Remote Tables', link: '/docs/2.1.0-rc1/data-sources/remote-tables' },
+                { text: 'ERDDAP', link: '/docs/2.1.0-rc1/data-sources/erddap' },
+                { text: 'ATTACH another server', link: '/docs/2.1.0-rc1/data-sources/attach' },
+                { text: 'Secrets', link: '/docs/2.1.0-rc1/sql/secrets' },
+              ]
+            },
+          ]
+        },
+        {
+          text: 'SQL Reference',
+          collapsed: true,
+          items: [
+            { text: 'Overview', link: '/docs/2.1.0-rc1/sql/' },
+            { text: 'Identifiers & Case', link: '/docs/2.1.0-rc1/sql/identifiers' },
+            { text: 'SELECT', link: '/docs/2.1.0-rc1/sql/select' },
+            { text: 'WHERE', link: '/docs/2.1.0-rc1/sql/where' },
+            { text: 'GROUP BY', link: '/docs/2.1.0-rc1/sql/group-by' },
+            { text: 'JOIN', link: '/docs/2.1.0-rc1/sql/join' },
+            { text: 'UNION BY NAME', link: '/docs/2.1.0-rc1/sql/union-by-name' },
+            { text: 'CREATE TABLE', link: '/docs/2.1.0-rc1/sql/managed-tables' },
+            { text: 'CREATE EXTERNAL TABLE', link: '/docs/2.1.0-rc1/sql/create-external-table' },
+            { text: 'CREATE VIEW', link: '/docs/2.1.0-rc1/sql/create-view' },
+            { text: 'CREATE MATERIALIZED VIEW', link: '/docs/2.1.0-rc1/sql/create-materialized-view' },
+            { text: 'COMMENT ON', link: '/docs/2.1.0-rc1/sql/comment-on' },
+            { text: 'Remote Tables & ATTACH', link: '/docs/2.1.0-rc1/sql/remote-tables' },
+            { text: 'CREATE SECRET', link: '/docs/2.1.0-rc1/sql/secrets' },
+            { text: 'SUMMARIZE', link: '/docs/2.1.0-rc1/sql/summarize' },
+            { text: 'Table Functions', link: '/docs/2.1.0-rc1/sql/table-functions' },
+            { text: 'Introspection', link: '/docs/2.1.0-rc1/sql/table-functions-utility' },
+            { text: 'Function Reference', link: '/docs/2.1.0-rc1/sql/function-reference' },
+            { text: 'Spatial Functions', link: '/docs/2.1.0-rc1/sql/spatial-functions' },
+          ]
+        },
+        {
+          text: 'REST API',
+          collapsed: true,
+          items: [
+            { text: 'Overview', link: '/docs/2.1.0-rc1/api/' },
+            { text: 'Querying', link: '/docs/2.1.0-rc1/api/querying/' },
+            { text: 'SQL Queries', link: '/docs/2.1.0-rc1/api/querying/sql' },
+            { text: 'JSON Queries', link: '/docs/2.1.0-rc1/api/querying/json' },
+            { text: 'Examples', link: '/docs/2.1.0-rc1/api/querying/examples' },
+            { text: 'Exploring the catalog', link: '/docs/2.1.0-rc1/api/exploring-data' },
+            { text: 'OPeNDAP (DAP2)', link: '/docs/2.1.0-rc1/api/opendap' },
+          ]
+        },
+        {
+          text: 'Connect',
+          collapsed: true,
+          items: [
+            { text: 'Python SDK', link: '/docs/2.1.0-rc1/connect/python' },
+            { text: 'TypeScript SDK', link: '/docs/2.1.0-rc1/connect/typescript' },
+            { text: 'CLI', link: '/docs/2.1.0-rc1/connect/cli' },
+            { text: 'Web Admin UI', link: '/docs/2.1.0-rc1/connect/web-admin-ui' },
+            { text: 'DataGrip / JDBC', link: '/docs/2.1.0-rc1/connect/datagrip' },
+            { text: 'Python ADBC', link: '/docs/2.1.0-rc1/connect/python-adbc' },
+          ]
+        },
+        {
+          text: 'Scientific Data',
+          collapsed: true,
+          items: [
+            { text: 'How It Works', link: '/docs/2.1.0-rc1/how-it-works' },
+            { text: 'Arrays to tables', link: '/docs/2.1.0-rc1/arrays-to-tables' },
+            { text: 'CF decoding', link: '/docs/2.1.0-rc1/cf-decoding' },
+            { text: 'Coming from xarray', link: '/docs/2.1.0-rc1/coming-from-xarray' },
+            {
+              text: 'Guides',
+              link: '/docs/2.1.0-rc1/guides/',
+              collapsed: true,
+              items: [
+                { text: 'Query a File Collection', link: '/docs/2.1.0-rc1/guides/query-a-collection' },
+                { text: 'Query Data on S3', link: '/docs/2.1.0-rc1/guides/query-s3' },
+                { text: 'Export Query Results', link: '/docs/2.1.0-rc1/guides/export-results' },
+                { text: 'Speed Up Slow Queries', link: '/docs/2.1.0-rc1/guides/speed-up-queries' },
+              ]
+            },
+          ]
+        },
+      ],
       '/docs/2.0.1/': [
         {
           text: 'Overview',
@@ -252,7 +431,6 @@ export default defineConfig({
                 { text: 'Object Storage (S3)', link: '/docs/2.0.1/data-sources/object-storage' },
                 { text: 'SQL Databases', link: '/docs/2.0.1/data-sources/sql-databases' },
                 { text: 'Remote Tables', link: '/docs/2.0.1/data-sources/remote-tables' },
-                { text: 'ERDDAP', link: '/docs/2.0.1/data-sources/erddap' },
                 { text: 'ATTACH another server', link: '/docs/2.0.1/data-sources/attach' },
                 { text: 'Secrets', link: '/docs/2.0.1/sql/secrets' },
               ]
@@ -294,7 +472,6 @@ export default defineConfig({
             { text: 'JSON Queries', link: '/docs/2.0.1/api/querying/json' },
             { text: 'Examples', link: '/docs/2.0.1/api/querying/examples' },
             { text: 'Exploring the catalog', link: '/docs/2.0.1/api/exploring-data' },
-            { text: 'OPeNDAP (DAP2)', link: '/docs/2.0.1/api/opendap' },
           ]
         },
         {
@@ -819,459 +996,6 @@ export default defineConfig({
           ]
         }
       ],
-      '/docs/1.7.3/': [
-        {
-          text: 'Introduction',
-          link: '/docs/1.7.3/introduction',
-        },
-        {
-          text: 'Getting Started',
-          link: '/docs/1.7.3/getting-started',
-          collapsed: false,
-          items: [
-            {
-              text: 'Local',
-              link: '/docs/1.7.3/getting-started#local',
-            },
-            {
-              text: 'S3 / Object Storage',
-              link: '/docs/1.7.3/getting-started#s3-compatible-object-storage',
-            }
-          ]
-        },
-        {
-          text: 'Data Lakehouse Setup',
-          link: '/docs/1.7.3/data-lake',
-          collapsed: false,
-          items: [
-            {
-              text: 'Supported Formats',
-              link: '/docs/1.7.3/data-lake/datasets',
-              collapsed: true,
-              items: [
-                {
-                  text: 'Parquet',
-                  link: '/docs/1.7.3/data-lake/datasets#parquet'
-                },
-                {
-                  text: 'GeoParquet',
-                  link: '/docs/1.7.3/data-lake/geoparquet'
-                },
-                {
-                  text: 'NetCDF',
-                  link: '/docs/1.7.3/data-lake/datasets#netcdf'
-                },
-                {
-                  text: 'Zarr',
-                  link: '/docs/1.7.3/data-lake/datasets#zarr'
-                },
-                {
-                  text: 'Arrow IPC',
-                  link: '/docs/1.7.3/data-lake/datasets#arrow-ipc'
-                },
-                {
-                  text: 'ODV ASCII',
-                  link: '/docs/1.7.3/data-lake/datasets#odv-ascii'
-                },
-                {
-                  text: 'CSV',
-                  link: '/docs/1.7.3/data-lake/datasets#csv'
-                },
-                {
-                  text: 'GeoTIFF',
-                  link: '/docs/1.7.3/data-lake/datasets#geotiff--cloud-optimized-geotiff'
-                },
-                {
-                  text: 'Atlas',
-                  link: '/docs/1.7.3/data-lake/datasets#atlas'
-                },
-                {
-                  text: 'Beacon Binary Format',
-                  link: '/docs/1.7.3/data-lake/datasets#beacon-binary-format-bbf'
-                },
-              ]
-            },
-            {
-              text: 'SQL Tables & Views',
-              collapsed: true,
-              items: [
-                {
-                  text: 'External Tables',
-                  link: '/docs/1.7.3/data-lake/external-tables',
-                  collapsed: true,
-                  items: [
-                    { text: 'Parquet', link: '/docs/1.7.3/data-lake/external-tables#parquet' },
-                    { text: 'GeoParquet', link: '/docs/1.7.3/data-lake/external-tables#geoparquet' },
-                    { text: 'NetCDF', link: '/docs/1.7.3/data-lake/external-tables#netcdf' },
-                    { text: 'Zarr', link: '/docs/1.7.3/data-lake/external-tables#zarr' },
-                    { text: 'Atlas', link: '/docs/1.7.3/data-lake/external-tables#atlas' },
-                    { text: 'CSV', link: '/docs/1.7.3/data-lake/external-tables#csv' },
-                    { text: 'Arrow IPC', link: '/docs/1.7.3/data-lake/external-tables#arrow-ipc' },
-                    { text: 'ODV ASCII', link: '/docs/1.7.3/data-lake/external-tables#odv-ascii' },
-                    { text: 'GeoTIFF / COG', link: '/docs/1.7.3/data-lake/external-tables#geotiff-cog' },
-                    { text: 'Delta Lake', link: '/docs/1.7.3/data-lake/external-tables#delta-lake' },
-                  ]
-                },
-                {
-                  text: 'Crawlers',
-                  link: '/docs/1.7.3/data-lake/crawlers',
-                  collapsed: true,
-                  items: [
-                    { text: 'CREATE CRAWLER', link: '/docs/1.7.3/data-lake/crawlers#create-crawler' },
-                    { text: 'RUN / SHOW / DROP', link: '/docs/1.7.3/data-lake/crawlers#run-crawler' },
-                    { text: 'Partition detection', link: '/docs/1.7.3/data-lake/crawlers#partition-detection' },
-                    { text: 'Triggers', link: '/docs/1.7.3/data-lake/crawlers#triggers' },
-                    { text: 'Configuration', link: '/docs/1.7.3/data-lake/crawlers#configuration' },
-                    { text: 'Limitations', link: '/docs/1.7.3/data-lake/crawlers#supported-formats-and-limitations' },
-                  ]
-                },
-                {
-                  text: 'Managed Tables',
-                  link: '/docs/1.7.3/sql/managed-tables',
-                },
-                {
-                  text: 'Views',
-                  link: '/docs/1.7.3/data-lake/view',
-                },
-                {
-                  text: 'Delta Lake',
-                  link: '/docs/1.7.3/data-lake/delta-lake',
-                  collapsed: true,
-                  items: [
-                    { text: 'Defining a Delta table', link: '/docs/1.7.3/data-lake/delta-lake#defining-a-delta-external-table' },
-                    { text: 'Time travel', link: '/docs/1.7.3/data-lake/delta-lake#options-time-travel' },
-                    { text: 'Writing (INSERT INTO)', link: '/docs/1.7.3/data-lake/delta-lake#writing-insert-into' },
-                    { text: 'Limitations', link: '/docs/1.7.3/data-lake/delta-lake#limitations' },
-                  ]
-                },
-                {
-                  text: 'Remote Tables (Federation)',
-                  link: '/docs/1.7.3/data-lake/remote-tables',
-                  collapsed: true,
-                  items: [
-                    { text: 'Defining a remote table', link: '/docs/1.7.3/data-lake/remote-tables#defining-a-remote-table' },
-                    { text: 'How pushdown works', link: '/docs/1.7.3/data-lake/remote-tables#how-pushdown-works' },
-                    { text: 'Schema handling', link: '/docs/1.7.3/data-lake/remote-tables#schema-handling' },
-                    { text: 'Limitations', link: '/docs/1.7.3/data-lake/remote-tables#limitations' },
-                  ]
-                },
-                {
-                  text: 'SQL Databases (Postgres / MySQL)',
-                  link: '/docs/1.7.3/data-lake/sql-databases',
-                  collapsed: true,
-                  items: [
-                    { text: 'Credentials', link: '/docs/1.7.3/data-lake/sql-databases#credentials' },
-                    { text: 'Defining a database table', link: '/docs/1.7.3/data-lake/sql-databases#defining-a-sql-database-table' },
-                    { text: 'How pushdown works', link: '/docs/1.7.3/data-lake/sql-databases#how-pushdown-works' },
-                    { text: 'Limitations', link: '/docs/1.7.3/data-lake/sql-databases#limitations' },
-                  ]
-                }
-              ]
-            },
-            {
-              text: 'Configuration',
-              link: '/docs/1.7.3/data-lake/configuration',
-            },
-            {
-              text: 'Performance Tuning',
-              link: '/docs/1.7.3/data-lake/performance-tuning',
-              collapsed: true,
-              items: [
-                {
-                  text: 'Settings',
-                  link: '/docs/1.7.3/data-lake/performance-tuning#beacon-query-engine-settings'
-                },
-                {
-                  text: 'NetCDF',
-                  link: '/docs/1.7.3/data-lake/performance-tuning#netcdf-tuning'
-                },
-                {
-                  text: 'Zarr',
-                  link: '/docs/1.7.3/data-lake/performance-tuning#zarr-predicate-pushdown'
-                },
-                {
-                  text: 'Atlas',
-                  link: '/docs/1.7.3/data-lake/performance-tuning#atlas-tuning'
-                }
-              ]
-            }
-          ]
-        },
-        {
-          text: 'SQL Guide',
-          link: '/docs/1.7.3/sql/',
-          collapsed: true,
-          items: [
-            {
-              text: 'Introduction',
-              link: '/docs/1.7.3/sql/',
-            },
-            {
-              text: 'Querying',
-              collapsed: true,
-              items: [
-                {
-                  text: 'SELECT',
-                  link: '/docs/1.7.3/sql/select',
-                },
-                {
-                  text: 'WHERE',
-                  link: '/docs/1.7.3/sql/where',
-                  collapsed: true,
-                  items: [
-                    { text: 'Comparison', link: '/docs/1.7.3/sql/where#comparison-operators' },
-                    { text: 'BETWEEN', link: '/docs/1.7.3/sql/where#between' },
-                    { text: 'IN', link: '/docs/1.7.3/sql/where#in' },
-                    { text: 'LIKE', link: '/docs/1.7.3/sql/where#like' },
-                    { text: 'IS NULL', link: '/docs/1.7.3/sql/where#is-null--is-not-null' },
-                    { text: 'AND / OR / NOT', link: '/docs/1.7.3/sql/where#and--or--not' },
-                    { text: 'Date & time', link: '/docs/1.7.3/sql/where#date-and-time-filtering' },
-                  ]
-                },
-                {
-                  text: 'GROUP BY',
-                  link: '/docs/1.7.3/sql/group-by',
-                },
-                {
-                  text: 'JOIN',
-                  link: '/docs/1.7.3/sql/join',
-                  collapsed: true,
-                  items: [
-                    { text: 'INNER JOIN', link: '/docs/1.7.3/sql/join#inner-join' },
-                    { text: 'LEFT JOIN', link: '/docs/1.7.3/sql/join#left-join' },
-                  ]
-                },
-                {
-                  text: 'Reading Files',
-                  link: '/docs/1.7.3/sql/table-functions',
-                  collapsed: true,
-                  items: [
-                    { text: 'read_netcdf', link: '/docs/1.7.3/sql/table-functions#read_netcdf' },
-                    { text: 'read_zarr', link: '/docs/1.7.3/sql/table-functions#read_zarr' },
-                    { text: 'read_atlas', link: '/docs/1.7.3/sql/table-functions#read_atlas' },
-                    { text: 'read_parquet', link: '/docs/1.7.3/sql/table-functions#read_parquet' },
-                    { text: 'read_arrow', link: '/docs/1.7.3/sql/table-functions#read_arrow' },
-                    { text: 'read_csv', link: '/docs/1.7.3/sql/table-functions#read_csv' },
-                    { text: 'read_odv_ascii', link: '/docs/1.7.3/sql/table-functions#read_odv_ascii' },
-                    { text: 'read_bbf', link: '/docs/1.7.3/sql/table-functions#read_bbf' },
-                    { text: 'read_tiff', link: '/docs/1.7.3/sql/table-functions#read_tiff' },
-                    { text: 'read_delta', link: '/docs/1.7.3/sql/table-functions#read_delta' },
-                  ]
-                },
-                {
-                  text: 'UNION ALL BY NAME',
-                  link: '/docs/1.7.3/sql/union-by-name',
-                },
-                {
-                  text: 'GeoParquet',
-                  link: '/docs/1.7.3/sql/geoparquet',
-                },
-                {
-                  text: 'Remote Tables',
-                  link: '/docs/1.7.3/sql/remote-tables',
-                },
-              ]
-            },
-            {
-              text: 'DDL',
-              collapsed: true,
-              items: [
-                {
-                  text: 'CREATE EXTERNAL TABLE',
-                  link: '/docs/1.7.3/sql/create-table',
-                  collapsed: true,
-                  items: [
-                    { text: 'IF NOT EXISTS', link: '/docs/1.7.3/sql/create-table#if-not-exists' },
-                    { text: 'OR REPLACE', link: '/docs/1.7.3/sql/create-table#or-replace' },
-                    { text: 'PARTITIONED BY', link: '/docs/1.7.3/sql/create-table#partitioned-by' },
-                    { text: 'DROP TABLE', link: '/docs/1.7.3/sql/create-table#drop-table' },
-                  ]
-                },
-                {
-                  text: 'CREATE TABLE (Managed)',
-                  link: '/docs/1.7.3/sql/managed-tables',
-                  collapsed: true,
-                  items: [
-                    { text: 'Storage engine', link: '/docs/1.7.3/sql/managed-tables#choosing-the-storage-engine' },
-                    { text: 'CREATE TABLE AS SELECT', link: '/docs/1.7.3/sql/managed-tables#create-table-as-select' },
-                    { text: 'INSERT INTO', link: '/docs/1.7.3/sql/managed-tables#insert-into' },
-                    { text: 'DELETE', link: '/docs/1.7.3/sql/managed-tables#delete' },
-                    { text: 'UPDATE', link: '/docs/1.7.3/sql/managed-tables#update' },
-                    { text: 'ALTER TABLE', link: '/docs/1.7.3/sql/managed-tables#alter-table' },
-                    { text: 'Indexes', link: '/docs/1.7.3/sql/managed-tables#indexes' },
-                    { text: 'DROP TABLE', link: '/docs/1.7.3/sql/managed-tables#drop-table' },
-                  ]
-                },
-                {
-                  text: 'CREATE VIEW',
-                  link: '/docs/1.7.3/sql/create-view',
-                },
-                {
-                  text: 'CREATE MATERIALIZED VIEW',
-                  link: '/docs/1.7.3/sql/create-materialized-view',
-                  collapsed: true,
-                  items: [
-                    { text: 'Querying', link: '/docs/1.7.3/sql/create-materialized-view#querying' },
-                    { text: 'REFRESH', link: '/docs/1.7.3/sql/create-materialized-view#refresh' },
-                    { text: 'DROP', link: '/docs/1.7.3/sql/create-materialized-view#drop' },
-                  ]
-                },
-                {
-                  text: 'CREATE CRAWLER',
-                  link: '/docs/1.7.3/data-lake/crawlers',
-                  collapsed: true,
-                  items: [
-                    { text: 'Options', link: '/docs/1.7.3/data-lake/crawlers#options' },
-                    { text: 'RUN CRAWLER', link: '/docs/1.7.3/data-lake/crawlers#run-crawler' },
-                    { text: 'SHOW CRAWLERS', link: '/docs/1.7.3/data-lake/crawlers#show-crawlers' },
-                    { text: 'DROP CRAWLER', link: '/docs/1.7.3/data-lake/crawlers#drop-crawler' },
-                  ]
-                },
-              ]
-            },
-            {
-              text: 'Introspection',
-              link: '/docs/1.7.3/sql/table-functions-utility',
-              collapsed: true,
-              items: [
-                { text: 'read_schema', link: '/docs/1.7.3/sql/table-functions-utility#read_schema' },
-                { text: 'list_datasets', link: '/docs/1.7.3/sql/table-functions-utility#list_datasets' },
-                { text: 'view_dataset_statistics', link: '/docs/1.7.3/sql/table-functions-utility#view_dataset_statistics' },
-                { text: 'view_external_table_statistics', link: '/docs/1.7.3/sql/table-functions-utility#view_external_table_statistics' },
-                { text: 'view_statistics_cache', link: '/docs/1.7.3/sql/table-functions-utility#view_statistics_cache' },
-              ]
-            },
-            {
-              text: 'Function Reference',
-              link: '/docs/1.7.3/sql/function-reference',
-              collapsed: true,
-              items: [
-                { text: 'Aggregate', link: '/docs/1.7.3/sql/function-reference#aggregate-functions' },
-                { text: 'Math', link: '/docs/1.7.3/sql/function-reference#math-functions' },
-                { text: 'String', link: '/docs/1.7.3/sql/function-reference#string-functions' },
-                { text: 'Regular Expressions', link: '/docs/1.7.3/sql/function-reference#regular-expression-functions' },
-                { text: 'Binary String', link: '/docs/1.7.3/sql/function-reference#binary-string-functions' },
-                { text: 'Date & Time', link: '/docs/1.7.3/sql/function-reference#date-and-time-functions' },
-                { text: 'Conditional', link: '/docs/1.7.3/sql/function-reference#conditional-expressions' },
-                { text: 'Casting', link: '/docs/1.7.3/sql/function-reference#casting' },
-                {
-                  text: 'Beacon-specific',
-                  link: '/docs/1.7.3/sql/function-reference#beacon-specific-functions',
-                  collapsed: true,
-                  items: [
-                    { text: 'beacon_version', link: '/docs/1.7.3/sql/function-reference#beacon_version' },
-                    { text: 'coalesce_label', link: '/docs/1.7.3/sql/function-reference#coalesce_label' },
-                    { text: 'cast_int8_as_char', link: '/docs/1.7.3/sql/function-reference#cast_int8_as_charn' },
-                    { text: 'try_arrow_cast', link: '/docs/1.7.3/sql/function-reference#try_arrow_castexpr-type_str' },
-                  ]
-                },
-                {
-                  text: 'Geospatial',
-                  link: '/docs/1.7.3/sql/function-reference#geospatial-functions',
-                  collapsed: true,
-                  items: [
-                    { text: 'st_within_point', link: '/docs/1.7.3/sql/function-reference#st_within_point' },
-                    { text: 'st_geojson_as_wkt', link: '/docs/1.7.3/sql/function-reference#st_geojson_as_wkt' },
-                  ]
-                },
-                {
-                  text: 'Domain Mapping',
-                  link: '/docs/1.7.3/sql/function-reference#domain-mapping-functions',
-                  collapsed: true,
-                  items: [
-                    { text: 'pressure_to_depth_teos_10', link: '/docs/1.7.3/sql/function-reference#pressure_to_depth_teos_10' },
-                    { text: 'map_units', link: '/docs/1.7.3/sql/function-reference#map_units' },
-                    { text: 'Common', link: '/docs/1.7.3/sql/function-reference#common' },
-                    { text: 'CMEMS', link: '/docs/1.7.3/sql/function-reference#cmems' },
-                    { text: 'CORA', link: '/docs/1.7.3/sql/function-reference#cora' },
-                    { text: 'EMODnet Chemistry', link: '/docs/1.7.3/sql/function-reference#emodnet-chemistry' },
-                    { text: 'SeaDataNet', link: '/docs/1.7.3/sql/function-reference#seadatanet' },
-                    { text: 'Argo', link: '/docs/1.7.3/sql/function-reference#argo' },
-                    { text: 'World Ocean Database', link: '/docs/1.7.3/sql/function-reference#world-ocean-database-wod' },
-                  ]
-                },
-              ]
-            },
-          ]
-        },
-        {
-          text: 'REST API',
-          link: '/docs/1.7.3/api/',
-          collapsed: true,
-          items: [
-            {
-              text: 'Introduction',
-              link: '/docs/1.7.3/api/',
-            },
-            {
-              text: 'Exploring the Data Lake',
-              link: '/docs/1.7.3/api/exploring-data-lake',
-              collapsed: true,
-              items: [
-                { text: 'Datasets', link: '/docs/1.7.3/api/exploring-data-lake#datasets' },
-                { text: 'Tables', link: '/docs/1.7.3/api/exploring-data-lake#tables' },
-                { text: 'Functions', link: '/docs/1.7.3/api/exploring-data-lake#functions' },
-                { text: 'Admin', link: '/docs/1.7.3/api/exploring-data-lake#admin' },
-              ]
-            },
-            {
-              text: 'Querying',
-              link: '/docs/1.7.3/api/querying',
-              collapsed: true,
-              items: [
-                {
-                  text: 'JSON Query DSL',
-                  link: '/docs/1.7.3/api/querying/json',
-                  collapsed: true,
-                  items: [
-                    { text: 'Selecting Columns', link: '/docs/1.7.3/api/querying/json#selecting-columns' },
-                    { text: 'Data Source', link: '/docs/1.7.3/api/querying/json#choosing-the-data-source-from' },
-                    { text: 'Filters', link: '/docs/1.7.3/api/querying/json#filters' },
-                    { text: 'Sorting & Pagination', link: '/docs/1.7.3/api/querying/json#sorting-and-pagination' },
-                    { text: 'Output Formats', link: '/docs/1.7.3/api/querying/json#output-formats' },
-                  ]
-                },
-                {
-                  text: 'SQL',
-                  link: '/docs/1.7.3/api/querying/sql',
-                  collapsed: true,
-                  items: [
-                    { text: 'Query a Table', link: '/docs/1.7.3/api/querying/sql#query-a-registered-table' },
-                    { text: 'Table Functions', link: '/docs/1.7.3/api/querying/sql#query-files-directly' },
-                    { text: 'Output Formats', link: '/docs/1.7.3/api/querying/sql#output-formats' },
-                  ]
-                },
-                {
-                  text: 'Examples',
-                  link: '/docs/1.7.3/api/querying/examples',
-                },
-              ]
-            },
-          ]
-        },
-        {
-          text: 'Connect',
-          collapsed: true,
-          items: [
-            {
-              text: 'JetBrains DataGrip',
-              link: '/docs/1.7.3/connect/jetbrains-datagrip',
-            },
-            {
-              text: 'Beacon Datalake CLI',
-              link: '/docs/1.7.3/connect/beacon-datalake-cli',
-            },
-            {
-              text: 'Beacon Python SDK',
-              link: '/docs/1.7.3/connect/beacon-python-sdk',
-            },
-            {
-              text: 'Python ADBC Driver',
-              link: '/docs/1.7.3/connect/python-adbc',
-            }
-          ]
-        }
-      ],
       '/available-nodes/': [
         {
           text: 'Euro-Argo',
@@ -1642,46 +1366,18 @@ export default defineConfig({
         {
           text: 'Changelog',
           items: [
-            {
-              text: '1.8.0',
-              link: '/docs/changelog'
-            },
-            {
-              text: '1.7.3',
-              link: '/docs/changelog'
-            },
-            {
-              text: '1.7.2',
-              link: '/docs/changelog'
-            },
-            {
-              text: '1.7.1',
-              link: '/docs/changelog'
-            },
-            {
-              text: '1.7.0',
-              link: '/docs/changelog'
-            },
-            {
-              text: '1.6.1',
-              link: '/docs/changelog'
-            },
-            {
-              text: '1.6.0',
-              link: '/docs/changelog'
-            },
-            {
-              text: '1.5.4',
-              link: '/docs/changelog'
-            },
-            {
-              text: '1.2.0',
-              link: '/docs/changelog'
-            },
-            {
-              text: '1.0.1',
-              link: '/docs/changelog'
-            },
+            { text: '2.0.1', link: '/docs/changelog#v2-0-1' },
+            { text: '2.0.0', link: '/docs/changelog#v2-0-0' },
+            { text: '1.8.0', link: '/docs/changelog#v1-8-0' },
+            { text: '1.7.3', link: '/docs/changelog#v1-7-3' },
+            { text: '1.7.2', link: '/docs/changelog#v1-7-2' },
+            { text: '1.7.1', link: '/docs/changelog#v1-7-1' },
+            { text: '1.7.0', link: '/docs/changelog#v1-7-0' },
+            { text: '1.6.1', link: '/docs/changelog#v1-6-1' },
+            { text: '1.6.0', link: '/docs/changelog#v1-6-0' },
+            { text: '1.5.4', link: '/docs/changelog#v1-5-4' },
+            { text: '1.2.0', link: '/docs/changelog#v1-2-0' },
+            { text: '1.0.1', link: '/docs/changelog#v1-0-1' },
           ]
         },
         {
