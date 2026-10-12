@@ -5,7 +5,6 @@
 //! [`ZarrWriteOptions::zip_output`] set, the sink builds it in a scratch
 //! directory and packs it into one zip file at the output path.
 
-use std::any::Any;
 use std::fmt::Formatter;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,10 +60,6 @@ impl DisplayAs for ZarrSink {
 
 #[async_trait::async_trait]
 impl DataSink for ZarrSink {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> &SchemaRef {
         self.sink_config.output_schema()
     }

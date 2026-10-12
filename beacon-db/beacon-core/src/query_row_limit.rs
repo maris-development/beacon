@@ -12,7 +12,6 @@
 //! [`DataFusionError::ResourcesExhausted`]. It does not cut the result, so a
 //! client never takes a partial result for a complete one.
 
-use std::any::Any;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,7 +55,7 @@ pub fn limit_output(
     plan: Arc<dyn ExecutionPlan>,
     limit: u64,
 ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-    if plan.as_any().is::<DataSinkExec>() {
+    if plan.is::<DataSinkExec>() {
         let input = plan.children()[0].clone();
         return plan.with_new_children(vec![Arc::new(RowLimitExec::new(input, limit))]);
     }
@@ -91,10 +90,6 @@ impl DisplayAs for RowLimitExec {
 impl ExecutionPlan for RowLimitExec {
     fn name(&self) -> &str {
         "RowLimitExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -141,7 +136,7 @@ impl ExecutionPlan for RowLimitExec {
         None
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Arc<Statistics>> {
         self.input.partition_statistics(partition)
     }
 
@@ -245,9 +240,9 @@ mod tests {
         let sql = format!("COPY ({SQL}) TO '{}' STORED AS CSV", target.display());
 
         let plan = limit_output(physical_plan(&ctx, &sql).await, 10).unwrap();
-        assert!(plan.as_any().is::<DataSinkExec>(), "the sink stays on top");
+        assert!(plan.is::<DataSinkExec>(), "the sink stays on top");
         assert!(
-            plan.children()[0].as_any().is::<RowLimitExec>(),
+            plan.children()[0].is::<RowLimitExec>(),
             "{}",
             displayable(plan.as_ref()).indent(true)
         );

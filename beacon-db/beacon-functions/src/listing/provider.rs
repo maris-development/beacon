@@ -75,10 +75,6 @@ fn effective_limit(declared: Option<usize>, pushed: Option<usize>) -> Option<usi
 
 #[async_trait::async_trait]
 impl TableProvider for DatasetsTable {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }

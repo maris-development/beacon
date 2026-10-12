@@ -3,7 +3,6 @@
 //! The type wraps a `ListingTable`. It prunes inside `scan`. See the
 //! [module docs](super).
 
-use std::any::Any;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -155,10 +154,6 @@ impl FastObjectTable {
 
 #[async_trait::async_trait]
 impl TableProvider for FastObjectTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }
@@ -282,8 +277,8 @@ impl FastObjectTable {
 fn record_counters(plan: &Arc<dyn ExecutionPlan>, considered: usize, dropped: usize) {
     let mut node: &dyn ExecutionPlan = plan.as_ref();
     loop {
-        if let Some(exec) = node.as_any().downcast_ref::<DataSourceExec>() {
-            let Some(config) = exec.data_source().as_any().downcast_ref::<FileScanConfig>() else {
+        if let Some(exec) = node.downcast_ref::<DataSourceExec>() {
+            let Some(config) = exec.data_source().downcast_ref::<FileScanConfig>() else {
                 return;
             };
             let metrics = datafusion::datasource::source::DataSource::metrics(config);

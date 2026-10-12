@@ -6,7 +6,6 @@
 //! netCDF factory, which is what this crate did before the Rust reader
 //! existed.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -231,9 +230,6 @@ impl FileFormatFactory for Hdf5FormatFactory {
         Arc::new(self.build_format(options, self.inner.default()))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl FileFormatFactoryExt for Hdf5FormatFactory {
@@ -319,7 +315,7 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
     /// names dimensions derives its schema, exactly as it did before the cache
     /// existed. The default read is cached.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let Some(hdf5) = format.as_any().downcast_ref::<Hdf5Format>() else {
+        let Some(hdf5) = format.downcast_ref::<Hdf5Format>() else {
             // netcdf-c reads this one. Ask the factory that built it.
             return self.inner.schema_options_fingerprint(format);
         };
@@ -387,7 +383,6 @@ impl Hdf5Format {
     /// invariant is checkable rather than only stated.
     pub fn writes_with_netcdf_c(&self) -> bool {
         self.writer
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .is_some()
     }
@@ -395,10 +390,6 @@ impl Hdf5Format {
 
 #[async_trait::async_trait]
 impl FileFormat for Hdf5Format {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         None
     }
@@ -653,8 +644,8 @@ mod tests {
 
         assert!(f.config().use_rust_reader);
         let format = f.create(&ctx.state(), &HashMap::new()).unwrap();
-        assert!(format.as_any().downcast_ref::<Hdf5Format>().is_some());
-        assert!(f.default().as_any().downcast_ref::<Hdf5Format>().is_some());
+        assert!(format.downcast_ref::<Hdf5Format>().is_some());
+        assert!(f.default().downcast_ref::<Hdf5Format>().is_some());
     }
 
     /// The fallback hands the whole call to the netCDF format, which is what a
@@ -671,10 +662,9 @@ mod tests {
         );
 
         let format = f.create(&ctx.state(), &HashMap::new()).unwrap();
-        assert!(format.as_any().downcast_ref::<NetcdfFormat>().is_some());
+        assert!(format.downcast_ref::<NetcdfFormat>().is_some());
         assert!(f
             .default()
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .is_some());
     }
@@ -688,7 +678,7 @@ mod tests {
 
         let rust = factory("hdf5", Hdf5Config::default());
         let format = rust.create(&ctx.state(), &options("false")).unwrap();
-        assert!(format.as_any().downcast_ref::<NetcdfFormat>().is_some());
+        assert!(format.downcast_ref::<NetcdfFormat>().is_some());
 
         let netcdf_c = factory(
             "hdf5",
@@ -698,7 +688,7 @@ mod tests {
             },
         );
         let format = netcdf_c.create(&ctx.state(), &options("true")).unwrap();
-        assert!(format.as_any().downcast_ref::<Hdf5Format>().is_some());
+        assert!(format.downcast_ref::<Hdf5Format>().is_some());
     }
 
     /// The fallback reads through netcdf-c even when netCDF itself is set to the
@@ -709,7 +699,6 @@ mod tests {
         let ctx = session();
         let backend_of = |format: Arc<dyn FileFormat>| {
             format
-                .as_any()
                 .downcast_ref::<NetcdfFormat>()
                 .expect("the fallback builds a NetcdfFormat")
                 .reader_backend()
@@ -764,7 +753,7 @@ mod tests {
         let ctx = session();
         let f = factory("hdf5", Hdf5Config::default());
         let format = f.create(&ctx.state(), &HashMap::new()).unwrap();
-        let hdf5 = format.as_any().downcast_ref::<Hdf5Format>().unwrap();
+        let hdf5 = format.downcast_ref::<Hdf5Format>().unwrap();
         assert!(hdf5.writes_with_netcdf_c());
     }
 
@@ -783,7 +772,7 @@ mod tests {
                 ]),
             )
             .unwrap();
-        let hdf5 = format.as_any().downcast_ref::<Hdf5Format>().unwrap();
+        let hdf5 = format.downcast_ref::<Hdf5Format>().unwrap();
         assert!(!hdf5.statistics_enabled());
         assert_eq!(
             hdf5.read_dimensions(),
@@ -805,7 +794,7 @@ mod tests {
                 &HashMap::from([("unify_phony_dimensions".to_string(), "false".to_string())]),
             )
             .unwrap();
-        let hdf5 = format.as_any().downcast_ref::<Hdf5Format>().unwrap();
+        let hdf5 = format.downcast_ref::<Hdf5Format>().unwrap();
         assert!(!hdf5.unifies_phony_dimensions());
     }
 
@@ -821,7 +810,7 @@ mod tests {
             },
         );
         let format = f.create(&ctx.state(), &HashMap::new()).unwrap();
-        let hdf5 = format.as_any().downcast_ref::<Hdf5Format>().unwrap();
+        let hdf5 = format.downcast_ref::<Hdf5Format>().unwrap();
         assert!(!hdf5.unifies_phony_dimensions());
     }
 }

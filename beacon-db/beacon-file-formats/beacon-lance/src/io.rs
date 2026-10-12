@@ -15,7 +15,7 @@ use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::write::InsertBuilder;
 use lance::dataset::{WriteDestination, WriteMode, WriteParams};
 use lance::session::Session;
-use lance_encoding::version::LanceFileVersion;
+use lance_file::version::LanceFileVersion;
 
 /// Map an Arrow data type to one Lance can store. Lance 7.x does not support the
 /// Arrow "view" types (`Utf8View`/`BinaryView`) that DataFusion 53 produces for

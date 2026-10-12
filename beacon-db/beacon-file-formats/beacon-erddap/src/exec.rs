@@ -1,6 +1,5 @@
 //! `ErddapExec`: one tabledap `.parquet` request per partition.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -73,10 +72,6 @@ impl DisplayAs for ErddapExec {
 impl ExecutionPlan for ErddapExec {
     fn name(&self) -> &str {
         "ErddapExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

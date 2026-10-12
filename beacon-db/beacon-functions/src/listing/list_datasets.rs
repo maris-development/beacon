@@ -100,7 +100,11 @@ fn usize_arg(args: &[Expr], index: usize) -> Option<usize> {
 impl TableFunctionImpl for ListDatasetsFunc {
     /// `list_datasets([pattern[, offset[, limit]]])`. No I/O happens here; the
     /// [`DatasetsTable`] lists when scanned.
-    fn call(&self, args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+    fn call_with_args(
+        &self,
+        args: datafusion::catalog::TableFunctionArgs,
+    ) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+        let args = args.exprs();
         let pattern = string_arg(args, 0).unwrap_or_else(|| "**/*".to_string());
         let offset = usize_arg(args, 1).unwrap_or(0);
         let limit = usize_arg(args, 2);

@@ -3,7 +3,7 @@
 //! This module provides an implementation of DataFusion's [`FileSource`] trait
 //! for reading ODV ASCII files using the beacon-arrow-odv crate.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
@@ -103,11 +103,6 @@ impl FileSource for OdvSource {
         _config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
         Ok(None)
-    }
-
-    /// Returns a reference to self as [`Any`].
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     /// Returns a new [`FileSource`] with the given batch size.

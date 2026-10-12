@@ -4,7 +4,6 @@
 //! batch. `limit` is applied to the row stream, so reaching it drops the
 //! stream and stops the walk behind it.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -94,10 +93,6 @@ impl DisplayAs for DatasetsExec {
 impl ExecutionPlan for DatasetsExec {
     fn name(&self) -> &str {
         "DatasetsExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

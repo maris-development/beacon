@@ -1,6 +1,5 @@
 //! Terminal materializer of the nd pipeline.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -63,10 +62,6 @@ impl DisplayAs for NdBroadcastExec {
 impl ExecutionPlan for NdBroadcastExec {
     fn name(&self) -> &str {
         "NdBroadcastExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

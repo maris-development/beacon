@@ -447,8 +447,6 @@ mod tests {
     /// element-wise (here a volatile scalar function): no `NdProjectionExec`.
     #[tokio::test]
     async fn pushdown_rule_skips_non_elementwise() {
-        use std::any::Any;
-
         use datafusion::common::config::ConfigOptions;
         use datafusion::logical_expr::{
             ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
@@ -463,9 +461,6 @@ mod tests {
             signature: Signature,
         }
         impl ScalarUDFImpl for VolatileUdf {
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
             fn name(&self) -> &str {
                 "test_volatile"
             }
@@ -779,8 +774,6 @@ mod tests {
     /// into an `NdFilterExec` below it.
     #[tokio::test]
     async fn pushdown_rule_splits_mixed_predicate() {
-        use std::any::Any;
-
         use datafusion::common::config::ConfigOptions;
         use datafusion::logical_expr::{
             ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
@@ -795,9 +788,6 @@ mod tests {
             signature: Signature,
         }
         impl ScalarUDFImpl for VolatilePred {
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
             fn name(&self) -> &str {
                 "test_volatile_pred"
             }

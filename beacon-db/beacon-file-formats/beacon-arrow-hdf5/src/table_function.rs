@@ -90,7 +90,11 @@ impl BeaconTableFunctionImpl for ReadHdf5Func {
 }
 
 impl TableFunctionImpl for ReadHdf5Func {
-    fn call(&self, args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+    fn call_with_args(
+        &self,
+        args: datafusion::catalog::TableFunctionArgs,
+    ) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+        let args = args.exprs();
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
@@ -99,7 +103,7 @@ impl TableFunctionImpl for ReadHdf5Func {
         let factory = state.get_file_format_factory(crate::HDF5_FORMAT_NAME);
         let hdf5_factory = factory
             .as_ref()
-            .and_then(|f| f.as_any().downcast_ref::<crate::Hdf5FormatFactory>());
+            .and_then(|f| f.downcast_ref::<crate::Hdf5FormatFactory>());
 
         // Not registered, or registered on netcdf-c: this is the delegating
         // path this function has always taken. `read_netcdf` is told which

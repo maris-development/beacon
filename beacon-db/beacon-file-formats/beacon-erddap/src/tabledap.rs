@@ -112,12 +112,12 @@ enum Kind {
 fn column_name<'a>(expr: &'a Expr, schema: &Schema) -> Option<&'a str> {
     match expr {
         Expr::Column(column) => Some(column.name.as_str()),
-        Expr::Cast(Cast { expr, data_type }) => {
+        Expr::Cast(Cast { expr, field }) => {
             let Expr::Column(column) = expr.as_ref() else {
                 return None;
             };
             let source = schema.field_with_name(&column.name).ok()?.data_type();
-            is_lossless_widening(source, data_type).then_some(column.name.as_str())
+            is_lossless_widening(source, field.data_type()).then_some(column.name.as_str())
         }
         _ => None,
     }

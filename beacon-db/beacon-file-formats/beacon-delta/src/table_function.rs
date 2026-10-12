@@ -73,7 +73,11 @@ fn string_literal(expr: &Expr) -> Option<String> {
 }
 
 impl TableFunctionImpl for ReadDeltaFunc {
-    fn call(&self, args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+    fn call_with_args(
+        &self,
+        args: datafusion::catalog::TableFunctionArgs,
+    ) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+        let args = args.exprs();
         let Some(location) = args.first().and_then(string_literal) else {
             return plan_err!("read_delta requires a location string as the first argument");
         };
@@ -220,7 +224,12 @@ mod tests {
     fn call_without_a_location_is_a_plan_error() {
         let handle = tokio::runtime::Runtime::new().unwrap();
         let func = ReadDeltaFunc::new(handle.handle().clone(), Weak::new());
-        let err = func.call(&[]).unwrap_err();
+        let err = func
+            .call_with_args(datafusion::catalog::TableFunctionArgs::new(
+                &[],
+                &datafusion::prelude::SessionContext::new().state(),
+            ))
+            .unwrap_err();
         assert!(err.to_string().contains("location"), "{err}");
     }
 
@@ -230,7 +239,12 @@ mod tests {
         // this must be a graceful plan error rather than a panic.
         let handle = tokio::runtime::Runtime::new().unwrap();
         let func = ReadDeltaFunc::new(handle.handle().clone(), Weak::new());
-        let err = func.call(&[utf8("db://t")]).unwrap_err();
+        let err = func
+            .call_with_args(datafusion::catalog::TableFunctionArgs::new(
+                &[utf8("db://t")],
+                &datafusion::prelude::SessionContext::new().state(),
+            ))
+            .unwrap_err();
         assert!(err.to_string().contains("session context"), "{err}");
     }
 }

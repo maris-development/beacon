@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, StringBuilder, UInt8Builder};
@@ -31,10 +30,6 @@ impl CoalesceLabel {
 }
 
 impl ScalarUDFImpl for CoalesceLabel {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "coalesce_label"
     }

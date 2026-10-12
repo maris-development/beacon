@@ -24,14 +24,14 @@ datafusion-federation = { workspace = true }
 datafusion-table-providers = { workspace = true }
 arrow = { workspace = true }
 
-# Version-pins only (enabled with the `odbc` feature), working around a resolution conflict in
-# `datafusion-table-providers 0.11`'s ODBC path: its `arrow-odbc "23.1"` otherwise resolves to
-# 23.2.0, which loosened `odbc-api` to `>=23,<26` and lets the resolver pick 25.x — a second,
-# incompatible `odbc-api` that breaks dtp's own ODBC module. `arrow-odbc =23.1.0` keeps `odbc-api`
-# at `>=23,<25`, and the explicit `odbc-api =24.1.1` pins the single instance all three share.
-# Neither is used directly by beacon.
-arrow-odbc = { version = "=23.1.0", optional = true }
-odbc-api = { version = "=24.1.1", optional = true }
+# Version-pins only (enabled with the `odbc` feature). They prevent a resolution conflict in the
+# ODBC path of `datafusion-table-providers 0.12`. It asks for `arrow-odbc "25.2"` and
+# `odbc-api "28.2"`. Without a pin, `arrow-odbc` resolves to 25.3.0, which allows `odbc-api` 29.
+# The resolver then adds a second, incompatible `odbc-api` that breaks the ODBC module of dtp.
+# `arrow-odbc =25.2.0` keeps `odbc-api` below 29, and `odbc-api =28.2.0` pins the single instance.
+# Beacon does not use either crate directly.
+arrow-odbc = { version = "=25.2.0", optional = true }
+odbc-api = { version = "=28.2.0", optional = true }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }

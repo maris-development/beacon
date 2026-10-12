@@ -115,10 +115,11 @@ impl BeaconTableFunctionImpl for ViewExternalTableStatisticsFunc {
 // ─── TableFunctionImpl ───────────────────────────────────────────────────────
 
 impl TableFunctionImpl for ViewExternalTableStatisticsFunc {
-    fn call(
+    fn call_with_args(
         &self,
-        args: &[Expr],
+        args: datafusion::catalog::TableFunctionArgs,
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        let args = args.exprs();
         let table_name = match args.first() {
             Some(Expr::Literal(ScalarValue::Utf8(Some(s)), _)) => s.clone(),
             _ => {
@@ -141,7 +142,6 @@ impl TableFunctionImpl for ViewExternalTableStatisticsFunc {
                 let state = session_ctx.state();
 
                 let external = provider
-                    .as_any()
                     .downcast_ref::<ExternalTable>()
                     .ok_or_else(|| {
                         plan_datafusion_err!("'{table_name}' is not an external table")

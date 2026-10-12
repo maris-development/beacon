@@ -1,6 +1,5 @@
 //! `ErddapTable`: the DataFusion provider over one ERDDAP dataset.
 
-use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -112,10 +111,6 @@ async fn resolve(
 
 #[async_trait::async_trait]
 impl TableProvider for ErddapTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
