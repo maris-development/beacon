@@ -103,7 +103,7 @@ In SQL, set the option in a `COPY` statement. The format name is `NC`. `NETCDF` 
 
 ```sql
 COPY (SELECT temp, 'degC' AS "temp.units" FROM t)
-TO 'tmp:///result.nc'
+TO 'result.nc'
 STORED AS NC
 OPTIONS ('combine_attrs' 'identical')
 ```
