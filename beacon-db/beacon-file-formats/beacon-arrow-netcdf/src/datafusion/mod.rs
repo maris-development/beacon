@@ -601,6 +601,11 @@ impl FileFormat for NetcdfFormat {
         let output_dir = self.output_dir.clone();
         match &self.options.write_dimensions {
             Some(dim_columns) if !dim_columns.is_empty() => {
+                if self.options.combine_attrs.is_some() {
+                    return Err(exec_datafusion_err!(
+                        "combine_attrs applies only to the flat NetCDF output"
+                    ));
+                }
                 let unique_columns = dim_columns.clone();
 
                 let (unique_exec, collection_handle) =
@@ -1197,6 +1202,47 @@ mod reader_backend_tests {
     async fn a_bad_combine_attrs_is_an_error() {
         let options = HashMap::from([("combine_attrs".to_string(), "union".to_string())]);
         let error = combine_attrs_of(&options).unwrap_err().to_string();
+        assert!(error.contains("combine_attrs"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn combine_attrs_with_write_dimensions_is_an_error() {
+        use datafusion::datasource::physical_plan::{FileGroup, FileOutputMode};
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        use datafusion::logical_expr::dml::InsertOp;
+        use datafusion::physical_plan::empty::EmptyExec;
+
+        let factory = NetCDFFormatFactory::new(
+            Arc::new(ListingFactory::dynamic()),
+            std::env::temp_dir(),
+            NetcdfOptions {
+                write_dimensions: Some(vec!["lat".to_string()]),
+                combine_attrs: Some(crate::attributes::CombineAttrs::Identical),
+                ..NetcdfOptions::default()
+            },
+            NetcdfConfig::default(),
+        );
+        let ctx = session();
+        let format = factory.create(&ctx.state(), &HashMap::new()).unwrap();
+        let schema: SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
+        let conf = FileSinkConfig {
+            original_url: String::new(),
+            object_store_url: ObjectStoreUrl::local_filesystem(),
+            file_group: FileGroup::default(),
+            table_paths: vec![],
+            output_schema: schema.clone(),
+            table_partition_cols: vec![],
+            insert_op: InsertOp::Append,
+            keep_partition_by_columns: false,
+            file_extension: "nc".to_string(),
+            file_output_mode: FileOutputMode::SingleFile,
+        };
+        let error = format
+            .create_writer_physical_plan(Arc::new(EmptyExec::new(schema)), &ctx.state(), conf, None)
+            .await
+            .err()
+            .expect("combine_attrs with write_dimensions is an error")
+            .to_string();
         assert!(error.contains("combine_attrs"), "{error}");
     }
 
