@@ -22,6 +22,8 @@ pub struct EncoderOptions {
     pub chunk_rows: Option<usize>,
     /// Source `_FillValue` of each variable. A variable not in the map uses the default fill.
     pub fill_values: HashMap<String, netcdf::AttributeValue>,
+    /// Length of the record dimension. `None` makes it unlimited.
+    pub record_rows: Option<usize>,
 }
 
 /// Trait implemented by concrete NetCDF encoders.

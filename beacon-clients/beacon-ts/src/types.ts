@@ -126,6 +126,8 @@ export interface NetcdfOutputOptions {
   variable_attributes?: Record<string, Record<string, string | number>>;
   /** Coordinate columns. Each other variable gets a `coordinates` attribute. */
   coordinates?: string[];
+  /** Dimensions to write as unlimited. The only dimension is `"obs"`. */
+  unlimited_dims?: "obs"[];
 }
 
 export interface Output {

@@ -102,8 +102,30 @@ format name is `NC`. `NETCDF` does not work.
 | `global_attributes` | `global_attributes` | Not set | Global attributes, as an object of name to string or number. In SQL, give a JSON object. See [file and variable attributes](#file-and-variable-attributes). |
 | `variable_attributes` | `variable_attributes` | Not set | Attributes of each column, as an object of column to attributes. In SQL, give a JSON object. |
 | `coordinates` | `coordinates` | Not set | Coordinate columns, for example `["time", "lat", "lon"]`. In SQL, give a comma list: `'time,lat,lon'`. See [coordinates](#coordinates). |
+| `unlimited_dims` | `unlimited_dims` | Not set | Dimensions to write as unlimited, as in xarray. The only dimension is `obs`: `["obs"]`. See [the obs dimension](#the-obs-dimension). |
 
 A gridded NetCDF output, with dimension columns, does not accept these options.
+
+### The obs dimension
+
+A flat NetCDF output has one dimension, `obs`, with one entry for each row. Beacon gives `obs` the
+row count of the output. A fixed dimension reads faster than an unlimited dimension.
+
+To append data to the file later, make `obs` unlimited:
+
+```json
+{ "output": { "format": { "netcdf": { "unlimited_dims": ["obs"] } } } }
+```
+
+```sql
+COPY (SELECT * FROM argo)
+TO 'result.nc'
+STORED AS NC
+OPTIONS ('unlimited_dims' 'obs')
+```
+
+An output with no rows always has an unlimited `obs`, because netCDF reads a length of 0 as
+unlimited.
 
 ### Compression and chunks
 

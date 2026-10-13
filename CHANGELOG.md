@@ -43,6 +43,9 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 - **NetCDF booleans.** A boolean column in a flat NetCDF output gets `flag_values = 0, 1` and
   `flag_meanings = "false true"`. A boolean column with no null also gets `dtype = "bool"`, so
   xarray reads it as `bool`. ([#581](https://github.com/maris-development/beacon/issues/581))
+- **NetCDF unlimited dimensions.** `unlimited_dims: ["obs"]` on a `netcdf` output keeps `obs`
+  unlimited, as xarray `unlimited_dims` does. In SQL, use `'unlimited_dims' 'obs'`.
+  ([#582](https://github.com/maris-development/beacon/issues/582))
 
 ### Changed
 
@@ -53,6 +56,9 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 - **NetCDF time calendar.** A NetCDF output writes `calendar = "standard"` on a timestamp, as CF
   recommends. Before, it wrote the deprecated name `gregorian`. The `units` do not change.
   ([#578](https://github.com/maris-development/beacon/issues/578))
+- **Fixed NetCDF obs dimension.** The `obs` dimension of a flat NetCDF output has the row count of
+  the output. Before, it was unlimited. An output with no rows keeps an unlimited `obs`.
+  ([#582](https://github.com/maris-development/beacon/issues/582))
 
 ## [2.0.2] — 2026-10-13
 
