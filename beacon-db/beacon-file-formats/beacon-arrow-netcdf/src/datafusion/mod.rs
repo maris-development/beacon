@@ -192,6 +192,13 @@ impl FileFormatFactory for NetCDFFormatFactory {
         if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
             options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
         }
+        if let Some(value) = format_option(format_options, "combine_attrs") {
+            options.combine_attrs = Some(
+                value
+                    .parse()
+                    .map_err(|e: String| exec_datafusion_err!("{e}"))?,
+            );
+        }
         // Parsed here only so a bad value is an error at `CREATE EXTERNAL
         // TABLE` rather than at the first analysis pass. The value itself is
         // read by `create_for_analysis`; a format built for a query computes no
@@ -629,7 +636,11 @@ impl FileFormat for NetcdfFormat {
                 )))
             }
             _ => {
-                let netcdf_sink = Arc::new(NetCDFSink::new(conf, output_dir));
+                let netcdf_sink = Arc::new(NetCDFSink::new(
+                    conf,
+                    output_dir,
+                    self.options.combine_attrs,
+                ));
                 Ok(Arc::new(DataSinkExec::new(
                     input,
                     netcdf_sink,
@@ -1144,6 +1155,49 @@ mod reader_backend_tests {
             backend_of(&factory, &ctx.state(), &options).unwrap(),
             ReaderBackend::Oxcdf
         );
+    }
+
+    /// The `combine_attrs` of a format the factory built from `format_options`.
+    fn combine_attrs_of(
+        format_options: &HashMap<String, String>,
+    ) -> datafusion::error::Result<Option<crate::attributes::CombineAttrs>> {
+        let format = factory().create(&session().state(), format_options)?;
+        Ok(format
+            .as_any()
+            .downcast_ref::<NetcdfFormat>()
+            .expect("the factory builds a NetcdfFormat")
+            .options
+            .combine_attrs)
+    }
+
+    #[tokio::test]
+    async fn combine_attrs_is_off_by_default() {
+        assert_eq!(combine_attrs_of(&HashMap::new()).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn combine_attrs_reads_the_bare_and_the_prefixed_key() {
+        use crate::attributes::CombineAttrs;
+        let bare = HashMap::from([("combine_attrs".to_string(), "identical".to_string())]);
+        assert_eq!(
+            combine_attrs_of(&bare).unwrap(),
+            Some(CombineAttrs::Identical)
+        );
+        let prefixed = HashMap::from([(
+            "format.combine_attrs".to_string(),
+            "drop_conflicts".to_string(),
+        )]);
+        assert_eq!(
+            combine_attrs_of(&prefixed).unwrap(),
+            Some(CombineAttrs::DropConflicts)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_combine_attrs_is_an_error() {
+        let options = HashMap::from([("combine_attrs".to_string(), "union".to_string())]);
+        let error = combine_attrs_of(&options).unwrap_err().to_string();
+        assert!(error.contains("combine_attrs"), "{error}");
     }
 
     /// `FileFormatFactory::default` also carries the configured reader.

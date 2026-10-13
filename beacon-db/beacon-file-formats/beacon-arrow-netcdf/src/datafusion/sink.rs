@@ -22,7 +22,9 @@
 
 use std::{any::Any, fmt::Formatter, path::PathBuf, sync::Arc};
 
-use crate::{encoders::default::DefaultEncoder, writer::ArrowRecordBatchWriter};
+use crate::{
+    attributes::CombineAttrs, encoders::default::DefaultEncoder, writer::ArrowRecordBatchWriter,
+};
 use arrow::{
     array::{Array, ArrowPrimitiveType, PrimitiveArray, RecordBatch},
     datatypes::{DataType, FieldRef, SchemaRef},
@@ -56,15 +58,22 @@ pub struct NetCDFSink {
     sink_config: FileSinkConfig,
     /// Directory the NetCDF file is written to — the configured tmp store root.
     output_dir: PathBuf,
+    /// How the writer folds attribute columns. `None` writes them as variables.
+    combine_attrs: Option<CombineAttrs>,
 }
 
 impl NetCDFSink {
     /// Create a new flat sink bound to the given [`FileSinkConfig`], writing into
     /// `output_dir`.
-    pub fn new(sink_config: FileSinkConfig, output_dir: PathBuf) -> Self {
+    pub fn new(
+        sink_config: FileSinkConfig,
+        output_dir: PathBuf,
+        combine_attrs: Option<CombineAttrs>,
+    ) -> Self {
         Self {
             sink_config,
             output_dir,
+            combine_attrs,
         }
     }
 }
@@ -100,13 +109,17 @@ impl DataSink for NetCDFSink {
         tracing::info!("Writing NetCDF to path: {:?}", full_path);
 
         let mut rows_written: u64 = 0;
-        let mut nc_writer = ArrowRecordBatchWriter::<DefaultEncoder>::new(full_path, arrow_schema)
-            .map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to create NetCDF ArrowRecordBatchWriter: {}",
-                    e
-                ))
-            })?;
+        let mut nc_writer = ArrowRecordBatchWriter::<DefaultEncoder>::with_combine_attrs(
+            full_path,
+            arrow_schema,
+            self.combine_attrs,
+        )
+        .map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Failed to create NetCDF ArrowRecordBatchWriter: {}",
+                e
+            ))
+        })?;
 
         let mut pinned_stream = std::pin::pin!(data);
 
@@ -1469,7 +1482,7 @@ mod tests {
     fn test_display_as_flat() {
         let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Int32, false)]));
         let sink_config = test_sink_config(schema);
-        let sink = NetCDFSink::new(sink_config, std::env::temp_dir());
+        let sink = NetCDFSink::new(sink_config, std::env::temp_dir(), None);
         let display = format!("{}", DisplayAsWrapper(&sink));
         assert!(display.contains("NetCDFSink"));
     }
