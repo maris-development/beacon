@@ -29,7 +29,7 @@ pub(crate) async fn file_response(
     let constraint = constraint::parse(query)?;
     let compiled = compile::compile(&reference, &schema, &constraint)?;
     let mut query = Query::sql_with_params(compiled.sql, compiled.params);
-    query.output = Some(Output { format });
+    query.output = Some(Output { format, combine_attrs: None });
 
     let result = runtime
         .run_query(query, identity)

@@ -145,7 +145,7 @@ pub fn run_to_file(
     block_on(py, async move {
         let query = Query {
             inner: InnerQuery::Sql(sql),
-            output: Some(Output { format }),
+            output: Some(Output { format, combine_attrs: None }),
             params: Vec::new(),
         };
         let result = database.run_query(query, identity).await?;

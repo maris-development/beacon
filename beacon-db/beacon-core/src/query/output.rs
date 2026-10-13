@@ -11,7 +11,8 @@ use beacon_arrow_csv::datafusion::DEFAULT_CSV_EXTENSION;
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
 use beacon_arrow_ipc::datafusion::{ArrowFormatFactory, DEFAULT_ARROW_EXTENSION};
 use beacon_arrow_netcdf::datafusion::NETCDF_EXTENSION;
-use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
+use beacon_arrow_netcdf::attributes::CombineAttrs;
+use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
@@ -31,6 +32,9 @@ use utoipa::ToSchema;
 pub struct Output {
     /// The desired output format.
     pub format: OutputFormat,
+    /// How the flat `netcdf` output combines `variable.attribute` columns. Other formats reject it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combine_attrs: Option<CombineAttrs>,
 }
 
 impl Output {
@@ -55,10 +59,15 @@ impl Output {
         tmp_store_url: &datafusion::execution::object_store::ObjectStoreUrl,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
+        if self.combine_attrs.is_some() && !matches!(self.format, OutputFormat::NetCDF) {
+            return Err(DataFusionError::Plan(
+                "combine_attrs applies only to the netcdf output format".to_string(),
+            ));
+        }
         let kind = self.format.file_kind();
         let file_type = self
             .format
-            .file_type(session)
+            .file_type(session, self.combine_attrs)
             .map_err(|e| DataFusionError::External(e.into()))?;
 
         // Reserve a unique name under `tmp_dir` (the tmp store's root). The COPY
@@ -141,7 +150,11 @@ impl OutputFormat {
     /// `datasets_root` (the datasets store's local root) and `output_dir` (where
     /// the NetCDF writer emits its file) are used by the NetCDF writers; both are
     /// ignored by the other formats.
-    pub fn file_type(&self, session: &SessionContext) -> anyhow::Result<Arc<dyn FileType>> {
+    pub fn file_type(
+        &self,
+        session: &SessionContext,
+        combine_attrs: Option<CombineAttrs>,
+    ) -> anyhow::Result<Arc<dyn FileType>> {
         match self {
             OutputFormat::Csv => Ok(format_as_file_type(
                 session
@@ -185,21 +198,31 @@ impl OutputFormat {
                 },
             )))),
             OutputFormat::NetCDF => {
-                let options = NetcdfOptions::default();
-
-                // Writing NetCDF: the reader cache / statistics config is
-                // irrelevant here, so the defaults suffice.
-                Ok(format_as_file_type(
-                    session
-                        .state()
-                        .get_file_format_factory(NETCDF_EXTENSION)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "NetCDF format factory not registered under extension '{}'",
-                                NETCDF_EXTENSION
-                            )
-                        })?,
-                ))
+                let registered = session
+                    .state()
+                    .get_file_format_factory(NETCDF_EXTENSION)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "NetCDF format factory not registered under extension '{}'",
+                            NETCDF_EXTENSION
+                        )
+                    })?;
+                let Some(combine_attrs) = combine_attrs else {
+                    return Ok(format_as_file_type(registered));
+                };
+                // The COPY sink reads combine_attrs from the factory, so clone the registered one.
+                let mut factory = registered
+                    .as_any()
+                    .downcast_ref::<NetCDFFormatFactory>()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "the format factory under extension '{}' is not the NetCDF factory",
+                            NETCDF_EXTENSION
+                        )
+                    })?
+                    .clone();
+                factory.options.combine_attrs = Some(combine_attrs);
+                Ok(format_as_file_type(Arc::new(factory)))
             }
             OutputFormat::NdNetCDF { dimension_columns } => {
                 let registered = session

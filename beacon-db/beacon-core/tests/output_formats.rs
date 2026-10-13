@@ -126,6 +126,103 @@ async fn netcdf_output_writes_large_strings_and_booleans() {
     assert_eq!(values, vec![1, 0]);
 }
 
+/// The string value of attribute `name` on `variable`, or on the file when `variable` is `None`.
+fn str_attribute(
+    file: &beacon_arrow_netcdf::netcdf::File,
+    variable: Option<&str>,
+    name: &str,
+) -> Option<String> {
+    use beacon_arrow_netcdf::netcdf::AttributeValue;
+    let value = match variable {
+        Some(variable) => file.variable(variable)?.attribute(name)?.value().ok()?,
+        None => file.attribute(name)?.value().ok()?,
+    };
+    match value {
+        AttributeValue::Str(value) => Some(value),
+        _ => None,
+    }
+}
+
+const CONFLICT_SQL: &str =
+    r#"SELECT * FROM (VALUES (1.0, 'degC'), (2.0, 'K')) AS t(temp, "temp.units")"#;
+
+/// `identical` writes a column with one value as an attribute.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_identical_writes_a_unique_column_as_an_attribute() {
+    let rt = runtime("output-netcdf-combine-identical").await;
+    let sql = r#"SELECT temp, 'degC' AS "temp.units", 'Argo' AS ".title"
+                 FROM (VALUES (1.0), (2.0)) AS t(temp)"#;
+    let file = netcdf_output(&rt, sql, json!({ "format": "netcdf", "combine_attrs": "identical" })).await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert_eq!(str_attribute(&nc, Some("temp"), "units").as_deref(), Some("degC"));
+    assert_eq!(str_attribute(&nc, None, "title").as_deref(), Some("Argo"));
+    assert!(nc.variable("temp.units").is_none());
+}
+
+/// `identical` keeps a column with two values as a variable on `obs`.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_identical_keeps_a_conflict_as_a_variable() {
+    let rt = runtime("output-netcdf-combine-conflict").await;
+    let file = netcdf_output(&rt, CONFLICT_SQL, json!({ "format": "netcdf", "combine_attrs": "identical" })).await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert_eq!(str_attribute(&nc, Some("temp"), "units"), None);
+    assert_eq!(nc.variable("temp.units").expect("the conflict is a variable").len(), 2);
+}
+
+/// `drop_conflicts` drops a column with two values.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_drop_conflicts_drops_a_conflict() {
+    let rt = runtime("output-netcdf-combine-drop").await;
+    let file = netcdf_output(&rt, CONFLICT_SQL, json!({ "format": "netcdf", "combine_attrs": "drop_conflicts" })).await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert_eq!(str_attribute(&nc, Some("temp"), "units"), None);
+    assert!(nc.variable("temp.units").is_none());
+}
+
+/// `first` writes one of the values as the attribute.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_first_keeps_one_value() {
+    let rt = runtime("output-netcdf-combine-first").await;
+    let file = netcdf_output(&rt, CONFLICT_SQL, json!({ "format": "netcdf", "combine_attrs": "first" })).await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    let units = str_attribute(&nc, Some("temp"), "units").expect("an attribute");
+    assert!(units == "degC" || units == "K", "{units}");
+    assert!(nc.variable("temp.units").is_none());
+}
+
+/// Without `combine_attrs`, an attribute column stays a variable.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_without_combine_attrs_keeps_the_column() {
+    let rt = runtime("output-netcdf-combine-off").await;
+    let sql = r#"SELECT temp, 'degC' AS "temp.units" FROM (VALUES (1.0), (2.0)) AS t(temp)"#;
+    let file = netcdf_output(&rt, sql, json!({ "format": "netcdf" })).await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert!(nc.variable("temp.units").is_some());
+}
+
+/// `combine_attrs` with a format other than `netcdf` is an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn combine_attrs_with_parquet_is_an_error() {
+    let rt = runtime("output-combine-parquet").await;
+    let mut query = Query::sql("SELECT 1 AS a".to_string());
+    query.output = Some(
+        serde_json::from_value(json!({ "format": "parquet", "combine_attrs": "identical" }))
+            .expect("valid output spec"),
+    );
+    let error = rt
+        .runtime
+        .run_query(query, rt.admin().await)
+        .await
+        .err()
+        .expect("the query must fail");
+    assert!(error.to_string().contains("combine_attrs"), "{error}");
+}
+
 /// The GeoParquet output takes its point from the columns the request names, also when the
 /// names are not ones the column detection knows.
 #[tokio::test(flavor = "multi_thread")]
