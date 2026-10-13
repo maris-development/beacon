@@ -22,9 +22,6 @@ use crate::attributes::{AttributeCombiner, AttributePlan, AttributeTarget, TIME_
 use crate::datafusion::options::NetcdfWriterOptions;
 use crate::encoders::{Encoder, EncoderOptions};
 
-/// The CF version that the flat writer names in the `Conventions` attribute.
-const CONVENTIONS: &str = "CF-1.10";
-
 /// Generic writer backed by an [`Encoder`] implementation.
 pub struct Writer<E: Encoder> {
     encoder: E,
@@ -343,10 +340,8 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
             env!("CARGO_PKG_VERSION")
         );
-        let mut attributes = vec![
-            (global("Conventions"), CONVENTIONS.into()),
-            (global("history"), history.into()),
-        ];
+        // No default `Conventions`: Beacon cannot promise that a query output follows CF.
+        let mut attributes = vec![(global("history"), history.into())];
         for field in schema.fields() {
             let Some(has_null) = boolean_columns.get(field.name()) else {
                 continue;
@@ -872,17 +867,14 @@ mod tests {
     }
 
     #[test]
-    fn every_file_has_conventions_and_history() {
+    fn every_file_has_history_and_no_default_conventions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cf.nc");
         let schema = series_schema();
         write(&path, schema.clone(), vec![series_batch(&schema, 3)], None);
 
         let file = netcdf::open(&path).unwrap();
-        assert_eq!(
-            str_attribute(&file, None, "Conventions").as_deref(),
-            Some(CONVENTIONS)
-        );
+        assert_eq!(str_attribute(&file, None, "Conventions"), None);
         let history = str_attribute(&file, None, "history").unwrap();
         assert!(history.contains("Beacon"), "{history}");
     }
