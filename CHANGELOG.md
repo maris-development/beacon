@@ -28,6 +28,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   name `"netcdf"` keeps the default options. In SQL, use
   `COPY ... STORED AS NC OPTIONS ('combine_attrs' 'identical')`. Without the option, the output does
   not change.
+- **NetCDF compression.** `compression: { "level": 0-9, "shuffle": true }` on a `netcdf` output
+  writes each variable with deflate. `chunk_rows` sets the rows in one chunk of `obs`, with a
+  default of 65536. In SQL, use the keys `compression.level`, `compression.shuffle` and
+  `chunk_rows`. ([#576](https://github.com/maris-development/beacon/issues/576))
 
 ## [2.0.2] — 2026-10-13
 

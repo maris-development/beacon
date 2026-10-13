@@ -261,6 +261,65 @@ async fn copy_to_nc_with_combine_attrs_writes_an_attribute() {
     assert!(nc.variable("temp.units").is_none());
 }
 
+/// 100 000 rows of a repeated pattern, so that deflate has something to compress.
+const SERIES_SQL: &str =
+    "SELECT CAST(value % 100 AS DOUBLE) / 4.0 AS v FROM generate_series(1, 100000)";
+
+/// `compression` and `chunk_rows` make a smaller file with the same values.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_compression_makes_a_smaller_file() {
+    let rt = runtime("output-netcdf-compression").await;
+    let plain = netcdf_output(&rt, SERIES_SQL, json!({ "format": "netcdf" })).await;
+    let packed = netcdf_output(
+        &rt,
+        SERIES_SQL,
+        json!({ "format": { "netcdf": {
+            "compression": { "level": 4, "shuffle": true },
+            "chunk_rows": 10000
+        } } }),
+    )
+    .await;
+
+    let size = |path: &std::path::Path| std::fs::metadata(path).unwrap().len();
+    assert!(
+        size(packed.path()) * 4 < size(plain.path()),
+        "compressed {} bytes, plain {} bytes",
+        size(packed.path()),
+        size(plain.path())
+    );
+    let plain = beacon_arrow_netcdf::netcdf::open(plain.path()).expect("a readable NetCDF file");
+    let packed = beacon_arrow_netcdf::netcdf::open(packed.path()).expect("a readable NetCDF file");
+    // The scan is parallel, so the row order can differ between the two queries.
+    let values = |file: &beacon_arrow_netcdf::netcdf::File| -> Vec<f64> {
+        let mut values: Vec<f64> = file.variable("v").unwrap().get_values(..).unwrap();
+        values.sort_by(f64::total_cmp);
+        values
+    };
+    assert_eq!(values(&packed), values(&plain));
+    assert_eq!(
+        packed.variable("v").unwrap().chunking().unwrap(),
+        Some(vec![10000])
+    );
+}
+
+/// The SQL form: `COPY ... STORED AS NC OPTIONS ('compression.level' ...)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_nc_with_compression_sets_the_chunks() {
+    let rt = runtime("copy-nc-compression").await;
+
+    rt.sql(&format!(
+        "COPY ({SERIES_SQL}) TO 'tmp:///compressed.nc' STORED AS NC \
+         OPTIONS ('compression.level' '4', 'compression.shuffle' 'false', 'chunk_rows' '5000')"
+    ))
+    .await;
+
+    let path = rt.tmp_dir().join("compressed.nc");
+    let nc = beacon_arrow_netcdf::netcdf::open(&path).expect("a readable NetCDF file");
+    let v = nc.variable("v").expect("the column is a variable");
+    assert_eq!(v.chunking().unwrap(), Some(vec![5000]));
+    assert_eq!(v.len(), 100_000);
+}
+
 fn format_of(value: serde_json::Value) -> Result<OutputFormat, serde_json::Error> {
     serde_json::from_value(value)
 }
@@ -274,7 +333,8 @@ fn netcdf_is_a_name_or_an_object() {
             matches!(
                 format,
                 OutputFormat::NetCDF(NetcdfOutputOptions {
-                    combine_attrs: None
+                    combine_attrs: None,
+                    ..
                 })
             ),
             "{name}"
@@ -284,14 +344,16 @@ fn netcdf_is_a_name_or_an_object() {
     assert!(matches!(
         format,
         OutputFormat::NetCDF(NetcdfOutputOptions {
-            combine_attrs: None
+            combine_attrs: None,
+            ..
         })
     ));
     let format = format_of(json!({ "h5": { "combine_attrs": "first" } })).expect("an alias key");
     assert!(matches!(
         format,
         OutputFormat::NetCDF(NetcdfOutputOptions {
-            combine_attrs: Some(CombineAttrs::First)
+            combine_attrs: Some(CombineAttrs::First),
+            ..
         })
     ));
 }
@@ -309,6 +371,10 @@ fn format_errors_name_the_problem() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("unknown variant `union`"), "{error}");
+    let error = format_of(json!({ "netcdf": { "compression": { "level": 12 } } }))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("expected 0 to 9"), "{error}");
     let error = format_of(json!(5)).unwrap_err().to_string();
     assert!(error.contains("output format"), "{error}");
 }
