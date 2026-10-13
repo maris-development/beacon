@@ -43,6 +43,9 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   `coordinates = "time lat lon"` on each other variable, so xarray shows these columns as
   coordinates. In SQL, use `'coordinates' 'time,lat,lon'`.
   ([#580](https://github.com/maris-development/beacon/issues/580))
+- **NetCDF booleans.** A boolean column in a flat NetCDF output gets `flag_values = 0, 1` and
+  `flag_meanings = "false true"`. A boolean column with no null also gets `dtype = "bool"`, so
+  xarray reads it as `bool`. ([#581](https://github.com/maris-development/beacon/issues/581))
 
 ### Changed
 

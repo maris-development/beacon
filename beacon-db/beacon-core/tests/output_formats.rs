@@ -132,6 +132,21 @@ async fn netcdf_output_writes_large_strings_and_booleans() {
         .expect("the boolean column is a variable");
     let values: Vec<u8> = flag.get_values(..).expect("flag values");
     assert_eq!(values, vec![1, 0]);
+    assert_eq!(
+        str_attribute(&nc, Some("flag"), "flag_meanings").as_deref(),
+        Some("false true")
+    );
+    assert_eq!(
+        str_attribute(&nc, Some("flag"), "dtype").as_deref(),
+        Some("bool")
+    );
+
+    // Beacon reads the flag attributes back.
+    std::fs::copy(file.path(), rt.datasets_dir().join("flags.nc")).unwrap();
+    let batches = rt
+        .sql(r#"SELECT flag, "flag.flag_meanings" FROM read_netcdf('flags.nc')"#)
+        .await;
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
 }
 
 /// The string value of attribute `name` on `variable`, or on the file when `variable` is `None`.

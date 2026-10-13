@@ -208,6 +208,16 @@ OPTIONS ('coordinates' 'time,lat,lon')
 - A name that is not a column of the output is an error.
 - A `coordinates` value in `variable_attributes` wins over this option.
 
+### Booleans
+
+NetCDF has no boolean type. Beacon writes a boolean column as `uint8`, with `0` for false and `1`
+for true. The variable gets the CF attributes `flag_values = 0, 1` and
+`flag_meanings = "false true"`.
+
+A boolean column with no null also gets `dtype = "bool"`. xarray then reads it as `bool`. A column
+with a null does not get this attribute, because xarray reads a null as `True`. xarray reads such a
+column as a float with `NaN` for a null.
+
 ### Fill values
 
 Beacon writes a null as the `_FillValue` of the variable.
