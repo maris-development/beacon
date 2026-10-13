@@ -207,6 +207,11 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         let mut nc_writer = Writer::<E>::new(&self.path, updated_schema.clone())?;
         nc_writer.put_attributes(&plan.attributes)?;
 
+        // A batch with no column has no row count, so the file keeps its attributes only.
+        if kept_columns.is_empty() {
+            return Ok(());
+        }
+
         for batch in reader {
             let batch = batch.map_err(|e| anyhow::anyhow!(e))?;
             let batch = batch
@@ -455,6 +460,34 @@ mod tests {
             Some("nanoseconds since 1970-01-01T00:00:00Z")
         );
         assert!(file.variable("time.units").is_none());
+    }
+
+    #[test]
+    fn only_global_attribute_columns_write_a_file_with_attributes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("globals.nc");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            ".title",
+            DataType::Utf8,
+            true,
+        )]));
+        let batch = |rows: usize| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(StringArray::from(vec!["Argo"; rows]))],
+            )
+            .unwrap()
+        };
+        write(
+            &path,
+            schema.clone(),
+            vec![batch(2), batch(3)],
+            Some(CombineAttrs::Identical),
+        );
+
+        let file = netcdf::open(&path).unwrap();
+        assert_eq!(str_attribute(&file, None, "title").as_deref(), Some("Argo"));
+        assert_eq!(file.variables().count(), 0);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use arrow::{
     array::{Array, ArrayRef, RecordBatch},
-    datatypes::{DataType, Schema},
+    datatypes::{DataType, Field, Schema},
 };
 use datafusion::common::ScalarValue;
 use netcdf::AttributeValue;
@@ -128,7 +128,7 @@ pub fn classify(schema: &Schema) -> Classification {
 
     let mut classification = Classification::default();
     for (column, target) in candidates {
-        if is_dropped(&target, schema, &packed) {
+        if is_dropped(&column, &target, schema, &packed) {
             classification.dropped.insert(column);
         } else {
             classification.attributes.push((column, target));
@@ -138,7 +138,12 @@ pub fn classify(schema: &Schema) -> Classification {
 }
 
 /// Whether the writer drops this attribute, because the reader decoded it into the data.
-fn is_dropped(target: &AttributeTarget, schema: &Schema, packed: &HashSet<String>) -> bool {
+fn is_dropped(
+    column: &str,
+    target: &AttributeTarget,
+    schema: &Schema,
+    packed: &HashSet<String>,
+) -> bool {
     let name = target.name();
     if name.starts_with('_') || name == "scale_factor" || name == "add_offset" {
         return true;
@@ -146,8 +151,12 @@ fn is_dropped(target: &AttributeTarget, schema: &Schema, packed: &HashSet<String
     let Some(variable) = target.variable() else {
         return false;
     };
-    if packed.contains(variable) && PACKED_TYPE.contains(&name) {
-        return true;
+    if PACKED_TYPE.contains(&name) {
+        // CF gives a packed-type attribute the type of the packed variable.
+        let data_type = |name: &str| schema.field_with_name(name).ok().map(Field::data_type);
+        if packed.contains(variable) || data_type(column) != data_type(variable) {
+            return true;
+        }
     }
     let is_time = schema
         .field_with_name(variable)
@@ -276,35 +285,38 @@ pub struct AttributeCombiner {
     columns: HashSet<String>,
     dropped: HashSet<String>,
     tracked: Vec<Tracked>,
+    /// Global attribute columns with no NetCDF attribute type. They stay variables.
+    untracked_globals: Vec<(String, AttributeTarget)>,
 }
 
 impl AttributeCombiner {
     /// Classify the columns of `schema`. Use the schema of the batches that `observe` gets.
     pub fn new(schema: &Schema, policy: CombineAttrs) -> Self {
         let classification = classify(schema);
-        let tracked = classification
-            .attributes
-            .into_iter()
-            .filter(|(column, _)| {
-                schema
-                    .field_with_name(column)
-                    .is_ok_and(|field| is_attribute_type(field.data_type()))
-            })
-            .map(|(column, target)| Tracked {
-                index: schema
-                    .index_of(&column)
-                    .expect("classify returns schema columns"),
-                column,
-                target,
-                seen: Seen::Empty,
-                first: None,
-            })
-            .collect();
+        let mut tracked = Vec::new();
+        let mut untracked_globals = Vec::new();
+        for (column, target) in classification.attributes {
+            let index = schema
+                .index_of(&column)
+                .expect("classify returns schema columns");
+            if is_attribute_type(schema.field(index).data_type()) {
+                tracked.push(Tracked {
+                    index,
+                    column,
+                    target,
+                    seen: Seen::Empty,
+                    first: None,
+                });
+            } else if let AttributeTarget::Global { .. } = target {
+                untracked_globals.push((column, target));
+            }
+        }
         Self {
             policy,
             columns: schema.fields().iter().map(|f| f.name().clone()).collect(),
             dropped: classification.dropped,
             tracked,
+            untracked_globals,
         }
     }
 
@@ -330,6 +342,9 @@ impl AttributeCombiner {
             skipped: self.dropped,
             ..AttributePlan::default()
         };
+        for (column, target) in self.untracked_globals {
+            keep_as_variable(&mut plan, &self.columns, column, &target)?;
+        }
         for tracked in self.tracked {
             let value = match (tracked.seen, self.policy) {
                 (Seen::Empty | Seen::One(None), _) => None,
@@ -388,7 +403,10 @@ fn keep_as_variable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{ArrayRef, Float64Array, Int16Array, ListArray, RecordBatch, StringArray};
+    use arrow::array::{
+        ArrayRef, Float64Array, Int16Array, ListArray, RecordBatch, StringArray,
+        TimestampNanosecondArray,
+    };
     use arrow::datatypes::{Field, Float64Type, Schema, TimeUnit};
     use netcdf::AttributeValue;
     use std::sync::Arc;
@@ -798,5 +816,95 @@ mod tests {
         assert!(attribute(&plan, &variable("temp", "actual_range")).is_none());
         assert!(!plan.skipped.contains("temp.actual_range"));
         assert!(plan.renamed.is_empty());
+    }
+
+    #[test]
+    fn a_global_of_an_unsupported_type_stays_a_renamed_variable() {
+        let s = Arc::new(schema(&[
+            ("temp", DataType::Float64),
+            (
+                ".date_created",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            s.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(TimestampNanosecondArray::from(vec![0])),
+            ],
+        )
+        .unwrap();
+        let plan = combine(CombineAttrs::Identical, &s, &[batch]).unwrap();
+        assert!(plan.attributes.is_empty());
+        assert!(!plan.skipped.contains(".date_created"));
+        assert_eq!(
+            plan.renamed.get(".date_created").map(String::as_str),
+            Some("global.date_created")
+        );
+    }
+
+    #[test]
+    fn a_renamed_unsupported_global_that_hits_a_column_is_an_error() {
+        let s = Arc::new(schema(&[
+            ("temp", DataType::Float64),
+            (
+                ".date_created",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+            ),
+            ("global.date_created", DataType::Float64),
+        ]));
+        let error = combine(CombineAttrs::Identical, &s, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("global.date_created"), "{error}");
+    }
+
+    #[test]
+    fn a_packed_type_attribute_of_another_type_is_dropped_without_a_scale_factor() {
+        let c = classify(&schema(&[
+            ("temp", DataType::Float64),
+            ("temp.valid_min", DataType::Int16),
+            ("temp.valid_max", DataType::Float64),
+        ]));
+        assert!(c.dropped.contains("temp.valid_min"));
+        assert!(!c.dropped.contains("temp.valid_max"));
+        assert_eq!(target_of(&c, "temp.valid_min"), None);
+    }
+
+    #[test]
+    fn a_null_then_a_value_stays_a_variable_under_identical() {
+        let s = units_schema();
+        let batches = [
+            units_batch(&s, vec![None], vec![Some("Argo")]),
+            units_batch(&s, vec![Some("degC")], vec![Some("Argo")]),
+        ];
+        let plan = combine(CombineAttrs::Identical, &s, &batches).unwrap();
+        assert!(attribute(&plan, &variable("temp", "units")).is_none());
+        assert!(!plan.skipped.contains("temp.units"));
+    }
+
+    #[test]
+    fn nan_in_every_row_of_two_batches_is_one_attribute() {
+        let s = Arc::new(schema(&[
+            ("temp", DataType::Float64),
+            ("temp.valid_min", DataType::Float64),
+        ]));
+        let batch = || {
+            RecordBatch::try_new(
+                s.clone(),
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                    Arc::new(Float64Array::from(vec![f64::NAN, f64::NAN])),
+                ],
+            )
+            .unwrap()
+        };
+        let plan = combine(CombineAttrs::Identical, &s, &[batch(), batch()]).unwrap();
+        assert_eq!(plan.attributes.len(), 1);
+        assert!(
+            matches!(attribute(&plan, &variable("temp", "valid_min")), Some(AttributeValue::Double(v)) if v.is_nan())
+        );
+        assert!(plan.skipped.contains("temp.valid_min"));
     }
 }
