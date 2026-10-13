@@ -123,7 +123,8 @@ OPTIONS ('compression.level' '4', 'compression.shuffle' 'true', 'chunk_rows' '65
 
 - Level 1 is fast. Level 9 gives the smallest file and is slow. Level 4 is a good default.
 - Each variable on `obs` is in chunks of `chunk_rows` rows. A file with fewer rows gets one chunk.
-- HDF5 does not compress the text of a string variable.
+- Beacon does not compress a string variable. netCDF-C does not accept a filter on a
+  variable-length string.
 - xarray, netCDF4-python, Panoply and ncview read a deflate file. They need no plugin.
 
 ### Attributes in a NetCDF output
