@@ -39,6 +39,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   `history` line. `global_attributes` and `variable_attributes` on a `netcdf` output set more
   attributes. In SQL, give each one as a JSON object. A value from an option wins over a value from
   `combine_attrs`. ([#579](https://github.com/maris-development/beacon/issues/579))
+- **NetCDF coordinates.** `coordinates: ["time", "lat", "lon"]` on a `netcdf` output writes
+  `coordinates = "time lat lon"` on each other variable, so xarray shows these columns as
+  coordinates. In SQL, use `'coordinates' 'time,lat,lon'`.
+  ([#580](https://github.com/maris-development/beacon/issues/580))
 
 ### Changed
 

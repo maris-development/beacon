@@ -102,6 +102,7 @@ format name is `NC`. `NETCDF` does not work.
 | `time_units` | `time_units` | Not set | CF units of each timestamp column, for example `seconds since 1970-01-01`. See [time encoding](#time-encoding). |
 | `global_attributes` | `global_attributes` | Not set | Global attributes, as an object of name to string or number. In SQL, give a JSON object. See [file and variable attributes](#file-and-variable-attributes). |
 | `variable_attributes` | `variable_attributes` | Not set | Attributes of each column, as an object of column to attributes. In SQL, give a JSON object. |
+| `coordinates` | `coordinates` | Not set | Coordinate columns, for example `["time", "lat", "lon"]`. In SQL, give a comma list: `'time,lat,lon'`. See [coordinates](#coordinates). |
 
 A gridded NetCDF output, with dimension columns, does not accept these options.
 
@@ -186,6 +187,26 @@ OPTIONS (
 - `variable_attributes` must name a column of the output. Else Beacon gives an error.
 - An attribute name must not be empty or start with `_`.
 - On a timestamp column, `units` and `calendar` are not allowed. Use `time_units`.
+
+### Coordinates
+
+The `coordinates` option names the coordinate columns. Beacon writes the attribute
+`coordinates = "time lat lon"` on each other variable. xarray, Panoply and ERDDAP then show these
+columns as coordinates.
+
+```json
+{ "output": { "format": { "netcdf": { "coordinates": ["time", "lat", "lon"] } } } }
+```
+
+```sql
+COPY (SELECT time, lat, lon, temp FROM argo)
+TO 'result.nc'
+STORED AS NC
+OPTIONS ('coordinates' 'time,lat,lon')
+```
+
+- A name that is not a column of the output is an error.
+- A `coordinates` value in `variable_attributes` wins over this option.
 
 ### Fill values
 
