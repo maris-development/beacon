@@ -88,6 +88,8 @@ pub struct ArrowRecordBatchWriter<E: Encoder> {
     options: NetcdfWriterOptions,
     /// Rows written so far.
     rows: usize,
+    /// Boolean columns, and whether each one has a null so far.
+    boolean_columns: HashMap<String, bool>,
     encoder: PhantomData<E>,
 }
 
@@ -123,6 +125,12 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         options: NetcdfWriterOptions,
     ) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
+        let boolean_columns = schema
+            .fields()
+            .iter()
+            .filter(|field| field.data_type() == &DataType::Boolean)
+            .map(|field| (field.name().clone(), false))
+            .collect();
         let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
             schema
                 .fields()
@@ -151,6 +159,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             combiner,
             options,
             rows: 0,
+            boolean_columns,
             encoder: PhantomData,
         };
         // Fail before the spool. `finish` checks again, because combine_attrs can drop a column.
@@ -163,6 +172,13 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         &mut self,
         record_batch: arrow::record_batch::RecordBatch,
     ) -> anyhow::Result<()> {
+        for (field, column) in self.schema.fields().iter().zip(record_batch.columns()) {
+            if column.null_count() > 0 {
+                if let Some(has_null) = self.boolean_columns.get_mut(field.name()) {
+                    *has_null = true;
+                }
+            }
+        }
         let columns = record_batch
             .columns()
             .iter()
@@ -239,7 +255,12 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
 
         let updated_schema = Arc::new(arrow::datatypes::Schema::new(updated_schema_fields));
 
-        let attributes = Self::attributes(&self.options, plan.attributes, &updated_schema)?;
+        let attributes = Self::attributes(
+            &self.options,
+            plan.attributes,
+            &updated_schema,
+            &self.boolean_columns,
+        )?;
         let mut nc_writer =
             Writer::<E>::with_options(&self.path, updated_schema.clone(), &encoder_options)?;
         nc_writer.put_attributes(&attributes)?;
@@ -308,6 +329,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         options: &NetcdfWriterOptions,
         combined: Vec<(AttributeTarget, netcdf::AttributeValue)>,
         schema: &Schema,
+        boolean_columns: &HashMap<String, bool>,
     ) -> anyhow::Result<Vec<(AttributeTarget, netcdf::AttributeValue)>> {
         Self::check_attribute_options(options, schema)?;
         let global = |name: &str| AttributeTarget::Global {
@@ -320,6 +342,21 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         );
         // No default `Conventions`: Beacon cannot promise that a query output follows CF.
         let mut attributes = vec![(global("history"), history.into())];
+        for field in schema.fields() {
+            let Some(has_null) = boolean_columns.get(field.name()) else {
+                continue;
+            };
+            let target = |name: &str| AttributeTarget::Variable {
+                variable: field.name().clone(),
+                name: name.to_string(),
+            };
+            attributes.push((target("flag_values"), vec![0u8, 1u8].into()));
+            attributes.push((target("flag_meanings"), "false true".into()));
+            // xarray reads a null as True, so mark only a column with no null as a boolean.
+            if !has_null {
+                attributes.push((target("dtype"), "bool".into()));
+            }
+        }
         attributes.extend(combined);
         for (name, value) in &options.global_attributes {
             attributes.push((global(name), value.to_netcdf()));
@@ -909,6 +946,48 @@ mod tests {
             Some("name")
         );
         assert_eq!(str_attribute(&file, Some("name"), "coordinates"), None);
+    }
+
+    #[test]
+    fn a_boolean_gets_cf_flags_and_the_xarray_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flags.nc");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("good", DataType::Boolean, true),
+            Field::new("maybe", DataType::Boolean, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(arrow::array::BooleanArray::from(vec![
+                    Some(true),
+                    Some(false),
+                ])),
+                Arc::new(arrow::array::BooleanArray::from(vec![Some(true), None])),
+            ],
+        )
+        .unwrap();
+        write(&path, schema, vec![batch], None);
+
+        let file = netcdf::open(&path).unwrap();
+        for variable in ["good", "maybe"] {
+            let flags = file.variable(variable).unwrap();
+            assert_eq!(
+                flags.attribute_value("flag_values").unwrap().unwrap(),
+                AttributeValue::Uchars(vec![0, 1])
+            );
+            assert_eq!(
+                str_attribute(&file, Some(variable), "flag_meanings").as_deref(),
+                Some("false true")
+            );
+        }
+        assert_eq!(
+            str_attribute(&file, Some("good"), "dtype").as_deref(),
+            Some("bool")
+        );
+        assert_eq!(str_attribute(&file, Some("maybe"), "dtype"), None);
+        let values: Vec<u8> = file.variable("good").unwrap().get_values(..).unwrap();
+        assert_eq!(values, vec![1, 0]);
     }
 
     #[test]
