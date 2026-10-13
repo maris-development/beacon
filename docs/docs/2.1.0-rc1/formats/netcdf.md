@@ -99,7 +99,6 @@ format name is `NC`. `NETCDF` does not work.
 | `compression.level` | `compression.level` | Not set | Deflate level from 0 to 9. See [compression and chunks](#compression-and-chunks). |
 | `compression.shuffle` | `compression.shuffle` | `true` | Apply the shuffle filter before deflate. |
 | `chunk_rows` | `chunk_rows` | `65536` | Number of rows in one chunk of the `obs` dimension. |
-| `time_units` | `time_units` | Not set | CF units of each timestamp column, for example `seconds since 1970-01-01`. See [time encoding](#time-encoding). |
 | `global_attributes` | `global_attributes` | Not set | Global attributes, as an object of name to string or number. In SQL, give a JSON object. See [file and variable attributes](#file-and-variable-attributes). |
 | `variable_attributes` | `variable_attributes` | Not set | Attributes of each column, as an object of column to attributes. In SQL, give a JSON object. |
 | `coordinates` | `coordinates` | Not set | Coordinate columns, for example `["time", "lat", "lon"]`. In SQL, give a comma list: `'time,lat,lon'`. See [coordinates](#coordinates). |
@@ -155,27 +154,9 @@ OPTIONS ('compression.level' '4', 'compression.shuffle' 'true', 'chunk_rows' '65
 
 ### Time encoding
 
-Beacon writes a timestamp column with `standard_name = "time"` and `calendar = "standard"`. Without
-`time_units`, the column keeps its Arrow unit, for example `nanoseconds since 1970-01-01T00:00:00Z`.
-Some tools, such as Panoply and ncview, read `seconds since` or `days since` better. Set
-`time_units` to choose the units:
-
-```json
-{ "output": { "format": { "netcdf": { "time_units": "days since 1950-01-01" } } } }
-```
-
-```sql
-COPY (SELECT * FROM argo)
-TO 'result.nc'
-STORED AS NC
-OPTIONS ('time_units' 'days since 1950-01-01')
-```
-
-- The unit is `days`, `hours`, `minutes`, `seconds`, `milliseconds`, `microseconds` or `nanoseconds`.
-- The reference time is a date, or a date and a time, in UTC.
-- Beacon writes `int64` when each value is a whole number in the unit. Else it writes `float64`,
-  so no precision is lost.
-- An invalid `time_units` is an error.
+Beacon writes a timestamp column as `int64` in its Arrow unit since 1970, for example
+`units = "seconds since 1970-01-01T00:00:00Z"` or `units = "nanoseconds since 1970-01-01T00:00:00Z"`.
+The variable also gets `standard_name = "time"` and `calendar = "standard"`.
 
 ### File and variable attributes
 
@@ -209,7 +190,8 @@ OPTIONS (
   `history`.
 - `variable_attributes` must name a column of the output. Else Beacon gives an error.
 - An attribute name must not be empty or start with `_`.
-- On a timestamp column, `units` and `calendar` are not allowed. Use `time_units`.
+- On a timestamp column, `units` and `calendar` are not allowed. Beacon writes them. See
+  [time encoding](#time-encoding).
 
 ### Coordinates
 
@@ -250,7 +232,7 @@ Beacon writes a null as the `_FillValue` of the variable.
 | Float | `NaN`, as in xarray |
 | Integer | The maximum of the type, for example `2147483647` for `int32` |
 | String | An empty string |
-| Timestamp | The maximum of `int64`, or `NaN` for a `float64` time |
+| Timestamp | The maximum of `int64` |
 
 With `combine_attrs`, Beacon uses the source `_FillValue` of a numeric variable. The column
 `<variable>._FillValue` must have one value and the type of the variable. Beacon reads a fill value
