@@ -1,7 +1,7 @@
 //! High-level writers for serializing Arrow record batches into NetCDF.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::Arc,
@@ -91,8 +91,6 @@ pub struct ArrowRecordBatchWriter<E: Encoder> {
     options: NetcdfWriterOptions,
     /// Rows written so far.
     rows: usize,
-    /// Timestamp columns with a value that is not a whole number in `time_units`.
-    float_time_columns: HashSet<String>,
     /// Boolean columns, and whether each one has a null so far.
     boolean_columns: HashMap<String, bool>,
     encoder: PhantomData<E>,
@@ -164,7 +162,6 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             combiner,
             options,
             rows: 0,
-            float_time_columns: HashSet::new(),
             boolean_columns,
             encoder: PhantomData,
         };
@@ -204,16 +201,6 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         if let Some(combiner) = &mut self.combiner {
             combiner.observe(&record_batch)?;
         }
-        if let Some(units) = &self.options.time_units {
-            for (field, column) in self.schema.fields().iter().zip(record_batch.columns()) {
-                if matches!(field.data_type(), DataType::Timestamp(_, _))
-                    && !self.float_time_columns.contains(field.name())
-                    && !units.fits_integer(column)
-                {
-                    self.float_time_columns.insert(field.name().clone());
-                }
-            }
-        }
 
         self.writer
             .write(&record_batch)
@@ -229,8 +216,6 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             compression: self.options.compression,
             // A chunk larger than the data wastes space, because HDF5 stores full chunks.
             chunk_rows: Some(self.options.chunk_rows().min(self.rows).max(1)),
-            time_units: self.options.time_units.clone(),
-            float_time_columns: self.float_time_columns.clone(),
             ..Default::default()
         }
     }
@@ -327,7 +312,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
                 {
                     anyhow::bail!(
                         "variable_attributes cannot set '{name}' on the time variable \
-                         '{variable}': use the option time_units"
+                         '{variable}': Beacon writes them from the Arrow time unit"
                     );
                 }
             }
@@ -657,6 +642,10 @@ mod tests {
             str_attribute(&file, Some("time"), "units").as_deref(),
             Some("nanoseconds since 1970-01-01T00:00:00Z")
         );
+        assert_eq!(
+            str_attribute(&file, Some("time"), "calendar").as_deref(),
+            Some("standard")
+        );
         assert!(file.variable("time.units").is_none());
     }
 
@@ -882,89 +871,6 @@ mod tests {
         assert!(file.variable("temp._FillValue").is_none());
     }
 
-    fn write_times(path: &Path, nanoseconds: Vec<Option<i64>>, time_units: Option<&str>) {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "time",
-            DataType::Timestamp(TimeUnit::Nanosecond, None),
-            true,
-        )]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(TimestampNanosecondArray::from(nanoseconds))],
-        )
-        .unwrap();
-        let options = NetcdfWriterOptions {
-            time_units: time_units.map(|units| units.parse().unwrap()),
-            ..Default::default()
-        };
-        write_with(path, schema, vec![batch], options).unwrap();
-    }
-
-    const DAY_NS: i64 = 86_400_000_000_000;
-
-    #[test]
-    fn time_units_write_whole_values_as_integers() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("days.nc");
-        write_times(
-            &path,
-            vec![Some(0), None, Some(2 * DAY_NS)],
-            Some("days since 1950-01-01"),
-        );
-
-        let file = netcdf::open(&path).unwrap();
-        let time = file.variable("time").unwrap();
-        assert_eq!(
-            str_attribute(&file, Some("time"), "units").as_deref(),
-            Some("days since 1950-01-01")
-        );
-        assert_eq!(
-            str_attribute(&file, Some("time"), "calendar").as_deref(),
-            Some("standard")
-        );
-        assert_eq!(
-            time.get_values::<i64, _>(..).unwrap(),
-            vec![7305, i64::MAX, 7307]
-        );
-    }
-
-    #[test]
-    fn time_units_write_a_fraction_as_a_float() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fraction.nc");
-        write_times(
-            &path,
-            vec![Some(DAY_NS / 2), None],
-            Some("days since 1970-01-01"),
-        );
-
-        let file = netcdf::open(&path).unwrap();
-        let time = file.variable("time").unwrap();
-        let values: Vec<f64> = time.get_values(..).unwrap();
-        assert_eq!(values[0], 0.5);
-        assert!(values[1].is_nan());
-        assert!(time.fill_value::<f64>().unwrap().unwrap().is_nan());
-    }
-
-    #[test]
-    fn without_time_units_a_timestamp_keeps_its_arrow_unit() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("default_time.nc");
-        write_times(&path, vec![Some(5)], None);
-
-        let file = netcdf::open(&path).unwrap();
-        assert_eq!(
-            str_attribute(&file, Some("time"), "units").as_deref(),
-            Some("nanoseconds since 1970-01-01T00:00:00Z")
-        );
-        assert_eq!(
-            str_attribute(&file, Some("time"), "calendar").as_deref(),
-            Some("standard")
-        );
-        let values: Vec<i64> = file.variable("time").unwrap().get_values(..).unwrap();
-        assert_eq!(values, vec![5]);
-    }
-
     #[test]
     fn every_file_has_conventions_and_history() {
         let dir = tempfile::tempdir().unwrap();
@@ -1114,7 +1020,7 @@ mod tests {
         ]));
         for (global, variable, expected) in [
             ("{}", r#"{"salt": {"units": "psu"}}"#, "salt"),
-            ("{}", r#"{"time": {"units": "days"}}"#, "time_units"),
+            ("{}", r#"{"time": {"units": "days"}}"#, "Arrow time unit"),
             (r#"{"_NCProperties": "x"}"#, "{}", "_NCProperties"),
         ] {
             let error = write_with(
