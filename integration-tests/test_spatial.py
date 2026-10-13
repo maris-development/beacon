@@ -97,7 +97,7 @@ def test_geoparquet_output_and_readback(client, datasets_dir):
 
     resp = client.raw({"sql": src, "output": {"format": fmt}})
     assert resp.status_code == 200, resp.text
-    assert resp.headers["Content-Type"] == "application/vnd.apache.arrow.geo+parquet"
+    assert resp.headers["Content-Type"] == "application/vnd.apache.parquet"
     data = resp.content
     assert data[:4] == b"PAR1" and data[-4:] == b"PAR1"  # parquet magic
 
