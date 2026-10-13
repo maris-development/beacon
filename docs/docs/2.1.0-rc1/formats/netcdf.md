@@ -87,6 +87,45 @@ arrays that you select. This is much faster than a scan of the original NetCDF f
 
 ## Write a NetCDF output
 
+### NetCDF output options
+
+The plain name `"format": "netcdf"` uses the default options. To set an option, give the `netcdf`
+format an object. In SQL, set the same keys in `COPY ... STORED AS NC OPTIONS (...)`. The SQL
+format name is `NC`. `NETCDF` does not work.
+
+| JSON key | SQL key | Default | Description |
+|---|---|---|---|
+| `combine_attrs` | `combine_attrs` | Not set | Write an attribute column as a NetCDF attribute. See [attributes in a NetCDF output](#attributes-in-a-netcdf-output). |
+| `compression.level` | `compression.level` | Not set | Deflate level from 0 to 9. See [compression and chunks](#compression-and-chunks). |
+| `compression.shuffle` | `compression.shuffle` | `true` | Apply the shuffle filter before deflate. |
+| `chunk_rows` | `chunk_rows` | `65536` | Number of rows in one chunk of the `obs` dimension. |
+
+A gridded NetCDF output, with dimension columns, does not accept these options.
+
+### Compression and chunks
+
+Without `compression`, Beacon writes the data with no compression. Set a deflate level to make the
+file smaller:
+
+```json
+{ "output": { "format": { "netcdf": {
+  "compression": { "level": 4, "shuffle": true },
+  "chunk_rows": 65536
+} } } }
+```
+
+```sql
+COPY (SELECT * FROM argo)
+TO 'result.nc'
+STORED AS NC
+OPTIONS ('compression.level' '4', 'compression.shuffle' 'true', 'chunk_rows' '65536')
+```
+
+- Level 1 is fast. Level 9 gives the smallest file and is slow. Level 4 is a good default.
+- Each variable on `obs` is in chunks of `chunk_rows` rows. A file with fewer rows gets one chunk.
+- HDF5 does not compress the text of a string variable.
+- xarray, netCDF4-python, Panoply and ncview read a deflate file. They need no plugin.
+
 ### Attributes in a NetCDF output
 
 A NetCDF output writes each column as a variable on the `obs` dimension. An attribute column such
@@ -131,7 +170,6 @@ OPTIONS ('combine_attrs' 'identical')
   case is a variable with a `scale_factor` or `add_offset` column in the output. The second case is
   an attribute with a type that is not the type of the variable.
 - On a timestamp column, Beacon writes its own `units` and `calendar`.
-- A gridded NetCDF output, with dimension columns, does not accept `combine_attrs`.
 
 ## As an external table
 
@@ -146,7 +184,8 @@ full read model.
 
 ### `OPTIONS`
 
-`STORED AS NC` takes five keys. Four keys apply to a read. The key `combine_attrs` applies to a write only.
+`STORED AS NC` takes four keys for a read. The keys for a write are in
+[NetCDF output options](#netcdf-output-options).
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -154,7 +193,6 @@ full read model.
 | `skip_unbroadcastable` | Boolean | `false` | Skip a file that does not fit `read_dimensions`. Beacon writes a warning and reads the next file. Without it the query fails. |
 | `use_rust_reader` | Boolean | `true` (`BEACON_NETCDF_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library needs anonymous access to a bucket. |
 | `enable_statistics` | Boolean | `true` (`BEACON_NETCDF_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_NETCDF_ENABLE_STATISTICS` to turn the column ranges off. |
-| `combine_attrs` | `identical`, `first` or `drop_conflicts` | Not set | Write only. Write an attribute column as a NetCDF attribute. See [attributes in a NetCDF output](#attributes-in-a-netcdf-output). |
 
 ```sql
 -- One grid, and the netCDF-C reader for this table alone

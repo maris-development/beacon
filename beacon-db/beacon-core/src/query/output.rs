@@ -10,7 +10,6 @@ use std::sync::Arc;
 use beacon_arrow_csv::datafusion::DEFAULT_CSV_EXTENSION;
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
 use beacon_arrow_ipc::datafusion::{ArrowFormatFactory, DEFAULT_ARROW_EXTENSION};
-use beacon_arrow_netcdf::attributes::CombineAttrs;
 use beacon_arrow_netcdf::datafusion::NETCDF_EXTENSION;
 use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
@@ -84,14 +83,7 @@ impl Output {
     }
 }
 
-/// Options of the flat NetCDF output.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct NetcdfOutputOptions {
-    /// How the writer combines `variable.attribute` columns. When not set, they stay variables.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub combine_attrs: Option<CombineAttrs>,
-}
+pub use beacon_arrow_netcdf::datafusion::options::NetcdfWriterOptions as NetcdfOutputOptions;
 
 /// Supported output formats for query results.
 // `remote = "Self"` makes the derived serde code inherent, for the trait impls below.
@@ -292,10 +284,10 @@ impl OutputFormat {
                             NETCDF_EXTENSION
                         )
                     })?;
-                let Some(combine_attrs) = options.combine_attrs else {
+                if *options == NetcdfOutputOptions::default() {
                     return Ok(format_as_file_type(registered));
-                };
-                // The COPY sink reads combine_attrs from the factory, so clone the registered one.
+                }
+                // The COPY sink reads its options from the factory, so clone the registered one.
                 let mut factory = registered
                     .as_any()
                     .downcast_ref::<NetCDFFormatFactory>()
@@ -306,7 +298,7 @@ impl OutputFormat {
                         )
                     })?
                     .clone();
-                factory.options.combine_attrs = Some(combine_attrs);
+                factory.options.writer = options.clone();
                 Ok(format_as_file_type(Arc::new(factory)))
             }
             OutputFormat::NdNetCDF { dimension_columns } => {

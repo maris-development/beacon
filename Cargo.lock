@@ -1599,6 +1599,7 @@ dependencies = [
  "ordered-float 5.3.0",
  "oxcdf",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

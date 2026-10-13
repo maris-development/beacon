@@ -117,7 +117,9 @@ Content-Type: application/json
 ```
 
 See [attributes in a NetCDF output](/docs/2.1.0-rc1/formats/netcdf#attributes-in-a-netcdf-output)
-for the values of `combine_attrs`.
+for the values of `combine_attrs`. See
+[NetCDF output options](/docs/2.1.0-rc1/formats/netcdf#netcdf-output-options) for all options,
+for example `compression` and `chunk_rows`.
 
 ### GeoParquet
 
