@@ -320,6 +320,28 @@ async fn copy_to_nc_with_compression_sets_the_chunks() {
     assert_eq!(v.len(), 100_000);
 }
 
+/// A null float is NaN in the file, and Beacon reads the NaN back as a null.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_null_float_is_nan_and_reads_back_as_null() {
+    let rt = runtime("output-netcdf-nan-fill").await;
+    let sql = "SELECT v FROM (VALUES (1.5), (NULL)) AS t(v)";
+    let file = netcdf_output(&rt, sql, json!({ "format": "netcdf" })).await;
+    {
+        let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+        let v = nc.variable("v").expect("the column is a variable");
+        assert!(v.fill_value::<f64>().unwrap().unwrap().is_nan());
+    }
+
+    std::fs::copy(file.path(), rt.datasets_dir().join("nan.nc")).unwrap();
+    let batches = rt
+        .sql("SELECT count(*) AS nulls FROM read_netcdf('nan.nc') WHERE v IS NULL")
+        .await;
+    let nulls =
+        arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(batches[0].column(0))
+            .value(0);
+    assert_eq!(nulls, 1);
+}
+
 fn format_of(value: serde_json::Value) -> Result<OutputFormat, serde_json::Error> {
     serde_json::from_value(value)
 }

@@ -7,7 +7,7 @@ use arrow::{
     datatypes::{DataType, Field, SchemaRef},
 };
 use ndarray::ArrayView;
-use netcdf::FileMut;
+use netcdf::{AttributeValue, FileMut, NcTypeDescriptor};
 
 use crate::{NcChar, NcString};
 
@@ -18,6 +18,8 @@ pub struct DefaultEncoder {
     nc_file: FileMut,
     _schema: SchemaRef,
     offsets: HashMap<String, usize>,
+    /// Source fill value of each variable. Other variables use [`FillValue::DEFAULT`].
+    fill_values: HashMap<String, AttributeValue>,
 }
 
 impl DefaultEncoder {
@@ -25,24 +27,81 @@ impl DefaultEncoder {
     const OBS_DIM_NAME: &'static str = "obs";
 }
 
+/// A numeric NetCDF type and its fill value.
+trait FillValue: NcTypeDescriptor + Copy {
+    /// The fill value of a variable with no source fill value.
+    const DEFAULT: Self;
+    /// `value` as this type, or `None` when it has another type.
+    fn from_attribute(value: &AttributeValue) -> Option<Self>;
+}
+
+macro_rules! impl_fill_value {
+    ($native_type:ty, $default:expr, $variant:ident) => {
+        impl FillValue for $native_type {
+            const DEFAULT: Self = $default;
+
+            fn from_attribute(value: &AttributeValue) -> Option<Self> {
+                match value {
+                    AttributeValue::$variant(value) => Some(*value),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+impl_fill_value!(i8, i8::MAX, Schar);
+impl_fill_value!(i16, i16::MAX, Short);
+impl_fill_value!(i32, i32::MAX, Int);
+impl_fill_value!(i64, i64::MAX, Longlong);
+impl_fill_value!(u8, u8::MAX, Uchar);
+impl_fill_value!(u16, u16::MAX, Ushort);
+impl_fill_value!(u32, u32::MAX, Uint);
+impl_fill_value!(u64, u64::MAX, Ulonglong);
+// xarray writes NaN, and a tool that does not mask still shows a float null as NaN.
+impl_fill_value!(f32, f32::NAN, Float);
+impl_fill_value!(f64, f64::NAN, Double);
+
+/// The fill value of the variable `name`.
+fn fill_value<T: FillValue>(fill_values: &HashMap<String, AttributeValue>, name: &str) -> T {
+    fill_values
+        .get(name)
+        .and_then(T::from_attribute)
+        .unwrap_or(T::DEFAULT)
+}
+
 macro_rules! downcast_and_put_values {
-    ($array:expr, $variable:expr, $extents:expr, $arrow_type:ty, $native_type:ty) => {{
+    ($array:expr, $variable:expr, $extents:expr, $arrow_type:ty, $native_type:ty, $fill:expr) => {{
         let array = $array
             .as_any()
             .downcast_ref::<$arrow_type>()
             .expect(concat!("Failed to downcast to ", stringify!($arrow_type)));
 
-        let temp_buffer = array
-            .iter()
-            .map(|x| x.unwrap_or(<$native_type>::MAX))
-            .collect::<Vec<_>>();
+        let fill: $native_type = $fill;
+        let temp_buffer = array.iter().map(|x| x.unwrap_or(fill)).collect::<Vec<_>>();
 
         $variable.put_values::<$native_type, _>(&temp_buffer, $extents)?;
     }};
 }
 
 impl DefaultEncoder {
-    fn define_variable(file: &mut FileMut, field: &Field) -> anyhow::Result<()> {
+    /// Define a numeric variable on `obs` with its fill value.
+    fn define_numeric<T: FillValue>(
+        file: &mut FileMut,
+        name: &str,
+        fill_values: &HashMap<String, AttributeValue>,
+    ) -> anyhow::Result<()> {
+        let mut variable = file.add_variable::<T>(name, &[Self::OBS_DIM_NAME])?;
+        variable.set_fill_value(fill_value::<T>(fill_values, name))?;
+        Ok(())
+    }
+
+    fn define_variable(
+        file: &mut FileMut,
+        field: &Field,
+        fill_values: &HashMap<String, AttributeValue>,
+    ) -> anyhow::Result<()> {
+        let name = field.name();
         match field.data_type() {
             DataType::FixedSizeBinary(size) => {
                 let strlen_dim_name = format!("STRING{}", size);
@@ -63,46 +122,16 @@ impl DefaultEncoder {
                     file.add_variable::<NcString>(field.name(), &[Self::OBS_DIM_NAME])?;
                 variable.set_fill_value(NcString::new(""))?;
             }
-            DataType::Int8 => {
-                let mut variable = file.add_variable::<i8>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(i8::MAX)?;
-            }
-            DataType::Int16 => {
-                let mut variable = file.add_variable::<i16>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(i16::MAX)?;
-            }
-            DataType::Int32 => {
-                let mut variable = file.add_variable::<i32>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(i32::MAX)?;
-            }
-            DataType::Int64 => {
-                let mut variable = file.add_variable::<i64>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(i64::MAX)?;
-            }
-            DataType::UInt8 => {
-                let mut variable = file.add_variable::<u8>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(u8::MAX)?;
-            }
-            DataType::UInt16 => {
-                let mut variable = file.add_variable::<u16>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(u16::MAX)?;
-            }
-            DataType::UInt32 => {
-                let mut variable = file.add_variable::<u32>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(u32::MAX)?;
-            }
-            DataType::UInt64 => {
-                let mut variable = file.add_variable::<u64>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(u64::MAX)?;
-            }
-            DataType::Float32 => {
-                let mut variable = file.add_variable::<f32>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(f32::MAX)?;
-            }
-            DataType::Float64 => {
-                let mut variable = file.add_variable::<f64>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(f64::MAX)?;
-            }
+            DataType::Int8 => Self::define_numeric::<i8>(file, name, fill_values)?,
+            DataType::Int16 => Self::define_numeric::<i16>(file, name, fill_values)?,
+            DataType::Int32 => Self::define_numeric::<i32>(file, name, fill_values)?,
+            DataType::Int64 => Self::define_numeric::<i64>(file, name, fill_values)?,
+            DataType::UInt8 => Self::define_numeric::<u8>(file, name, fill_values)?,
+            DataType::UInt16 => Self::define_numeric::<u16>(file, name, fill_values)?,
+            DataType::UInt32 => Self::define_numeric::<u32>(file, name, fill_values)?,
+            DataType::UInt64 => Self::define_numeric::<u64>(file, name, fill_values)?,
+            DataType::Float32 => Self::define_numeric::<f32>(file, name, fill_values)?,
+            DataType::Float64 => Self::define_numeric::<f64>(file, name, fill_values)?,
             DataType::Timestamp(time_unit, _) => {
                 let mut variable = file.add_variable::<i64>(field.name(), &[Self::OBS_DIM_NAME])?;
                 variable.put_attribute("calendar", "gregorian")?;
@@ -171,6 +200,7 @@ impl DefaultEncoder {
     ) -> anyhow::Result<()> {
         let mut extents = vec![offset..offset + array.len()];
 
+        let fills = &self.fill_values;
         let nc_file = &mut self.nc_file;
         let mut variable = nc_file
             .variable_mut(var_name)
@@ -217,34 +247,104 @@ impl DefaultEncoder {
                 variable.put_values::<NcString, _>(&cstrings, extents)?;
             }
             DataType::Int8 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::Int8Array, i8);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::Int8Array,
+                    i8,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::Int16 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::Int16Array, i16);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::Int16Array,
+                    i16,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::Int32 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::Int32Array, i32);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::Int32Array,
+                    i32,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::Int64 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::Int64Array, i64);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::Int64Array,
+                    i64,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::UInt8 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::UInt8Array, u8);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::UInt8Array,
+                    u8,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::UInt16 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::UInt16Array, u16);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::UInt16Array,
+                    u16,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::UInt32 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::UInt32Array, u32);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::UInt32Array,
+                    u32,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::UInt64 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::UInt64Array, u64);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::UInt64Array,
+                    u64,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::Float32 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::Float32Array, f32);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::Float32Array,
+                    f32,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::Float64 => {
-                downcast_and_put_values!(array, variable, extents, arrow::array::Float64Array, f64);
+                downcast_and_put_values!(
+                    array,
+                    variable,
+                    extents,
+                    arrow::array::Float64Array,
+                    f64,
+                    fill_value(fills, var_name)
+                );
             }
             DataType::Timestamp(time_unit, _) => match time_unit {
                 arrow::datatypes::TimeUnit::Second => {
@@ -253,7 +353,8 @@ impl DefaultEncoder {
                         variable,
                         extents,
                         arrow::array::TimestampSecondArray,
-                        i64
+                        i64,
+                        i64::MAX
                     );
                 }
                 arrow::datatypes::TimeUnit::Millisecond => {
@@ -262,7 +363,8 @@ impl DefaultEncoder {
                         variable,
                         extents,
                         arrow::array::TimestampMillisecondArray,
-                        i64
+                        i64,
+                        i64::MAX
                     );
                 }
                 arrow::datatypes::TimeUnit::Microsecond => {
@@ -271,7 +373,8 @@ impl DefaultEncoder {
                         variable,
                         extents,
                         arrow::array::TimestampMicrosecondArray,
-                        i64
+                        i64,
+                        i64::MAX
                     );
                 }
                 arrow::datatypes::TimeUnit::Nanosecond => {
@@ -280,7 +383,8 @@ impl DefaultEncoder {
                         variable,
                         extents,
                         arrow::array::TimestampNanosecondArray,
-                        i64
+                        i64,
+                        i64::MAX
                     );
                 }
             },
@@ -309,7 +413,7 @@ impl Encoder for DefaultEncoder {
         nc_file.add_unlimited_dimension(Self::OBS_DIM_NAME)?;
 
         for field in schema.fields() {
-            Self::define_variable(&mut nc_file, field)?;
+            Self::define_variable(&mut nc_file, field, &options.fill_values)?;
             Self::set_storage(&mut nc_file, field, options)?;
         }
 
@@ -323,6 +427,7 @@ impl Encoder for DefaultEncoder {
             nc_file,
             _schema: schema,
             offsets,
+            fill_values: options.fill_values.clone(),
         })
     }
 

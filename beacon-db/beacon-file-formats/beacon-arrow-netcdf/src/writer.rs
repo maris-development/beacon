@@ -192,17 +192,19 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             compression: self.options.compression,
             // A chunk larger than the data wastes space, because HDF5 stores full chunks.
             chunk_rows: Some(self.options.chunk_rows().min(self.rows).max(1)),
+            ..Default::default()
         }
     }
 
     /// Finalize buffered data and write the NetCDF file.
     pub fn finish(&mut self) -> anyhow::Result<()> {
         self.writer.finish().map_err(|e| anyhow::anyhow!(e))?;
-        let plan = match self.combiner.take() {
+        let mut plan = match self.combiner.take() {
             Some(combiner) => combiner.resolve()?,
             None => AttributePlan::default(),
         };
-        let encoder_options = self.encoder_options();
+        let mut encoder_options = self.encoder_options();
+        encoder_options.fill_values = std::mem::take(&mut plan.fill_values);
         let inner_f = self.writer.get_mut();
         let reader = arrow::ipc::reader::FileReader::try_new(inner_f, None)
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -618,8 +620,10 @@ mod tests {
 
         let plain = netcdf::open(&plain).unwrap();
         let packed = netcdf::open(&packed).unwrap();
-        let values = |file: &netcdf::File| -> Vec<f64> {
-            file.variable("value").unwrap().get_values(..).unwrap()
+        // A null is NaN, and NaN is not equal to NaN, so compare the bits.
+        let values = |file: &netcdf::File| -> Vec<u64> {
+            let values: Vec<f64> = file.variable("value").unwrap().get_values(..).unwrap();
+            values.into_iter().map(f64::to_bits).collect()
         };
         let names = |file: &netcdf::File| -> Vec<String> {
             file.variable("name").unwrap().get_strings(..).unwrap()
@@ -667,5 +671,59 @@ mod tests {
         let file = netcdf::open(&path).unwrap();
         let chunking = file.variable("value").unwrap().chunking().unwrap();
         assert_eq!(chunking, Some(vec![10]));
+    }
+
+    #[test]
+    fn a_null_float_is_nan_and_a_null_integer_is_the_type_maximum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fill.nc");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Float32, true),
+            Field::new("count", DataType::Int32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(arrow::array::Float32Array::from(vec![Some(1.5), None])),
+                Arc::new(arrow::array::Int32Array::from(vec![Some(3), None])),
+            ],
+        )
+        .unwrap();
+        write(&path, schema, vec![batch], None);
+
+        let file = netcdf::open(&path).unwrap();
+        let temp = file.variable("temp").unwrap();
+        assert!(temp.fill_value::<f32>().unwrap().unwrap().is_nan());
+        let values: Vec<f32> = temp.get_values(..).unwrap();
+        assert_eq!(values[0], 1.5);
+        assert!(values[1].is_nan());
+        let count = file.variable("count").unwrap();
+        assert_eq!(count.fill_value::<i32>().unwrap(), Some(i32::MAX));
+        assert_eq!(count.get_values::<i32, _>(..).unwrap(), vec![3, i32::MAX]);
+    }
+
+    #[test]
+    fn a_source_fill_value_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source_fill.nc");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Float64, true),
+            Field::new("temp._FillValue", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![Some(1.5), None])),
+                Arc::new(Float64Array::from(vec![-999.0, -999.0])),
+            ],
+        )
+        .unwrap();
+        write(&path, schema, vec![batch], Some(CombineAttrs::Identical));
+
+        let file = netcdf::open(&path).unwrap();
+        let temp = file.variable("temp").unwrap();
+        assert_eq!(temp.fill_value::<f64>().unwrap(), Some(-999.0));
+        assert_eq!(temp.get_values::<f64, _>(..).unwrap(), vec![1.5, -999.0]);
+        assert!(file.variable("temp._FillValue").is_none());
     }
 }

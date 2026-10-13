@@ -4,6 +4,8 @@ use arrow::{
     array::{ArrayRef, RecordBatch},
     datatypes::SchemaRef,
 };
+use std::collections::HashMap;
+
 use netcdf::FileMut;
 
 use crate::datafusion::options::Compression;
@@ -18,6 +20,8 @@ pub struct EncoderOptions {
     pub compression: Option<Compression>,
     /// Rows in one chunk of the record dimension. `None` keeps the netCDF default chunks.
     pub chunk_rows: Option<usize>,
+    /// Source `_FillValue` of each variable. A variable not in the map uses the default fill.
+    pub fill_values: HashMap<String, netcdf::AttributeValue>,
 }
 
 /// Trait implemented by concrete NetCDF encoders.
