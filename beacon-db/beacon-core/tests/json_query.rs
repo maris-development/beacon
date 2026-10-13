@@ -134,6 +134,126 @@ async fn filter_on_a_column_outside_the_select() {
     assert_eq!(column_strings(&batches, 0), vec!["y", "z"]);
 }
 
+/// An Arrow IPC file with the column names of a World Ocean Database export.
+fn write_wod_arrow(path: &std::path::Path) {
+    use arrow::array::{Float32Array, Float64Array, Int32Array, StringArray, TimestampSecondArray};
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::ipc::writer::FileWriter;
+    use std::sync::Arc;
+
+    // Row 1 and row 7 pass every filter. Each other row fails one filter.
+    let days = [
+        "2022-06-01",
+        "2021-06-01",
+        "2022-07-01",
+        "2022-08-01",
+        "2022-09-01",
+        "2022-10-01",
+        "2022-11-01",
+    ];
+    let time: Vec<i64> = days
+        .iter()
+        .map(|day| {
+            format!("{day}T00:00:00")
+                .parse::<chrono::NaiveDateTime>()
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        })
+        .collect();
+    let text = |value: &str| Arc::new(StringArray::from(vec![value; 7]));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("wod_unique_cast", DataType::Int64, false),
+        Field::new("Temperature", DataType::Float64, true),
+        Field::new("Temperature_WODflag", DataType::Int32, true),
+        Field::new("Temperature.units", DataType::Utf8, true),
+        Field::new("z", DataType::Float32, true),
+        Field::new("z.units", DataType::Utf8, true),
+        Field::new("time", DataType::Timestamp(TimeUnit::Second, None), true),
+        Field::new("lon", DataType::Float64, true),
+        Field::new("lat", DataType::Float64, true),
+        Field::new("Platform", DataType::Utf8, true),
+        Field::new("Institute", DataType::Utf8, true),
+        Field::new(".featureType", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5, 6, 7])),
+            Arc::new(Float64Array::from(vec![
+                Some(15.0),
+                Some(14.0),
+                Some(-10000000000.0),
+                None,
+                Some(13.0),
+                Some(11.0),
+                Some(12.0),
+            ])),
+            Arc::new(Int32Array::from(vec![0, 0, 0, 0, 1, 0, 0])),
+            text("degrees_C"),
+            Arc::new(Float32Array::from(vec![
+                5.0, 5.0, 5.0, 5.0, 5.0, 50.0, 10.0,
+            ])),
+            text("m"),
+            Arc::new(TimestampSecondArray::from(time)),
+            Arc::new(Float64Array::from(vec![4.0; 7])),
+            Arc::new(Float64Array::from(vec![52.0; 7])),
+            text("SHIP"),
+            text("NIOZ"),
+            text("profile"),
+        ],
+    )
+    .unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut writer = FileWriter::try_new(std::fs::File::create(path).unwrap(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.finish().unwrap();
+}
+
+/// A filter names a select alias, and the compiler reads the column behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn filters_name_select_aliases() {
+    let rt = seeded("json-filter-alias").await;
+    write_wod_arrow(&rt.datasets_dir().join("wod/data.arrow"));
+
+    let batches = run_json(
+        &rt,
+        json!({
+            "output": null,
+            "select": [
+                {"column": "wod_unique_cast", "alias": null},
+                {"column": "Temperature", "alias": "TEMPERATURE"},
+                {"column": "Temperature_WODflag", "alias": "TEMPERATURE_QC"},
+                {"column": "Temperature.units", "alias": "TEMPERATURE_UNIT"},
+                {"column": "z", "alias": "DEPTH"},
+                {"column": "z.units", "alias": "DEPTH_UNIT"},
+                {"column": "time", "alias": "TIME"},
+                {"column": "lon", "alias": "LONGITUDE"},
+                {"column": "lat", "alias": "LATITUDE"},
+                {"column": "Platform", "alias": "PLATFORM"},
+                {"column": "Institute", "alias": "INSTITUTE"},
+                {"column": ".featureType", "alias": "FEATURE_TYPE"}
+            ],
+            "filters": [
+                {"column": "TIME", "gt_eq": "2022-01-01T00:00:00", "lt_eq": "2023-01-01T00:00:00"},
+                {"is_not_null": {"column": "TEMPERATURE"}},
+                {"column": "TEMPERATURE", "neq": -10000000000.0},
+                {"column": "TEMPERATURE_QC", "eq": 0.0},
+                {"column": "DEPTH", "gt_eq": 0, "lt_eq": 10}
+            ],
+            "distinct": null,
+            "sort_by": [{"Asc": "wod_unique_cast"}],
+            "limit": null,
+            "offset": null,
+            "from": {"arrow": {"paths": ["wod/data.arrow"]}}
+        }),
+    )
+    .await;
+
+    assert_eq!(batches[0].schema().field(1).name(), "TEMPERATURE");
+    assert_eq!(i64_column(&batches, 0), vec![1, 7]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn offset_skips_rows() {
     let rt = seeded("json-offset").await;
