@@ -124,6 +124,8 @@ export interface NetcdfOutputOptions {
   global_attributes?: Record<string, string | number>;
   /** Attributes of each column, by column name. A value here wins over `combine_attrs`. */
   variable_attributes?: Record<string, Record<string, string | number>>;
+  /** Coordinate columns. Each other variable gets a `coordinates` attribute. */
+  coordinates?: string[];
 }
 
 export interface Output {

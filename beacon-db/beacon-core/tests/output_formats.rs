@@ -388,6 +388,41 @@ async fn copy_to_nc_with_global_attributes() {
     assert!(nc.attribute("id").is_some());
 }
 
+/// `coordinates` writes the attribute on each data variable, not on the coordinates.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_coordinates_write_the_attribute() {
+    let rt = runtime("output-netcdf-coordinates").await;
+    let sql = "SELECT lat, lon, temp FROM (VALUES (1.0, 2.0, 3.0)) AS t(lat, lon, temp)";
+    let file = netcdf_output(
+        &rt,
+        sql,
+        json!({ "format": { "netcdf": { "coordinates": ["lat", "lon"] } } }),
+    )
+    .await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert_eq!(
+        str_attribute(&nc, Some("temp"), "coordinates").as_deref(),
+        Some("lat lon")
+    );
+    assert_eq!(str_attribute(&nc, Some("lat"), "coordinates"), None);
+}
+
+/// A `coordinates` name that is not a column is an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_nc_with_an_unknown_coordinate_fails() {
+    let rt = runtime("copy-nc-unknown-coordinate").await;
+    let error = rt
+        .try_sql(
+            "COPY (SELECT 1.0 AS temp) TO 'tmp:///bad.nc' STORED AS NC \
+             OPTIONS ('coordinates' 'time,lat')",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("'time'"), "{error}");
+}
+
 fn format_of(value: serde_json::Value) -> Result<OutputFormat, serde_json::Error> {
     serde_json::from_value(value)
 }

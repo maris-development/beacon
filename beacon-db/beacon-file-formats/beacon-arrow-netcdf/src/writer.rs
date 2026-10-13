@@ -293,10 +293,16 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
                 }
             }
         }
+        for name in &options.coordinates {
+            if schema.field_with_name(name).is_err() {
+                anyhow::bail!("coordinates names '{name}', which is not a variable of the output");
+            }
+        }
         Ok(())
     }
 
-    /// The attributes of the file: the defaults, then `combined`, then the attribute options.
+    /// The attributes of the file: the defaults, then `combined`, then the options. A
+    /// `variable_attributes` value wins over `coordinates`.
     /// A later value of the same attribute wins.
     fn attributes(
         options: &NetcdfWriterOptions,
@@ -317,6 +323,18 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         attributes.extend(combined);
         for (name, value) in &options.global_attributes {
             attributes.push((global(name), value.to_netcdf()));
+        }
+        if !options.coordinates.is_empty() {
+            let coordinates = options.coordinates.join(" ");
+            for field in schema.fields() {
+                if !options.coordinates.contains(field.name()) {
+                    let target = AttributeTarget::Variable {
+                        variable: field.name().clone(),
+                        name: "coordinates".to_string(),
+                    };
+                    attributes.push((target, coordinates.clone().into()));
+                }
+            }
         }
         for (variable, values) in &options.variable_attributes {
             for (name, value) in values {
@@ -866,6 +884,44 @@ mod tests {
             str_attribute(&file, Some("temp"), "long_name").as_deref(),
             Some("Temperature")
         );
+    }
+
+    #[test]
+    fn coordinates_go_on_each_data_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coordinates.nc");
+        let schema = series_schema();
+        let options = NetcdfWriterOptions {
+            coordinates: vec!["name".to_string()],
+            ..Default::default()
+        };
+        write_with(
+            &path,
+            schema.clone(),
+            vec![series_batch(&schema, 3)],
+            options,
+        )
+        .unwrap();
+
+        let file = netcdf::open(&path).unwrap();
+        assert_eq!(
+            str_attribute(&file, Some("value"), "coordinates").as_deref(),
+            Some("name")
+        );
+        assert_eq!(str_attribute(&file, Some("name"), "coordinates"), None);
+    }
+
+    #[test]
+    fn an_unknown_coordinate_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = NetcdfWriterOptions {
+            coordinates: vec!["lat".to_string()],
+            ..Default::default()
+        };
+        let error = write_with(&dir.path().join("bad.nc"), series_schema(), vec![], options)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("'lat'"), "{error}");
     }
 
     #[test]

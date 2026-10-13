@@ -73,6 +73,10 @@ pub struct NetcdfWriterOptions {
     /// value.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub variable_attributes: BTreeMap<String, BTreeMap<String, AttributeOption>>,
+    /// Coordinate columns, for example `["time", "lat", "lon"]`. Each other variable gets the
+    /// attribute `coordinates = "time lat lon"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coordinates: Vec<String>,
 }
 
 /// The value of an attribute option: a string or a number.
@@ -211,6 +215,13 @@ impl NetcdfWriterOptions {
                 )
             })?;
         }
+        if let Some(value) = format_option(format_options, "coordinates") {
+            self.coordinates = value
+                .split(',')
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect();
+        }
         Ok(())
     }
 
@@ -231,6 +242,9 @@ impl NetcdfWriterOptions {
         }
         if !self.variable_attributes.is_empty() {
             keys.push("variable_attributes");
+        }
+        if !self.coordinates.is_empty() {
+            keys.push("coordinates");
         }
         keys
     }
@@ -307,6 +321,12 @@ mod tests {
                 .to_string();
         assert!(error.contains("expected 0 to 9"), "{error}");
         assert!(serde_json::from_str::<NetcdfWriterOptions>(r#"{"chunk_rows": 0}"#).is_err());
+    }
+
+    #[test]
+    fn coordinates_read_a_comma_list() {
+        let options = apply(&[("coordinates", "time, lat ,lon")]).unwrap();
+        assert_eq!(options.coordinates, vec!["time", "lat", "lon"]);
     }
 
     #[test]
