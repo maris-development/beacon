@@ -33,6 +33,13 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   default of 65536. In SQL, use the keys `compression.level`, `compression.shuffle` and
   `chunk_rows`. ([#576](https://github.com/maris-development/beacon/issues/576))
 
+### Changed
+
+- **NetCDF float fill value.** A flat NetCDF output writes a null float as `NaN`, with
+  `_FillValue = NaN`, as xarray does. Before, the fill value was the maximum of the type. With
+  `combine_attrs`, a source `_FillValue` with one value and the type of the variable stays the fill
+  value. ([#577](https://github.com/maris-development/beacon/issues/577))
+
 ## [2.0.2] — 2026-10-13
 
 Beacon 2.0.2 fixes one regression in the JSON query API. A 2.0.1 server upgrades in place.

@@ -126,6 +126,21 @@ OPTIONS ('compression.level' '4', 'compression.shuffle' 'true', 'chunk_rows' '65
 - HDF5 does not compress the text of a string variable.
 - xarray, netCDF4-python, Panoply and ncview read a deflate file. They need no plugin.
 
+### Fill values
+
+Beacon writes a null as the `_FillValue` of the variable.
+
+| Column type | `_FillValue` |
+|---|---|
+| Float | `NaN`, as in xarray |
+| Integer | The maximum of the type, for example `2147483647` for `int32` |
+| String | An empty string |
+| Timestamp | The maximum of `int64` |
+
+With `combine_attrs`, Beacon uses the source `_FillValue` of a numeric variable. The column
+`<variable>._FillValue` must have one value and the type of the variable. Beacon reads a fill value
+in a file as a null, so this keeps the original fill value.
+
 ### Attributes in a NetCDF output
 
 A NetCDF output writes each column as a variable on the `obs` dimension. An attribute column such
@@ -165,7 +180,7 @@ OPTIONS ('combine_attrs' 'identical')
 - The Beacon option `identical` keeps a conflict as a variable. The xarray option with the same name stops
   with an error.
 - Beacon never copies an attribute with a name that starts with `_`. Beacon also never copies
-  `scale_factor` and `add_offset`.
+  `scale_factor` and `add_offset`. One exception is `_FillValue`. See [fill values](#fill-values).
 - Beacon drops `valid_min`, `valid_max`, `valid_range` and `missing_value` in two cases. The first
   case is a variable with a `scale_factor` or `add_offset` column in the output. The second case is
   an attribute with a type that is not the type of the variable.

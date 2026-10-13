@@ -72,6 +72,8 @@ impl AttributeTarget {
 const PACKED_TYPE: [&str; 4] = ["valid_min", "valid_max", "valid_range", "missing_value"];
 /// Attributes the encoder writes itself on a timestamp variable.
 const TIME_OWNED: [&str; 2] = ["units", "calendar"];
+/// The fill value attribute. The encoder sets it when it defines the variable.
+pub const FILL_VALUE: &str = "_FillValue";
 
 /// The attribute columns of one schema.
 #[derive(Debug, Default)]
@@ -145,6 +147,18 @@ fn is_dropped(
     packed: &HashSet<String>,
 ) -> bool {
     let name = target.name();
+    let data_type = |name: &str| schema.field_with_name(name).ok().map(Field::data_type);
+    if name == FILL_VALUE {
+        // The writer uses a source fill value only when it fits the type of the variable.
+        return match target.variable() {
+            Some(variable) => {
+                packed.contains(variable)
+                    || data_type(column) != data_type(variable)
+                    || !data_type(variable).is_some_and(|t| t.is_integer() || t.is_floating())
+            }
+            None => true,
+        };
+    }
     if name.starts_with('_') || name == "scale_factor" || name == "add_offset" {
         return true;
     }
@@ -153,7 +167,6 @@ fn is_dropped(
     };
     if PACKED_TYPE.contains(&name) {
         // CF gives a packed-type attribute the type of the packed variable.
-        let data_type = |name: &str| schema.field_with_name(name).ok().map(Field::data_type);
         if packed.contains(variable) || data_type(column) != data_type(variable) {
             return true;
         }
@@ -176,6 +189,8 @@ pub struct AttributePlan {
     pub skipped: HashSet<String>,
     /// Columns that stay variables under a new name.
     pub renamed: HashMap<String, String>,
+    /// Source `_FillValue` of each variable. The encoder writes a null as this value.
+    pub fill_values: HashMap<String, AttributeValue>,
 }
 
 /// The values one attribute column held so far.
@@ -346,6 +361,20 @@ impl AttributeCombiner {
             keep_as_variable(&mut plan, &self.columns, column, &target)?;
         }
         for tracked in self.tracked {
+            if let AttributeTarget::Variable { variable, name } = &tracked.target {
+                if name == FILL_VALUE {
+                    // A fill value with more values has no meaning, because the reader masked them.
+                    let value = match tracked.seen {
+                        Seen::One(Some(value)) => to_attribute_value(&value),
+                        _ => None,
+                    };
+                    if let Some(value) = value {
+                        plan.fill_values.insert(variable.clone(), value);
+                    }
+                    plan.skipped.insert(tracked.column);
+                    continue;
+                }
+            }
             let value = match (tracked.seen, self.policy) {
                 (Seen::Empty | Seen::One(None), _) => None,
                 (Seen::One(Some(value)), _) => Some(value),
@@ -794,6 +823,65 @@ mod tests {
         ]));
         let plan = combine(CombineAttrs::Identical, &s, &[]).unwrap();
         assert!(plan.skipped.contains("temp._FillValue"));
+    }
+
+    fn fill_batch(s: &Arc<Schema>, fills: Vec<f64>) -> RecordBatch {
+        RecordBatch::try_new(
+            s.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0; fills.len()])) as ArrayRef,
+                Arc::new(Float64Array::from(fills)),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_fill_value_of_the_variable_type_becomes_the_fill_value() {
+        let s = Arc::new(schema(&[
+            ("temp", DataType::Float64),
+            ("temp._FillValue", DataType::Float64),
+        ]));
+        let plan = combine(
+            CombineAttrs::Identical,
+            &s,
+            &[fill_batch(&s, vec![-999.0, -999.0])],
+        )
+        .unwrap();
+        assert_eq!(
+            plan.fill_values.get("temp"),
+            Some(&AttributeValue::Double(-999.0))
+        );
+        assert!(plan.skipped.contains("temp._FillValue"));
+        assert!(plan.attributes.is_empty());
+    }
+
+    #[test]
+    fn a_fill_value_with_two_values_is_dropped() {
+        let s = Arc::new(schema(&[
+            ("temp", DataType::Float64),
+            ("temp._FillValue", DataType::Float64),
+        ]));
+        let plan = combine(
+            CombineAttrs::Identical,
+            &s,
+            &[fill_batch(&s, vec![-999.0, 99999.0])],
+        )
+        .unwrap();
+        assert!(plan.fill_values.is_empty());
+        assert!(plan.skipped.contains("temp._FillValue"));
+    }
+
+    #[test]
+    fn a_fill_value_of_another_type_is_dropped() {
+        let c = classify(&schema(&[
+            ("temp", DataType::Float32),
+            ("temp._FillValue", DataType::Float64),
+            ("name", DataType::Utf8),
+            ("name._FillValue", DataType::Utf8),
+        ]));
+        assert!(c.dropped.contains("temp._FillValue"));
+        assert!(c.dropped.contains("name._FillValue"));
     }
 
     #[test]
