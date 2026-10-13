@@ -51,8 +51,10 @@ impl OutputFileKind {
             OutputFileKind::Csv => "text/csv",
             OutputFileKind::Ipc => "application/vnd.apache.arrow.file",
             OutputFileKind::Json => "application/json",
-            OutputFileKind::Parquet => "application/vnd.apache.parquet",
-            OutputFileKind::GeoParquet => "application/vnd.apache.parquet",
+            // GeoParquet has no registered media type of its own.
+            OutputFileKind::Parquet | OutputFileKind::GeoParquet => {
+                "application/vnd.apache.parquet"
+            }
             OutputFileKind::NetCDF => "application/x-netcdf",
             OutputFileKind::Odv => "application/zip",
             OutputFileKind::Zarr => "application/zip",
