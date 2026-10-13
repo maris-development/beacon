@@ -4,11 +4,11 @@ use arrow::{
     array::{ArrayRef, RecordBatch},
     datatypes::SchemaRef,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use netcdf::FileMut;
 
-use crate::{datafusion::options::Compression, time_units::TimeUnits};
+use crate::datafusion::options::Compression;
 
 /// Default encoder implementation.
 pub mod default;
@@ -22,10 +22,6 @@ pub struct EncoderOptions {
     pub chunk_rows: Option<usize>,
     /// Source `_FillValue` of each variable. A variable not in the map uses the default fill.
     pub fill_values: HashMap<String, netcdf::AttributeValue>,
-    /// CF units of each timestamp variable. `None` keeps the Arrow unit since 1970.
-    pub time_units: Option<TimeUnits>,
-    /// Timestamp variables with a value that is not a whole number in `time_units`.
-    pub float_time_columns: HashSet<String>,
 }
 
 /// Trait implemented by concrete NetCDF encoders.
