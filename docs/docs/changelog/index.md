@@ -1,10 +1,20 @@
 # Changelog
 
-> **Release posts:** [Upgrade from 1.8.0 to 2.0](/docs/2.0.1/upgrade) · [What's new in 1.8.0](/docs/changelog/release-1.8.0) · [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
+> **Release posts:** [Upgrade from 1.8.0 to 2.0](/docs/2.0.2/upgrade) · [What's new in 1.8.0](/docs/changelog/release-1.8.0) · [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
 
 All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
 changes), and **Fixed** (bug fixes).
+
+## v2.0.2 — 2026-10-13 {#v2-0-2}
+
+Beacon 2.0.2 is a patch release of the 2.0 line. A 2.0.1 server upgrades in place: change the image
+tag to `v2.0.2`.
+
+### Fixed
+
+- **A JSON query filter can name a select alias again.** Beacon filters on the column or the
+  function behind the alias. See [Filters](/docs/2.0.2/api/querying/json#filters).
 
 ## v2.0.1 — 2026-10-08 {#v2-0-1}
 
@@ -18,26 +28,26 @@ change.
 
 - **Table and column comments.** `COMMENT ON TABLE` and `COMMENT ON COLUMN` add metadata, such as
   a description, a unit or a source. The table schema shows it over HTTP and Flight SQL. See
-  [COMMENT ON](/docs/2.0.1/sql/comment-on).
+  [COMMENT ON](/docs/2.0.2/sql/comment-on).
 - **Role settings and query limits.** `ALTER ROLE ... SET` stores a setting on a role.
   `query_cpu_limit_ms` limits the CPU time of a query, and `query_output_row_limit` limits its
-  output rows. See [Query limits](/docs/2.0.1/security/access-control#query-limits).
+  output rows. See [Query limits](/docs/2.0.2/security/access-control#query-limits).
 - **`SELECT *` on Atlas and BBF tables with declared columns.** See
-  [Atlas](/docs/2.0.1/formats/atlas) and [BBF](/docs/2.0.1/formats/bbf).
+  [Atlas](/docs/2.0.2/formats/atlas) and [BBF](/docs/2.0.2/formats/bbf).
 
 ### Changed
 
 - **Breaking: GeoTIFF coordinates are pixel centers.** `geo.lon` and `geo.lat` of a PixelIsArea
-  file move by half a pixel. See [GeoTIFF](/docs/2.0.1/formats/geotiff).
+  file move by half a pixel. See [GeoTIFF](/docs/2.0.2/formats/geotiff).
 - **A read of a table checks only the table grant.** Path rules apply to the read functions only.
-  See [How Beacon checks a read](/docs/2.0.1/security/access-control#how-beacon-checks-a-read).
+  See [How Beacon checks a read](/docs/2.0.2/security/access-control#how-beacon-checks-a-read).
 - **`CREATE EXTERNAL TABLE` reports schema errors.** A schema that Beacon cannot read makes the
   statement fail. Before, the table got no columns.
 
 ### Removed
 
 - **Breaking: table extensions.** `SET EXTENSION`, `DROP EXTENSION` and `SHOW EXTENSIONS` are
-  removed. Use [`COMMENT ON`](/docs/2.0.1/sql/comment-on) for metadata and a view for a preset.
+  removed. Use [`COMMENT ON`](/docs/2.0.2/sql/comment-on) for metadata and a view for a preset.
 
 ### Fixed
 
@@ -54,7 +64,7 @@ change.
 
 Beacon 2.0.0 is a major release. A 1.8.0 server does not upgrade in place. A 2.0.0 server does not
 read the table definitions of a 1.8.0 server, so create your tables again. Read
-[Upgrade from 1.8.0](/docs/2.0.1/upgrade) before you change the image tag. The
+[Upgrade from 1.8.0](/docs/2.0.2/upgrade) before you change the image tag. The
 [full changelog](https://github.com/maris-development/beacon/blob/main/CHANGELOG.md) lists each
 change.
 
@@ -62,18 +72,18 @@ change.
 
 - **N-dimensional execution.** NetCDF, HDF5, Zarr, Atlas, BBF and GeoTIFF read through an nd
   pipeline. A `WHERE` filter and a projection run before the broadcast. See
-  [How it works](/docs/2.0.1/how-it-works).
+  [How it works](/docs/2.0.2/how-it-works).
 - **A single-file database.** One `beacon.db` file holds the catalog, the managed tables and the
-  users. See [Storage internals](/docs/2.0.1/internals/storage).
+  users. See [Storage internals](/docs/2.0.2/internals/storage).
 - **File statistics.** Beacon records the column ranges of each file. A query skips each file that
-  holds no match. See [File statistics](/docs/2.0.1/internals/file-statistics).
-- **New readers.** Read [Iceberg](/docs/2.0.1/formats/iceberg) tables and
-  [Icechunk](/docs/2.0.1/formats/icechunk) repositories. Pure-Rust readers read
-  [netCDF](/docs/2.0.1/formats/netcdf) and [HDF5](/docs/2.0.1/formats/hdf5).
+  holds no match. See [File statistics](/docs/2.0.2/internals/file-statistics).
+- **New readers.** Read [Iceberg](/docs/2.0.2/formats/iceberg) tables and
+  [Icechunk](/docs/2.0.2/formats/icechunk) repositories. Pure-Rust readers read
+  [netCDF](/docs/2.0.2/formats/netcdf) and [HDF5](/docs/2.0.2/formats/hdf5).
 - **123 spatial functions with PostGIS names.** See
-  [Spatial Functions](/docs/2.0.1/sql/spatial-functions).
+  [Spatial Functions](/docs/2.0.2/sql/spatial-functions).
 - **Secrets and remote catalogs.** `CREATE SECRET` holds credentials. `ATTACH` queries another
-  Beacon server. See [ATTACH](/docs/2.0.1/data-sources/attach).
+  Beacon server. See [ATTACH](/docs/2.0.2/data-sources/attach).
 - **An embedded engine.** `pip install beacondb` runs the engine in your Python process.
 
 ### Changed
