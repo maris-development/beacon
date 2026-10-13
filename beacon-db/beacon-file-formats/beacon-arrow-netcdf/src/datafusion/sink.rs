@@ -4,7 +4,7 @@
 //!
 //! * [`NetCDFSink`] — writes each incoming batch directly via the high-level
 //!   [`ArrowRecordBatchWriter`], producing a *flat* NetCDF file with a single
-//!   unlimited `obs` dimension. Suitable for classic table-shaped / ragged data.
+//!   `obs` dimension. Suitable for classic table-shaped / ragged data.
 //!
 //! * [`NetCDFNdSink`] — reshapes tabular rows into N-dimensional slabs using
 //!   previously collected unique dimension values (via
@@ -17,7 +17,7 @@
 //!
 //! | `write_dimensions`           | Sink used       | NetCDF layout           |
 //! |------------------------------|-----------------|-------------------------|
-//! | `None` / empty               | [`NetCDFSink`]  | flat, unlimited `obs`   |
+//! | `None` / empty               | [`NetCDFSink`]  | flat, one `obs`         |
 //! | `Some(["lat", "lon", …])`  | [`NetCDFNdSink`]| gridded, named dims     |
 
 use std::{any::Any, fmt::Formatter, path::PathBuf, sync::Arc};
@@ -50,7 +50,7 @@ use ordered_float::OrderedFloat;
 ///
 /// Every incoming [`RecordBatch`] is forwarded to an
 /// [`ArrowRecordBatchWriter<DefaultEncoder>`] which serializes columns into
-/// NetCDF variables along a single unlimited `obs` dimension.
+/// NetCDF variables along a single `obs` dimension.
 ///
 /// The output file is written to `output_dir` (the configured tmp store root)
 /// joined with the path from [`FileSinkConfig::table_paths`].

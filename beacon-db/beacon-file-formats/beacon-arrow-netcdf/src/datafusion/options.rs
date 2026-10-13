@@ -82,6 +82,10 @@ pub struct NetcdfWriterOptions {
     /// attribute `coordinates = "time lat lon"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coordinates: Vec<String>,
+    /// Dimensions to write as unlimited, as in xarray. The only dimension is `obs`. When not
+    /// set, `obs` has the row count of the output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unlimited_dims: Vec<String>,
 }
 
 /// The value of an attribute option: a string or a number.
@@ -126,6 +130,18 @@ pub struct Compression {
 
 fn default_shuffle() -> bool {
     true
+}
+
+/// The name of the record dimension of the flat output.
+pub const OBS_DIMENSION: &str = "obs";
+
+/// The names in a comma-separated `OPTIONS` value.
+fn comma_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// A deflate level from 0 to 9.
@@ -228,13 +244,17 @@ impl NetcdfWriterOptions {
             })?;
         }
         if let Some(value) = format_option(format_options, "coordinates") {
-            self.coordinates = value
-                .split(',')
-                .map(|name| name.trim().to_string())
-                .filter(|name| !name.is_empty())
-                .collect();
+            self.coordinates = comma_list(value);
+        }
+        if let Some(value) = format_option(format_options, "unlimited_dims") {
+            self.unlimited_dims = comma_list(value);
         }
         Ok(())
+    }
+
+    /// Whether `obs` is an unlimited dimension.
+    pub fn unlimited_obs(&self) -> bool {
+        self.unlimited_dims.iter().any(|name| name == OBS_DIMENSION)
     }
 
     /// The names of the options that have a value.
@@ -260,6 +280,9 @@ impl NetcdfWriterOptions {
         }
         if !self.coordinates.is_empty() {
             keys.push("coordinates");
+        }
+        if !self.unlimited_dims.is_empty() {
+            keys.push("unlimited_dims");
         }
         keys
     }
@@ -359,6 +382,9 @@ mod tests {
     fn coordinates_read_a_comma_list() {
         let options = apply(&[("coordinates", "time, lat ,lon")]).unwrap();
         assert_eq!(options.coordinates, vec!["time", "lat", "lon"]);
+        let options = apply(&[("unlimited_dims", "obs")]).unwrap();
+        assert!(options.unlimited_obs());
+        assert!(!NetcdfWriterOptions::default().unlimited_obs());
     }
 
     #[test]

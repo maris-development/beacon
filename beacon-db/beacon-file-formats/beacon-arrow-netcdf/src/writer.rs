@@ -19,7 +19,7 @@ use tempfile::SpooledTempFile;
 use indexmap::IndexMap;
 
 use crate::attributes::{AttributeCombiner, AttributePlan, AttributeTarget, TIME_OWNED};
-use crate::datafusion::options::NetcdfWriterOptions;
+use crate::datafusion::options::{NetcdfWriterOptions, OBS_DIMENSION};
 use crate::encoders::{Encoder, EncoderOptions};
 
 /// The CF version that the flat writer names in the `Conventions` attribute.
@@ -169,7 +169,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             encoder: PhantomData,
         };
         // Fail before the spool. `finish` checks again, because combine_attrs can drop a column.
-        Self::check_attribute_options(&writer.options, &writer.schema)?;
+        Self::check_options(&writer.options, &writer.schema)?;
         Ok(writer)
     }
 
@@ -231,6 +231,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             chunk_rows: Some(self.options.chunk_rows().min(self.rows).max(1)),
             time_units: self.options.time_units.clone(),
             float_time_columns: self.float_time_columns.clone(),
+            record_rows: (!self.options.unlimited_obs()).then_some(self.rows),
             ..Default::default()
         }
     }
@@ -300,11 +301,18 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         Ok(())
     }
 
-    /// Check the attribute options against the columns of `schema`.
-    fn check_attribute_options(
-        options: &NetcdfWriterOptions,
-        schema: &Schema,
-    ) -> anyhow::Result<()> {
+    /// Check the options against the columns of `schema`.
+    fn check_options(options: &NetcdfWriterOptions, schema: &Schema) -> anyhow::Result<()> {
+        if let Some(name) = options
+            .unlimited_dims
+            .iter()
+            .find(|name| *name != OBS_DIMENSION)
+        {
+            anyhow::bail!(
+                "unlimited_dims names '{name}': the flat output has the dimension \
+                 '{OBS_DIMENSION}' only"
+            );
+        }
         let reserved = |name: &str| name.is_empty() || name.starts_with('_');
         if let Some(name) = options.global_attributes.keys().find(|n| reserved(n)) {
             anyhow::bail!("invalid global attribute name '{name}': it is empty or starts with '_'");
@@ -349,7 +357,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         schema: &Schema,
         boolean_columns: &HashMap<String, bool>,
     ) -> anyhow::Result<Vec<(AttributeTarget, netcdf::AttributeValue)>> {
-        Self::check_attribute_options(options, schema)?;
+        Self::check_options(options, schema)?;
         let global = |name: &str| AttributeTarget::Global {
             name: name.to_string(),
         };
@@ -698,6 +706,61 @@ mod tests {
         assert!(file.variable("temp").is_some());
         assert!(file.variable("temp.units").is_none());
         assert_eq!(str_attribute(&file, Some("temp"), "units"), None);
+        // netCDF reads a dimension of length 0 as unlimited.
+        assert!(file.dimension("obs").unwrap().is_unlimited());
+    }
+
+    #[test]
+    fn obs_has_the_row_count_of_the_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixed.nc");
+        let schema = series_schema();
+        let batches = vec![series_batch(&schema, 3), series_batch(&schema, 4)];
+        write(&path, schema, batches, None);
+
+        let file = netcdf::open(&path).unwrap();
+        let obs = file.dimension("obs").unwrap();
+        assert!(!obs.is_unlimited());
+        assert_eq!(obs.len(), 7);
+        let names = file.variable("name").unwrap().get_strings(..).unwrap();
+        assert_eq!(names.len(), 7);
+        assert_eq!(names[3], "argo");
+    }
+
+    #[test]
+    fn unlimited_dims_keeps_obs_unlimited() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unlimited.nc");
+        let schema = series_schema();
+        let options = NetcdfWriterOptions {
+            unlimited_dims: vec!["obs".to_string()],
+            ..Default::default()
+        };
+        write_with(
+            &path,
+            schema.clone(),
+            vec![series_batch(&schema, 5)],
+            options,
+        )
+        .unwrap();
+
+        let file = netcdf::open(&path).unwrap();
+        let obs = file.dimension("obs").unwrap();
+        assert!(obs.is_unlimited());
+        assert_eq!(obs.len(), 5);
+    }
+
+    #[test]
+    fn an_unknown_unlimited_dimension_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = NetcdfWriterOptions {
+            unlimited_dims: vec!["time".to_string()],
+            ..Default::default()
+        };
+        let error = write_with(&dir.path().join("bad.nc"), series_schema(), vec![], options)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("'time'"), "{error}");
     }
 
     fn series_schema() -> SchemaRef {

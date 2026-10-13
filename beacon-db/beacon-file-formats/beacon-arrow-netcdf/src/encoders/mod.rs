@@ -26,6 +26,8 @@ pub struct EncoderOptions {
     pub time_units: Option<TimeUnits>,
     /// Timestamp variables with a value that is not a whole number in `time_units`.
     pub float_time_columns: HashSet<String>,
+    /// Length of the record dimension. `None` makes it unlimited.
+    pub record_rows: Option<usize>,
 }
 
 /// Trait implemented by concrete NetCDF encoders.

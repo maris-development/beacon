@@ -467,6 +467,44 @@ async fn copy_to_nc_with_an_unknown_coordinate_fails() {
     assert!(error.contains("'time'"), "{error}");
 }
 
+/// `obs` has the row count of the output. A zero-row output gives a valid file.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_obs_is_a_fixed_dimension() {
+    let rt = runtime("output-netcdf-fixed-obs").await;
+    let file = netcdf_output(&rt, SERIES_SQL, json!({ "format": "netcdf" })).await;
+    {
+        let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+        let obs = nc.dimension("obs").expect("an obs dimension");
+        assert!(!obs.is_unlimited());
+        assert_eq!(obs.len(), 100_000);
+    }
+
+    let empty = netcdf_output(
+        &rt,
+        &format!("{SERIES_SQL} WHERE value < 0"),
+        json!({ "format": "netcdf" }),
+    )
+    .await;
+    let nc = beacon_arrow_netcdf::netcdf::open(empty.path()).expect("a readable NetCDF file");
+    assert_eq!(nc.dimension("obs").expect("an obs dimension").len(), 0);
+    assert!(nc.variable("v").is_some());
+}
+
+/// `unlimited_dims` keeps `obs` unlimited.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_nc_with_unlimited_dims() {
+    let rt = runtime("copy-nc-unlimited-dims").await;
+    rt.sql(
+        "COPY (SELECT 1.0 AS v) TO 'tmp:///unlimited.nc' STORED AS NC \
+         OPTIONS ('unlimited_dims' 'obs')",
+    )
+    .await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(rt.tmp_dir().join("unlimited.nc"))
+        .expect("a readable NetCDF file");
+    assert!(nc.dimension("obs").unwrap().is_unlimited());
+}
+
 /// An invalid `time_units` is an error.
 #[tokio::test(flavor = "multi_thread")]
 async fn copy_to_nc_with_bad_time_units_fails() {

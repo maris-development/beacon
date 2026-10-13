@@ -419,8 +419,11 @@ impl Encoder for DefaultEncoder {
     where
         Self: Sized,
     {
-        //Add unlimited dimension to append data as it comes
-        nc_file.add_unlimited_dimension(Self::OBS_DIM_NAME)?;
+        // A length of 0 means unlimited in netCDF, so an empty output stays unlimited.
+        match options.record_rows {
+            Some(rows) if rows > 0 => nc_file.add_dimension(Self::OBS_DIM_NAME, rows)?,
+            _ => nc_file.add_unlimited_dimension(Self::OBS_DIM_NAME)?,
+        };
 
         for field in schema.fields() {
             Self::define_variable(&mut nc_file, field, options)?;
