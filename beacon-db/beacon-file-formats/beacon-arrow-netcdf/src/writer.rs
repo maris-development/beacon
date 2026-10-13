@@ -502,6 +502,10 @@ mod tests {
             str_attribute(&file, Some("time"), "units").as_deref(),
             Some("nanoseconds since 1970-01-01T00:00:00Z")
         );
+        assert_eq!(
+            str_attribute(&file, Some("time"), "calendar").as_deref(),
+            Some("standard")
+        );
         assert!(file.variable("time.units").is_none());
     }
 

@@ -127,6 +127,12 @@ OPTIONS ('compression.level' '4', 'compression.shuffle' 'true', 'chunk_rows' '65
   variable-length string.
 - xarray, netCDF4-python, Panoply and ncview read a deflate file. They need no plugin.
 
+### Time encoding
+
+Beacon writes a timestamp column as `int64` in its Arrow unit since 1970, for example
+`units = "seconds since 1970-01-01T00:00:00Z"` or `units = "nanoseconds since 1970-01-01T00:00:00Z"`.
+The variable also gets `standard_name = "time"` and `calendar = "standard"`.
+
 ### Fill values
 
 Beacon writes a null as the `_FillValue` of the variable.

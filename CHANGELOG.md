@@ -39,6 +39,9 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   `_FillValue = NaN`, as xarray does. Before, the fill value was the maximum of the type. With
   `combine_attrs`, a source `_FillValue` with one value and the type of the variable stays the fill
   value. ([#577](https://github.com/maris-development/beacon/issues/577))
+- **NetCDF time calendar.** A NetCDF output writes `calendar = "standard"` on a timestamp, as CF
+  recommends. Before, it wrote the deprecated name `gregorian`. The `units` do not change.
+  ([#578](https://github.com/maris-development/beacon/issues/578))
 
 ## [2.0.2] — 2026-10-13
 

@@ -134,7 +134,7 @@ impl DefaultEncoder {
             DataType::Float64 => Self::define_numeric::<f64>(file, name, fill_values)?,
             DataType::Timestamp(time_unit, _) => {
                 let mut variable = file.add_variable::<i64>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.put_attribute("calendar", "gregorian")?;
+                variable.put_attribute("calendar", "standard")?;
                 variable.put_attribute("standard_name", "time")?;
                 match time_unit {
                     arrow::datatypes::TimeUnit::Second => {
