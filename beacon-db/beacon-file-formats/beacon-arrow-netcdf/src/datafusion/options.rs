@@ -6,7 +6,7 @@ use std::{
 use beacon_datafusion_ext::format_options::{format_option, parse_bool_option};
 use datafusion::common::exec_datafusion_err;
 
-use crate::{attributes::CombineAttrs, time_units::TimeUnits};
+use crate::attributes::CombineAttrs;
 
 /// Configuration options for the NetCDF file format in DataFusion queries.
 ///
@@ -66,11 +66,6 @@ pub struct NetcdfWriterOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<u64>, minimum = 1)]
     pub chunk_rows: Option<NonZeroUsize>,
-    /// CF units of each timestamp variable, for example `seconds since 1970-01-01`.
-    /// When not set, a timestamp keeps its Arrow unit since 1970-01-01T00:00:00Z.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<String>, example = "seconds since 1970-01-01")]
-    pub time_units: Option<TimeUnits>,
     /// Global attributes of the file. A value here wins over a `combine_attrs` value.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub global_attributes: BTreeMap<String, AttributeOption>,
@@ -200,13 +195,6 @@ impl NetcdfWriterOptions {
                 exec_datafusion_err!("invalid chunk_rows '{value}': expected a number above 0")
             })?);
         }
-        if let Some(value) = format_option(format_options, "time_units") {
-            self.time_units = Some(
-                value
-                    .parse()
-                    .map_err(|e: String| exec_datafusion_err!("{e}"))?,
-            );
-        }
         if let Some(value) = format_option(format_options, "global_attributes") {
             self.global_attributes = serde_json::from_str(value).map_err(|e| {
                 exec_datafusion_err!(
@@ -237,9 +225,6 @@ impl NetcdfWriterOptions {
         }
         if self.chunk_rows.is_some() {
             keys.push("chunk_rows");
-        }
-        if self.time_units.is_some() {
-            keys.push("time_units");
         }
         if !self.global_attributes.is_empty() {
             keys.push("global_attributes");
@@ -322,23 +307,6 @@ mod tests {
                 .to_string();
         assert!(error.contains("expected 0 to 9"), "{error}");
         assert!(serde_json::from_str::<NetcdfWriterOptions>(r#"{"chunk_rows": 0}"#).is_err());
-    }
-
-    #[test]
-    fn time_units_are_checked_in_json_and_in_sql() {
-        let options: NetcdfWriterOptions =
-            serde_json::from_str(r#"{"time_units": "days since 1950-01-01"}"#).unwrap();
-        assert_eq!(
-            options.time_units.unwrap().as_str(),
-            "days since 1950-01-01"
-        );
-        let error = serde_json::from_str::<NetcdfWriterOptions>(r#"{"time_units": "days"}"#)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("time_units"), "{error}");
-        let options = apply(&[("time_units", "seconds since 1970-01-01")]).unwrap();
-        assert!(options.time_units.is_some());
-        assert!(apply(&[("time_units", "weeks since 1970-01-01")]).is_err());
     }
 
     #[test]

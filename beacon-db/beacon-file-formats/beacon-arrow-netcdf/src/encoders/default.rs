@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use arrow::{
     array::{self, Array, ArrayRef},
-    datatypes::{DataType, Field, SchemaRef, TimeUnit},
+    datatypes::{DataType, Field, SchemaRef},
 };
 use ndarray::ArrayView;
 use netcdf::{AttributeValue, FileMut, NcTypeDescriptor};
@@ -18,8 +18,8 @@ pub struct DefaultEncoder {
     nc_file: FileMut,
     _schema: SchemaRef,
     offsets: HashMap<String, usize>,
-    /// The settings of the variables: fill values and time units.
-    options: EncoderOptions,
+    /// Source fill value of each variable. Other variables use [`FillValue::DEFAULT`].
+    fill_values: HashMap<String, AttributeValue>,
 }
 
 impl DefaultEncoder {
@@ -96,18 +96,12 @@ impl DefaultEncoder {
         Ok(())
     }
 
-    /// Whether the timestamp variable `name` holds floats in `time_units`.
-    fn is_float_time(options: &EncoderOptions, name: &str) -> bool {
-        options.time_units.is_some() && options.float_time_columns.contains(name)
-    }
-
     fn define_variable(
         file: &mut FileMut,
         field: &Field,
-        options: &EncoderOptions,
+        fill_values: &HashMap<String, AttributeValue>,
     ) -> anyhow::Result<()> {
         let name = field.name();
-        let fill_values = &options.fill_values;
         match field.data_type() {
             DataType::FixedSizeBinary(size) => {
                 let strlen_dim_name = format!("STRING{}", size);
@@ -139,25 +133,27 @@ impl DefaultEncoder {
             DataType::Float32 => Self::define_numeric::<f32>(file, name, fill_values)?,
             DataType::Float64 => Self::define_numeric::<f64>(file, name, fill_values)?,
             DataType::Timestamp(time_unit, _) => {
-                let mut variable = if Self::is_float_time(options, name) {
-                    let mut variable = file.add_variable::<f64>(name, &[Self::OBS_DIM_NAME])?;
-                    variable.set_fill_value(f64::NAN)?;
-                    variable
-                } else {
-                    let mut variable = file.add_variable::<i64>(name, &[Self::OBS_DIM_NAME])?;
-                    variable.set_fill_value(i64::MAX)?;
-                    variable
-                };
+                let mut variable = file.add_variable::<i64>(field.name(), &[Self::OBS_DIM_NAME])?;
                 variable.put_attribute("calendar", "standard")?;
                 variable.put_attribute("standard_name", "time")?;
-                let units = match (&options.time_units, time_unit) {
-                    (Some(units), _) => units.as_str(),
-                    (None, TimeUnit::Second) => "seconds since 1970-01-01T00:00:00Z",
-                    (None, TimeUnit::Millisecond) => "milliseconds since 1970-01-01T00:00:00Z",
-                    (None, TimeUnit::Microsecond) => "microseconds since 1970-01-01T00:00:00Z",
-                    (None, TimeUnit::Nanosecond) => "nanoseconds since 1970-01-01T00:00:00Z",
-                };
-                variable.put_attribute("units", units)?;
+                match time_unit {
+                    arrow::datatypes::TimeUnit::Second => {
+                        variable.put_attribute("units", "seconds since 1970-01-01T00:00:00Z")?;
+                    }
+                    arrow::datatypes::TimeUnit::Millisecond => {
+                        variable
+                            .put_attribute("units", "milliseconds since 1970-01-01T00:00:00Z")?;
+                    }
+                    arrow::datatypes::TimeUnit::Microsecond => {
+                        variable
+                            .put_attribute("units", "microseconds since 1970-01-01T00:00:00Z")?;
+                    }
+                    arrow::datatypes::TimeUnit::Nanosecond => {
+                        variable
+                            .put_attribute("units", "nanoseconds since 1970-01-01T00:00:00Z")?;
+                    }
+                }
+                variable.set_fill_value(i64::MAX)?;
             }
             // DataType::Utf8 => {
             //     anyhow::bail!("Variable sized string not supported yet");
@@ -204,7 +200,7 @@ impl DefaultEncoder {
     ) -> anyhow::Result<()> {
         let mut extents = vec![offset..offset + array.len()];
 
-        let fills = &self.options.fill_values;
+        let fills = &self.fill_values;
         let nc_file = &mut self.nc_file;
         let mut variable = nc_file
             .variable_mut(var_name)
@@ -350,14 +346,6 @@ impl DefaultEncoder {
                     fill_value(fills, var_name)
                 );
             }
-            DataType::Timestamp(_, _) if self.options.time_units.is_some() => {
-                let units = self.options.time_units.as_ref().expect("checked above");
-                if Self::is_float_time(&self.options, var_name) {
-                    variable.put_values(&units.encode_float(&array, f64::NAN), extents)?;
-                } else {
-                    variable.put_values(&units.encode_integer(&array, i64::MAX), extents)?;
-                }
-            }
             DataType::Timestamp(time_unit, _) => match time_unit {
                 arrow::datatypes::TimeUnit::Second => {
                     downcast_and_put_values!(
@@ -425,7 +413,7 @@ impl Encoder for DefaultEncoder {
         nc_file.add_unlimited_dimension(Self::OBS_DIM_NAME)?;
 
         for field in schema.fields() {
-            Self::define_variable(&mut nc_file, field, options)?;
+            Self::define_variable(&mut nc_file, field, &options.fill_values)?;
             Self::set_storage(&mut nc_file, field, options)?;
         }
 
@@ -439,7 +427,7 @@ impl Encoder for DefaultEncoder {
             nc_file,
             _schema: schema,
             offsets,
-            options: options.clone(),
+            fill_values: options.fill_values.clone(),
         })
     }
 

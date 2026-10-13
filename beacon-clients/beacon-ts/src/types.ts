@@ -120,8 +120,6 @@ export interface NetcdfOutputOptions {
   compression?: NetcdfCompression;
   /** Number of rows in one chunk of the `obs` dimension. The default is 65536. */
   chunk_rows?: number;
-  /** CF units of each timestamp column, for example `"seconds since 1970-01-01"`. */
-  time_units?: string;
   /** Global attributes of the file. A value here wins over `combine_attrs`. */
   global_attributes?: Record<string, string | number>;
   /** Attributes of each column, by column name. A value here wins over `combine_attrs`. */
