@@ -101,18 +101,18 @@ In SQL, use `COPY ... STORED AS NETCDF OPTIONS ('combine_attrs' 'identical')`.
 |---|---|---|
 | not set | variable | variable |
 | `identical` | attribute | variable |
-| `first` | attribute | attribute with the first value |
+| `first` | attribute | attribute with the first non-null value |
 | `drop_conflicts` | attribute | no output |
 
 - A column `<variable>.<attribute>` becomes an attribute of `<variable>` only when `<variable>` is
   also in the output.
 - A null is a value. A column with `degC` and null has two values.
 - A global attribute column `.title` that stays a variable gets the name `global.title`.
-- `first` takes the first value that Beacon reads. This value can change from one run to the next.
+- `first` takes the first non-null value that Beacon reads. This value can change from one run to the next.
 - Beacon `identical` keeps a conflict as a variable. The xarray option with the same name stops
   with an error.
-- Beacon never copies `_FillValue`, `scale_factor`, `add_offset` or other names that start with
-  `_`. The reader already applied them to the data.
+- Beacon never copies an attribute with a name that starts with `_`, `scale_factor` or `add_offset`. On a packed variable, Beacon also never copies `valid_min`, `valid_max`, `valid_range` or `missing_value`. The reader already applied these to the data.
+- On a timestamp column, Beacon writes its own `units` and `calendar`.
 
 ## As an external table
 
