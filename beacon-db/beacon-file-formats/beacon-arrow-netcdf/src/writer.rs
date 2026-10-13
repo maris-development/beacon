@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn a_compressed_file_is_smaller() {
         let dir = tempfile::tempdir().unwrap();
-        // HDF5 does not compress the heap of a variable-length string, so use numbers only.
+        // Beacon does not compress a string variable, so use numbers only.
         let schema = series_schema();
         let batch = series_batch(&schema, 100_000).project(&[0]).unwrap();
         let schema = batch.schema();
