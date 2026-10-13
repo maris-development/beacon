@@ -219,6 +219,26 @@ fn first_value(column: &ArrayRef) -> anyhow::Result<Option<ScalarValue>> {
     }
 }
 
+/// Whether `to_attribute_value` converts a column of this type.
+fn is_attribute_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Utf8View
+            | DataType::Int8
+            | DataType::UInt8
+            | DataType::Int16
+            | DataType::UInt16
+            | DataType::Int32
+            | DataType::UInt32
+            | DataType::Int64
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
+    )
+}
+
 /// The NetCDF attribute value of `value`, or `None` when NetCDF has no such type.
 fn to_attribute_value(value: &ScalarValue) -> Option<AttributeValue> {
     Some(match value {
@@ -265,6 +285,11 @@ impl AttributeCombiner {
         let tracked = classification
             .attributes
             .into_iter()
+            .filter(|(column, _)| {
+                schema
+                    .field_with_name(column)
+                    .is_ok_and(|field| is_attribute_type(field.data_type()))
+            })
             .map(|(column, target)| Tracked {
                 index: schema
                     .index_of(&column)
@@ -363,7 +388,10 @@ fn keep_as_variable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::datatypes::{Field, Schema, TimeUnit};
+    use arrow::array::{ArrayRef, Float64Array, Int16Array, ListArray, RecordBatch, StringArray};
+    use arrow::datatypes::{Field, Float64Type, Schema, TimeUnit};
+    use netcdf::AttributeValue;
+    use std::sync::Arc;
 
     fn schema(fields: &[(&str, DataType)]) -> Schema {
         Schema::new(
@@ -518,10 +546,6 @@ mod tests {
         let error = "union".parse::<CombineAttrs>().unwrap_err();
         assert!(error.contains("combine_attrs"), "{error}");
     }
-
-    use arrow::array::{ArrayRef, Float64Array, Int16Array, RecordBatch, StringArray};
-    use netcdf::AttributeValue;
-    use std::sync::Arc;
 
     /// Schema `temp`, `temp.units`, `.title`.
     fn units_schema() -> Arc<Schema> {
@@ -752,5 +776,27 @@ mod tests {
         ]));
         let plan = combine(CombineAttrs::Identical, &s, &[]).unwrap();
         assert!(plan.skipped.contains("temp._FillValue"));
+    }
+
+    #[test]
+    fn an_unsupported_type_stays_a_variable() {
+        let list = DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
+        let s = Arc::new(schema(&[
+            ("temp", DataType::Float64),
+            ("temp.actual_range", list),
+        ]));
+        let range = ListArray::from_iter_primitive::<Float64Type, _, _>(vec![Some(vec![
+            Some(0.0),
+            Some(40.0),
+        ])]);
+        let batch = RecordBatch::try_new(
+            s.clone(),
+            vec![Arc::new(Float64Array::from(vec![1.0])), Arc::new(range)],
+        )
+        .unwrap();
+        let plan = combine(CombineAttrs::Identical, &s, &[batch]).unwrap();
+        assert!(attribute(&plan, &variable("temp", "actual_range")).is_none());
+        assert!(!plan.skipped.contains("temp.actual_range"));
+        assert!(plan.renamed.is_empty());
     }
 }
