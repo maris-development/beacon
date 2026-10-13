@@ -32,9 +32,6 @@ use utoipa::ToSchema;
 pub struct Output {
     /// The desired output format.
     pub format: OutputFormat,
-    /// How the flat `netcdf` output combines `variable.attribute` columns. Other formats reject it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub combine_attrs: Option<CombineAttrs>,
 }
 
 impl Output {
@@ -59,15 +56,10 @@ impl Output {
         tmp_store_url: &datafusion::execution::object_store::ObjectStoreUrl,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
-        if self.combine_attrs.is_some() && !matches!(self.format, OutputFormat::NetCDF) {
-            return Err(DataFusionError::Plan(
-                "combine_attrs applies only to the netcdf output format".to_string(),
-            ));
-        }
         let kind = self.format.file_kind();
         let file_type = self
             .format
-            .file_type(session, self.combine_attrs)
+            .file_type(session)
             .map_err(|e| DataFusionError::External(e.into()))?;
 
         // Reserve a unique name under `tmp_dir` (the tmp store's root). The COPY
@@ -91,9 +83,21 @@ impl Output {
     }
 }
 
+/// Options of the flat NetCDF output.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NetcdfOutputOptions {
+    /// How the writer combines `variable.attribute` columns. When not set, they stay variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combine_attrs: Option<CombineAttrs>,
+}
+
 /// Supported output formats for query results.
+///
+/// `remote = "Self"` keeps the derived serde code as inherent functions. The trait impls below
+/// add the plain name `"netcdf"` for NetCDF with default options.
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(remote = "Self", rename_all = "lowercase")]
 pub enum OutputFormat {
     /// CSV format.
     Csv,
@@ -105,9 +109,9 @@ pub enum OutputFormat {
     // Json,
     // Odv(OdvOptions),
     /// Flat (record-oriented) NetCDF format. A NetCDF-4 file *is* HDF5, so `hdf5`/`h5` are
-    /// accepted as aliases for this format.
+    /// accepted as aliases for this format. The plain name gives the default options.
     #[serde(alias = "hdf5", alias = "h5")]
-    NetCDF,
+    NetCDF(NetcdfOutputOptions),
     /// Multi-dimensional (nd-array) NetCDF format. The named columns become the
     /// output dimensions; must not be empty.
     #[serde(alias = "nd_netcdf")]
@@ -129,6 +133,51 @@ pub enum OutputFormat {
     Zarr,
 }
 
+/// Format names that select the flat NetCDF output.
+const NETCDF_NAMES: [&str; 3] = ["netcdf", "hdf5", "h5"];
+
+impl<'de> serde::Deserialize<'de> for OutputFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FormatVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for FormatVisitor {
+            type Value = OutputFormat;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an output format name, or an object with one output format key")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<OutputFormat, E> {
+                // The derived code reads a newtype variant only from an object.
+                if NETCDF_NAMES.contains(&name) {
+                    return Ok(OutputFormat::NetCDF(NetcdfOutputOptions::default()));
+                }
+                OutputFormat::deserialize(serde::de::value::StrDeserializer::new(name))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<OutputFormat, A::Error> {
+                OutputFormat::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            }
+        }
+
+        deserializer.deserialize_any(FormatVisitor)
+    }
+}
+
+impl serde::Serialize for OutputFormat {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OutputFormat::NetCDF(options) if *options == NetcdfOutputOptions::default() => {
+                serializer.serialize_str("netcdf")
+            }
+            _ => OutputFormat::serialize(self, serializer),
+        }
+    }
+}
+
 impl OutputFormat {
     /// The [`OutputFileKind`] the result file is tagged with (drives the download
     /// transport's MIME type / filename; both NetCDF variants share one kind).
@@ -138,7 +187,7 @@ impl OutputFormat {
             OutputFormat::Ipc => OutputFileKind::Ipc,
             OutputFormat::Parquet => OutputFileKind::Parquet,
             OutputFormat::GeoParquet { .. } => OutputFileKind::GeoParquet,
-            OutputFormat::NetCDF => OutputFileKind::NetCDF,
+            OutputFormat::NetCDF(_) => OutputFileKind::NetCDF,
             OutputFormat::NdNetCDF { .. } => OutputFileKind::NetCDF,
             OutputFormat::Odv(_) => OutputFileKind::Odv,
             OutputFormat::Zarr => OutputFileKind::Zarr,
@@ -146,13 +195,7 @@ impl OutputFormat {
     }
 
     /// Returns the DataFusion file type for this output format.
-    ///
-    /// `combine_attrs` applies to the flat `NetCDF` format only. The other formats ignore it.
-    pub fn file_type(
-        &self,
-        session: &SessionContext,
-        combine_attrs: Option<CombineAttrs>,
-    ) -> anyhow::Result<Arc<dyn FileType>> {
+    pub fn file_type(&self, session: &SessionContext) -> anyhow::Result<Arc<dyn FileType>> {
         match self {
             OutputFormat::Csv => Ok(format_as_file_type(
                 session
@@ -195,7 +238,7 @@ impl OutputFormat {
                     latitude_column: latitude_column.clone(),
                 },
             )))),
-            OutputFormat::NetCDF => {
+            OutputFormat::NetCDF(options) => {
                 let registered = session
                     .state()
                     .get_file_format_factory(NETCDF_EXTENSION)
@@ -205,7 +248,7 @@ impl OutputFormat {
                             NETCDF_EXTENSION
                         )
                     })?;
-                let Some(combine_attrs) = combine_attrs else {
+                let Some(combine_attrs) = options.combine_attrs else {
                     return Ok(format_as_file_type(registered));
                 };
                 // The COPY sink reads combine_attrs from the factory, so clone the registered one.

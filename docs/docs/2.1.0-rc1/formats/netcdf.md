@@ -90,12 +90,14 @@ arrays that you select. This is much faster than a scan of the original NetCDF f
 ### Attributes in a NetCDF output
 
 A NetCDF output writes each column as a variable on the `obs` dimension. An attribute column such
-as `temp.units` thus becomes a variable with one value for each row. Set `combine_attrs` to write
-the column as a NetCDF attribute instead:
+as `temp.units` becomes a variable with one value for each row. To write such a column as a NetCDF
+attribute, give the `netcdf` format an object with `combine_attrs`:
 
 ```json
-{ "output": { "format": "netcdf", "combine_attrs": "identical" } }
+{ "output": { "format": { "netcdf": { "combine_attrs": "identical" } } } }
 ```
+
+The plain name `"format": "netcdf"` uses the default options. It writes each column as a variable.
 
 In SQL, set the option in a `COPY` statement. The format name is `NC`. `NETCDF` does not work.
 
@@ -121,7 +123,7 @@ OPTIONS ('combine_attrs' 'identical')
 - A global attribute column `.title` that stays a variable gets the name `global.title`.
 - A `global.<attribute>` name that matches a column in the output is an error.
 - `first` takes the first non-null value that Beacon reads. This value can change from one run to the next.
-- Beacon `identical` keeps a conflict as a variable. The xarray option with the same name stops
+- The Beacon option `identical` keeps a conflict as a variable. The xarray option with the same name stops
   with an error.
 - Beacon never copies an attribute with a name that starts with `_`. Beacon also never copies
   `scale_factor` and `add_offset`.

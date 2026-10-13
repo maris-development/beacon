@@ -16,7 +16,6 @@ fn csv_query(sql: &str) -> Query {
         inner: InnerQuery::Sql(sql.to_string()),
         output: Some(Output {
             format: OutputFormat::Csv,
-            combine_attrs: None,
         }),
         params: Vec::new(),
     }

@@ -85,8 +85,14 @@ async fn dataset(
             crate::files::file_response(&runtime, identity, table, &query, OutputFormat::Csv).await
         }
         Suffix::Nc => {
-            crate::files::file_response(&runtime, identity, table, &query, OutputFormat::NetCDF)
-                .await
+            crate::files::file_response(
+                &runtime,
+                identity,
+                table,
+                &query,
+                OutputFormat::NetCDF(Default::default()),
+            )
+            .await
         }
     };
     result.unwrap_or_else(IntoResponse::into_response)

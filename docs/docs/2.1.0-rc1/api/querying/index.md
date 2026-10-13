@@ -97,7 +97,27 @@ Content-Type: application/json
 }
 ```
 
-The `netcdf` format also takes `combine_attrs` next to `format`. This option writes attribute columns as NetCDF attributes. Other formats reject it. See [attributes in a NetCDF output](/docs/2.1.0-rc1/formats/netcdf#attributes-in-a-netcdf-output).
+### NetCDF with options
+
+The plain name `netcdf` uses the default options. To set options, give `netcdf` as an object.
+The option `combine_attrs` writes attribute columns as NetCDF attributes:
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "select": ["temperature", "temperature.units"],
+  "output": {
+    "format": {
+      "netcdf": { "combine_attrs": "identical" }
+    }
+  }
+}
+```
+
+See [attributes in a NetCDF output](/docs/2.1.0-rc1/formats/netcdf#attributes-in-a-netcdf-output)
+for the values of `combine_attrs`.
 
 ### GeoParquet
 
