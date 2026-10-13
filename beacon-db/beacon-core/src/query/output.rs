@@ -31,6 +31,7 @@ use utoipa::ToSchema;
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct Output {
     /// The desired output format.
+    #[schema(value_type = OutputFormatSchema)]
     pub format: OutputFormat,
 }
 
@@ -93,9 +94,7 @@ pub struct NetcdfOutputOptions {
 }
 
 /// Supported output formats for query results.
-///
-/// `remote = "Self"` keeps the derived serde code as inherent functions. The trait impls below
-/// add the plain name `"netcdf"` for NetCDF with default options.
+// `remote = "Self"` makes the derived serde code inherent, for the trait impls below.
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(remote = "Self", rename_all = "lowercase")]
 pub enum OutputFormat {
@@ -164,6 +163,51 @@ impl<'de> serde::Deserialize<'de> for OutputFormat {
         }
 
         deserializer.deserialize_any(FormatVisitor)
+    }
+}
+
+/// The OpenAPI schema of [`OutputFormat`]: the derived variants, plus the plain NetCDF names.
+struct OutputFormatSchema;
+
+impl utoipa::PartialSchema for OutputFormatSchema {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+        use utoipa::openapi::{schema::Type, ObjectBuilder, RefOr, Schema};
+
+        let mut schema = <OutputFormat as utoipa::PartialSchema>::schema();
+        if let RefOr::T(Schema::OneOf(one_of)) = &mut schema {
+            let names = ObjectBuilder::new()
+                .schema_type(Type::String)
+                .enum_values(Some(NETCDF_NAMES))
+                .description(Some(
+                    "Flat NetCDF format with the default options. `hdf5` and `h5` are aliases.",
+                ))
+                .build();
+            // Put the plain names next to the object form of the same format.
+            let at = one_of
+                .items
+                .iter()
+                .position(|item| {
+                    matches!(item, RefOr::T(Schema::Object(object)) if object.properties.contains_key("netcdf"))
+                })
+                .unwrap_or(one_of.items.len());
+            one_of.items.insert(at, Schema::Object(names).into());
+        }
+        schema
+    }
+}
+
+impl utoipa::ToSchema for OutputFormatSchema {
+    fn name() -> std::borrow::Cow<'static, str> {
+        <OutputFormat as utoipa::ToSchema>::name()
+    }
+
+    fn schemas(
+        schemas: &mut Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) {
+        <OutputFormat as utoipa::ToSchema>::schemas(schemas);
     }
 }
 

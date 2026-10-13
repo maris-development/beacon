@@ -5,7 +5,7 @@
 mod common;
 
 use beacon_arrow_netcdf::attributes::CombineAttrs;
-use beacon_core::query::output::{NetcdfOutputOptions, OutputFormat};
+use beacon_core::query::output::{NetcdfOutputOptions, Output, OutputFormat};
 use beacon_core::query::Query;
 use beacon_core::query_result::QueryOutput;
 use common::runtime;
@@ -311,6 +311,56 @@ fn format_errors_name_the_problem() {
     assert!(error.contains("unknown variant `union`"), "{error}");
     let error = format_of(json!(5)).unwrap_err().to_string();
     assert!(error.contains("output format"), "{error}");
+}
+
+/// The OpenAPI component schemas that `Output` registers, by name.
+fn output_components() -> std::collections::HashMap<String, serde_json::Value> {
+    let mut schemas = Vec::new();
+    <Output as utoipa::ToSchema>::schemas(&mut schemas);
+    schemas.push((
+        <Output as utoipa::ToSchema>::name().into_owned(),
+        <Output as utoipa::PartialSchema>::schema(),
+    ));
+    schemas
+        .into_iter()
+        .map(|(name, schema)| (name, serde_json::to_value(schema).expect("a JSON schema")))
+        .collect()
+}
+
+/// The OpenAPI schema of `output.format` has the plain NetCDF names and the object form.
+#[test]
+fn output_format_schema_has_the_plain_netcdf_names() {
+    let components = output_components();
+    let output = &components["Output"];
+    assert_eq!(
+        output
+            .pointer("/properties/format/$ref")
+            .and_then(|r| r.as_str()),
+        Some("#/components/schemas/OutputFormat"),
+        "{output}"
+    );
+
+    let format = components
+        .get("OutputFormat")
+        .expect("an OutputFormat component");
+    let items = format
+        .pointer("/oneOf")
+        .and_then(|items| items.as_array())
+        .unwrap_or_else(|| panic!("OutputFormat is a oneOf: {format}"));
+    let names: Vec<&str> = items
+        .iter()
+        .filter(|item| item["type"] == "string")
+        .flat_map(|item| item["enum"].as_array().into_iter().flatten())
+        .filter_map(|name| name.as_str())
+        .collect();
+    for name in ["netcdf", "hdf5", "h5"] {
+        assert!(names.contains(&name), "`{name}` is missing: {format}");
+    }
+    assert!(
+        components.contains_key("NetcdfOutputOptions"),
+        "the object form needs NetcdfOutputOptions: {:?}",
+        components.keys().collect::<Vec<_>>()
+    );
 }
 
 /// NetCDF with default options serializes as the plain name, so stored query JSON stays the same.
