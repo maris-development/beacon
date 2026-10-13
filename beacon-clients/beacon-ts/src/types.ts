@@ -102,8 +102,13 @@ export interface GeoParquetOptions {
   latitude_column?: string | null;
 }
 
+/** How a flat `netcdf` output combines `variable.attribute` columns. */
+export type CombineAttrs = "identical" | "first" | "drop_conflicts";
+
 export interface Output {
   format: OutputFormat;
+  /** Only the `netcdf` format accepts this. */
+  combine_attrs?: CombineAttrs;
 }
 
 /** The fields of a structured (non-SQL) query. */

@@ -21,6 +21,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 - **ERDDAP tables.** `CREATE EXTERNAL TABLE t STORED AS ERDDAP LOCATION 'https://host/erddap/tabledap/<id>'`
   reads an ERDDAP tabledap dataset. Beacon sends filters and columns to ERDDAP. The ERDDAP
   attributes are table and column metadata, and `title`, `long_name` and `units` give the comments.
+- **NetCDF attributes on write.** `combine_attrs` on a `netcdf` output writes a `<variable>.<attribute>`
+  or `.<attribute>` column with one unique value as a NetCDF attribute. `identical` keeps a column
+  with more values as a variable, `first` keeps the first value, and `drop_conflicts` drops the
+  column. Without the option, the output does not change.
 
 ## [2.0.2] — 2026-10-13
 

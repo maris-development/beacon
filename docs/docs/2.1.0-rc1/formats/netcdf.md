@@ -85,6 +85,35 @@ files into one array store with statistics. Beacon can then drop whole datasets 
 arrays that you select. This is much faster than a scan of the original NetCDF files.
 :::
 
+### Attributes in a NetCDF output
+
+A NetCDF output writes each column as a variable on the `obs` dimension. An attribute column such
+as `temp.units` thus becomes a variable with one value per row. Set `combine_attrs` to write such
+a column as a NetCDF attribute:
+
+```json
+{ "output": { "format": "netcdf", "combine_attrs": "identical" } }
+```
+
+In SQL, use `COPY ... STORED AS NETCDF OPTIONS ('combine_attrs' 'identical')`.
+
+| `combine_attrs` | One unique value | More than one value |
+|---|---|---|
+| not set | variable | variable |
+| `identical` | attribute | variable |
+| `first` | attribute | attribute with the first value |
+| `drop_conflicts` | attribute | no output |
+
+- A column `<variable>.<attribute>` becomes an attribute of `<variable>` only when `<variable>` is
+  also in the output.
+- A null is a value. A column with `degC` and null has two values.
+- A global attribute column `.title` that stays a variable gets the name `global.title`.
+- `first` takes the first value that Beacon reads. This value can change from one run to the next.
+- Beacon `identical` keeps a conflict as a variable. The xarray option with the same name stops
+  with an error.
+- Beacon never copies `_FillValue`, `scale_factor`, `add_offset` or other names that start with
+  `_`. The reader already applied them to the data.
+
 ## As an external table
 
 ```sql
