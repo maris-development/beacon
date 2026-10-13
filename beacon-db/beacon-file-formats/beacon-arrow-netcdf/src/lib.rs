@@ -38,6 +38,8 @@ pub mod encoders;
 pub mod reader;
 /// High-level NetCDF writer.
 pub mod writer;
+/// Folds `variable.attribute` columns into NetCDF attributes on write.
+pub mod attributes;
 /// Re-export of the `netcdf` crate used by this crate.
 pub use netcdf;
 /// Re-export of low-level `netcdf-sys` bindings.

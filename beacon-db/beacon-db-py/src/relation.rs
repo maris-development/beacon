@@ -340,14 +340,14 @@ impl Relation {
 
     /// Writes the relation to a flat (record-oriented) NetCDF-4 file.
     fn to_netcdf(&self, py: Python<'_>, path: &str) -> PyResult<()> {
-        self.write(py, OutputFormat::NetCDF, path)
+        self.write(py, OutputFormat::NetCDF(Default::default()), path)
     }
 
     /// Writes the relation to an HDF5 file. A NetCDF-4 file *is* HDF5, so this is the flat
     /// NetCDF writer under an HDF5-friendly name — the output is a valid HDF5 file that h5py and
     /// `read_hdf5` read back. For a gridded/multi-dimensional layout, use [`Self::to_nd_netcdf`].
     fn to_hdf5(&self, py: Python<'_>, path: &str) -> PyResult<()> {
-        self.write(py, OutputFormat::NetCDF, path)
+        self.write(py, OutputFormat::NetCDF(Default::default()), path)
     }
 
     /// Writes the relation to a multi-dimensional NetCDF-4 file, using `dimensions` as the grid

@@ -58,6 +58,8 @@ export type {
   OutputFormat,
   SimpleOutputFormat,
   GeoParquetOptions,
+  CombineAttrs,
+  NetcdfOutputOptions,
   Output,
   QueryBody,
   SqlQuery,
