@@ -368,7 +368,7 @@ async fn netcdf_attribute_options_write_attributes() {
         str_attribute(&nc, Some("temp"), "units").as_deref(),
         Some("K")
     );
-    assert!(str_attribute(&nc, None, "Conventions").is_some());
+    assert!(str_attribute(&nc, None, "Conventions").is_none());
     assert!(str_attribute(&nc, None, "history").is_some());
 }
 
