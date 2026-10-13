@@ -85,6 +85,54 @@ files into one array store with statistics. Beacon can then drop whole datasets 
 arrays that you select. This is much faster than a scan of the original NetCDF files.
 :::
 
+## Write a NetCDF output
+
+### Attributes in a NetCDF output
+
+A NetCDF output writes each column as a variable on the `obs` dimension. An attribute column such
+as `temp.units` becomes a variable with one value for each row. To write such a column as a NetCDF
+attribute, give the `netcdf` format an object with `combine_attrs`:
+
+```json
+{ "output": { "format": { "netcdf": { "combine_attrs": "identical" } } } }
+```
+
+The plain name `"format": "netcdf"` uses the default options. It writes each column as a variable.
+
+In SQL, set the option in a `COPY` statement. The format name is `NC`. `NETCDF` does not work.
+
+```sql
+COPY (SELECT temp, 'degC' AS "temp.units" FROM t)
+TO 'result.nc'
+STORED AS NC
+OPTIONS ('combine_attrs' 'identical')
+```
+
+| `combine_attrs` | One unique value | More than one value |
+|---|---|---|
+| not set | variable | variable |
+| `identical` | attribute | variable |
+| `first` | attribute | attribute with the first non-null value |
+| `drop_conflicts` | attribute | Beacon drops the column |
+
+- A column `<variable>.<attribute>` becomes an attribute of `<variable>` only when `<variable>` is
+  also in the output.
+- A null is a value. A column with `degC` and null has two values.
+- A column with only null values, or with no rows, gives no attribute and no variable.
+- A column with a type that has no NetCDF attribute type, such as a timestamp, stays a variable.
+- A global attribute column `.title` that stays a variable gets the name `global.title`.
+- A `global.<attribute>` name that matches a column in the output is an error.
+- `first` takes the first non-null value that Beacon reads. This value can change from one run to the next.
+- The Beacon option `identical` keeps a conflict as a variable. The xarray option with the same name stops
+  with an error.
+- Beacon never copies an attribute with a name that starts with `_`. Beacon also never copies
+  `scale_factor` and `add_offset`.
+- Beacon drops `valid_min`, `valid_max`, `valid_range` and `missing_value` in two cases. The first
+  case is a variable with a `scale_factor` or `add_offset` column in the output. The second case is
+  an attribute with a type that is not the type of the variable.
+- On a timestamp column, Beacon writes its own `units` and `calendar`.
+- A gridded NetCDF output, with dimension columns, does not accept `combine_attrs`.
+
 ## As an external table
 
 ```sql
@@ -98,7 +146,7 @@ full read model.
 
 ### `OPTIONS`
 
-`STORED AS NC` reads four keys:
+`STORED AS NC` takes five keys. Four keys apply to a read. The key `combine_attrs` applies to a write only.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -106,6 +154,7 @@ full read model.
 | `skip_unbroadcastable` | Boolean | `false` | Skip a file that does not fit `read_dimensions`. Beacon writes a warning and reads the next file. Without it the query fails. |
 | `use_rust_reader` | Boolean | `true` (`BEACON_NETCDF_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library needs anonymous access to a bucket. |
 | `enable_statistics` | Boolean | `true` (`BEACON_NETCDF_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_NETCDF_ENABLE_STATISTICS` to turn the column ranges off. |
+| `combine_attrs` | `identical`, `first` or `drop_conflicts` | Not set | Write only. Write an attribute column as a NetCDF attribute. See [attributes in a NetCDF output](#attributes-in-a-netcdf-output). |
 
 ```sql
 -- One grid, and the netCDF-C reader for this table alone

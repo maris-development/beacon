@@ -4,6 +4,8 @@
 
 mod common;
 
+use beacon_arrow_netcdf::attributes::CombineAttrs;
+use beacon_core::query::output::{NetcdfOutputOptions, Output, OutputFormat};
 use beacon_core::query::Query;
 use beacon_core::query_result::QueryOutput;
 use common::runtime;
@@ -56,7 +58,8 @@ async fn arrow_output_is_a_real_ipc_file() {
 #[tokio::test(flavor = "multi_thread")]
 async fn nd_netcdf_output_writes_the_dimension_columns_as_dimensions() {
     let rt = runtime("output-nd-netcdf").await;
-    rt.sql("CREATE TABLE grid (lat DOUBLE, lon DOUBLE, v DOUBLE)").await;
+    rt.sql("CREATE TABLE grid (lat DOUBLE, lon DOUBLE, v DOUBLE)")
+        .await;
     rt.sql(
         "INSERT INTO grid VALUES (1.0, 10.0, 0.1), (1.0, 20.0, 0.2), (1.0, 30.0, 0.3), \
          (2.0, 10.0, 0.4), (2.0, 20.0, 0.5), (2.0, 30.0, 0.6)",
@@ -120,10 +123,263 @@ async fn netcdf_output_writes_large_strings_and_booleans() {
     let file = netcdf_output(&rt, sql, json!({ "format": "netcdf" })).await;
 
     let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
-    assert!(nc.variable("name").is_some(), "the string column is a variable");
-    let flag = nc.variable("flag").expect("the boolean column is a variable");
+    assert!(
+        nc.variable("name").is_some(),
+        "the string column is a variable"
+    );
+    let flag = nc
+        .variable("flag")
+        .expect("the boolean column is a variable");
     let values: Vec<u8> = flag.get_values(..).expect("flag values");
     assert_eq!(values, vec![1, 0]);
+}
+
+/// The string value of attribute `name` on `variable`, or on the file when `variable` is `None`.
+fn str_attribute(
+    file: &beacon_arrow_netcdf::netcdf::File,
+    variable: Option<&str>,
+    name: &str,
+) -> Option<String> {
+    use beacon_arrow_netcdf::netcdf::AttributeValue;
+    let value = match variable {
+        Some(variable) => file.variable(variable)?.attribute(name)?.value().ok()?,
+        None => file.attribute(name)?.value().ok()?,
+    };
+    match value {
+        AttributeValue::Str(value) => Some(value),
+        _ => None,
+    }
+}
+
+const CONFLICT_SQL: &str =
+    r#"SELECT * FROM (VALUES (1.0, 'degC'), (2.0, 'K')) AS t(temp, "temp.units")"#;
+
+/// `identical` writes a column with one value as an attribute.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_identical_writes_a_unique_column_as_an_attribute() {
+    let rt = runtime("output-netcdf-combine-identical").await;
+    let sql = r#"SELECT temp, 'degC' AS "temp.units", 'Argo' AS ".title"
+                 FROM (VALUES (1.0), (2.0)) AS t(temp)"#;
+    let file = netcdf_output(
+        &rt,
+        sql,
+        json!({ "format": { "netcdf": { "combine_attrs": "identical" } } }),
+    )
+    .await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert_eq!(
+        str_attribute(&nc, Some("temp"), "units").as_deref(),
+        Some("degC")
+    );
+    assert_eq!(str_attribute(&nc, None, "title").as_deref(), Some("Argo"));
+    assert!(nc.variable("temp.units").is_none());
+}
+
+/// `identical` keeps a column with two values as a variable on `obs`.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_identical_keeps_a_conflict_as_a_variable() {
+    let rt = runtime("output-netcdf-combine-conflict").await;
+    let file = netcdf_output(
+        &rt,
+        CONFLICT_SQL,
+        json!({ "format": { "netcdf": { "combine_attrs": "identical" } } }),
+    )
+    .await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert_eq!(str_attribute(&nc, Some("temp"), "units"), None);
+    assert_eq!(
+        nc.variable("temp.units")
+            .expect("the conflict is a variable")
+            .len(),
+        2
+    );
+}
+
+/// `drop_conflicts` drops a column with two values.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_drop_conflicts_drops_a_conflict() {
+    let rt = runtime("output-netcdf-combine-drop").await;
+    let file = netcdf_output(
+        &rt,
+        CONFLICT_SQL,
+        json!({ "format": { "netcdf": { "combine_attrs": "drop_conflicts" } } }),
+    )
+    .await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert_eq!(str_attribute(&nc, Some("temp"), "units"), None);
+    assert!(nc.variable("temp.units").is_none());
+}
+
+/// `first` writes one of the values as the attribute.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_first_keeps_one_value() {
+    let rt = runtime("output-netcdf-combine-first").await;
+    let file = netcdf_output(
+        &rt,
+        CONFLICT_SQL,
+        json!({ "format": { "netcdf": { "combine_attrs": "first" } } }),
+    )
+    .await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    let units = str_attribute(&nc, Some("temp"), "units").expect("an attribute");
+    assert!(units == "degC" || units == "K", "{units}");
+    assert!(nc.variable("temp.units").is_none());
+}
+
+/// Without `combine_attrs`, an attribute column stays a variable.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_without_combine_attrs_keeps_the_column() {
+    let rt = runtime("output-netcdf-combine-off").await;
+    let sql = r#"SELECT temp, 'degC' AS "temp.units" FROM (VALUES (1.0), (2.0)) AS t(temp)"#;
+    let file = netcdf_output(&rt, sql, json!({ "format": "netcdf" })).await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert!(nc.variable("temp.units").is_some());
+}
+
+/// The documented SQL form: `COPY ... STORED AS NC OPTIONS ('combine_attrs' ...)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_nc_with_combine_attrs_writes_an_attribute() {
+    let rt = runtime("copy-nc-combine").await;
+
+    rt.sql(
+        "COPY (SELECT temp, 'degC' AS \"temp.units\" FROM (VALUES (1.0), (2.0)) AS t(temp)) \
+         TO 'tmp:///combine.nc' STORED AS NC OPTIONS ('combine_attrs' 'identical')",
+    )
+    .await;
+
+    let path = rt.tmp_dir().join("combine.nc");
+    let nc = beacon_arrow_netcdf::netcdf::open(&path).expect("a readable NetCDF file");
+    assert_eq!(
+        str_attribute(&nc, Some("temp"), "units").as_deref(),
+        Some("degC")
+    );
+    assert!(nc.variable("temp.units").is_none());
+}
+
+fn format_of(value: serde_json::Value) -> Result<OutputFormat, serde_json::Error> {
+    serde_json::from_value(value)
+}
+
+/// `netcdf` is a plain name with default options, or an object with options.
+#[test]
+fn netcdf_is_a_name_or_an_object() {
+    for name in ["netcdf", "hdf5", "h5"] {
+        let format = format_of(json!(name)).expect("a valid format name");
+        assert!(
+            matches!(
+                format,
+                OutputFormat::NetCDF(NetcdfOutputOptions {
+                    combine_attrs: None
+                })
+            ),
+            "{name}"
+        );
+    }
+    let format = format_of(json!({ "netcdf": {} })).expect("an empty options object");
+    assert!(matches!(
+        format,
+        OutputFormat::NetCDF(NetcdfOutputOptions {
+            combine_attrs: None
+        })
+    ));
+    let format = format_of(json!({ "h5": { "combine_attrs": "first" } })).expect("an alias key");
+    assert!(matches!(
+        format,
+        OutputFormat::NetCDF(NetcdfOutputOptions {
+            combine_attrs: Some(CombineAttrs::First)
+        })
+    ));
+}
+
+/// An invalid format gives an error that names the problem.
+#[test]
+fn format_errors_name_the_problem() {
+    let error = format_of(json!("parqet")).unwrap_err().to_string();
+    assert!(error.contains("unknown variant `parqet`"), "{error}");
+    let error = format_of(json!({ "netcdf": { "combine_attr": "first" } }))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown field `combine_attr`"), "{error}");
+    let error = format_of(json!({ "netcdf": { "combine_attrs": "union" } }))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown variant `union`"), "{error}");
+    let error = format_of(json!(5)).unwrap_err().to_string();
+    assert!(error.contains("output format"), "{error}");
+}
+
+/// The OpenAPI component schemas that `Output` registers, by name.
+fn output_components() -> std::collections::HashMap<String, serde_json::Value> {
+    let mut schemas = Vec::new();
+    <Output as utoipa::ToSchema>::schemas(&mut schemas);
+    schemas.push((
+        <Output as utoipa::ToSchema>::name().into_owned(),
+        <Output as utoipa::PartialSchema>::schema(),
+    ));
+    schemas
+        .into_iter()
+        .map(|(name, schema)| (name, serde_json::to_value(schema).expect("a JSON schema")))
+        .collect()
+}
+
+/// The OpenAPI schema of `output.format` has the plain NetCDF names and the object form.
+#[test]
+fn output_format_schema_has_the_plain_netcdf_names() {
+    let components = output_components();
+    let output = &components["Output"];
+    assert_eq!(
+        output
+            .pointer("/properties/format/$ref")
+            .and_then(|r| r.as_str()),
+        Some("#/components/schemas/OutputFormat"),
+        "{output}"
+    );
+
+    let format = components
+        .get("OutputFormat")
+        .expect("an OutputFormat component");
+    let items = format
+        .pointer("/oneOf")
+        .and_then(|items| items.as_array())
+        .unwrap_or_else(|| panic!("OutputFormat is a oneOf: {format}"));
+    let names: Vec<&str> = items
+        .iter()
+        .filter(|item| item["type"] == "string")
+        .flat_map(|item| item["enum"].as_array().into_iter().flatten())
+        .filter_map(|name| name.as_str())
+        .collect();
+    for name in ["netcdf", "hdf5", "h5"] {
+        assert!(names.contains(&name), "`{name}` is missing: {format}");
+    }
+    assert!(
+        components.contains_key("NetcdfOutputOptions"),
+        "the object form needs NetcdfOutputOptions: {:?}",
+        components.keys().collect::<Vec<_>>()
+    );
+}
+
+/// NetCDF with default options serializes as the plain name, so stored query JSON stays the same.
+#[test]
+fn netcdf_with_default_options_serializes_as_the_name() {
+    let to_json = |value: serde_json::Value| {
+        serde_json::to_value(format_of(value).expect("a valid format")).expect("serializable")
+    };
+    assert_eq!(to_json(json!("netcdf")), json!("netcdf"));
+    assert_eq!(to_json(json!({ "netcdf": {} })), json!("netcdf"));
+    assert_eq!(
+        to_json(json!({ "netcdf": { "combine_attrs": "identical" } })),
+        json!({ "netcdf": { "combine_attrs": "identical" } })
+    );
+    assert_eq!(to_json(json!("csv")), json!("csv"));
+    assert_eq!(
+        to_json(json!({ "ndnetcdf": { "dimension_columns": ["lat"] } })),
+        json!({ "ndnetcdf": { "dimension_columns": ["lat"] } })
+    );
 }
 
 /// The GeoParquet output takes its point from the columns the request names, also when the
@@ -131,7 +387,8 @@ async fn netcdf_output_writes_large_strings_and_booleans() {
 #[tokio::test(flavor = "multi_thread")]
 async fn geoparquet_output_uses_the_named_coordinate_columns() {
     let rt = runtime("output-geoparquet-named").await;
-    rt.sql("CREATE TABLE stations (x_coord DOUBLE, y_coord DOUBLE)").await;
+    rt.sql("CREATE TABLE stations (x_coord DOUBLE, y_coord DOUBLE)")
+        .await;
     rt.sql("INSERT INTO stations VALUES (4.5, 52.0)").await;
 
     let mut query = Query::sql("SELECT x_coord, y_coord FROM stations".to_string());
@@ -233,8 +490,16 @@ async fn zarr_output_is_a_zipped_flat_store_that_reads_back() {
 
     let store = rt.datasets_dir().join("back.zarr");
     let names = unzip(file.path(), &store);
-    for expected in ["zarr.json", "id/zarr.json", "temp/zarr.json", "site/zarr.json"] {
-        assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
+    for expected in [
+        "zarr.json",
+        "id/zarr.json",
+        "temp/zarr.json",
+        "site/zarr.json",
+    ] {
+        assert!(
+            names.iter().any(|n| n == expected),
+            "missing {expected} in {names:?}"
+        );
     }
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(store.join("temp/zarr.json")).unwrap()).unwrap();
@@ -246,10 +511,18 @@ async fn zarr_output_is_a_zipped_flat_store_that_reads_back() {
         .unwrap()
         .flatten()
         .filter(|entry| entry.path().is_dir())
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("beacon_out_"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("beacon_out_")
+        })
         .map(|entry| entry.file_name())
         .collect();
-    assert!(leftovers.is_empty(), "scratch directories left: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "scratch directories left: {leftovers:?}"
+    );
 
     let rows = rt
         .sql("SELECT id, temp, site FROM read_zarr(['back.zarr/']) ORDER BY id")
@@ -261,13 +534,19 @@ async fn zarr_output_is_a_zipped_flat_store_that_reads_back() {
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
         .unwrap();
-    assert_eq!(temp.iter().collect::<Vec<_>>(), vec![Some(10.5), None, Some(12.5)]);
+    assert_eq!(
+        temp.iter().collect::<Vec<_>>(),
+        vec![Some(10.5), None, Some(12.5)]
+    );
     let site = arrow::compute::cast(batch.column(2), &arrow::datatypes::DataType::Utf8).unwrap();
     let site = site
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
-    assert_eq!(site.iter().collect::<Vec<_>>(), vec![Some("a"), Some("b"), None]);
+    assert_eq!(
+        site.iter().collect::<Vec<_>>(),
+        vec![Some("a"), Some("b"), None]
+    );
 }
 
 /// `COPY TO ... STORED AS ZARR` writes a plain directory store, not a zip.

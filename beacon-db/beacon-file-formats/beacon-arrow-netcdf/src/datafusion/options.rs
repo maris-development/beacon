@@ -32,6 +32,12 @@ pub struct NetcdfOptions {
     ///   become named dimensions and remaining columns become data variables.
     #[serde(default)]
     pub write_dimensions: Option<Vec<String>>,
+    /// How the flat writer combines `variable.attribute` columns.
+    ///
+    /// * `None` → every column is a variable on `obs`.
+    /// * `Some(policy)` → see [`CombineAttrs`](crate::attributes::CombineAttrs).
+    #[serde(default)]
+    pub combine_attrs: Option<crate::attributes::CombineAttrs>,
 }
 
 fn default_replay_batch_size() -> usize {
