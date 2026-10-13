@@ -122,6 +122,10 @@ export interface NetcdfOutputOptions {
   chunk_rows?: number;
   /** CF units of each timestamp column, for example `"seconds since 1970-01-01"`. */
   time_units?: string;
+  /** Global attributes of the file. A value here wins over `combine_attrs`. */
+  global_attributes?: Record<string, string | number>;
+  /** Attributes of each column, by column name. A value here wins over `combine_attrs`. */
+  variable_attributes?: Record<string, Record<string, string | number>>;
 }
 
 export interface Output {

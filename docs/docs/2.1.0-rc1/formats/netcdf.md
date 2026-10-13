@@ -100,6 +100,8 @@ format name is `NC`. `NETCDF` does not work.
 | `compression.shuffle` | `compression.shuffle` | `true` | Apply the shuffle filter before deflate. |
 | `chunk_rows` | `chunk_rows` | `65536` | Number of rows in one chunk of the `obs` dimension. |
 | `time_units` | `time_units` | Not set | CF units of each timestamp column, for example `seconds since 1970-01-01`. See [time encoding](#time-encoding). |
+| `global_attributes` | `global_attributes` | Not set | Global attributes, as an object of name to string or number. In SQL, give a JSON object. See [file and variable attributes](#file-and-variable-attributes). |
+| `variable_attributes` | `variable_attributes` | Not set | Attributes of each column, as an object of column to attributes. In SQL, give a JSON object. |
 
 A gridded NetCDF output, with dimension columns, does not accept these options.
 
@@ -150,6 +152,40 @@ OPTIONS ('time_units' 'days since 1950-01-01')
 - Beacon writes `int64` when each value is a whole number in the unit. Else it writes `float64`,
   so no precision is lost.
 - An invalid `time_units` is an error.
+
+### File and variable attributes
+
+Each NetCDF output has two global attributes:
+
+- `Conventions = "CF-1.10"`.
+- `history`, with the time of the write and the Beacon version.
+
+Set more attributes with `global_attributes` and `variable_attributes`:
+
+```json
+{ "output": { "format": { "netcdf": {
+  "global_attributes": { "title": "Argo extract", "institution": "MARIS" },
+  "variable_attributes": { "temp": { "units": "degC", "long_name": "Sea temperature" } }
+} } } }
+```
+
+```sql
+COPY (SELECT temp FROM argo)
+TO 'result.nc'
+STORED AS NC
+OPTIONS (
+  'global_attributes' '{"title": "Argo extract"}',
+  'variable_attributes' '{"temp": {"units": "degC"}}'
+)
+```
+
+- A value is a string or a number. An integer is `int` in the file, or `int64` when it is too
+  large. A number with a fraction is `double`.
+- A value from an option wins over a value from `combine_attrs`, and over `Conventions` and
+  `history`.
+- `variable_attributes` must name a column of the output. Else Beacon gives an error.
+- An attribute name must not be empty or start with `_`.
+- On a timestamp column, `units` and `calendar` are not allowed. Use `time_units`.
 
 ### Fill values
 

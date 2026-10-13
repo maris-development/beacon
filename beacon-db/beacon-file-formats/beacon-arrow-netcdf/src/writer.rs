@@ -11,14 +11,19 @@ use arrow::{
     array::{
         Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, RecordBatch, StringArray,
     },
-    datatypes::{DataType, Field, SchemaRef},
+    datatypes::{DataType, Field, Schema, SchemaRef},
     ipc::writer::FileWriter,
 };
 use tempfile::SpooledTempFile;
 
-use crate::attributes::{AttributeCombiner, AttributePlan, AttributeTarget};
+use indexmap::IndexMap;
+
+use crate::attributes::{AttributeCombiner, AttributePlan, AttributeTarget, TIME_OWNED};
 use crate::datafusion::options::NetcdfWriterOptions;
 use crate::encoders::{Encoder, EncoderOptions};
+
+/// The CF version that the flat writer names in the `Conventions` attribute.
+const CONVENTIONS: &str = "CF-1.10";
 
 /// Generic writer backed by an [`Encoder`] implementation.
 pub struct Writer<E: Encoder> {
@@ -143,7 +148,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         let writer = FileWriter::try_new(file, &schema).map_err(|e| anyhow::anyhow!(e))?;
         let fixed_string_sizes = HashMap::new();
 
-        Ok(Self {
+        let writer = Self {
             path,
             writer,
             schema,
@@ -153,7 +158,10 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             rows: 0,
             float_time_columns: HashSet::new(),
             encoder: PhantomData,
-        })
+        };
+        // Fail before the spool. `finish` checks again, because combine_attrs can drop a column.
+        Self::check_attribute_options(&writer.options, &writer.schema)?;
+        Ok(writer)
     }
 
     /// Append an Arrow record batch to the buffered stream.
@@ -249,9 +257,10 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
 
         let updated_schema = Arc::new(arrow::datatypes::Schema::new(updated_schema_fields));
 
+        let attributes = Self::attributes(&self.options, plan.attributes, &updated_schema)?;
         let mut nc_writer =
             Writer::<E>::with_options(&self.path, updated_schema.clone(), &encoder_options)?;
-        nc_writer.put_attributes(&plan.attributes)?;
+        nc_writer.put_attributes(&attributes)?;
 
         // A batch with no column has no row count, so the file keeps its attributes only.
         if kept_columns.is_empty() {
@@ -268,6 +277,82 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         }
 
         Ok(())
+    }
+
+    /// Check the attribute options against the columns of `schema`.
+    fn check_attribute_options(
+        options: &NetcdfWriterOptions,
+        schema: &Schema,
+    ) -> anyhow::Result<()> {
+        let reserved = |name: &str| name.is_empty() || name.starts_with('_');
+        if let Some(name) = options.global_attributes.keys().find(|n| reserved(n)) {
+            anyhow::bail!("invalid global attribute name '{name}': it is empty or starts with '_'");
+        }
+        for (variable, attributes) in &options.variable_attributes {
+            let field = schema.field_with_name(variable).map_err(|_| {
+                anyhow::anyhow!(
+                    "variable_attributes names '{variable}', which is not a variable of the output"
+                )
+            })?;
+            for name in attributes.keys() {
+                if reserved(name) {
+                    anyhow::bail!(
+                        "invalid attribute name '{name}' on '{variable}': it is empty or starts \
+                         with '_'"
+                    );
+                }
+                if matches!(field.data_type(), DataType::Timestamp(_, _))
+                    && TIME_OWNED.contains(&name.as_str())
+                {
+                    anyhow::bail!(
+                        "variable_attributes cannot set '{name}' on the time variable \
+                         '{variable}': use the option time_units"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The attributes of the file: the defaults, then `combined`, then the attribute options.
+    /// A later value of the same attribute wins.
+    fn attributes(
+        options: &NetcdfWriterOptions,
+        combined: Vec<(AttributeTarget, netcdf::AttributeValue)>,
+        schema: &Schema,
+    ) -> anyhow::Result<Vec<(AttributeTarget, netcdf::AttributeValue)>> {
+        Self::check_attribute_options(options, schema)?;
+        let global = |name: &str| AttributeTarget::Global {
+            name: name.to_string(),
+        };
+        let history = format!(
+            "{} Beacon {}: query output",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            env!("CARGO_PKG_VERSION")
+        );
+        let mut attributes = vec![
+            (global("Conventions"), CONVENTIONS.into()),
+            (global("history"), history.into()),
+        ];
+        attributes.extend(combined);
+        for (name, value) in &options.global_attributes {
+            attributes.push((global(name), value.to_netcdf()));
+        }
+        for (variable, values) in &options.variable_attributes {
+            for (name, value) in values {
+                let target = AttributeTarget::Variable {
+                    variable: variable.clone(),
+                    name: name.clone(),
+                };
+                attributes.push((target, value.to_netcdf()));
+            }
+        }
+
+        let mut merged = IndexMap::new();
+        for (target, value) in attributes {
+            merged.insert(target, value);
+        }
+        Ok(merged.into_iter().collect())
     }
 
     fn map_record_batch(
@@ -823,5 +908,89 @@ mod tests {
         );
         let values: Vec<i64> = file.variable("time").unwrap().get_values(..).unwrap();
         assert_eq!(values, vec![5]);
+    }
+
+    #[test]
+    fn every_file_has_conventions_and_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cf.nc");
+        let schema = series_schema();
+        write(&path, schema.clone(), vec![series_batch(&schema, 3)], None);
+
+        let file = netcdf::open(&path).unwrap();
+        assert_eq!(
+            str_attribute(&file, None, "Conventions").as_deref(),
+            Some(CONVENTIONS)
+        );
+        let history = str_attribute(&file, None, "history").unwrap();
+        assert!(history.contains("Beacon"), "{history}");
+    }
+
+    fn attribute_options(global: &str, variable: &str) -> NetcdfWriterOptions {
+        NetcdfWriterOptions {
+            combine_attrs: Some(CombineAttrs::Identical),
+            global_attributes: serde_json::from_str(global).unwrap(),
+            variable_attributes: serde_json::from_str(variable).unwrap(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_attribute_option_wins_over_combine_attrs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("options.nc");
+        let schema = units_schema();
+        let options = attribute_options(
+            r#"{"title": "From the option", "Conventions": "CF-1.8", "version": 3}"#,
+            r#"{"temp": {"units": "K", "long_name": "Temperature"}}"#,
+        );
+        let batch = units_batch(&schema, "degC", "From the column", 2);
+        write_with(&path, schema, vec![batch], options).unwrap();
+
+        let file = netcdf::open(&path).unwrap();
+        assert_eq!(
+            str_attribute(&file, None, "title").as_deref(),
+            Some("From the option")
+        );
+        assert_eq!(
+            str_attribute(&file, None, "Conventions").as_deref(),
+            Some("CF-1.8")
+        );
+        assert_eq!(
+            file.attribute("version").unwrap().value().unwrap(),
+            AttributeValue::Int(3)
+        );
+        assert_eq!(
+            str_attribute(&file, Some("temp"), "units").as_deref(),
+            Some("K")
+        );
+        assert_eq!(
+            str_attribute(&file, Some("temp"), "long_name").as_deref(),
+            Some("Temperature")
+        );
+    }
+
+    #[test]
+    fn bad_attribute_options_are_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Float64, true),
+            Field::new("time", DataType::Timestamp(TimeUnit::Second, None), true),
+        ]));
+        for (global, variable, expected) in [
+            ("{}", r#"{"salt": {"units": "psu"}}"#, "salt"),
+            ("{}", r#"{"time": {"units": "days"}}"#, "time_units"),
+            (r#"{"_NCProperties": "x"}"#, "{}", "_NCProperties"),
+        ] {
+            let error = write_with(
+                &dir.path().join("bad.nc"),
+                schema.clone(),
+                vec![],
+                attribute_options(global, variable),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 }

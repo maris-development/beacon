@@ -35,6 +35,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 - **NetCDF time units.** `time_units`, for example `"days since 1950-01-01"`, on a `netcdf` output
   writes each timestamp in these units. A value that is not a whole number in the unit makes the
   variable `float64`. ([#578](https://github.com/maris-development/beacon/issues/578))
+- **NetCDF attribute options.** A flat NetCDF output writes `Conventions = "CF-1.10"` and a
+  `history` line. `global_attributes` and `variable_attributes` on a `netcdf` output set more
+  attributes. In SQL, give each one as a JSON object. A value from an option wins over a value from
+  `combine_attrs`. ([#579](https://github.com/maris-development/beacon/issues/579))
 
 ### Changed
 
