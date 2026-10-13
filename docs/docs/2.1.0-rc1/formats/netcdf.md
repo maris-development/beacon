@@ -160,10 +160,12 @@ The variable also gets `standard_name = "time"` and `calendar = "standard"`.
 
 ### File and variable attributes
 
-Each NetCDF output has two global attributes:
+Each NetCDF output has the global attribute `history`, with the time of the write and the Beacon
+version.
 
-- `Conventions = "CF-1.10"`.
-- `history`, with the time of the write and the Beacon version.
+Beacon does not write `Conventions`. A query output does not always follow CF: for example, a
+column can have no `units`, or a name with a dot. When your output follows CF, set the attribute
+yourself: `"global_attributes": { "Conventions": "CF-1.10" }`.
 
 Set more attributes with `global_attributes` and `variable_attributes`:
 
@@ -186,8 +188,7 @@ OPTIONS (
 
 - A value is a string or a number. An integer is `int` in the file, or `int64` when it is too
   large. A number with a fraction is `double`.
-- A value from an option wins over a value from `combine_attrs`, and over `Conventions` and
-  `history`.
+- A value from an option wins over a value from `combine_attrs`, and over `history`.
 - `variable_attributes` must name a column of the output. Else Beacon gives an error.
 - An attribute name must not be empty or start with `_`.
 - On a timestamp column, `units` and `calendar` are not allowed. Beacon writes them. See
