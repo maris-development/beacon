@@ -309,6 +309,27 @@ impl Encoder for DefaultEncoder {
         Ok(())
     }
 
+    fn put_attribute(
+        &mut self,
+        variable: Option<&str>,
+        name: &str,
+        value: netcdf::AttributeValue,
+    ) -> Result<(), EncoderError> {
+        match variable {
+            Some(variable) => {
+                let mut nc_variable = self
+                    .nc_file
+                    .variable_mut(variable)
+                    .ok_or_else(|| format!("NetCDF variable not found: {variable}"))?;
+                nc_variable.put_attribute(name, value)?;
+            }
+            None => {
+                self.nc_file.add_attribute(name, value)?;
+            }
+        }
+        Ok(())
+    }
+
     fn encoder_name() -> &'static str {
         "DefaultEncoder"
     }

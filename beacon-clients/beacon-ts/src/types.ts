@@ -84,6 +84,7 @@ export type OutputFormat =
   | SimpleOutputFormat
   | { ndnetcdf: { dimension_columns: string[] } }
   | { nd_netcdf: { dimension_columns: string[] } }
+  | { netcdf: NetcdfOutputOptions }
   | { geoparquet: GeoParquetOptions }
   | { odv: Record<string, unknown> };
 
@@ -100,6 +101,14 @@ export type SimpleOutputFormat =
 export interface GeoParquetOptions {
   longitude_column?: string | null;
   latitude_column?: string | null;
+}
+
+/** How a flat `netcdf` output combines `variable.attribute` columns. */
+export type CombineAttrs = "identical" | "first" | "drop_conflicts";
+
+/** Options of the flat NetCDF output. The plain name `"netcdf"` uses the defaults. */
+export interface NetcdfOutputOptions {
+  combine_attrs?: CombineAttrs;
 }
 
 export interface Output {

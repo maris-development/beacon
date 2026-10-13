@@ -1,0 +1,168 @@
+---
+description: Read NetCDF files with read_netcdf(). Beacon streams chunks, shows variable attributes as columns and takes an optional dimension filter.
+---
+
+# NetCDF
+
+## Read the files
+
+```text
+read_netcdf(glob_paths)
+read_netcdf(glob_paths, dimensions)
+read_netcdf(glob_paths, dimensions, skip_unbroadcastable)
+```
+
+Beacon reads the NetCDF files that match one or more glob patterns.
+
+Beacon recognizes `.nc`, `.nc3`, `.nc4` and `.netcdf`, in upper or lower case. It finds them in the
+dataset store automatically. A crawler makes one table for each extension in a folder.
+
+The optional `dimensions` argument selects the variables. Beacon returns a variable only if the list
+holds all of its dimensions. Use the argument to drop variables with many dimensions. Also use it
+when the files hold variables with different dimensions.
+
+The optional `skip_unbroadcastable` argument sets what Beacon does with a file that does not fit the list. Beacon fails the query by default. Set it to true to skip the file instead. Beacon writes a warning and reads the next file.
+
+```sql
+SELECT time, latitude, longitude, temperature
+FROM read_netcdf('argo/**/*.nc')
+
+-- With explicit dimension columns
+SELECT *
+FROM read_netcdf(['argo/**/*.nc'], ['time', 'pressure'])
+```
+
+## Inspect the schema
+
+Check the columns and the types before you write a query:
+
+```sql
+SELECT * FROM read_netcdf('argo/**/*.nc') LIMIT 0;
+```
+
+[Inspect a schema](/docs/2.1.0-rc1/formats/inspect-a-schema) compares the `_schema` functions,
+`SUMMARIZE`, `DESCRIBE` and `LIMIT 0`, and says what each one costs.
+
+## Format details
+
+Beacon streams the data and reads one chunk at a time. It reads a large file step by step. It does
+not load the whole file into memory.
+
+Supported dialects:
+
+- **NetCDF4** (recommended)
+- **NetCDF3**: a `char*` array with a string dimension such as `STRLEN` becomes a fixed-length string
+
+### Variable attributes
+
+A NetCDF variable carries metadata attributes such as `units`, `long_name` and `valid_min`. Beacon
+shows these as extra columns. It uses dot notation: `<variable>.<attribute>`. The `units` attribute
+of the `temperature` variable becomes the column `temperature.units`.
+
+An attribute column keeps the type from the file: string, integer, float and so on. Every query
+returns these columns next to the variable columns.
+
+A file attribute has no variable prefix. Beacon shows it with a leading dot: `.<attribute>`. The
+global attribute `source` becomes the column `.source`.
+
+```sql
+SELECT temperature, "temperature.units", "temperature.long_name", ".source"
+FROM read_netcdf(['argo/**/*.nc'])
+LIMIT 1
+```
+
+Limitations:
+
+- Beacon does not support user-defined types.
+- Object storage authenticates on the default `BEACON_NETCDF_USE_RUST_READER=true`. On the netCDF-C
+  library a bucket supports anonymous access only, because that library opens a file by URL and
+  never sees the credential chain.
+
+:::tip
+For a large NetCDF collection, convert the files into one
+[Atlas](/docs/2.1.0-rc1/formats/atlas) collection. Atlas merges many NetCDF
+files into one array store with statistics. Beacon can then drop whole datasets and read only the
+arrays that you select. This is much faster than a scan of the original NetCDF files.
+:::
+
+## Write a NetCDF output
+
+### Attributes in a NetCDF output
+
+A NetCDF output writes each column as a variable on the `obs` dimension. An attribute column such
+as `temp.units` becomes a variable with one value for each row. To write such a column as a NetCDF
+attribute, give the `netcdf` format an object with `combine_attrs`:
+
+```json
+{ "output": { "format": { "netcdf": { "combine_attrs": "identical" } } } }
+```
+
+The plain name `"format": "netcdf"` uses the default options. It writes each column as a variable.
+
+In SQL, set the option in a `COPY` statement. The format name is `NC`. `NETCDF` does not work.
+
+```sql
+COPY (SELECT temp, 'degC' AS "temp.units" FROM t)
+TO 'result.nc'
+STORED AS NC
+OPTIONS ('combine_attrs' 'identical')
+```
+
+| `combine_attrs` | One unique value | More than one value |
+|---|---|---|
+| not set | variable | variable |
+| `identical` | attribute | variable |
+| `first` | attribute | attribute with the first non-null value |
+| `drop_conflicts` | attribute | Beacon drops the column |
+
+- A column `<variable>.<attribute>` becomes an attribute of `<variable>` only when `<variable>` is
+  also in the output.
+- A null is a value. A column with `degC` and null has two values.
+- A column with only null values, or with no rows, gives no attribute and no variable.
+- A column with a type that has no NetCDF attribute type, such as a timestamp, stays a variable.
+- A global attribute column `.title` that stays a variable gets the name `global.title`.
+- A `global.<attribute>` name that matches a column in the output is an error.
+- `first` takes the first non-null value that Beacon reads. This value can change from one run to the next.
+- The Beacon option `identical` keeps a conflict as a variable. The xarray option with the same name stops
+  with an error.
+- Beacon never copies an attribute with a name that starts with `_`. Beacon also never copies
+  `scale_factor` and `add_offset`.
+- Beacon drops `valid_min`, `valid_max`, `valid_range` and `missing_value` in two cases. The first
+  case is a variable with a `scale_factor` or `add_offset` column in the output. The second case is
+  an attribute with a type that is not the type of the variable.
+- On a timestamp column, Beacon writes its own `units` and `calendar`.
+- A gridded NetCDF output, with dimension columns, does not accept `combine_attrs`.
+
+## As an external table
+
+```sql
+CREATE EXTERNAL TABLE argo
+STORED AS NC
+LOCATION 'argo/**/*.nc'
+```
+
+See [Create External Tables](/docs/2.1.0-rc1/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.1.0-rc1/data-sources/) for the
+full read model.
+
+### `OPTIONS`
+
+`STORED AS NC` takes five keys. Four keys apply to a read. The key `combine_attrs` applies to a write only.
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `read_dimensions` | List of dimension names | The default grid of each file | The dimensions the table reads. Beacon returns a variable only if the list holds every dimension of that variable. |
+| `skip_unbroadcastable` | Boolean | `false` | Skip a file that does not fit `read_dimensions`. Beacon writes a warning and reads the next file. Without it the query fails. |
+| `use_rust_reader` | Boolean | `true` (`BEACON_NETCDF_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library needs anonymous access to a bucket. |
+| `enable_statistics` | Boolean | `true` (`BEACON_NETCDF_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_NETCDF_ENABLE_STATISTICS` to turn the column ranges off. |
+| `combine_attrs` | `identical`, `first` or `drop_conflicts` | Not set | Write only. Write an attribute column as a NetCDF attribute. See [attributes in a NetCDF output](#attributes-in-a-netcdf-output). |
+
+```sql
+-- One grid, and the netCDF-C reader for this table alone
+CREATE EXTERNAL TABLE argo
+STORED AS NC
+LOCATION 'argo/**/*.nc'
+OPTIONS ('read_dimensions' 'time,latitude,longitude', 'use_rust_reader' 'false')
+```
+
+See [`OPTIONS`](/docs/2.1.0-rc1/sql/create-external-table#options) for the rules that hold for every key. See
+[Arrays to tables](/docs/2.1.0-rc1/arrays-to-tables#the-dimensions-argument) for the grid rule.

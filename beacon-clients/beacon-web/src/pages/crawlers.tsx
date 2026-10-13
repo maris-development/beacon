@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/dialog";
 
 /** Format identifiers accepted by a crawler's `format_filter`. */
-const CRAWLER_DOCS = "https://maris-development.github.io/beacon/docs/1.7.3/data-lake/crawlers";
+const CRAWLER_DOCS = "https://maris-development.github.io/beacon/docs/latest/server/crawlers";
 
 const FORMATS = [
   { value: "parquet", label: "Parquet" },

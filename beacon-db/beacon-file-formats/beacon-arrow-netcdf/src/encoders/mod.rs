@@ -25,6 +25,15 @@ pub trait Encoder {
         }
         Ok(())
     }
+    /// Write one attribute on `variable`, or a global attribute when `variable` is `None`.
+    fn put_attribute(
+        &mut self,
+        _variable: Option<&str>,
+        _name: &str,
+        _value: netcdf::AttributeValue,
+    ) -> Result<(), EncoderError> {
+        Err(format!("{} does not support attributes", Self::encoder_name()).into())
+    }
     /// Return a static encoder identifier.
     fn encoder_name() -> &'static str;
 }
