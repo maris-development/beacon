@@ -10,8 +10,8 @@ use std::sync::Arc;
 use beacon_arrow_csv::datafusion::DEFAULT_CSV_EXTENSION;
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
 use beacon_arrow_ipc::datafusion::{ArrowFormatFactory, DEFAULT_ARROW_EXTENSION};
-use beacon_arrow_netcdf::datafusion::NETCDF_EXTENSION;
 use beacon_arrow_netcdf::attributes::CombineAttrs;
+use beacon_arrow_netcdf::datafusion::NETCDF_EXTENSION;
 use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
@@ -147,9 +147,7 @@ impl OutputFormat {
 
     /// Returns the DataFusion file type for this output format.
     ///
-    /// `datasets_root` (the datasets store's local root) and `output_dir` (where
-    /// the NetCDF writer emits its file) are used by the NetCDF writers; both are
-    /// ignored by the other formats.
+    /// `combine_attrs` applies to the flat `NetCDF` format only. The other formats ignore it.
     pub fn file_type(
         &self,
         session: &SessionContext,

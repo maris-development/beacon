@@ -152,10 +152,18 @@ async fn netcdf_identical_writes_a_unique_column_as_an_attribute() {
     let rt = runtime("output-netcdf-combine-identical").await;
     let sql = r#"SELECT temp, 'degC' AS "temp.units", 'Argo' AS ".title"
                  FROM (VALUES (1.0), (2.0)) AS t(temp)"#;
-    let file = netcdf_output(&rt, sql, json!({ "format": "netcdf", "combine_attrs": "identical" })).await;
+    let file = netcdf_output(
+        &rt,
+        sql,
+        json!({ "format": "netcdf", "combine_attrs": "identical" }),
+    )
+    .await;
 
     let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
-    assert_eq!(str_attribute(&nc, Some("temp"), "units").as_deref(), Some("degC"));
+    assert_eq!(
+        str_attribute(&nc, Some("temp"), "units").as_deref(),
+        Some("degC")
+    );
     assert_eq!(str_attribute(&nc, None, "title").as_deref(), Some("Argo"));
     assert!(nc.variable("temp.units").is_none());
 }
@@ -164,18 +172,33 @@ async fn netcdf_identical_writes_a_unique_column_as_an_attribute() {
 #[tokio::test(flavor = "multi_thread")]
 async fn netcdf_identical_keeps_a_conflict_as_a_variable() {
     let rt = runtime("output-netcdf-combine-conflict").await;
-    let file = netcdf_output(&rt, CONFLICT_SQL, json!({ "format": "netcdf", "combine_attrs": "identical" })).await;
+    let file = netcdf_output(
+        &rt,
+        CONFLICT_SQL,
+        json!({ "format": "netcdf", "combine_attrs": "identical" }),
+    )
+    .await;
 
     let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
     assert_eq!(str_attribute(&nc, Some("temp"), "units"), None);
-    assert_eq!(nc.variable("temp.units").expect("the conflict is a variable").len(), 2);
+    assert_eq!(
+        nc.variable("temp.units")
+            .expect("the conflict is a variable")
+            .len(),
+        2
+    );
 }
 
 /// `drop_conflicts` drops a column with two values.
 #[tokio::test(flavor = "multi_thread")]
 async fn netcdf_drop_conflicts_drops_a_conflict() {
     let rt = runtime("output-netcdf-combine-drop").await;
-    let file = netcdf_output(&rt, CONFLICT_SQL, json!({ "format": "netcdf", "combine_attrs": "drop_conflicts" })).await;
+    let file = netcdf_output(
+        &rt,
+        CONFLICT_SQL,
+        json!({ "format": "netcdf", "combine_attrs": "drop_conflicts" }),
+    )
+    .await;
 
     let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
     assert_eq!(str_attribute(&nc, Some("temp"), "units"), None);
@@ -186,7 +209,12 @@ async fn netcdf_drop_conflicts_drops_a_conflict() {
 #[tokio::test(flavor = "multi_thread")]
 async fn netcdf_first_keeps_one_value() {
     let rt = runtime("output-netcdf-combine-first").await;
-    let file = netcdf_output(&rt, CONFLICT_SQL, json!({ "format": "netcdf", "combine_attrs": "first" })).await;
+    let file = netcdf_output(
+        &rt,
+        CONFLICT_SQL,
+        json!({ "format": "netcdf", "combine_attrs": "first" }),
+    )
+    .await;
 
     let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
     let units = str_attribute(&nc, Some("temp"), "units").expect("an attribute");
@@ -203,6 +231,26 @@ async fn netcdf_without_combine_attrs_keeps_the_column() {
 
     let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
     assert!(nc.variable("temp.units").is_some());
+}
+
+/// The documented SQL form: `COPY ... STORED AS NC OPTIONS ('combine_attrs' ...)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_nc_with_combine_attrs_writes_an_attribute() {
+    let rt = runtime("copy-nc-combine").await;
+
+    rt.sql(
+        "COPY (SELECT temp, 'degC' AS \"temp.units\" FROM (VALUES (1.0), (2.0)) AS t(temp)) \
+         TO 'tmp:///combine.nc' STORED AS NC OPTIONS ('combine_attrs' 'identical')",
+    )
+    .await;
+
+    let path = rt.tmp_dir().join("combine.nc");
+    let nc = beacon_arrow_netcdf::netcdf::open(&path).expect("a readable NetCDF file");
+    assert_eq!(
+        str_attribute(&nc, Some("temp"), "units").as_deref(),
+        Some("degC")
+    );
+    assert!(nc.variable("temp.units").is_none());
 }
 
 /// `combine_attrs` with a format other than `netcdf` is an error.
