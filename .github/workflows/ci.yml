@@ -37,6 +37,12 @@ jobs:
       - name: Check layer boundary (beacon-db must not depend on beacon-server)
         run: ./scripts/check-layer-boundary.sh
 
+      # A restored cache from an older lockfile adds stale artifacts to the full build, which fills the default disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Install system dependencies (Dockerfile parity)
         run: |
           sudo apt-get update
