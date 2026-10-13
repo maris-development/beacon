@@ -40,6 +40,8 @@ pub mod reader;
 pub mod writer;
 /// Folds `variable.attribute` columns into NetCDF attributes on write.
 pub mod attributes;
+/// CF time units for the flat NetCDF writer.
+pub mod time_units;
 /// Re-export of the `netcdf` crate used by this crate.
 pub use netcdf;
 /// Re-export of low-level `netcdf-sys` bindings.

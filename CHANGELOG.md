@@ -32,6 +32,9 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   writes each variable with deflate. `chunk_rows` sets the rows in one chunk of `obs`, with a
   default of 65536. In SQL, use the keys `compression.level`, `compression.shuffle` and
   `chunk_rows`. ([#576](https://github.com/maris-development/beacon/issues/576))
+- **NetCDF time units.** `time_units`, for example `"days since 1950-01-01"`, on a `netcdf` output
+  writes each timestamp in these units. A value that is not a whole number in the unit makes the
+  variable `float64`. ([#578](https://github.com/maris-development/beacon/issues/578))
 
 ### Changed
 
@@ -39,6 +42,9 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   `_FillValue = NaN`, as xarray does. Before, the fill value was the maximum of the type. With
   `combine_attrs`, a source `_FillValue` with one value and the type of the variable stays the fill
   value. ([#577](https://github.com/maris-development/beacon/issues/577))
+- **NetCDF time calendar.** A NetCDF output writes `calendar = "standard"` on a timestamp, as CF
+  recommends. Before, it wrote the deprecated name `gregorian`.
+  ([#578](https://github.com/maris-development/beacon/issues/578))
 
 ## [2.0.2] — 2026-10-13
 

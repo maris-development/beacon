@@ -383,7 +383,7 @@ fn create_variable<'a>(
                 .put_attribute("units", format!("{} since 1970-01-01T00:00:00Z", unit))
                 .map_err(|e| df_err(variable.name(), "write timestamp units attribute", e))?;
             nc_variable
-                .put_attribute("calendar", "gregorian")
+                .put_attribute("calendar", "standard")
                 .map_err(|e| df_err(variable.name(), "write timestamp calendar attribute", e))?;
             nc_variable
                 .put_attribute("standard_name", "time")

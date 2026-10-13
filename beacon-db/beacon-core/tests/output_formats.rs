@@ -342,6 +342,50 @@ async fn netcdf_null_float_is_nan_and_reads_back_as_null() {
     assert_eq!(nulls, 1);
 }
 
+/// `time_units` writes the time in the given units, and Beacon reads the same time back.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_nc_with_time_units_round_trips() {
+    let rt = runtime("copy-nc-time-units").await;
+    rt.sql(
+        "COPY (SELECT CAST('2020-01-02T12:00:00' AS TIMESTAMP) AS time) \
+         TO 'tmp:///time.nc' STORED AS NC OPTIONS ('time_units' 'days since 1950-01-01')",
+    )
+    .await;
+
+    let path = rt.tmp_dir().join("time.nc");
+    {
+        let nc = beacon_arrow_netcdf::netcdf::open(&path).expect("a readable NetCDF file");
+        assert_eq!(
+            str_attribute(&nc, Some("time"), "units").as_deref(),
+            Some("days since 1950-01-01")
+        );
+        let values: Vec<f64> = nc.variable("time").unwrap().get_values(..).unwrap();
+        assert_eq!(values, vec![25568.5]);
+    }
+
+    std::fs::copy(&path, rt.datasets_dir().join("time.nc")).unwrap();
+    let batches = rt
+        .sql("SELECT CAST(time AS VARCHAR) AS time FROM read_netcdf('time.nc')")
+        .await;
+    let time = arrow::array::AsArray::as_string::<i32>(batches[0].column(0)).value(0);
+    assert_eq!(time, "2020-01-02T12:00:00");
+}
+
+/// An invalid `time_units` is an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_nc_with_bad_time_units_fails() {
+    let rt = runtime("copy-nc-bad-time-units").await;
+    let error = rt
+        .try_sql(
+            "COPY (SELECT 1 AS a) TO 'tmp:///bad.nc' STORED AS NC \
+             OPTIONS ('time_units' 'days after 1950-01-01')",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("time_units"), "{error}");
+}
+
 fn format_of(value: serde_json::Value) -> Result<OutputFormat, serde_json::Error> {
     serde_json::from_value(value)
 }
