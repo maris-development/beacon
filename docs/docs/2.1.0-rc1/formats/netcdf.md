@@ -99,6 +99,8 @@ format name is `NC`. `NETCDF` does not work.
 | `compression.level` | `compression.level` | Not set | Deflate level from 0 to 9. See [compression and chunks](#compression-and-chunks). |
 | `compression.shuffle` | `compression.shuffle` | `true` | Apply the shuffle filter before deflate. |
 | `chunk_rows` | `chunk_rows` | `65536` | Number of rows in one chunk of the `obs` dimension. |
+| `global_attributes` | `global_attributes` | Not set | Global attributes, as an object of name to string or number. In SQL, give a JSON object. See [file and variable attributes](#file-and-variable-attributes). |
+| `variable_attributes` | `variable_attributes` | Not set | Attributes of each column, as an object of column to attributes. In SQL, give a JSON object. |
 
 A gridded NetCDF output, with dimension columns, does not accept these options.
 
@@ -132,6 +134,42 @@ OPTIONS ('compression.level' '4', 'compression.shuffle' 'true', 'chunk_rows' '65
 Beacon writes a timestamp column as `int64` in its Arrow unit since 1970, for example
 `units = "seconds since 1970-01-01T00:00:00Z"` or `units = "nanoseconds since 1970-01-01T00:00:00Z"`.
 The variable also gets `standard_name = "time"` and `calendar = "standard"`.
+
+### File and variable attributes
+
+Each NetCDF output has the global attribute `history`, with the time of the write and the Beacon
+version.
+
+Beacon does not write `Conventions`. A query output does not always follow CF: for example, a
+column can have no `units`, or a name with a dot. When your output follows CF, set the attribute
+yourself: `"global_attributes": { "Conventions": "CF-1.10" }`.
+
+Set more attributes with `global_attributes` and `variable_attributes`:
+
+```json
+{ "output": { "format": { "netcdf": {
+  "global_attributes": { "title": "Argo extract", "institution": "MARIS" },
+  "variable_attributes": { "temp": { "units": "degC", "long_name": "Sea temperature" } }
+} } } }
+```
+
+```sql
+COPY (SELECT temp FROM argo)
+TO 'result.nc'
+STORED AS NC
+OPTIONS (
+  'global_attributes' '{"title": "Argo extract"}',
+  'variable_attributes' '{"temp": {"units": "degC"}}'
+)
+```
+
+- A value is a string or a number. An integer is `int` in the file, or `int64` when it is too
+  large. A number with a fraction is `double`.
+- A value from an option wins over a value from `combine_attrs`, and over `history`.
+- `variable_attributes` must name a column of the output. Else Beacon gives an error.
+- An attribute name must not be empty or start with `_`.
+- On a timestamp column, `units` and `calendar` are not allowed. Beacon writes them. See
+  [time encoding](#time-encoding).
 
 ### Fill values
 

@@ -120,6 +120,10 @@ export interface NetcdfOutputOptions {
   compression?: NetcdfCompression;
   /** Number of rows in one chunk of the `obs` dimension. The default is 65536. */
   chunk_rows?: number;
+  /** Global attributes of the file. A value here wins over `combine_attrs`. */
+  global_attributes?: Record<string, string | number>;
+  /** Attributes of each column, by column name. A value here wins over `combine_attrs`. */
+  variable_attributes?: Record<string, Record<string, string | number>>;
 }
 
 export interface Output {

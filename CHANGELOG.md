@@ -32,6 +32,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   writes each variable with deflate. `chunk_rows` sets the rows in one chunk of `obs`, with a
   default of 65536. In SQL, use the keys `compression.level`, `compression.shuffle` and
   `chunk_rows`. ([#576](https://github.com/maris-development/beacon/issues/576))
+- **NetCDF attribute options.** A flat NetCDF output writes a `history` line. It does not write
+  `Conventions`, because a query output does not always follow CF. `global_attributes` and
+  `variable_attributes` on a `netcdf` output set more attributes, `Conventions` too. In SQL, give each one as a JSON object. A value from an option wins over a value from
+  `combine_attrs`. ([#579](https://github.com/maris-development/beacon/issues/579))
 
 ### Changed
 

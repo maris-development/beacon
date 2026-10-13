@@ -43,7 +43,7 @@ impl std::str::FromStr for CombineAttrs {
 }
 
 /// The NetCDF attribute that one attribute column describes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AttributeTarget {
     /// Attribute `name` on the variable `variable`.
     Variable { variable: String, name: String },
@@ -71,7 +71,7 @@ impl AttributeTarget {
 /// Attributes that use the packed type of a packed variable (CF §8.1).
 const PACKED_TYPE: [&str; 4] = ["valid_min", "valid_max", "valid_range", "missing_value"];
 /// Attributes the encoder writes itself on a timestamp variable.
-const TIME_OWNED: [&str; 2] = ["units", "calendar"];
+pub(crate) const TIME_OWNED: [&str; 2] = ["units", "calendar"];
 /// The fill value attribute. The encoder sets it when it defines the variable.
 pub const FILL_VALUE: &str = "_FillValue";
 

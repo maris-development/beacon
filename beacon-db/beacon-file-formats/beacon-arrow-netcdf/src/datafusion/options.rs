@@ -1,4 +1,7 @@
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, HashMap},
+    num::NonZeroUsize,
+};
 
 use beacon_datafusion_ext::format_options::{format_option, parse_bool_option};
 use datafusion::common::exec_datafusion_err;
@@ -63,6 +66,39 @@ pub struct NetcdfWriterOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<u64>, minimum = 1)]
     pub chunk_rows: Option<NonZeroUsize>,
+    /// Global attributes of the file. A value here wins over a `combine_attrs` value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub global_attributes: BTreeMap<String, AttributeOption>,
+    /// Attributes of each variable, by column name. A value here wins over a `combine_attrs`
+    /// value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variable_attributes: BTreeMap<String, BTreeMap<String, AttributeOption>>,
+}
+
+/// The value of an attribute option: a string or a number.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(untagged)]
+pub enum AttributeOption {
+    /// An integer. It is `int` in the file when it fits, else `int64`.
+    Integer(i64),
+    /// A floating-point number. It is `double` in the file.
+    Float(f64),
+    /// A string.
+    Text(String),
+}
+
+impl AttributeOption {
+    /// The NetCDF attribute value.
+    pub fn to_netcdf(&self) -> netcdf::AttributeValue {
+        match self {
+            Self::Integer(value) => i32::try_from(*value).map_or(
+                netcdf::AttributeValue::Longlong(*value),
+                netcdf::AttributeValue::Int,
+            ),
+            Self::Float(value) => netcdf::AttributeValue::Double(*value),
+            Self::Text(value) => netcdf::AttributeValue::Str(value.clone()),
+        }
+    }
 }
 
 /// Deflate compression of the flat NetCDF output.
@@ -159,6 +195,22 @@ impl NetcdfWriterOptions {
                 exec_datafusion_err!("invalid chunk_rows '{value}': expected a number above 0")
             })?);
         }
+        if let Some(value) = format_option(format_options, "global_attributes") {
+            self.global_attributes = serde_json::from_str(value).map_err(|e| {
+                exec_datafusion_err!(
+                    "invalid global_attributes: expected a JSON object of name to string \
+                     or number: {e}"
+                )
+            })?;
+        }
+        if let Some(value) = format_option(format_options, "variable_attributes") {
+            self.variable_attributes = serde_json::from_str(value).map_err(|e| {
+                exec_datafusion_err!(
+                    "invalid variable_attributes: expected a JSON object of column to \
+                     attributes: {e}"
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -173,6 +225,12 @@ impl NetcdfWriterOptions {
         }
         if self.chunk_rows.is_some() {
             keys.push("chunk_rows");
+        }
+        if !self.global_attributes.is_empty() {
+            keys.push("global_attributes");
+        }
+        if !self.variable_attributes.is_empty() {
+            keys.push("variable_attributes");
         }
         keys
     }
@@ -249,5 +307,31 @@ mod tests {
                 .to_string();
         assert!(error.contains("expected 0 to 9"), "{error}");
         assert!(serde_json::from_str::<NetcdfWriterOptions>(r#"{"chunk_rows": 0}"#).is_err());
+    }
+
+    #[test]
+    fn attributes_read_strings_and_numbers() {
+        let options = apply(&[
+            ("global_attributes", r#"{"title": "Argo", "version": 2}"#),
+            (
+                "variable_attributes",
+                r#"{"temp": {"units": "degC", "scale": 0.5}}"#,
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            options.global_attributes["title"],
+            AttributeOption::Text("Argo".to_string())
+        );
+        assert_eq!(
+            options.global_attributes["version"].to_netcdf(),
+            netcdf::AttributeValue::Int(2)
+        );
+        assert_eq!(
+            options.variable_attributes["temp"]["scale"],
+            AttributeOption::Float(0.5)
+        );
+        assert!(apply(&[("global_attributes", "title=Argo")]).is_err());
+        assert!(apply(&[("variable_attributes", r#"{"temp": "degC"}"#)]).is_err());
     }
 }

@@ -342,6 +342,52 @@ async fn netcdf_null_float_is_nan_and_reads_back_as_null() {
     assert_eq!(nulls, 1);
 }
 
+/// `global_attributes` and `variable_attributes` write attributes. An option wins over a
+/// `combine_attrs` column.
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_attribute_options_write_attributes() {
+    let rt = runtime("output-netcdf-attribute-options").await;
+    let sql = r#"SELECT temp, 'degC' AS "temp.units" FROM (VALUES (1.0), (2.0)) AS t(temp)"#;
+    let file = netcdf_output(
+        &rt,
+        sql,
+        json!({ "format": { "netcdf": {
+            "combine_attrs": "identical",
+            "global_attributes": { "title": "Argo extract" },
+            "variable_attributes": { "temp": { "units": "K" } }
+        } } }),
+    )
+    .await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    assert_eq!(
+        str_attribute(&nc, None, "title").as_deref(),
+        Some("Argo extract")
+    );
+    assert_eq!(
+        str_attribute(&nc, Some("temp"), "units").as_deref(),
+        Some("K")
+    );
+    assert!(str_attribute(&nc, None, "Conventions").is_none());
+    assert!(str_attribute(&nc, None, "history").is_some());
+}
+
+/// The SQL form takes the attributes as a JSON object.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_nc_with_global_attributes() {
+    let rt = runtime("copy-nc-global-attributes").await;
+    rt.sql(
+        r#"COPY (SELECT 1.0 AS temp) TO 'tmp:///attrs.nc' STORED AS NC
+           OPTIONS ('global_attributes' '{"title": "Argo", "id": 7}')"#,
+    )
+    .await;
+
+    let nc = beacon_arrow_netcdf::netcdf::open(rt.tmp_dir().join("attrs.nc"))
+        .expect("a readable NetCDF file");
+    assert_eq!(str_attribute(&nc, None, "title").as_deref(), Some("Argo"));
+    assert!(nc.attribute("id").is_some());
+}
+
 fn format_of(value: serde_json::Value) -> Result<OutputFormat, serde_json::Error> {
     serde_json::from_value(value)
 }
