@@ -64,9 +64,9 @@ memmap2 = "=0.9.11"
 # No crates.io deltalake release is on DataFusion 54. Pin the last DataFusion 54 commit of delta-rs main.
 deltalake = { git = "https://github.com/delta-io/delta-rs.git", rev = "37ee982736b645b4d3f79a5d59e680add229a58c", features = ["datafusion"] }
 
-# No crates.io iceberg release is on DataFusion 54. Pin the last DataFusion 54 commit of iceberg-rust main.
-iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2" }
-iceberg-datafusion = { git = "https://github.com/apache/iceberg-rust.git", rev = "c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2" }
+# No crates.io iceberg release is on DataFusion 54. Use the 0.11.0 release candidate until 0.11.0 is published.
+iceberg = { git = "https://github.com/apache/iceberg-rust.git", tag = "v0.11.0-rc.2" }
+iceberg-datafusion = { git = "https://github.com/apache/iceberg-rust.git", tag = "v0.11.0-rc.2" }
 datafusion = "^54.1"
 
 datafusion-datasource = "^54.1"

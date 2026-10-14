@@ -6448,8 +6448,8 @@ dependencies = [
 
 [[package]]
 name = "iceberg"
-version = "0.10.1"
-source = "git+https://github.com/apache/iceberg-rust.git?rev=c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2#c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2"
+version = "0.11.0"
+source = "git+https://github.com/apache/iceberg-rust.git?tag=v0.11.0-rc.2#859048563bc71a3167d0545cb66756d26c64e4ca"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -6507,8 +6507,8 @@ dependencies = [
 
 [[package]]
 name = "iceberg-datafusion"
-version = "0.10.1"
-source = "git+https://github.com/apache/iceberg-rust.git?rev=c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2#c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2"
+version = "0.11.0"
+source = "git+https://github.com/apache/iceberg-rust.git?tag=v0.11.0-rc.2#859048563bc71a3167d0545cb66756d26c64e4ca"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6523,8 +6523,8 @@ dependencies = [
 
 [[package]]
 name = "iceberg-property-macro"
-version = "0.10.1"
-source = "git+https://github.com/apache/iceberg-rust.git?rev=c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2#c8fc70e5dcf4591a4c0d834223b4c7078ddb28c2"
+version = "0.11.0"
+source = "git+https://github.com/apache/iceberg-rust.git?tag=v0.11.0-rc.2#859048563bc71a3167d0545cb66756d26c64e4ca"
 dependencies = [
  "proc-macro2",
  "quote",
