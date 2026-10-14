@@ -11,7 +11,7 @@ use netcdf::FileMut;
 
 use crate::{NcChar, NcString};
 
-use super::{Encoder, EncoderError};
+use super::{Encoder, EncoderError, EncoderOptions};
 
 /// Default encoder mapping common Arrow scalar arrays into NetCDF variables.
 pub struct DefaultEncoder {
@@ -136,6 +136,30 @@ impl DefaultEncoder {
             ),
         }
 
+        Ok(())
+    }
+
+    /// Set the chunk shape and the compression of the variable of `field`.
+    fn set_storage(
+        file: &mut FileMut,
+        field: &Field,
+        options: &EncoderOptions,
+    ) -> anyhow::Result<()> {
+        let mut variable = file
+            .variable_mut(field.name())
+            .ok_or_else(|| anyhow::anyhow!("NetCDF variable not found: {}", field.name()))?;
+        if let Some(rows) = options.chunk_rows {
+            let mut chunk = vec![rows];
+            if let DataType::FixedSizeBinary(size) = field.data_type() {
+                chunk.push(*size as usize);
+            }
+            variable.set_chunking(&chunk)?;
+        }
+        // netCDF-C 4.9 rejects a filter on a variable-length type, such as a string.
+        let variable_length = field.data_type() == &DataType::Utf8;
+        if let Some(compression) = options.compression.filter(|_| !variable_length) {
+            variable.set_compression(compression.level.get().into(), compression.shuffle)?;
+        }
         Ok(())
     }
 
@@ -273,7 +297,11 @@ impl DefaultEncoder {
 }
 
 impl Encoder for DefaultEncoder {
-    fn create(mut nc_file: FileMut, schema: SchemaRef) -> Result<Self, EncoderError>
+    fn create(
+        mut nc_file: FileMut,
+        schema: SchemaRef,
+        options: &EncoderOptions,
+    ) -> Result<Self, EncoderError>
     where
         Self: Sized,
     {
@@ -282,6 +310,7 @@ impl Encoder for DefaultEncoder {
 
         for field in schema.fields() {
             Self::define_variable(&mut nc_file, field)?;
+            Self::set_storage(&mut nc_file, field, options)?;
         }
 
         let offsets = schema

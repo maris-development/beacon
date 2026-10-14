@@ -23,7 +23,8 @@
 use std::{any::Any, fmt::Formatter, path::PathBuf, sync::Arc};
 
 use crate::{
-    attributes::CombineAttrs, encoders::default::DefaultEncoder, writer::ArrowRecordBatchWriter,
+    datafusion::options::NetcdfWriterOptions, encoders::default::DefaultEncoder,
+    writer::ArrowRecordBatchWriter,
 };
 use arrow::{
     array::{Array, ArrowPrimitiveType, PrimitiveArray, RecordBatch},
@@ -58,8 +59,8 @@ pub struct NetCDFSink {
     sink_config: FileSinkConfig,
     /// Directory the NetCDF file is written to — the configured tmp store root.
     output_dir: PathBuf,
-    /// How the writer folds attribute columns. `None` writes them as variables.
-    combine_attrs: Option<CombineAttrs>,
+    /// Options of the flat output.
+    options: NetcdfWriterOptions,
 }
 
 impl NetCDFSink {
@@ -68,12 +69,12 @@ impl NetCDFSink {
     pub fn new(
         sink_config: FileSinkConfig,
         output_dir: PathBuf,
-        combine_attrs: Option<CombineAttrs>,
+        options: NetcdfWriterOptions,
     ) -> Self {
         Self {
             sink_config,
             output_dir,
-            combine_attrs,
+            options,
         }
     }
 }
@@ -109,10 +110,10 @@ impl DataSink for NetCDFSink {
         tracing::info!("Writing NetCDF to path: {:?}", full_path);
 
         let mut rows_written: u64 = 0;
-        let mut nc_writer = ArrowRecordBatchWriter::<DefaultEncoder>::with_combine_attrs(
+        let mut nc_writer = ArrowRecordBatchWriter::<DefaultEncoder>::with_options(
             full_path,
             arrow_schema,
-            self.combine_attrs,
+            self.options.clone(),
         )
         .map_err(|e| {
             DataFusionError::Execution(format!(
@@ -1482,7 +1483,7 @@ mod tests {
     fn test_display_as_flat() {
         let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Int32, false)]));
         let sink_config = test_sink_config(schema);
-        let sink = NetCDFSink::new(sink_config, std::env::temp_dir(), None);
+        let sink = NetCDFSink::new(sink_config, std::env::temp_dir(), Default::default());
         let display = format!("{}", DisplayAsWrapper(&sink));
         assert!(display.contains("NetCDFSink"));
     }

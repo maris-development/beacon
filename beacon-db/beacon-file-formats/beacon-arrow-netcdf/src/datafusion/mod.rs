@@ -192,13 +192,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
         if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
             options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
         }
-        if let Some(value) = format_option(format_options, "combine_attrs") {
-            options.combine_attrs = Some(
-                value
-                    .parse()
-                    .map_err(|e: String| exec_datafusion_err!("{e}"))?,
-            );
-        }
+        options.writer.apply_format_options(format_options)?;
         // Parsed here only so a bad value is an error at `CREATE EXTERNAL
         // TABLE` rather than at the first analysis pass. The value itself is
         // read by `create_for_analysis`; a format built for a query computes no
@@ -601,9 +595,11 @@ impl FileFormat for NetcdfFormat {
         let output_dir = self.output_dir.clone();
         match &self.options.write_dimensions {
             Some(dim_columns) if !dim_columns.is_empty() => {
-                if self.options.combine_attrs.is_some() {
+                let flat_keys = self.options.writer.set_keys();
+                if !flat_keys.is_empty() {
                     return Err(exec_datafusion_err!(
-                        "combine_attrs applies only to the flat NetCDF output"
+                        "{} applies only to the flat NetCDF output",
+                        flat_keys.join(", ")
                     ));
                 }
                 let unique_columns = dim_columns.clone();
@@ -644,7 +640,7 @@ impl FileFormat for NetcdfFormat {
                 let netcdf_sink = Arc::new(NetCDFSink::new(
                     conf,
                     output_dir,
-                    self.options.combine_attrs,
+                    self.options.writer.clone(),
                 ));
                 Ok(Arc::new(DataSinkExec::new(
                     input,
@@ -1172,6 +1168,7 @@ mod reader_backend_tests {
             .downcast_ref::<NetcdfFormat>()
             .expect("the factory builds a NetcdfFormat")
             .options
+            .writer
             .combine_attrs)
     }
 
@@ -1217,7 +1214,10 @@ mod reader_backend_tests {
             std::env::temp_dir(),
             NetcdfOptions {
                 write_dimensions: Some(vec!["lat".to_string()]),
-                combine_attrs: Some(crate::attributes::CombineAttrs::Identical),
+                writer: crate::datafusion::options::NetcdfWriterOptions {
+                    combine_attrs: Some(crate::attributes::CombineAttrs::Identical),
+                    ..Default::default()
+                },
                 ..NetcdfOptions::default()
             },
             NetcdfConfig::default(),

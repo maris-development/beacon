@@ -16,8 +16,9 @@ use arrow::{
 };
 use tempfile::SpooledTempFile;
 
-use crate::attributes::{AttributeCombiner, AttributePlan, AttributeTarget, CombineAttrs};
-use crate::encoders::Encoder;
+use crate::attributes::{AttributeCombiner, AttributePlan, AttributeTarget};
+use crate::datafusion::options::NetcdfWriterOptions;
+use crate::encoders::{Encoder, EncoderOptions};
 
 /// Generic writer backed by an [`Encoder`] implementation.
 pub struct Writer<E: Encoder> {
@@ -27,9 +28,18 @@ pub struct Writer<E: Encoder> {
 impl<E: Encoder> Writer<E> {
     /// Create a writer for `path` using the provided Arrow `schema`.
     pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
+        Self::with_options(path, schema, &EncoderOptions::default())
+    }
+
+    /// Create a writer for `path` that defines the variables with `options`.
+    pub fn with_options<P: AsRef<Path>>(
+        path: P,
+        schema: SchemaRef,
+        options: &EncoderOptions,
+    ) -> anyhow::Result<Self> {
         let nc_file = netcdf::create(path).map_err(|e| anyhow::anyhow!(e))?;
 
-        let encoder = E::create(nc_file, schema).map_err(|e| anyhow::anyhow!(e))?;
+        let encoder = E::create(nc_file, schema, options).map_err(|e| anyhow::anyhow!(e))?;
 
         Ok(Self { encoder })
     }
@@ -73,6 +83,9 @@ pub struct ArrowRecordBatchWriter<E: Encoder> {
     fixed_string_sizes: HashMap<String, usize>,
     /// Records attribute column values when `combine_attrs` is set.
     combiner: Option<AttributeCombiner>,
+    options: NetcdfWriterOptions,
+    /// Rows written so far.
+    rows: usize,
     encoder: PhantomData<E>,
 }
 
@@ -98,14 +111,14 @@ fn encodable_type(data_type: &DataType) -> Option<DataType> {
 impl<E: Encoder> ArrowRecordBatchWriter<E> {
     /// Create a buffered writer targeting `path`.
     pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
-        Self::with_combine_attrs(path, schema, None)
+        Self::with_options(path, schema, NetcdfWriterOptions::default())
     }
 
-    /// Create a buffered writer that folds attribute columns by `policy`.
-    pub fn with_combine_attrs<P: AsRef<Path>>(
+    /// Create a buffered writer with the flat output `options`.
+    pub fn with_options<P: AsRef<Path>>(
         path: P,
         schema: SchemaRef,
-        policy: Option<CombineAttrs>,
+        options: NetcdfWriterOptions,
     ) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
@@ -120,7 +133,9 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             schema.metadata().clone(),
         ));
         // The combiner sees the cast schema, so a dictionary column compares as Utf8.
-        let combiner = policy.map(|policy| AttributeCombiner::new(&schema, policy));
+        let combiner = options
+            .combine_attrs
+            .map(|policy| AttributeCombiner::new(&schema, policy));
         // 256 MB spooled temp file
         let file = SpooledTempFile::new(256 * 1024 * 1024);
         let writer = FileWriter::try_new(file, &schema).map_err(|e| anyhow::anyhow!(e))?;
@@ -132,6 +147,8 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             schema,
             fixed_string_sizes,
             combiner,
+            options,
+            rows: 0,
             encoder: PhantomData,
         })
     }
@@ -164,8 +181,18 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         self.writer
             .write(&record_batch)
             .map_err(|e| anyhow::anyhow!(e))?;
+        self.rows += record_batch.num_rows();
 
         Ok(())
+    }
+
+    /// The settings the encoder applies when it defines the variables.
+    fn encoder_options(&self) -> EncoderOptions {
+        EncoderOptions {
+            compression: self.options.compression,
+            // A chunk larger than the data wastes space, because HDF5 stores full chunks.
+            chunk_rows: Some(self.options.chunk_rows().min(self.rows).max(1)),
+        }
     }
 
     /// Finalize buffered data and write the NetCDF file.
@@ -175,6 +202,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             Some(combiner) => combiner.resolve()?,
             None => AttributePlan::default(),
         };
+        let encoder_options = self.encoder_options();
         let inner_f = self.writer.get_mut();
         let reader = arrow::ipc::reader::FileReader::try_new(inner_f, None)
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -204,7 +232,8 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
 
         let updated_schema = Arc::new(arrow::datatypes::Schema::new(updated_schema_fields));
 
-        let mut nc_writer = Writer::<E>::new(&self.path, updated_schema.clone())?;
+        let mut nc_writer =
+            Writer::<E>::with_options(&self.path, updated_schema.clone(), &encoder_options)?;
         nc_writer.put_attributes(&plan.attributes)?;
 
         // A batch with no column has no row count, so the file keeps its attributes only.
@@ -297,13 +326,25 @@ mod tests {
         batches: Vec<RecordBatch>,
         policy: Option<CombineAttrs>,
     ) {
+        let options = NetcdfWriterOptions {
+            combine_attrs: policy,
+            ..Default::default()
+        };
+        write_with(path, schema, batches, options).expect("write the file");
+    }
+
+    fn write_with(
+        path: &Path,
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+        options: NetcdfWriterOptions,
+    ) -> anyhow::Result<()> {
         let mut writer =
-            ArrowRecordBatchWriter::<DefaultEncoder>::with_combine_attrs(path, schema, policy)
-                .expect("a netCDF writer");
+            ArrowRecordBatchWriter::<DefaultEncoder>::with_options(path, schema, options)?;
         for batch in batches {
-            writer.write_record_batch(batch).expect("write the batch");
+            writer.write_record_batch(batch)?;
         }
-        writer.finish().expect("finish the file");
+        writer.finish()
     }
 
     fn str_attribute(file: &netcdf::File, variable: Option<&str>, name: &str) -> Option<String> {
@@ -500,5 +541,131 @@ mod tests {
         assert!(file.variable("temp").is_some());
         assert!(file.variable("temp.units").is_none());
         assert_eq!(str_attribute(&file, Some("temp"), "units"), None);
+    }
+
+    fn series_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]))
+    }
+
+    /// Rows with repeated values, so that deflate has something to compress.
+    fn series_batch(schema: &SchemaRef, rows: usize) -> RecordBatch {
+        let values: Vec<Option<f64>> = (0..rows)
+            .map(|row| (row % 7 != 0).then_some((row % 100) as f64 / 4.0))
+            .collect();
+        let names: Vec<&str> = (0..rows)
+            .map(|row| if row % 2 == 0 { "argo" } else { "glider" })
+            .collect();
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(values)),
+                Arc::new(StringArray::from(names)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn compressed(level: u8) -> NetcdfWriterOptions {
+        NetcdfWriterOptions {
+            compression: Some(crate::datafusion::options::Compression {
+                level: level.try_into().unwrap(),
+                shuffle: true,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_compressed_file_is_smaller() {
+        let dir = tempfile::tempdir().unwrap();
+        // Beacon does not compress a string variable, so use numbers only.
+        let schema = series_schema();
+        let batch = series_batch(&schema, 100_000).project(&[0]).unwrap();
+        let schema = batch.schema();
+        let plain = dir.path().join("plain.nc");
+        let packed = dir.path().join("packed.nc");
+        let options = NetcdfWriterOptions::default();
+        write_with(&plain, schema.clone(), vec![batch.clone()], options).unwrap();
+        write_with(&packed, schema, vec![batch], compressed(4)).unwrap();
+
+        let size = |path: &Path| std::fs::metadata(path).unwrap().len();
+        assert!(
+            size(&packed) * 4 < size(&plain),
+            "compressed {} bytes, plain {} bytes",
+            size(&packed),
+            size(&plain)
+        );
+    }
+
+    #[test]
+    fn a_compressed_file_reads_back_the_same_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = series_schema();
+        let batches = || vec![series_batch(&schema, 50_000), series_batch(&schema, 50_000)];
+        let plain = dir.path().join("plain.nc");
+        let packed = dir.path().join("packed.nc");
+        write_with(
+            &plain,
+            schema.clone(),
+            batches(),
+            NetcdfWriterOptions::default(),
+        )
+        .unwrap();
+        write_with(&packed, schema.clone(), batches(), compressed(4)).unwrap();
+
+        let plain = netcdf::open(&plain).unwrap();
+        let packed = netcdf::open(&packed).unwrap();
+        let values = |file: &netcdf::File| -> Vec<f64> {
+            file.variable("value").unwrap().get_values(..).unwrap()
+        };
+        let names = |file: &netcdf::File| -> Vec<String> {
+            file.variable("name").unwrap().get_strings(..).unwrap()
+        };
+        assert_eq!(values(&packed).len(), 100_000);
+        assert_eq!(values(&packed), values(&plain));
+        assert_eq!(names(&packed), names(&plain));
+    }
+
+    #[test]
+    fn chunk_rows_sets_the_chunk_of_obs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunks.nc");
+        let schema = series_schema();
+        let options = NetcdfWriterOptions {
+            chunk_rows: std::num::NonZeroUsize::new(1000),
+            ..compressed(1)
+        };
+        write_with(
+            &path,
+            schema.clone(),
+            vec![series_batch(&schema, 5000)],
+            options,
+        )
+        .unwrap();
+
+        let file = netcdf::open(&path).unwrap();
+        let chunking = file.variable("value").unwrap().chunking().unwrap();
+        assert_eq!(chunking, Some(vec![1000]));
+    }
+
+    #[test]
+    fn the_default_chunk_is_not_larger_than_the_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.nc");
+        let schema = series_schema();
+        write_with(
+            &path,
+            schema.clone(),
+            vec![series_batch(&schema, 10)],
+            NetcdfWriterOptions::default(),
+        )
+        .unwrap();
+
+        let file = netcdf::open(&path).unwrap();
+        let chunking = file.variable("value").unwrap().chunking().unwrap();
+        assert_eq!(chunking, Some(vec![10]));
     }
 }
