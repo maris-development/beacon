@@ -45,6 +45,13 @@ Beacon 2.0.2 fixes one regression in the JSON query API. A 2.0.1 server upgrades
   [JSON Query DSL](docs/docs/2.0.2/api/querying/json.md#filters).
   ([#571](https://github.com/maris-development/beacon/pull/571))
 
+### Fixed
+
+- **A count on a MySQL table works.** `SELECT count(*) FROM t WHERE revenue > 40` reads no column
+  of `t`, so Beacon sent a `SELECT` with an empty select list. MySQL rejected it with a syntax
+  error. Beacon now sends `SELECT 1` for such a `SELECT`, for every SQL database engine.
+  ([#497](https://github.com/maris-development/beacon/issues/497))
+
 ## [2.0.1] — 2026-10-08
 
 Beacon 2.0.1 adds table and column comments, role settings, and per-role limits on the CPU time
