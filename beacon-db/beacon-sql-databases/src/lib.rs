@@ -23,6 +23,7 @@ mod definition;
 mod executor;
 mod options;
 mod secret;
+mod select_list;
 mod source;
 
 use std::any::Any;

@@ -85,6 +85,93 @@ files into one array store with statistics. Beacon can then drop whole datasets 
 arrays that you select. This is much faster than a scan of the original NetCDF files.
 :::
 
+## Write a NetCDF output
+
+### NetCDF output options
+
+The plain name `"format": "netcdf"` uses the default options. To set an option, give the `netcdf`
+format an object. In SQL, set the same keys in `COPY ... STORED AS NC OPTIONS (...)`. The SQL
+format name is `NC`. `NETCDF` does not work.
+
+| JSON key | SQL key | Default | Description |
+|---|---|---|---|
+| `combine_attrs` | `combine_attrs` | Not set | Write an attribute column as a NetCDF attribute. See [attributes in a NetCDF output](#attributes-in-a-netcdf-output). |
+| `compression.level` | `compression.level` | Not set | Deflate level from 0 to 9. See [compression and chunks](#compression-and-chunks). |
+| `compression.shuffle` | `compression.shuffle` | `true` | Apply the shuffle filter before deflate. |
+| `chunk_rows` | `chunk_rows` | `65536` | Number of rows in one chunk of the `obs` dimension. |
+
+A gridded NetCDF output, with dimension columns, does not accept these options.
+
+### Compression and chunks
+
+Without `compression`, Beacon writes the data with no compression. Set a deflate level to make the
+file smaller:
+
+```json
+{ "output": { "format": { "netcdf": {
+  "compression": { "level": 4, "shuffle": true },
+  "chunk_rows": 65536
+} } } }
+```
+
+```sql
+COPY (SELECT * FROM argo)
+TO 'result.nc'
+STORED AS NC
+OPTIONS ('compression.level' '4', 'compression.shuffle' 'true', 'chunk_rows' '65536')
+```
+
+- Level 1 is fast. Level 9 gives the smallest file and is slow. Level 4 is a good default.
+- Each variable on `obs` is in chunks of `chunk_rows` rows. A file with fewer rows gets one chunk.
+- Beacon does not compress a string variable. netCDF-C does not accept a filter on a
+  variable-length string.
+- xarray, netCDF4-python, Panoply and ncview read a deflate file. They need no plugin.
+
+### Attributes in a NetCDF output
+
+A NetCDF output writes each column as a variable on the `obs` dimension. An attribute column such
+as `temp.units` becomes a variable with one value for each row. To write such a column as a NetCDF
+attribute, give the `netcdf` format an object with `combine_attrs`:
+
+```json
+{ "output": { "format": { "netcdf": { "combine_attrs": "identical" } } } }
+```
+
+The plain name `"format": "netcdf"` uses the default options. It writes each column as a variable.
+
+In SQL, set the option in a `COPY` statement. The format name is `NC`. `NETCDF` does not work.
+
+```sql
+COPY (SELECT temp, 'degC' AS "temp.units" FROM t)
+TO 'result.nc'
+STORED AS NC
+OPTIONS ('combine_attrs' 'identical')
+```
+
+| `combine_attrs` | One unique value | More than one value |
+|---|---|---|
+| not set | variable | variable |
+| `identical` | attribute | variable |
+| `first` | attribute | attribute with the first non-null value |
+| `drop_conflicts` | attribute | Beacon drops the column |
+
+- A column `<variable>.<attribute>` becomes an attribute of `<variable>` only when `<variable>` is
+  also in the output.
+- A null is a value. A column with `degC` and null has two values.
+- A column with only null values, or with no rows, gives no attribute and no variable.
+- A column with a type that has no NetCDF attribute type, such as a timestamp, stays a variable.
+- A global attribute column `.title` that stays a variable gets the name `global.title`.
+- A `global.<attribute>` name that matches a column in the output is an error.
+- `first` takes the first non-null value that Beacon reads. This value can change from one run to the next.
+- The Beacon option `identical` keeps a conflict as a variable. The xarray option with the same name stops
+  with an error.
+- Beacon never copies an attribute with a name that starts with `_`. Beacon also never copies
+  `scale_factor` and `add_offset`.
+- Beacon drops `valid_min`, `valid_max`, `valid_range` and `missing_value` in two cases. The first
+  case is a variable with a `scale_factor` or `add_offset` column in the output. The second case is
+  an attribute with a type that is not the type of the variable.
+- On a timestamp column, Beacon writes its own `units` and `calendar`.
+
 ## As an external table
 
 ```sql
@@ -98,7 +185,8 @@ full read model.
 
 ### `OPTIONS`
 
-`STORED AS NC` reads four keys:
+`STORED AS NC` takes four keys for a read. The keys for a write are in
+[NetCDF output options](#netcdf-output-options).
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |

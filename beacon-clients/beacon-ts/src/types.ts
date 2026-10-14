@@ -84,6 +84,7 @@ export type OutputFormat =
   | SimpleOutputFormat
   | { ndnetcdf: { dimension_columns: string[] } }
   | { nd_netcdf: { dimension_columns: string[] } }
+  | { netcdf: NetcdfOutputOptions }
   | { geoparquet: GeoParquetOptions }
   | { odv: Record<string, unknown> };
 
@@ -100,6 +101,25 @@ export type SimpleOutputFormat =
 export interface GeoParquetOptions {
   longitude_column?: string | null;
   latitude_column?: string | null;
+}
+
+/** How a flat `netcdf` output combines `variable.attribute` columns. */
+export type CombineAttrs = "identical" | "first" | "drop_conflicts";
+
+/** Deflate compression of a flat `netcdf` output. */
+export interface NetcdfCompression {
+  /** Deflate level from 0 to 9. */
+  level: number;
+  /** Apply the shuffle filter before deflate. The default is `true`. */
+  shuffle?: boolean;
+}
+
+/** Options of the flat NetCDF output. The plain name `"netcdf"` uses the defaults. */
+export interface NetcdfOutputOptions {
+  combine_attrs?: CombineAttrs;
+  compression?: NetcdfCompression;
+  /** Number of rows in one chunk of the `obs` dimension. The default is 65536. */
+  chunk_rows?: number;
 }
 
 export interface Output {

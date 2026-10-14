@@ -11,7 +11,7 @@ use beacon_arrow_csv::datafusion::DEFAULT_CSV_EXTENSION;
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
 use beacon_arrow_ipc::datafusion::{ArrowFormatFactory, DEFAULT_ARROW_EXTENSION};
 use beacon_arrow_netcdf::datafusion::NETCDF_EXTENSION;
-use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
+use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
@@ -30,6 +30,7 @@ use utoipa::ToSchema;
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct Output {
     /// The desired output format.
+    #[schema(value_type = OutputFormatSchema)]
     pub format: OutputFormat,
 }
 
@@ -82,9 +83,12 @@ impl Output {
     }
 }
 
+pub use beacon_arrow_netcdf::datafusion::options::NetcdfWriterOptions as NetcdfOutputOptions;
+
 /// Supported output formats for query results.
+// `remote = "Self"` makes the derived serde code inherent, for the trait impls below.
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(remote = "Self", rename_all = "lowercase")]
 pub enum OutputFormat {
     /// CSV format.
     Csv,
@@ -96,9 +100,9 @@ pub enum OutputFormat {
     // Json,
     // Odv(OdvOptions),
     /// Flat (record-oriented) NetCDF format. A NetCDF-4 file *is* HDF5, so `hdf5`/`h5` are
-    /// accepted as aliases for this format.
+    /// accepted as aliases for this format. The plain name gives the default options.
     #[serde(alias = "hdf5", alias = "h5")]
-    NetCDF,
+    NetCDF(NetcdfOutputOptions),
     /// Multi-dimensional (nd-array) NetCDF format. The named columns become the
     /// output dimensions; must not be empty.
     #[serde(alias = "nd_netcdf")]
@@ -120,6 +124,96 @@ pub enum OutputFormat {
     Zarr,
 }
 
+/// Format names that select the flat NetCDF output.
+const NETCDF_NAMES: [&str; 3] = ["netcdf", "hdf5", "h5"];
+
+impl<'de> serde::Deserialize<'de> for OutputFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FormatVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for FormatVisitor {
+            type Value = OutputFormat;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an output format name, or an object with one output format key")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<OutputFormat, E> {
+                // The derived code reads a newtype variant only from an object.
+                if NETCDF_NAMES.contains(&name) {
+                    return Ok(OutputFormat::NetCDF(NetcdfOutputOptions::default()));
+                }
+                OutputFormat::deserialize(serde::de::value::StrDeserializer::new(name))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<OutputFormat, A::Error> {
+                OutputFormat::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            }
+        }
+
+        deserializer.deserialize_any(FormatVisitor)
+    }
+}
+
+/// The OpenAPI schema of [`OutputFormat`]: the derived variants, plus the plain NetCDF names.
+struct OutputFormatSchema;
+
+impl utoipa::PartialSchema for OutputFormatSchema {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+        use utoipa::openapi::{schema::Type, ObjectBuilder, RefOr, Schema};
+
+        let mut schema = <OutputFormat as utoipa::PartialSchema>::schema();
+        if let RefOr::T(Schema::OneOf(one_of)) = &mut schema {
+            let names = ObjectBuilder::new()
+                .schema_type(Type::String)
+                .enum_values(Some(NETCDF_NAMES))
+                .description(Some(
+                    "Flat NetCDF format with the default options. `hdf5` and `h5` are aliases.",
+                ))
+                .build();
+            // Put the plain names next to the object form of the same format.
+            let at = one_of
+                .items
+                .iter()
+                .position(|item| {
+                    matches!(item, RefOr::T(Schema::Object(object)) if object.properties.contains_key("netcdf"))
+                })
+                .unwrap_or(one_of.items.len());
+            one_of.items.insert(at, Schema::Object(names).into());
+        }
+        schema
+    }
+}
+
+impl utoipa::ToSchema for OutputFormatSchema {
+    fn name() -> std::borrow::Cow<'static, str> {
+        <OutputFormat as utoipa::ToSchema>::name()
+    }
+
+    fn schemas(
+        schemas: &mut Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) {
+        <OutputFormat as utoipa::ToSchema>::schemas(schemas);
+    }
+}
+
+impl serde::Serialize for OutputFormat {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OutputFormat::NetCDF(options) if *options == NetcdfOutputOptions::default() => {
+                serializer.serialize_str("netcdf")
+            }
+            _ => OutputFormat::serialize(self, serializer),
+        }
+    }
+}
+
 impl OutputFormat {
     /// The [`OutputFileKind`] the result file is tagged with (drives the download
     /// transport's MIME type / filename; both NetCDF variants share one kind).
@@ -129,7 +223,7 @@ impl OutputFormat {
             OutputFormat::Ipc => OutputFileKind::Ipc,
             OutputFormat::Parquet => OutputFileKind::Parquet,
             OutputFormat::GeoParquet { .. } => OutputFileKind::GeoParquet,
-            OutputFormat::NetCDF => OutputFileKind::NetCDF,
+            OutputFormat::NetCDF(_) => OutputFileKind::NetCDF,
             OutputFormat::NdNetCDF { .. } => OutputFileKind::NetCDF,
             OutputFormat::Odv(_) => OutputFileKind::Odv,
             OutputFormat::Zarr => OutputFileKind::Zarr,
@@ -137,10 +231,6 @@ impl OutputFormat {
     }
 
     /// Returns the DataFusion file type for this output format.
-    ///
-    /// `datasets_root` (the datasets store's local root) and `output_dir` (where
-    /// the NetCDF writer emits its file) are used by the NetCDF writers; both are
-    /// ignored by the other formats.
     pub fn file_type(&self, session: &SessionContext) -> anyhow::Result<Arc<dyn FileType>> {
         match self {
             OutputFormat::Csv => Ok(format_as_file_type(
@@ -184,22 +274,32 @@ impl OutputFormat {
                     latitude_column: latitude_column.clone(),
                 },
             )))),
-            OutputFormat::NetCDF => {
-                let options = NetcdfOptions::default();
-
-                // Writing NetCDF: the reader cache / statistics config is
-                // irrelevant here, so the defaults suffice.
-                Ok(format_as_file_type(
-                    session
-                        .state()
-                        .get_file_format_factory(NETCDF_EXTENSION)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "NetCDF format factory not registered under extension '{}'",
-                                NETCDF_EXTENSION
-                            )
-                        })?,
-                ))
+            OutputFormat::NetCDF(options) => {
+                let registered = session
+                    .state()
+                    .get_file_format_factory(NETCDF_EXTENSION)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "NetCDF format factory not registered under extension '{}'",
+                            NETCDF_EXTENSION
+                        )
+                    })?;
+                if *options == NetcdfOutputOptions::default() {
+                    return Ok(format_as_file_type(registered));
+                }
+                // The COPY sink reads its options from the factory, so clone the registered one.
+                let mut factory = registered
+                    .as_any()
+                    .downcast_ref::<NetCDFFormatFactory>()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "the format factory under extension '{}' is not the NetCDF factory",
+                            NETCDF_EXTENSION
+                        )
+                    })?
+                    .clone();
+                factory.options.writer = options.clone();
+                Ok(format_as_file_type(Arc::new(factory)))
             }
             OutputFormat::NdNetCDF { dimension_columns } => {
                 let registered = session

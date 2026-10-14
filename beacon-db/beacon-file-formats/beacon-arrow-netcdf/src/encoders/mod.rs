@@ -6,13 +6,28 @@ use arrow::{
 };
 use netcdf::FileMut;
 
+use crate::datafusion::options::Compression;
+
 /// Default encoder implementation.
 pub mod default;
+
+/// Settings that an encoder applies when it defines the variables.
+#[derive(Debug, Clone, Default)]
+pub struct EncoderOptions {
+    /// Deflate compression of each variable. `None` writes the data without compression.
+    pub compression: Option<Compression>,
+    /// Rows in one chunk of the record dimension. `None` keeps the netCDF default chunks.
+    pub chunk_rows: Option<usize>,
+}
 
 /// Trait implemented by concrete NetCDF encoders.
 pub trait Encoder {
     /// Create an encoder instance for an open mutable NetCDF file and schema.
-    fn create(nc_file: FileMut, schema: SchemaRef) -> Result<Self, EncoderError>
+    fn create(
+        nc_file: FileMut,
+        schema: SchemaRef,
+        options: &EncoderOptions,
+    ) -> Result<Self, EncoderError>
     where
         Self: Sized;
     /// Write one named Arrow column.
@@ -24,6 +39,15 @@ pub trait Encoder {
             self.write_column(field.name(), array.clone())?;
         }
         Ok(())
+    }
+    /// Write one attribute on `variable`, or a global attribute when `variable` is `None`.
+    fn put_attribute(
+        &mut self,
+        _variable: Option<&str>,
+        _name: &str,
+        _value: netcdf::AttributeValue,
+    ) -> Result<(), EncoderError> {
+        Err(format!("{} does not support attributes", Self::encoder_name()).into())
     }
     /// Return a static encoder identifier.
     fn encoder_name() -> &'static str;

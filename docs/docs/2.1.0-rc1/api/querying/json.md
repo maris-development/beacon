@@ -152,6 +152,16 @@ The other format keys are `csv`, `arrow`, `odv`, `tiff` and `bbf`.
 `filters` is an array of filter objects. Beacon combines the entries with `AND`. A filter works on
 any column of the schema.
 
+A filter can also name the `alias` of a `select` item. Beacon then filters on the column or the
+function behind the alias. An alias wins over a source column with the same name.
+
+```json
+{
+  "select": [{ "column": "z", "alias": "DEPTH" }],
+  "filters": [{ "column": "DEPTH", "gt_eq": 0, "lt_eq": 10 }]
+}
+```
+
 ### Range (min / max)
 
 ```json

@@ -191,6 +191,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
         if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
             options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
         }
+        options.writer.apply_format_options(format_options)?;
         // Parsed here only so a bad value is an error at `CREATE EXTERNAL
         // TABLE` rather than at the first analysis pass. The value itself is
         // read by `create_for_analysis`; a format built for a query computes no
@@ -584,6 +585,13 @@ impl FileFormat for NetcdfFormat {
         let output_dir = self.output_dir.clone();
         match &self.options.write_dimensions {
             Some(dim_columns) if !dim_columns.is_empty() => {
+                let flat_keys = self.options.writer.set_keys();
+                if !flat_keys.is_empty() {
+                    return Err(exec_datafusion_err!(
+                        "{} applies only to the flat NetCDF output",
+                        flat_keys.join(", ")
+                    ));
+                }
                 let unique_columns = dim_columns.clone();
 
                 let (unique_exec, collection_handle) =
@@ -619,7 +627,11 @@ impl FileFormat for NetcdfFormat {
                 )))
             }
             _ => {
-                let netcdf_sink = Arc::new(NetCDFSink::new(conf, output_dir));
+                let netcdf_sink = Arc::new(NetCDFSink::new(
+                    conf,
+                    output_dir,
+                    self.options.writer.clone(),
+                ));
                 Ok(Arc::new(DataSinkExec::new(
                     input,
                     netcdf_sink,
@@ -1133,6 +1145,94 @@ mod reader_backend_tests {
             backend_of(&factory, &ctx.state(), &options).unwrap(),
             ReaderBackend::Oxcdf
         );
+    }
+
+    /// The `combine_attrs` of a format the factory built from `format_options`.
+    fn combine_attrs_of(
+        format_options: &HashMap<String, String>,
+    ) -> datafusion::error::Result<Option<crate::attributes::CombineAttrs>> {
+        let format = factory().create(&session().state(), format_options)?;
+        Ok(format
+            .as_any()
+            .downcast_ref::<NetcdfFormat>()
+            .expect("the factory builds a NetcdfFormat")
+            .options
+            .writer
+            .combine_attrs)
+    }
+
+    #[tokio::test]
+    async fn combine_attrs_is_off_by_default() {
+        assert_eq!(combine_attrs_of(&HashMap::new()).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn combine_attrs_reads_the_bare_and_the_prefixed_key() {
+        use crate::attributes::CombineAttrs;
+        let bare = HashMap::from([("combine_attrs".to_string(), "identical".to_string())]);
+        assert_eq!(
+            combine_attrs_of(&bare).unwrap(),
+            Some(CombineAttrs::Identical)
+        );
+        let prefixed = HashMap::from([(
+            "format.combine_attrs".to_string(),
+            "drop_conflicts".to_string(),
+        )]);
+        assert_eq!(
+            combine_attrs_of(&prefixed).unwrap(),
+            Some(CombineAttrs::DropConflicts)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_combine_attrs_is_an_error() {
+        let options = HashMap::from([("combine_attrs".to_string(), "union".to_string())]);
+        let error = combine_attrs_of(&options).unwrap_err().to_string();
+        assert!(error.contains("combine_attrs"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn combine_attrs_with_write_dimensions_is_an_error() {
+        use datafusion::datasource::physical_plan::{FileGroup, FileOutputMode};
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        use datafusion::logical_expr::dml::InsertOp;
+        use datafusion::physical_plan::empty::EmptyExec;
+
+        let factory = NetCDFFormatFactory::new(
+            Arc::new(ListingFactory::dynamic()),
+            std::env::temp_dir(),
+            NetcdfOptions {
+                write_dimensions: Some(vec!["lat".to_string()]),
+                writer: crate::datafusion::options::NetcdfWriterOptions {
+                    combine_attrs: Some(crate::attributes::CombineAttrs::Identical),
+                    ..Default::default()
+                },
+                ..NetcdfOptions::default()
+            },
+            NetcdfConfig::default(),
+        );
+        let ctx = session();
+        let format = factory.create(&ctx.state(), &HashMap::new()).unwrap();
+        let schema: SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
+        let conf = FileSinkConfig {
+            original_url: String::new(),
+            object_store_url: ObjectStoreUrl::local_filesystem(),
+            file_group: FileGroup::default(),
+            table_paths: vec![],
+            output_schema: schema.clone(),
+            table_partition_cols: vec![],
+            insert_op: InsertOp::Append,
+            keep_partition_by_columns: false,
+            file_extension: "nc".to_string(),
+            file_output_mode: FileOutputMode::SingleFile,
+        };
+        let error = format
+            .create_writer_physical_plan(Arc::new(EmptyExec::new(schema)), &ctx.state(), conf, None)
+            .await
+            .err()
+            .expect("combine_attrs with write_dimensions is an error")
+            .to_string();
+        assert!(error.contains("combine_attrs"), "{error}");
     }
 
     /// `FileFormatFactory::default` also carries the configured reader.
