@@ -156,10 +156,9 @@ async fn table(ctx: &SessionContext, urls: &[&str]) -> FastObjectTable {
 fn scan_config(plan: &Arc<dyn ExecutionPlan>) -> &FileScanConfig {
     let mut node: &dyn ExecutionPlan = plan.as_ref();
     loop {
-        if let Some(exec) = node.as_any().downcast_ref::<DataSourceExec>() {
+        if let Some(exec) = node.downcast_ref::<DataSourceExec>() {
             return exec
                 .data_source()
-                .as_any()
                 .downcast_ref::<FileScanConfig>()
                 .expect("a FastObjectTable scan is a file scan");
         }

@@ -163,10 +163,6 @@ impl FileSource for ZarrSource {
         }))
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn table_schema(&self) -> &TableSchema {
         &self.table_schema
     }

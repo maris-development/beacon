@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -217,9 +216,6 @@ impl FileFormatFactory for NetCDFFormatFactory {
         ))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl GetExt for NetCDFFormatFactory {
@@ -257,7 +253,6 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         let wanted = self.statistics_wanted(format_options)?;
         let format = self.create_with_native_root(state, format_options, url, listing)?;
         let netcdf = format
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .ok_or_else(|| {
                 exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
@@ -275,7 +270,6 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         let format = self.create(state, format_options)?;
         let netcdf = format
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .ok_or_else(|| {
                 exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
@@ -344,7 +338,7 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
     /// existed. The default read — every table, and every collector pass — is
     /// what the 9.2s was measured on, and that one is cached.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let format = format.as_any().downcast_ref::<NetcdfFormat>()?;
+        let format = format.downcast_ref::<NetcdfFormat>()?;
         if format.options.read_dimensions.is_some() {
             return None;
         }
@@ -409,10 +403,6 @@ impl NetcdfFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for NetcdfFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         None
     }
@@ -707,7 +697,6 @@ mod reader_backend_tests {
     ) -> datafusion::error::Result<ReaderBackend> {
         let format = factory.create(state, format_options)?;
         Ok(format
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .expect("the factory builds a NetcdfFormat")
             .reader_backend())
@@ -1164,7 +1153,6 @@ mod reader_backend_tests {
     ) -> datafusion::error::Result<Option<crate::attributes::CombineAttrs>> {
         let format = factory().create(&session().state(), format_options)?;
         Ok(format
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .expect("the factory builds a NetcdfFormat")
             .options
@@ -1261,7 +1249,6 @@ mod reader_backend_tests {
         let format = FileFormatFactory::default(&factory);
         assert_eq!(
             format
-                .as_any()
                 .downcast_ref::<NetcdfFormat>()
                 .unwrap()
                 .reader_backend(),
@@ -1442,7 +1429,6 @@ mod reader_backend_tests {
 
             let planned_source = planned
                 .file_source()
-                .as_any()
                 .downcast_ref::<NetCDFSource>()
                 .expect("the config carries a NetCDFSource");
             assert_eq!(
@@ -1553,11 +1539,11 @@ mod reader_backend_tests {
         let options = HashMap::from([("skip_unbroadcastable".to_string(), "true".to_string())]);
 
         let format = factory.create(&ctx.state(), &options).unwrap();
-        let format = format.as_any().downcast_ref::<NetcdfFormat>().unwrap();
+        let format = format.downcast_ref::<NetcdfFormat>().unwrap();
         assert!(format.options.skip_unbroadcastable);
 
         let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
-        let default = default.as_any().downcast_ref::<NetcdfFormat>().unwrap();
+        let default = default.downcast_ref::<NetcdfFormat>().unwrap();
         assert!(!default.options.skip_unbroadcastable);
     }
 

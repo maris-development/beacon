@@ -172,14 +172,13 @@ impl LanceWarehouse {
     /// name of a dropped table has the same URI and starts again at version 1,
     /// so without this it reads the manifests and index lists of the dropped
     /// table, and then fails on the index files that `DROP` deleted.
-    pub async fn forget(&self, uri: &str) {
-        // Lance prefixes each key with the dataset URI and a `/`.
-        let prefix = format!("{uri}/");
-        self.session
-            .file_metadata_cache()
-            .invalidate_prefix(&prefix)
-            .await;
-        self.index_cache.invalidate_prefix(&prefix).await;
+    ///
+    /// Lance hashes its cache keys, so it cannot remove the keys of one URI.
+    /// This clears both caches for all tables. `DROP` is rare, so the cost is
+    /// some cold reads after it.
+    pub async fn forget(&self, _uri: &str) {
+        self.session.file_metadata_cache().clear().await;
+        self.index_cache.clear().await;
     }
 
     /// The tables object store, for `DROP` cleanup.

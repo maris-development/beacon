@@ -257,9 +257,8 @@ fn collect_scan_totals(plan: &dyn ExecutionPlan, totals: &mut ScanTotals) {
         .map(|value| value.as_usize() as u64);
 
     let files: Vec<&object_store::ObjectMeta> = crate::query_cpu::unwrap_metered(plan)
-        .as_any()
         .downcast_ref::<DataSourceExec>()
-        .and_then(|exec| exec.data_source().as_any().downcast_ref::<FileScanConfig>())
+        .and_then(|exec| exec.data_source().downcast_ref::<FileScanConfig>())
         .map(|config| {
             config
                 .file_groups
@@ -308,7 +307,7 @@ fn collect_metrics_json(plan: &dyn ExecutionPlan) -> NodeMetrics {
 /// The output is the array form consumed by pgjson visualizers (e.g. dalibo):
 /// a single-element array wrapping the root `"Plan"` node, with children nested
 /// recursively under `"Plans"`. Newer DataFusion produces this natively via
-/// `EXPLAIN (ANALYZE, FORMAT pgjson)`, which the pinned DataFusion 53 rejects;
+/// `EXPLAIN (ANALYZE, FORMAT pgjson)`, which the pinned DataFusion 54 rejects;
 /// this backports the same shape by walking the already-executed plan.
 ///
 /// The plan must have been run to completion first so its metrics are populated.

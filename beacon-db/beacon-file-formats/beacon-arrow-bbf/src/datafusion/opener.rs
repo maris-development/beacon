@@ -389,9 +389,7 @@ impl PruningStatistics for BBFPruningStatistics {
             .null_counts(&stats.null_count(), &stats.row_count())
     }
 
-    // DataFusion keeps the first row count it asks for and uses it for every
-    // column, so the answer must not depend on `column`.
-    fn row_counts(&self, _column: &Column) -> Option<arrow::array::ArrayRef> {
+    fn row_counts(&self) -> Option<arrow::array::ArrayRef> {
         Some(self.counts.row_counts())
     }
 

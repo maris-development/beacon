@@ -47,13 +47,11 @@ pub(crate) async fn drop_table(
     let provider = session.table_provider(name.clone()).await.ok();
     let materialized_prefix = provider.as_ref().and_then(|provider| {
         provider
-            .as_any()
             .downcast_ref::<MaterializedView>()
             .map(|mv| mv.base_storage_prefix())
     });
     let lance_location = provider.as_ref().and_then(|provider| {
         provider
-            .as_any()
             .downcast_ref::<beacon_lance::LanceTable>()
             .map(|table| table.definition().location.clone())
     });
@@ -572,7 +570,7 @@ pub(crate) async fn drop_view(
         }
         anyhow::bail!("View '{name}' does not exist");
     };
-    if !provider.as_any().is::<ViewTable>() {
+    if !provider.is::<ViewTable>() {
         anyhow::bail!("'{name}' is not a view; use DROP TABLE");
     }
     session.deregister_table(name.clone())?;
@@ -699,7 +697,7 @@ pub(crate) async fn replace_table_contents(
     // Lance: prefer native delete/update; fall back to overwrite with the
     // surviving/updated rows. The provider reopens the latest dataset version on
     // each scan, so no rebuild is needed.
-    if let Some(lance) = provider.as_any().downcast_ref::<beacon_lance::LanceTable>() {
+    if let Some(lance) = provider.downcast_ref::<beacon_lance::LanceTable>() {
         let location = lance.definition().location.clone();
         let warehouse = lance_warehouse(session)?;
         match mutation {
@@ -743,7 +741,6 @@ pub(crate) async fn alter_table(
 
     let provider = session.table_provider(table_ref.clone()).await?;
     let definition = provider
-        .as_any()
         .downcast_ref::<beacon_lance::LanceTable>()
         .map(|table| table.definition().clone())
         .ok_or_else(|| {
@@ -854,7 +851,6 @@ async fn lance_table_location(
         .table_provider(crate::table_name::table_reference(table))
         .await?;
     provider
-        .as_any()
         .downcast_ref::<beacon_lance::LanceTable>()
         .map(|t| t.definition().location.clone())
         .ok_or_else(|| {
@@ -1012,6 +1008,13 @@ impl datafusion::sql::planner::ContextProvider for AlterTypeContextProvider {
         None
     }
 
+    fn get_higher_order_meta(
+        &self,
+        _name: &str,
+    ) -> Option<Arc<datafusion::logical_expr::HigherOrderUDF>> {
+        None
+    }
+
     fn get_aggregate_meta(
         &self,
         _name: &str,
@@ -1032,6 +1035,10 @@ impl datafusion::sql::planner::ContextProvider for AlterTypeContextProvider {
     }
 
     fn udf_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn higher_order_function_names(&self) -> Vec<String> {
         Vec::new()
     }
 

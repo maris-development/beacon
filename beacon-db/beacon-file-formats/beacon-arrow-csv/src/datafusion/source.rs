@@ -28,7 +28,6 @@
 //! one string per cell, for a collection under that setting alone. See
 //! [`scan_adapt`](beacon_datafusion_ext::scan_adapt).
 
-use std::any::Any;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 
@@ -147,10 +146,6 @@ impl FileSource for BeaconCsvSource {
         ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn table_schema(&self) -> &TableSchema {
         &self.table_schema
     }
@@ -256,7 +251,6 @@ impl FileOpener for BeaconCsvOpener {
             let inner = CsvSource::new(schema).with_csv_options(options);
             let inner = inner.with_batch_size(batch_size);
             let inner = inner
-                .as_any()
                 .downcast_ref::<CsvSource>()
                 .ok_or_else(|| {
                     DataFusionError::Internal(

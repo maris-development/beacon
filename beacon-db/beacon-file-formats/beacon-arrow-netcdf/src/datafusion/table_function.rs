@@ -157,7 +157,6 @@ impl ReadNetCDFFunc {
             })?;
         let file_format = factory.create(&state, &format_options)?;
         let netcdf_file_format = file_format
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .ok_or_else(|| {
                 datafusion::error::DataFusionError::Execution(
@@ -212,10 +211,11 @@ impl ReadNetCDFFunc {
 }
 
 impl TableFunctionImpl for ReadNetCDFFunc {
-    fn call(
+    fn call_with_args(
         &self,
-        args: &[datafusion::prelude::Expr],
+        args: datafusion::catalog::TableFunctionArgs,
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let args = args.exprs();
         self.call_with_options(args, HashMap::new())
     }
 }

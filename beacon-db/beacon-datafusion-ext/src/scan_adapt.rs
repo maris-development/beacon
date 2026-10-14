@@ -61,7 +61,7 @@ use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{FileOpenFuture, FileOpener};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_expr::expressions::{CastColumnExpr, Column, lit};
+use datafusion::physical_expr::expressions::{CastExpr, Column, lit};
 use datafusion::physical_expr_adapter::{
     BatchAdapterFactory, DefaultPhysicalExprAdapterFactory, PhysicalExprAdapter,
     PhysicalExprAdapterFactory,
@@ -369,7 +369,7 @@ impl PhysicalExprAdapter for LenientCastAdapter {
     fn rewrite(&self, expr: Arc<dyn PhysicalExpr>) -> Result<Arc<dyn PhysicalExpr>> {
         let expr = expr
             .transform_down(|expr| {
-                let Some(column) = expr.as_any().downcast_ref::<Column>() else {
+                let Some(column) = expr.downcast_ref::<Column>() else {
                     return Ok(Transformed::no(expr));
                 };
                 let Some((target, source)) = self.lenient_pair(column) else {
@@ -388,19 +388,22 @@ impl PhysicalExprAdapter for LenientCastAdapter {
         self.inner
             .rewrite(expr)?
             .transform_down(|expr| {
-                let Some(cast) = expr.as_any().downcast_ref::<CastColumnExpr>() else {
+                let Some(cast) = expr.downcast_ref::<CastExpr>() else {
                     return Ok(Transformed::no(expr));
                 };
-                if !casts_leniently(
-                    cast.target_field(),
-                    cast.input_field().data_type(),
-                    self.strategy.as_ref(),
-                ) {
+                // The inner rule casts the file column straight to the table type.
+                // Other casts come from the query and keep their options.
+                let Some(column) = cast.expr().downcast_ref::<Column>() else {
+                    return Ok(Transformed::no(expr));
+                };
+                let Some((target, _)) = self.lenient_pair(column) else {
+                    return Ok(Transformed::no(expr));
+                };
+                if cast.cast_type() != target.data_type() {
                     return Ok(Transformed::no(expr));
                 }
-                Ok(Transformed::yes(Arc::new(CastColumnExpr::new(
+                Ok(Transformed::yes(Arc::new(CastExpr::new_with_target_field(
                     Arc::clone(cast.expr()),
-                    Arc::clone(cast.input_field()),
                     Arc::clone(cast.target_field()),
                     Some(LENIENT_CAST_OPTIONS),
                 )) as Arc<dyn PhysicalExpr>))

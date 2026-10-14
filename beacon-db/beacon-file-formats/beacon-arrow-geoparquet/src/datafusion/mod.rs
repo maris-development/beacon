@@ -1,4 +1,4 @@
-use std::{any::Any, fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::file_descriptors::file_open_parallelism;
@@ -72,9 +72,6 @@ impl FileFormatFactory for GeoParquetFormatFactory {
         Arc::new(GeoParquetFormat::new(self.options.clone()))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl GetExt for GeoParquetFormatFactory {
@@ -88,7 +85,7 @@ impl FileFormatFactoryExt for GeoParquetFormatFactory {
     /// build a geometry from. Naming a longitude and a latitude column replaces
     /// them with one geometry column, so it changes the schema.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let format = format.as_any().downcast_ref::<GeoParquetFormat>()?;
+        let format = format.downcast_ref::<GeoParquetFormat>()?;
         Some(
             SchemaOptions::new("geoparquet")
                 .opt_str(format.options.longitude_column.as_deref())
@@ -132,10 +129,6 @@ impl GeoParquetFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for GeoParquetFormat {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         None
     }

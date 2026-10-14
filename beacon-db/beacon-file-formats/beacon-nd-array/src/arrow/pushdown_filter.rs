@@ -161,8 +161,8 @@ fn peel_casts(e: &Arc<dyn PhysicalExpr>) -> Option<&Arc<dyn PhysicalExpr>> {
     }
 }
 
-fn downcast<T: 'static>(expr: &Arc<dyn PhysicalExpr>) -> Option<&T> {
-    expr.as_any().downcast_ref::<T>()
+fn downcast<T: PhysicalExpr>(expr: &Arc<dyn PhysicalExpr>) -> Option<&T> {
+    expr.downcast_ref::<T>()
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 //! the scan, and [`ZarrSource`] streams each leaf group through the shared
 //! `beacon-nd-array` engine with predicate pushdown.
 
-use std::{any::Any, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{
@@ -160,9 +160,6 @@ impl FileFormatFactory for ZarrFormatFactory {
         Arc::new(self.writable(ZarrFormat::default().with_enable_statistics(false)))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl FileFormatFactoryExt for ZarrFormatFactory {
@@ -179,7 +176,7 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
     /// names dimensions derives its schema, exactly as it did before the cache
     /// existed. The default read is cached.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let format = format.as_any().downcast_ref::<ZarrFormat>()?;
+        let format = format.downcast_ref::<ZarrFormat>()?;
         if format.has_storage() || format.read_dimensions.is_some() {
             return None;
         }
@@ -237,7 +234,6 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
         let wanted = self.statistics_wanted(format_options)?;
         let format = self.create_with_native_root(state, format_options, url, listing)?;
         let zarr = format
-            .as_any()
             .downcast_ref::<ZarrFormat>()
             .ok_or_else(|| {
                 datafusion::error::DataFusionError::Execution(
@@ -347,10 +343,6 @@ pub use beacon_datafusion_ext::nd::exec::nd_scan_plan;
 
 #[async_trait::async_trait]
 impl FileFormat for ZarrFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         None
     }
@@ -812,7 +804,6 @@ mod tests {
         // The queue is what stops every partition reading the whole group.
         let planned_source = planned
             .file_source()
-            .as_any()
             .downcast_ref::<ZarrSource>()
             .expect("the config carries a ZarrSource");
         assert_eq!(
@@ -1099,7 +1090,6 @@ mod tests {
                 .unwrap();
             assert!(
                 !format
-                    .as_any()
                     .downcast_ref::<ZarrFormat>()
                     .unwrap()
                     .enable_statistics,
@@ -1132,7 +1122,6 @@ mod tests {
                 .create_for_analysis(&ctx.state(), &options, &url, &listing)
                 .unwrap();
             format
-                .as_any()
                 .downcast_ref::<ZarrFormat>()
                 .unwrap()
                 .enable_statistics
@@ -1299,11 +1288,11 @@ mod tests {
             HashMap::from([("skip_unbroadcastable".to_string(), "true".to_string())]);
 
         let format = factory.create(&ctx.state(), &options).unwrap();
-        let format = format.as_any().downcast_ref::<ZarrFormat>().unwrap();
+        let format = format.downcast_ref::<ZarrFormat>().unwrap();
         assert!(format.skip_unbroadcastable);
 
         let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
-        let default = default.as_any().downcast_ref::<ZarrFormat>().unwrap();
+        let default = default.downcast_ref::<ZarrFormat>().unwrap();
         assert!(!default.skip_unbroadcastable);
     }
 

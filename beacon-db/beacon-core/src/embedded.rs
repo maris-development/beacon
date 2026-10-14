@@ -716,7 +716,6 @@ impl Database {
             .schema(&schema_name)
             .ok_or_else(|| anyhow::anyhow!("default schema `{schema_name}` is not registered"))?;
         let provider = schema
-            .as_any()
             .downcast_ref::<PersistentSchemaProvider>()
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -808,7 +807,6 @@ fn is_remote_catalog(session_ctx: &datafusion::prelude::SessionContext, name: &s
         .catalog(name)
         .map(|catalog| {
             catalog
-                .as_any()
                 .downcast_ref::<beacon_datafusion_ext::remote::RemoteCatalogProvider>()
                 .is_some()
         })

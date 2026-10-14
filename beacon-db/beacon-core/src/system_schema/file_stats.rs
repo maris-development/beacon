@@ -246,7 +246,11 @@ impl FileStatisticsFunc {
 }
 
 impl TableFunctionImpl for FileStatisticsFunc {
-    fn call(&self, args: &[Expr]) -> DFResult<Arc<dyn TableProvider>> {
+    fn call_with_args(
+        &self,
+        args: datafusion::catalog::TableFunctionArgs,
+    ) -> DFResult<Arc<dyn TableProvider>> {
+        let args = args.exprs();
         let patterns = parse_glob_paths_arg(args, "file_statistics")?;
         if patterns.is_empty() {
             return plan_err!("file_statistics requires a path: file_statistics('argo/a.nc')");
@@ -426,10 +430,6 @@ pub(crate) struct FileStatisticsTable(SystemTable);
 
 #[async_trait::async_trait]
 impl TableProvider for FileStatisticsTable {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.0.schema()
     }

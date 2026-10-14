@@ -122,9 +122,7 @@ impl PruningStatistics for PruningIndex {
         self.counts.null_counts(&c.null_count, &c.row_count)
     }
 
-    // DataFusion keeps the first row count it asks for and uses it for every
-    // column, so the answer must not depend on `column`.
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+    fn row_counts(&self) -> Option<ArrayRef> {
         Some(self.counts.row_counts())
     }
 

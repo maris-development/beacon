@@ -20,7 +20,6 @@
 //! Work that a query hands to other threads is not counted: `spawn_blocking`
 //! closures, object store I/O threads and threads inside native libraries.
 
-use std::any::Any;
 use std::cell::Cell;
 use std::fmt;
 use std::future::Future;
@@ -291,7 +290,7 @@ pub fn meter_plan(
 ///
 /// Use it before a downcast on a metered plan.
 pub fn unwrap_metered(plan: &dyn ExecutionPlan) -> &dyn ExecutionPlan {
-    match plan.as_any().downcast_ref::<CpuMeteredExec>() {
+    match plan.downcast_ref::<CpuMeteredExec>() {
         Some(metered) => metered.inner.as_ref(),
         None => plan,
     }
@@ -327,10 +326,6 @@ impl DisplayAs for CpuMeteredExec {
 impl ExecutionPlan for CpuMeteredExec {
     fn name(&self) -> &str {
         self.inner.name()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -399,7 +394,7 @@ impl ExecutionPlan for CpuMeteredExec {
         self.inner.metrics()
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Arc<Statistics>> {
         self.inner.partition_statistics(partition)
     }
 

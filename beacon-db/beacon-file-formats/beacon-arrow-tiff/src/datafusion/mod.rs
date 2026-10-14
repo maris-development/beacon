@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -48,9 +47,6 @@ impl FileFormatFactory for TiffFormatFactory {
         Arc::new(TiffFormat::new(self.options.clone()))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl GetExt for TiffFormatFactory {
@@ -63,7 +59,7 @@ impl FileFormatFactoryExt for TiffFormatFactory {
     /// TIFF opts into the schema cache on its name alone. `TiffOptions` carries
     /// nothing today, so there is nothing else to tell two reads apart.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        format.as_any().downcast_ref::<TiffFormat>()?;
+        format.downcast_ref::<TiffFormat>()?;
         Some(SchemaOptions::new("tiff").finish())
     }
 
@@ -106,10 +102,6 @@ impl TiffFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for TiffFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         None
     }

@@ -21,7 +21,7 @@ tempfile = { workspace=true}
 utoipa = { workspace=true}
 csv = {workspace = true}
 # default-features disabled to drop xz/lzma support (xz2 -> lzma-sys conflicts with
-# datafusion 53's liblzma on the native `lzma` links). Only deflate is used.
+# datafusion's liblzma on the native `lzma` links). Only deflate is used.
 zip = {workspace = true}
 async_zip = {workspace = true}
 tokio-util = {workspace = true}

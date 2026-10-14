@@ -265,10 +265,6 @@ impl ExternalTable {
 
 #[async_trait::async_trait]
 impl TableProvider for ExternalTable {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.inner.read().schema()
     }
@@ -693,10 +689,6 @@ impl MaterializedView {
 
 #[async_trait::async_trait]
 impl TableProvider for MaterializedView {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }

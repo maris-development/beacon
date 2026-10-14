@@ -13,7 +13,7 @@ engine links. A Rust compiler alone is not enough:
   machine without it still builds: the build compiles PROJ from source instead, which needs
   **cmake** and the **sqlite3** program. `--no-default-features` drops `ST_Transform` and PROJ
   with it. The other 122 spatial functions stay.
-- A Rust toolchain, **1.94 or later**. See `rust-version` in the workspace `Cargo.toml`. The
+- A Rust toolchain, **1.95 or later**. See `rust-version` in the workspace `Cargo.toml`. The
   `rust-toolchain.toml` file here selects stable for local development.
 
 ```bash

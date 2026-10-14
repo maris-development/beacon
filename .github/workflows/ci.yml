@@ -18,9 +18,9 @@ jobs:
       matrix:
         include:
           # The declared MSRV (`rust-version` in the workspace Cargo.toml). Building at the floor is
-          # what keeps that claim honest — a post-1.94 feature fails here rather than silently
+          # what keeps that claim honest — a post-1.95 feature fails here rather than silently
           # breaking source builds for anyone on distro Rust.
-          - toolchain: "1.94"
+          - toolchain: "1.95"
             lint: true
           # What the released wheels are actually compiled with: maturin-action defaults to stable
           # inside the manylinux container, and the host builds follow rust-toolchain.toml. Without
@@ -36,6 +36,12 @@ jobs:
 
       - name: Check layer boundary (beacon-db must not depend on beacon-server)
         run: ./scripts/check-layer-boundary.sh
+
+      # A restored cache from an older lockfile adds stale artifacts to the full build, which fills the default disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Install system dependencies (Dockerfile parity)
         run: |

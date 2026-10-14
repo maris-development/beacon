@@ -289,7 +289,6 @@ impl OutputFormat {
                 }
                 // The COPY sink reads its options from the factory, so clone the registered one.
                 let mut factory = registered
-                    .as_any()
                     .downcast_ref::<NetCDFFormatFactory>()
                     .ok_or_else(|| {
                         anyhow::anyhow!(
@@ -314,7 +313,6 @@ impl OutputFormat {
                 // The COPY sink reads its write dimensions from the factory, so clone the
                 // registered one and set them there.
                 let mut factory = registered
-                    .as_any()
                     .downcast_ref::<NetCDFFormatFactory>()
                     .ok_or_else(|| {
                         anyhow::anyhow!(
@@ -343,7 +341,6 @@ impl OutputFormat {
                     })?;
                 // The registered factory carries the output directory; clone it to set zipping.
                 let mut factory = registered
-                    .as_any()
                     .downcast_ref::<ZarrFormatFactory>()
                     .ok_or_else(|| {
                         anyhow::anyhow!(

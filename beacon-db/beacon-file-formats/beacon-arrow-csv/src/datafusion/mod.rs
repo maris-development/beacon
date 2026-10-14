@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
@@ -66,9 +66,6 @@ impl FileFormatFactory for CsvFormatFactory {
         Arc::new(CsvFormat::new(b',', DEFAULT_INFER_RECORDS))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl FileFormatFactoryExt for CsvFormatFactory {
@@ -106,7 +103,7 @@ impl FileFormatFactoryExt for CsvFormatFactory {
     /// The delimiter decides where a column ends. The header flag decides
     /// whether the first record names the columns or is data.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let format = format.as_any().downcast_ref::<CsvFormat>()?;
+        let format = format.downcast_ref::<CsvFormat>()?;
         Some(
             SchemaOptions::new("csv")
                 .u64(u64::from(format.delimiter()))
@@ -153,10 +150,6 @@ impl CsvFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for CsvFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn compression_type(&self) -> Option<FileCompressionType> {
         self.inner_format.compression_type()
     }
@@ -240,7 +233,7 @@ impl FileFormat for CsvFormat {
         // The merge rule of the session decides which casts read null.
         let type_widening = Arc::clone(&session_widening(state).strategy);
         let source: Arc<dyn FileSource> =
-            match conf.file_source.as_any().downcast_ref::<BeaconCsvSource>() {
+            match conf.file_source.downcast_ref::<BeaconCsvSource>() {
                 Some(source) => Arc::new(
                     source
                         .clone()

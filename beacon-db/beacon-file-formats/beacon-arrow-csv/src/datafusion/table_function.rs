@@ -67,10 +67,11 @@ impl BeaconTableFunctionImpl for ReadCsvFunc {
 }
 
 impl TableFunctionImpl for ReadCsvFunc {
-    fn call(
+    fn call_with_args(
         &self,
-        args: &[datafusion::prelude::Expr],
+        args: datafusion::catalog::TableFunctionArgs,
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let args = args.exprs();
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
@@ -152,7 +153,13 @@ mod tests {
     #[tokio::test]
     async fn call_on_dropped_session_returns_an_error() {
         let func = ReadCsvFunc::new(tokio::runtime::Handle::current(), Weak::new());
-        let err = func.call(&[glob("data/*.x")]).unwrap_err().to_string();
+        let err = func
+            .call_with_args(datafusion::catalog::TableFunctionArgs::new(
+                &[glob("data/*.x")],
+                &datafusion::prelude::SessionContext::new().state(),
+            ))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("session context has been dropped"), "{err}");
     }
 
@@ -163,7 +170,13 @@ mod tests {
     async fn call_without_listing_factory_reports_the_missing_extension() {
         let ctx = Arc::new(SessionContext::new());
         let func = ReadCsvFunc::new(tokio::runtime::Handle::current(), Arc::downgrade(&ctx));
-        let err = func.call(&[glob("data/*.x")]).unwrap_err().to_string();
+        let err = func
+            .call_with_args(datafusion::catalog::TableFunctionArgs::new(
+                &[glob("data/*.x")],
+                &datafusion::prelude::SessionContext::new().state(),
+            ))
+            .unwrap_err()
+            .to_string();
         assert!(err.to_lowercase().contains("listing factory"), "{err}");
     }
 

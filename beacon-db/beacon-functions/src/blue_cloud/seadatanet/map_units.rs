@@ -73,10 +73,6 @@ impl MapUnits {
 }
 
 impl ScalarUDFImpl for MapUnits {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "map_units"
     }

@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
@@ -43,9 +43,6 @@ impl FileFormatFactory for ParquetFormatFactory {
         Arc::new(ParquetFormat::new())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl FileFormatFactoryExt for ParquetFormatFactory {
@@ -56,7 +53,7 @@ impl FileFormatFactoryExt for ParquetFormatFactory {
     /// metadata skipping, view types, pruning. Nothing varies per table, so
     /// nothing but the format itself belongs in the key.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        format.as_any().downcast_ref::<ParquetFormat>()?;
+        format.downcast_ref::<ParquetFormat>()?;
         Some(SchemaOptions::new("parquet").finish())
     }
 
@@ -106,10 +103,6 @@ impl Default for ParquetFormat {
 
 #[async_trait::async_trait]
 impl FileFormat for ParquetFormat {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     /// Returns whether this instance uses compression if applicable
     fn compression_type(&self) -> Option<FileCompressionType> {
         None

@@ -85,14 +85,13 @@ pub trait NdExecutionPlan: ExecutionPlan {
 /// nd-aware operator is added; external crates plug in through
 /// [`NdBatchProvider`] + [`NdSourceExec`] rather than new node types.
 pub fn as_nd_plan(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn NdExecutionPlan>> {
-    let any = plan.as_any();
-    if let Some(source) = any.downcast_ref::<NdSourceExec>() {
+    if let Some(source) = plan.downcast_ref::<NdSourceExec>() {
         return Some(Arc::new(source.clone()));
     }
-    if let Some(projection) = any.downcast_ref::<NdProjectionExec>() {
+    if let Some(projection) = plan.downcast_ref::<NdProjectionExec>() {
         return Some(Arc::new(projection.clone()));
     }
-    if let Some(filter) = any.downcast_ref::<NdFilterExec>() {
+    if let Some(filter) = plan.downcast_ref::<NdFilterExec>() {
         return Some(Arc::new(filter.clone()));
     }
     None

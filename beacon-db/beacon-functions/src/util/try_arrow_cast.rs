@@ -34,10 +34,6 @@ impl TryArrowCastFunc {
 }
 
 impl ScalarUDFImpl for TryArrowCastFunc {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "try_arrow_cast"
     }
@@ -93,10 +89,10 @@ impl ScalarUDFImpl for TryArrowCastFunc {
             arg
         } else {
             // Use an actual cast to get the correct type
-            Expr::TryCast(datafusion::logical_expr::TryCast {
-                expr: Box::new(arg),
-                data_type: target_type,
-            })
+            Expr::TryCast(datafusion::logical_expr::TryCast::new(
+                Box::new(arg),
+                target_type,
+            ))
         };
         // return the newly written argument to DataFusion
         Ok(ExprSimplifyResult::Simplified(new_expr))
