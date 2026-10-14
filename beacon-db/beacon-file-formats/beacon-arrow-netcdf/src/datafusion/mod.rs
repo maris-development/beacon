@@ -1153,7 +1153,6 @@ mod reader_backend_tests {
     ) -> datafusion::error::Result<Option<crate::attributes::CombineAttrs>> {
         let format = factory().create(&session().state(), format_options)?;
         Ok(format
-            .as_any()
             .downcast_ref::<NetcdfFormat>()
             .expect("the factory builds a NetcdfFormat")
             .options
