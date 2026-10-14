@@ -40,6 +40,7 @@ pub mod object_meta_resolver;
 pub mod options;
 #[cfg(test)]
 mod partition_coverage_tests;
+pub mod planner;
 pub mod reader;
 pub mod sink;
 pub mod source;
@@ -215,7 +216,6 @@ impl FileFormatFactory for NetCDFFormatFactory {
             access_for(self.config.use_rust_reader),
         ))
     }
-
 }
 
 impl GetExt for NetCDFFormatFactory {
@@ -467,10 +467,7 @@ impl FileFormat for NetcdfFormat {
         session_widening(state)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
-                exec_datafusion_err!(
-                    "Failed to merge the schemas of the NetCDF datasets: {}",
-                    e
-                )
+                exec_datafusion_err!("Failed to merge the schemas of the NetCDF datasets: {}", e)
             })
     }
 
@@ -546,9 +543,7 @@ impl FileFormat for NetcdfFormat {
         ));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
             encoded_file_schema,
-            beacon_nd_array::arrow::partition::encoded_partition_cols(
-                conf.table_partition_cols(),
-            ),
+            beacon_nd_array::arrow::partition::encoded_partition_cols(conf.table_partition_cols()),
         );
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
@@ -791,7 +786,11 @@ mod reader_backend_tests {
                         .to_string()
                 }
             };
-            assert_eq!(count("alias").await, count("canonical").await, "{backend:?}");
+            assert_eq!(
+                count("alias").await,
+                count("canonical").await,
+                "{backend:?}"
+            );
         }
     }
 
@@ -1499,7 +1498,11 @@ mod reader_backend_tests {
         for file in [GRIDDED_FILE, WOD_FILE] {
             std::fs::copy(test_file(file), dir.path().join(file)).unwrap();
         }
-        let dims = Some(vec!["time".to_string(), "lat".to_string(), "lon".to_string()]);
+        let dims = Some(vec![
+            "time".to_string(),
+            "lat".to_string(),
+            "lon".to_string(),
+        ]);
         let ctx = session();
 
         let strict = NetcdfOptions {
@@ -1528,7 +1531,11 @@ mod reader_backend_tests {
             .unwrap();
         let read: usize = batches.iter().map(|batch| batch.num_rows()).sum();
 
-        assert_eq!(read, rows_in_one_file(&ctx, "lat").await, "the gridded file alone");
+        assert_eq!(
+            read,
+            rows_in_one_file(&ctx, "lat").await,
+            "the gridded file alone"
+        );
     }
 
     /// `OPTIONS ('skip_unbroadcastable' 'true')` reaches the format.
@@ -1632,9 +1639,8 @@ mod reader_backend_tests {
         let batch = &counted[0];
         assert_eq!(batch.num_rows(), 2, "one row per partition directory");
         let years = arrow::array::AsArray::as_string::<i32>(batch.column(0));
-        let counts = arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(
-            batch.column(1),
-        );
+        let counts =
+            arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(batch.column(1));
         assert_eq!((years.value(0), years.value(1)), ("2023", "2024"));
         assert_eq!(
             (counts.value(0), counts.value(1)),
@@ -1706,9 +1712,8 @@ mod reader_backend_tests {
 
         let batch = &counted[0];
         let years = arrow::array::AsArray::as_string::<i32>(batch.column(0));
-        let counts = arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(
-            batch.column(1),
-        );
+        let counts =
+            arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(batch.column(1));
         assert_eq!(batch.num_rows(), 2);
         assert_eq!((years.value(0), years.value(1)), ("2023", "2024"));
         assert_eq!(
@@ -2579,7 +2584,15 @@ mod extension_tests {
     #[test]
     fn discovery_keeps_every_netcdf_extension() {
         let objects: Vec<ObjectMeta> = [
-            "a.nc", "b.nc3", "c.nc4", "d.netcdf", "e.cdf", "f.NC4", "g.h5", "h.ncml", "i.parquet",
+            "a.nc",
+            "b.nc3",
+            "c.nc4",
+            "d.netcdf",
+            "e.cdf",
+            "f.NC4",
+            "g.h5",
+            "h.ncml",
+            "i.parquet",
         ]
         .into_iter()
         .map(object_meta)
