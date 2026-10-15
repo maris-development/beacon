@@ -1,6 +1,6 @@
-//! Managed-table–backed persistence for the auth subsystem (users, roles, grants).
+//! Managed-table–backed persistence for the auth subsystem (users, roles, grants, sessions).
 //!
-//! The durable truth for auth state lives in four internal managed tables in the `db://` tables
+//! The durable truth for auth state lives in six internal managed tables in the `db://` tables
 //! store, so it survives a restart; [`beacon_auth`]'s in-memory `InMemoryUserStore`/`RoleProvider`
 //! are the hot read path, hydrated from these tables at startup and written through on every
 //! mutation. This mirrors the schema of the removed SQLite backend:
@@ -10,6 +10,7 @@
 //! - `__beacon_roles(name)`
 //! - `__beacon_role_rules(role, kind, privilege, target_type, target_value)`  (`kind` ∈ grant|deny)
 //! - `__beacon_role_settings(role, key, value)`  (one row for each `ALTER ROLE … SET`)
+//! - `__beacon_sessions(token_hash, username, credential_fingerprint, remember, created_at, expires_at)`
 //!
 //! # Reaching the session without a cycle
 //!
@@ -36,7 +37,8 @@ use arrow::{array::Array, record_batch::RecordBatch};
 use async_trait::async_trait;
 use beacon_auth::{
     decode_target, encode_target, hash_password, normalize_setting, rule_kind, Privilege,
-    PrivilegeRule, Role, RoleStore, StoredUser, UserDirectory, UserRecord,
+    PrivilegeRule, Role, RoleStore, SessionPersistence, StoredSession, StoredUser, UserDirectory,
+    UserRecord,
 };
 use datafusion::{prelude::SessionContext, sql::parser::DFParserBuilder};
 use futures::TryStreamExt;
@@ -52,10 +54,11 @@ const USER_ROLES_TABLE: &str = "__beacon_user_roles";
 const ROLES_TABLE: &str = "__beacon_roles";
 const ROLE_RULES_TABLE: &str = "__beacon_role_rules";
 const ROLE_SETTINGS_TABLE: &str = "__beacon_role_settings";
+const SESSIONS_TABLE: &str = "__beacon_sessions";
 
 /// SQL-managed durable backend for auth state, addressing the internal managed tables through the
-/// runtime session. Implements both [`UserDirectory`] and [`RoleStore`]: the in-memory working
-/// copies write through to it and hydrate from it.
+/// runtime session. Implements [`UserDirectory`], [`RoleStore`] and [`SessionPersistence`]: the
+/// in-memory working copies write through to it and hydrate from it.
 pub(crate) struct TablesAuthStore {
     /// Late-filled weak handle to the session, upgraded per call. A `Weak` (not an `Arc`) breaks the
     /// config-extension cycle described in the module docs.
@@ -94,6 +97,30 @@ fn string_at(array: &dyn Array, row: usize) -> anyhow::Result<String> {
         "auth store: unexpected column type {:?} where a string was expected",
         array.data_type()
     )
+}
+
+/// Reads an integer cell as `i64`, casting from any integer layout a scan returns.
+fn i64_at(array: &dyn Array, row: usize) -> anyhow::Result<i64> {
+    use arrow::array::Int64Array;
+    let cast = arrow::compute::cast(
+        &arrow::array::make_array(array.to_data()),
+        &arrow::datatypes::DataType::Int64,
+    )?;
+    let values = cast
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| anyhow::anyhow!("auth store: expected an integer column"))?;
+    Ok(if values.is_null(row) { 0 } else { values.value(row) })
+}
+
+/// Reads a boolean cell (false for NULL).
+fn bool_at(array: &dyn Array, row: usize) -> anyhow::Result<bool> {
+    use arrow::array::BooleanArray;
+    let values = array
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| anyhow::anyhow!("auth store: expected a boolean column"))?;
+    Ok(!values.is_null(row) && values.value(row))
 }
 
 impl TablesAuthStore {
@@ -146,6 +173,11 @@ impl TablesAuthStore {
             format!(
                 "CREATE TABLE IF NOT EXISTS {ROLE_SETTINGS_TABLE} \
                  (role VARCHAR, \"key\" VARCHAR, value VARCHAR)"
+            ),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {SESSIONS_TABLE} \
+                 (token_hash VARCHAR, username VARCHAR, credential_fingerprint VARCHAR, \
+                 remember BOOLEAN, created_at BIGINT, expires_at BIGINT)"
             ),
         ] {
             self.run(ddl).await?;
@@ -469,6 +501,82 @@ impl RoleStore for TablesAuthStore {
         ))
         .await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SessionPersistence for TablesAuthStore {
+    async fn insert_session(&self, session: &StoredSession) -> anyhow::Result<()> {
+        self.run(format!(
+            "INSERT INTO {SESSIONS_TABLE} \
+             (token_hash, username, credential_fingerprint, remember, created_at, expires_at) \
+             VALUES ('{}', '{}', '{}', {}, {}, {})",
+            quote_literal(&session.token_hash),
+            quote_literal(&session.username),
+            quote_literal(&session.credential_fingerprint),
+            session.remember,
+            session.created_at,
+            session.expires_at,
+        ))
+        .await?;
+        Ok(())
+    }
+
+    async fn update_session_expiry(&self, token_hash: &str, expires_at: i64) -> anyhow::Result<()> {
+        self.run(format!(
+            "UPDATE {SESSIONS_TABLE} SET expires_at = {expires_at} WHERE token_hash = '{}'",
+            quote_literal(token_hash),
+        ))
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_sessions(&self, token_hashes: &[String]) -> anyhow::Result<()> {
+        if token_hashes.is_empty() {
+            return Ok(());
+        }
+        let list = token_hashes
+            .iter()
+            .map(|hash| format!("'{}'", quote_literal(hash)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.run(format!(
+            "DELETE FROM {SESSIONS_TABLE} WHERE token_hash IN ({list})"
+        ))
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_user_sessions(&self, username: &str) -> anyhow::Result<()> {
+        self.run(format!(
+            "DELETE FROM {SESSIONS_TABLE} WHERE username = '{}'",
+            quote_literal(username),
+        ))
+        .await?;
+        Ok(())
+    }
+
+    async fn load_sessions(&self) -> anyhow::Result<Vec<StoredSession>> {
+        let batches = self
+            .run(format!(
+                "SELECT token_hash, username, credential_fingerprint, remember, created_at, expires_at \
+                 FROM {SESSIONS_TABLE}"
+            ))
+            .await?;
+        let mut sessions = Vec::new();
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                sessions.push(StoredSession {
+                    token_hash: string_at(batch.column(0).as_ref(), row)?,
+                    username: string_at(batch.column(1).as_ref(), row)?,
+                    credential_fingerprint: string_at(batch.column(2).as_ref(), row)?,
+                    remember: bool_at(batch.column(3).as_ref(), row)?,
+                    created_at: i64_at(batch.column(4).as_ref(), row)?,
+                    expires_at: i64_at(batch.column(5).as_ref(), row)?,
+                });
+            }
+        }
+        Ok(sessions)
     }
 }
 
