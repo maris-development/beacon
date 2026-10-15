@@ -21,6 +21,7 @@ pub mod sys;
 pub mod uploads;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use beacon_core::runtime::Runtime;
@@ -276,6 +277,10 @@ async fn build_runtime(
         .with_tmp_dir_path(config.data.tmp.clone())
         .with_admin_credentials(config.admin.username.clone(), config.admin.password.clone())
         .with_auth_enforcement(config.auth.enforce)
+        .with_session_ttls(beacon_core::beacon_auth::SessionTtls {
+            normal: Duration::from_secs(config.auth.session_ttl_secs),
+            remember: Duration::from_secs(config.auth.session_remember_ttl_secs),
+        })
         .with_batch_size(config.runtime.batch_size)
         // `BEACON_VM_MEMORY_SIZE` is megabytes (default 8192 = 8 GiB); the
         // builder takes bytes. Passing it through unconverted yields an 8 KB

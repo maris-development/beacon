@@ -33,6 +33,10 @@ pub enum ConfigError {
     #[error("invalid thread count: {0}")]
     InvalidThreads(String),
 
+    /// A session TTL is zero where it must not be, or above ten years.
+    #[error("invalid session TTL: {0}")]
+    InvalidSessionTtl(String),
+
     /// `BEACON_SECRETS_KEY` was set but is not a base64-encoded 32-byte key.
     #[error("invalid BEACON_SECRETS_KEY: {0}")]
     InvalidSecretsKey(String),

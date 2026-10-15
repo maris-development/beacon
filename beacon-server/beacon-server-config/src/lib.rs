@@ -55,6 +55,10 @@ pub struct AuthConfig {
     /// Whether query-time authorization (read enforcement) is applied. When false, queries are not
     /// privilege-checked beyond the existing super-user DDL/DML gate — backwards compatible default.
     pub enforce: bool,
+    /// Idle TTL of a sign-in session, in seconds.
+    pub session_ttl_secs: u64,
+    /// Idle TTL of a "stay signed in" session, in seconds. `0` turns the feature off.
+    pub session_remember_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +306,10 @@ struct RawConfig {
     auth_anonymous_enabled: bool,
     #[envconfig(from = "BEACON_AUTH_ENFORCE", default = "false")]
     auth_enforce: bool,
+    #[envconfig(from = "BEACON_AUTH_SESSION_TTL_SECS", default = "28800")]
+    auth_session_ttl_secs: u64,
+    #[envconfig(from = "BEACON_AUTH_SESSION_REMEMBER_TTL_SECS", default = "2592000")]
+    auth_session_remember_ttl_secs: u64,
     #[envconfig(from = "BEACON_OIDC_ENABLED", default = "false")]
     oidc_enabled: bool,
     #[envconfig(from = "BEACON_OIDC_ISSUER", default = "")]
@@ -621,6 +629,8 @@ impl From<RawConfig> for Config {
             auth: AuthConfig {
                 anonymous_enabled: raw.auth_anonymous_enabled,
                 enforce: raw.auth_enforce,
+                session_ttl_secs: raw.auth_session_ttl_secs,
+                session_remember_ttl_secs: raw.auth_session_remember_ttl_secs,
             },
             oidc: OidcConfig {
                 enabled: raw.oidc_enabled,
@@ -795,6 +805,32 @@ fn validate_threads(server: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
+/// The longest session TTL: ten years, in seconds.
+const MAX_SESSION_TTL_SECS: u64 = 315_360_000;
+
+/// Rejects session TTLs that issue dead tokens or overflow an expiry.
+///
+/// A zero normal TTL expires every session at once. A zero remember TTL is valid: it turns
+/// "stay signed in" off.
+fn validate_session_ttls(auth: &AuthConfig) -> Result<()> {
+    if auth.session_ttl_secs == 0 {
+        return Err(ConfigError::InvalidSessionTtl(
+            "BEACON_AUTH_SESSION_TTL_SECS must be at least 1".to_string(),
+        ));
+    }
+    for (name, secs) in [
+        ("BEACON_AUTH_SESSION_TTL_SECS", auth.session_ttl_secs),
+        ("BEACON_AUTH_SESSION_REMEMBER_TTL_SECS", auth.session_remember_ttl_secs),
+    ] {
+        if secs > MAX_SESSION_TTL_SECS {
+            return Err(ConfigError::InvalidSessionTtl(format!(
+                "{name} must be at most {MAX_SESSION_TTL_SECS} (10 years)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Levels accepted by `BEACON_LOG_LEVEL`, in the spelling `tracing` expects.
 const LOG_LEVELS: [&str; 6] = ["trace", "debug", "info", "warn", "error", "off"];
 
@@ -882,6 +918,7 @@ impl Config {
 
         validate_threads(&config.server)?;
         validate_storage(&config.s3)?;
+        validate_session_ttls(&config.auth)?;
 
         // Create the configured data directories (idempotent). `db_file` is a file,
         // not a directory — its parent is created here. The local datasets
@@ -999,8 +1036,8 @@ fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWidening
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_master_key, normalize_base_path, normalize_log_level, validate_storage,
-        validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
+        decode_master_key, normalize_base_path, normalize_log_level, validate_session_ttls,
+        validate_storage, validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1219,6 +1256,9 @@ mod tests {
         // the backwards-compatible default), OIDC is off.
         assert!(config.auth.anonymous_enabled);
         assert!(!config.auth.enforce);
+        // Sessions: 8 hours idle, 30 days with "stay signed in".
+        assert_eq!(config.auth.session_ttl_secs, 28_800);
+        assert_eq!(config.auth.session_remember_ttl_secs, 2_592_000);
         assert!(!config.oidc.enabled);
         assert_eq!(config.oidc.roles_claim, "realm_access.roles");
         assert_eq!(config.oidc.username_claim, "preferred_username");
@@ -1234,6 +1274,39 @@ mod tests {
         // No secrets key configured: features that persist credentials must fail
         // closed rather than write plaintext.
         assert!(config.secrets.master_key().is_none());
+    }
+
+    #[test]
+    fn session_ttls_load_from_the_environment() {
+        let config = config(&[
+            ("BEACON_AUTH_SESSION_TTL_SECS", "60"),
+            ("BEACON_AUTH_SESSION_REMEMBER_TTL_SECS", "0"),
+        ]);
+        assert_eq!(config.auth.session_ttl_secs, 60);
+        assert_eq!(config.auth.session_remember_ttl_secs, 0);
+        assert!(raw(&[("BEACON_AUTH_SESSION_TTL_SECS", "-1")]).is_err());
+        assert!(validate_session_ttls(&config.auth).is_ok());
+    }
+
+    /// A zero normal TTL issues dead tokens, and a TTL above ten years can overflow the expiry.
+    #[test]
+    fn session_ttls_are_range_checked() {
+        let ttl_error = |vars: &[(&str, &str)]| {
+            validate_session_ttls(&config(vars).auth).map_err(|error| error.to_string())
+        };
+
+        let error = ttl_error(&[("BEACON_AUTH_SESSION_TTL_SECS", "0")]).unwrap_err();
+        assert!(error.contains("BEACON_AUTH_SESSION_TTL_SECS"), "{error}");
+
+        for name in [
+            "BEACON_AUTH_SESSION_TTL_SECS",
+            "BEACON_AUTH_SESSION_REMEMBER_TTL_SECS",
+        ] {
+            let error = ttl_error(&[(name, "315360001")]).unwrap_err();
+            assert!(error.contains(name), "{error}");
+            assert!(ttl_error(&[(name, "315360000")]).is_ok());
+        }
+        assert!(ttl_error(&[("BEACON_AUTH_SESSION_REMEMBER_TTL_SECS", "0")]).is_ok());
     }
 
     /// Booleans are parsed by `bool::from_str`, which accepts only the exact
