@@ -7,5 +7,6 @@ mod home;
 pub(crate) mod redact;
 mod router;
 mod security;
+mod session;
 
 pub use router::setup_router;

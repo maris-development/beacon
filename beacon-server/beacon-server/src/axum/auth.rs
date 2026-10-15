@@ -18,14 +18,15 @@ use crate::auth::{parse_basic_auth_credentials, parse_bearer_token};
 
 /// Parses an `Authorization` header value into a [`Credential`].
 ///
-/// Supports HTTP Basic (`Basic <base64>`) and bearer tokens (`Bearer <token>`, e.g. an OIDC JWT).
+/// Supports HTTP Basic (`Basic <base64>`) and bearer tokens (`Bearer <token>`). A `bst_` bearer
+/// token is a Beacon session token. Any other bearer token is an OIDC JWT.
 fn credential_from_header(value: &str) -> Result<Credential, StatusCode> {
     if value.starts_with("Basic ") {
         let (username, password) =
             parse_basic_auth_credentials(value).map_err(|_| StatusCode::UNAUTHORIZED)?;
         Ok(Credential::basic(username, password))
     } else if let Ok(token) = parse_bearer_token(value) {
-        Ok(Credential::bearer(token.to_string()))
+        Ok(Credential::from_bearer(token))
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
@@ -121,6 +122,14 @@ mod tests {
         match credential {
             Credential::Bearer(token) => assert_eq!(token, "a.b.c"),
             other => panic!("expected bearer credential, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_session_token() {
+        match credential_from_header("Bearer bst_abc").unwrap() {
+            Credential::Session(token) => assert_eq!(token, "bst_abc"),
+            other => panic!("expected session credential, got {other:?}"),
         }
     }
 

@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 
 use crate::{
     credential::Credential,
-    password::{hash_password, verify_password},
+    password::{hash_password, verify_dummy_password, verify_password},
     provider::{AuthProvider, Authenticated, StoredUser, UserDirectory},
 };
 
@@ -78,9 +78,11 @@ impl InMemoryUserStore {
     /// Returns the role names assigned to a user after verifying their password.
     fn verify(&self, username: &str, password: &str) -> anyhow::Result<Vec<String>> {
         let users = self.users.read();
-        let record = users
-            .get(username)
-            .ok_or_else(|| anyhow::anyhow!("authentication failed"))?;
+        let Some(record) = users.get(username) else {
+            // Run a dummy verification to make the timing similar to a wrong password.
+            verify_dummy_password(password);
+            anyhow::bail!("authentication failed");
+        };
         if !verify_password(&record.password_hash, password) {
             anyhow::bail!("authentication failed");
         }
@@ -164,6 +166,13 @@ impl UserDirectory for InMemoryUserStore {
 
     async fn user_exists(&self, username: &str) -> bool {
         self.users.read().contains_key(username)
+    }
+
+    async fn user_roles(&self, username: &str) -> Option<Vec<String>> {
+        let users = self.users.read();
+        let mut roles: Vec<String> = users.get(username)?.roles.iter().cloned().collect();
+        roles.sort();
+        Some(roles)
     }
 
     async fn list_users(&self) -> anyhow::Result<Vec<crate::provider::UserRecord>> {
@@ -254,6 +263,9 @@ impl AuthProvider for BasicAuthProvider {
                 Credential::Bearer(_) => {
                     anyhow::bail!("basic auth provider does not accept bearer credentials")
                 }
+                Credential::Session(_) => {
+                    anyhow::bail!("session tokens are resolved by the auth context")
+                }
             }
         })
     }
@@ -265,6 +277,8 @@ impl AuthProvider for BasicAuthProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     #[tokio::test]
@@ -299,6 +313,38 @@ mod tests {
             .authenticate(&Credential::basic("ghost", "secret"))
             .await
             .is_err());
+    }
+
+    /// Fastest of `runs` failed authentications of `username`.
+    async fn fastest_failure(provider: &BasicAuthProvider, username: &str, runs: usize) -> Duration {
+        let mut fastest = Duration::MAX;
+        for _ in 0..runs {
+            let started = Instant::now();
+            assert!(provider
+                .authenticate(&Credential::basic(username, "wrong"))
+                .await
+                .is_err());
+            fastest = fastest.min(started.elapsed());
+        }
+        fastest
+    }
+
+    #[tokio::test]
+    async fn an_unknown_user_fails_as_slowly_as_a_wrong_password() {
+        let provider = BasicAuthProvider::new();
+        provider
+            .user_directory()
+            .unwrap()
+            .create_user("alice", "secret")
+            .await
+            .unwrap();
+
+        let wrong_password = fastest_failure(&provider, "alice", 3).await;
+        let unknown_user = fastest_failure(&provider, "ghost", 3).await;
+        assert!(
+            unknown_user * 2 >= wrong_password,
+            "unknown user failed in {unknown_user:?}, wrong password in {wrong_password:?}"
+        );
     }
 
     #[tokio::test]

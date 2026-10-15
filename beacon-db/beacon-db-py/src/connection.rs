@@ -828,7 +828,7 @@ fn build_credential(
     }
     match (username, password, token) {
         (None, None, None) => Ok(None),
-        (_, _, Some(token)) => Ok(Some(Credential::bearer(token))),
+        (_, _, Some(token)) => Ok(Some(Credential::from_bearer(token))),
         (Some(username), Some(password), None) => Ok(Some(Credential::basic(username, password))),
         (Some(_), None, None) => Err(programming_error("username given without a password")),
         (None, Some(_), None) => Err(programming_error("password given without a username")),

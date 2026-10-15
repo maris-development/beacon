@@ -17,7 +17,8 @@ use beacon_arrow_tiff::datafusion::TiffFormatFactory;
 use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
 use beacon_arrow_zarr::ZarrConfig;
 use beacon_auth::{
-    AuthContext, BasicAuthProvider, InMemoryUserStore, RoleProvider, RoleStore, UserDirectory,
+    AuthContext, BasicAuthProvider, InMemoryUserStore, RoleProvider, RoleStore, SessionPersistence,
+    SessionStore, UserDirectory,
 };
 use beacon_datafusion_ext::{
     consts::{DEFAULT_DB_STORE_URL_OBJECT_URL, TMP_STORE_URL_OBJECT_URL},
@@ -105,6 +106,8 @@ pub struct RuntimeBuilder {
 
     /// Username resolving unauthenticated access. `None` disables anonymous access.
     pub anonymous_username: Option<String>,
+    /// Idle TTLs of sign-in sessions.
+    pub session_ttls: beacon_auth::SessionTtls,
     /// Whether table-level grants are enforced for non-super-users.
     pub auth_enforce: bool,
     /// Whether the runtime refuses all writes (a read-only open).
@@ -283,6 +286,12 @@ impl RuntimeBuilder {
     /// The user is created (password-less, roleless) at build time if absent.
     pub fn with_anonymous_user(mut self, username: impl Into<String>) -> Self {
         self.anonymous_username = Some(username.into());
+        self
+    }
+
+    /// Sets the idle TTLs of sign-in sessions.
+    pub fn with_session_ttls(mut self, ttls: beacon_auth::SessionTtls) -> Self {
+        self.session_ttls = ttls;
         self
     }
 
@@ -575,6 +584,15 @@ async fn init_auth_context(
     };
 
     let mut context = AuthContext::with_role_provider(provider, role_provider);
+    // A read-only runtime writes nothing, so its sessions live in memory only.
+    context.set_sessions(if builder.read_only {
+        SessionStore::new(builder.session_ttls)
+    } else {
+        SessionStore::with_persistence(
+            builder.session_ttls,
+            store.clone() as Arc<dyn SessionPersistence>,
+        )
+    });
 
     if let (Some(username), Some(password)) = (&builder.admin_username, &builder.admin_password) {
         context.set_super_user(username, password);

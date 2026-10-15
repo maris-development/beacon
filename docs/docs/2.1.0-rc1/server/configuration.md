@@ -48,6 +48,8 @@ model and the SQL reference. These variables control it:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_AUTH_ENFORCE` | `false` | Enforce read authorization (default-deny). When `false`, authorization is a no-op. |
+| `BEACON_AUTH_SESSION_TTL_SECS` | `28800` | Idle lifetime of a sign-in session, in seconds. The default is 8 hours. |
+| `BEACON_AUTH_SESSION_REMEMBER_TTL_SECS` | `2592000` | Idle lifetime of a "stay signed in" session, in seconds. The default is 30 days. Set `0` to turn the feature off. |
 | `BEACON_AUTH_ANONYMOUS_ENABLED` | `true` | Allow unauthenticated requests as the built-in `anonymous` user. |
 | `BEACON_OIDC_ENABLED` | `false` | Accept OIDC bearer tokens in addition to local passwords. |
 | `BEACON_OIDC_ISSUER` | _(none)_ | Expected token issuer. |

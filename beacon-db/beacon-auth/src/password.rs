@@ -2,6 +2,8 @@
 //!
 //! Passwords are stored as Argon2 PHC strings (salt + parameters embedded), never in plain text.
 
+use std::sync::OnceLock;
+
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -24,6 +26,17 @@ pub fn verify_password(stored_hash: &str, candidate: &str) -> bool {
     Argon2::default()
         .verify_password(candidate.as_bytes(), &parsed)
         .is_ok()
+}
+
+/// Runs one Argon2 verification that always fails, at the cost of a real one.
+///
+/// Called for an unknown username, so its failure takes as long as a wrong password and the
+/// response time does not reveal which usernames exist.
+pub(crate) fn verify_dummy_password(candidate: &str) {
+    static DUMMY_HASH: OnceLock<String> = OnceLock::new();
+    let hash = DUMMY_HASH.get_or_init(|| hash_password("beacon-dummy-password").unwrap_or_default());
+    // The result is ignored: the caller fails whatever the candidate is.
+    let _ = verify_password(hash, candidate);
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ mod oidc;
 mod password;
 mod provider;
 mod role;
+mod session;
 
 pub use basic::{BasicAuthProvider, InMemoryUserStore};
 pub use composite::CompositeAuthProvider;
@@ -25,6 +26,10 @@ pub use credential::Credential;
 pub use oidc::{OidcAuthProvider, OidcConfig};
 pub use password::{hash_password, verify_password};
 pub use provider::{AuthProvider, Authenticated, StoredUser, UserDirectory, UserRecord};
+pub use session::{
+    failed_sign_in_delay, IssuedSession, SessionError, SessionInfo, SessionPersistence,
+    SessionStore, SessionTtls, StoredSession, SESSION_TOKEN_PREFIX,
+};
 pub use role::{
     decode_target, encode_target, normalize_setting, normalize_setting_key, rule_kind,
     ConcreteTarget, Privilege, PrivilegeRule, PrivilegeTarget, Role, RoleProvider, RoleStore,

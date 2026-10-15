@@ -149,6 +149,9 @@ impl AuthProvider for OidcAuthProvider {
                 Credential::Basic { .. } => {
                     anyhow::bail!("oidc provider does not accept basic credentials")
                 }
+                Credential::Session(_) => {
+                    anyhow::bail!("session tokens are resolved by the auth context")
+                }
             }
         })
     }

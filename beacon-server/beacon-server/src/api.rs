@@ -503,6 +503,39 @@ pub struct CreateExternalTableRequest {
     pub if_not_exists: bool,
 }
 
+/// Sign-in request for a session token.
+#[derive(Debug, Clone, serde::Deserialize, ToSchema)]
+pub struct SessionRequest {
+    pub username: String,
+    pub password: String,
+    /// Stay signed in: use the long idle TTL.
+    #[serde(default)]
+    pub remember: bool,
+}
+
+/// A new session. Send `token` as `Authorization: Bearer <token>`.
+#[derive(Debug, Clone, serde::Serialize, ToSchema)]
+pub struct SessionCreated {
+    #[schema(example = "bst_3q2-7wEXAMPLE")]
+    pub token: String,
+    pub username: String,
+    pub is_super_user: bool,
+    /// False when the server has "stay signed in" turned off.
+    pub remember: bool,
+    /// Unix seconds. Each request moves it forward.
+    pub expires_at: i64,
+}
+
+/// The state of the current session.
+#[derive(Debug, Clone, serde::Serialize, ToSchema)]
+pub struct SessionView {
+    pub username: String,
+    pub is_super_user: bool,
+    pub remember: bool,
+    /// Unix seconds. Each request moves it forward.
+    pub expires_at: i64,
+}
+
 #[cfg(test)]
 mod query_request_tests {
     use super::*;

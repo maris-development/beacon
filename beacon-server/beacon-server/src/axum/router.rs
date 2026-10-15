@@ -38,6 +38,8 @@ pub fn setup_router(
 ) -> anyhow::Result<Router> {
     let (client_router, mut api_docs_client) = setup_client_router();
     let (admin_router, api_docs_admin) = setup_admin_router();
+    // Sign-in must work without credentials, so these routes skip `resolve_identity` and the alias.
+    let (session_router, api_docs_session) = crate::axum::session::setup_session_router();
 
     // The alias of both surfaces (see `ADMIN_ALIAS_PREFIX`). It copies the two
     // routers before any middleware goes on them, so the admin gate added below
@@ -63,6 +65,7 @@ pub fn setup_router(
     let alias_router = with_admin_auth(alias_router, &beacon_runtime);
 
     api_docs_client.merge(api_docs_admin);
+    api_docs_client.merge(api_docs_session);
     api_docs_client = set_api_docs_info(api_docs_client, &config.api_docs);
 
     let base_path = &config.server.base_path;
@@ -90,7 +93,10 @@ pub fn setup_router(
     // calls execute under the caller's identity (or the anonymous principal when
     // enabled) and per-user RBAC applies at query time.
     let mcp_enabled = flag_on(std::env::var("BEACON_MCP_ENABLED").ok().as_deref());
-    let mut router = client_router.merge(admin_router).merge(alias_router);
+    let mut router = client_router
+        .merge(admin_router)
+        .merge(alias_router)
+        .merge(session_router);
     if mcp_enabled {
         let mcp_router = ::axum::Router::new()
             .route_service(
