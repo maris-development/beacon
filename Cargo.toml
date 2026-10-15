@@ -40,6 +40,8 @@ tempfile = "3.15.0"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 
 jsonwebtoken = { version = "10.4.0", features = ["aws_lc_rs"] }
+# SHA-256 and the RNG for session tokens. Already in the lock file through jsonwebtoken.
+aws-lc-rs = "1.18.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 typetag = "0.2.19"
 indexmap = {version = "2.7.1", features = ["serde"]}

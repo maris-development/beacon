@@ -65,6 +65,15 @@ pub trait UserDirectory: std::fmt::Debug + Send + Sync {
     async fn revoke_role(&self, username: &str, role: &str) -> anyhow::Result<()>;
     /// Whether a user with `username` exists. Used for idempotent bootstrap.
     async fn user_exists(&self, username: &str) -> bool;
+    /// The roles of `username`, or `None` when the user does not exist.
+    async fn user_roles(&self, username: &str) -> Option<Vec<String>> {
+        self.list_users()
+            .await
+            .ok()?
+            .into_iter()
+            .find(|user| user.username == username)
+            .map(|user| user.roles)
+    }
     /// Enumerate all stored users with their assigned roles.
     async fn list_users(&self) -> anyhow::Result<Vec<UserRecord>>;
     /// Loads every user with their password hash, to hydrate an in-memory working copy at startup.

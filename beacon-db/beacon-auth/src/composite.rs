@@ -33,6 +33,9 @@ impl AuthProvider for CompositeAuthProvider {
         match credential {
             Credential::Basic { .. } => self.local.authenticate(credential),
             Credential::Bearer(_) => self.token.authenticate(credential),
+            Credential::Session(_) => Box::pin(async {
+                anyhow::bail!("session tokens are resolved by the auth context")
+            }),
         }
     }
 

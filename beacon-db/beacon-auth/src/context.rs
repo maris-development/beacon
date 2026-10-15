@@ -6,6 +6,10 @@ use crate::{
     credential::Credential,
     provider::{AuthProvider, UserRecord},
     role::{ConcreteTarget, Privilege, PrivilegeRule, Role, RoleProvider},
+    session::{
+        super_user_fingerprint, IssuedSession, SessionError, SessionInfo, SessionStore,
+        SessionTtls, StoredSession,
+    },
 };
 
 /// Default username of the built-in anonymous principal.
@@ -26,6 +30,7 @@ pub const LOCAL_USERNAME: &str = "local";
 struct SuperUser {
     username: String,
     password: String,
+    fingerprint: String,
 }
 
 /// Constant-time string equality, to avoid leaking the super-user credential via timing.
@@ -91,6 +96,8 @@ pub struct AuthContext {
     super_user: Option<SuperUser>,
     /// Username of the anonymous principal used for unauthenticated access, if enabled.
     anonymous_user: Option<String>,
+    /// Sign-in sessions. In memory only until [`Self::set_sessions`] attaches a persistent store.
+    sessions: SessionStore,
 }
 
 impl AuthContext {
@@ -109,15 +116,18 @@ impl AuthContext {
             auth_provider,
             super_user: None,
             anonymous_user: None,
+            sessions: SessionStore::new(SessionTtls::default()),
         }
     }
 
     /// Configures the single super-user credential (from `BEACON_ADMIN_USERNAME`/`PASSWORD`).
     /// A Basic login matching these credentials is the only way to become a super-user.
     pub fn set_super_user(&mut self, username: impl Into<String>, password: impl Into<String>) {
+        let (username, password) = (username.into(), password.into());
         self.super_user = Some(SuperUser {
-            username: username.into(),
-            password: password.into(),
+            fingerprint: super_user_fingerprint(&username, &password),
+            username,
+            password,
         });
     }
 
@@ -130,6 +140,11 @@ impl AuthContext {
     /// The named user must already exist in the provider.
     pub fn set_anonymous_user(&mut self, username: impl Into<String>) {
         self.anonymous_user = Some(username.into());
+    }
+
+    /// Replaces the session store, for example with one that persists sessions.
+    pub fn set_sessions(&mut self, sessions: SessionStore) {
+        self.sessions = sessions;
     }
 
     /// Whether anonymous access is enabled.
@@ -179,6 +194,7 @@ impl AuthContext {
         if let Some(directory) = self.auth_provider.user_directory() {
             directory.hydrate().await?;
         }
+        self.sessions.hydrate().await?;
         Ok(())
     }
 
@@ -206,6 +222,9 @@ impl AuthContext {
         credential: &Credential,
         allow_empty_password: bool,
     ) -> anyhow::Result<AuthIdentity> {
+        if let Credential::Session(token) = credential {
+            return Ok(self.session_info(token).await?.identity);
+        }
         if let Credential::Basic { username, password } = credential {
             if let Some(super_user) = &self.super_user {
                 if constant_time_eq(username, &super_user.username)
@@ -229,6 +248,91 @@ impl AuthContext {
             roles: authed.roles,
             is_super_user: false,
         })
+    }
+
+    /// Signs in with a password and issues a session token.
+    pub async fn create_session(
+        &self,
+        username: &str,
+        password: &str,
+        remember: bool,
+    ) -> Result<IssuedSession, SessionError> {
+        let identity = self
+            .authenticate(&Credential::basic(username, password))
+            .await
+            .map_err(|_| SessionError::InvalidCredentials)?;
+        let fingerprint = match (&self.super_user, identity.is_super_user) {
+            (Some(super_user), true) => super_user.fingerprint.clone(),
+            _ => String::new(),
+        };
+        let (token, session) = self
+            .sessions
+            .create(&identity.username, &fingerprint, remember)
+            .await?;
+        Ok(IssuedSession {
+            token,
+            identity,
+            remember: session.remember,
+            expires_at: session.expires_at,
+        })
+    }
+
+    /// Resolves a live session token, slides its expiry, and ends it when its credential changed.
+    pub async fn session_info(&self, token: &str) -> anyhow::Result<SessionInfo> {
+        let Some(session) = self.sessions.touch(token) else {
+            tracing::debug!("session rejected: unknown or expired token");
+            anyhow::bail!("invalid or expired session");
+        };
+        let Some(identity) = self.session_identity(&session).await else {
+            tracing::debug!(username = %session.username, "session rejected: its credential changed");
+            if let Err(error) = self.sessions.remove_hash(&session.token_hash).await {
+                tracing::warn!(?error, "could not delete a revoked session");
+            }
+            anyhow::bail!("invalid or expired session");
+        };
+        Ok(SessionInfo {
+            identity,
+            remember: session.remember,
+            expires_at: session.expires_at,
+        })
+    }
+
+    /// The identity a session stands for, or `None` when its credential is no longer valid.
+    async fn session_identity(&self, session: &StoredSession) -> Option<AuthIdentity> {
+        if let Some(super_user) = &self.super_user {
+            if session.username == super_user.username {
+                return constant_time_eq(&session.credential_fingerprint, &super_user.fingerprint)
+                    .then(|| AuthIdentity {
+                        username: super_user.username.clone(),
+                        roles: Vec::new(),
+                        is_super_user: true,
+                    });
+            }
+        }
+        // A fingerprint marks a super-user session. Without a matching super-user it is void.
+        if !session.credential_fingerprint.is_empty() {
+            return None;
+        }
+        let roles = self
+            .auth_provider
+            .user_directory()?
+            .user_roles(&session.username)
+            .await?;
+        Some(AuthIdentity {
+            username: session.username.clone(),
+            roles,
+            is_super_user: false,
+        })
+    }
+
+    /// Ends the session of `token`.
+    pub async fn end_session(&self, token: &str) -> anyhow::Result<()> {
+        self.sessions.remove(token).await
+    }
+
+    /// Ends every session of `username`. A future password change must call this.
+    pub async fn end_user_sessions(&self, username: &str) -> anyhow::Result<()> {
+        self.sessions.remove_user(username).await
     }
 
     /// Evaluates whether the given roles may perform `privilege` on `target`.
@@ -375,7 +479,9 @@ impl AuthContext {
 
     pub async fn create_user(&self, username: &str, password: &str) -> anyhow::Result<()> {
         self.ensure_not_super_user_name(username)?;
-        self.user_directory()?.create_user(username, password).await
+        self.user_directory()?.create_user(username, password).await?;
+        // A session that outlived an earlier user of this name must not become valid again.
+        self.end_user_sessions(username).await
     }
 
     pub async fn drop_user(&self, username: &str) -> anyhow::Result<()> {
@@ -389,7 +495,12 @@ impl AuthContext {
                  is enabled (set BEACON_AUTH_ANONYMOUS_ENABLED=false to disable it)"
             );
         }
-        self.user_directory()?.drop_user(username).await
+        self.user_directory()?.drop_user(username).await?;
+        // CREATE USER also ends sessions, so a reused name never inherits them.
+        if let Err(error) = self.end_user_sessions(username).await {
+            tracing::warn!(?error, "could not delete the sessions of a dropped user");
+        }
+        Ok(())
     }
 
     /// Rejects operations on the reserved super-user username: the super-user is config-defined and

@@ -166,6 +166,13 @@ impl UserDirectory for InMemoryUserStore {
         self.users.read().contains_key(username)
     }
 
+    async fn user_roles(&self, username: &str) -> Option<Vec<String>> {
+        let users = self.users.read();
+        let mut roles: Vec<String> = users.get(username)?.roles.iter().cloned().collect();
+        roles.sort();
+        Some(roles)
+    }
+
     async fn list_users(&self) -> anyhow::Result<Vec<crate::provider::UserRecord>> {
         let users = self.users.read();
         let mut out: Vec<crate::provider::UserRecord> = users
@@ -253,6 +260,9 @@ impl AuthProvider for BasicAuthProvider {
                 }
                 Credential::Bearer(_) => {
                     anyhow::bail!("basic auth provider does not accept bearer credentials")
+                }
+                Credential::Session(_) => {
+                    anyhow::bail!("session tokens are resolved by the auth context")
                 }
             }
         })

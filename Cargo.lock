@@ -1691,6 +1691,8 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
+ "aws-lc-rs",
+ "base64",
  "futures",
  "glob",
  "jsonwebtoken",
