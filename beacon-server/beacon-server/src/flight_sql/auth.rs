@@ -2,7 +2,8 @@
 //!
 //! Credential validation is delegated to the runtime's auth context; this module parses the wire
 //! formats (HTTP Basic in metadata, `BasicAuth` in the handshake payload, Beacon-issued bearer
-//! tokens) and caches resolved sessions behind short-lived bearer tokens.
+//! tokens and `bst_` session tokens, which the runtime resolves) and caches resolved sessions
+//! behind short-lived bearer tokens.
 
 use std::{
     collections::HashMap,
@@ -12,6 +13,7 @@ use std::{
 
 use arrow_flight::{BasicAuth, HandshakeRequest};
 use crate::server::Server;
+use beacon_core::beacon_auth::SESSION_TOKEN_PREFIX;
 use beacon_core::{AuthIdentity, Credential};
 use prost::Message;
 use tonic::{Request, Status};
@@ -155,6 +157,15 @@ impl Authenticator {
     /// Resolves either a Beacon-issued bearer token or inline basic credentials into an auth context.
     async fn authorize_value(&self, auth_value: String) -> Result<AuthContext, Status> {
         if let Ok(token) = parse_bearer_token(&auth_value) {
+            if token.starts_with(SESSION_TOKEN_PREFIX) {
+                let identity = self
+                    .runtime
+                    .runtime()
+                    .authenticate(&Credential::session(token))
+                    .await
+                    .map_err(|_| Status::unauthenticated("invalid or expired session token"))?;
+                return Ok(AuthContext::from_identity(identity));
+            }
             return self.authorize_bearer(token).await;
         }
 

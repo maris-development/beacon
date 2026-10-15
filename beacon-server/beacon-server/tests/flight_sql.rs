@@ -1061,3 +1061,56 @@ async fn prepared_update_inserts_rows() {
     run_sql_rows(runtime, &format!("DROP TABLE {table}")).await;
     server.handle.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_token_authenticates_flight_sql() {
+    let server = spawn_server(false).await;
+    let issued = server
+        .harness
+        .server
+        .runtime()
+        .auth()
+        .create_session(common::ADMIN_USERNAME, common::ADMIN_PASSWORD, false)
+        .await
+        .unwrap();
+
+    let mut client = client(server.addr).await;
+    client.set_token(issued.token);
+    let flight_info = client
+        .execute("SELECT 1 AS value".to_string(), None)
+        .await
+        .expect("a session token should authenticate");
+    let ticket = flight_info.endpoint[0].ticket.clone().unwrap();
+    let batches = client
+        .do_get(ticket)
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
+
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ended_session_token_is_rejected_by_flight_sql() {
+    let server = spawn_server(false).await;
+    let auth = server.harness.server.runtime().auth().clone();
+    let issued = auth
+        .create_session(common::ADMIN_USERNAME, common::ADMIN_PASSWORD, false)
+        .await
+        .unwrap();
+    auth.end_session(&issued.token).await.unwrap();
+
+    let mut client = client(server.addr).await;
+    client.set_token(issued.token);
+    let error = client
+        .execute("SELECT 1 AS value".to_string(), None)
+        .await
+        .expect_err("an ended session must be rejected");
+    assert!(error.to_string().to_lowercase().contains("unauthenticated")
+        || error.to_string().to_lowercase().contains("session"));
+
+    server.handle.abort();
+}
