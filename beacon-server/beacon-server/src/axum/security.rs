@@ -30,9 +30,9 @@ impl Modify for SecurityAddon {
             SecurityScheme::Http(
                 HttpBuilder::new()
                     .scheme(HttpAuthScheme::Bearer)
-                    .bearer_format("JWT")
                     .description(Some(
-                        "OIDC access token, sent as `Authorization: Bearer <token>`.",
+                        "A Beacon session token from `POST /api/auth/session` (`bst_...`), \
+                         or an OIDC access token. Sent as `Authorization: Bearer <token>`.",
                     ))
                     .build(),
             ),

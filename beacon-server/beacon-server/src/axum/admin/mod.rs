@@ -22,7 +22,7 @@ use crate::axum::security::SecurityAddon;
 #[openapi(
     modifiers(&SecurityAddon),
     tags(
-        (name = "admin", description = "Authenticated administrative endpoints (HTTP Basic auth or bearer token, super-user only) for managing crawlers and external tables, and inspecting table configuration.")
+        (name = "admin", description = "Authenticated administrative endpoints (HTTP Basic auth, a super-user session token, or an OIDC bearer token; super-user only) for managing crawlers and external tables, and inspecting table configuration.")
     )
 )]
 pub struct AdminApiDoc;
