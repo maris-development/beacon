@@ -345,6 +345,11 @@ impl AuthContext {
         self.role_provider.query_output_row_limit(roles)
     }
 
+    /// Whether `roles` allow `operation` in a query. See [`RoleProvider::operation_allowed`].
+    pub fn operation_allowed(&self, roles: &[String], operation: crate::QueryOperation) -> bool {
+        self.role_provider.operation_allowed(roles, operation)
+    }
+
     /// Rejects any non-`SELECT` privilege: roles can only grant read access.
     fn ensure_read_only(rule: &PrivilegeRule) -> anyhow::Result<()> {
         if rule.privilege != Privilege::Select {

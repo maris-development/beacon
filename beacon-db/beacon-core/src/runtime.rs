@@ -182,6 +182,7 @@ impl Runtime {
             self.auth_enforce,
         )
         .await?;
+        crate::statement_plan::authorize_operations(&plan, &self.auth, &identity)?;
 
         match output {
             Some(output) => {
@@ -623,6 +624,7 @@ impl Runtime {
             self.auth_enforce,
         )
         .await?;
+        crate::statement_plan::authorize_operations(&plan, &self.auth, &identity)?;
 
         // Keep the `Arc` so per-node metrics can be read once the stream drains.
         // `execute_statement_plan` discards the plan, so create/execute are inlined.
