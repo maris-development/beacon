@@ -53,7 +53,7 @@ use std::sync::Arc;
 
 use beacon_nd_array::{
     dataset::{AnyDataset, Dataset},
-    NdArrayD,
+    dataset_v2, NdArrayD,
 };
 use indexmap::IndexMap;
 use object_store::{path::Path, ObjectStore};
@@ -86,6 +86,26 @@ pub async fn open_dataset(store: Arc<dyn ObjectStore>, path: Path) -> anyhow::Re
         .await
         .with_invented_dimensions(phony.invented_names().iter().cloned());
     AnyDataset::try_from_dataset(dataset).await
+}
+
+/// Open a NetCDF object from `store` and return its contents as a
+/// [`dataset_v2::Dataset`].
+///
+/// The arrays are the same as those of [`open_dataset`], and they read lazily too.
+///
+/// # Errors
+///
+/// Returns an error when the object cannot be opened, or when two arrays give
+/// one dimension different sizes.
+pub async fn open_dataset_v2(
+    store: Arc<dyn ObjectStore>,
+    path: Path,
+) -> anyhow::Result<dataset_v2::Dataset> {
+    let name = path.to_string();
+    let file = Arc::new(AsyncNetcdfFile::open_store(store, path).await?);
+    let phony = PhonyDimensions::of_file(&file);
+    let arrays = read_arrays(&file)?;
+    dataset_v2::Dataset::from_arrays(name, arrays, phony.invented_names().clone())
 }
 
 /// Read every variable and attribute of an opened file into an ordered map of

@@ -2,7 +2,12 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use crate::{NdArrayD, dataset_v2::Dataset};
+use crate::{
+    NdArrayD,
+    array::subset::ArraySubset,
+    arrow::batch::{c_order_chunk_shape, generate_chunk_subsets},
+    dataset_v2::Dataset,
+};
 
 pub struct GriddedDataset {
     pub inner: Dataset,
@@ -75,6 +80,37 @@ impl GriddedDataset {
             grid_dimensions,
             chunk_sizes,
         })
+    }
+
+    /// The size of each grid dimension, in grid order.
+    pub fn shape(&self) -> Vec<usize> {
+        self.grid_dimensions
+            .iter()
+            .map(|dim| self.inner.dimensions[dim])
+            .collect()
+    }
+
+    /// Cut the grid into the chunks that the scan reads one at a time.
+    ///
+    /// The cut follows `chunk_sizes`, and a chunk at the end of an axis is smaller.
+    /// A grid that is stored in one chunk is cut into C-order runs of at most
+    /// `batch_size` cells, so a large contiguous variable does not become one chunk.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_size` - The largest number of cells in one chunk of a grid that is stored in one chunk
+    ///
+    /// # Returns
+    ///
+    /// The chunks in C order. A grid of rank 0 gives one empty subset.
+    pub fn chunks(&self, batch_size: usize) -> Vec<ArraySubset> {
+        let shape = self.shape();
+        let chunk_shape = if self.chunk_sizes == shape {
+            c_order_chunk_shape(&shape, batch_size)
+        } else {
+            self.chunk_sizes.clone()
+        };
+        generate_chunk_subsets(&shape, &chunk_shape)
     }
 }
 
@@ -198,5 +234,49 @@ mod tests {
         .unwrap();
         assert!(gridded.grid_dimensions.is_empty());
         assert!(gridded.chunk_sizes.is_empty());
+    }
+
+    fn temp_grid() -> GriddedDataset {
+        GriddedDataset::try_new(
+            dataset(vec![("temp", array(&[4, 5], &["time", "lat"]))]),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn chunks_follow_the_chunk_sizes() {
+        let mut gridded = temp_grid();
+        gridded.chunk_sizes = vec![3, 5];
+
+        let chunks = gridded.chunks(usize::MAX);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            (chunks[0].start.clone(), chunks[0].shape.clone()),
+            (vec![0, 0], vec![3, 5])
+        );
+        assert_eq!(
+            (chunks[1].start.clone(), chunks[1].shape.clone()),
+            (vec![3, 0], vec![1, 5])
+        );
+    }
+
+    #[test]
+    fn a_grid_in_one_chunk_is_cut_by_batch_size() {
+        let chunks = temp_grid().chunks(10);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.shape == vec![2, 5]));
+    }
+
+    #[test]
+    fn a_grid_of_rank_zero_gives_one_chunk() {
+        let gridded = GriddedDataset::try_new(dataset(vec![("a", array(&[], &[]))]), None).unwrap();
+
+        let chunks = gridded.chunks(10);
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].shape.is_empty());
     }
 }

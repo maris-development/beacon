@@ -42,4 +42,4 @@ pub mod compat;
 /// High-level reader that opens an object and returns a dataset.
 pub mod reader;
 
-pub use reader::{open_dataset, read_arrays};
+pub use reader::{open_dataset, open_dataset_v2, read_arrays};

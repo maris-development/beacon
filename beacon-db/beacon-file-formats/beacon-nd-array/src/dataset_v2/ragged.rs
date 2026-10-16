@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use indexmap::IndexMap;
 
@@ -109,10 +109,7 @@ impl RaggedDataset {
                     "array '{name}' has observation dimension '{dim}' at a later axis, it must be the first"
                 );
             }
-            match dimensions
-                .first()
-                .and_then(|dim| row_size_arrays.get(dim))
-            {
+            match dimensions.first().and_then(|dim| row_size_arrays.get(dim)) {
                 Some(row_size_name) => {
                     ragged_arrays.insert(name.clone(), row_size_name.clone());
                 }
@@ -153,6 +150,48 @@ impl RaggedDataset {
             result.insert(row_size_name.clone(), offsets);
         }
         Ok(result)
+    }
+
+    /// Group the casts into ranges that the scan reads one at a time.
+    ///
+    /// A range closes before the cast that would take it above `batch_size` rows.
+    /// The rows of a range are the most observations that one row-size array counts for it.
+    /// A cast with more than `batch_size` rows is a range of its own.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch_size` - The largest number of rows in a range of more than one cast
+    ///
+    /// # Returns
+    ///
+    /// Ranges of cast indices, in order, that cover every cast one time
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a row-size array cannot be read.
+    pub async fn cast_ranges(&self, batch_size: usize) -> anyhow::Result<Vec<Range<usize>>> {
+        let offsets = self.row_offsets().await?;
+        let casts = offsets.values().map(|o| o.len() - 1).max().unwrap_or(0);
+        let rows = |range: Range<usize>| {
+            offsets
+                .values()
+                .map(|o| o[range.end] - o[range.start])
+                .max()
+                .unwrap_or(0)
+        };
+
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        for end in 1..=casts {
+            if end > start + 1 && rows(start..end) > batch_size {
+                ranges.push(start..end - 1);
+                start = end - 1;
+            }
+        }
+        if start < casts {
+            ranges.push(start..casts);
+        }
+        Ok(ranges)
     }
 }
 
@@ -251,9 +290,11 @@ mod tests {
 
     #[tokio::test]
     async fn missing_row_size_array_is_rejected() {
-        let result =
-            RaggedDataset::try_new(dataset(vec![("z_row_size.sample_dimension", text("z_obs"))]))
-                .await;
+        let result = RaggedDataset::try_new(dataset(vec![(
+            "z_row_size.sample_dimension",
+            text("z_obs"),
+        )]))
+        .await;
         assert!(result.is_err());
     }
 
@@ -285,5 +326,32 @@ mod tests {
         arrays.push(("flags", array(vec![0u8; 12], &[2, 6], &["n", "z_obs"])));
         let result = RaggedDataset::try_new(dataset(arrays)).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cast_ranges_stay_within_the_batch_size() {
+        let ragged = RaggedDataset::try_new(dataset(wod_like())).await.unwrap();
+
+        let ranges = ragged.cast_ranges(3).await.unwrap();
+
+        assert_eq!(ranges, vec![0..2, 2..3]);
+    }
+
+    #[tokio::test]
+    async fn a_large_cast_is_a_range_of_its_own() {
+        let ragged = RaggedDataset::try_new(dataset(wod_like())).await.unwrap();
+
+        let ranges = ragged.cast_ranges(1).await.unwrap();
+
+        assert_eq!(ranges, vec![0..1, 1..2, 2..3]);
+    }
+
+    #[tokio::test]
+    async fn one_range_holds_all_casts_when_they_fit() {
+        let ragged = RaggedDataset::try_new(dataset(wod_like())).await.unwrap();
+
+        let ranges = ragged.cast_ranges(usize::MAX).await.unwrap();
+
+        assert_eq!(ranges, vec![0..3]);
     }
 }
