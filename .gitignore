@@ -59,3 +59,4 @@ beacon-db/beacon-db-py/wheelhouse/
 *.pyc
 .ruff_cache/
 .mypy_cache/
+.vscode/settings.json

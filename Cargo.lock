@@ -1875,6 +1875,7 @@ dependencies = [
  "beacon-file-stats",
  "blake3",
  "chrono",
+ "crossbeam",
  "datafusion 54.1.0",
  "datafusion-federation",
  "datafusion-spatial",
