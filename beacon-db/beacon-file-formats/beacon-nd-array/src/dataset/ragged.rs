@@ -101,6 +101,30 @@ where
         .collect()
 }
 
+/// Read a row-size variable of any integer type as a list of counts.
+pub(crate) async fn read_any_row_sizes(
+    arr: &Arc<dyn NdArrayD>,
+    rs_var: &str,
+) -> anyhow::Result<Vec<usize>> {
+    // CF fixes no width on a row-size variable, so a writer picks whatever
+    // integer holds its largest cast. WOD ships `short`, other producers
+    // ship `int` or `int64`. Read every signed and unsigned width through
+    // the same path.
+    match arr.datatype() {
+        NdArrayDataType::I8 => read_row_sizes::<i8>(arr, rs_var).await,
+        NdArrayDataType::I16 => read_row_sizes::<i16>(arr, rs_var).await,
+        NdArrayDataType::I32 => read_row_sizes::<i32>(arr, rs_var).await,
+        NdArrayDataType::I64 => read_row_sizes::<i64>(arr, rs_var).await,
+        NdArrayDataType::U8 => read_row_sizes::<u8>(arr, rs_var).await,
+        NdArrayDataType::U16 => read_row_sizes::<u16>(arr, rs_var).await,
+        NdArrayDataType::U32 => read_row_sizes::<u32>(arr, rs_var).await,
+        NdArrayDataType::U64 => read_row_sizes::<u64>(arr, rs_var).await,
+        other => anyhow::bail!(
+            "row-size variable {rs_var} holds {other:?}; it must hold an integer type"
+        ),
+    }
+}
+
 impl RaggedDataset {
     /// Build a `RaggedDataset` from a [`Dataset`] that follows the CF
     /// contiguous ragged-array convention.
@@ -270,24 +294,7 @@ impl RaggedDataset {
 
         for (obs_dim, arr) in &self.row_size_arrays {
             let rs_var = &self.row_size_vars[obs_dim];
-
-            // CF fixes no width on a row-size variable, so a writer picks whatever
-            // integer holds its largest cast. WOD ships `short`, other producers
-            // ship `int` or `int64`. Read every signed and unsigned width through
-            // the same path.
-            let row_sizes: Vec<usize> = match arr.datatype() {
-                NdArrayDataType::I8 => read_row_sizes::<i8>(arr, rs_var).await?,
-                NdArrayDataType::I16 => read_row_sizes::<i16>(arr, rs_var).await?,
-                NdArrayDataType::I32 => read_row_sizes::<i32>(arr, rs_var).await?,
-                NdArrayDataType::I64 => read_row_sizes::<i64>(arr, rs_var).await?,
-                NdArrayDataType::U8 => read_row_sizes::<u8>(arr, rs_var).await?,
-                NdArrayDataType::U16 => read_row_sizes::<u16>(arr, rs_var).await?,
-                NdArrayDataType::U32 => read_row_sizes::<u32>(arr, rs_var).await?,
-                NdArrayDataType::U64 => read_row_sizes::<u64>(arr, rs_var).await?,
-                other => anyhow::bail!(
-                    "row-size variable {rs_var} holds {other:?}; it must hold an integer type"
-                ),
-            };
+            let row_sizes = read_any_row_sizes(arr, rs_var).await?;
 
             let mut cum = Vec::with_capacity(self.n_instances + 1);
             cum.push(0usize);

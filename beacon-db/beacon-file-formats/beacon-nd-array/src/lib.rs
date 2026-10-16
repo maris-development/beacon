@@ -60,9 +60,11 @@
 pub mod array;
 pub mod arrow;
 pub mod dataset;
+pub mod dataset_v2;
 pub mod datatypes;
 pub mod error;
 pub mod projection;
+pub mod statistics;
 
 pub use error::NdArrayError;
 
@@ -324,9 +326,13 @@ mod tests {
 
     #[test]
     fn test_try_new_from_vec_rejects_values_that_do_not_fill_the_shape() {
-        let err =
-            NdArray::<i32>::try_new_from_vec_in_mem(vec![1, 2, 3], vec![2, 2], dims(&["a", "b"]), None)
-                .unwrap_err();
+        let err = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![1, 2, 3],
+            vec![2, 2],
+            dims(&["a", "b"]),
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, NdArrayError::InvalidShape(_)),
             "unexpected error: {err}"
@@ -404,9 +410,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_subset_carries_the_fill_value_forward() {
-        let array =
-            NdArray::<i32>::try_new_from_vec_in_mem((0..4).collect(), vec![4], dims(&["x"]), Some(-9))
-                .unwrap();
+        let array = NdArray::<i32>::try_new_from_vec_in_mem(
+            (0..4).collect(),
+            vec![4],
+            dims(&["x"]),
+            Some(-9),
+        )
+        .unwrap();
         let sub = array
             .subset(ArraySubset {
                 start: vec![1],
@@ -438,7 +448,10 @@ mod tests {
     #[tokio::test]
     async fn test_broadcast_repeats_along_an_inserted_dimension() {
         let array = i32_array(vec![10, 20], vec![2], &["lat"]);
-        let broadcasted = array.broadcast(&[3, 2], &dims(&["time", "lat"])).await.unwrap();
+        let broadcasted = array
+            .broadcast(&[3, 2], &dims(&["time", "lat"]))
+            .await
+            .unwrap();
 
         assert_eq!(broadcasted.shape(), vec![3, 2]);
         assert_eq!(broadcasted.dimensions(), dims(&["time", "lat"]));
@@ -452,7 +465,10 @@ mod tests {
     async fn test_broadcast_of_a_scalar_attribute_fills_the_whole_grid() {
         // Rank-0 arrays back every NetCDF attribute; they must reach any grid.
         let array = i32_array(vec![7], vec![], &[]);
-        let broadcasted = array.broadcast(&[2, 3], &dims(&["time", "lat"])).await.unwrap();
+        let broadcasted = array
+            .broadcast(&[2, 3], &dims(&["time", "lat"]))
+            .await
+            .unwrap();
         assert_eq!(broadcasted.clone_into_raw_vec().await, vec![7; 6]);
     }
 
@@ -461,7 +477,10 @@ mod tests {
         let array =
             NdArray::<i32>::try_new_from_vec_in_mem(vec![1, -9], vec![2], dims(&["lat"]), Some(-9))
                 .unwrap();
-        let broadcasted = array.broadcast(&[2, 2], &dims(&["time", "lat"])).await.unwrap();
+        let broadcasted = array
+            .broadcast(&[2, 2], &dims(&["time", "lat"]))
+            .await
+            .unwrap();
         assert_eq!(broadcasted.fill_value().await, Some(-9));
     }
 
@@ -493,7 +512,10 @@ mod tests {
     #[tokio::test]
     async fn test_broadcast_of_a_zero_length_dimension_stays_empty() {
         let array = i32_array(vec![], vec![0], &["time"]);
-        let broadcasted = array.broadcast(&[0, 3], &dims(&["time", "lat"])).await.unwrap();
+        let broadcasted = array
+            .broadcast(&[0, 3], &dims(&["time", "lat"]))
+            .await
+            .unwrap();
         assert_eq!(broadcasted.shape(), vec![0, 3]);
         assert!(broadcasted.clone_into_raw_vec().await.is_empty());
     }
@@ -508,7 +530,10 @@ mod tests {
         // Stored as (lat, time): lat0 -> [0, 1, 2], lat1 -> [3, 4, 5].
         // In (time, lat) order that is [0, 3, 1, 4, 2, 5].
         let array = i32_array((0..6).collect(), vec![2, 3], &["lat", "time"]);
-        let broadcasted = array.broadcast(&[3, 2], &dims(&["time", "lat"])).await.unwrap();
+        let broadcasted = array
+            .broadcast(&[3, 2], &dims(&["time", "lat"]))
+            .await
+            .unwrap();
 
         assert_eq!(broadcasted.shape(), vec![3, 2]);
         assert_eq!(
