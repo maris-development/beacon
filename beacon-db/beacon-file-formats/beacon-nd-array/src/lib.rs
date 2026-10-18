@@ -64,6 +64,7 @@ pub mod dataset_v2;
 pub mod datatypes;
 pub mod error;
 pub mod nd_file_opener;
+pub mod nd_morsel_file_source;
 pub mod nd_morsel_planner;
 pub mod projection;
 pub mod statistics;

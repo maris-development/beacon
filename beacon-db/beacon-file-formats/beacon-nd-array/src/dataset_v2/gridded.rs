@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use arrow::datatypes::SchemaRef;
 use indexmap::IndexMap;
 
 use crate::{
@@ -18,16 +19,16 @@ pub struct GriddedDataset {
 impl GriddedDataset {
     pub fn try_new(
         mut inner: Dataset,
-        projection: Option<Arc<[String]>>,
+        projected_schema: Option<SchemaRef>,
     ) -> anyhow::Result<GriddedDataset> {
         // Check if all the variables
-        if let Some(projection) = &projection {
+        if let Some(projection) = &projected_schema {
             let mut projected_arrays = IndexMap::new();
             // Keep track of the projected dimensions
             let mut projected_dimensions = Vec::new();
-            for var in projection.iter() {
-                if let Some(array) = inner.arrays.get(var) {
-                    projected_arrays.insert(var.clone(), array.clone());
+            for var in projection.fields() {
+                if let Some(array) = inner.arrays.get(var.name()) {
+                    projected_arrays.insert(var.name().to_string(), array.clone());
                     for dim in &array.dimensions() {
                         if !projected_dimensions.contains(dim) {
                             projected_dimensions.push(dim.clone());
@@ -118,6 +119,8 @@ impl GriddedDataset {
 mod tests {
     use std::collections::HashSet;
 
+    use arrow::datatypes::{DataType, Field, Schema};
+
     use super::*;
     use crate::NdArray;
 
@@ -175,7 +178,7 @@ mod tests {
 
     #[test]
     fn projection_narrows_the_grid() {
-        let projection: Arc<[String]> = strings(&["time"]).into();
+        let projection = Arc::new(Schema::new(vec![Field::new("time", DataType::Int32, true)]));
         let gridded = GriddedDataset::try_new(
             dataset(vec![
                 ("time", array(&[2], &["time"])),

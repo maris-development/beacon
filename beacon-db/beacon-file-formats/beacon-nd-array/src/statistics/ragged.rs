@@ -141,7 +141,7 @@ mod tests {
                 .collect(),
             invented_dimensions: HashSet::new(),
         };
-        RaggedDataset::try_new(dataset).await.unwrap()
+        RaggedDataset::try_new(dataset, None).await.unwrap()
     }
 
     /// The value at `index` of the min or max array of column `name`.

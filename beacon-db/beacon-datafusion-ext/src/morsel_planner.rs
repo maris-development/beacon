@@ -8,6 +8,7 @@ use std::{
     },
 };
 
+use arrow::array::RecordBatch;
 use crossbeam::{
     deque::{Steal, Stealer, Worker},
     queue::ArrayQueue,
@@ -17,8 +18,6 @@ use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use crate::nd::NdRecordBatch;
-
 /// One unit of scan work that produces one batch.
 pub trait Morsel: Send + Debug {
     /// Read the data of this morsel.
@@ -26,7 +25,7 @@ pub trait Morsel: Send + Debug {
     /// # Errors
     ///
     /// Returns the error of the read.
-    fn produce(self: Box<Self>) -> BoxFuture<'static, Result<NdRecordBatch>>;
+    fn produce(self: Box<Self>) -> BoxFuture<'static, Result<RecordBatch>>;
 }
 
 /// Cuts one file into morsels.
@@ -278,7 +277,7 @@ mod tests {
     struct TestMorsel(String, usize);
 
     impl Morsel for TestMorsel {
-        fn produce(self: Box<Self>) -> BoxFuture<'static, Result<NdRecordBatch>> {
+        fn produce(self: Box<Self>) -> BoxFuture<'static, Result<RecordBatch>> {
             Box::pin(async { Err(DataFusionError::Internal("test morsel".to_string())) })
         }
     }

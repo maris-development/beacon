@@ -61,7 +61,7 @@ impl OxcdfMorselPlanner {
 
     /// Cut a ragged file into one morsel per range of casts.
     async fn plan_ragged(&self, dataset: Dataset) -> Result<Vec<Box<dyn Morsel>>> {
-        let ragged = Arc::new(RaggedDataset::try_new(dataset).await.map_err(external)?);
+        let ragged = Arc::new(RaggedDataset::try_new(dataset, None).await.map_err(external)?);
         let ranges = ragged
             .cast_ranges(self.batch_size)
             .await

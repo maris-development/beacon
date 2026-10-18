@@ -1,5 +1,6 @@
 use std::{ops::Range, sync::Arc};
 
+use arrow::datatypes::SchemaRef;
 use indexmap::IndexMap;
 
 use crate::{
@@ -25,7 +26,22 @@ pub struct RaggedDataset {
 }
 
 impl RaggedDataset {
-    pub async fn try_new(inner: Dataset) -> anyhow::Result<RaggedDataset> {
+    /// Classify the arrays of a ragged dataset.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The dataset of one file
+    /// * `projected_schema` - The columns that the scan reads, or `None` for all arrays.
+    ///   The dataset keeps only these arrays, plus the row-size arrays and their attributes.
+    ///   A projected row-size array is not a column.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the dataset does not follow the contiguous ragged-array convention.
+    pub async fn try_new(
+        mut inner: Dataset,
+        projected_schema: Option<SchemaRef>,
+    ) -> anyhow::Result<RaggedDataset> {
         // A `<var>.sample_dimension` attribute marks `<var>` as a row-size array.
         let mut row_size_arrays = IndexMap::new();
         for (key, attribute) in &inner.arrays {
@@ -85,17 +101,26 @@ impl RaggedDataset {
         }
         let instance_dimension = instance_dimension.expect("row_size_arrays is not empty");
 
-        // The leading observation dimension of an array selects its row-size array.
-        let mut ragged_arrays = IndexMap::new();
-        let mut instance_arrays = Vec::new();
-        for (name, array) in &inner.arrays {
-            let is_row_size_part = row_size_arrays.values().any(|row_size_name| {
+        let is_row_size_part = |name: &str| {
+            row_size_arrays.values().any(|row_size_name| {
                 name == row_size_name
                     || name
                         .strip_prefix(row_size_name.as_str())
                         .is_some_and(|rest| rest.starts_with('.'))
+            })
+        };
+        // Filter before the classification, so an array outside the projection cannot fail the scan.
+        if let Some(projection) = &projected_schema {
+            inner.arrays.retain(|name, _| {
+                is_row_size_part(name) || projection.field_with_name(name).is_ok()
             });
-            if is_row_size_part {
+        }
+
+        // The leading observation dimension of an array selects its row-size array.
+        let mut ragged_arrays = IndexMap::new();
+        let mut instance_arrays = Vec::new();
+        for (name, array) in &inner.arrays {
+            if is_row_size_part(name) {
                 continue;
             }
 
@@ -204,6 +229,8 @@ fn is_integer(datatype: &NdArrayDataType) -> bool {
 mod tests {
     use std::collections::HashSet;
 
+    use arrow::datatypes::{DataType, Field, Schema};
+
     use super::*;
 
     fn array<T: crate::datatypes::NdArrayType + Clone>(
@@ -267,7 +294,9 @@ mod tests {
 
     #[tokio::test]
     async fn arrays_are_classified() {
-        let ragged = RaggedDataset::try_new(dataset(wod_like())).await.unwrap();
+        let ragged = RaggedDataset::try_new(dataset(wod_like()), None)
+            .await
+            .unwrap();
         assert_eq!(ragged.instance_dimension, "casts");
         assert_eq!(ragged.row_size_arrays["z_obs"], "z_row_size");
         assert_eq!(ragged.row_size_arrays["t_obs"], "t_row_size");
@@ -282,55 +311,118 @@ mod tests {
 
     #[tokio::test]
     async fn dataset_without_sample_dimension_is_rejected() {
-        let result =
-            RaggedDataset::try_new(dataset(vec![("station", array(vec![1], &[1], &["casts"]))]))
-                .await;
+        let result = RaggedDataset::try_new(
+            dataset(vec![("station", array(vec![1], &[1], &["casts"]))]),
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn missing_row_size_array_is_rejected() {
-        let result = RaggedDataset::try_new(dataset(vec![(
-            "z_row_size.sample_dimension",
-            text("z_obs"),
-        )]))
+        let result = RaggedDataset::try_new(
+            dataset(vec![("z_row_size.sample_dimension", text("z_obs"))]),
+            None,
+        )
         .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn float_row_size_array_is_rejected() {
-        let result = RaggedDataset::try_new(dataset(vec![
-            ("z_row_size", array(vec![2.0f32], &[1], &["casts"])),
-            ("z_row_size.sample_dimension", text("z_obs")),
-        ]))
+        let result = RaggedDataset::try_new(
+            dataset(vec![
+                ("z_row_size", array(vec![2.0f32], &[1], &["casts"])),
+                ("z_row_size.sample_dimension", text("z_obs")),
+            ]),
+            None,
+        )
         .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn two_instance_dimensions_are_rejected() {
-        let result = RaggedDataset::try_new(dataset(vec![
-            ("z_row_size", array(vec![2], &[1], &["casts"])),
-            ("z_row_size.sample_dimension", text("z_obs")),
-            ("t_row_size", array(vec![1], &[1], &["profiles"])),
-            ("t_row_size.sample_dimension", text("t_obs")),
-        ]))
+        let result = RaggedDataset::try_new(
+            dataset(vec![
+                ("z_row_size", array(vec![2], &[1], &["casts"])),
+                ("z_row_size.sample_dimension", text("z_obs")),
+                ("t_row_size", array(vec![1], &[1], &["profiles"])),
+                ("t_row_size.sample_dimension", text("t_obs")),
+            ]),
+            None,
+        )
         .await;
         assert!(result.is_err());
+    }
+
+    fn projection(names: &[&str]) -> Option<SchemaRef> {
+        let fields: Vec<Field> = names
+            .iter()
+            .map(|name| Field::new(*name, DataType::Int32, true))
+            .collect();
+        Some(Arc::new(Schema::new(fields)))
+    }
+
+    #[tokio::test]
+    async fn projection_keeps_the_projected_and_row_size_arrays() {
+        let ragged = RaggedDataset::try_new(
+            dataset(wod_like()),
+            projection(&["depth", "station", "salt"]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            ragged.ragged_arrays.keys().collect::<Vec<_>>(),
+            vec!["depth"]
+        );
+        assert_eq!(ragged.instance_arrays, strings(&["station"]));
+        assert_eq!(ragged.row_size_arrays.len(), 2);
+        assert!(ragged.inner.arrays.contains_key("z_row_size"));
+        assert!(
+            ragged
+                .inner
+                .arrays
+                .contains_key("t_row_size.sample_dimension")
+        );
+        assert!(!ragged.inner.arrays.contains_key("temp"));
+    }
+
+    #[tokio::test]
+    async fn a_projected_row_size_array_is_not_a_column() {
+        let ragged = RaggedDataset::try_new(dataset(wod_like()), projection(&["z_row_size"]))
+            .await
+            .unwrap();
+
+        assert!(ragged.ragged_arrays.is_empty());
+        assert!(ragged.instance_arrays.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_array_outside_the_projection_is_not_checked() {
+        let mut arrays = wod_like();
+        arrays.push(("flags", array(vec![0u8; 12], &[2, 6], &["n", "z_obs"])));
+
+        let result = RaggedDataset::try_new(dataset(arrays), projection(&["depth"])).await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn later_observation_axis_is_rejected() {
         let mut arrays = wod_like();
         arrays.push(("flags", array(vec![0u8; 12], &[2, 6], &["n", "z_obs"])));
-        let result = RaggedDataset::try_new(dataset(arrays)).await;
+        let result = RaggedDataset::try_new(dataset(arrays), None).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn cast_ranges_stay_within_the_batch_size() {
-        let ragged = RaggedDataset::try_new(dataset(wod_like())).await.unwrap();
+        let ragged = RaggedDataset::try_new(dataset(wod_like()), None)
+            .await
+            .unwrap();
 
         let ranges = ragged.cast_ranges(3).await.unwrap();
 
@@ -339,7 +431,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_large_cast_is_a_range_of_its_own() {
-        let ragged = RaggedDataset::try_new(dataset(wod_like())).await.unwrap();
+        let ragged = RaggedDataset::try_new(dataset(wod_like()), None)
+            .await
+            .unwrap();
 
         let ranges = ragged.cast_ranges(1).await.unwrap();
 
@@ -348,7 +442,9 @@ mod tests {
 
     #[tokio::test]
     async fn one_range_holds_all_casts_when_they_fit() {
-        let ragged = RaggedDataset::try_new(dataset(wod_like())).await.unwrap();
+        let ragged = RaggedDataset::try_new(dataset(wod_like()), None)
+            .await
+            .unwrap();
 
         let ranges = ragged.cast_ranges(usize::MAX).await.unwrap();
 
