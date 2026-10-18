@@ -13,13 +13,20 @@ use crossbeam::{
     deque::{Steal, Stealer, Worker},
     queue::ArrayQueue,
 };
-use datafusion::{datasource::listing::PartitionedFile, error::Result};
-use futures::future::BoxFuture;
+use datafusion::{
+    datasource::{
+        listing::PartitionedFile,
+        physical_plan::{FileOpenFuture, FileOpener},
+    },
+    error::Result,
+};
+use futures::{FutureExt, StreamExt, future::BoxFuture};
+use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 /// One unit of scan work that produces one batch.
-pub trait Morsel: Send + Debug {
+pub trait Morsel: Send + Sync + Debug {
     /// Read the data of this morsel.
     ///
     /// # Errors
@@ -29,7 +36,7 @@ pub trait Morsel: Send + Debug {
 }
 
 /// Cuts one file into morsels.
-pub trait MorselPlanner: Send + Sync {
+pub trait MorselPlanner: Send + Sync + Debug {
     /// Plan the morsels of `file`.
     ///
     /// # Errors
@@ -37,6 +44,7 @@ pub trait MorselPlanner: Send + Sync {
     /// Returns the error of the open or of the plan.
     fn plan(
         self: Arc<Self>,
+        store: Arc<dyn ObjectStore>,
         file: PartitionedFile,
     ) -> BoxFuture<'static, Result<Vec<Box<dyn Morsel>>>>;
 }
@@ -48,7 +56,7 @@ pub trait MorselPlanner: Send + Sync {
 /// 2. Shared: it plans large files into its own queue, which the other partitions can steal from.
 ///
 /// Each partition can have only one handle. Clones share the same queues.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct MorselPlannerQueue {
     inner: Arc<SharedMorsels>,
 }
@@ -56,6 +64,7 @@ pub struct MorselPlannerQueue {
 /// The owner end of one partition's queue of shared morsels.
 type MorselWorker = Worker<Box<dyn Morsel>>;
 
+#[derive(Debug)]
 struct SharedMorsels {
     planner: Arc<dyn MorselPlanner>,
     local_files: ArrayQueue<PartitionedFile>, // Files whose morsels stay with the partition that plans them
@@ -103,7 +112,11 @@ impl MorselPlannerQueue {
     /// # Panics
     ///
     /// Panics if `partition` is not below `num_partitions`, or if `partition` already has a handle
-    pub fn partition(&self, partition: usize) -> PartitionMorsels {
+    pub fn partition(
+        &self,
+        store: Arc<dyn ObjectStore>,
+        partition: usize,
+    ) -> anyhow::Result<PartitionMorsels> {
         let count = self.inner.morsels.len();
         assert!(
             partition < count,
@@ -113,13 +126,14 @@ impl MorselPlannerQueue {
         // WITH RECURSIVE re-executes partition 0 of its recursive term on each iteration.
         let worker = self.inner.workers.lock()[partition]
             .take()
-            .unwrap_or_else(|| panic!("partition {partition} already has a handle"));
-        PartitionMorsels {
+            .ok_or_else(|| anyhow::anyhow!("partition {partition} already has a handle"))?;
+        Ok(PartitionMorsels {
             queue: self.clone(),
+            store,
             partition,
-            local: VecDeque::new(),
-            worker,
-        }
+            local: parking_lot::Mutex::new(VecDeque::new()),
+            worker: Arc::new(parking_lot::Mutex::new(worker)),
+        })
     }
 }
 
@@ -131,9 +145,10 @@ impl MorselPlannerQueue {
 /// The methods take `&mut self`: `Worker` is not `Sync`, so a future that holds `&self` is not `Send`.
 pub struct PartitionMorsels {
     queue: MorselPlannerQueue,
+    store: Arc<dyn ObjectStore>,
     partition: usize,
-    local: VecDeque<Box<dyn Morsel>>, // Morsels of local files; only this handle reads them
-    worker: MorselWorker,             // Owner end of this partition's shared morsels
+    local: parking_lot::Mutex<VecDeque<Box<dyn Morsel>>>, // Morsels of local files; only this handle reads them
+    worker: Arc<parking_lot::Mutex<MorselWorker>>, // Owner end of this partition's shared morsels
 }
 
 impl PartitionMorsels {
@@ -146,7 +161,7 @@ impl PartitionMorsels {
     /// `Some(Ok(morsel))` for work, `Some(Err(_))` when a plan fails, and `None` when the scan is done
     pub async fn next_morsel(&mut self) -> Option<Result<Box<dyn Morsel>>> {
         loop {
-            if let Some(morsel) = self.local.pop_front() {
+            if let Some(morsel) = self.local.lock().pop_front() {
                 return Some(Ok(morsel));
             }
             let shared = &*self.queue.inner;
@@ -154,8 +169,11 @@ impl PartitionMorsels {
                 return self.next_shared().await;
             };
             // No claim here: other partitions cannot steal these morsels, so they never wait for them.
-            match Arc::clone(&shared.planner).plan(file).await {
-                Ok(morsels) => self.local.extend(morsels),
+            match Arc::clone(&shared.planner)
+                .plan(self.store.clone(), file)
+                .await
+            {
+                Ok(morsels) => self.local.lock().extend(morsels),
                 Err(error) => return Some(Err(error)),
             }
         }
@@ -167,7 +185,7 @@ impl PartitionMorsels {
     /// While another partition plans, this waits for its morsels.
     async fn next_shared(&mut self) -> Option<Result<Box<dyn Morsel>>> {
         loop {
-            if let Some(morsel) = self.worker.pop() {
+            if let Some(morsel) = self.worker.lock().pop() {
                 return Some(Ok(morsel));
             }
             match self.plan_next().await {
@@ -201,8 +219,10 @@ impl PartitionMorsels {
         let mut claim = PlanningClaim::new(shared);
         let file = shared.shared_files.pop()?;
         claim.wake_always = true;
-        let morsels = Arc::clone(&shared.planner).plan(file).await;
-        let worker = &self.worker;
+        let morsels = Arc::clone(&shared.planner)
+            .plan(Arc::clone(&self.store), file)
+            .await;
+        let worker = &self.worker.lock();
         // Reverse, so the owner pops chunk 0 first and thieves take the last chunk.
         Some(morsels.map(|morsels| morsels.into_iter().rev().for_each(|m| worker.push(m))))
     }
@@ -222,6 +242,37 @@ impl PartitionMorsels {
                 return steal.success();
             }
         }
+    }
+}
+
+impl PartitionMorsels {
+    /// A handle that the caller owns, on the same queue and the same shared morsels.
+    ///
+    /// The new handle starts with no local morsels.
+    fn to_owned_handle(&self) -> PartitionMorsels {
+        PartitionMorsels {
+            queue: self.queue.clone(),
+            partition: self.partition,
+            local: Mutex::new(VecDeque::new()),
+            store: Arc::clone(&self.store),
+            worker: Arc::clone(&self.worker),
+        }
+    }
+}
+
+impl FileOpener for PartitionMorsels {
+    /// Stream the batch of each morsel of this partition, until the scan is done.
+    ///
+    /// The file is a placeholder: the queue decides which morsels this partition reads.
+    fn open(&self, _partitioned_file: PartitionedFile) -> Result<FileOpenFuture> {
+        let stream = futures::stream::unfold(self.to_owned_handle(), |mut handle| async move {
+            let batch = match handle.next_morsel().await? {
+                Ok(morsel) => morsel.produce().await,
+                Err(error) => Err(error),
+            };
+            Some((batch, handle))
+        });
+        Ok(futures::future::ready(Ok(stream.boxed())).boxed())
     }
 }
 
@@ -284,6 +335,7 @@ mod tests {
 
     /// Plans `count` morsels per file, or fails when `count` is `None`.
     /// With a `gate`, each plan waits for one permit of it.
+    #[derive(Debug)]
     struct TestPlanner {
         count: Option<usize>,
         gate: Option<Arc<Notify>>,
@@ -292,6 +344,7 @@ mod tests {
     impl MorselPlanner for TestPlanner {
         fn plan(
             self: Arc<Self>,
+            store: Arc<dyn ObjectStore>,
             file: PartitionedFile,
         ) -> BoxFuture<'static, Result<Vec<Box<dyn Morsel>>>> {
             Box::pin(async move {
@@ -373,7 +426,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_accepts_empty_file_lists() {
-        let mut p0 = Setup::new(0, 0, Some(1), 2).build().partition(0);
+        let mut p0 = Setup::new(0, 0, Some(1), 2).build().partition(0).unwrap();
 
         assert!(next(&mut p0).await.is_none());
     }
@@ -381,12 +434,12 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "partition 2 is not below 2")]
     async fn partition_rejects_an_index_out_of_range() {
-        Setup::new(0, 0, Some(1), 2).build().partition(2);
+        Setup::new(0, 0, Some(1), 2).build().partition(2).unwrap();
     }
 
     #[tokio::test]
     async fn shared_files_plan_into_the_own_queue_first() {
-        let mut p0 = Setup::new(0, 1, Some(2), 2).build().partition(0);
+        let mut p0 = Setup::new(0, 1, Some(2), 2).build().partition(0).unwrap();
 
         assert_eq!(next_id(&mut p0).await, morsel("shared_0.nc", 0));
         assert_eq!(next_id(&mut p0).await, morsel("shared_0.nc", 1));
@@ -395,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_shared_file_is_planned() {
-        let mut p0 = Setup::new(0, 3, Some(1), 1).build().partition(0);
+        let mut p0 = Setup::new(0, 3, Some(1), 1).build().partition(0).unwrap();
 
         for _ in 0..3 {
             assert!(next_id(&mut p0).await.is_some());
@@ -405,14 +458,14 @@ mod tests {
 
     #[tokio::test]
     async fn empty_plans_are_skipped() {
-        let mut p0 = Setup::new(2, 2, Some(0), 1).build().partition(0);
+        let mut p0 = Setup::new(2, 2, Some(0), 1).build().partition(0).unwrap();
 
         assert!(next(&mut p0).await.is_none());
     }
 
     #[tokio::test]
     async fn shared_plan_error_reaches_the_caller() {
-        let mut p0 = Setup::new(0, 1, None, 1).build().partition(0);
+        let mut p0 = Setup::new(0, 1, None, 1).build().partition(0).unwrap();
 
         assert!(matches!(next(&mut p0).await, Some(Err(_))));
         assert!(next(&mut p0).await.is_none());
@@ -421,7 +474,7 @@ mod tests {
     #[tokio::test]
     async fn shared_morsels_are_stolen_when_no_file_is_left() {
         let queue = Setup::new(0, 1, Some(2), 3).build();
-        let (mut p0, mut p2) = (queue.partition(0), queue.partition(2));
+        let (mut p0, mut p2) = (queue.partition(0).unwrap(), queue.partition(2).unwrap());
 
         assert_eq!(next_id(&mut p2).await, morsel("shared_0.nc", 0));
 
@@ -431,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_reads_shared_morsels_in_order() {
-        let mut p0 = Setup::new(0, 1, Some(3), 1).build().partition(0);
+        let mut p0 = Setup::new(0, 1, Some(3), 1).build().partition(0).unwrap();
 
         for id in 0..3 {
             assert_eq!(next_id(&mut p0).await, morsel("shared_0.nc", id));
@@ -441,7 +494,7 @@ mod tests {
     #[tokio::test]
     async fn thief_takes_the_far_end_of_the_queue() {
         let queue = Setup::new(0, 1, Some(3), 2).build();
-        let (mut p0, mut p1) = (queue.partition(0), queue.partition(1));
+        let (mut p0, mut p1) = (queue.partition(0).unwrap(), queue.partition(1).unwrap());
         assert_eq!(next_id(&mut p0).await, morsel("shared_0.nc", 0));
 
         assert_eq!(next_id(&mut p1).await, morsel("shared_0.nc", 2));
@@ -453,15 +506,34 @@ mod tests {
     #[should_panic(expected = "partition 0 already has a handle")]
     async fn partition_gives_one_handle_per_partition() {
         let queue = Setup::new(0, 0, Some(1), 1).build();
-        let _first = queue.partition(0);
+        let _first = queue.partition(0).unwrap();
 
-        queue.partition(0);
+        queue.partition(0).unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_streams_one_batch_per_morsel_of_the_partition() {
+        let p0 = Setup::new(1, 2, Some(2), 1).build().partition(0).unwrap();
+
+        let stream = p0
+            .open(PartitionedFile::new("placeholder", 0))
+            .unwrap()
+            .await
+            .unwrap();
+        let batches: Vec<Result<RecordBatch>> =
+            tokio::time::timeout(Duration::from_secs(5), stream.collect::<Vec<_>>())
+                .await
+                .expect("the stream must end");
+
+        // Each test morsel fails its read, so each batch is the error of one morsel.
+        assert_eq!(batches.len(), 6);
+        assert!(batches.iter().all(Result::is_err));
     }
 
     #[tokio::test]
     async fn shared_morsels_outlive_their_owner() {
         let queue = Setup::new(0, 1, Some(2), 2).build();
-        let (mut p0, mut p1) = (queue.partition(0), queue.partition(1));
+        let (mut p0, mut p1) = (queue.partition(0).unwrap(), queue.partition(1).unwrap());
         assert_eq!(next_id(&mut p0).await, morsel("shared_0.nc", 0));
 
         drop(p0);
@@ -472,7 +544,7 @@ mod tests {
     #[test]
     fn next_morsel_future_is_send() {
         fn assert_send<T: Send>(_: &T) {}
-        let mut p0 = Setup::new(0, 0, Some(1), 1).build().partition(0);
+        let mut p0 = Setup::new(0, 0, Some(1), 1).build().partition(0).unwrap();
 
         assert_send(&p0.next_morsel());
     }
@@ -481,7 +553,7 @@ mod tests {
     async fn shared_phase_waits_for_a_plan_in_flight() {
         let gate = Arc::new(Notify::new());
         let queue = Setup::new(0, 1, Some(2), 2).gated(&gate).build();
-        let (mut p0, mut p1) = (queue.partition(0), queue.partition(1));
+        let (mut p0, mut p1) = (queue.partition(0).unwrap(), queue.partition(1).unwrap());
         // The test runtime has one thread, so tasks run in spawn order at each yield.
         let planner = tokio::spawn(async move { next_id(&mut p0).await });
         let thief = tokio::spawn(async move { next_id(&mut p1).await });
@@ -500,7 +572,7 @@ mod tests {
     async fn shared_phase_ends_when_a_plan_in_flight_is_cancelled() {
         let gate = Arc::new(Notify::new());
         let queue = Setup::new(0, 1, Some(1), 2).gated(&gate).build();
-        let (mut p0, mut p1) = (queue.partition(0), queue.partition(1));
+        let (mut p0, mut p1) = (queue.partition(0).unwrap(), queue.partition(1).unwrap());
         let planner = tokio::spawn(async move { next(&mut p0).await.is_some() });
         tokio::task::yield_now().await;
 
@@ -512,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_files_come_before_shared_files() {
-        let mut p0 = Setup::new(1, 1, Some(1), 1).build().partition(0);
+        let mut p0 = Setup::new(1, 1, Some(1), 1).build().partition(0).unwrap();
 
         assert_eq!(next_id(&mut p0).await, morsel("local_0.nc", 0));
         assert_eq!(next_id(&mut p0).await, morsel("shared_0.nc", 0));
@@ -522,7 +594,7 @@ mod tests {
     #[tokio::test]
     async fn local_morsels_are_not_stolen() {
         let queue = Setup::new(1, 0, Some(2), 2).build();
-        let (mut p0, mut p1) = (queue.partition(0), queue.partition(1));
+        let (mut p0, mut p1) = (queue.partition(0).unwrap(), queue.partition(1).unwrap());
 
         assert_eq!(next_id(&mut p0).await, morsel("local_0.nc", 0));
 
@@ -533,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn local_files_are_a_shared_pool() {
         let queue = Setup::new(2, 0, Some(1), 2).build();
-        let (mut p0, mut p1) = (queue.partition(0), queue.partition(1));
+        let (mut p0, mut p1) = (queue.partition(0).unwrap(), queue.partition(1).unwrap());
 
         let first = next_id(&mut p0).await;
         let second = next_id(&mut p1).await;
@@ -545,7 +617,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_plan_error_does_not_end_the_scan() {
-        let mut p0 = Setup::new(1, 1, None, 1).build().partition(0);
+        let mut p0 = Setup::new(1, 1, None, 1).build().partition(0).unwrap();
 
         assert!(matches!(next(&mut p0).await, Some(Err(_))));
         assert!(matches!(next(&mut p0).await, Some(Err(_))));
@@ -556,7 +628,7 @@ mod tests {
     async fn local_plans_do_not_hold_up_other_partitions() {
         let gate = Arc::new(Notify::new());
         let queue = Setup::new(1, 0, Some(1), 2).gated(&gate).build();
-        let (mut p0, mut p1) = (queue.partition(0), queue.partition(1));
+        let (mut p0, mut p1) = (queue.partition(0).unwrap(), queue.partition(1).unwrap());
         let planner = tokio::spawn(async move { next_id(&mut p0).await });
         tokio::task::yield_now().await;
 

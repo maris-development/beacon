@@ -6,6 +6,7 @@ use datafusion::{
     physical_plan::PhysicalExpr,
 };
 use futures::prelude::future::BoxFuture;
+use object_store::ObjectStore;
 
 use crate::{
     dataset_v2::{
@@ -33,13 +34,18 @@ pub struct NdMorselPlanner {
 impl MorselPlanner for NdMorselPlanner {
     fn plan(
         self: Arc<Self>,
+        store: Arc<dyn ObjectStore>,
         file: PartitionedFile,
     ) -> BoxFuture<'static, Result<Vec<Box<dyn Morsel>>>> {
         let fut = async move {
             let location = file.object_meta.location.clone();
-            let dataset = self.opener.open(file).await.map_err(|e| {
-                DataFusionError::Execution(format!("Failed to open ND file {location}: {e}"))
-            })?;
+            let dataset = self
+                .opener
+                .open(Arc::clone(&store), file)
+                .await
+                .map_err(|e| {
+                    DataFusionError::Execution(format!("Failed to open ND file {location}: {e}"))
+                })?;
 
             // A file that holds none of the projected columns adds no rows.
             if !self.table_schema.fields().is_empty()
@@ -75,7 +81,7 @@ impl NdMorselPlanner {
     /// # Arguments
     ///
     /// * `opener` - The opener that reads a file into a dataset
-    /// * `schema` - The logical file schema that the scan projects, without partition columns
+    /// * `table_schema` - The logical file schema that the scan projects, without partition columns
     /// * `pushdown_predicate` - An optional predicate to filter out chunks during planning
     /// * `batch_size` - The largest number of rows in a morsel of a file stored in one chunk
     pub fn new(

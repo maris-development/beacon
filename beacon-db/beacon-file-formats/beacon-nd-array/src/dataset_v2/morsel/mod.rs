@@ -8,7 +8,7 @@ mod common;
 mod gridded;
 mod ragged;
 #[cfg(test)]
-mod test_util;
+pub(crate) mod test_util;
 
 pub use gridded::GriddedChunkMorsel;
 pub use ragged::{OBSERVATION_DIMENSION, RaggedCastsMorsel};

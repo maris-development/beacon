@@ -11,7 +11,7 @@ use beacon_datafusion_ext::nd::encoding::{decode_nd_record_batch_row, nd_batch_c
 
 use crate::{NdArray, NdArrayD};
 
-pub(super) fn array(values: Vec<i32>, shape: &[usize], dims: &[&str]) -> Arc<dyn NdArrayD> {
+pub(crate) fn array(values: Vec<i32>, shape: &[usize], dims: &[&str]) -> Arc<dyn NdArrayD> {
     Arc::new(
         NdArray::<i32>::try_new_from_vec_in_mem(
             values,
@@ -23,14 +23,14 @@ pub(super) fn array(values: Vec<i32>, shape: &[usize], dims: &[&str]) -> Arc<dyn
     )
 }
 
-pub(super) fn text(value: &str) -> Arc<dyn NdArrayD> {
+pub(crate) fn text(value: &str) -> Arc<dyn NdArrayD> {
     Arc::new(
         NdArray::<String>::try_new_from_vec_in_mem(vec![value.to_string()], vec![], vec![], None)
             .unwrap(),
     )
 }
 
-pub(super) fn schema(fields: &[(&str, DataType)]) -> SchemaRef {
+pub(crate) fn schema(fields: &[(&str, DataType)]) -> SchemaRef {
     Arc::new(Schema::new(
         fields
             .iter()
@@ -40,7 +40,7 @@ pub(super) fn schema(fields: &[(&str, DataType)]) -> SchemaRef {
 }
 
 /// Decode each row of an nd-encoded batch, broadcast it to flat rows, and join the rows.
-pub(super) fn decode_all(encoded: &RecordBatch) -> RecordBatch {
+pub(crate) fn decode_all(encoded: &RecordBatch) -> RecordBatch {
     let batches: Vec<RecordBatch> = (0..nd_batch_count(encoded))
         .map(|row| {
             decode_nd_record_batch_row(encoded, row)
@@ -52,7 +52,7 @@ pub(super) fn decode_all(encoded: &RecordBatch) -> RecordBatch {
     concat_batches(&batches[0].schema(), &batches).unwrap()
 }
 
-pub(super) fn i32_values(batch: &RecordBatch, name: &str) -> Vec<i32> {
+pub(crate) fn i32_values(batch: &RecordBatch, name: &str) -> Vec<i32> {
     let column = batch.column_by_name(name).unwrap();
     column
         .as_any()
@@ -62,7 +62,7 @@ pub(super) fn i32_values(batch: &RecordBatch, name: &str) -> Vec<i32> {
         .to_vec()
 }
 
-pub(super) fn nullable_i32_values(batch: &RecordBatch, name: &str) -> Vec<Option<i32>> {
+pub(crate) fn nullable_i32_values(batch: &RecordBatch, name: &str) -> Vec<Option<i32>> {
     let column = batch.column_by_name(name).unwrap();
     column
         .as_any()
