@@ -10,7 +10,7 @@ import {
 import { parseCsv } from "./csv.js";
 import { Http, type ClientOptions } from "./http.js";
 import { QueryBuilder } from "./query-builder.js";
-import { responseByteStream } from "./stream.js";
+import { openByteStream } from "./stream.js";
 import type {
   CatalogsView,
   From,
@@ -153,8 +153,9 @@ export class BeaconClient {
     const decoder = await getArrowDecoder();
     const res = await this.queryRaw(query, undefined, signal);
     const queryId = res.headers.get(QUERY_ID_HEADER);
-    const batches = await decoder.readStream(responseByteStream(res));
-    return { queryId, batches };
+    const body = openByteStream(res);
+    const batches = await decoder.readStream(body.chunks);
+    return { queryId, batches: closeBodyOnExit(batches, body.cancel) };
   }
 
   /**
@@ -359,6 +360,27 @@ export class BeaconClient {
 }
 
 /** Builds the `/api/query` request body from any accepted query input. */
+/**
+ * Yields `batches` and cancels the response body when the consumer stops. The
+ * Arrow reader reads ahead, so its own `return()` waits for the next server chunk.
+ */
+async function* closeBodyOnExit(
+  batches: AsyncIterable<ArrowRecordBatch>,
+  cancel: () => void,
+): AsyncGenerator<ArrowRecordBatch> {
+  const it = batches[Symbol.asyncIterator]();
+  try {
+    for (;;) {
+      const next = await it.next();
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    cancel();
+    Promise.resolve(it.return?.()).catch(() => {});
+  }
+}
+
 function buildBody(query: QueryInput, output?: Output): Record<string, unknown> {
   const body: Record<string, unknown> = typeof query === "string" ? { sql: query } : { ...query };
   if (output !== undefined) body.output = output;

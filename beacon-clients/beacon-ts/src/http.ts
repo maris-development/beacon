@@ -155,11 +155,12 @@ export class Http {
       body = init.body;
     }
 
-    const { signal, cancel, timedOut } = this.withTimeout(init.signal, init.timeoutMs);
+    const { signal, clearTimer, detach, timedOut } = this.withTimeout(init.signal, init.timeoutMs);
     let res: Response;
     try {
       res = await this.fetchImpl(url, { method, headers, body, signal });
     } catch (err) {
+      detach();
       // Our internal controller aborted the request: classify why.
       if (signal.aborted) {
         if (timedOut()) throw new TimeoutError(url, err);
@@ -167,13 +168,15 @@ export class Http {
       }
       throw new ConnectionError(url, err);
     } finally {
-      cancel();
+      clearTimer();
     }
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
+      detach();
       throw new ApiError(res.status, decodeErrorBody(text), url);
     }
+    // Keep the caller's abort attached: it must still cancel the body after the headers.
     return res;
   }
 
@@ -202,13 +205,17 @@ export class Http {
    * caller-supplied signal. Returns `timedOut()` so the caller can tell a
    * timeout abort apart from an external cancellation (the abort reason is not
    * reliably propagated across runtimes, so we track it explicitly).
+   *
+   * `clearTimer()` stops the timeout. `detach()` stops the forwarding of the
+   * caller's abort; skip it while the caller still reads the body.
    */
   private withTimeout(
     external?: AbortSignal,
     timeoutOverrideMs?: number,
   ): {
     signal: AbortSignal;
-    cancel: () => void;
+    clearTimer: () => void;
+    detach: () => void;
     timedOut: () => boolean;
   } {
     const controller = new AbortController();
@@ -230,11 +237,11 @@ export class Http {
       }, timeoutMs);
     }
 
-    const cancel = () => {
+    const clearTimer = () => {
       if (timer !== undefined) clearTimeout(timer);
-      external?.removeEventListener("abort", onExternalAbort);
     };
-    return { signal: controller.signal, cancel, timedOut: () => timedOut };
+    const detach = () => external?.removeEventListener("abort", onExternalAbort);
+    return { signal: controller.signal, clearTimer, detach, timedOut: () => timedOut };
   }
 }
 
