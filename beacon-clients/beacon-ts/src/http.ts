@@ -207,7 +207,8 @@ export class Http {
    * reliably propagated across runtimes, so we track it explicitly).
    *
    * `clearTimer()` stops the timeout. `detach()` stops the forwarding of the
-   * caller's abort; skip it while the caller still reads the body.
+   * caller's abort; skip it while the caller still reads the body. Where
+   * `AbortSignal.any` exists, no listener is added and `detach()` does nothing.
    */
   private withTimeout(
     external?: AbortSignal,
@@ -221,9 +222,12 @@ export class Http {
     const controller = new AbortController();
     let timedOut = false;
 
-    // Forward an external abort to our controller, preserving its reason.
+    // AbortSignal.any follows the caller's signal for the body lifetime and leaves no listener behind.
+    const combine = external != null && typeof AbortSignal.any === "function";
+
+    // Fallback for runtimes without AbortSignal.any (Node 18): forward the abort, preserving its reason.
     const onExternalAbort = () => controller.abort(external?.reason);
-    if (external) {
+    if (external && !combine) {
       if (external.aborted) controller.abort(external.reason);
       else external.addEventListener("abort", onExternalAbort, { once: true });
     }
@@ -241,7 +245,8 @@ export class Http {
       if (timer !== undefined) clearTimeout(timer);
     };
     const detach = () => external?.removeEventListener("abort", onExternalAbort);
-    return { signal: controller.signal, clearTimer, detach, timedOut: () => timedOut };
+    const signal = combine ? AbortSignal.any([external, controller.signal]) : controller.signal;
+    return { signal, clearTimer, detach, timedOut: () => timedOut };
   }
 }
 

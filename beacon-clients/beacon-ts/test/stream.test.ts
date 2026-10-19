@@ -44,6 +44,41 @@ describe("responseByteStream", () => {
     }
     expect(cancel).toHaveBeenCalledOnce();
   });
+
+  it("leaves the body unlocked until the first read", async () => {
+    const res = new Response("abc");
+    await responseByteStream(res).return(undefined);
+    expect(res.body?.locked).toBe(false);
+  });
+});
+
+describe("abort listeners", () => {
+  it("leaves no listener on a shared signal after successful requests", async () => {
+    const fetchImpl = (async () => new Response("a\n1\n")) as unknown as typeof fetch;
+    const client = new BeaconClient({ url: "http://beacon.test", fetch: fetchImpl });
+    const ac = new AbortController();
+    const add = vi.spyOn(ac.signal, "addEventListener");
+    const remove = vi.spyOn(ac.signal, "removeEventListener");
+    for (let i = 0; i < 3; i++) await client.query("SELECT 1", { format: "csv", signal: ac.signal });
+    expect(add.mock.calls.length).toBe(remove.mock.calls.length);
+  });
+
+  it("forwards an abort after the headers without AbortSignal.any (Node 18)", async () => {
+    const any = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+    Object.defineProperty(AbortSignal, "any", { value: undefined, configurable: true });
+    try {
+      const { fetchImpl } = openEndedFetch(firstBatch());
+      const client = new BeaconClient({ url: "http://beacon.test", fetch: fetchImpl });
+      const ac = new AbortController();
+      const { batches } = await client.queryBatches("SELECT n", ac.signal);
+      const consume = (async () => {
+        for await (const _batch of batches) ac.abort();
+      })();
+      await expect(consume).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      if (any) Object.defineProperty(AbortSignal, "any", any);
+    }
+  });
 });
 
 describe("queryBatches cancellation", () => {
@@ -74,6 +109,15 @@ describe("queryBatches cancellation", () => {
       expect(batch.numRows).toBe(2);
       break;
     }
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("cancels the body on a return() before the first read", async () => {
+    const { fetchImpl, cancel } = openEndedFetch(firstBatch());
+    const client = new BeaconClient({ url: "http://beacon.test", fetch: fetchImpl });
+    const { batches } = await client.queryBatches("SELECT n");
+
+    await batches[Symbol.asyncIterator]().return?.();
     expect(cancel).toHaveBeenCalledOnce();
   });
 

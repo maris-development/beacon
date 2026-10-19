@@ -359,28 +359,46 @@ export class BeaconClient {
   }
 }
 
-/** Builds the `/api/query` request body from any accepted query input. */
 /**
- * Yields `batches` and cancels the response body when the consumer stops. The
+ * Iterates `batches` and cancels the response body when the consumer stops. The
  * Arrow reader reads ahead, so its own `return()` waits for the next server chunk.
+ * An explicit iterator, because a generator skips its cleanup on a `return()`
+ * before the first `next()`.
  */
-async function* closeBodyOnExit(
+function closeBodyOnExit(
   batches: AsyncIterable<ArrowRecordBatch>,
   cancel: () => void,
-): AsyncGenerator<ArrowRecordBatch> {
+): AsyncIterableIterator<ArrowRecordBatch> {
   const it = batches[Symbol.asyncIterator]();
-  try {
-    for (;;) {
-      const next = await it.next();
-      if (next.done) return;
-      yield next.value;
-    }
-  } finally {
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
     cancel();
     Promise.resolve(it.return?.()).catch(() => {});
-  }
+  };
+  return {
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    async next() {
+      try {
+        const next = await it.next();
+        if (next.done) close();
+        return next;
+      } catch (err) {
+        close();
+        throw err;
+      }
+    },
+    async return() {
+      close();
+      return { done: true, value: undefined };
+    },
+  };
 }
 
+/** Builds the `/api/query` request body from any accepted query input. */
 function buildBody(query: QueryInput, output?: Output): Record<string, unknown> {
   const body: Record<string, unknown> = typeof query === "string" ? { sql: query } : { ...query };
   if (output !== undefined) body.output = output;

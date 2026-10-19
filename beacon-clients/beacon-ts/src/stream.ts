@@ -4,10 +4,11 @@
  * Adapts a `Response` body to an `AsyncIterable<Uint8Array>`.
  *
  * Node's `ReadableStream` is async-iterable, but browsers' is not (yet), so we
- * drive the reader manually for portability. An early stop cancels the body.
+ * drive the reader manually for portability. The body is locked only from the
+ * first `next()`. An early stop cancels the body.
  */
-export function responseByteStream(res: Response): AsyncGenerator<Uint8Array> {
-  return openByteStream(res).chunks;
+export async function* responseByteStream(res: Response): AsyncGenerator<Uint8Array> {
+  yield* openByteStream(res).chunks;
 }
 
 /**
