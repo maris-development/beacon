@@ -5,8 +5,10 @@ use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_datafusion_ext::type_widening::{label_by_object, session_widening, ArrowTypeWidening};
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
+use beacon_nd_array::nd_file_opener::NdFileOpener;
+use beacon_nd_array::nd_morsel_file_source::NdMorselFileSource;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
@@ -23,10 +25,12 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
+use crate::datafusion::config::NetCDFConfig;
+use crate::datafusion::native::opener::NativeOpener;
+use crate::datafusion::oxcdf::opener::OxcdfOpener;
 use crate::datafusion::{
     options::NetcdfOptions,
     sink::{NetCDFNdSink, NetCDFSink},
-    source::NetCDFSource,
 };
 
 pub const NETCDF_EXTENSION: &str = "nc";
@@ -36,6 +40,8 @@ pub const NETCDF_EXTENSION: &str = "nc";
 /// `cdf` is not here: it is also the NASA Common Data Format, which this reader cannot open.
 pub const NETCDF_EXTENSIONS: [&str; 4] = [NETCDF_EXTENSION, "nc3", "nc4", "netcdf"];
 
+pub mod config;
+pub mod native;
 pub mod object_meta_resolver;
 pub mod options;
 pub mod oxcdf;
@@ -43,41 +49,10 @@ pub mod oxcdf;
 mod partition_coverage_tests;
 pub mod reader;
 pub mod sink;
-pub mod source;
 pub mod statistics;
 pub mod table_function;
 pub use reader::{FileAccess, NetcdfInput, ReaderBackend};
 pub use table_function::ReadNetCDFFunc;
-
-/// Runtime configuration for the NetCDF format.
-///
-/// Plain data with sensible defaults; the caller populates it (there is no
-/// environment parsing here, so the crate stays reusable and the host decides
-/// where the values come from). These are the *defaults* for a runtime — some
-/// can be overridden per table via `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
-#[derive(Debug, Clone)]
-pub struct NetcdfConfig {
-    /// Whether to generate per-file statistics during planning.
-    pub enable_statistics: bool,
-    /// Whether reads go through the pure-Rust [`oxcdf`] reader instead of
-    /// netcdf-c.
-    ///
-    /// On by default: the Rust reader reads byte ranges through the object
-    /// store, so a scan runs in parallel and a file in s3, gs or az needs no
-    /// local copy. See [`crate::oxcdf_reader`]. Turn it off for netcdf-c, the
-    /// fallback, for a file the Rust reader cannot yet read. Writes always use
-    /// netcdf-c.
-    pub use_rust_reader: bool,
-}
-
-impl Default for NetcdfConfig {
-    fn default() -> Self {
-        Self {
-            enable_statistics: true,
-            use_rust_reader: true,
-        }
-    }
-}
 
 /// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
 fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> {
@@ -94,21 +69,18 @@ fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> 
 pub struct NetCDFFormatFactory {
     pub listing_factory: Arc<ListingFactory>,
     pub output_dir: PathBuf,
-    pub options: NetcdfOptions,
-    pub config: NetcdfConfig,
+    pub config: NetCDFConfig,
 }
 
 impl NetCDFFormatFactory {
     pub fn new(
         listing_factory: Arc<ListingFactory>,
         output_dir: PathBuf,
-        options: NetcdfOptions,
-        config: NetcdfConfig,
+        config: NetCDFConfig,
     ) -> Self {
         Self {
             listing_factory,
             output_dir,
-            options,
             config,
         }
     }
@@ -129,29 +101,10 @@ impl NetCDFFormatFactory {
     }
 
     /// Build a [`NetcdfFormat`] with the given per-table effective settings.
-    fn build_format(
-        &self,
-        options: NetcdfOptions,
-        enable_statistics: bool,
-        access: FileAccess,
-    ) -> NetcdfFormat {
+    fn build_format(&self, options: NetcdfOptions) -> NetcdfFormat {
         NetcdfFormat::new(self.listing_factory.clone(), options)
-            .with_enable_statistics(enable_statistics)
-            .with_access(access)
+            .with_enable_statistics(self.config.enable_statistics)
             .with_output_dir(self.output_dir.clone())
-    }
-
-    /// Whether a table built with `format_options` reads through the Rust
-    /// reader. The per-table `use_rust_reader` option wins over the runtime
-    /// default.
-    fn uses_rust_reader(
-        &self,
-        format_options: &std::collections::HashMap<String, String>,
-    ) -> datafusion::error::Result<bool> {
-        match format_option(format_options, "use_rust_reader") {
-            Some(value) => parse_bool_option("use_rust_reader", value),
-            None => Ok(self.config.use_rust_reader),
-        }
     }
 }
 
@@ -175,10 +128,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
         _state: &dyn Session,
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        // Per-table overrides from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
-        // defaulting to the runtime config.
-        let mut options = self.options.clone();
-
+        let mut options = NetcdfOptions::default();
         if let Some(value) = format_option(format_options, "read_dimensions") {
             options.read_dimensions = Some(
                 value
@@ -197,22 +147,18 @@ impl FileFormatFactory for NetCDFFormatFactory {
         // read by `create_for_analysis`; a format built for a query computes no
         // statistics whatever it says.
         self.statistics_wanted(format_options)?;
-        let use_rust_reader = self.uses_rust_reader(format_options)?;
 
         Ok(Arc::new(self.build_format(
-            options,
-            // A query never computes statistics. See `create_for_analysis`.
+            options, // A query never computes statistics. See `create_for_analysis`.
             false,
-            access_for(use_rust_reader),
         )))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
         Arc::new(self.build_format(
-            self.options.clone(),
+            NetcdfOptions::default(),
             // A query never computes statistics. See `create_for_analysis`.
             false,
-            access_for(self.config.use_rust_reader),
         ))
     }
 }
@@ -362,6 +308,7 @@ pub struct NetcdfFormat {
     output_dir: PathBuf,
     /// How this table reaches its files, and which reader opens them.
     pub access: FileAccess,
+    pub type_widening: Option<Arc<ArrowTypeWidening>>,
 }
 
 impl NetcdfFormat {
@@ -372,6 +319,7 @@ impl NetcdfFormat {
             enable_statistics: false,
             output_dir: std::env::temp_dir(),
             access: FileAccess::default(),
+            type_widening: None,
         }
     }
 
@@ -396,6 +344,11 @@ impl NetcdfFormat {
     /// OS temp dir).
     pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
         self.output_dir = output_dir;
+        self
+    }
+
+    pub fn with_type_widening(mut self, type_widening: Arc<ArrowTypeWidening>) -> Self {
+        self.type_widening = Some(type_widening);
         self
     }
 }
@@ -533,10 +486,8 @@ impl FileFormat for NetcdfFormat {
         // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
         // back to the logical schema above the scan.
         //
-        // The `PARTITIONED BY` columns are encoded with it. Their values come
-        // from a file's path rather than its contents, and the reader appends
-        // them per file, but they reach the plan the same way every other column
-        // does — so that one decoder reads the whole batch.
+        // The `PARTITIONED BY` columns are encoded with it, so the morsel
+        // source can name them when it rejects a partitioned table.
         let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
             conf.file_schema(),
         ));
@@ -547,15 +498,15 @@ impl FileFormat for NetcdfFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = NetCDFSource::new(
-            self.access.clone(),
-            self.options.read_dimensions.clone(),
-            table_schema,
-        )
-        .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
-        .with_projection(projection);
+        let mut source = self.file_source(table_schema);
+        if let Some(projection) = projection.as_ref() {
+            if let Some(projected_source) = source.try_pushdown_projection(projection)? {
+                source = projected_source;
+            }
+        }
+
         let conf = FileScanConfigBuilder::from(conf)
-            .with_source(Arc::new(source))
+            .with_source(source)
             .build();
 
         let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
@@ -639,14 +590,13 @@ impl FileFormat for NetcdfFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(
-            NetCDFSource::new(
-                self.access.clone(),
-                self.options.read_dimensions.clone(),
-                table_schema,
-            )
-            .with_skip_unbroadcastable(self.options.skip_unbroadcastable),
-        )
+        let opener = match &self.access {
+            FileAccess::NetcdfC { .. } => Arc::new(NativeOpener {}) as Arc<dyn NdFileOpener>,
+            FileAccess::Oxcdf => Arc::new(OxcdfOpener) as Arc<dyn NdFileOpener>,
+        };
+        let morsel_file_source = NdMorselFileSource::new(opener, self.get_ext(), table_schema).with;
+
+        Arc::new(morsel_file_source)
     }
 }
 
@@ -758,39 +708,73 @@ mod reader_backend_tests {
         ctx.register_table(table, Arc::new(listing)).unwrap();
     }
 
-    /// Both readers open a file by its content, so an alias extension reads the same rows.
+    /// The reader opens a file by its content, so an alias extension reads the same rows.
     #[tokio::test]
-    async fn a_file_with_an_alias_extension_reads_on_both_readers() {
+    async fn a_file_with_an_alias_extension_reads_the_same_rows() {
         let dir = tempfile::tempdir().unwrap();
         let alias = dir.path().join("wod.nc4");
         std::fs::copy(test_file(WOD_FILE), &alias).unwrap();
 
-        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
-            let ctx = session();
-            register(&ctx, "canonical", backend, WOD_FILE).await;
-            register_path(&ctx, "alias", backend, &alias).await;
+        let ctx = session();
+        register(&ctx, "canonical", ReaderBackend::Oxcdf, WOD_FILE).await;
+        register_path(&ctx, "alias", ReaderBackend::Oxcdf, &alias).await;
 
-            let count = |table: &'static str| {
-                let ctx = ctx.clone();
-                async move {
-                    let batches = ctx
-                        .sql(&format!("SELECT COUNT(*) FROM {table}"))
-                        .await
-                        .unwrap()
-                        .collect()
-                        .await
-                        .unwrap();
-                    arrow::util::pretty::pretty_format_batches(&batches)
-                        .unwrap()
-                        .to_string()
-                }
-            };
-            assert_eq!(
-                count("alias").await,
-                count("canonical").await,
-                "{backend:?}"
-            );
-        }
+        let count = |table: &'static str| {
+            let ctx = ctx.clone();
+            async move {
+                let batches = ctx
+                    .sql(&format!("SELECT COUNT(*) FROM {table}"))
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+                    .unwrap();
+                arrow::util::pretty::pretty_format_batches(&batches)
+                    .unwrap()
+                    .to_string()
+            }
+        };
+        assert_eq!(count("alias").await, count("canonical").await);
+    }
+
+    /// A projection out of table-schema order reads its own columns.
+    ///
+    /// The table schema is sorted, so `Temperature` comes before `lat`. The scan
+    /// must emit only the projected columns, because the projection above it
+    /// picks them by index.
+    #[tokio::test]
+    async fn a_projection_out_of_schema_order_reads_its_own_columns() {
+        use arrow::datatypes::DataType;
+
+        let ctx = session();
+        register(&ctx, "wod", ReaderBackend::Oxcdf, WOD_FILE).await;
+
+        let batches = ctx
+            .sql(r#"SELECT wod_unique_cast, "Temperature", lon, lat, z FROM wod LIMIT 10"#)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect("the scan emits the projected columns");
+
+        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(rows, 10);
+        let types: Vec<DataType> = batches[0]
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                DataType::Int32,
+                DataType::Float32,
+                DataType::Float32,
+                DataType::Float32,
+                DataType::Float32
+            ]
+        );
     }
 
     // ── statistics follow the reader ───────────────────────────────────
@@ -1277,265 +1261,7 @@ mod reader_backend_tests {
         }
     }
 
-    /// A full scan through the object store gives the same rows as netcdf-c.
-    #[tokio::test]
-    async fn both_readers_return_the_same_rows() {
-        use arrow::compute::concat_batches;
-
-        let ctx = session();
-        register(&ctx, "netcdf_c", ReaderBackend::NetcdfC, GRIDDED_FILE).await;
-        register(&ctx, "rust", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
-
-        let query = "SELECT analysed_sst, lat, lon FROM {table}";
-        let collect = async |table: &str| {
-            let batches = ctx
-                .sql(&query.replace("{table}", table))
-                .await
-                .unwrap()
-                .collect()
-                .await
-                .unwrap();
-            let schema = batches[0].schema();
-            concat_batches(&schema, &batches).unwrap()
-        };
-
-        let rust = collect("rust").await;
-        assert!(rust.num_rows() > 0, "the scan must return rows");
-        assert_eq!(rust, collect("netcdf_c").await);
-    }
-
     // ── Partitioning ───────────────────────────────────────────────────
-
-    /// A scan of many files already runs one file for each partition, on either
-    /// reader: `ListingTable` splits the file groups by `target_partitions`
-    /// before `FileSource::repartitioned` is ever consulted. So neither reader
-    /// needs a repartition rule to read files in parallel. What the Rust reader
-    /// adds is that those partitions then run at the same time, because it
-    /// holds no global lock.
-    ///
-    /// Sharing one file across partitions is the separate case, and only the
-    /// Rust reader does it. See [`only_the_rust_reader_shares_one_file`].
-    #[tokio::test]
-    async fn a_multi_file_scan_gets_one_partition_for_each_file() {
-        use datafusion::physical_plan::ExecutionPlanProperties;
-
-        let files = 4;
-        let dir = tempfile::tempdir().unwrap();
-        for i in 0..files {
-            std::fs::copy(test_file(GRIDDED_FILE), dir.path().join(format!("f{i}.nc"))).unwrap();
-        }
-
-        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
-            let state = SessionStateBuilder::new()
-                .with_config(
-                    SessionConfig::new()
-                        .with_target_partitions(files)
-                        .with_extension(
-                        beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(
-                        ),
-                    ),
-                )
-                .with_default_features()
-                .build();
-            let ctx = SessionContext::new_with_state(state);
-            let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
-            let table =
-                FastObjectTable::try_new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
-                    .await
-                    .unwrap();
-            ctx.register_table("many", Arc::new(table)).unwrap();
-
-            let plan = ctx
-                .sql("SELECT analysed_sst FROM many")
-                .await
-                .unwrap()
-                .create_physical_plan()
-                .await
-                .unwrap();
-            assert_eq!(
-                plan.output_partitioning().partition_count(),
-                files,
-                "{backend:?} should scan {files} files in {files} partitions"
-            );
-        }
-    }
-
-    /// The split minimum a scan takes from its session
-    /// (`repartition_file_min_size`), and what these tests pass by hand.
-    const MIN_SHARE_SIZE: usize = 10 * 1024 * 1024;
-
-    /// A scan of any size plans one entry per partition, and one queue.
-    ///
-    /// Size decides nothing here. It used to: a file under the minimum was left
-    /// whole, and one over it went into every partition's group with a share.
-    /// Both were guesses made at plan time, and both were measured losing to no
-    /// guess at all. A queue does not guess — whoever is free takes the next
-    /// file, and a partition with nothing left helps divide an open one.
-    #[test]
-    fn a_scan_plans_one_entry_per_partition_whatever_its_files() {
-        use datafusion::datasource::listing::PartitionedFile;
-        use datafusion::datasource::table_schema::TableSchema;
-        use datafusion::execution::object_store::ObjectStoreUrl;
-
-        const PARTITIONS: usize = 4;
-
-        // One file well under the old minimum, one well over, and a collection.
-        let scans: Vec<(&str, Vec<PartitionedFile>)> = vec![
-            (
-                "one small file",
-                vec![PartitionedFile::new("small.nc", 1024 * 1024)],
-            ),
-            (
-                "one large file",
-                vec![PartitionedFile::new("large.nc", 64 * 1024 * 1024)],
-            ),
-            (
-                "many files",
-                (0..500)
-                    .map(|i| PartitionedFile::new(format!("f-{i}.nc"), 1024 * 1024))
-                    .collect(),
-            ),
-        ];
-
-        for (what, files) in scans {
-            let table_schema =
-                TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-            let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
-            let count = files.len();
-            let mut builder = FileScanConfigBuilder::new(
-                ObjectStoreUrl::local_filesystem(),
-                Arc::new(source.clone()) as Arc<dyn FileSource>,
-            );
-            for file in files {
-                builder = builder.with_file(file);
-            }
-            let config = builder.build();
-
-            let planned = source
-                .repartitioned(PARTITIONS, MIN_SHARE_SIZE, None, &config)
-                .unwrap()
-                .unwrap_or_else(|| panic!("{what}: a scan is planned morsel-driven"));
-
-            assert_eq!(planned.file_groups.len(), PARTITIONS, "{what}");
-            for group in &planned.file_groups {
-                assert_eq!(
-                    group.len(),
-                    1,
-                    "{what}: one standing entry, not a file list"
-                );
-            }
-
-            let planned_source = planned
-                .file_source()
-                .downcast_ref::<NetCDFSource>()
-                .expect("the config carries a NetCDFSource");
-            assert_eq!(
-                planned_source.morsel_files(),
-                Some(count),
-                "{what}: every file is in the queue the openers draw from"
-            );
-        }
-    }
-
-    /// A hive-partitioned table over copies of `GRIDDED_FILE`: one file per
-    /// `year=` directory, and `year` as a `PARTITIONED BY` column.
-    async fn register_partitioned(
-        ctx: &SessionContext,
-        table: &str,
-        dir: &std::path::Path,
-        years: &[&str],
-    ) {
-        use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
-
-        for year in years {
-            let part = dir.join(format!("year={year}"));
-            std::fs::create_dir_all(&part).unwrap();
-            std::fs::copy(test_file(GRIDDED_FILE), part.join("obs.nc")).unwrap();
-        }
-
-        let options = ListingOptions::new(Arc::new(format_on(ReaderBackend::Oxcdf)))
-            // The format finds its own files, so a suffix here would have to
-            // match it. This is what `CREATE EXTERNAL TABLE` passes too.
-            .with_file_extension("")
-            .with_collect_stat(false)
-            .with_table_partition_cols(vec![(
-                "year".to_string(),
-                arrow::datatypes::DataType::Utf8,
-            )]);
-
-        let url = ListingTableUrl::parse(dir.to_string_lossy()).unwrap();
-        let config = ListingTableConfig::new(url)
-            .with_listing_options(options)
-            .infer_schema(&ctx.state())
-            .await
-            .unwrap_or_else(|e| panic!("the partitioned collection infers a schema: {e}"));
-
-        ctx.register_table(table, Arc::new(ListingTable::try_new(config).unwrap()))
-            .unwrap();
-    }
-
-    /// A table on the Rust reader over `path`, built from `options`.
-    async fn table_with_options(
-        ctx: &SessionContext,
-        options: NetcdfOptions,
-        path: &std::path::Path,
-    ) -> datafusion::error::Result<Arc<FastObjectTable>> {
-        let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
-        let format = NetcdfFormat::new(Arc::new(ListingFactory::dynamic()), options)
-            .with_access(FileAccess::Oxcdf);
-        FastObjectTable::try_new(&ctx.state(), Arc::new(format), vec![url])
-            .await
-            .map(Arc::new)
-    }
-
-    /// `WOD_FILE` is ragged, so no dimension list fits it. Without
-    /// `skip_unbroadcastable` it fails the table. With it, the file is skipped
-    /// and the gridded file next to it is read whole.
-    #[tokio::test]
-    async fn the_skip_option_reads_past_a_file_the_dimension_list_does_not_fit() {
-        let dir = tempfile::tempdir().unwrap();
-        for file in [GRIDDED_FILE, WOD_FILE] {
-            std::fs::copy(test_file(file), dir.path().join(file)).unwrap();
-        }
-        let dims = Some(vec![
-            "time".to_string(),
-            "lat".to_string(),
-            "lon".to_string(),
-        ]);
-        let ctx = session();
-
-        let strict = NetcdfOptions {
-            read_dimensions: dims.clone(),
-            ..NetcdfOptions::default()
-        };
-        let error = table_with_options(&ctx, strict, dir.path())
-            .await
-            .expect_err("the ragged file fits no list")
-            .to_string();
-        assert!(error.contains("ragged"), "{error}");
-
-        let lenient = NetcdfOptions {
-            read_dimensions: dims,
-            skip_unbroadcastable: true,
-            ..NetcdfOptions::default()
-        };
-        let table = table_with_options(&ctx, lenient, dir.path()).await.unwrap();
-        ctx.register_table("mixed", table).unwrap();
-        let batches = ctx
-            .sql("SELECT lat FROM mixed")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        let read: usize = batches.iter().map(|batch| batch.num_rows()).sum();
-
-        assert_eq!(
-            read,
-            rows_in_one_file(&ctx, "lat").await,
-            "the gridded file alone"
-        );
-    }
 
     /// `OPTIONS ('skip_unbroadcastable' 'true')` reaches the format.
     #[tokio::test]
@@ -1553,243 +1279,7 @@ mod reader_backend_tests {
         assert!(!default.options.skip_unbroadcastable);
     }
 
-    /// The rows one copy of `GRIDDED_FILE` contributes to `column`.
-    async fn rows_in_one_file(ctx: &SessionContext, column: &str) -> usize {
-        register(ctx, "one", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
-        let batches = ctx
-            .sql(&format!("SELECT {column} FROM one"))
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        batches.iter().map(|batch| batch.num_rows()).sum()
-    }
-
-    /// A partitioned table reads, and every row holds the value of its own
-    /// file's path.
-    ///
-    /// The value is in the *path*, and an nd scan reads a whole collection
-    /// behind one plan entry, so `FileStream` cannot append it: it does not know
-    /// which file a batch came from. The reader appends it itself instead —
-    /// per file, which is per morsel.
-    #[tokio::test]
-    async fn a_partitioned_table_gives_every_row_the_value_of_its_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = session();
-        register_partitioned(&ctx, "obs", dir.path(), &["2023", "2024"]).await;
-        let per_file = rows_in_one_file(&ctx, "analysed_sst").await;
-
-        let rows = ctx
-            .sql("SELECT year FROM obs WHERE analysed_sst IS NOT NULL OR analysed_sst IS NULL")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-
-        let mut years: Vec<String> = Vec::new();
-        for batch in &rows {
-            let column = batch
-                .column_by_name("year")
-                .expect("the partition column is in the scan");
-            let values = arrow::array::AsArray::as_string::<i32>(column);
-            years.extend((0..batch.num_rows()).map(|row| values.value(row).to_string()));
-        }
-
-        assert_eq!(
-            years.len(),
-            2 * per_file,
-            "both files are read, whole: {} rows each",
-            per_file
-        );
-        assert_eq!(
-            years.iter().filter(|year| *year == "2023").count(),
-            per_file,
-            "and one file's worth of rows carries 2023"
-        );
-        assert_eq!(
-            years.iter().filter(|year| *year == "2024").count(),
-            per_file,
-            "and the other's carries 2024"
-        );
-    }
-
-    /// A scan of nothing but the partition column still counts the file's rows.
-    ///
-    /// It reads no column of the file, so there is no grid for the value to
-    /// spread over. The read is driven by a column of its own and the value is
-    /// stated over the rows it produces — see `FilePartitions::row_columns`.
-    #[tokio::test]
-    async fn a_group_by_on_the_partition_column_counts_every_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = session();
-        register_partitioned(&ctx, "obs", dir.path(), &["2023", "2024"]).await;
-        let per_file = rows_in_one_file(&ctx, "analysed_sst").await;
-
-        let counted = ctx
-            .sql("SELECT year, count(*) AS n FROM obs GROUP BY year ORDER BY year")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-
-        let batch = &counted[0];
-        assert_eq!(batch.num_rows(), 2, "one row per partition directory");
-        let years = arrow::array::AsArray::as_string::<i32>(batch.column(0));
-        let counts =
-            arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(batch.column(1));
-        assert_eq!((years.value(0), years.value(1)), ("2023", "2024"));
-        assert_eq!(
-            (counts.value(0), counts.value(1)),
-            (per_file as i64, per_file as i64),
-            "each directory counts one file's rows"
-        );
-    }
-
-    /// A filter on the partition column leaves the other directory unlisted.
-    ///
-    /// Pruning happens where it does for every other format — in the listing,
-    /// before a scan exists — so the plan holds only the files that can match.
-    #[tokio::test]
-    async fn a_filter_on_the_partition_column_prunes_files() {
-        use datafusion::physical_plan::displayable;
-
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = session();
-        register_partitioned(&ctx, "obs", dir.path(), &["2023", "2024"]).await;
-
-        let plan = ctx
-            .sql("SELECT analysed_sst FROM obs WHERE year = '2024'")
-            .await
-            .unwrap()
-            .create_physical_plan()
-            .await
-            .unwrap();
-
-        let shown = displayable(plan.as_ref()).indent(false).to_string();
-        assert!(
-            shown.contains("year=2024"),
-            "the matching directory is scanned: {shown}"
-        );
-        assert!(
-            !shown.contains("year=2023"),
-            "and the other one is not listed at all: {shown}"
-        );
-    }
-
-    /// The same values come back when the scan divides over many partitions.
-    ///
-    /// That is the morsel path: every partition draws from one queue, and the
-    /// entry it is handed stands for the scan rather than for a file. The values
-    /// travel on the queued files instead.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_parallel_partitioned_scan_keeps_the_values_apart() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = SessionStateBuilder::new()
-            .with_config(
-                SessionConfig::new()
-                    .with_target_partitions(4)
-                    .with_extension(
-                        beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(
-                        ),
-                    ),
-            )
-            .with_default_features()
-            .build();
-        let ctx = SessionContext::new_with_state(state);
-        register_partitioned(&ctx, "obs", dir.path(), &["2023", "2024"]).await;
-
-        let counted = ctx
-            .sql("SELECT year, count(*) AS n FROM obs GROUP BY year ORDER BY year")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-
-        let batch = &counted[0];
-        let years = arrow::array::AsArray::as_string::<i32>(batch.column(0));
-        let counts =
-            arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(batch.column(1));
-        assert_eq!(batch.num_rows(), 2);
-        assert_eq!((years.value(0), years.value(1)), ("2023", "2024"));
-        assert_eq!(
-            counts.value(0),
-            counts.value(1),
-            "the two copies of one file hold the same number of rows"
-        );
-        assert!(counts.value(0) > 0, "and the scan read them");
-    }
-
-    /// An ordered scan is left alone: a partition holding an arbitrary subset of
-    /// a file cannot emit its rows in file order.
-    #[test]
-    fn an_ordered_scan_is_not_shared() {
-        use datafusion::datasource::listing::PartitionedFile;
-        use datafusion::datasource::table_schema::TableSchema;
-        use datafusion::execution::object_store::ObjectStoreUrl;
-        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
-
-        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("time", arrow::datatypes::DataType::Int64, true),
-        ]));
-        let table_schema = TableSchema::from_file_schema(schema.clone());
-        let source = NetCDFSource::new(access_on(ReaderBackend::Oxcdf), None, table_schema);
-        let config = FileScanConfigBuilder::new(
-            ObjectStoreUrl::local_filesystem(),
-            Arc::new(source.clone()) as Arc<dyn FileSource>,
-        )
-        .with_file(PartitionedFile::new("large.nc", 64 * 1024 * 1024))
-        .build();
-
-        let ordering = LexOrdering::new(vec![PhysicalSortExpr::new_default(
-            datafusion::physical_expr::expressions::col("time", &schema).unwrap(),
-        )])
-        .unwrap();
-
-        assert!(
-            source
-                .repartitioned(4, MIN_SHARE_SIZE, Some(ordering), &config)
-                .unwrap()
-                .is_none(),
-            "an ordered scan must keep its single group"
-        );
-    }
-
-    /// netcdf-c never shares a file, whatever its size: every call it makes
-    /// queues on one process-global mutex, so the partitions would serialise.
-    #[test]
-    fn only_the_rust_reader_shares_one_file() {
-        use datafusion::datasource::listing::PartitionedFile;
-        use datafusion::datasource::table_schema::TableSchema;
-        use datafusion::execution::object_store::ObjectStoreUrl;
-
-        let table_schema =
-            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-        let source = NetCDFSource::new(access_on(ReaderBackend::NetcdfC), None, table_schema);
-        let config = FileScanConfigBuilder::new(
-            ObjectStoreUrl::local_filesystem(),
-            Arc::new(source.clone()) as Arc<dyn FileSource>,
-        )
-        .with_file(PartitionedFile::new("large.nc", 64 * 1024 * 1024))
-        .build();
-
-        assert!(
-            source
-                .repartitioned(4, MIN_SHARE_SIZE, None, &config)
-                .unwrap()
-                .is_none(),
-            "netcdf-c must not share a file"
-        );
-    }
-
-    /// A session with `target_partitions` partitions.
-    ///
-    /// Nothing is done to the split minimum here, so a test that wants a share
-    /// has to bring a file large enough to earn one under the session default
-    /// ([`MIN_SHARE_SIZE`]).
+    /// A session with `target_partitions` partitions and the given batch size.
     fn splitting_session(target_partitions: usize, batch_size: usize) -> SessionContext {
         let config = SessionConfig::new()
             .with_target_partitions(target_partitions)
@@ -1811,17 +1301,17 @@ mod reader_backend_tests {
     /// How many rows it writes in each.
     const LARGE_ROWS: usize = 100_000;
 
-    /// Write a netCDF-4 file larger than [`MIN_SHARE_SIZE`], and return its path.
+    /// Write a netCDF-4 file of about 16 MB, and return its path.
     ///
-    /// Every bundled fixture is hundreds of KB, well under the minimum, so a
-    /// test that needs a real split has to make its own file.
+    /// The morsels of a file stay in one partition below 1 MiB. Every bundled
+    /// fixture is under that size, so a test that shares one file makes its own.
     ///
     /// It is written **wide** rather than long, and that is not a free choice.
     /// `oxcdf` cannot read this writer's output once a single variable grows
     /// past roughly 200k values: it fails with "chunk at […] was neither cached
     /// nor fetched" while netcdf-c reads the same bytes. The limit follows one
     /// variable's chunk count, not the file's size, so 20 columns of 100k values
-    /// clears the minimum with room to spare and still reads back. Measured:
+    /// is large enough and still reads back. Measured:
     /// 20x100k is 16.3 MB and reads; 12x200k is 19.4 MB and does not.
     ///
     /// The caller holds the [`TempDir`](tempfile::TempDir) for as long as the
@@ -2035,18 +1525,13 @@ mod reader_backend_tests {
         node.output_partitioning().partition_count()
     }
 
-    /// A file over the split minimum scans in several partitions, and returns
-    /// the same rows it returns in one.
+    /// A large file scans in several partitions, and returns the same rows it
+    /// returns in one.
     ///
     /// The partition count is the point of the feature. The row check is the
-    /// guard on it: `count(*)` catches a share that overlapped another or a gap
-    /// between two, and `min`/`max` catch a share that read the wrong region.
-    /// None of those raise an error on their own.
-    ///
-    /// This is the only test that reaches the split the way a query does: a real
-    /// file over the real minimum, planned and executed through SQL. The others
-    /// hand the opener its ranges directly, because no bundled fixture is large
-    /// enough for a scan to split one.
+    /// guard on it: `count(*)` catches a morsel read twice or not at all, and
+    /// `min`/`max` catch a morsel that read the wrong region. None of those
+    /// raise an error on their own.
     #[tokio::test]
     async fn a_large_file_splits_and_returns_the_same_rows() {
         const QUERY: &str = r#"SELECT count(*), count("V0"), min("V0"), max("V0") FROM one"#;
@@ -2069,7 +1554,7 @@ mod reader_backend_tests {
         assert_eq!(
             scan_partitions(&plan),
             4,
-            "a file over the minimum should scan in 4 partitions:\n{}",
+            "a large file should scan in 4 partitions:\n{}",
             datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
         );
 
@@ -2084,12 +1569,10 @@ mod reader_backend_tests {
 
     /// A bare `count(*)` over a shared file counts every row once.
     ///
-    /// This is the one read that cannot inherit its division from the decode: it
-    /// projects no column, so it drives the read with a column of its own and
-    /// never builds an nd array. It has to take that work from the same queue as
-    /// everything else. A share that read the file whole would count it once per
-    /// partition, and the answer would grow with `target_partitions` — silently,
-    /// because nothing about it is an error.
+    /// It projects no column, so the planner cuts the full grid of the file into
+    /// morsels. A partition that read the file whole would count it once per
+    /// partition, and the answer would grow with `target_partitions`. Nothing
+    /// about that is an error.
     ///
     /// The whole-file session answers in one partition, so it is the count to
     /// match.
@@ -2153,91 +1636,14 @@ mod reader_backend_tests {
         }
     }
 
-    /// Every column, including every attribute, comes back identical.
+    /// A filtered scan counts what the coordinate itself says it should.
     ///
-    /// The other comparisons check data variables, or check that attributes are
-    /// *present* with the right type and shape. Neither would catch an
-    /// attribute whose **value** differs between the readers. This one reads
-    /// the lot: data variables, variable attributes (`analysed_sst.units`) and
-    /// global attributes (`.Conventions`), the last two broadcast onto every
-    /// row by the nd pipeline.
-    #[tokio::test]
-    async fn both_readers_return_identical_values_for_every_column() {
-        use arrow::compute::concat_batches;
-
-        // The ragged file in full: 418 rows over 147 columns, ~1 MiB.
-        //
-        // The gridded file gets an explicit column list, not `SELECT *`. Its
-        // grid is 2.3M rows, and `LIMIT` does not bound what the scan
-        // materialises: the nd broadcast emits the whole grid as one batch and
-        // the limit only slices it, so `SELECT *` here costs ~10 GiB for each
-        // reader. The columns below are the ones this test is actually for — a
-        // global attribute, a variable attribute, and the two CF decodes.
-        for (file, query) in [
-            (WOD_FILE, "SELECT * FROM {table}"),
-            (
-                GRIDDED_FILE,
-                r#"SELECT ".Conventions", "analysed_sst.units", analysed_sst, time
-                   FROM {table}"#,
-            ),
-        ] {
-            let ctx = session();
-            register(&ctx, "netcdf_c", ReaderBackend::NetcdfC, file).await;
-            register(&ctx, "rust", ReaderBackend::Oxcdf, file).await;
-
-            let collect = async |table: &str| {
-                let batches = ctx
-                    .sql(&query.replace("{table}", table))
-                    .await
-                    .unwrap()
-                    .collect()
-                    .await
-                    .unwrap();
-                let schema = batches[0].schema();
-                concat_batches(&schema, &batches).unwrap()
-            };
-
-            let rust = collect("rust").await;
-            let c = collect("netcdf_c").await;
-
-            assert!(rust.num_rows() > 0, "{file}: the scan must return rows");
-            // Guard the guard: a column set that lost the attributes would make
-            // the comparison below pass without checking any of them.
-            let schema = rust.schema();
-            let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-            assert!(
-                names.iter().any(|n| n.starts_with('.')),
-                "{file}: no global attribute in {names:?}"
-            );
-            assert!(
-                names.iter().any(|n| n.contains('.') && !n.starts_with('.')),
-                "{file}: no variable attribute in {names:?}"
-            );
-
-            // Compare column by column, so a failure names the column.
-            for (i, field) in rust.schema().fields().iter().enumerate() {
-                assert_eq!(
-                    rust.column(i),
-                    c.column(i),
-                    "{file}: column '{}' differs between the readers",
-                    field.name()
-                );
-            }
-            assert_eq!(rust, c, "{file}: batches differ");
-        }
-    }
-
-    /// A pruned scan counts what the coordinate itself says it should.
-    ///
-    /// The scan skips chunks whose coordinates cannot meet the predicate, so a
-    /// bound that is too tight loses rows and reports a smaller count. Nothing
-    /// about that raises an error, and comparing the two readers would not catch
-    /// it — they share the pruning. So the expected answer comes from the
-    /// coordinate column itself, read with no predicate in the plan and
-    /// therefore with no pruning.
+    /// A scan that skips chunks on the predicate loses rows when a bound is too
+    /// tight, and no error shows it. So the expected answer comes from the
+    /// coordinate column itself, read with no predicate in the plan.
     ///
     /// The fixture's `lat` runs from about 38.8 to 48.8, so the thresholds below
-    /// prune nothing, some, and everything in turn. The middle one is the one
+    /// keep everything, some, and nothing in turn. The middle one is the one
     /// that matters: a chunk half inside the bound has to be read whole.
     #[tokio::test]
     async fn a_pruned_scan_counts_what_the_coordinate_says_it_should() {
@@ -2318,178 +1724,6 @@ mod reader_backend_tests {
         );
     }
 
-    /// The predicate reaches the file source through the nd pipeline.
-    ///
-    /// The scan sits under an `NdSourceExec` and an `NdBroadcastExec`, and a
-    /// node that does not forward filters leaves the source with nothing to
-    /// prune on. That failure is invisible in a result — every row still comes
-    /// back, the scan just reads the whole file — so it is asserted on the
-    /// scan's own output instead.
-    ///
-    /// One encoded batch carries one chunk, so the scan's output rows *are* its
-    /// chunk count.
-    #[tokio::test]
-    async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
-        use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
-
-        let ctx = session();
-        register(&ctx, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
-
-        /// The chunk count of the scan at the bottom of an executed plan.
-        struct ScanRows(Option<usize>);
-        impl ExecutionPlanVisitor for ScanRows {
-            type Error = std::convert::Infallible;
-            fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> Result<bool, Self::Error> {
-                if plan.name().contains("DataSourceExec") {
-                    self.0 = plan.metrics().and_then(|metrics| metrics.output_rows());
-                    return Ok(false);
-                }
-                Ok(true)
-            }
-        }
-
-        let chunks_read = async |sql: &str| {
-            let plan = ctx
-                .sql(sql)
-                .await
-                .unwrap()
-                .create_physical_plan()
-                .await
-                .unwrap();
-            datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
-                .await
-                .unwrap();
-            let mut visitor = ScanRows(None);
-            datafusion::physical_plan::accept(plan.as_ref(), &mut visitor).unwrap();
-            visitor.0.expect("the scan reports its output rows")
-        };
-
-        let whole = chunks_read("SELECT lat FROM gridded").await;
-        assert!(whole > 1, "the fixture must hold several chunks");
-
-        // `lat` runs from about 38.8 to 48.8, so nothing can satisfy this and
-        // every chunk is skipped before it is fetched.
-        assert_eq!(
-            chunks_read("SELECT lat FROM gridded WHERE lat > 1000").await,
-            0,
-            "a predicate no row can meet must leave the scan nothing to read"
-        );
-
-        // A bound the whole file satisfies prunes nothing.
-        assert_eq!(
-            chunks_read("SELECT lat FROM gridded WHERE lat > 0").await,
-            whole,
-            "a predicate every row meets must not skip a chunk"
-        );
-
-        // And one that cuts the file reads some of it.
-        let partial = chunks_read("SELECT lat FROM gridded WHERE lat > 44").await;
-        assert!(
-            partial > 0 && partial < whole,
-            "lat > 44 should read some of the {whole} chunks, it read {partial}"
-        );
-    }
-
-    /// The scan reports what each partition read, and what the predicate saved.
-    ///
-    /// These four counters are the only view of the sharing there is: the scan's
-    /// own `output_rows` counts encoded batches, which says nothing about how a
-    /// file divided between the partitions or how much of it was skipped. They
-    /// went unrecorded once already, so this holds them in place.
-    #[tokio::test]
-    async fn the_scan_reports_what_it_read_and_what_it_skipped() {
-        use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
-
-        let ctx = session();
-        register(&ctx, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
-
-        /// The named counter, summed over the scan's partitions.
-        struct Counter(&'static str, usize);
-        impl ExecutionPlanVisitor for Counter {
-            type Error = std::convert::Infallible;
-            fn pre_visit(&mut self, plan: &dyn ExecutionPlan) -> Result<bool, Self::Error> {
-                if plan.name().contains("DataSourceExec") {
-                    self.1 = plan
-                        .metrics()
-                        .map(|metrics| {
-                            metrics
-                                .iter()
-                                .filter(|metric| metric.value().name() == self.0)
-                                .map(|metric| metric.value().as_usize())
-                                .sum()
-                        })
-                        .unwrap_or(0);
-                    return Ok(false);
-                }
-                Ok(true)
-            }
-        }
-
-        let counters = async |sql: &str| {
-            let plan = ctx
-                .sql(sql)
-                .await
-                .unwrap()
-                .create_physical_plan()
-                .await
-                .unwrap();
-            datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
-                .await
-                .unwrap();
-            let read = |name: &'static str| {
-                let mut counter = Counter(name, 0);
-                datafusion::physical_plan::accept(plan.as_ref(), &mut counter).unwrap();
-                counter.1
-            };
-            (
-                read("chunks_read"),
-                read("rows_read"),
-                read("chunks_pruned"),
-                read("rows_pruned"),
-            )
-        };
-
-        // No predicate: everything is read, nothing is skipped, and the rows are
-        // the grid's own — not the one-row-per-chunk the scan emits.
-        let (chunks, rows, pruned, pruned_rows) = counters("SELECT lat FROM gridded").await;
-        assert!(chunks > 1, "the fixture must hold several chunks");
-        assert!(
-            rows > chunks,
-            "rows_read must count broadcast rows ({rows}), not batches ({chunks})"
-        );
-        assert_eq!((pruned, pruned_rows), (0, 0), "nothing to skip");
-
-        // A predicate nothing can meet: every chunk is skipped before it is
-        // read, and the rows it would have produced are accounted for.
-        let (chunks, rows, pruned, pruned_rows) =
-            counters("SELECT lat FROM gridded WHERE lat > 1000").await;
-        assert_eq!((chunks, rows), (0, 0), "nothing is read");
-        assert!(pruned > 0 && pruned_rows > 0, "and the skip is reported");
-    }
-
-    /// A projection and a predicate push down the same way on either reader.
-    #[tokio::test]
-    async fn a_pushed_down_predicate_gives_the_same_answer() {
-        let ctx = session();
-        register(&ctx, "netcdf_c", ReaderBackend::NetcdfC, GRIDDED_FILE).await;
-        register(&ctx, "rust", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
-
-        let count = async |table: &str| {
-            let sql = format!("SELECT count(*) FROM {table} WHERE lat > 0");
-            let batches = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
-            batches[0]
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
-                .unwrap()
-                .value(0)
-        };
-
-        let rust = count("rust").await;
-        assert!(rust > 0, "the predicate must keep some rows");
-        assert_eq!(rust, count("netcdf_c").await);
-    }
-
     /// A gridded scan must respect the batch size. `gridded-example.nc` has the
     /// shape `[time=1, lat=1208, lon=1920]`. The engine cut only the first axis,
     /// so the short `time` axis gave one chunk that held the whole array. See
@@ -2499,9 +1733,8 @@ mod reader_backend_tests {
     /// shape as its chunk shape and the engine computes the chunk itself.
     #[tokio::test]
     async fn a_short_first_axis_still_splits_into_batches() {
-        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
-            for batch_size in [4096usize, 8192] {
-                let state = SessionStateBuilder::new()
+        for batch_size in [4096usize, 8192] {
+            let state = SessionStateBuilder::new()
                     .with_config(
                         SessionConfig::new()
                             .with_target_partitions(1)
@@ -2512,32 +1745,31 @@ mod reader_backend_tests {
                     )
                     .with_default_features()
                     .build();
-                let ctx = SessionContext::new_with_state(state);
-                register(&ctx, "gridded", backend, GRIDDED_FILE).await;
+            let ctx = SessionContext::new_with_state(state);
+            register(&ctx, "gridded", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
 
-                let batches = ctx
-                    .sql("SELECT sea_ice_fraction FROM gridded")
-                    .await
-                    .unwrap()
-                    .collect()
-                    .await
-                    .unwrap();
+            let batches = ctx
+                .sql("SELECT sea_ice_fraction FROM gridded")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
 
-                let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-                let largest = batches.iter().map(|b| b.num_rows()).max().unwrap_or(0);
-                assert_eq!(rows, 1208 * 1920, "{backend:?} must read every row");
-                assert!(
-                    batches.len() > 1,
-                    "{backend:?} at batch size {batch_size} gave {} batch(es)",
-                    batches.len()
-                );
-                // The chunk fills from the last axis, so it holds at most
-                // `batch_size` elements. Here one row of `lon` is 1920 ≤ 4096.
-                assert!(
-                    largest <= batch_size,
-                    "{backend:?} at batch size {batch_size} gave a batch of {largest} rows"
-                );
-            }
+            let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            let largest = batches.iter().map(|b| b.num_rows()).max().unwrap_or(0);
+            assert_eq!(rows, 1208 * 1920, "the scan must read every row");
+            assert!(
+                batches.len() > 1,
+                "at batch size {batch_size} gave {} batch(es)",
+                batches.len()
+            );
+            // The chunk fills from the last axis, so it holds at most
+            // `batch_size` elements. Here one row of `lon` is 1920 ≤ 4096.
+            assert!(
+                largest <= batch_size,
+                "at batch size {batch_size} gave a batch of {largest} rows"
+            );
         }
     }
 }

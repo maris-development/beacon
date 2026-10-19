@@ -4,6 +4,7 @@ pub mod cancel;
 pub mod consts;
 pub use beacon_file_stats::container_counts;
 pub mod fast_object;
+pub mod file_stream_adapters;
 pub mod format_ext;
 pub mod format_options;
 pub mod listing_factory;

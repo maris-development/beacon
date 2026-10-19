@@ -77,6 +77,7 @@ pub fn label_by_object(objects: &[ObjectMeta], schemas: &[SchemaRef]) -> Vec<Lab
 }
 
 /// The merge rule of a session.
+#[derive(Debug)]
 pub struct ArrowTypeWidening {
     pub strategy: Arc<dyn ArrowTypeWideningStrategy>,
 }
@@ -119,6 +120,12 @@ impl ArrowTypeWidening {
             target,
             Arc::clone(&self.strategy),
         ))
+    }
+}
+
+impl Default for ArrowTypeWidening {
+    fn default() -> Self {
+        Self::new(Arc::new(DefaultArrowTypeWidening::new()))
     }
 }
 

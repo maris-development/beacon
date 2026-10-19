@@ -5,6 +5,32 @@ use datafusion::common::exec_datafusion_err;
 
 use crate::attributes::CombineAttrs;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NetcdfReaderOptions {
+    /// Whether to skip a file that causes an error during reading, instead of failing the query.
+    pub skip_on_error: bool,
+}
+
+impl Default for NetcdfReaderOptions {
+    fn default() -> Self {
+        Self {
+            skip_on_error: false,
+        }
+    }
+}
+
+impl NetcdfReaderOptions {
+    pub fn apply_format_options(
+        &mut self,
+        format_options: &HashMap<String, String>,
+    ) -> datafusion::error::Result<()> {
+        if let Some(value) = format_option(format_options, "skip_on_error") {
+            self.skip_on_error = parse_bool_option("skip_on_error", value)?;
+        }
+        Ok(())
+    }
+}
+
 /// Configuration options for the NetCDF file format in DataFusion queries.
 ///
 /// Controls both reading (schema inference, dimension handling) and writing

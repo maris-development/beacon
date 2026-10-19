@@ -118,11 +118,19 @@ impl NdMorselPlanner {
     /// Cut a ragged dataset into one morsel per range of casts.
     async fn plan_ragged(&self, dataset: RaggedDataset) -> Result<Vec<Box<dyn Morsel>>> {
         let dataset = Arc::new(dataset);
-        let ranges = dataset
-            .cast_ranges(self.batch_size)
-            .await
-            .map_err(external)?;
-        let offsets = Arc::new(dataset.row_offsets().await.map_err(external)?);
+
+        let ranges = match dataset.cast_ranges(self.batch_size).await {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(external(e));
+            }
+        };
+        let offsets = match dataset.row_offsets().await {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                return Err(external(e));
+            }
+        };
         Ok(ranges
             .into_iter()
             .map(|casts| {

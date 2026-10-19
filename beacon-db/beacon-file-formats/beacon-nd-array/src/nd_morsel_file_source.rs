@@ -4,17 +4,22 @@
 
 use std::sync::{Arc, OnceLock};
 
-use beacon_datafusion_ext::{morsel_planner::MorselPlannerQueue, nd::logical_schema};
+use beacon_datafusion_ext::{
+    file_stream_adapters::{FileStreamAdapter, OnError},
+    morsel_planner::MorselPlannerQueue,
+    nd::logical_schema,
+};
 use datafusion::{
     common::internal_datafusion_err,
     datasource::{
         listing::PartitionedFile,
-        physical_plan::{FileGroup, FileOpener, FileScanConfig, FileSource},
+        physical_plan::{FileGroup, FileOpener, FileScanConfig, FileSource, FileStream},
         table_schema::TableSchema,
     },
     error::Result,
     physical_expr::{LexOrdering, expressions::Column, projection::ProjectionExprs},
-    physical_plan::metrics::ExecutionPlanMetricsSet,
+    physical_expr_adapter::{DefaultPhysicalExprAdapterFactory, PhysicalExprAdapterFactory},
+    physical_plan::{PhysicalExpr, metrics::ExecutionPlanMetricsSet},
 };
 use object_store::ObjectStore;
 
@@ -38,12 +43,18 @@ const LOCAL_FILE_MAX_SIZE: u64 = 1 << 20;
 #[derive(Debug, Clone)]
 pub struct NdMorselFileSource {
     opener: Arc<dyn NdFileOpener>,
+    expr_adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
+    on_error: OnError,
+
     metrics: ExecutionPlanMetricsSet,
-    file_type: String,
     table_schema: TableSchema, // nd-encoded, as `NdSourceExec` above the scan expects
-    batch_size: usize,
     projection: Option<ProjectionExprs>, // Plain file columns only
+    pushdown_predicate: Option<Arc<dyn PhysicalExpr>>,
+    // Local settings
+    batch_size: usize,
+    file_type: String,
     local_file_max_size: u64,
+    // Planned scans
     scan: Option<Arc<MorselScan>>, // Set by `repartitioned`: the files behind the placeholder groups
     unrepartitioned: Arc<OnceLock<Arc<MorselScan>>>, // The scan of the planned file groups, when `repartitioned` did not run
 }
@@ -63,15 +74,41 @@ impl NdMorselFileSource {
     ) -> Self {
         Self {
             opener,
+            expr_adapter_factory: Arc::new(DefaultPhysicalExprAdapterFactory),
             file_type,
             table_schema,
             metrics: ExecutionPlanMetricsSet::new(),
             batch_size: usize::MAX,
             projection: None,
+            pushdown_predicate: None,
             local_file_max_size: LOCAL_FILE_MAX_SIZE,
             scan: None,
+            on_error: OnError::default(),
             unrepartitioned: Arc::new(OnceLock::new()),
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: ExecutionPlanMetricsSet) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    pub fn with_pushdown_predicate(mut self, predicate: Arc<dyn PhysicalExpr>) -> Self {
+        self.pushdown_predicate = Some(predicate);
+        self
+    }
+
+    pub fn with_on_error(mut self, on_error: OnError) -> Self {
+        self.on_error = on_error;
+        self
+    }
+
+    pub fn with_expr_adapter_factory(
+        mut self,
+        factory: Arc<dyn PhysicalExprAdapterFactory>,
+    ) -> Self {
+        self.expr_adapter_factory = factory;
+        self
     }
 
     /// The same source for a new scan shape, with a scan of its own.
@@ -124,6 +161,7 @@ impl FileSource for NdMorselFileSource {
         partition: usize,
     ) -> Result<Arc<dyn FileOpener>> {
         reject_partition_columns(&self.file_type, base_config)?;
+        tracing::debug!("Creating file opener for partition {partition}");
         let scan = match &self.scan {
             Some(scan) => Arc::clone(scan),
             None => Arc::clone(self.unrepartitioned.get_or_init(|| {
@@ -140,14 +178,22 @@ impl FileSource for NdMorselFileSource {
             Ok(Arc::new(NdMorselPlanner::new(
                 Arc::clone(&self.opener),
                 projected,
-                None,
+                self.pushdown_predicate.clone(),
                 self.batch_size,
             )))
         })?;
         let partition_morsels = queue
             .partition(object_store, partition)
             .map_err(|e| internal_datafusion_err!("Failed to get partition morsels: {e}"))?;
-        Ok(Arc::new(partition_morsels))
+
+        let file_stream_adapter = FileStreamAdapter::new(Arc::new(partition_morsels))
+            .with_on_error(self.on_error)
+            .with_schema_adapter(
+                self.expr_adapter_factory.clone(),
+                base_config.projected_schema()?,
+            );
+
+        Ok(Arc::new(file_stream_adapter))
     }
 
     fn table_schema(&self) -> &TableSchema {
@@ -662,6 +708,33 @@ mod tests {
             .collect();
         assert_eq!(sorted_values(&batch, "temp"), expected);
         assert_eq!(batch.num_rows(), 18);
+    }
+
+    /// The grid files, with `grid_bad.nc` between them. `TestOpener` cannot open it.
+    fn files_with_a_bad_file() -> Vec<(&'static str, u64)> {
+        let mut files = grid_files();
+        files.insert(1, ("grid_bad.nc", 10));
+        files
+    }
+
+    #[tokio::test]
+    async fn skip_error_reads_the_files_that_open() {
+        let source = source(&grid_schema(), vec![]).with_on_error(OnError::Skip);
+        let conf = config(source, &files_with_a_bad_file()).build();
+
+        let batch = run(conf, 4).await;
+
+        assert_eq!(batch.num_rows(), 18);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_fails_fails_the_scan_without_skip_error() {
+        let conf = config(source(&grid_schema(), vec![]), &files_with_a_bad_file()).build();
+        let plan = nd_exec(repartition(&conf, 4));
+
+        let result = collect(plan, SessionContext::new().task_ctx()).await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]

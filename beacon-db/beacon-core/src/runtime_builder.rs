@@ -974,6 +974,17 @@ fn build_session_config(
         .execution
         .parquet
         .allow_single_file_parallelism = true;
+    // DataFusion writes one row group at a time by default, which stalls a parallel scan.
+    config
+        .options_mut()
+        .execution
+        .parquet
+        .maximum_parallel_row_group_writers = 8;
+    config
+        .options_mut()
+        .execution
+        .parquet
+        .maximum_buffered_record_batches_per_stream = 64;
     config.options_mut().optimizer.expand_views_at_output = true;
     config.options_mut().sql_parser.map_string_types_to_utf8view = false;
 

@@ -6,16 +6,14 @@ rust-version.workspace = true
 readme = "README.md"
 
 [features]
-default = ["ndarray"]
-ndarray = ["dep:ndarray", "dep:chrono"]
 
 [dependencies]
 arrow = { workspace = true }
 arrow-schema = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-chrono = { workspace = true, optional = true }
-ndarray = {workspace = true, optional = true}
+chrono = { workspace = true }
+ndarray = {workspace = true }
 anyhow = { workspace=true }
 async-trait = { workspace=true }
 futures = { workspace=true }
