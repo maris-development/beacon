@@ -1,0 +1,39 @@
+Beacon has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+1. Beacon serves the HTTP API and admin UI on port {{ .Values.beacon.port }}.
+{{- if .Values.beacon.flightSql.enabled }}
+   Arrow Flight SQL is on port {{ .Values.beacon.flightSql.port }}.
+{{- end }}
+
+2. Reach it:
+{{- if .Values.ingress.enabled }}
+   Via Ingress:
+   {{- range .Values.ingress.hosts }}
+     http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ (first .paths).path }}
+   {{- end }}
+{{- else if eq .Values.service.type "LoadBalancer" }}
+   Via the LoadBalancer service external IP:
+     kubectl get svc {{ include "beacon.fullname" . }} -n {{ .Release.Namespace }}
+{{- else }}
+   Port-forward for local access:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "beacon.fullname" . }} {{ .Values.service.httpPort }}:{{ .Values.service.httpPort }}
+   then open http://localhost:{{ .Values.service.httpPort }}/admin
+{{- end }}
+
+3. Admin credentials:
+{{- if .Values.beacon.admin.existingSecret }}
+   From your supplied Secret "{{ .Values.beacon.admin.existingSecret }}".
+{{- else }}
+   Username/password are in Secret "{{ include "beacon.adminSecretName" . }}":
+     kubectl -n {{ .Release.Namespace }} get secret {{ include "beacon.adminSecretName" . }} -o jsonpath='{.data.BEACON_ADMIN_USERNAME}' | base64 -d; echo
+     kubectl -n {{ .Release.Namespace }} get secret {{ include "beacon.adminSecretName" . }} -o jsonpath='{.data.BEACON_ADMIN_PASSWORD}' | base64 -d; echo
+{{- end }}
+
+4. Data:
+{{- if .Values.beacon.s3.enabled }}
+   Datasets are backed by S3 bucket "{{ .Values.beacon.s3.bucket }}".
+   The catalog (beacon.db) lives on the persistent volume at {{ .Values.beacon.dataDir }}/tables.
+{{- else }}
+   Datasets and catalog live on the persistent volume at {{ .Values.beacon.dataDir }}.
+   Add supported files (.parquet, .nc, .zarr, .csv) under {{ .Values.beacon.dataDir }}/datasets.
+{{- end }}

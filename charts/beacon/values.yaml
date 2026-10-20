@@ -1,0 +1,186 @@
+# Default values for the Beacon Helm chart.
+# These defaults are intentionally GENERIC and deployment-agnostic. Supply a
+# site-specific values overlay (e.g. your own ingress host, storage class,
+# S3 bucket and resource sizing) rather than editing this file.
+
+# -- Number of Beacon replicas. Beacon keeps its catalog (beacon.db) on the
+# `tables` volume; if you run more than one replica, back `tables` with a
+# ReadWriteMany volume or an external store, or keep replicaCount at 1.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/maris-development/beacon
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Workload kind. "Deployment" (default) or "StatefulSet". Use StatefulSet
+# with persistence.enabled=true for stable per-replica volumes.
+kind: Deployment
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext: {}
+securityContext: {}
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+
+# ---------------------------------------------------------------------------
+# Beacon server configuration. Everything here maps to a BEACON_* / AWS_*
+# environment variable on the container. Only set what you need; unset keys
+# fall back to Beacon's own defaults.
+# ---------------------------------------------------------------------------
+beacon:
+  # HTTP API + admin UI
+  port: 5001
+  host: "0.0.0.0"
+  # URL prefix for all routes, e.g. "/beacon". Empty serves at "/".
+  basePath: ""
+  logLevel: "info"           # trace|debug|info|warn|error|off
+  # Root data directory inside the container. datasets/ and tables/ derive
+  # from this unless overridden by Beacon.
+  dataDir: "/beacon/data"
+
+  # Admin credentials. By default a Secret is created from adminUsername /
+  # adminPassword below. For production, set existingSecret to a Secret that
+  # provides BEACON_ADMIN_USERNAME and BEACON_ADMIN_PASSWORD and leave the
+  # inline values empty.
+  admin:
+    adminUsername: "admin"
+    adminPassword: ""        # if empty and existingSecret unset, a random one is generated
+    existingSecret: ""       # name of a Secret with BEACON_ADMIN_USERNAME/PASSWORD keys
+
+  # Arrow Flight SQL endpoint
+  flightSql:
+    enabled: true
+    port: 32011
+    host: "0.0.0.0"
+    allowAnonymous: false
+
+  # Runtime tuning (optional). Leave null to use Beacon defaults.
+  workerThreads: null
+  apiThreads: null
+  batchSize: null
+  maxUploadBytes: null
+  vmMemorySize: null
+
+  # Background crawler / file-stats (optional)
+  crawler:
+    enabled: null            # BEACON_CRAWLER_ENABLE
+    defaultIntervalSecs: null
+  fileStats:
+    enabled: null            # BEACON_FILE_STATS_ENABLE
+
+  # CORS (optional). Only set if the admin UI / API is called cross-origin.
+  cors:
+    allowedOrigins: null
+    allowedMethods: null
+    allowedHeaders: null
+
+  # OIDC auth (optional). Enable to delegate auth to an OIDC provider.
+  oidc:
+    enabled: false
+    issuer: ""
+    audience: ""
+    jwksUrl: ""
+    rolesClaim: ""
+    usernameClaim: ""
+
+  # Back the datasets store with an S3-compatible bucket instead of a local
+  # volume. Credentials use the standard AWS chain (IRSA / Pod Identity /
+  # env / instance profile). Prefer IRSA or Pod Identity over static keys.
+  s3:
+    enabled: false
+    bucket: ""
+    region: ""
+    endpoint: ""             # set for S3-compatible stores (e.g. MinIO)
+    allowHttp: false
+    virtualHostedStyle: false
+    # Static credentials (NOT recommended — prefer IRSA/Pod Identity).
+    # If set, a Secret is created exposing AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY.
+    accessKeyId: ""
+    secretAccessKey: ""
+    existingSecret: ""       # Secret providing AWS_* keys instead of the above
+
+  # Free-form extra environment variables (list of name/value or name/valueFrom).
+  extraEnv: []
+  # Mount extra config via envFrom (ConfigMaps / Secrets you manage yourself).
+  extraEnvFrom: []
+
+# ---------------------------------------------------------------------------
+# Persistence for the local data directory (datasets + tables / beacon.db).
+# When beacon.s3.enabled=true the datasets live in S3, but `tables` (the
+# catalog) is still local and should be persisted.
+# ---------------------------------------------------------------------------
+persistence:
+  enabled: true
+  # Existing PVC name to reuse instead of creating one.
+  existingClaim: ""
+  storageClass: ""           # "" uses the cluster default
+  accessModes:
+    - ReadWriteOnce
+  size: 20Gi
+  annotations: {}
+
+service:
+  type: ClusterIP
+  httpPort: 5001
+  flightSqlPort: 32011
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: beacon.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources: {}
+  # limits:
+  #   cpu: "4"
+  #   memory: 8Gi
+  # requests:
+  #   cpu: "1"
+  #   memory: 2Gi
+
+livenessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
