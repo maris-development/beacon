@@ -11,14 +11,17 @@ pub struct NetCDFReaderOptions {
     pub skip_on_error: bool,
     pub skip_unbroadcastable: bool,
     pub enable_statistics: bool,
+    pub enable_partitioning: bool,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for NetCDFReaderOptions {
     fn default() -> Self {
         Self {
             skip_on_error: false,
             skip_unbroadcastable: false,
             enable_statistics: false,
+            enable_partitioning: false,
         }
     }
 }
@@ -96,7 +99,7 @@ pub struct NetCDFWriterOptions {
     /// * `Some(["lat", "lon", …])` → gridded output via
     ///   [`NetCDFNdSink`](super::sink::NetCDFNdSink) where the listed columns
     ///   become named dimensions and remaining columns become data variables.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_dimensions: Option<Vec<String>>,
     /// How the writer combines `variable.attribute` columns. When not set, they stay variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,7 +278,11 @@ mod tests {
         let options = apply(&[("format.write_dimensions", " lat, lon ,,time")]).unwrap();
         assert_eq!(
             options.write_dimensions,
-            Some(vec!["lat".to_string(), "lon".to_string(), "time".to_string()])
+            Some(vec![
+                "lat".to_string(),
+                "lon".to_string(),
+                "time".to_string()
+            ])
         );
         let options = apply(&[("write_dimensions", " , ")]).unwrap();
         assert_eq!(options.write_dimensions, None);

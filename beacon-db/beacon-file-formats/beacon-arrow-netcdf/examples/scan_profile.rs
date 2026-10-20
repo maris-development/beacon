@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use beacon_arrow_netcdf::datafusion::{FileAccess, NetcdfFormat};
+use beacon_arrow_netcdf::datafusion::NetCDFFormat;
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::nd::optimizer::{NdFilterPushdown, NdProjectionPushdown};
@@ -48,7 +48,9 @@ async fn main() -> anyhow::Result<()> {
 
     let config = SessionConfig::new()
         .with_target_partitions(partitions)
-        .with_extension(beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension());
+        .with_extension(
+            beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+        );
 
     // The two rules `RuntimeBuilder` adds for the nd pipeline. Without them the
     // filter runs above the broadcast and the profile is dominated by
@@ -62,11 +64,11 @@ async fn main() -> anyhow::Result<()> {
         .build();
     let ctx = SessionContext::new_with_state(state);
 
-    // The Rust reader, which is what a server reads with by default. The
-    // netcdf-c backend serialises on a process-global mutex, so profiling it
-    // would measure the mutex.
-    let format = NetcdfFormat::new(Arc::new(ListingFactory::dynamic()), Default::default())
-        .with_access(FileAccess::Oxcdf);
+    let format = NetCDFFormat::new(
+        Arc::new(ListingFactory::dynamic()),
+        Default::default(),
+        Default::default(),
+    );
     let url = ListingTableUrl::parse(&dir)?;
 
     let listed = Instant::now();

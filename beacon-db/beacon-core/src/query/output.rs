@@ -11,7 +11,7 @@ use beacon_arrow_csv::datafusion::DEFAULT_CSV_EXTENSION;
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
 use beacon_arrow_ipc::datafusion::{ArrowFormatFactory, DEFAULT_ARROW_EXTENSION};
 use beacon_arrow_netcdf::datafusion::NETCDF_EXTENSION;
-use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, NetcdfConfig};
+use beacon_arrow_netcdf::datafusion::NetCDFFormatFactory;
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
@@ -297,7 +297,7 @@ impl OutputFormat {
                         )
                     })?
                     .clone();
-                factory.options.writer = options.clone();
+                factory.writer_options = options.clone();
                 Ok(format_as_file_type(Arc::new(factory)))
             }
             OutputFormat::NdNetCDF { dimension_columns } => {
@@ -321,8 +321,7 @@ impl OutputFormat {
                         )
                     })?
                     .clone();
-                factory.options.unique_value_columns = dimension_columns.clone();
-                factory.options.write_dimensions = Some(dimension_columns.clone());
+                factory.writer_options.write_dimensions = Some(dimension_columns.clone());
 
                 Ok(format_as_file_type(Arc::new(factory)))
             }

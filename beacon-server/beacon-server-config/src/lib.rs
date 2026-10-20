@@ -11,7 +11,7 @@ use error::Result;
 // Per-format and storage config types are owned by their crates; beacon-config
 // composes them here and fills them from the environment.
 pub use beacon_arrow_hdf5::{Hdf5Config, Hdf5Convention};
-pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
+pub use beacon_arrow_netcdf::datafusion::NetCDFConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::CrawlerConfig;
 pub use beacon_common::FileStatsConfig;
@@ -29,7 +29,7 @@ pub struct Config {
     pub flight_sql: FlightSqlConfig,
     pub cors: CorsConfig,
     pub mcp: McpConfig,
-    pub netcdf: NetcdfConfig,
+    pub netcdf: NetCDFConfig,
     pub hdf5: Hdf5Config,
     pub zarr: ZarrConfig,
     pub crawler: CrawlerConfig,
@@ -454,16 +454,6 @@ struct RawConfig {
     #[envconfig(from = "BEACON_NETCDF_ENABLE_STATISTICS", default = "true")]
     netcdf_enable_statistics: bool,
 
-    /// Read netCDF with the pure-Rust `oxcdf` reader instead of netcdf-c.
-    ///
-    /// On by default. It reads in parallel. It opens a netCDF file in an object
-    /// store (s3, gs or az), which netcdf-c cannot. It reports the statistics of
-    /// each file.
-    ///
-    /// Set it to false to read with netcdf-c. Writes always use netcdf-c.
-    #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER", default = "true")]
-    netcdf_use_rust_reader: bool,
-
     /// Read HDF5 with the pure-Rust reader instead of netcdf-c.
     ///
     /// On by default. It reads in parallel. It opens an HDF5 file in an object
@@ -474,9 +464,6 @@ struct RawConfig {
     /// Set it to false to read with netcdf-c. A NetCDF-4 file is an HDF5 file,
     /// so the netcdf-c HDF5 dispatch opens a plain HDF5 file too. Writes always
     /// use netcdf-c.
-    ///
-    /// This flag is separate from `BEACON_NETCDF_USE_RUST_READER`. A server can
-    /// change one format at a time.
     #[envconfig(from = "BEACON_HDF5_USE_RUST_READER", default = "true")]
     hdf5_use_rust_reader: bool,
 
@@ -688,9 +675,9 @@ impl From<RawConfig> for Config {
                     .map(str::to_string)
                     .collect(),
             },
-            netcdf: NetcdfConfig {
+            netcdf: NetCDFConfig {
                 enable_statistics: raw.netcdf_enable_statistics,
-                use_rust_reader: raw.netcdf_use_rust_reader,
+                ..NetCDFConfig::default()
             },
             hdf5: Hdf5Config {
                 use_rust_reader: raw.hdf5_use_rust_reader,
@@ -1396,23 +1383,16 @@ mod tests {
 
     // ── Reader flags ───────────────────────────────────────────────────
 
-    /// A server that sets neither flag reads both formats in Rust.
+    /// A server that sets no flag reads HDF5 in Rust.
     #[test]
-    fn both_formats_default_to_the_rust_reader() {
-        let config = config(&[]);
-        assert!(config.netcdf.use_rust_reader);
-        assert!(config.hdf5.use_rust_reader);
+    fn hdf5_defaults_to_the_rust_reader() {
+        assert!(config(&[]).hdf5.use_rust_reader);
     }
 
-    /// Each flag moves one format, so a server can fall back for one alone.
+    /// The HDF5 flag selects the netCDF fallback.
     #[test]
-    fn each_flag_moves_one_format() {
-        let netcdf_c = config(&[("BEACON_NETCDF_USE_RUST_READER", "false")]);
-        assert!(!netcdf_c.netcdf.use_rust_reader);
-        assert!(netcdf_c.hdf5.use_rust_reader);
-
+    fn the_hdf5_flag_selects_the_fallback() {
         let hdf5_c = config(&[("BEACON_HDF5_USE_RUST_READER", "false")]);
-        assert!(hdf5_c.netcdf.use_rust_reader);
         assert!(!hdf5_c.hdf5.use_rust_reader);
     }
 

@@ -36,27 +36,17 @@
 //! `zarr.json` has a group behind it; the rest fail, which is why a zarr
 //! collection shows a large `failed` count on an otherwise healthy pass.
 //!
-//! **netCDF and HDF5 join that list unless the Rust reader is on.** Every
-//! netcdf-c call serialises on a process-global mutex and the read is
-//! synchronous, so computing ranges under it is serial *and* parks a tokio
-//! worker. The format therefore reports unknown when `use_rust_reader` is off.
-//! The flag is on by default. A netCDF node that prunes no file usually has the
-//! flag off. `column_count = 0` on its records shows this.
-//!
-//! `.h5` and `.hdf5` follow the same rule through their own variable. HDF5 owns
-//! the identity and picks the reader; on the default `BEACON_HDF5_USE_RUST_READER=true`
-//! a file is read by `beacon-arrow-hdf5`, which computes ranges for every rank-0
-//! and rank-1 array, in plain HDF5 and NetCDF-4 alike, whatever the extension
-//! says. With it off the read goes to netcdf-c and the ranges are unknown.
-//! Each pass says so once, through
-//! [`FormatFileAnalyzer::report_netcdf_c_once`].
+//! **netCDF joins that list for now.** The morsel scan of the netCDF format
+//! reports unknown statistics. `.h5` and `.hdf5` files on the default
+//! `BEACON_HDF5_USE_RUST_READER=true` are read by `beacon-arrow-hdf5`, which
+//! computes ranges for every rank-0 and rank-1 array. With it off the read goes
+//! to the netCDF format, and the ranges are unknown.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use arrow::datatypes::{DataType, SchemaRef};
-use beacon_arrow_netcdf::datafusion::{NetcdfFormat, ReaderBackend};
 use beacon_common::FileStatsConfig;
 use beacon_datafusion_ext::format_ext::{try_file_format_factory_ext, FileFormatFactoryExt};
 use beacon_datafusion_ext::listing_factory::try_listing_factory_from_session;
@@ -76,24 +66,6 @@ use object_store::{path::Path, ObjectMeta, ObjectStore};
 
 use crate::statement_plan::{upgrade_session, SessionCell};
 
-/// A latch that fires once in a pass, however many files ask it.
-///
-/// Files are analyzed concurrently, so this is atomic rather than a `bool`.
-#[derive(Debug, Default)]
-struct OncePerPass(std::sync::atomic::AtomicBool);
-
-impl OncePerPass {
-    /// True for exactly one caller in a pass, false for the rest.
-    fn take(&self) -> bool {
-        !self.0.swap(true, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Arm it again for the next pass.
-    fn reset(&self) {
-        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 /// Reads one file's statistics through Beacon's format registry.
 pub struct FormatFileAnalyzer {
     /// Weak, like every other holder: the session owns the runtime that owns
@@ -101,13 +73,6 @@ pub struct FormatFileAnalyzer {
     session: SessionCell,
     /// The store bare dataset paths resolve against.
     datasets_url: ObjectStoreUrl,
-    /// Whether this pass has yet to say that netcdf-c yields no ranges.
-    ///
-    /// The condition holds for every `.nc`, `.h5` and `.hdf5` file the pass
-    /// touches, so it is reported once per pass rather than once per file: a
-    /// backfill of a million files would otherwise write a million identical
-    /// lines. Re-armed by [`FileAnalyzer::begin_pass`].
-    netcdf_c_reason: OncePerPass,
 }
 
 impl FormatFileAnalyzer {
@@ -115,7 +80,6 @@ impl FormatFileAnalyzer {
         Self {
             session,
             datasets_url,
-            netcdf_c_reason: OncePerPass::default(),
         }
     }
 
@@ -123,40 +87,12 @@ impl FormatFileAnalyzer {
         upgrade_session(&self.session, "file statistics analyzer")
             .map_err(|e| FileStatsError::Format(e.to_string()))
     }
-
-    /// Say once per pass that this reader records no ranges, and which switch
-    /// changes that.
-    ///
-    /// A `.nc`, `.h5` or `.hdf5` file read through netcdf-c analyzes cleanly and
-    /// contributes nothing, so the record looks the same as a file the reader
-    /// simply found no ranges in. Naming the reason is the difference between a
-    /// node that prunes nothing and a node whose operator knows why.
-    fn report_netcdf_c_once(&self, format_name: &str, format: &dyn FileFormat) {
-        let Some(netcdf) = format.downcast_ref::<NetcdfFormat>() else {
-            return; // the Rust reader, or a format with no netcdf-c in it
-        };
-        if netcdf.reader_backend() != ReaderBackend::NetcdfC {
-            return;
-        }
-        if !self.netcdf_c_reason.take() {
-            return;
-        }
-        let switch = rust_reader_switch(format_name);
-        tracing::info!(
-            format = format_name,
-            switch,
-            "this pass records no column ranges for {format_name} files: netcdf-c \
-             serialises every call on a process-global lock, so statistics need \
-             the pure-Rust reader. Set {switch}=true and run ANALYZE FILES FORCE."
-        );
-    }
 }
 
 #[async_trait::async_trait]
 impl FileAnalyzer for FormatFileAnalyzer {
     fn begin_pass(&self) {
         tracing::debug!("beginning a file statistics pass");
-        self.netcdf_c_reason.reset();
     }
 
     async fn analyze(&self, record: &FileRecord) -> beacon_file_stats::Result<FileAnalysis> {
@@ -175,7 +111,6 @@ impl FileAnalyzer for FormatFileAnalyzer {
             .map_err(|e| FileStatsError::Format(format!("datasets store unavailable: {e}")))?;
 
         let (format_name, factory, format) = resolve_format(&session, &self.datasets_url, &object)?;
-        self.report_netcdf_c_once(&format_name, format.as_ref());
 
         // The file's *own* schema, not the table's. `column_statistics` is
         // positional against whatever schema is passed, so handing over a merged
@@ -217,22 +152,6 @@ impl FileAnalyzer for FormatFileAnalyzer {
             "analyzed a file"
         );
         Ok(analysis)
-    }
-}
-
-/// The environment switch that turns on the Rust reader for `format`.
-///
-/// The HDF5 identity delegates its reads to the netCDF format, so an `.h5` file
-/// on netcdf-c *is* that format. Name the variable that owns the file at hand
-/// anyway: the HDF5 one covers every HDF5 layout, including the plain ones the
-/// netCDF data model cannot express.
-fn rust_reader_switch(format: &str) -> &'static str {
-    // Both spellings the factory answers to: it registers under `hdf5`, and
-    // under `h5` as well for `STORED AS H5`.
-    if beacon_arrow_hdf5::HDF5_EXTENSIONS.contains(&format) {
-        "BEACON_HDF5_USE_RUST_READER"
-    } else {
-        "BEACON_NETCDF_USE_RUST_READER"
     }
 }
 
@@ -878,34 +797,6 @@ mod tests {
             Field::new("TEMP", DataType::Float64, true),
             Field::new("PSAL", DataType::Float64, true),
         ]))
-    }
-
-    /// The latch behind the once-per-pass reason. Every file of a pass asks it;
-    /// exactly one gets to speak, and the next pass re-arms it.
-    #[test]
-    fn a_pass_reports_a_reason_once_and_the_next_pass_may_report_it_again() {
-        let latch = OncePerPass::default();
-        assert!(latch.take(), "the first file of a pass reports");
-        assert!(!latch.take(), "the second does not");
-        assert!(!latch.take());
-
-        latch.reset();
-        assert!(latch.take(), "the next pass reports again");
-        assert!(!latch.take());
-    }
-
-    /// The reason has to name the switch of the format that owns the file. An
-    /// `.h5` file on netcdf-c is read by the netCDF format, but the switch to
-    /// reach for is the HDF5 one: it covers every HDF5 layout, not only the
-    /// NetCDF-4 ones.
-    #[test]
-    fn the_reason_names_the_switch_of_the_format_that_owns_the_file() {
-        assert_eq!(rust_reader_switch("hdf5"), "BEACON_HDF5_USE_RUST_READER");
-        assert_eq!(rust_reader_switch("h5"), "BEACON_HDF5_USE_RUST_READER");
-        assert_eq!(
-            rust_reader_switch("netcdf"),
-            "BEACON_NETCDF_USE_RUST_READER"
-        );
     }
 
     fn known(min: f64, max: f64, nulls: usize) -> ColumnStatistics {

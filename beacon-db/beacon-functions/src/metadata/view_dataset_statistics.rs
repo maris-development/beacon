@@ -5,8 +5,8 @@
 //!
 //! Statistics are served from the session's [`FileStatisticsCache`] when a
 //! valid entry exists (validated by file size **and** last-modified time).
-//! A cache miss triggers a full computation via
-//! [`statistics::generate_statistics`], and the result is inserted into the
+//! A cache miss triggers a full computation through the file format's
+//! `infer_stats`, and the result is inserted into the
 //! cache so that subsequent queries against the same unchanged file are free.
 //!
 //! # Output schema
@@ -27,7 +27,6 @@ use arrow::{
     array::{BooleanArray, RecordBatch, StringArray},
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
-use beacon_arrow_netcdf::datafusion::{reader, statistics};
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use datafusion::{
     catalog::TableFunctionImpl,

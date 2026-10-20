@@ -15,9 +15,8 @@
 //! - [`reader`] calls netcdf-c. It is the fallback, and it is the only path that
 //!   writes files.
 //!
-//! Both produce the same dataset. The
-//! [`use_rust_reader`](datafusion::NetcdfConfig::use_rust_reader) flag selects
-//! between them.
+//! Both produce the same dataset. The DataFusion format reads through
+//! [`oxcdf_reader`].
 //!
 //! # Key modules
 //! - [`reader`]: high-level NetCDF -> Arrow reader API (netcdf-c).

@@ -352,8 +352,8 @@ async fn second_open_of_a_locked_file_fails_with_a_useful_message() {
 
 /// An embedder reads HDF5 with the pure-Rust reader, as the server does.
 ///
-/// `Hdf5Config` and `NetcdfConfig` both default `use_rust_reader` to true (#400), and
-/// `Database::open` overrides neither. This pins that default from the embedded host, so
+/// `Hdf5Config` defaults `use_rust_reader` to true (#400), and `Database::open` does not
+/// override it. This pins that default from the embedded host, so
 /// a change to it cannot silently make one query return two different tables on the two
 /// hosts.
 ///

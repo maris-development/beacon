@@ -51,8 +51,33 @@ impl Dataset {
         })
     }
 
+    /// The Arrow schema of the dataset, with the fields sorted by name.
+    ///
+    /// Every field is nullable, because broadcast and ragged padding can add nulls.
+    /// A row-size array of a ragged dataset and its attributes are not fields.
     pub fn arrow_schema(&self) -> arrow::datatypes::Schema {
-        todo!()
+        let row_size_arrays: Vec<&str> = self
+            .arrays
+            .keys()
+            .filter_map(|key| key.strip_suffix(".sample_dimension"))
+            .collect();
+        let is_row_size_part = |name: &str| {
+            row_size_arrays.iter().any(|row_size_name| {
+                name == *row_size_name
+                    || name
+                        .strip_prefix(row_size_name)
+                        .is_some_and(|rest| rest.starts_with('.'))
+            })
+        };
+
+        let mut fields: Vec<arrow::datatypes::Field> = self
+            .arrays
+            .iter()
+            .filter(|(name, _)| !is_row_size_part(name))
+            .map(|(name, array)| arrow::datatypes::Field::new(name, array.datatype().into(), true))
+            .collect();
+        fields.sort_by(|a, b| a.name().cmp(b.name()));
+        arrow::datatypes::Schema::new(fields)
     }
 }
 
@@ -98,5 +123,26 @@ mod tests {
         let result = Dataset::from_arrays("test".to_string(), arrays, HashSet::new());
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn arrow_schema_is_sorted_nullable_and_skips_row_sizes() {
+        let sample_dimension: Arc<dyn NdArrayD> = Arc::new(
+            NdArray::<String>::try_new_from_vec_in_mem(vec!["z_obs".to_string()], vec![], vec![], None)
+                .unwrap(),
+        );
+        let arrays = IndexMap::from([
+            ("temp".to_string(), array(&[4], &["z_obs"])),
+            ("lat".to_string(), array(&[2], &["casts"])),
+            ("z_row_size".to_string(), array(&[2], &["casts"])),
+            ("z_row_size.sample_dimension".to_string(), sample_dimension),
+        ]);
+        let dataset = Dataset::from_arrays("test".to_string(), arrays, HashSet::new()).unwrap();
+
+        let schema = dataset.arrow_schema();
+
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, ["lat", "temp"]);
+        assert!(schema.fields().iter().all(|f| f.is_nullable()));
     }
 }

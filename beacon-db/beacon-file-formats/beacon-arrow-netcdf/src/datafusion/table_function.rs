@@ -3,13 +3,12 @@ use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
-use beacon_datafusion_ext::listing_factory::{ListingFactory, RootStore};
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{catalog::TableFunctionImpl, common::plan_err, prelude::SessionContext};
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
-use crate::datafusion::object_meta_resolver::create_object_resolver;
-use crate::datafusion::{FileAccess, NetcdfFormat};
+use crate::datafusion::NetCDFFormat;
 
 /// Format identity the NetCDF factory is registered under (its `get_ext`).
 const NETCDF_FORMAT: &str = "nc";
@@ -157,7 +156,7 @@ impl ReadNetCDFFunc {
             })?;
         let file_format = factory.create(&state, &format_options)?;
         let netcdf_file_format = file_format
-            .downcast_ref::<NetcdfFormat>()
+            .downcast_ref::<NetCDFFormat>()
             .ok_or_else(|| {
                 datafusion::error::DataFusionError::Execution(
                     "read_netcdf: the file format registered under 'nc' is not a NetcdfFormat"
@@ -165,35 +164,6 @@ impl ReadNetCDFFunc {
                 )
             })?
             .clone();
-
-        // netcdf-c opens a path itself, so the format needs a resolver built from
-        // the one root store every path shares. The `oxcdf` reader reads through
-        // the object store, so it needs none, and it takes s3, gs and az too.
-        let netcdf_file_format = match netcdf_file_format.access {
-            FileAccess::Oxcdf => netcdf_file_format,
-            FileAccess::NetcdfC { .. } => {
-                let mut root_store: Option<RootStore> = None;
-                for url in &listing_urls {
-                    // Reject a remote object store (s3/gs/az) here with a clear
-                    // error rather than failing later inside the reader.
-                    let native_read_store = listing_factory.native_read_root(url)?;
-                    match &root_store {
-                        Some(store) if store != &native_read_store => {
-                            return plan_err!(
-                                "read_netcdf: all glob paths must resolve to the same root store (local or http/https)"
-                            );
-                        }
-                        Some(_) => {}
-                        None => root_store = Some(native_read_store),
-                    }
-                }
-                let Some(root_store) = root_store else {
-                    return plan_err!("read_netcdf: no root store could be determined from the provided glob paths. NetCDF files only work for local or http/https paths.");
-                };
-                netcdf_file_format
-                    .with_access(FileAccess::netcdf_c(create_object_resolver(&root_store)))
-            }
-        };
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async {
