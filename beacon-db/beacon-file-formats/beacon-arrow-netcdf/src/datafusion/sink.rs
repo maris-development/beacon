@@ -23,7 +23,7 @@
 use std::{fmt::Formatter, path::PathBuf, sync::Arc};
 
 use crate::{
-    datafusion::options::NetcdfWriterOptions, encoders::default::DefaultEncoder,
+    datafusion::options::NetCDFWriterOptions, encoders::default::DefaultEncoder,
     writer::ArrowRecordBatchWriter,
 };
 use arrow::{
@@ -60,7 +60,7 @@ pub struct NetCDFSink {
     /// Directory the NetCDF file is written to — the configured tmp store root.
     output_dir: PathBuf,
     /// Options of the flat output.
-    options: NetcdfWriterOptions,
+    options: NetCDFWriterOptions,
 }
 
 impl NetCDFSink {
@@ -69,7 +69,7 @@ impl NetCDFSink {
     pub fn new(
         sink_config: FileSinkConfig,
         output_dir: PathBuf,
-        options: NetcdfWriterOptions,
+        options: NetCDFWriterOptions,
     ) -> Self {
         Self {
             sink_config,

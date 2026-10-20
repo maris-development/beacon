@@ -15,6 +15,7 @@ use std::sync::Arc;
 use arrow_schema::{ArrowError, DataType, Schema, SchemaRef};
 use datafusion::catalog::Session;
 use datafusion::datasource::physical_plan::FileOpener;
+use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use object_store::ObjectMeta;
 
 mod common;
@@ -106,6 +107,10 @@ impl ArrowTypeWidening {
             // field. One fold over the named schemas stops at the same pair.
             Err(error) => Err(strategy.merge_schemas(&distinct).err().unwrap_or(error)),
         }
+    }
+
+    pub fn physical_expr_adapter_factory(&self) -> Arc<dyn PhysicalExprAdapterFactory> {
+        todo!()
     }
 
     /// `opener`, with every batch mapped onto `target`. See

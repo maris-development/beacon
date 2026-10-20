@@ -16,7 +16,7 @@ use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::prelude::{SessionConfig, SessionContext};
 
-use crate::datafusion::{options::NetcdfOptions, FileAccess, NetcdfFormat};
+use crate::datafusion::{options::NetCDFOptions, FileAccess, NetcdfFormat};
 
 /// Copy the ragged fixture `copies` times into a fresh temp dir.
 fn stage_files(copies: usize) -> tempfile::TempDir {
@@ -37,7 +37,7 @@ async fn ctx_for(dir: &tempfile::TempDir, target_partitions: usize) -> SessionCo
 
     let factory = Arc::new(ListingFactory::dynamic());
     let format = Arc::new(
-        NetcdfFormat::new(factory, NetcdfOptions::default()).with_access(FileAccess::Oxcdf),
+        NetcdfFormat::new(factory, NetCDFOptions::default()).with_access(FileAccess::Oxcdf),
     );
 
     let url = datafusion::datasource::listing::ListingTableUrl::parse(format!(

@@ -229,7 +229,6 @@ impl FileFormatFactory for Hdf5FormatFactory {
         };
         Arc::new(self.build_format(options, self.inner.default()))
     }
-
 }
 
 impl FileFormatFactoryExt for Hdf5FormatFactory {
@@ -382,9 +381,7 @@ impl Hdf5Format {
     /// the netCDF format whatever the read flag says. This is here so the
     /// invariant is checkable rather than only stated.
     pub fn writes_with_netcdf_c(&self) -> bool {
-        self.writer
-            .downcast_ref::<NetcdfFormat>()
-            .is_some()
+        self.writer.downcast_ref::<NetcdfFormat>().is_some()
     }
 }
 
@@ -446,10 +443,7 @@ impl FileFormat for Hdf5Format {
         session_widening(state)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
-                exec_datafusion_err!(
-                    "Failed to merge the schemas of the HDF5 datasets: {}",
-                    e
-                )
+                exec_datafusion_err!("Failed to merge the schemas of the HDF5 datasets: {}", e)
             })
     }
 
@@ -513,9 +507,7 @@ impl FileFormat for Hdf5Format {
         ));
         let table_schema = TableSchema::new(
             encoded_file_schema,
-            beacon_nd_array::arrow::partition::encoded_partition_cols(
-                conf.table_partition_cols(),
-            ),
+            beacon_nd_array::arrow::partition::encoded_partition_cols(conf.table_partition_cols()),
         );
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
@@ -559,7 +551,7 @@ impl FileFormat for Hdf5Format {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetcdfConfig, ReaderBackend};
+    use beacon_arrow_netcdf::datafusion::{options::NetCDFOptions, NetcdfConfig, ReaderBackend};
     use datafusion::execution::session_state::SessionStateBuilder;
     use datafusion::prelude::SessionContext;
     use object_store::{path::Path, ObjectMeta};
@@ -571,7 +563,7 @@ mod tests {
         let inner = NetCDFFormatFactory::new(
             listing,
             std::env::temp_dir(),
-            NetcdfOptions::default(),
+            NetCDFOptions::default(),
             NetcdfConfig::default(),
         );
         Hdf5FormatFactory::new(inner, config).with_ext(ext)
@@ -663,10 +655,7 @@ mod tests {
 
         let format = f.create(&ctx.state(), &HashMap::new()).unwrap();
         assert!(format.downcast_ref::<NetcdfFormat>().is_some());
-        assert!(f
-            .default()
-            .downcast_ref::<NetcdfFormat>()
-            .is_some());
+        assert!(f.default().downcast_ref::<NetcdfFormat>().is_some());
     }
 
     /// A per-table option wins over the runtime default, both ways.

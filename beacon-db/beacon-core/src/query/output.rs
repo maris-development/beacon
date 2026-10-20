@@ -83,7 +83,7 @@ impl Output {
     }
 }
 
-pub use beacon_arrow_netcdf::datafusion::options::NetcdfWriterOptions as NetcdfOutputOptions;
+pub use beacon_arrow_netcdf::datafusion::options::NetCDFWriterOptions as NetcdfOutputOptions;
 
 /// Supported output formats for query results.
 // `remote = "Self"` makes the derived serde code inherent, for the trait impls below.

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use beacon_arrow_hdf5::{Hdf5Config, Hdf5FormatFactory};
-use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
+use beacon_arrow_netcdf::datafusion::{options::NetCDFOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
@@ -117,7 +117,7 @@ fn factory(default_reader: Backend) -> Hdf5FormatFactory {
     let inner = NetCDFFormatFactory::new(
         listing,
         std::env::temp_dir(),
-        NetcdfOptions::default(),
+        NetCDFOptions::default(),
         NetcdfConfig::default(),
     );
     Hdf5FormatFactory::new(

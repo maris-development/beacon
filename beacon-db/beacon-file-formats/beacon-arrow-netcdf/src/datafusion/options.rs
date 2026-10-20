@@ -6,26 +6,36 @@ use datafusion::common::exec_datafusion_err;
 use crate::attributes::CombineAttrs;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct NetcdfReaderOptions {
+pub struct NetCDFReaderOptions {
     /// Whether to skip a file that causes an error during reading, instead of failing the query.
     pub skip_on_error: bool,
+    pub skip_unbroadcastable: bool,
+    pub enable_statistics: bool,
 }
 
-impl Default for NetcdfReaderOptions {
+impl Default for NetCDFReaderOptions {
     fn default() -> Self {
         Self {
             skip_on_error: false,
+            skip_unbroadcastable: false,
+            enable_statistics: false,
         }
     }
 }
 
-impl NetcdfReaderOptions {
+impl NetCDFReaderOptions {
     pub fn apply_format_options(
         &mut self,
         format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<()> {
         if let Some(value) = format_option(format_options, "skip_on_error") {
             self.skip_on_error = parse_bool_option("skip_on_error", value)?;
+        }
+        if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
+            self.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
+        }
+        if let Some(value) = format_option(format_options, "enable_statistics") {
+            self.enable_statistics = parse_bool_option("enable_statistics", value)?;
         }
         Ok(())
     }
@@ -36,7 +46,7 @@ impl NetcdfReaderOptions {
 /// Controls both reading (schema inference, dimension handling) and writing
 /// (flat vs. gridded output mode, flat output options).
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-pub struct NetcdfOptions {
+pub struct NetCDFOptions {
     /// Column names whose unique values should be tracked during execution
     /// for downstream consumers (e.g. sink nodes).
     #[serde(default)]
@@ -65,7 +75,7 @@ pub struct NetcdfOptions {
     pub write_dimensions: Option<Vec<String>>,
     /// Options of the flat writer.
     #[serde(default)]
-    pub writer: NetcdfWriterOptions,
+    pub writer: NetCDFWriterOptions,
 }
 
 fn default_replay_batch_size() -> usize {
@@ -78,7 +88,16 @@ fn default_replay_batch_size() -> usize {
 )]
 #[serde(deny_unknown_fields)]
 #[schema(as = NetcdfOutputOptions)]
-pub struct NetcdfWriterOptions {
+pub struct NetCDFWriterOptions {
+    /// Columns to use as NetCDF dimensions when **writing**.
+    ///
+    /// * `None` / empty → flat output via [`NetCDFSink`](super::sink::NetCDFSink)
+    ///   with a single `obs` dimension.
+    /// * `Some(["lat", "lon", …])` → gridded output via
+    ///   [`NetCDFNdSink`](super::sink::NetCDFNdSink) where the listed columns
+    ///   become named dimensions and remaining columns become data variables.
+    #[serde(default)]
+    pub write_dimensions: Option<Vec<String>>,
     /// How the writer combines `variable.attribute` columns. When not set, they stay variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combine_attrs: Option<CombineAttrs>,
@@ -141,7 +160,7 @@ impl From<DeflateLevel> for u8 {
     }
 }
 
-impl NetcdfWriterOptions {
+impl NetCDFWriterOptions {
     /// The default number of rows in one chunk of the `obs` dimension.
     pub const DEFAULT_CHUNK_ROWS: usize = 65536;
 
@@ -150,6 +169,15 @@ impl NetcdfWriterOptions {
         &mut self,
         format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<()> {
+        if let Some(value) = format_option(format_options, "write_dimensions") {
+            let dimensions: Vec<String> = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            // An empty list selects the flat writer, the same as no value.
+            self.write_dimensions = (!dimensions.is_empty()).then_some(dimensions);
+        }
         if let Some(value) = format_option(format_options, "combine_attrs") {
             self.combine_attrs = Some(
                 value
@@ -214,12 +242,12 @@ impl NetcdfWriterOptions {
 mod tests {
     use super::*;
 
-    fn apply(pairs: &[(&str, &str)]) -> datafusion::error::Result<NetcdfWriterOptions> {
+    fn apply(pairs: &[(&str, &str)]) -> datafusion::error::Result<NetCDFWriterOptions> {
         let map = pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let mut options = NetcdfWriterOptions::default();
+        let mut options = NetCDFWriterOptions::default();
         options.apply_format_options(&map)?;
         Ok(options)
     }
@@ -243,12 +271,23 @@ mod tests {
     }
 
     #[test]
+    fn write_dimensions_reads_a_comma_list() {
+        let options = apply(&[("format.write_dimensions", " lat, lon ,,time")]).unwrap();
+        assert_eq!(
+            options.write_dimensions,
+            Some(vec!["lat".to_string(), "lon".to_string(), "time".to_string()])
+        );
+        let options = apply(&[("write_dimensions", " , ")]).unwrap();
+        assert_eq!(options.write_dimensions, None);
+    }
+
+    #[test]
     fn shuffle_is_on_by_default() {
         let options = apply(&[("compression.level", "1")]).unwrap();
         assert!(options.compression.unwrap().shuffle);
         assert_eq!(
             options.chunk_rows(),
-            NetcdfWriterOptions::DEFAULT_CHUNK_ROWS
+            NetCDFWriterOptions::DEFAULT_CHUNK_ROWS
         );
     }
 
@@ -266,14 +305,14 @@ mod tests {
 
     #[test]
     fn json_compression_checks_the_level() {
-        let options: NetcdfWriterOptions =
+        let options: NetCDFWriterOptions =
             serde_json::from_str(r#"{"compression": {"level": 9}, "chunk_rows": 10}"#).unwrap();
         assert_eq!(options.compression.unwrap().level.get(), 9);
         let error =
-            serde_json::from_str::<NetcdfWriterOptions>(r#"{"compression": {"level": 10}}"#)
+            serde_json::from_str::<NetCDFWriterOptions>(r#"{"compression": {"level": 10}}"#)
                 .unwrap_err()
                 .to_string();
         assert!(error.contains("expected 0 to 9"), "{error}");
-        assert!(serde_json::from_str::<NetcdfWriterOptions>(r#"{"chunk_rows": 0}"#).is_err());
+        assert!(serde_json::from_str::<NetCDFWriterOptions>(r#"{"chunk_rows": 0}"#).is_err());
     }
 }

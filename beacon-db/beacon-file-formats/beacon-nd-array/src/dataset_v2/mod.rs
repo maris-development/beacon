@@ -50,6 +50,10 @@ impl Dataset {
             invented_dimensions,
         })
     }
+
+    pub fn arrow_schema(&self) -> arrow::datatypes::Schema {
+        todo!()
+    }
 }
 
 #[cfg(test)]

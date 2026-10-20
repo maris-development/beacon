@@ -2,10 +2,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use beacon_datafusion_ext::file_stream_adapters::OnError;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
 use beacon_datafusion_ext::format_options::format_option;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_datafusion_ext::type_widening::{label_by_object, session_widening, ArrowTypeWidening};
+use beacon_datafusion_ext::type_widening::{
+    label_by_object, session_widening, ArrowTypeWidening, ArrowTypeWideningStrategy,
+    DefaultArrowTypeWidening,
+};
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
 use beacon_nd_array::nd_file_opener::NdFileOpener;
 use beacon_nd_array::nd_morsel_file_source::NdMorselFileSource;
@@ -27,11 +31,13 @@ use object_store::{ObjectMeta, ObjectStore};
 
 use crate::datafusion::config::NetCDFConfig;
 use crate::datafusion::native::opener::NativeOpener;
+use crate::datafusion::options::{NetCDFReaderOptions, NetCDFWriterOptions};
 use crate::datafusion::oxcdf::opener::OxcdfOpener;
 use crate::datafusion::{
-    options::NetcdfOptions,
+    options::NetCDFOptions,
     sink::{NetCDFNdSink, NetCDFSink},
 };
+use crate::oxcdf_reader::open_dataset_v2;
 
 pub const NETCDF_EXTENSION: &str = "nc";
 
@@ -85,40 +91,18 @@ impl NetCDFFormatFactory {
         }
     }
 
-    /// Whether this table wants file statistics computed at all.
-    ///
-    /// Only the file analyzer computes them, through
-    /// [`FileFormatFactoryExt::create_for_analysis`]. This is the switch that
-    /// turns even that off, per table or per runtime.
-    fn statistics_wanted(
-        &self,
-        format_options: &std::collections::HashMap<String, String>,
-    ) -> datafusion::error::Result<bool> {
-        match format_option(format_options, "enable_statistics") {
-            Some(value) => parse_bool_option("enable_statistics", value),
-            None => Ok(self.config.enable_statistics),
-        }
-    }
-
-    /// Build a [`NetcdfFormat`] with the given per-table effective settings.
-    fn build_format(&self, options: NetcdfOptions) -> NetcdfFormat {
-        NetcdfFormat::new(self.listing_factory.clone(), options)
-            .with_enable_statistics(self.config.enable_statistics)
-            .with_output_dir(self.output_dir.clone())
-    }
-}
-
-/// The access a `use_rust_reader` setting selects, for a format built without a
-/// location.
-///
-/// `oxcdf` is complete as it stands: it reads through the scan's object store.
-/// netcdf-c needs a resolver it cannot have yet, so it gets the unresolvable
-/// default; `create_with_native_root` is where it gets a real one.
-fn access_for(use_rust_reader: bool) -> FileAccess {
-    if use_rust_reader {
-        FileAccess::Oxcdf
-    } else {
-        FileAccess::default()
+    /// A format with the runtime config defaults and no per-table options.
+    fn base_format(&self) -> NetcdfFormat {
+        let reader_options = NetCDFReaderOptions {
+            enable_statistics: self.config.enable_statistics,
+            ..NetCDFReaderOptions::default()
+        };
+        NetcdfFormat::new(
+            self.listing_factory.clone(),
+            reader_options,
+            NetCDFWriterOptions::default(),
+        )
+        .with_output_dir(self.output_dir.clone())
     }
 }
 
@@ -128,38 +112,15 @@ impl FileFormatFactory for NetCDFFormatFactory {
         _state: &dyn Session,
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        let mut options = NetcdfOptions::default();
-        if let Some(value) = format_option(format_options, "read_dimensions") {
-            options.read_dimensions = Some(
-                value
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-            );
-        }
-        if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
-            options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
-        }
-        options.writer.apply_format_options(format_options)?;
-        // Parsed here only so a bad value is an error at `CREATE EXTERNAL
-        // TABLE` rather than at the first analysis pass. The value itself is
-        // read by `create_for_analysis`; a format built for a query computes no
-        // statistics whatever it says.
-        self.statistics_wanted(format_options)?;
-
-        Ok(Arc::new(self.build_format(
-            options, // A query never computes statistics. See `create_for_analysis`.
-            false,
-        )))
+        // Per-table options from `CREATE EXTERNAL TABLE` or `COPY` override the runtime config.
+        let mut format = self.base_format();
+        format.reader_options.apply_format_options(format_options)?;
+        format.writer_options.apply_format_options(format_options)?;
+        Ok(Arc::new(format))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(self.build_format(
-            NetcdfOptions::default(),
-            // A query never computes statistics. See `create_for_analysis`.
-            false,
-        ))
+        Arc::new(self.base_format())
     }
 }
 
@@ -170,24 +131,6 @@ impl GetExt for NetCDFFormatFactory {
 }
 
 impl FileFormatFactoryExt for NetCDFFormatFactory {
-    /// This is where a [`FileAccess::NetcdfC`] gets its resolver.
-    ///
-    /// netcdf-c opens a local path or an http(s) URL and never the object store,
-    /// so it needs a resolver built from the root store `url` resolves against.
-    /// Plain [`FileFormatFactory::create`] has no location to work from, so it
-    /// leaves [`FileAccess::default`] in place, which resolves nothing.
-    ///
-    /// `native_read_root` rejects a scheme netcdf-c cannot open (s3/gs/az) here,
-    /// naming the location, rather than failing later per listed object.
-    ///
-    /// [`FileAccess::Oxcdf`] reads through the object store, so it needs no
-    /// resolver and no native root. It is returned as it is, which is what lets
-    /// a table live in s3, gs or az.
-    /// The same format, with statistics switched on.
-    ///
-    /// `infer_stats` opens the file and reads every coordinate array, so only
-    /// the file analyzer asks for this. See
-    /// [`FileFormatFactoryExt::create_for_analysis`].
     fn create_for_analysis(
         &self,
         state: &dyn Session,
@@ -195,42 +138,17 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         url: &datafusion::datasource::listing::ListingTableUrl,
         listing: &ListingFactory,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        let wanted = self.statistics_wanted(format_options)?;
-        let format = self.create_with_native_root(state, format_options, url, listing)?;
-        let netcdf = format
-            .downcast_ref::<NetcdfFormat>()
-            .ok_or_else(|| {
-                exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
-            })?
-            .clone();
-        Ok(Arc::new(netcdf.with_enable_statistics(wanted)))
+        todo!()
     }
 
     fn create_with_native_root(
         &self,
         state: &dyn Session,
         format_options: &std::collections::HashMap<String, String>,
-        url: &datafusion::datasource::listing::ListingTableUrl,
-        listing: &ListingFactory,
+        _url: &datafusion::datasource::listing::ListingTableUrl,
+        _listing: &ListingFactory,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        let format = self.create(state, format_options)?;
-        let netcdf = format
-            .downcast_ref::<NetcdfFormat>()
-            .ok_or_else(|| {
-                exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
-            })?
-            .clone();
-        match netcdf.access {
-            // Already complete: it reads through the scan's object store.
-            FileAccess::Oxcdf => Ok(Arc::new(netcdf)),
-            // Supply the resolver `create` had no location to build.
-            FileAccess::NetcdfC { .. } => {
-                let root = listing.native_read_root(url)?;
-                Ok(Arc::new(netcdf.with_access(FileAccess::netcdf_c(
-                    object_meta_resolver::create_object_resolver(&root),
-                ))))
-            }
-        }
+        todo!()
     }
 
     fn discover_datasets(
@@ -264,80 +182,39 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         self.file_extensions()
     }
 
-    /// netCDF opts into the schema cache on its reader backend alone.
-    ///
-    /// The backend is in the key because netcdf-c and `oxcdf` walk different
-    /// metadata, and a file whose schema they read differently must not be
-    /// answered from the other's entry. netcdf-c stays reachable as a fallback,
-    /// so one runtime still serves tables on both.
-    ///
-    /// Nothing else is. The resolver only says how to reach the bytes, and the
-    /// statistics switch only decides whether ranges are computed. Neither
-    /// changes a field or a type.
-    ///
-    /// TODO(#367): cache a dimension-projected read as well. `read_dimensions`
-    /// decides which variables appear, so the same file has one schema per
-    /// dimension set, and the key would have to carry the set in order. It is
-    /// left out of this first pass to keep the key simple: a `read_netcdf` that
-    /// names dimensions derives its schema, exactly as it did before the cache
-    /// existed. The default read — every table, and every collector pass — is
-    /// what the 9.2s was measured on, and that one is cached.
-    fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let format = format.downcast_ref::<NetcdfFormat>()?;
-        if format.options.read_dimensions.is_some() {
-            return None;
-        }
-        Some(
-            SchemaOptions::new(NETCDF_EXTENSION)
-                .str(match format.reader_backend() {
-                    ReaderBackend::NetcdfC => "netcdf-c",
-                    ReaderBackend::Oxcdf => "oxcdf",
-                })
-                .finish(),
-        )
+    fn schema_options_fingerprint(&self, _format: &dyn FileFormat) -> Option<u64> {
+        Some(SchemaOptions::new(NETCDF_EXTENSION).finish())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct NetcdfFormat {
     pub listing_factory: Arc<ListingFactory>,
-    pub options: NetcdfOptions,
+    pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+
+    pub reader_options: NetCDFReaderOptions,
+    pub writer_options: NetCDFWriterOptions,
+
     /// Whether to generate per-file statistics during planning.
     enable_statistics: bool,
     /// Local directory the netcdf-c writer emits output files into.
     output_dir: PathBuf,
-    /// How this table reaches its files, and which reader opens them.
-    pub access: FileAccess,
-    pub type_widening: Option<Arc<ArrowTypeWidening>>,
 }
 
 impl NetcdfFormat {
-    pub fn new(listing_factory: Arc<ListingFactory>, options: NetcdfOptions) -> Self {
+    pub fn new(
+        listing_factory: Arc<ListingFactory>,
+        reader_options: NetCDFReaderOptions,
+        writer_options: NetCDFWriterOptions,
+    ) -> Self {
         Self {
             listing_factory,
-            options,
+            reader_options,
+            writer_options,
             enable_statistics: false,
             output_dir: std::env::temp_dir(),
-            access: FileAccess::default(),
-            type_widening: None,
+            type_widening: Arc::new(DefaultArrowTypeWidening::default()),
         }
-    }
-
-    /// Set how this format reaches its files.
-    pub fn with_access(mut self, access: FileAccess) -> Self {
-        self.access = access;
-        self
-    }
-
-    /// The reader this format opens files with.
-    pub fn reader_backend(&self) -> ReaderBackend {
-        self.access.backend()
-    }
-
-    /// Set whether per-file statistics are generated during planning.
-    pub fn with_enable_statistics(mut self, enable_statistics: bool) -> Self {
-        self.enable_statistics = enable_statistics;
-        self
     }
 
     /// Set the local directory the writer emits output files into (defaults to the
@@ -347,8 +224,8 @@ impl NetcdfFormat {
         self
     }
 
-    pub fn with_type_widening(mut self, type_widening: Arc<ArrowTypeWidening>) -> Self {
-        self.type_widening = Some(type_widening);
+    pub fn with_type_widening(mut self, type_widening: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = type_widening;
         self
     }
 }
@@ -378,44 +255,31 @@ impl FileFormat for NetcdfFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         use futures::{StreamExt, TryStreamExt};
 
-        // Resolving an input can fail, and doing it up front keeps the stream
-        // below infallible in its setup.
-        let mut inputs = Vec::with_capacity(objects.len());
-        for object in objects {
-            inputs.push(self.access.input_for(store, object)?);
-        }
-
-        // Bounded, because each open holds a file descriptor until its schema is
-        // read. `try_join_all` polls every future at once, so a table over a
-        // hundred thousand objects opened a hundred thousand files before the
-        // first one closed and died with `Too many open files` — the crash in
-        // issue #361. `buffered` keeps the width to the session's
-        // `meta_fetch_concurrency`, the same knob Parquet's inference uses, and
-        // preserves order so the merged schema does not depend on which file
-        // finished first.
-        let width = state
-            .config_options()
-            .execution
-            .meta_fetch_concurrency
-            .max(1);
-        let schemas: Vec<SchemaRef> = futures::stream::iter(inputs)
-            .map(|input| {
-                reader::fetch_schema(
-                    input,
-                    self.options.read_dimensions.clone(),
-                    self.options.skip_unbroadcastable,
-                )
+        let locations: Vec<_> = objects.iter().map(|o| o.location.clone()).collect();
+        let schemas: Vec<SchemaRef> = futures::stream::iter(locations)
+            .map(|location| {
+                let store = Arc::clone(store);
+                async move {
+                    let dataset = open_dataset_v2(store, location.clone())
+                        .await
+                        .map_err(|e| {
+                            exec_datafusion_err!("Failed to open dataset '{}': {}", location, e)
+                        })?;
+                    Ok::<SchemaRef, datafusion::error::DataFusionError>(Arc::new(
+                        dataset.arrow_schema(),
+                    ))
+                }
             })
-            .buffered(width)
+            .buffered(16)
             .try_collect()
             .await?;
+
         if schemas.is_empty() {
             // Return a default empty schema
             return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
-        // The rule of the session decides the result for a column that two
-        // files describe differently. Each schema names its file, so a refused
-        // column names both files.
+
+        // Merge the schemas of all input NetCDF files, using the session's type widening rules.
         session_widening(state)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
@@ -426,54 +290,13 @@ impl FileFormat for NetcdfFormat {
     async fn infer_stats(
         &self,
         _state: &dyn Session,
-        store: &Arc<dyn ObjectStore>,
+        _store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
-        object: &ObjectMeta,
+        _object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
-        // Statistics need the Rust reader. Every netcdf-c call serialises on a
-        // process-global mutex (`netcdf_sys::libnetcdf_lock`, which the crate
-        // documents as the difference between working and segfaulting on a
-        // non-threadsafe hdf5 build), and `read_arrays` is synchronous, so
-        // generating statistics under netcdf-c parks a tokio worker while
-        // queued behind every other netCDF call in the process. One cold query
-        // over a large collection is then serial *and* blocks query serving.
-        //
-        // `oxcdf` reads byte ranges through the object store: async, no global
-        // lock, and it produces the same ranges for the same file. So the
-        // capability follows the reader.
-        //
-        // Reporting unknown rather than erroring is deliberate. Absent
-        // statistics are always a legal answer -- DataFusion prunes nothing and
-        // scans everything, which is correct, just slower -- so a netcdf-c
-        // deployment keeps working untouched.
-        if !self.enable_statistics {
-            return Ok(Statistics::new_unknown(&table_schema));
-        }
-        if !matches!(self.access, FileAccess::Oxcdf) {
-            tracing::debug!(
-                object = %object.location,
-                "netCDF statistics need the Rust reader; set the backend to rust to enable them"
-            );
-            return Ok(Statistics::new_unknown(&table_schema));
-        }
-        tracing::trace!(
-            object = %object.location,
-            "generating statistics for NetCDF file"
-        );
-
-        // Built the same way the reader builds it, so statistics and scans
-        // can never disagree about where a file is or which reader opens it.
-        let input = self.access.input_for(store, object)?;
-        Ok(statistics::generate_statistics(input, &table_schema)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to generate statistics for object {}: {}",
-                    object.location,
-                    e
-                );
-                Statistics::new_unknown(&table_schema)
-            }))
+        // ToDo: Implement statistics generation for NetCDF files.
+        // Currently, we return unknown statistics for all files.
+        return Ok(Statistics::new_unknown(&table_schema));
     }
 
     async fn create_physical_plan(
@@ -481,13 +304,6 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        // The scan carries nd data as `beacon.nd`-encoded struct columns, so
-        // the file source's schema is the encoded form of the logical table
-        // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
-        // back to the logical schema above the scan.
-        //
-        // The `PARTITIONED BY` columns are encoded with it, so the morsel
-        // source can name them when it rejects a partitioned table.
         let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
             conf.file_schema(),
         ));
@@ -528,9 +344,9 @@ impl FileFormat for NetcdfFormat {
         // object store). Write into the configured output directory (the tmp store
         // root), threaded in by the runtime, rather than the OS temp dir.
         let output_dir = self.output_dir.clone();
-        match &self.options.write_dimensions {
+        match &self.writer_options.write_dimensions {
             Some(dim_columns) if !dim_columns.is_empty() => {
-                let flat_keys = self.options.writer.set_keys();
+                let flat_keys = self.writer_options.set_keys();
                 if !flat_keys.is_empty() {
                     return Err(exec_datafusion_err!(
                         "{} applies only to the flat NetCDF output",
@@ -575,7 +391,7 @@ impl FileFormat for NetcdfFormat {
                 let netcdf_sink = Arc::new(NetCDFSink::new(
                     conf,
                     output_dir,
-                    self.options.writer.clone(),
+                    self.writer_options.clone(),
                 ));
                 Ok(Arc::new(DataSinkExec::new(
                     input,
@@ -590,11 +406,12 @@ impl FileFormat for NetcdfFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        let opener = match &self.access {
-            FileAccess::NetcdfC { .. } => Arc::new(NativeOpener {}) as Arc<dyn NdFileOpener>,
-            FileAccess::Oxcdf => Arc::new(OxcdfOpener) as Arc<dyn NdFileOpener>,
-        };
-        let morsel_file_source = NdMorselFileSource::new(opener, self.get_ext(), table_schema).with;
+        let opener = Arc::new(OxcdfOpener) as Arc<dyn NdFileOpener>;
+        let mut morsel_file_source = NdMorselFileSource::new(opener, self.get_ext(), table_schema);
+
+        if self.reader_options.skip_on_error {
+            morsel_file_source = morsel_file_source.with_on_error(OnError::Skip);
+        }
 
         Arc::new(morsel_file_source)
     }
@@ -628,7 +445,7 @@ mod reader_backend_tests {
         NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
             std::env::temp_dir(),
-            NetcdfOptions::default(),
+            NetCDFOptions::default(),
             NetcdfConfig::default(),
         )
     }
@@ -665,7 +482,7 @@ mod reader_backend_tests {
     fn format_on(backend: ReaderBackend) -> NetcdfFormat {
         NetcdfFormat::new(
             Arc::new(ListingFactory::dynamic()),
-            NetcdfOptions::default(),
+            NetCDFOptions::default(),
         )
         .with_access(access_on(backend))
     }
@@ -1108,7 +925,7 @@ mod reader_backend_tests {
         let factory = NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
             std::env::temp_dir(),
-            NetcdfOptions::default(),
+            NetCDFOptions::default(),
             NetcdfConfig {
                 use_rust_reader: false,
                 ..NetcdfConfig::default()
@@ -1182,13 +999,13 @@ mod reader_backend_tests {
         let factory = NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
             std::env::temp_dir(),
-            NetcdfOptions {
+            NetCDFOptions {
                 write_dimensions: Some(vec!["lat".to_string()]),
-                writer: crate::datafusion::options::NetcdfWriterOptions {
+                writer: crate::datafusion::options::NetCDFWriterOptions {
                     combine_attrs: Some(crate::attributes::CombineAttrs::Identical),
                     ..Default::default()
                 },
-                ..NetcdfOptions::default()
+                ..NetCDFOptions::default()
             },
             NetcdfConfig::default(),
         );
@@ -1222,7 +1039,7 @@ mod reader_backend_tests {
         let factory = NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
             std::env::temp_dir(),
-            NetcdfOptions::default(),
+            NetCDFOptions::default(),
             NetcdfConfig {
                 use_rust_reader: false,
                 ..NetcdfConfig::default()
@@ -1785,7 +1602,7 @@ mod extension_tests {
         NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
             std::env::temp_dir(),
-            NetcdfOptions::default(),
+            NetCDFOptions::default(),
             NetcdfConfig::default(),
         )
     }

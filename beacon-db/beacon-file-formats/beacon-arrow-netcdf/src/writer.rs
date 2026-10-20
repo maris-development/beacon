@@ -17,7 +17,7 @@ use arrow::{
 use tempfile::SpooledTempFile;
 
 use crate::attributes::{AttributeCombiner, AttributePlan, AttributeTarget};
-use crate::datafusion::options::NetcdfWriterOptions;
+use crate::datafusion::options::NetCDFWriterOptions;
 use crate::encoders::{Encoder, EncoderOptions};
 
 /// Generic writer backed by an [`Encoder`] implementation.
@@ -83,7 +83,7 @@ pub struct ArrowRecordBatchWriter<E: Encoder> {
     fixed_string_sizes: HashMap<String, usize>,
     /// Records attribute column values when `combine_attrs` is set.
     combiner: Option<AttributeCombiner>,
-    options: NetcdfWriterOptions,
+    options: NetCDFWriterOptions,
     /// Rows written so far.
     rows: usize,
     encoder: PhantomData<E>,
@@ -111,14 +111,14 @@ fn encodable_type(data_type: &DataType) -> Option<DataType> {
 impl<E: Encoder> ArrowRecordBatchWriter<E> {
     /// Create a buffered writer targeting `path`.
     pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
-        Self::with_options(path, schema, NetcdfWriterOptions::default())
+        Self::with_options(path, schema, NetCDFWriterOptions::default())
     }
 
     /// Create a buffered writer with the flat output `options`.
     pub fn with_options<P: AsRef<Path>>(
         path: P,
         schema: SchemaRef,
-        options: NetcdfWriterOptions,
+        options: NetCDFWriterOptions,
     ) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
@@ -326,7 +326,7 @@ mod tests {
         batches: Vec<RecordBatch>,
         policy: Option<CombineAttrs>,
     ) {
-        let options = NetcdfWriterOptions {
+        let options = NetCDFWriterOptions {
             combine_attrs: policy,
             ..Default::default()
         };
@@ -337,7 +337,7 @@ mod tests {
         path: &Path,
         schema: SchemaRef,
         batches: Vec<RecordBatch>,
-        options: NetcdfWriterOptions,
+        options: NetCDFWriterOptions,
     ) -> anyhow::Result<()> {
         let mut writer =
             ArrowRecordBatchWriter::<DefaultEncoder>::with_options(path, schema, options)?;
@@ -568,8 +568,8 @@ mod tests {
         .unwrap()
     }
 
-    fn compressed(level: u8) -> NetcdfWriterOptions {
-        NetcdfWriterOptions {
+    fn compressed(level: u8) -> NetCDFWriterOptions {
+        NetCDFWriterOptions {
             compression: Some(crate::datafusion::options::Compression {
                 level: level.try_into().unwrap(),
                 shuffle: true,
@@ -587,7 +587,7 @@ mod tests {
         let schema = batch.schema();
         let plain = dir.path().join("plain.nc");
         let packed = dir.path().join("packed.nc");
-        let options = NetcdfWriterOptions::default();
+        let options = NetCDFWriterOptions::default();
         write_with(&plain, schema.clone(), vec![batch.clone()], options).unwrap();
         write_with(&packed, schema, vec![batch], compressed(4)).unwrap();
 
@@ -611,7 +611,7 @@ mod tests {
             &plain,
             schema.clone(),
             batches(),
-            NetcdfWriterOptions::default(),
+            NetCDFWriterOptions::default(),
         )
         .unwrap();
         write_with(&packed, schema.clone(), batches(), compressed(4)).unwrap();
@@ -634,7 +634,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chunks.nc");
         let schema = series_schema();
-        let options = NetcdfWriterOptions {
+        let options = NetCDFWriterOptions {
             chunk_rows: std::num::NonZeroUsize::new(1000),
             ..compressed(1)
         };
@@ -660,7 +660,7 @@ mod tests {
             &path,
             schema.clone(),
             vec![series_batch(&schema, 10)],
-            NetcdfWriterOptions::default(),
+            NetCDFWriterOptions::default(),
         )
         .unwrap();
 

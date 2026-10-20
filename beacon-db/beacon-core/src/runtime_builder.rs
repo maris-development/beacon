@@ -11,7 +11,7 @@ use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
 use beacon_arrow_hdf5::Hdf5Config;
 use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
-use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
+use beacon_arrow_netcdf::datafusion::{options::NetCDFOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
 use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
@@ -806,7 +806,7 @@ fn register_file_formats(
         Arc::new(NetCDFFormatFactory::new(
             listing_factory.clone(),
             native_output_dir.clone(),
-            NetcdfOptions::default(),
+            NetCDFOptions::default(),
             builder.netcdf.clone(),
         )),
         // HDF5 (its own crate — a NetCDF-4 file is HDF5). It reads through the netCDF reader
@@ -818,7 +818,7 @@ fn register_file_formats(
             NetCDFFormatFactory::new(
                 listing_factory.clone(),
                 native_output_dir.clone(),
-                NetcdfOptions::default(),
+                NetCDFOptions::default(),
                 builder.netcdf.clone(),
             ),
             builder.hdf5.clone(),
@@ -834,7 +834,7 @@ fn register_file_formats(
         NetCDFFormatFactory::new(
             listing_factory.clone(),
             native_output_dir.clone(),
-            NetcdfOptions::default(),
+            NetCDFOptions::default(),
             builder.netcdf.clone(),
         ),
         builder.hdf5.clone(),
