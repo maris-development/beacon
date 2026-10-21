@@ -113,7 +113,7 @@ letting the server fall back to its own defaults otherwise.
 {{- end }}
 {{/* S3-backed datasets store (uses the standard AWS_* credential chain) */}}
 {{- if $b.s3.enabled }}
-- name: BEACON_S3_ENABLE
+- name: BEACON_S3_DATASETS
   value: "true"
 {{- if $b.s3.bucket }}
 - name: BEACON_S3_BUCKET
@@ -121,7 +121,7 @@ letting the server fall back to its own defaults otherwise.
 {{- end }}
 - name: BEACON_S3_ALLOW_HTTP
   value: {{ $b.s3.allowHttp | quote }}
-- name: BEACON_S3_VIRTUAL_HOSTED_STYLE
+- name: BEACON_S3_ENABLE_VIRTUAL_HOSTING
   value: {{ $b.s3.virtualHostedStyle | quote }}
 {{- if $b.s3.region }}
 - name: AWS_REGION
