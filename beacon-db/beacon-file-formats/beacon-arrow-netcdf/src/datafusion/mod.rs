@@ -239,7 +239,8 @@ impl NetCDFFormat {
     /// The morsel source that reads the files of this format through `oxcdf`.
     fn morsel_source(&self, table_schema: TableSchema) -> NdMorselFileSource {
         let source =
-            NdMorselFileSource::new(self.opener(), NETCDF_EXTENSION.to_string(), table_schema);
+            NdMorselFileSource::new(self.opener(), NETCDF_EXTENSION.to_string(), table_schema)
+                .with_pruning_chunk_threshold(self.reader_options.pruning_chunk_threshold);
         if self.reader_options.skip_on_error {
             source.with_on_error(OnError::Skip)
         } else {
@@ -488,8 +489,18 @@ mod format_tests {
 
     /// The same, for a file that is not bundled — one a test wrote itself.
     async fn register_path(ctx: &SessionContext, table: &str, path: &std::path::Path) {
+        register_format(ctx, table, path, format()).await
+    }
+
+    /// The same, read through `format`.
+    async fn register_format(
+        ctx: &SessionContext,
+        table: &str,
+        path: &std::path::Path,
+        format: NetCDFFormat,
+    ) {
         let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
-        let listing = FastObjectTable::try_new(&ctx.state(), Arc::new(format()), vec![url])
+        let listing = FastObjectTable::try_new(&ctx.state(), Arc::new(format), vec![url])
             .await
             .unwrap_or_else(|e| panic!("register {}: {e}", path.display()));
         ctx.register_table(table, Arc::new(listing)).unwrap();
@@ -1145,6 +1156,90 @@ mod format_tests {
             count("SELECT count(*) FROM gridded WHERE NOT (lat <= 44)").await,
             partial,
             "a negation must not prune on the child it negates"
+        );
+    }
+
+    /// Run `sql`, and return its row count and the chunks that its scan pruned.
+    async fn rows_and_pruned_chunks(ctx: &SessionContext, sql: &str) -> (usize, usize) {
+        fn pruned(plan: &Arc<dyn ExecutionPlan>) -> usize {
+            let own = plan
+                .metrics()
+                .and_then(|metrics| metrics.sum_by_name("chunks_pruned"))
+                .map_or(0, |value| value.as_usize());
+            own + plan.children().into_iter().map(pruned).sum::<usize>()
+        }
+        let plan = ctx
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let batches = datafusion::physical_plan::collect(Arc::clone(&plan), ctx.task_ctx())
+            .await
+            .unwrap();
+        let rows = batches.iter().map(|batch| batch.num_rows()).sum();
+        (rows, pruned(&plan))
+    }
+
+    /// Register `file` twice: `pruned` with the default threshold, `unpruned` with pruning off.
+    async fn register_pruned_and_unpruned(ctx: &SessionContext, file: &str) {
+        let mut unpruned = format();
+        unpruned.reader_options.pruning_chunk_threshold = usize::MAX;
+        register(ctx, "pruned", file).await;
+        register_format(ctx, "unpruned", &test_file(file), unpruned).await;
+    }
+
+    #[tokio::test]
+    async fn a_gridded_predicate_prunes_chunks_and_keeps_the_rows() {
+        let ctx = session();
+        register_pruned_and_unpruned(&ctx, GRIDDED_FILE).await;
+
+        // `sea_ice_fraction` is contiguous, so the batch size cuts it into many chunks.
+        let query = |table: &str| format!("SELECT sea_ice_fraction FROM {table} WHERE lat > 44");
+        let (rows, pruned) = rows_and_pruned_chunks(&ctx, &query("pruned")).await;
+        let (unpruned_rows, unpruned) = rows_and_pruned_chunks(&ctx, &query("unpruned")).await;
+
+        assert!(pruned > 0, "lat > 44 must prune chunks");
+        assert_eq!(
+            unpruned, 0,
+            "a threshold above the chunk count must prune nothing"
+        );
+        assert_eq!(rows, unpruned_rows);
+    }
+
+    #[tokio::test]
+    async fn a_ragged_predicate_prunes_cast_ranges_and_keeps_the_rows() {
+        // About 9 cast ranges of 50 rows, above the default threshold.
+        let ctx = splitting_session(1, 50);
+        register_pruned_and_unpruned(&ctx, WOD_FILE).await;
+
+        let query = |table: &str| {
+            format!("SELECT \"Temperature\" FROM {table} WHERE wod_unique_cast > 10959640")
+        };
+        let (rows, pruned) = rows_and_pruned_chunks(&ctx, &query("pruned")).await;
+        let (unpruned_rows, _) = rows_and_pruned_chunks(&ctx, &query("unpruned")).await;
+
+        assert!(pruned > 0, "the predicate must prune cast ranges");
+        assert!(rows > 0, "the predicate must keep some casts");
+        assert_eq!(rows, unpruned_rows);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_0d_value_prunes_the_whole_file() {
+        let ctx = splitting_session(1, 50);
+        register(&ctx, "wod", WOD_FILE).await;
+
+        let (rows, pruned) = rows_and_pruned_chunks(
+            &ctx,
+            "SELECT \"Temperature\" FROM wod WHERE crs > 2147483646",
+        )
+        .await;
+
+        assert_eq!(rows, 0);
+        assert!(
+            pruned > 0,
+            "a crs outside the range must prune every cast range"
         );
     }
 

@@ -42,29 +42,7 @@ impl RaggedDataset {
         mut inner: Dataset,
         projected_schema: Option<SchemaRef>,
     ) -> anyhow::Result<RaggedDataset> {
-        // A `<var>.sample_dimension` attribute marks `<var>` as a row-size array.
-        let mut row_size_arrays = IndexMap::new();
-        for (key, attribute) in &inner.arrays {
-            let Some(row_size_name) = key.strip_suffix(".sample_dimension") else {
-                continue;
-            };
-            let observation_dimension = attribute
-                .as_any()
-                .downcast_ref::<NdArray<String>>()
-                .ok_or_else(|| anyhow::anyhow!("attribute '{key}' is not a string"))?
-                .clone_into_raw_vec()
-                .await
-                .into_iter()
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("attribute '{key}' is empty"))?;
-            if let Some(other) =
-                row_size_arrays.insert(observation_dimension.clone(), row_size_name.to_string())
-            {
-                anyhow::bail!(
-                    "row-size arrays '{other}' and '{row_size_name}' both split dimension '{observation_dimension}'"
-                );
-            }
-        }
+        let row_size_arrays = row_size_arrays(&inner.arrays).await?;
         if row_size_arrays.is_empty() {
             anyhow::bail!(
                 "dataset '{}' has no sample_dimension attribute, so it is not ragged",
@@ -218,6 +196,43 @@ impl RaggedDataset {
         }
         Ok(ranges)
     }
+}
+
+/// The row-size array name for each observation dimension of `arrays`.
+///
+/// A `<var>.sample_dimension` attribute marks `<var>` as a row-size array, and names the
+/// observation dimension it splits. Arrays without such an attribute give an empty map.
+///
+/// # Errors
+///
+/// Returns an error when an attribute is not a string or is empty, or when two row-size
+/// arrays split one dimension.
+pub(crate) async fn row_size_arrays(
+    arrays: &IndexMap<String, Arc<dyn NdArrayD>>,
+) -> anyhow::Result<IndexMap<String, String>> {
+    let mut row_size_arrays = IndexMap::new();
+    for (key, attribute) in arrays {
+        let Some(row_size_name) = key.strip_suffix(".sample_dimension") else {
+            continue;
+        };
+        let observation_dimension = attribute
+            .as_any()
+            .downcast_ref::<NdArray<String>>()
+            .ok_or_else(|| anyhow::anyhow!("attribute '{key}' is not a string"))?
+            .clone_into_raw_vec()
+            .await
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("attribute '{key}' is empty"))?;
+        if let Some(other) =
+            row_size_arrays.insert(observation_dimension.clone(), row_size_name.to_string())
+        {
+            anyhow::bail!(
+                "row-size arrays '{other}' and '{row_size_name}' both split dimension '{observation_dimension}'"
+            );
+        }
+    }
+    Ok(row_size_arrays)
 }
 
 fn is_integer(datatype: &NdArrayDataType) -> bool {

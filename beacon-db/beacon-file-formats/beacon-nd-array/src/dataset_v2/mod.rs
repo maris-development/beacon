@@ -4,6 +4,7 @@ use crate::NdArrayD;
 use std::{collections::HashSet, sync::Arc};
 pub mod gridded;
 pub mod morsel;
+pub mod pruning;
 pub mod ragged;
 
 // A clone copies the array handles, not the array data.

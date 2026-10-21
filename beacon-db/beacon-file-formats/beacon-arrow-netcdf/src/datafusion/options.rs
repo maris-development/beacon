@@ -1,6 +1,7 @@
 use std::{collections::HashMap, num::NonZeroUsize};
 
 use beacon_datafusion_ext::format_options::{format_option, parse_bool_option};
+use beacon_nd_array::nd_morsel_planner::DEFAULT_PRUNING_CHUNK_THRESHOLD;
 use datafusion::common::exec_datafusion_err;
 
 use crate::attributes::CombineAttrs;
@@ -12,9 +13,15 @@ pub struct NetCDFReaderOptions {
     pub skip_unbroadcastable: bool,
     pub enable_statistics: bool,
     pub enable_partitioning: bool,
+    /// The predicate prunes only a file of more than this many chunks or cast ranges.
+    #[serde(default = "default_pruning_chunk_threshold")]
+    pub pruning_chunk_threshold: usize,
 }
 
-#[allow(clippy::derivable_impls)]
+fn default_pruning_chunk_threshold() -> usize {
+    DEFAULT_PRUNING_CHUNK_THRESHOLD
+}
+
 impl Default for NetCDFReaderOptions {
     fn default() -> Self {
         Self {
@@ -22,6 +29,7 @@ impl Default for NetCDFReaderOptions {
             skip_unbroadcastable: false,
             enable_statistics: false,
             enable_partitioning: false,
+            pruning_chunk_threshold: DEFAULT_PRUNING_CHUNK_THRESHOLD,
         }
     }
 }
@@ -39,6 +47,13 @@ impl NetCDFReaderOptions {
         }
         if let Some(value) = format_option(format_options, "enable_statistics") {
             self.enable_statistics = parse_bool_option("enable_statistics", value)?;
+        }
+        if let Some(value) = format_option(format_options, "pruning_chunk_threshold") {
+            self.pruning_chunk_threshold = value.parse().map_err(|_| {
+                exec_datafusion_err!(
+                    "pruning_chunk_threshold must be a whole number of chunks, not '{value}'"
+                )
+            })?;
         }
         Ok(())
     }

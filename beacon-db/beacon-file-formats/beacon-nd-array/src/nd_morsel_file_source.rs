@@ -11,21 +11,28 @@ use beacon_datafusion_ext::{
 };
 use datafusion::{
     common::internal_datafusion_err,
+    config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileGroup, FileOpener, FileScanConfig, FileSource, FileStream},
         table_schema::TableSchema,
     },
     error::Result,
-    physical_expr::{LexOrdering, expressions::Column, projection::ProjectionExprs},
+    physical_expr::{LexOrdering, conjunction, expressions::Column, projection::ProjectionExprs},
     physical_expr_adapter::{DefaultPhysicalExprAdapterFactory, PhysicalExprAdapterFactory},
-    physical_plan::{PhysicalExpr, metrics::ExecutionPlanMetricsSet},
+    physical_plan::{
+        PhysicalExpr,
+        filter_pushdown::{FilterPushdownPropagation, PushedDown},
+        metrics::ExecutionPlanMetricsSet,
+    },
 };
 use object_store::ObjectStore;
 
 use crate::{
-    arrow::morsel::reject_partition_columns, nd_file_opener::NdFileOpener,
-    nd_morsel_planner::NdMorselPlanner,
+    arrow::morsel::reject_partition_columns,
+    dataset_v2::pruning::PruningPredicate,
+    nd_file_opener::NdFileOpener,
+    nd_morsel_planner::{DEFAULT_PRUNING_CHUNK_THRESHOLD, NdMorselPlanner},
 };
 
 /// Files below this size give morsels that stay with the partition that plans them.
@@ -54,6 +61,7 @@ pub struct NdMorselFileSource {
     batch_size: usize,
     file_type: String,
     local_file_max_size: u64,
+    pruning_chunk_threshold: usize, // A file of at most this many chunks is not pruned
     // Planned scans
     scan: Option<Arc<MorselScan>>, // Set by `repartitioned`: the files behind the placeholder groups
     unrepartitioned: Arc<OnceLock<Arc<MorselScan>>>, // The scan of the planned file groups, when `repartitioned` did not run
@@ -82,6 +90,7 @@ impl NdMorselFileSource {
             projection: None,
             pushdown_predicate: None,
             local_file_max_size: LOCAL_FILE_MAX_SIZE,
+            pruning_chunk_threshold: DEFAULT_PRUNING_CHUNK_THRESHOLD,
             scan: None,
             on_error: OnError::default(),
             unrepartitioned: Arc::new(OnceLock::new()),
@@ -123,6 +132,12 @@ impl NdMorselFileSource {
     /// The same source, with another size limit for files whose morsels stay local.
     pub fn with_local_file_max_size(mut self, size: u64) -> Self {
         self.local_file_max_size = size;
+        self
+    }
+
+    /// The same source, which prunes only a file of more than `threshold` chunks or cast ranges.
+    pub fn with_pruning_chunk_threshold(mut self, threshold: usize) -> Self {
+        self.pruning_chunk_threshold = threshold;
         self
     }
 
@@ -175,12 +190,23 @@ impl FileSource for NdMorselFileSource {
         };
         let queue = scan.queue(|| {
             let projected = logical_schema(base_config.projected_schema()?.as_ref())?;
-            Ok(Arc::new(NdMorselPlanner::new(
-                Arc::clone(&self.opener),
-                projected,
-                self.pushdown_predicate.clone(),
-                self.batch_size,
-            )))
+            let pruning = match &self.pushdown_predicate {
+                Some(predicate) => PruningPredicate::try_new(
+                    predicate,
+                    logical_schema(self.table_schema.file_schema())?,
+                ),
+                None => None,
+            };
+            Ok(Arc::new(
+                NdMorselPlanner::new(
+                    Arc::clone(&self.opener),
+                    projected,
+                    pruning,
+                    self.batch_size,
+                )
+                .with_pruning_chunk_threshold(self.pruning_chunk_threshold)
+                .with_metrics(&self.metrics),
+            ))
         })?;
         let partition_morsels = queue
             .partition(object_store, partition)
@@ -281,6 +307,24 @@ impl FileSource for NdMorselFileSource {
             projection: Some(merged),
             ..self.with_scan(self.scan.clone())
         })))
+    }
+
+    /// Keep the filters to prune chunks, but claim none: the filter above still applies them.
+    fn try_pushdown_filters(
+        &self,
+        filters: Vec<Arc<dyn PhysicalExpr>>,
+        _config: &ConfigOptions,
+    ) -> Result<FilterPushdownPropagation<Arc<dyn FileSource>>> {
+        let pushed_down = vec![PushedDown::No; filters.len()];
+        let predicate = conjunction(self.pushdown_predicate.clone().into_iter().chain(filters));
+        let source = Self {
+            pushdown_predicate: Some(predicate),
+            ..self.with_scan(self.scan.clone())
+        };
+        Ok(
+            FilterPushdownPropagation::with_parent_pushdown_result(pushed_down)
+                .with_updated_node(Arc::new(source)),
+        )
     }
 }
 
