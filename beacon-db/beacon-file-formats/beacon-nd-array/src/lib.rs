@@ -60,6 +60,7 @@
 pub mod array;
 pub mod arrow;
 pub mod dataset;
+pub mod dataset_cache;
 pub mod dataset_v2;
 pub mod datatypes;
 pub mod error;

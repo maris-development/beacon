@@ -6,6 +6,8 @@ pub mod gridded;
 pub mod morsel;
 pub mod ragged;
 
+// A clone copies the array handles, not the array data.
+#[derive(Debug, Clone)]
 pub struct Dataset {
     pub name: String,
     pub dimensions: IndexMap<String, usize>,
@@ -128,8 +130,13 @@ mod tests {
     #[test]
     fn arrow_schema_is_sorted_nullable_and_skips_row_sizes() {
         let sample_dimension: Arc<dyn NdArrayD> = Arc::new(
-            NdArray::<String>::try_new_from_vec_in_mem(vec!["z_obs".to_string()], vec![], vec![], None)
-                .unwrap(),
+            NdArray::<String>::try_new_from_vec_in_mem(
+                vec!["z_obs".to_string()],
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap(),
         );
         let arrays = IndexMap::from([
             ("temp".to_string(), array(&[4], &["z_obs"])),

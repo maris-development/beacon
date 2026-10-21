@@ -12,12 +12,15 @@ use beacon_datafusion_ext::type_widening::{
 };
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
 use beacon_nd_array::arrow::morsel::reject_partition_columns;
+use beacon_nd_array::dataset_cache::DatasetCache;
+use beacon_nd_array::nd_file_opener::{CachedNdFileOpener, NdFileOpener};
 use beacon_nd_array::nd_morsel_file_source::NdMorselFileSource;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
     datasource::{
         file_format::{file_compression_type::FileCompressionType, FileFormat, FileFormatFactory},
+        listing::PartitionedFile,
         physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
         sink::DataSinkExec,
         table_schema::TableSchema,
@@ -33,7 +36,6 @@ use object_store::{ObjectMeta, ObjectStore};
 use crate::datafusion::options::{NetCDFReaderOptions, NetCDFWriterOptions};
 use crate::datafusion::oxcdf::opener::OxcdfOpener;
 use crate::datafusion::sink::{NetCDFNdSink, NetCDFSink};
-use crate::oxcdf_reader::open_dataset_v2;
 
 pub const NETCDF_EXTENSION: &str = "nc";
 
@@ -54,10 +56,10 @@ pub use table_function::ReadNetCDFFunc;
 #[derive(Debug, Clone)]
 pub struct NetCDFFormatFactory {
     pub listing_factory: Arc<ListingFactory>,
+    /// The opened datasets, shared by every format this factory builds.
+    pub dataset_cache: DatasetCache,
     pub output_dir: PathBuf,
     pub config: NetCDFConfig,
-    /// The writer options of every format this factory builds. A `COPY` sets them on a clone.
-    pub writer_options: NetCDFWriterOptions,
 }
 
 impl NetCDFFormatFactory {
@@ -68,9 +70,9 @@ impl NetCDFFormatFactory {
     ) -> Self {
         Self {
             listing_factory,
+            dataset_cache: DatasetCache::new(config.dataset_cached_size),
             output_dir,
             config,
-            writer_options: NetCDFWriterOptions::default(),
         }
     }
 
@@ -83,9 +85,11 @@ impl NetCDFFormatFactory {
         NetCDFFormat::new(
             self.listing_factory.clone(),
             reader_options,
-            self.writer_options.clone(),
+            NetCDFWriterOptions::default(),
         )
+        .with_concurrent_schema_fetchers(self.config.concurrent_schema_fetchers)
         .with_output_dir(self.output_dir.clone())
+        .with_dataset_cache(self.dataset_cache.clone())
     }
 }
 
@@ -169,11 +173,16 @@ pub struct NetCDFFormat {
     pub listing_factory: Arc<ListingFactory>,
     pub type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 
+    /// The number of parallel schema fetchers.
+    pub concurrent_schema_fetchers: usize,
+
     pub reader_options: NetCDFReaderOptions,
     pub writer_options: NetCDFWriterOptions,
 
     /// Local directory the netcdf-c writer emits output files into.
     output_dir: PathBuf,
+    /// The cache of opened datasets. Without it, every read opens the file.
+    dataset_cache: Option<DatasetCache>,
 }
 
 impl NetCDFFormat {
@@ -186,8 +195,32 @@ impl NetCDFFormat {
             listing_factory,
             reader_options,
             writer_options,
+            concurrent_schema_fetchers: 1,
             output_dir: std::env::temp_dir(),
             type_widening: Arc::new(DefaultArrowTypeWidening::default()),
+            dataset_cache: None,
+        }
+    }
+
+    /// Keep the opened datasets in `cache`, so that schema inference and scans share them.
+    pub fn with_dataset_cache(mut self, cache: DatasetCache) -> Self {
+        self.dataset_cache = Some(cache);
+        self
+    }
+
+    pub fn with_concurrent_schema_fetchers(mut self, concurrent_schema_fetchers: usize) -> Self {
+        self.concurrent_schema_fetchers = concurrent_schema_fetchers;
+        self
+    }
+
+    /// The opener of this format, behind the dataset cache when the format has one.
+    fn opener(&self) -> Arc<dyn NdFileOpener> {
+        match &self.dataset_cache {
+            Some(cache) => Arc::new(CachedNdFileOpener::new(
+                Arc::new(OxcdfOpener),
+                cache.clone(),
+            )),
+            None => Arc::new(OxcdfOpener),
         }
     }
 
@@ -205,11 +238,8 @@ impl NetCDFFormat {
 
     /// The morsel source that reads the files of this format through `oxcdf`.
     fn morsel_source(&self, table_schema: TableSchema) -> NdMorselFileSource {
-        let source = NdMorselFileSource::new(
-            Arc::new(OxcdfOpener),
-            NETCDF_EXTENSION.to_string(),
-            table_schema,
-        );
+        let source =
+            NdMorselFileSource::new(self.opener(), NETCDF_EXTENSION.to_string(), table_schema);
         if self.reader_options.skip_on_error {
             source.with_on_error(OnError::Skip)
         } else {
@@ -243,23 +273,27 @@ impl FileFormat for NetCDFFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         use futures::{StreamExt, TryStreamExt};
 
-        let mut locations: Vec<_> = objects.iter().map(|o| o.location.clone()).collect();
-        locations.sort();
-        let schemas: Vec<SchemaRef> = futures::stream::iter(locations)
-            .map(|location| {
-                let store = Arc::clone(store);
+        // Sorted, so each schema gets the label of its own object.
+        let mut objects = objects.to_vec();
+        objects.sort_by(|a, b| a.location.cmp(&b.location));
+        let opener = self.opener();
+        let opens: Vec<_> = objects
+            .iter()
+            .map(|object| {
+                let location = object.location.clone();
+                let dataset = opener.open(Arc::clone(store), PartitionedFile::from(object.clone()));
                 async move {
-                    let dataset = open_dataset_v2(store, location.clone())
-                        .await
-                        .map_err(|e| {
-                            exec_datafusion_err!("Failed to open dataset '{}': {}", location, e)
-                        })?;
+                    let dataset = dataset.await.map_err(|e| {
+                        exec_datafusion_err!("Failed to open dataset '{}': {}", location, e)
+                    })?;
                     Ok::<SchemaRef, datafusion::error::DataFusionError>(Arc::new(
                         dataset.arrow_schema(),
                     ))
                 }
             })
-            .buffered(16)
+            .collect();
+        let schemas: Vec<SchemaRef> = futures::stream::iter(opens)
+            .buffered(self.concurrent_schema_fetchers)
             .try_collect()
             .await?;
 
@@ -270,7 +304,7 @@ impl FileFormat for NetCDFFormat {
 
         // Merge the schemas of all input NetCDF files, using the session's type widening rules.
         session_widening(state)
-            .merge_schemas(&label_by_object(objects, &schemas))
+            .merge_schemas(&label_by_object(&objects, &schemas))
             .map_err(|e| {
                 exec_datafusion_err!("Failed to merge the schemas of the NetCDF datasets: {}", e)
             })
@@ -488,6 +522,26 @@ mod format_tests {
             }
         };
         assert_eq!(count("alias").await, count("canonical").await);
+    }
+
+    /// Schema inference leaves the dataset in the factory cache, so the scan does not open it again.
+    #[tokio::test]
+    async fn schema_inference_fills_the_factory_dataset_cache() {
+        use object_store::ObjectStoreExt;
+
+        let factory = factory();
+        let format = factory.base_format();
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::local::LocalFileSystem::new());
+        let location =
+            object_store::path::Path::from_filesystem_path(test_file(GRIDDED_FILE)).unwrap();
+        let object = store.head(&location).await.unwrap();
+
+        format
+            .infer_schema(&session().state(), &store, std::slice::from_ref(&object))
+            .await
+            .unwrap();
+
+        assert!(factory.dataset_cache.try_get(&object).is_some());
     }
 
     /// A projection out of table-schema order reads its own columns.

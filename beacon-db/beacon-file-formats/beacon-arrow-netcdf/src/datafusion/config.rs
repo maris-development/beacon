@@ -12,6 +12,10 @@ pub struct NetCDFConfig {
     pub output_dir: std::path::PathBuf,
     /// Enable partitioning
     pub enable_partitioning: bool,
+    /// The maximum number of datasets to cache.
+    pub dataset_cached_size: usize,
+    /// Concurrent schema fetchers
+    pub concurrent_schema_fetchers: usize,
 }
 
 impl Default for NetCDFConfig {
@@ -20,6 +24,8 @@ impl Default for NetCDFConfig {
             enable_statistics: true,
             output_dir: std::path::PathBuf::from("/tmp"),
             enable_partitioning: false,
+            dataset_cached_size: 32,
+            concurrent_schema_fetchers: 16,
         }
     }
 }
