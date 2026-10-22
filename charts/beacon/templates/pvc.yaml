@@ -1,4 +1,4 @@
-{{- if and .Values.persistence.enabled (ne .Values.kind "StatefulSet") (not .Values.persistence.existingClaim) }}
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) (not (include "beacon.useClaimTemplate" .)) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

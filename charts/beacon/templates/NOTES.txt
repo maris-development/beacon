@@ -5,11 +5,12 @@ Beacon has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Rele
    Arrow Flight SQL is on port {{ .Values.beacon.flightSql.port }}.
 {{- end }}
 
+{{- $basePath := include "beacon.basePath" . }}
 2. Reach it:
 {{- if .Values.ingress.enabled }}
    Via Ingress:
    {{- range .Values.ingress.hosts }}
-     http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ (first .paths).path }}
+     http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ $basePath }}/admin
    {{- end }}
 {{- else if eq .Values.service.type "LoadBalancer" }}
    Via the LoadBalancer service external IP:
@@ -17,7 +18,7 @@ Beacon has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Rele
 {{- else }}
    Port-forward for local access:
      kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "beacon.fullname" . }} {{ .Values.service.httpPort }}:{{ .Values.service.httpPort }}
-   then open http://localhost:{{ .Values.service.httpPort }}/admin
+   then open http://localhost:{{ .Values.service.httpPort }}{{ $basePath }}/admin
 {{- end }}
 
 3. Admin credentials:

@@ -32,6 +32,13 @@ letting the server fall back to its own defaults otherwise.
     secretKeyRef:
       name: {{ include "beacon.adminSecretName" . }}
       key: BEACON_ADMIN_PASSWORD
+{{- if or $b.secretsKey.value $b.secretsKey.existingSecret }}
+- name: BEACON_SECRETS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "beacon.secretsKeySecretName" . }}
+      key: {{ $b.secretsKey.existingSecretKey | default "BEACON_SECRETS_KEY" }}
+{{- end }}
 {{/* Flight SQL */}}
 - name: BEACON_FLIGHT_SQL_ENABLE
   value: {{ $b.flightSql.enabled | quote }}
@@ -98,10 +105,8 @@ letting the server fall back to its own defaults otherwise.
   value: {{ $b.oidc.issuer | quote }}
 - name: BEACON_OIDC_AUDIENCE
   value: {{ $b.oidc.audience | quote }}
-{{- if $b.oidc.jwksUrl }}
 - name: BEACON_OIDC_JWKS_URL
   value: {{ $b.oidc.jwksUrl | quote }}
-{{- end }}
 {{- if $b.oidc.rolesClaim }}
 - name: BEACON_OIDC_ROLES_CLAIM
   value: {{ $b.oidc.rolesClaim | quote }}
@@ -115,10 +120,8 @@ letting the server fall back to its own defaults otherwise.
 {{- if $b.s3.enabled }}
 - name: BEACON_S3_DATASETS
   value: "true"
-{{- if $b.s3.bucket }}
 - name: BEACON_S3_BUCKET
   value: {{ $b.s3.bucket | quote }}
-{{- end }}
 - name: BEACON_S3_ALLOW_HTTP
   value: {{ $b.s3.allowHttp | quote }}
 - name: BEACON_S3_ENABLE_VIRTUAL_HOSTING

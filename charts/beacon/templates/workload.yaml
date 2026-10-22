@@ -1,4 +1,6 @@
+{{- include "beacon.validate" . -}}
 {{- $isSts := eq .Values.kind "StatefulSet" -}}
+{{- $useClaimTemplate := include "beacon.useClaimTemplate" . -}}
 apiVersion: apps/v1
 kind: {{ .Values.kind }}
 metadata:
@@ -6,12 +8,20 @@ metadata:
   labels:
     {{- include "beacon.labels" . | nindent 4 }}
 spec:
-  {{- if and (not .Values.autoscaling.enabled) (not $isSts) }}
   replicas: {{ .Values.replicaCount }}
-  {{- end }}
   {{- if $isSts }}
-  replicas: {{ .Values.replicaCount }}
   serviceName: {{ include "beacon.fullname" . }}-headless
+  {{- with .Values.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- else if .Values.updateStrategy }}
+  strategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  {{- else if .Values.persistence.enabled }}
+  # The old pod must release the volume and the beacon.db lock first.
+  strategy:
+    type: Recreate
   {{- end }}
   selector:
     matchLabels:
@@ -22,7 +32,9 @@ spec:
         {{- include "beacon.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}{{ toYaml . | nindent 8 }}{{- end }}
       annotations:
-        checksum/admin-secret: {{ include (print $.Template.BasePath "/secret-admin.yaml") . | sha256sum }}
+        # Hash the inputs, not the rendered Secret, so a generated password does not change it.
+        checksum/admin-secret: {{ .Values.beacon.admin | toJson | sha256sum }}
+        checksum/secrets-key: {{ .Values.beacon.secretsKey | toJson | sha256sum }}
         {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{- end }}
     spec:
       serviceAccountName: {{ include "beacon.serviceAccountName" . }}
@@ -58,9 +70,9 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           livenessProbe:
-            {{- toYaml .Values.livenessProbe | nindent 12 }}
+            {{- include "beacon.probe" (dict "probe" .Values.livenessProbe "root" .) | nindent 12 }}
           readinessProbe:
-            {{- toYaml .Values.readinessProbe | nindent 12 }}
+            {{- include "beacon.probe" (dict "probe" .Values.readinessProbe "root" .) | nindent 12 }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -68,7 +80,7 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.beacon.dataDir | quote }}
-      {{- if not $isSts }}
+      {{- if not $useClaimTemplate }}
       volumes:
         - name: data
           {{- if .Values.persistence.enabled }}
@@ -94,7 +106,7 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-  {{- if $isSts }}
+  {{- if $useClaimTemplate }}
   volumeClaimTemplates:
     - metadata:
         name: data

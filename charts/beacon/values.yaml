@@ -3,14 +3,15 @@
 # site-specific values overlay (e.g. your own ingress host, storage class,
 # S3 bucket and resource sizing) rather than editing this file.
 
-# -- Number of Beacon replicas. Beacon keeps its catalog (beacon.db) on the
-# `tables` volume; if you run more than one replica, back `tables` with a
-# ReadWriteMany volume or an external store, or keep replicaCount at 1.
+# -- Number of Beacon replicas: 1, or 0 to stop it. Beacon takes an exclusive
+# lock on its catalog (beacon.db), so a second replica cannot start. The chart
+# fails on values above 1.
 replicaCount: 1
 
 image:
   repository: ghcr.io/maris-development/beacon
-  tag: "latest"
+  # Empty uses the chart appVersion.
+  tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -20,6 +21,11 @@ fullnameOverride: ""
 # -- Workload kind. "Deployment" (default) or "StatefulSet". Use StatefulSet
 # with persistence.enabled=true for stable per-replica volumes.
 kind: Deployment
+
+# -- Deployment `strategy` or StatefulSet `updateStrategy`. When empty, a
+# Deployment with persistence uses Recreate: the old pod must release the
+# volume and the beacon.db lock before the new pod starts.
+updateStrategy: {}
 
 serviceAccount:
   create: true
@@ -54,10 +60,22 @@ beacon:
   # adminPassword below. For production, set existingSecret to a Secret that
   # provides BEACON_ADMIN_USERNAME and BEACON_ADMIN_PASSWORD and leave the
   # inline values empty.
+  # With GitOps tools (Argo CD, Flux) or `helm template`, set adminPassword or
+  # existingSecret. The chart cannot read the cluster there, so it generates
+  # a new random password on every render.
   admin:
     adminUsername: "admin"
     adminPassword: ""        # if empty and existingSecret unset, a random one is generated
     existingSecret: ""       # name of a Secret with BEACON_ADMIN_USERNAME/PASSWORD keys
+
+  # Master key (BEACON_SECRETS_KEY) that encrypts stored credentials of external
+  # SQL database tables. Without it, Beacon rejects a database table with a
+  # password. It must be 32 bytes in base64 (`openssl rand -base64 32`).
+  # Keep it stable: a changed or lost key makes stored credentials unreadable.
+  secretsKey:
+    value: ""                # creates a Secret; prefer existingSecret
+    existingSecret: ""       # name of a Secret that holds the key
+    existingSecretKey: ""    # key in that Secret; empty uses BEACON_SECRETS_KEY
 
   # Arrow Flight SQL endpoint
   flightSql:
@@ -103,6 +121,7 @@ beacon:
     bucket: ""
     region: ""
     endpoint: ""             # set for S3-compatible stores (e.g. MinIO)
+    # The server default is true. Set true for an http:// endpoint such as a local MinIO.
     allowHttp: false
     virtualHostedStyle: false
     # Static credentials (NOT recommended — prefer IRSA/Pod Identity).
@@ -156,9 +175,10 @@ resources: {}
   #   cpu: "1"
   #   memory: 2Gi
 
+# An empty httpGet.path checks {beacon.basePath}/api/health.
 livenessProbe:
   httpGet:
-    path: /
+    path: ""
     port: http
   initialDelaySeconds: 15
   periodSeconds: 20
@@ -167,18 +187,12 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /
+    path: ""
     port: http
   initialDelaySeconds: 10
   periodSeconds: 15
   timeoutSeconds: 5
   failureThreshold: 6
-
-autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 3
-  targetCPUUtilizationPercentage: 80
 
 nodeSelector: {}
 tolerations: []
