@@ -30,7 +30,6 @@ use object_store::ObjectStore;
 
 use crate::{
     arrow::morsel::reject_partition_columns,
-    dataset_v2::pruning::PruningPredicate,
     nd_file_opener::NdFileOpener,
     nd_morsel_planner::{DEFAULT_PRUNING_CHUNK_THRESHOLD, NdMorselPlanner},
 };
@@ -190,18 +189,11 @@ impl FileSource for NdMorselFileSource {
         };
         let queue = scan.queue(|| {
             let projected = logical_schema(base_config.projected_schema()?.as_ref())?;
-            let pruning = match &self.pushdown_predicate {
-                Some(predicate) => PruningPredicate::try_new(
-                    predicate,
-                    logical_schema(self.table_schema.file_schema())?,
-                ),
-                None => None,
-            };
             Ok(Arc::new(
                 NdMorselPlanner::new(
                     Arc::clone(&self.opener),
                     projected,
-                    pruning,
+                    self.pushdown_predicate.clone(),
                     self.batch_size,
                 )
                 .with_pruning_chunk_threshold(self.pruning_chunk_threshold)
