@@ -10,18 +10,17 @@
 pub struct ZarrConfig {
     /// Whether to generate per-file statistics.
     ///
-    /// On by default. A zarr store answers from its metadata where it can, and
-    /// otherwise reads only the rank-0 and rank-1 arrays — the coordinates a
-    /// `WHERE` clause names. A data grid of rank 2 or higher is never read.
-    /// The switch exists because a collection of many small stores turns even
-    /// that into real I/O, and an operator needs a way to stop it.
+    /// The Zarr format generates no statistics yet, so every store reports unknown statistics.
     pub enable_statistics: bool,
+    /// The maximum number of opened leaf groups to cache.
+    pub dataset_cached_size: usize,
 }
 
 impl Default for ZarrConfig {
     fn default() -> Self {
         Self {
             enable_statistics: true,
+            dataset_cached_size: 32,
         }
     }
 }

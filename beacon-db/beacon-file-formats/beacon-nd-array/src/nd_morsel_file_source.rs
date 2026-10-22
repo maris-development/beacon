@@ -42,7 +42,8 @@ const LOCAL_FILE_MAX_SIZE: u64 = 1 << 20;
 /// Each file is cut into morsels: one per chunk of a gridded file, one per range
 /// of casts of a ragged file. A [`MorselPlannerQueue`] gives them to the partitions.
 /// Files below `local_file_max_size` keep their morsels in the partition that
-/// plans them. Other partitions can steal the morsels of larger files.
+/// plans them. Other partitions can steal the morsels of larger files. A source
+/// without a size limit shares the morsels of every file.
 ///
 /// The first opener of the scan builds the planner and the queue, so they see the
 /// final projection and batch size.
@@ -59,8 +60,8 @@ pub struct NdMorselFileSource {
     // Local settings
     batch_size: usize,
     file_type: String,
-    local_file_max_size: u64,
-    pruning_chunk_threshold: usize, // A file of at most this many chunks is not pruned
+    local_file_max_size: Option<u64>, // `None` shares every file
+    pruning_chunk_threshold: usize,   // A file of at most this many chunks is not pruned
     // Planned scans
     scan: Option<Arc<MorselScan>>, // Set by `repartitioned`: the files behind the placeholder groups
     unrepartitioned: Arc<OnceLock<Arc<MorselScan>>>, // The scan of the planned file groups, when `repartitioned` did not run
@@ -88,7 +89,7 @@ impl NdMorselFileSource {
             batch_size: usize::MAX,
             projection: None,
             pushdown_predicate: None,
-            local_file_max_size: LOCAL_FILE_MAX_SIZE,
+            local_file_max_size: Some(LOCAL_FILE_MAX_SIZE),
             pruning_chunk_threshold: DEFAULT_PRUNING_CHUNK_THRESHOLD,
             scan: None,
             on_error: OnError::default(),
@@ -130,8 +131,21 @@ impl NdMorselFileSource {
 
     /// The same source, with another size limit for files whose morsels stay local.
     pub fn with_local_file_max_size(mut self, size: u64) -> Self {
-        self.local_file_max_size = size;
+        self.local_file_max_size = Some(size);
         self
+    }
+
+    /// The same source, which shares the morsels of every file and does not look at file sizes.
+    ///
+    /// Use it for a format whose file size does not tell the size of its data.
+    pub fn with_shared_files_only(mut self) -> Self {
+        self.local_file_max_size = None;
+        self
+    }
+
+    /// True when the source shares the morsels of every file, whatever its size.
+    pub fn shares_every_file(&self) -> bool {
+        self.local_file_max_size.is_none()
     }
 
     /// The same source, which prunes only a file of more than `threshold` chunks or cast ranges.
@@ -331,8 +345,17 @@ struct MorselScan {
 
 impl MorselScan {
     /// Split `files` by `local_file_max_size` for a queue of `num_partitions` partitions.
-    fn new(files: Vec<PartitionedFile>, num_partitions: usize, local_file_max_size: u64) -> Self {
-        let (local_files, shared_files) = split_by_size(files, local_file_max_size);
+    ///
+    /// Without a size limit, every file is shared.
+    fn new(
+        files: Vec<PartitionedFile>,
+        num_partitions: usize,
+        local_file_max_size: Option<u64>,
+    ) -> Self {
+        let (local_files, shared_files) = match local_file_max_size {
+            Some(max_size) => split_by_size(files, max_size),
+            None => (Vec::new(), files),
+        };
         Self {
             local_files,
             shared_files,
@@ -574,6 +597,32 @@ mod tests {
         assert_eq!(scan.num_partitions, 4);
         // The first opener builds the queue.
         assert!(scan.queue.get().is_none());
+    }
+
+    #[test]
+    fn shared_files_only_shares_every_file_whatever_its_size() {
+        let source = source(&grid_schema(), vec![]).with_shared_files_only();
+        let files = [("grid_0.nc", 0), ("grid_1.nc", 2 << 20), ("grid_2.nc", 20)];
+        let config = config(source, &files).build();
+
+        let scan = scan_of(&repartition(&config, 4));
+
+        assert!(scan.local_files.is_empty());
+        assert_eq!(scan.shared_files.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn shared_files_only_reads_the_same_rows() {
+        let source = source(&grid_schema(), vec![]).with_shared_files_only();
+        let config = config(source, &grid_files()).build();
+
+        let batch = run(config, 3).await;
+
+        let mut expected: Vec<Option<i32>> = (0..3)
+            .flat_map(|i| (0..6).map(move |v| Some(10 * i + v)))
+            .collect();
+        expected.sort();
+        assert_eq!(sorted_values(&batch, "temp"), expected);
     }
 
     #[test]

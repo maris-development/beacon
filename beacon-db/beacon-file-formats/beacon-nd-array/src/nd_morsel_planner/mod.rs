@@ -54,7 +54,10 @@ impl MorselPlanner for NdMorselPlanner {
                     DataFusionError::Execution(format!("Failed to open ND file {location}: {e}"))
                 })?;
 
-            // A file that holds none of the projected columns adds no rows.
+            // A file without arrays, or without a projected column, adds no rows.
+            if dataset.arrays.is_empty() {
+                return Ok(Vec::new());
+            }
             if !self.table_schema.fields().is_empty()
                 && !self
                     .table_schema
@@ -205,6 +208,34 @@ mod tests {
             .await
             .unwrap()
             .len()
+    }
+
+    /// Opens a dataset without arrays, such as a zarr group that holds none.
+    #[derive(Debug)]
+    struct EmptyOpener;
+
+    impl NdFileOpener for EmptyOpener {
+        fn open(
+            &self,
+            _store: Arc<dyn ObjectStore>,
+            _file: PartitionedFile,
+        ) -> BoxFuture<'static, anyhow::Result<Dataset>> {
+            async move { Dataset::from_arrays("empty".to_string(), IndexMap::new(), HashSet::new()) }
+                .boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dataset_without_arrays_gives_no_morsels() {
+        let planner =
+            NdMorselPlanner::new(Arc::new(EmptyOpener), Arc::new(Schema::empty()), None, 1);
+
+        let morsels = Arc::new(planner)
+            .plan(Arc::new(InMemory::new()), PartitionedFile::new("empty", 0))
+            .await
+            .unwrap();
+
+        assert!(morsels.is_empty());
     }
 
     #[tokio::test]

@@ -18,7 +18,7 @@ use datafusion::datasource::listing::{
 };
 use datafusion::prelude::SessionContext;
 use object_store::local::LocalFileSystem;
-use zarrs::array::{data_type, ArrayBuilder};
+use zarrs::array::{ArrayBuilder, data_type};
 use zarrs::group::GroupBuilder;
 use zarrs_object_store::AsyncObjectStore;
 
@@ -35,7 +35,9 @@ fn attributes(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, se
 
 /// A store with one CF time array holding a NaN.
 async fn write_store(dir: &std::path::Path) -> anyhow::Result<()> {
-    let store = Arc::new(AsyncObjectStore::new(LocalFileSystem::new_with_prefix(dir)?));
+    let store = Arc::new(AsyncObjectStore::new(LocalFileSystem::new_with_prefix(
+        dir,
+    )?));
 
     GroupBuilder::new()
         .attributes(attributes(&[("Conventions", serde_json::json!("CF-1.8"))]))
@@ -79,9 +81,6 @@ async fn a_nan_time_does_not_kill_a_schema_read() {
     let schema = schema_from_group_path(
         storage.inner(),
         "/",
-        None,
-        false,
-        None,
         &beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
     )
     .await

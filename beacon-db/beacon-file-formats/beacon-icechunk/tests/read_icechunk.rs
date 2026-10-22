@@ -4,11 +4,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, Int64Array};
+use arrow::array::{Float32Array, Float64Array};
 use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_icechunk::fixture::{self, LATS, ROWS};
+use beacon_icechunk::fixture::{self, ROWS};
 use beacon_icechunk::{IcechunkTable, IcechunkTableDefinition};
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::{SessionConfig, SessionContext};
@@ -48,15 +48,6 @@ async fn register(location: &Path, options: &[(&str, &str)]) -> SessionContext {
 
 fn rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(RecordBatch::num_rows).sum()
-}
-
-fn scalar_i64(batches: &[RecordBatch]) -> i64 {
-    batches[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .expect("an Int64 column")
-        .value(0)
 }
 
 fn scalar_f64(batches: &[RecordBatch]) -> f64 {
@@ -234,36 +225,21 @@ async fn a_coordinate_predicate_pushes_down() {
     }
 }
 
-/// `read_dimensions` narrows the table to the variables on those dimensions,
-/// the same option the zarr reader takes.
+/// `read_dimensions` and `skip_unbroadcastable` are not supported, as for a zarr store.
 #[tokio::test(flavor = "multi_thread")]
-async fn read_dimensions_narrows_the_schema() {
+async fn the_dimension_options_are_not_supported() {
     let (dir, _) = repository().await;
-    let ctx = register(&dir.path().join("repo"), &[("read_dimensions", "lat")]).await;
-
-    let names: Vec<String> = ctx
-        .table_provider("repo")
+    for key in ["read_dimensions", "skip_unbroadcastable"] {
+        let ctx = session();
+        let error = IcechunkTable::try_new(
+            &ctx.state(),
+            definition(&dir.path().join("repo"), &[(key, "lat")]),
+        )
         .await
-        .unwrap()
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| field.name().clone())
-        .collect();
-    assert!(names.contains(&"lat".to_string()), "{names:?}");
-    assert!(
-        !names.contains(&"sst".to_string()),
-        "sst spans time/lat/lon and must be excluded: {names:?}"
-    );
-
-    let count = ctx
-        .sql("SELECT count(*) FROM repo")
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-    assert_eq!(scalar_i64(&count), LATS as i64);
+        .expect_err("an unsupported option")
+        .to_string();
+        assert!(error.contains(key), "{error}");
+    }
 }
 
 /// Detection: a repository is recognised as one, and a plain zarr store is not,

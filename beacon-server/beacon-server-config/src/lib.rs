@@ -695,6 +695,7 @@ impl From<RawConfig> for Config {
             },
             zarr: ZarrConfig {
                 enable_statistics: raw.zarr_enable_statistics,
+                ..ZarrConfig::default()
             },
             file_stats: FileStatsConfig {
                 enable: raw.file_stats_enable,
@@ -986,8 +987,8 @@ fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWidening
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_master_key, normalize_base_path, normalize_log_level, validate_storage,
-        validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
+        Config, Hdf5Convention, PathBuf, RawConfig, decode_master_key, normalize_base_path,
+        normalize_log_level, validate_storage, validate_threads,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;

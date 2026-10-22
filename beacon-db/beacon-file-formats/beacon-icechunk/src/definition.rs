@@ -23,8 +23,7 @@ pub struct IcechunkTableDefinition {
     /// Location of the repository, e.g. `argo/repo` (relative to the datasets
     /// store) or `s3://bucket/argo/repo`.
     pub location: String,
-    /// Table OPTIONS: `branch` / `tag` / `snapshot` select the version,
-    /// `read_dimensions` narrows the variables that are read.
+    /// Table OPTIONS: `branch` / `tag` / `snapshot` select the version.
     pub options: HashMap<String, String>,
     /// Original `CREATE EXTERNAL TABLE` SQL, if available.
     pub definition: Option<String>,

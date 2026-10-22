@@ -94,17 +94,19 @@ async fn a_netcdf_table_without_read_dimensions_reads_the_default_grid() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_zarr_table_honours_read_dimensions() {
+async fn a_zarr_table_rejects_read_dimensions() {
     let rt = runtime("options-zarr-read-dimensions").await;
     copy_gridded_zarr(&rt, "grid.zarr");
 
-    rt.sql(
-        "CREATE EXTERNAL TABLE grid STORED AS ZARR LOCATION 'grid.zarr/zarr.json' \
-         OPTIONS ('read_dimensions' 'lat')",
-    )
-    .await;
-
-    assert_eq!(variable_columns(&rt, "grid").await, vec!["lat"]);
+    let error = rt
+        .try_sql(
+            "CREATE EXTERNAL TABLE grid STORED AS ZARR LOCATION 'grid.zarr/zarr.json' \
+             OPTIONS ('read_dimensions' 'lat')",
+        )
+        .await
+        .expect_err("read_dimensions is not supported")
+        .to_string();
+    assert!(error.contains("read_dimensions"), "{error}");
 }
 
 /// The rule the create-table page states: an unknown key is ignored, not an

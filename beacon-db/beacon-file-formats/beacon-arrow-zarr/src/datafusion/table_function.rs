@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use crate::datafusion::ZarrFormat;
+use crate::datafusion::{ZARR_EXTENSION, ZarrFormat, ZarrFormatFactory};
 use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
@@ -38,12 +38,7 @@ impl BeaconTableFunctionImpl for ReadZarrFunc {
     }
 
     fn description(&self) -> Option<String> {
-        Some(
-            "Reads Zarr stores from specified glob paths. The optional second argument lists the \
-             dimensions to read. The optional third argument, a boolean, skips a group that \
-             does not fit that list instead of failing the query."
-                .to_string(),
-        )
+        Some("Reads Zarr stores from specified glob paths.".to_string())
     }
 
     fn name(&self) -> String {
@@ -51,19 +46,11 @@ impl BeaconTableFunctionImpl for ReadZarrFunc {
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
-        Some(vec![
-            Field::new(
-                "glob_paths",
-                DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
-                false,
-            ),
-            Field::new(
-                "dimensions",
-                DataType::List(Arc::new(Field::new("dimension", DataType::Utf8, false))),
-                true,
-            ),
-            Field::new("skip_unbroadcastable", DataType::Boolean, true),
-        ])
+        Some(vec![Field::new(
+            "glob_paths",
+            DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
+            false,
+        )])
     }
 }
 
@@ -85,11 +72,13 @@ impl TableFunctionImpl for ReadZarrFunc {
                     "ListingFactory extension not found in session state"
                 )
             })?;
+        // The dimension list and the skip flag are not supported.
+        if args.len() > 1 {
+            return Err(datafusion::common::not_impl_datafusion_err!(
+                "read_zarr takes only the glob paths; dimensions and skip_unbroadcastable are not supported"
+            ));
+        }
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_zarr")?;
-
-        // Optional second argument: an explicit list of dimensions to read.
-        let dimensions =
-            beacon_common::table_function::parse_dimensions_arg(args, 1, "read_zarr", "second")?;
 
         tracing::debug!("read_zarr glob paths: {:?}", glob_paths);
 
@@ -99,21 +88,13 @@ impl TableFunctionImpl for ReadZarrFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        // Optional third argument: skip a group that does not fit the list.
-        let skip_unbroadcastable = beacon_common::table_function::parse_bool_arg(
-            args,
-            2,
-            "read_zarr",
-            "third",
-            "skip the groups that cannot broadcast",
-        )?
-        .unwrap_or(false);
-
-        // Predicate pushdown is handled automatically by the shared engine, so
-        // no manual statistics/column selection is needed.
-        let read_dimensions = (!dimensions.is_empty()).then_some(dimensions);
-        let file_format =
-            ZarrFormat::new(read_dimensions).with_skip_unbroadcastable(skip_unbroadcastable);
+        // The format shares the dataset cache of the session's Zarr factory, when there is one.
+        let mut file_format = ZarrFormat::new();
+        if let Some(factory) = state.get_file_format_factory(ZARR_EXTENSION)
+            && let Some(factory) = factory.downcast_ref::<ZarrFormatFactory>()
+        {
+            file_format = file_format.with_dataset_cache(factory.dataset_cache.clone());
+        }
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

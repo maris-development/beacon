@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use arrow::datatypes::SchemaRef;
-use beacon_arrow_zarr::datafusion::{ZarrSource, nd_scan_plan};
+use beacon_arrow_zarr::datafusion::{ZarrFormat, nd_scan_plan, reject_unsupported_options};
 use beacon_arrow_zarr::reader::schema_from_group_path;
 use beacon_arrow_zarr::util::{ZarrStorage, leaf_group_keys};
 use datafusion::catalog::{Session, TableProvider};
@@ -48,9 +48,6 @@ pub struct IcechunkTable {
     /// this point is not picked up until the table is re-created; new data in
     /// the variables already present is, because every scan re-reads the ref.
     schema: SchemaRef,
-    read_dimensions: Option<Vec<String>>,
-    /// Skip a group that does not fit `read_dimensions`, instead of failing.
-    skip_unbroadcastable: bool,
 }
 
 impl std::fmt::Debug for IcechunkTable {
@@ -69,8 +66,7 @@ impl IcechunkTable {
         definition: IcechunkTableDefinition,
     ) -> anyhow::Result<Self> {
         let version = IcechunkVersion::from_options(&definition.options)?;
-        let read_dimensions = read_dimensions_option(&definition);
-        let skip_unbroadcastable = skip_unbroadcastable_option(&definition)?;
+        reject_unsupported_options(&definition.options)?;
 
         let ResolvedLocation {
             backend,
@@ -82,9 +78,6 @@ impl IcechunkTable {
         let schema = schema_from_group_path(
             storage.inner(),
             ROOT_GROUP,
-            read_dimensions.clone(),
-            skip_unbroadcastable,
-            Some("read_icechunk"),
             &beacon_datafusion_ext::type_widening::session_widening(session),
         )
         .await
@@ -101,8 +94,6 @@ impl IcechunkTable {
             repository,
             object_store_url,
             schema,
-            read_dimensions,
-            skip_unbroadcastable,
         })
     }
 
@@ -134,37 +125,6 @@ impl IcechunkTable {
             ))
         })
     }
-}
-
-/// Read the `read_dimensions` option, if any: a comma-separated dimension list
-/// that narrows the table to the variables living on those dimensions.
-fn read_dimensions_option(definition: &IcechunkTableDefinition) -> Option<Vec<String>> {
-    let raw = definition
-        .options
-        .get("read_dimensions")
-        .or_else(|| definition.options.get("format.read_dimensions"))?;
-    let dimensions: Vec<String> = raw
-        .split(',')
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect();
-    (!dimensions.is_empty()).then_some(dimensions)
-}
-
-/// Read the `skip_unbroadcastable` option: skip a group that does not fit
-/// the dimension list, instead of failing the table.
-fn skip_unbroadcastable_option(definition: &IcechunkTableDefinition) -> anyhow::Result<bool> {
-    let Some(raw) = definition
-        .options
-        .get("skip_unbroadcastable")
-        .or_else(|| definition.options.get("format.skip_unbroadcastable"))
-    else {
-        return Ok(false);
-    };
-    Ok(beacon_datafusion_ext::format_options::parse_bool_option(
-        "skip_unbroadcastable",
-        raw,
-    )?)
 }
 
 #[async_trait::async_trait]
@@ -207,10 +167,9 @@ impl TableProvider for IcechunkTable {
             Arc::new(beacon_datafusion_ext::nd::encoded_schema(&self.schema)),
             vec![],
         );
-        let source = ZarrSource::new(table_schema)
-            .with_read_dimensions(self.read_dimensions.clone())
-            .with_skip_unbroadcastable(self.skip_unbroadcastable)
-            .with_storage(storage);
+        let source = ZarrFormat::new()
+            .with_storage(storage)
+            .morsel_source(table_schema);
 
         let conf = FileScanConfigBuilder::new(self.object_store_url.clone(), Arc::new(source))
             .with_file_groups(vec![FileGroup::new(files)])
@@ -220,77 +179,7 @@ impl TableProvider for IcechunkTable {
 
         // Filters are not consumed here: `supports_filters_pushdown` leaves the
         // `FilterExec` in place and DataFusion's physical filter pushdown sinks
-        // it into the `ZarrSource`, exactly as for a listed zarr store.
+        // it into the morsel source, exactly as for a listed zarr store.
         nd_scan_plan(conf)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn definition(options: HashMap<String, String>) -> IcechunkTableDefinition {
-        IcechunkTableDefinition {
-            name: "repo".to_string(),
-            location: "repos/argo".to_string(),
-            options,
-            definition: None,
-        }
-    }
-
-    #[test]
-    fn read_dimensions_option_splits_and_trims() {
-        let definition = definition(HashMap::from([(
-            "read_dimensions".to_string(),
-            " time , depth ".to_string(),
-        )]));
-        assert_eq!(
-            read_dimensions_option(&definition),
-            Some(vec!["time".to_string(), "depth".to_string()])
-        );
-    }
-
-    #[test]
-    fn read_dimensions_option_accepts_the_format_prefixed_key() {
-        let definition = definition(HashMap::from([(
-            "format.read_dimensions".to_string(),
-            "time".to_string(),
-        )]));
-        assert_eq!(
-            read_dimensions_option(&definition),
-            Some(vec!["time".to_string()])
-        );
-    }
-
-    #[test]
-    fn skip_unbroadcastable_option_reads_both_spellings() {
-        let bare = definition(HashMap::from([(
-            "skip_unbroadcastable".to_string(),
-            "true".to_string(),
-        )]));
-        assert!(skip_unbroadcastable_option(&bare).unwrap());
-        let prefixed = definition(HashMap::from([(
-            "format.skip_unbroadcastable".to_string(),
-            "yes".to_string(),
-        )]));
-        assert!(skip_unbroadcastable_option(&prefixed).unwrap());
-        assert!(!skip_unbroadcastable_option(&definition(HashMap::new())).unwrap());
-        let bad = definition(HashMap::from([(
-            "skip_unbroadcastable".to_string(),
-            "maybe".to_string(),
-        )]));
-        assert!(skip_unbroadcastable_option(&bad).is_err());
-    }
-
-    #[test]
-    fn absent_or_empty_read_dimensions_auto_selects() {
-        assert_eq!(read_dimensions_option(&definition(HashMap::new())), None);
-        // A value of only separators names no dimensions, so it is not a filter.
-        let definition = definition(HashMap::from([(
-            "read_dimensions".to_string(),
-            " , ".to_string(),
-        )]));
-        assert_eq!(read_dimensions_option(&definition), None);
     }
 }

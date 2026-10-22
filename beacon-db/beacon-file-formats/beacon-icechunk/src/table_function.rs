@@ -53,9 +53,7 @@ impl BeaconTableFunctionImpl for ReadIcechunkFunc {
         Some(
             "Reads an Icechunk repository as a Zarr store. Optional arguments \
              select a branch or a snapshot (pass one of them; the default is the \
-             tip of 'main') and an explicit list of dimensions to read. The optional fifth \
-             argument, a boolean, skips a group that does not fit that list instead of failing \
-             the query."
+             tip of 'main')."
                 .to_string(),
         )
     }
@@ -65,12 +63,6 @@ impl BeaconTableFunctionImpl for ReadIcechunkFunc {
             Field::new("location", DataType::Utf8, false),
             Field::new("branch", DataType::Utf8, true),
             Field::new("snapshot", DataType::Utf8, true),
-            Field::new(
-                "dimensions",
-                DataType::List(Arc::new(Field::new("dimension", DataType::Utf8, false))),
-                true,
-            ),
-            Field::new("skip_unbroadcastable", DataType::Boolean, true),
         ])
     }
 }
@@ -107,6 +99,12 @@ fn string_list_literal(expr: &Expr) -> Option<Vec<String>> {
 /// [`IcechunkTableDefinition`] carries, so the table function and
 /// `CREATE EXTERNAL TABLE` build the same provider.
 fn options_from_args(args: &[Expr]) -> datafusion::error::Result<HashMap<String, String>> {
+    // The dimension list and the skip flag are not supported.
+    if args.len() > 3 {
+        return Err(datafusion::common::not_impl_datafusion_err!(
+            "read_icechunk takes a location, a branch and a snapshot; dimensions and skip_unbroadcastable are not supported"
+        ));
+    }
     let mut options = HashMap::new();
 
     for (index, key) in [(1usize, "branch"), (2, "snapshot")] {
@@ -122,22 +120,6 @@ fn options_from_args(args: &[Expr]) -> datafusion::error::Result<HashMap<String,
             Some(_) => {}
             None => return plan_err!("read_icechunk `{key}` argument must be a string"),
         }
-    }
-
-    let dimensions =
-        beacon_common::table_function::parse_dimensions_arg(args, 3, "read_icechunk", "fourth")?;
-    if !dimensions.is_empty() {
-        options.insert("read_dimensions".to_string(), dimensions.join(","));
-    }
-
-    if let Some(skip) = beacon_common::table_function::parse_bool_arg(
-        args,
-        4,
-        "read_icechunk",
-        "fifth",
-        "skip the groups that cannot broadcast",
-    )? {
-        options.insert("skip_unbroadcastable".to_string(), skip.to_string());
     }
 
     Ok(options)
@@ -222,44 +204,10 @@ mod tests {
     }
 
     #[test]
-    fn dimensions_become_the_read_dimensions_option() {
-        let options = options_from_args(&[
-            utf8("argo/repo"),
-            null(),
-            null(),
-            dimensions(&["time", "depth"]),
-        ])
-        .unwrap();
-        assert_eq!(
-            options.get("read_dimensions").map(String::as_str),
-            Some("time,depth")
-        );
-    }
-
-    #[test]
-    fn a_fifth_boolean_becomes_the_skip_option() {
-        let options = options_from_args(&[
-            utf8("argo/repo"),
-            null(),
-            null(),
-            dimensions(&["time"]),
-            Expr::Literal(ScalarValue::Boolean(Some(true)), None),
-        ])
-        .unwrap();
-        assert_eq!(
-            options.get("skip_unbroadcastable").map(String::as_str),
-            Some("true")
-        );
-
-        let err = options_from_args(&[
-            utf8("argo/repo"),
-            null(),
-            null(),
-            null(),
-            utf8("yes"),
-        ])
-        .unwrap_err();
-        assert!(err.to_string().contains("fifth argument"), "{err}");
+    fn a_dimension_argument_is_not_supported() {
+        let err = options_from_args(&[utf8("argo/repo"), null(), null(), dimensions(&["time"])])
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported"), "{err}");
     }
 
     #[test]
@@ -270,15 +218,6 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.to_string().contains("branch"), "{err}");
-
-        let err = options_from_args(&[
-            utf8("argo/repo"),
-            null(),
-            null(),
-            Expr::Literal(ScalarValue::Int64(Some(1)), None),
-        ])
-        .unwrap_err();
-        assert!(err.to_string().contains("List<Utf8>"), "{err}");
     }
 
     #[test]
@@ -287,11 +226,11 @@ mod tests {
         let func = ReadIcechunkFunc::new(runtime.handle().clone(), Weak::new());
         assert_eq!(func.name(), "read_icechunk");
         let args = func.arguments().unwrap();
-        assert_eq!(args.len(), 5);
+        assert_eq!(args.len(), 3);
         assert_eq!(args[0].name(), "location");
         assert!(!args[0].is_nullable());
         assert!(args[1].is_nullable());
-        assert_eq!(args[4].name(), "skip_unbroadcastable");
+        assert_eq!(args[2].name(), "snapshot");
     }
 
     #[test]
