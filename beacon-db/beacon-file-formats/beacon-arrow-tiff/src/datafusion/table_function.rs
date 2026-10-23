@@ -1,6 +1,6 @@
 use std::sync::{Arc, Weak};
 
-use crate::datafusion::TiffFormat;
+use crate::datafusion::{TIFF_EXTENSION, TiffFormat, TiffFormatFactory};
 use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
@@ -75,7 +75,13 @@ impl TableFunctionImpl for ReadTiffFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        let file_format = TiffFormat::new(Default::default());
+        // The format shares the dataset cache of the session's TIFF factory, when there is one.
+        let mut file_format = TiffFormat::new(Default::default());
+        if let Some(factory) = state.get_file_format_factory(TIFF_EXTENSION)
+            && let Some(factory) = factory.downcast_ref::<TiffFormatFactory>()
+        {
+            file_format = file_format.with_dataset_cache(factory.dataset_cache.clone());
+        }
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

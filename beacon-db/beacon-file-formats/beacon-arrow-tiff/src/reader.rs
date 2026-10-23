@@ -4,10 +4,7 @@ use async_tiff::ImageFileDirectory;
 use async_tiff::metadata::{TiffMetadataReader, cache::ReadaheadMetadataCache};
 use async_tiff::reader::{AsyncFileReader, Endianness};
 use async_tiff::tags::SampleFormat;
-use beacon_nd_array::{
-    NdArray, NdArrayD,
-    dataset::{AnyDataset, Dataset},
-};
+use beacon_nd_array::{NdArray, NdArrayD, dataset_v2::Dataset};
 use futures::FutureExt;
 
 use crate::backend::TiffBandBackend;
@@ -48,7 +45,7 @@ impl AsyncFileReader for ObjectStoreAsyncReader {
     }
 }
 
-/// Open a TIFF/GeoTIFF file and return its contents as an AnyDataset.
+/// Open a TIFF/GeoTIFF file and return its contents as a [`Dataset`].
 ///
 /// - Reads TIFF metadata through `async-tiff`.
 /// - Exposes deterministic metadata arrays.
@@ -57,7 +54,7 @@ impl AsyncFileReader for ObjectStoreAsyncReader {
 pub async fn open_dataset(
     object_store: Arc<dyn ObjectStore>,
     path: Path,
-) -> anyhow::Result<AnyDataset> {
+) -> anyhow::Result<Dataset> {
     let dataset_name = path.to_string();
     tracing::debug!(path = %dataset_name, "opening TIFF dataset");
     let reader = ObjectStoreAsyncReader {
@@ -87,7 +84,11 @@ pub async fn open_dataset(
     if layout.tiled {
         insert_scalar(&mut arrays, "image.tile_width", layout.block_width as u32)?;
         insert_scalar(&mut arrays, "image.tile_height", layout.block_height as u32)?;
-        insert_scalar(&mut arrays, "image.tile_count_x", layout.blocks_across as u64)?;
+        insert_scalar(
+            &mut arrays,
+            "image.tile_count_x",
+            layout.blocks_across as u64,
+        )?;
         insert_scalar(&mut arrays, "image.tile_count_y", layout.blocks_down as u64)?;
     }
 
@@ -155,8 +156,8 @@ pub async fn open_dataset(
 
     arrays.sort_keys();
 
-    let dataset = Dataset::new(dataset_name, arrays).await;
-    AnyDataset::try_from_dataset(dataset).await
+    // A TIFF reader names the image axes itself, so no dimension counts as invented.
+    Dataset::from_arrays(dataset_name, arrays, std::collections::HashSet::new())
 }
 
 fn insert_scalar<T: beacon_nd_array::datatypes::NdArrayType>(
@@ -285,7 +286,10 @@ fn pixel_center_offset(ifd: &ImageFileDirectory) -> f64 {
         Some(PIXEL_IS_POINT) => 0.0,
         Some(PIXEL_IS_AREA) | None => 0.5,
         Some(other) => {
-            tracing::warn!(raster_type = other, "unknown GTRasterTypeGeoKey, using PixelIsArea");
+            tracing::warn!(
+                raster_type = other,
+                "unknown GTRasterTypeGeoKey, using PixelIsArea"
+            );
             0.5
         }
     }
@@ -310,14 +314,17 @@ async fn read_image_ifd(
             .map_err(|e| anyhow::anyhow!("Failed to read TIFF metadata IFDs: {e}"))?;
         Ok::<_, anyhow::Error>((ifds, endianness))
     };
-    let (ifds, endianness) = AssertUnwindSafe(read).catch_unwind().await.map_err(|panic| {
-        let reason = panic
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown cause".to_string());
-        anyhow::anyhow!("Failed to read TIFF metadata IFDs: malformed IFD ({reason})")
-    })??;
+    let (ifds, endianness) = AssertUnwindSafe(read)
+        .catch_unwind()
+        .await
+        .map_err(|panic| {
+            let reason = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown cause".to_string());
+            anyhow::anyhow!("Failed to read TIFF metadata IFDs: malformed IFD ({reason})")
+        })??;
 
     // NewSubfileType bit 0 marks an overview and bit 2 marks a mask. Skip both.
     let is_full_image = |ifd: &ImageFileDirectory| ifd.new_subfile_type().unwrap_or(0) & 0b101 == 0;
@@ -375,9 +382,9 @@ fn read_pixel_bands(
         (SampleFormat::Int, 16) => make_bands::<i16>(layout, reader, nodata),
         (SampleFormat::Int, 32) => make_bands::<i32>(layout, reader, nodata),
         (SampleFormat::Int, 64) => make_bands::<i64>(layout, reader, nodata),
-        (sample_format, bits) => anyhow::bail!(
-            "Unsupported TIFF format: {sample_format:?} / {bits} bits per sample"
-        ),
+        (sample_format, bits) => {
+            anyhow::bail!("Unsupported TIFF format: {sample_format:?} / {bits} bits per sample")
+        }
     }
 }
 
@@ -396,9 +403,10 @@ mod tests {
     const LZW_STRIPPED_TIF_BYTES: &[u8] =
         include_bytes!("../test-files/synthetic_lzw_stripped_f32.tif");
 
-    async fn scalar_u32(dataset: &AnyDataset, name: &str) -> u32 {
+    async fn scalar_u32(dataset: &Dataset, name: &str) -> u32 {
         let arr = dataset
-            .get_array(name)
+            .arrays
+            .get(name)
             .unwrap_or_else(|| panic!("missing array '{name}'"));
         let nd = arr
             .as_any()
@@ -407,9 +415,10 @@ mod tests {
         nd.clone_into_raw_vec().await[0]
     }
 
-    async fn scalar_u16(dataset: &AnyDataset, name: &str) -> u16 {
+    async fn scalar_u16(dataset: &Dataset, name: &str) -> u16 {
         let arr = dataset
-            .get_array(name)
+            .arrays
+            .get(name)
             .unwrap_or_else(|| panic!("missing array '{name}'"));
         let nd = arr
             .as_any()
@@ -425,8 +434,7 @@ mod tests {
     const SPARSE_TILED_NO_NODATA: &[u8] =
         include_bytes!("../test-files/sparse_tiled_no_nodata_i16.tif");
     const SPARSE_STRIPPED: &[u8] = include_bytes!("../test-files/sparse_stripped_i16.tif");
-    const PLANAR_PARTLY_SPARSE: &[u8] =
-        include_bytes!("../test-files/planar_partly_sparse_u8.tif");
+    const PLANAR_PARTLY_SPARSE: &[u8] = include_bytes!("../test-files/planar_partly_sparse_u8.tif");
     const BIG_ENDIAN_PREDICTOR_TILED: &[u8] =
         include_bytes!("../test-files/big_endian_predictor_tiled_u16.tif");
     const FLOAT_PREDICTOR_STRIPPED: &[u8] =
@@ -437,7 +445,7 @@ mod tests {
     const PIXEL_IS_AREA: &[u8] = include_bytes!("../test-files/pixel_is_area.tif");
     const PIXEL_IS_POINT: &[u8] = include_bytes!("../test-files/pixel_is_point.tif");
 
-    async fn open_fixture(bytes: &'static [u8]) -> anyhow::Result<AnyDataset> {
+    async fn open_fixture(bytes: &'static [u8]) -> anyhow::Result<Dataset> {
         let store = Arc::new(InMemory::new());
         let path = Path::from("tests/fixture.tif");
         store
@@ -448,11 +456,12 @@ mod tests {
     }
 
     fn band<T: beacon_nd_array::datatypes::NdArrayType>(
-        dataset: &AnyDataset,
+        dataset: &Dataset,
         index: usize,
     ) -> NdArray<T> {
         dataset
-            .get_array(&format!("band.{index}"))
+            .arrays
+            .get(&format!("band.{index}"))
             .unwrap_or_else(|| panic!("missing band.{index}"))
             .as_any()
             .downcast_ref::<NdArray<T>>()
@@ -471,7 +480,11 @@ mod tests {
         for row in 0..height {
             for col in 0..width {
                 let want = expected(row, col);
-                assert_eq!(values[row * width + col], want, "pixel (row {row}, col {col})");
+                assert_eq!(
+                    values[row * width + col],
+                    want,
+                    "pixel (row {row}, col {col})"
+                );
             }
         }
     }
@@ -535,7 +548,12 @@ mod tests {
         let first = band::<u8>(&dataset, 0).clone_into_raw_vec().await;
         assert_grid(&first, 32, 32, |r, c| ((r * 100 + c) % 200) as u8);
         let second = band::<u8>(&dataset, 1).clone_into_raw_vec().await;
-        assert_grid(&second, 32, 32, |r, c| if r < 16 && c >= 16 { 9 } else { 255 });
+        assert_grid(
+            &second,
+            32,
+            32,
+            |r, c| if r < 16 && c >= 16 { 9 } else { 255 },
+        );
     }
 
     #[tokio::test]
@@ -557,7 +575,9 @@ mod tests {
         let dataset = open_fixture(FLOAT_PREDICTOR_STRIPPED).await.unwrap();
         for index in 0..3 {
             let values = band::<f32>(&dataset, index).clone_into_raw_vec().await;
-            assert_grid(&values, 20, 37, |r, c| (r * 100 + c + index * 10000) as f32 / 4.0);
+            assert_grid(&values, 20, 37, |r, c| {
+                (r * 100 + c + index * 10000) as f32 / 4.0
+            });
         }
         // The last strip holds rows 32..37 only.
         let tail = band::<f32>(&dataset, 2)
@@ -566,7 +586,9 @@ mod tests {
             .unwrap()
             .clone_into_raw_vec()
             .await;
-        assert_grid(&tail, 10, 7, |r, c| ((r + 30) * 100 + c + 5 + 20000) as f32 / 4.0);
+        assert_grid(&tail, 10, 7, |r, c| {
+            ((r + 30) * 100 + c + 5 + 20000) as f32 / 4.0
+        });
     }
 
     #[tokio::test]
@@ -576,10 +598,11 @@ mod tests {
         assert_grid(&values, 33, 21, |r, c| (r * 100 + c) as i32 - 1000);
     }
 
-    async fn coordinates(dataset: &AnyDataset) -> (Vec<f64>, Vec<f64>) {
+    async fn coordinates(dataset: &Dataset) -> (Vec<f64>, Vec<f64>) {
         let read = |name: &str| {
             dataset
-                .get_array(name)
+                .arrays
+                .get(name)
                 .unwrap_or_else(|| panic!("missing {name}"))
                 .as_any()
                 .downcast_ref::<NdArray<f64>>()
@@ -608,9 +631,14 @@ mod tests {
             let bytes: &'static [u8] = &SPARSE_TILED[..length];
             let result = async {
                 let dataset = open_fixture(bytes).await?;
-                band::<i16>(&dataset, 0).subset(ArraySubset::new(vec![0, 0], vec![64, 64])).await
+                band::<i16>(&dataset, 0)
+                    .subset(ArraySubset::new(vec![0, 0], vec![64, 64]))
+                    .await
             };
-            assert!(result.await.is_err(), "a file cut at {length} bytes must fail");
+            assert!(
+                result.await.is_err(),
+                "a file cut at {length} bytes must fail"
+            );
         }
     }
 
@@ -665,7 +693,8 @@ mod tests {
         assert_eq!(scalar_u16(&dataset, "image.bits_per_sample").await, 32);
 
         let band = dataset
-            .get_array("band.0")
+            .arrays
+            .get("band.0")
             .expect("band.0 should be present");
         let band_nd = band
             .as_any()
@@ -695,7 +724,11 @@ mod tests {
 
         // The generator carves an 8×8 nodata block and fills the rest with the gradient.
         assert_eq!(n_nodata, 8 * 8, "unexpected nodata pixel count");
-        assert_eq!(n_valid, WIDTH * HEIGHT - 8 * 8, "unexpected valid pixel count");
+        assert_eq!(
+            n_valid,
+            WIDTH * HEIGHT - 8 * 8,
+            "unexpected valid pixel count"
+        );
 
         // Row 0 starts inside the nodata block; the first valid pixel is at column 8.
         assert!(values[0] <= -1e30, "band.0[0] should be nodata");
@@ -747,7 +780,8 @@ mod tests {
         assert_eq!(scalar_u16(&dataset, "image.bits_per_sample").await, 32);
 
         let band = dataset
-            .get_array("band.0")
+            .arrays
+            .get("band.0")
             .expect("band.0 should be present");
         let band_nd = band
             .as_any()
@@ -757,7 +791,8 @@ mod tests {
         assert_eq!(band_nd.clone_into_raw_vec().await.len(), 1287 * 380);
 
         let lat_arr = dataset
-            .get_array("geo.lat")
+            .arrays
+            .get("geo.lat")
             .expect("geo.lat should be present");
         let lat = lat_arr
             .as_any()
@@ -767,11 +802,7 @@ mod tests {
         let lats = lat.clone_into_raw_vec().await;
         assert_eq!(lats.len(), 380);
         // ModelTransformationTag, PixelIsArea: lat[y] = 0.04166667002172143 * (y + 0.5) + 30.16666666498914
-        assert!(
-            (lats[0] - 30.1875).abs() < 1e-8,
-            "lat[0]={}",
-            lats[0]
-        );
+        assert!((lats[0] - 30.1875).abs() < 1e-8, "lat[0]={}", lats[0]);
         assert!(
             (lats[1] - 30.229_166_670_021_723).abs() < 1e-8,
             "lat[1]={}",
@@ -784,7 +815,8 @@ mod tests {
         );
 
         let lon_arr = dataset
-            .get_array("geo.lon")
+            .arrays
+            .get("geo.lon")
             .expect("geo.lon should be present");
         let lon = lon_arr
             .as_any()
