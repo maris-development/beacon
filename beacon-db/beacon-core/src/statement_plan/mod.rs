@@ -16,6 +16,7 @@ mod auth;
 mod authz;
 pub(crate) mod crawler;
 mod definition;
+pub(crate) mod functions;
 mod logical;
 mod lower;
 pub(crate) mod materialized_view;

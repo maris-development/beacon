@@ -966,6 +966,88 @@ impl UserDefinedLogicalNodeCore for ShowCreateTableNode {
     }
 }
 
+/// Logical node for `CREATE [OR REPLACE] FUNCTION`. It holds the statement
+/// text, which the physical node plans and stores.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct CreateFunctionNode {
+    pub(crate) definition: String,
+}
+
+impl UserDefinedLogicalNodeCore for CreateFunctionNode {
+    fn name(&self) -> &str {
+        "CreateFunction"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "CreateFunction: {}", self.definition)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            definition: self.definition.clone(),
+        })
+    }
+}
+
+/// Arrow schema produced by `SHOW CREATE FUNCTION`.
+pub(crate) fn show_create_function_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("function_name", DataType::Utf8, false),
+                Field::new("definition", DataType::Utf8, false),
+            ]))
+        })
+        .clone()
+}
+
+fn show_create_function_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(show_create_function_arrow_schema().as_ref().clone())
+                .expect("SHOW CREATE FUNCTION schema is valid"),
+        )
+    })
+}
+
+/// Logical node for `SHOW CREATE FUNCTION <name>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct ShowCreateFunctionNode {
+    pub(crate) name: String,
+}
+
+impl UserDefinedLogicalNodeCore for ShowCreateFunctionNode {
+    fn name(&self) -> &str {
+        "ShowCreateFunction"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        show_create_function_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ShowCreateFunction: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+        })
+    }
+}
+
 /// The report `COMPACT TABLE` returns.
 pub(crate) fn compact_table_arrow_schema() -> Arc<Schema> {
     static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
@@ -1125,9 +1207,10 @@ pub(crate) enum CommentTarget {
         table: TableReference,
         column: String,
     },
+    Function(String),
 }
 
-/// Logical node for `COMMENT ON TABLE | COLUMN <name> IS '<text>' | NULL`.
+/// Logical node for `COMMENT ON TABLE | COLUMN | FUNCTION <name> IS '<text>' | NULL`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct CommentOnNode {
     pub(crate) target: CommentTarget,
@@ -1155,6 +1238,7 @@ impl UserDefinedLogicalNodeCore for CommentOnNode {
             CommentTarget::Column { table, column } => {
                 write!(f, "CommentOn: table={table} column={column}")
             }
+            CommentTarget::Function(name) => write!(f, "CommentOn: function={name}"),
         }
     }
     fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {

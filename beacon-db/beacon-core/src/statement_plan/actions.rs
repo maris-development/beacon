@@ -988,6 +988,21 @@ fn sql_column_type_to_arrow(
     Ok(schema.field(0).data_type().clone())
 }
 
+/// Convert SQL column definitions to an Arrow schema with the session's parser
+/// options, so names and string types match the planner.
+pub(crate) fn sql_columns_to_arrow_schema(
+    options: &datafusion::config::ConfigOptions,
+    columns: Vec<SqlColumnDef>,
+) -> anyhow::Result<arrow::datatypes::Schema> {
+    let provider = AlterTypeContextProvider {
+        options: options.clone(),
+    };
+    let planner = datafusion::sql::planner::SqlToRel::new(&provider);
+    planner
+        .build_schema(columns)
+        .map_err(|error| anyhow::anyhow!("Unsupported type: {error}"))
+}
+
 /// Minimal [`ContextProvider`] used only to convert SQL column types to Arrow
 /// types (via `SqlToRel::build_schema`); type conversion never touches the
 /// catalog, functions, or variables.

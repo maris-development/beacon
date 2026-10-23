@@ -275,6 +275,7 @@ export default defineConfig({
             { text: 'CREATE EXTERNAL TABLE', link: '/docs/2.1.0-rc1/sql/create-external-table' },
             { text: 'CREATE VIEW', link: '/docs/2.1.0-rc1/sql/create-view' },
             { text: 'CREATE MATERIALIZED VIEW', link: '/docs/2.1.0-rc1/sql/create-materialized-view' },
+            { text: 'CREATE FUNCTION', link: '/docs/2.1.0-rc1/sql/create-function' },
             { text: 'COMMENT ON', link: '/docs/2.1.0-rc1/sql/comment-on' },
             { text: 'Remote Tables & ATTACH', link: '/docs/2.1.0-rc1/sql/remote-tables' },
             { text: 'CREATE SECRET', link: '/docs/2.1.0-rc1/sql/secrets' },

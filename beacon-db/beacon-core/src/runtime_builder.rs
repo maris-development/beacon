@@ -696,6 +696,9 @@ async fn register_schema_provider(
         .ok_or(anyhow::anyhow!("Failed to get catalog 'beacon'"))?
         .register_schema("public", schema_provider.clone())?;
 
+    // Views can call SQL functions, so the functions load first.
+    crate::statement_plan::functions::load_persisted_functions(session_ctx).await;
+
     init_tables(
         &session_ctx,
         &schema_provider,
