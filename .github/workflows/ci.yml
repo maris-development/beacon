@@ -87,3 +87,47 @@ jobs:
 
       - name: Build
         run: cargo build --workspace
+
+  helm:
+    name: Helm lint and template
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for chart changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            chart:
+              - 'charts/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/publish-helm-chart.yml'
+
+      - name: Set up Helm
+        if: steps.changes.outputs.chart == 'true'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Lint chart
+        if: steps.changes.outputs.chart == 'true'
+        run: helm lint charts/beacon --strict
+
+      # Render the default values and the main optional branches of the templates.
+      - name: Render chart
+        if: steps.changes.outputs.chart == 'true'
+        run: |
+          helm template beacon charts/beacon > /dev/null
+          helm template beacon charts/beacon --set kind=StatefulSet > /dev/null
+          helm template beacon charts/beacon --set persistence.enabled=false --set replicaCount=0 > /dev/null
+          helm template beacon charts/beacon \
+            --set ingress.enabled=true \
+            --set beacon.s3.enabled=true --set beacon.s3.bucket=example \
+            --set beacon.oidc.enabled=true --set beacon.oidc.issuer=https://issuer.example.com/ \
+            --set beacon.oidc.jwksUrl=https://issuer.example.com/jwks.json > /dev/null

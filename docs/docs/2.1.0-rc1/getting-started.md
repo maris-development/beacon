@@ -7,6 +7,7 @@ description: Deploy a Beacon server with Docker, on local disk or on S3 object s
 This guide deploys a Beacon node with Docker. The **[Quick Start](#quick-start)** below is the
 fastest path: start the server, add data, then explore it in the admin UI. The **[Local](#local)**
 and **[S3](#s3-compatible-object-storage)** sections show production-shaped Docker Compose setups.
+The **[Kubernetes](#kubernetes)** section deploys Beacon with the Helm chart.
 The [beacon-example repository](https://github.com/maris-development/beacon-example) holds ready-made
 examples with MinIO and sample datasets.
 
@@ -23,6 +24,7 @@ Running a node is four jobs, in this order:
 
 - [Docker](https://docs.docker.com/get-docker/)
 - [Docker Compose](https://docs.docker.com/compose/install/), for the setups below
+- [Helm](https://helm.sh/docs/intro/install/), for [Kubernetes](#kubernetes)
 
 ## Quick Start
 
@@ -218,6 +220,26 @@ For a public bucket, remove `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Add
 
 For Compose, run `docker compose up -d`. You can query the files in the S3 bucket at once. The
 `./tables` volume keeps the external tables and views that you create.
+
+## Kubernetes
+
+Use the Helm chart to deploy Beacon on Kubernetes. You need Helm 3.8 or later. The chart version is
+the Beacon server version.
+
+```bash
+helm install beacon oci://ghcr.io/maris-development/charts/beacon \
+    --version 2.1.0-rc1 --namespace beacon --create-namespace
+```
+
+The chart generates an admin password. Show it with this command:
+
+```bash
+kubectl -n beacon get secret beacon-admin \
+    -o jsonpath='{.data.BEACON_ADMIN_PASSWORD}' | base64 -d; echo
+```
+
+The chart runs one replica only, because Beacon locks its catalog file. For all chart values, S3 and
+OIDC, see the [chart README](https://github.com/maris-development/beacon/tree/main/charts/beacon).
 
 ## Next steps
 

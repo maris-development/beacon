@@ -183,6 +183,7 @@ export default defineConfig({
                 { text: 'Quick Start', link: '/docs/2.1.0-rc1/getting-started#quick-start' },
                 { text: 'Local', link: '/docs/2.1.0-rc1/getting-started#local' },
                 { text: 'S3 / Object Storage', link: '/docs/2.1.0-rc1/getting-started#s3-compatible-object-storage' },
+                { text: 'Kubernetes', link: '/docs/2.1.0-rc1/getting-started#kubernetes' },
               ]
             },
             { text: 'Configuration', link: '/docs/2.1.0-rc1/server/configuration' },
