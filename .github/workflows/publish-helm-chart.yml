@@ -36,10 +36,10 @@ jobs:
           RAW: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
         run: |
           version="${RAW#v}"
-          # Helm needs SemVer 2; fail early with a clear message.
-          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          # SemVer without build metadata: appVersion becomes an image tag and a label, which reject "+".
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
           if ! [[ "$version" =~ $semver ]]; then
-            echo "::error::'$RAW' is not a SemVer version (expected e.g. v2.0.2 or 2.1.0-rc1)."
+            echo "::error::'$RAW' is not a SemVer version without build metadata (expected e.g. v2.0.2 or 2.1.0-rc1)."
             exit 1
           fi
           echo "Chart version: $version"
