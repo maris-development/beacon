@@ -83,6 +83,10 @@ impl QueryPlanner for BeaconQueryPlanner {
                 )))
             }
 
+            LogicalPlan::Ddl(DdlStatement::DropFunction(drop)) => Ok(Arc::new(
+                physical::DropFunctionExec::new(drop.name.clone(), drop.if_exists, session),
+            )),
+
             LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) => {
                 // The optimizer has already optimized the (CTAS) input; plan it as
                 // the child whose rows populate the table.
@@ -304,6 +308,20 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
         if let Some(show) = any.downcast_ref::<logical::ShowCreateTableNode>() {
             return Ok(Some(Arc::new(physical::ShowCreateTableExec::new(
                 show.table.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(create) = any.downcast_ref::<logical::CreateFunctionNode>() {
+            return Ok(Some(Arc::new(physical::CreateFunctionExec::new(
+                create.definition.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(show) = any.downcast_ref::<logical::ShowCreateFunctionNode>() {
+            return Ok(Some(Arc::new(physical::ShowCreateFunctionExec::new(
+                show.name.clone(),
                 session,
             ))));
         }

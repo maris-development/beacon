@@ -12,6 +12,12 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **SQL functions.** `CREATE [OR REPLACE] FUNCTION f(a BIGINT) RETURNS VARCHAR RETURN <expression>`
+  makes a function from one scalar expression. Beacon puts the expression in place of each call, so
+  filters on it are pushed down. `DROP FUNCTION`, `SHOW CREATE FUNCTION` and
+  `COMMENT ON FUNCTION` complete the set. `SHOW FUNCTIONS` shows the argument names and the comment.
+  Functions survive a restart. Only the admin can create or drop one, and any user can call it.
+  ([#597](https://github.com/maris-development/beacon/issues/597))
 - **OPeNDAP DAP2 endpoint.** `GET /dap/{table}.dds`, `.das` and `.dods` serve each table as a DAP2
   dataset with one Sequence named `s`. Clients subset it with DAP2 value constraints, and Beacon
   runs them as SQL under the caller's grants. `.csv` and `.nc` give the subset as a file. pydap

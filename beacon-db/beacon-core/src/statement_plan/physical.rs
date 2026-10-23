@@ -28,10 +28,11 @@ use datafusion::{
 use futures::{StreamExt, TryStreamExt};
 
 use super::{
-    actions, crawler,
+    actions, crawler, functions,
     logical::{
         analyze_files_arrow_schema, compact_table_arrow_schema, count_arrow_schema,
-        run_crawler_arrow_schema, show_crawlers_arrow_schema, show_create_table_arrow_schema,
+        run_crawler_arrow_schema, show_crawlers_arrow_schema, show_create_function_arrow_schema,
+        show_create_table_arrow_schema,
         show_indexes_arrow_schema, show_secrets_arrow_schema, AlterTableSpec, CommentTarget,
         Mutation,
     },
@@ -702,6 +703,71 @@ side_effect_exec!(CreateViewExec, "CreateViewExec", |exec: &CreateViewExec| {
     let or_replace = exec.or_replace;
     Ok(side_effect_stream(async move {
         actions::create_view(&session, &name, &input, &definition, or_replace)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `CREATE [OR REPLACE] FUNCTION`.
+#[derive(Debug)]
+pub(crate) struct CreateFunctionExec {
+    definition: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl CreateFunctionExec {
+    pub(crate) fn new(definition: String, session: SessionCell) -> Self {
+        Self {
+            definition,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CreateFunctionExec: {}", self.definition)
+    }
+}
+
+side_effect_exec!(CreateFunctionExec, "CreateFunctionExec", |exec: &CreateFunctionExec| {
+    let session = upgrade_session(&exec.session)?;
+    let definition = exec.definition.clone();
+    Ok(side_effect_stream(async move {
+        functions::create_function(&session, &definition)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `DROP FUNCTION [IF EXISTS] <name>`.
+#[derive(Debug)]
+pub(crate) struct DropFunctionExec {
+    name: String,
+    if_exists: bool,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl DropFunctionExec {
+    pub(crate) fn new(name: String, if_exists: bool, session: SessionCell) -> Self {
+        Self {
+            name,
+            if_exists,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DropFunctionExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(DropFunctionExec, "DropFunctionExec", |exec: &DropFunctionExec| {
+    let session = upgrade_session(&exec.session)?;
+    let name = exec.name.clone();
+    let if_exists = exec.if_exists;
+    Ok(side_effect_stream(async move {
+        functions::drop_function(&session, &name, if_exists)
             .await
             .map_err(to_df_err)
     }))
@@ -1486,6 +1552,66 @@ impl ExecutionPlan for ShowCreateTableExec {
     }
 }
 
+/// Physical node for `SHOW CREATE FUNCTION <name>`. Produces one row.
+#[derive(Debug)]
+pub(crate) struct ShowCreateFunctionExec {
+    name: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl ShowCreateFunctionExec {
+    pub(crate) fn new(name: String, session: SessionCell) -> Self {
+        Self {
+            name,
+            session,
+            cache: Arc::new(plan_properties(show_create_function_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for ShowCreateFunctionExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "ShowCreateFunctionExec: name={}", self.name)
+            }
+            DisplayFormatType::TreeRender => write!(f, "ShowCreateFunctionExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for ShowCreateFunctionExec {
+    fn name(&self) -> &str {
+        "ShowCreateFunctionExec"
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let batch = functions::show_create_function(&session, &self.name).map_err(to_df_err);
+        let stream = futures::stream::once(async move { batch });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            show_create_function_arrow_schema(),
+            stream,
+        )))
+    }
+}
+
 /// Physical node for `COMPACT TABLE <table> [WITH (...)]`. Produces one report row.
 #[derive(Debug)]
 pub(crate) struct CompactTableExec {
@@ -1588,6 +1714,7 @@ impl CommentOnExec {
             CommentTarget::Column { table, column } => {
                 write!(f, "CommentOnExec: table={table} column={column}")
             }
+            CommentTarget::Function(name) => write!(f, "CommentOnExec: function={name}"),
         }
     }
 }
@@ -1604,6 +1731,9 @@ side_effect_exec!(CommentOnExec, "CommentOnExec", |exec: &CommentOnExec| {
             }
             CommentTarget::Column { table, column } => {
                 comments::comment_on_column(&session, &table, &column, comment, if_exists).await
+            }
+            CommentTarget::Function(name) => {
+                functions::comment_on_function(&session, &name, comment, if_exists).await
             }
         }
         .map_err(to_df_err)
