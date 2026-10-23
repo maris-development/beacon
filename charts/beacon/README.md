@@ -10,6 +10,15 @@ over SQL / JSON (HTTP API + admin UI on port `5001`) and Arrow Flight SQL
 
 ## Install
 
+Install the chart from GHCR. The chart version is the Beacon server version:
+
+```bash
+helm install beacon oci://ghcr.io/maris-development/charts/beacon \
+  --version 2.0.2 --namespace beacon --create-namespace
+```
+
+To install from a clone of the repository, use the chart folder:
+
 ```bash
 helm install beacon ./charts/beacon \
   --namespace beacon --create-namespace
