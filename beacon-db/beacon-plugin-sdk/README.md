@@ -25,10 +25,12 @@ Use `function` to build a function from a closure.
 Call `export_plugin!` with a function that returns the list of functions.
 
 ```rust,no_run
+use std::sync::Arc;
+
 use beacon_plugin_sdk::datafusion::arrow::array::{Array, Float64Array};
 use beacon_plugin_sdk::datafusion::arrow::datatypes::DataType;
 use beacon_plugin_sdk::datafusion::common::exec_err;
-use beacon_plugin_sdk::datafusion::logical_expr::{ColumnarValue, ScalarUDF};
+use beacon_plugin_sdk::datafusion::logical_expr::ScalarUDF;
 use beacon_plugin_sdk::function;
 
 fn functions() -> Vec<ScalarUDF> {
@@ -36,15 +38,12 @@ fn functions() -> Vec<ScalarUDF> {
         .args([DataType::Float64])
         .returns(DataType::Float64)
         .alias("inc")
-        .invoke(|args| {
-            let ColumnarValue::Array(array) = &args[0] else {
-                return exec_err!("add_one expects an array");
-            };
-            let Some(values) = array.as_any().downcast_ref::<Float64Array>() else {
+        .invoke_arrays(|arrays| {
+            let Some(values) = arrays[0].as_any().downcast_ref::<Float64Array>() else {
                 return exec_err!("add_one expects a Float64 argument");
             };
             let result: Float64Array = values.iter().map(|v| v.map(|v| v + 1.0)).collect();
-            Ok(ColumnarValue::Array(std::sync::Arc::new(result)))
+            Ok(Arc::new(result))
         });
     vec![add_one]
 }
@@ -52,7 +51,9 @@ fn functions() -> Vec<ScalarUDF> {
 beacon_plugin_sdk::export_plugin!(functions);
 ```
 
-A function is `Immutable` by default. Call `volatile()` to change this.
+`invoke_arrays` gives the closure arrays only, also for a call such as `add_one(1.5)`.
+Use `invoke` to get each argument as an array or a scalar.
+A function is `Immutable` by default. Call `stable()` or `volatile()` to change this.
 For full control, write a `ScalarUDFImpl` and wrap it with `ScalarUDF::from`.
 
 ## Write the manifest
@@ -63,7 +64,7 @@ Put a `beacon-plugin.toml` file in the plugin folder.
 [plugin]
 name = "example"
 version = "0.1.0"
-beacon = ">=2.0, <3"
+beacon = ">=2.1, <3"
 
 [native]
 crate = "native"
@@ -73,24 +74,6 @@ library = "example_native"
 files = ["sql/functions.sql"]
 ```
 
-## Build, pack, install and test
-
-Build the library. Then pack it with the script in the Beacon repository.
-
-```sh
-cargo build --release
-python3 scripts/package-plugin.py <plugin-folder> --out dist \
-  --library <path-to-library> --target x86_64-unknown-linux-gnu
-```
-
-Install the archive with an SQL statement.
-
-```sql
-INSTALL example FROM 'file:///plugins/example-0.1.0-df54-x86_64-unknown-linux-gnu.tar.gz'
-```
-
-Put tests in `tests/*.slt`. Run them against a Beacon server with `beacon-slt`.
-
 ## Rules
 
 - Set `panic = "unwind"`. This is the default. The SDK refuses `panic = "abort"` at compile time.
@@ -98,8 +81,3 @@ Put tests in `tests/*.slt`. Run them against a Beacon server with `beacon-slt`.
 - A fault in native code stops the Beacon server. Test the plugin well.
 - A panic in a function becomes a query error.
 - Do not panic in getters, such as `name`, `aliases` and `signature`. Do not panic in `Drop`.
-
-## More information
-
-- Read the guide `docs/docs/2.1.0-rc1/guides/write-a-plugin.md` in the Beacon repository.
-- See the sections above for a full minimal plugin.

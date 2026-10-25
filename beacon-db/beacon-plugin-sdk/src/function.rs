@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
+use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::Result;
 use datafusion::logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf};
+use datafusion::scalar::ScalarValue;
 
 /// Starts a [`FunctionBuilder`] for a function with the given name.
 pub fn function(name: &str) -> FunctionBuilder {
@@ -48,13 +50,48 @@ impl FunctionBuilder {
         self
     }
 
+    /// Marks the function as `Stable`: the result can change between queries, but not
+    /// inside one query.
+    pub fn stable(mut self) -> Self {
+        self.volatility = Volatility::Stable;
+        self
+    }
+
     /// Marks the function as `Volatile`.
     pub fn volatile(mut self) -> Self {
         self.volatility = Volatility::Volatile;
         self
     }
 
-    /// Builds the function with `f` as its body.
+    /// Builds the function with `f` as its body. `f` gets arrays only.
+    ///
+    /// A scalar argument arrives as an array. When every argument is a scalar, as for
+    /// `add_one(1.5)`, the function returns the first value of the result as a scalar.
+    /// So a function without arguments gives one value for all rows. Use
+    /// [`FunctionBuilder::invoke`] when that is not correct.
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`FunctionBuilder::returns`] was not called.
+    pub fn invoke_arrays<F>(self, f: F) -> ScalarUDF
+    where
+        F: Fn(&[ArrayRef]) -> Result<ArrayRef> + Send + Sync + 'static,
+    {
+        self.invoke(move |args| {
+            let all_scalars = args.iter().all(|a| matches!(a, ColumnarValue::Scalar(_)));
+            let result = f(&ColumnarValue::values_to_arrays(args)?)?;
+            if all_scalars {
+                Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
+                    &result, 0,
+                )?))
+            } else {
+                Ok(ColumnarValue::Array(result))
+            }
+        })
+    }
+
+    /// Builds the function with `f` as its body. `f` gets the arguments as DataFusion
+    /// passes them, so each argument is an array or a scalar.
     ///
     /// # Panics
     ///
@@ -86,6 +123,7 @@ mod tests {
     use datafusion::arrow::array::{Array, Float64Array};
     use datafusion::arrow::datatypes::Field;
     use datafusion::common::config::ConfigOptions;
+    use datafusion::common::exec_err;
     use datafusion::logical_expr::{ScalarFunctionArgs, TypeSignature};
     use datafusion::scalar::ScalarValue;
 
@@ -102,8 +140,51 @@ mod tests {
                     let out: Float64Array = values.iter().map(|v| v.map(|v| v + 1.0)).collect();
                     Ok(ColumnarValue::Array(Arc::new(out)))
                 }
-                other => Ok(other.clone()),
+                ColumnarValue::Scalar(ScalarValue::Float64(v)) => Ok(ColumnarValue::Scalar(
+                    ScalarValue::Float64(v.map(|v| v + 1.0)),
+                )),
+                other => exec_err!("h_add_one expects Float64, got {other:?}"),
             })
+    }
+
+    fn add_arrays(name: &str) -> FunctionBuilder {
+        function(name)
+            .args([DataType::Float64, DataType::Float64])
+            .returns(DataType::Float64)
+    }
+
+    fn sum() -> ScalarUDF {
+        add_arrays("h_sum").invoke_arrays(|arrays| {
+            let a = arrays[0].as_any().downcast_ref::<Float64Array>().unwrap();
+            let b = arrays[1].as_any().downcast_ref::<Float64Array>().unwrap();
+            let out: Float64Array = a.iter().zip(b.iter()).map(|(a, b)| Some(a? + b?)).collect();
+            Ok(Arc::new(out))
+        })
+    }
+
+    fn make_sum() -> Vec<ScalarUDF> {
+        vec![sum()]
+    }
+
+    fn scalar(v: f64) -> ColumnarValue {
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(v)))
+    }
+
+    fn array(values: Vec<Option<f64>>) -> ColumnarValue {
+        ColumnarValue::Array(Arc::new(Float64Array::from(values)))
+    }
+
+    fn sum_args(args: Vec<ColumnarValue>, number_rows: usize) -> ScalarFunctionArgs {
+        ScalarFunctionArgs {
+            arg_fields: args
+                .iter()
+                .map(|_| Arc::new(Field::new("a", DataType::Float64, true)))
+                .collect(),
+            args,
+            number_rows,
+            return_field: Arc::new(Field::new("r", DataType::Float64, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        }
     }
 
     fn panicking() -> ScalarUDF {
@@ -159,6 +240,57 @@ mod tests {
             .volatile()
             .invoke(|_| Ok(ColumnarValue::Scalar(ScalarValue::Float64(Some(0.0)))));
         assert_eq!(volatile.signature().volatility, Volatility::Volatile);
+        let stable = function("h_s")
+            .returns(DataType::Float64)
+            .stable()
+            .invoke(|_| Ok(ColumnarValue::Scalar(ScalarValue::Float64(Some(0.0)))));
+        assert_eq!(stable.signature().volatility, Volatility::Stable);
+    }
+
+    #[test]
+    fn invoke_handles_a_scalar_argument() {
+        let mut args = call_args();
+        args.args = vec![scalar(1.5)];
+        args.number_rows = 1;
+        let result = add_one().invoke_with_args(args).unwrap();
+        assert!(matches!(
+            result,
+            ColumnarValue::Scalar(ScalarValue::Float64(Some(v))) if v == 2.5
+        ));
+    }
+
+    #[test]
+    fn invoke_arrays_returns_a_scalar_for_scalar_arguments() {
+        let result = sum()
+            .invoke_with_args(sum_args(vec![scalar(1.5), scalar(2.0)], 1))
+            .unwrap();
+        assert!(matches!(
+            result,
+            ColumnarValue::Scalar(ScalarValue::Float64(Some(v))) if v == 3.5
+        ));
+    }
+
+    #[test]
+    fn invoke_arrays_expands_a_scalar_next_to_an_array() {
+        let result = sum()
+            .invoke_with_args(sum_args(
+                vec![array(vec![Some(1.0), None, Some(3.0)]), scalar(10.0)],
+                3,
+            ))
+            .unwrap();
+        assert_eq!(values(result), vec![Some(11.0), None, Some(13.0)]);
+    }
+
+    #[test]
+    fn invoke_arrays_crosses_the_ffi() {
+        let udf = crate::tests::foreign_udf_from(make_sum);
+        let result = udf
+            .invoke_with_args(sum_args(
+                vec![array(vec![Some(1.0)]), array(vec![Some(2.0)])],
+                1,
+            ))
+            .unwrap();
+        assert_eq!(values(result), vec![Some(3.0)]);
     }
 
     #[test]

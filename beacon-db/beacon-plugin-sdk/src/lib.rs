@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+
 #[cfg(panic = "abort")]
 compile_error!("beacon plugins need panic = \"unwind\"");
 
@@ -253,7 +254,7 @@ pub(crate) mod tests {
             abi(),
             BeaconPluginAbi {
                 sdk_abi: BEACON_PLUGIN_SDK_ABI,
-                ffi_major: 54
+                ffi_major: datafusion_ffi::version()
             }
         );
         let FFI_Result::Ok(functions) = functions() else {
