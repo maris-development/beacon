@@ -244,6 +244,23 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
+        if let Some(install) = any.downcast_ref::<logical::InstallPluginNode>() {
+            return Ok(Some(Arc::new(physical::InstallPluginExec::new(
+                install.name.clone(),
+                install.source.clone(),
+                install.plugins_dir.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(uninstall) = any.downcast_ref::<logical::UninstallPluginNode>() {
+            return Ok(Some(Arc::new(physical::UninstallPluginExec::new(
+                uninstall.name.clone(),
+                uninstall.plugins_dir.clone(),
+                session,
+            ))));
+        }
+
         if let Some(create) = any.downcast_ref::<logical::CreateSecretNode>() {
             return Ok(Some(Arc::new(physical::CreateSecretExec::new(
                 create.name.clone(),

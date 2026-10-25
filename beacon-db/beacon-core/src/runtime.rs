@@ -58,6 +58,11 @@ pub struct Runtime {
     /// owns its timer: dropping the runtime aborts it.
     pub(crate) file_stats: Option<Arc<crate::file_stats::FileStatsService>>,
 
+    /// The installed function plugins. The session config holds the same registry.
+    pub(crate) plugins: Arc<crate::plugins::PluginRegistry>,
+    /// The plugins directory, the only store of the plugins. `None` disables plugins.
+    pub(crate) plugins_dir: Option<PathBuf>,
+
     /// tmp directory for storing temporary files (e.g. for query output)
     pub(crate) tmp_dir: PathBuf,
 }
@@ -695,6 +700,14 @@ impl Runtime {
             BeaconStatement::Detach(statement) => {
                 Ok(crate::statement_plan::detach_plan(statement))
             }
+            BeaconStatement::Install(statement) => Ok(crate::statement_plan::install_plan(
+                statement,
+                self.plugins_dir.clone(),
+            )),
+            BeaconStatement::Uninstall(statement) => Ok(crate::statement_plan::uninstall_plan(
+                statement,
+                self.plugins_dir.clone(),
+            )),
             BeaconStatement::CreateSecret(statement) => {
                 crate::statement_plan::create_secret_plan(statement)
             }
@@ -1473,6 +1486,32 @@ impl Runtime {
     /// this runtime has a database file to keep the registry in.
     pub fn file_stats(&self) -> Option<&Arc<crate::file_stats::FileStatsService>> {
         self.file_stats.as_ref()
+    }
+
+    /// Checks a plugin archive, unpacks it into `<plugins_dir>/<name>/` and registers
+    /// its functions. `source` is recorded as given.
+    ///
+    /// It skips the `SHA256SUMS`, allowlist and super-user checks. It exists for tests and
+    /// embedders.
+    #[doc(hidden)]
+    pub async fn install_plugin_archive(
+        &self,
+        name: &str,
+        archive: bytes::Bytes,
+        source: &str,
+    ) -> anyhow::Result<()> {
+        let plugins_dir = self.plugins_dir.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("plugins are disabled: this runtime has no plugins directory")
+        })?;
+        crate::plugins::loader::install_archive(
+            &self.session_ctx,
+            &self.plugins,
+            plugins_dir,
+            name,
+            archive,
+            source,
+        )
+        .await
     }
 }
 

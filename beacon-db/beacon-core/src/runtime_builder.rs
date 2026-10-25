@@ -1,9 +1,10 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
+use crate::plugins::{PluginRegistry, PluginStatus};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
 use beacon_arrow_atlas::{AtlasFormatFactory, AtlasOptions};
 use beacon_arrow_bbf::datafusion::BBFFormatFactory;
@@ -66,6 +67,12 @@ pub struct RuntimeBuilder {
 
     pub db_path: Option<PathBuf>,
     pub tmp_dir_path: Option<PathBuf>,
+    /// The plugins directory, the only store of the plugins. `None` loads no plugins.
+    pub plugins_dir: Option<PathBuf>,
+    /// Allowed prefixes of remote plugin sources. Empty allows only `file://`.
+    pub plugin_sources: Vec<String>,
+    /// `(name, source)` pairs to install at startup when the name has no registry entry.
+    pub startup_plugins: Vec<(String, String)>,
     /// The default datasets store: the URL bare dataset paths resolve against,
     /// paired with the physical [`RootStore`] it maps to (a local directory or an
     /// https base) that native readers open files under. `None` => dynamic mode:
@@ -279,6 +286,25 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Enables function plugins, with `path` as their plugins directory.
+    /// Use one runtime per plugins directory.
+    pub fn with_plugins_dir(mut self, path: PathBuf) -> Self {
+        self.plugins_dir = Some(path);
+        self
+    }
+
+    /// Sets the allowed prefixes of remote plugin sources.
+    pub fn with_plugin_sources(mut self, prefixes: Vec<String>) -> Self {
+        self.plugin_sources = prefixes;
+        self
+    }
+
+    /// Sets the plugins to install at startup, as `(name, source)` pairs.
+    pub fn with_startup_plugins(mut self, plugins: Vec<(String, String)>) -> Self {
+        self.startup_plugins = plugins;
+        self
+    }
+
     /// Enables anonymous access, resolving unauthenticated callers to `username`.
     /// The user is created (password-less, roleless) at build time if absent.
     pub fn with_anonymous_user(mut self, username: impl Into<String>) -> Self {
@@ -319,10 +345,17 @@ impl RuntimeBuilder {
         } = init_auth_context(&self, session_cell.clone()).await?;
         let auth_context = Arc::new(auth_context);
 
-        let (session_ctx, redb_store) =
-            init_session_ctx(&self, auth_context.clone(), session_cell.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
+        let plugins = Arc::new(PluginRegistry::with_allowed_sources(
+            self.plugin_sources.clone(),
+        ));
+        let (session_ctx, redb_store) = init_session_ctx(
+            &self,
+            auth_context.clone(),
+            session_cell.clone(),
+            plugins.clone(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
 
         // Formats and functions FIRST — before any persisted table is rebuilt.
         //
@@ -357,7 +390,13 @@ impl RuntimeBuilder {
         // only a hydrated catalog lets their `CREATE TABLE IF NOT EXISTS` see them —
         // otherwise the managed-table create path re-creates them and Lance rejects
         // the duplicate dataset.
-        register_schema_provider(&runtime_handle, &session_ctx).await?;
+        register_schema_provider(
+            &runtime_handle,
+            &session_ctx,
+            self.plugins_dir.as_deref(),
+            &self.startup_plugins,
+        )
+        .await?;
 
         // The session and its tables now exist and the session cell is filled, so the auth store can
         // reach its tables. Ensure they exist, hydrate the in-memory user/role copies from whatever
@@ -378,7 +417,12 @@ impl RuntimeBuilder {
         query_metrics.ensure_table().await?;
 
         // `beacon.system` — the auth directory and query metrics as SQL tables.
-        register_system_schema(&session_ctx, session_cell.clone(), auth_context.clone())?;
+        register_system_schema(
+            &session_ctx,
+            session_cell.clone(),
+            auth_context.clone(),
+            plugins.clone(),
+        )?;
 
         init_crawler_manager(&self, &session_ctx, session_cell.clone(), file_formats).await?;
 
@@ -400,6 +444,8 @@ impl RuntimeBuilder {
             auth_enforce: self.auth_enforce,
             read_only: self.read_only,
             file_stats,
+            plugins,
+            plugins_dir: self.plugins_dir,
 
             tmp_dir,
         })
@@ -609,6 +655,7 @@ async fn init_session_ctx(
     builder: &RuntimeBuilder,
     auth_context: Arc<AuthContext>,
     session_cell: SessionCell,
+    plugins: Arc<PluginRegistry>,
 ) -> anyhow::Result<(Arc<SessionContext>, Option<RedbStore>)> {
     // The concrete store is returned alongside the trait object: the
     // file-statistics registry is a B-tree, not an object, and keeping it inside
@@ -635,10 +682,20 @@ async fn init_session_ctx(
         secrets_store.clone(),
         auth_context,
         db_store.clone(),
-    )?;
+    )?
+    // Statement planning reads function owners from here.
+    .with_extension(plugins.clone());
     let runtime_env = runtime_env_builder(builder, secrets_store.clone())?;
 
-    let session_state = build_session_state(builder, config, runtime_env, session_cell.clone())?;
+    let session_state = build_session_state(
+        builder,
+        config,
+        runtime_env,
+        session_cell.clone(),
+        Arc::new(crate::plugins::NativePluginFunctions(
+            plugins.native_function_names(),
+        )),
+    )?;
 
     let session_ctx = Arc::new(SessionContext::new_with_state(session_state));
 
@@ -682,6 +739,8 @@ async fn init_session_ctx(
 async fn register_schema_provider(
     runtime_handle: &Handle,
     session_ctx: &Arc<SessionContext>,
+    plugins_dir: Option<&Path>,
+    startup_plugins: &[(String, String)],
 ) -> anyhow::Result<()> {
     // The provider blocks on this handle from inside DataFusion's sync API. It
     // must be the query runtime, not the runtime `build` happens to run on.
@@ -696,6 +755,16 @@ async fn register_schema_provider(
         .ok_or(anyhow::anyhow!("Failed to get catalog 'beacon'"))?
         .register_schema("public", schema_provider.clone())?;
 
+    // User functions can call plugin functions, so the plugins load first.
+    let registry = session_ctx
+        .state()
+        .config()
+        .get_extension::<PluginRegistry>();
+    if let (Some(plugins_dir), Some(registry)) = (plugins_dir, registry) {
+        crate::plugins::loader::load_installed(session_ctx, &registry, plugins_dir).await;
+        install_startup_plugins(session_ctx, &registry, plugins_dir, startup_plugins).await;
+    }
+
     // Views can call SQL functions, so the functions load first.
     crate::statement_plan::functions::load_persisted_functions(session_ctx).await;
 
@@ -709,6 +778,46 @@ async fn register_schema_provider(
     load_persisted_secrets_into_store(session_ctx).await;
 
     Ok(())
+}
+
+/// Installs each configured plugin that has no registry entry. A failure is logged.
+async fn install_startup_plugins(
+    session_ctx: &Arc<SessionContext>,
+    registry: &PluginRegistry,
+    plugins_dir: &Path,
+    plugins: &[(String, String)],
+) {
+    use crate::plugins::loader::{install_with_kind, InstallError};
+
+    for (name, source) in plugins {
+        // A failed plugin stays failed until UNINSTALL, so it is not retried on each start.
+        let known = registry
+            .snapshot()
+            .into_iter()
+            .find(|entry| entry.name == *name && entry.status != PluginStatus::Uninstalled);
+        if let Some(entry) = known {
+            if let Some(record) = entry.record.filter(|record| record.source != *source) {
+                tracing::warn!(
+                    "Plugin '{name}' stays at its stored source '{}', not '{source}': run UNINSTALL {name} to change it",
+                    record.source
+                );
+            }
+            continue;
+        }
+        match install_with_kind(session_ctx, registry, plugins_dir, name, source).await {
+            Ok(()) => {}
+            // The next start tries the download again.
+            Err(InstallError::Fetch(error)) => {
+                tracing::error!("Failed to install plugin '{name}' from '{source}': {error:#}");
+            }
+            // The same archive fails again, so the plugin shows as failed until UNINSTALL.
+            Err(InstallError::Check(error)) => {
+                let reason = format!("{error:#}");
+                tracing::error!("Failed to install plugin '{name}' from '{source}': {reason}");
+                registry.add_failed(name.clone(), None, None, reason);
+            }
+        }
+    }
 }
 
 /// Load any secrets persisted (encrypted) in the database file into the in-memory secret store.
@@ -746,6 +855,7 @@ fn register_system_schema(
     session_ctx: &Arc<SessionContext>,
     session_cell: SessionCell,
     auth: Arc<AuthContext>,
+    plugins: Arc<PluginRegistry>,
 ) -> anyhow::Result<()> {
     // The same late-filled handle the scan path prunes against, so the tables
     // show whatever the subsystem has at query time. Absent on a session built
@@ -759,6 +869,7 @@ fn register_system_schema(
         session_cell,
         auth,
         file_stats.clone(),
+        plugins,
     ));
 
     session_ctx
@@ -864,6 +975,7 @@ fn build_session_state(
     session_config: SessionConfig,
     runtime_env: Arc<RuntimeEnv>,
     session_cell: SessionCell,
+    plugin_functions: Arc<dyn beacon_datafusion_ext::remote::LocalFunctions>,
 ) -> anyhow::Result<datafusion::execution::context::SessionState> {
     // Narrow every scan to the columns the query reads before any other rule.
     // CSE copies every input column into an intermediate projection, one linear
@@ -873,8 +985,9 @@ fn build_session_state(
     // This is DataFusion's default logical rule set with `BeaconFederationRule`
     // inserted, so replacing the defaults with it is intentional: sub-plans rooted
     // at remote tables get pushed down. The matching `FederatedPlanner` lives in
-    // `BeaconQueryPlanner`'s extension planners.
-    optimizer_rules.extend(beacon_datafusion_ext::remote::federation_optimizer_rules());
+    // `BeaconQueryPlanner`'s extension planners. Native plugin calls stay local.
+    optimizer_rules
+        .extend(beacon_datafusion_ext::remote::federation_optimizer_rules_with(plugin_functions));
 
     let mut state_builder = SessionStateBuilder::new()
         .with_config(session_config)

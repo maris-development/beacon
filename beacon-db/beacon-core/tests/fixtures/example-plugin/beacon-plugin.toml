@@ -1,0 +1,11 @@
+[plugin]
+name = "example"
+version = "0.1.0"
+beacon = ">=2.0, <3"
+
+[native]
+crate = "native"
+library = "example_native"
+
+[sql]
+files = ["sql/functions.sql"]

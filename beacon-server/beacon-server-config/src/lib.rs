@@ -29,6 +29,7 @@ pub struct Config {
     pub flight_sql: FlightSqlConfig,
     pub cors: CorsConfig,
     pub mcp: McpConfig,
+    pub plugins: PluginConfig,
     pub netcdf: NetcdfConfig,
     pub hdf5: Hdf5Config,
     pub zarr: ZarrConfig,
@@ -166,6 +167,15 @@ pub struct McpConfig {
     pub allowed_hosts: Vec<String>,
 }
 
+/// Function plugin settings.
+#[derive(Debug, Clone, Default)]
+pub struct PluginConfig {
+    /// Allowed prefixes of remote plugin sources, from `BEACON_PLUGIN_SOURCES`.
+    pub sources: Vec<String>,
+    /// `(name, source)` pairs that Beacon installs at startup, from `BEACON_PLUGINS`.
+    pub startup: Vec<(String, String)>,
+}
+
 /// Metadata exposed at the top level of the OpenAPI document (and the Swagger /
 /// Scalar UIs). All fields are configurable so deployments can brand their own
 /// API docs without recompiling.
@@ -224,6 +234,8 @@ pub struct DataDirsConfig {
     /// The tables store itself: catalog plus managed table data, one redb file.
     pub db_file: PathBuf,
     pub tmp: PathBuf,
+    /// The installed function plugins, one folder per plugin.
+    pub plugins: PathBuf,
 }
 
 /// Settings for backing the **datasets** store with an S3-compatible bucket
@@ -421,6 +433,12 @@ struct RawConfig {
     max_age: u64,
     #[envconfig(from = "BEACON_MCP_ALLOWED_HOSTS", default = "")]
     mcp_allowed_hosts: String,
+    /// Comma list of allowed remote plugin source prefixes. Empty allows only `file://`.
+    #[envconfig(from = "BEACON_PLUGIN_SOURCES", default = "")]
+    plugin_sources: String,
+    /// Comma list of `name=source`. Beacon installs each one at startup if not installed.
+    #[envconfig(from = "BEACON_PLUGINS", default = "")]
+    plugins: String,
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "true")]
     enable_pushdown_projection: bool,
     #[envconfig(from = "BEACON_ENABLE_ND_PIPELINE", default = "true")]
@@ -688,6 +706,17 @@ impl From<RawConfig> for Config {
                     .map(str::to_string)
                     .collect(),
             },
+            plugins: PluginConfig {
+                sources: raw
+                    .plugin_sources
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|source| !source.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                // `Config::load` rejects a bad entry first; this default is never used there.
+                startup: parse_startup_plugins(&raw.plugins).unwrap_or_default(),
+            },
             netcdf: NetcdfConfig {
                 enable_statistics: raw.netcdf_enable_statistics,
                 use_rust_reader: raw.netcdf_use_rust_reader,
@@ -746,6 +775,7 @@ impl From<RawConfig> for Config {
                     datasets: root.join("datasets"),
                     db_file: root.join("tables").join("beacon.db"),
                     tmp: root.join("tmp"),
+                    plugins: root.join("plugins"),
                 }
             },
             s3: S3Config {
@@ -775,6 +805,28 @@ fn validate_storage(s3: &S3Config) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Parses `BEACON_PLUGINS`: a comma list of `name=source`.
+///
+/// The name is trimmed and lowercased. Empty items are dropped.
+fn parse_startup_plugins(raw: &str) -> std::result::Result<Vec<(String, String)>, String> {
+    let mut plugins = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let parsed = entry
+            .split_once('=')
+            .map(|(name, source)| (name.trim().to_ascii_lowercase(), source.trim().to_string()))
+            .filter(|(name, source)| !name.is_empty() && !source.is_empty());
+        match parsed {
+            Some(pair) => plugins.push(pair),
+            None => {
+                return Err(format!(
+                    "BEACON_PLUGINS entry '{entry}' must be name=source"
+                ))
+            }
+        }
+    }
+    Ok(plugins)
 }
 
 /// Rejects a runtime with no threads.
@@ -861,6 +913,7 @@ impl Config {
         let raw = RawConfig::init_from_env().map_err(|e| ConfigError::EnvLoad(e.to_string()))?;
         // Capture the secrets key before `raw` is consumed; decode/validate below.
         let secrets_key_b64 = raw.secrets_key.clone();
+        parse_startup_plugins(&raw.plugins).map_err(ConfigError::InvalidPlugins)?;
         // Same, for the one case the deprecation warning below has to distinguish:
         // the S3 store turned on by the old variable alone.
         let s3_via_deprecated_name = raw.s3_data_lake_deprecated && !raw.s3_datasets;
@@ -886,7 +939,7 @@ impl Config {
         // Create the configured data directories (idempotent). `db_file` is a file,
         // not a directory — its parent is created here. The local datasets
         // directory is skipped when the datasets store lives in S3.
-        let mut dirs = vec![config.data.tmp.clone()];
+        let mut dirs = vec![config.data.tmp.clone(), config.data.plugins.clone()];
         if let Some(parent) = config.data.db_file.parent() {
             dirs.push(parent.to_path_buf());
         }
@@ -999,8 +1052,8 @@ fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWidening
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_master_key, normalize_base_path, normalize_log_level, validate_storage,
-        validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
+        decode_master_key, normalize_base_path, normalize_log_level, parse_startup_plugins,
+        validate_storage, validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1081,6 +1134,58 @@ mod tests {
         assert_eq!(config.data.datasets, root.join("datasets"));
         assert_eq!(config.data.db_file, root.join("tables").join("beacon.db"));
         assert_eq!(config.data.tmp, root.join("tmp"));
+    }
+
+    #[test]
+    fn plugins_dir_derives_from_data_dir() {
+        let config = config(&[("BEACON_DATA_DIR", "/srv/beacon")]);
+        assert_eq!(config.data.plugins, PathBuf::from("/srv/beacon/plugins"));
+    }
+
+    #[test]
+    fn parses_plugin_sources_and_startup_plugins() {
+        let defaults = config(&[]);
+        assert!(defaults.plugins.sources.is_empty());
+        assert!(defaults.plugins.startup.is_empty());
+
+        let config = config(&[
+            (
+                "BEACON_PLUGIN_SOURCES",
+                " github:maris-development/ , ,https://plugins.example.org/ ",
+            ),
+            (
+                "BEACON_PLUGINS",
+                "Demo=github:maris-development/demo@v1, extra = https://plugins.example.org/x?a=b,",
+            ),
+        ]);
+        assert_eq!(
+            config.plugins.sources,
+            ["github:maris-development/", "https://plugins.example.org/"]
+        );
+        assert_eq!(
+            config.plugins.startup,
+            [
+                (
+                    "demo".to_string(),
+                    "github:maris-development/demo@v1".to_string()
+                ),
+                (
+                    "extra".to_string(),
+                    "https://plugins.example.org/x?a=b".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn refuses_a_bad_startup_plugin_entry() {
+        for entry in ["demo", "=source", "demo="] {
+            let error = parse_startup_plugins(&format!("ok=file:///a,{entry}")).unwrap_err();
+            assert_eq!(
+                error,
+                format!("BEACON_PLUGINS entry '{entry}' must be name=source")
+            );
+        }
     }
 
     /// The datasets store is local unless `BEACON_S3_DATASETS` opts in, and the

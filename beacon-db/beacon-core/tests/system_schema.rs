@@ -46,6 +46,7 @@ async fn system_tables_are_listed_in_information_schema() {
             "comments",
             "file_stats",
             "file_stats_segments",
+            "plugins",
             "query_metrics",
             "role_settings",
             "roles",

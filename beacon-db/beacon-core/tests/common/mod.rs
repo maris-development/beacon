@@ -15,6 +15,8 @@
 
 /// Builds Iceberg tables for the tests that read them.
 pub mod iceberg_fixture;
+/// Builds plugin archives for the plugin tests.
+pub mod plugins;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,6 +43,7 @@ pub struct Storage {
     pub datasets_dir: PathBuf,
     pub tmp_dir: PathBuf,
     pub db_path: Option<PathBuf>,
+    pub plugins_dir: PathBuf,
 }
 
 /// Rebuilds an identical runtime over the same storage. `Fn` (not `FnOnce`) so
@@ -66,6 +69,11 @@ impl TestRuntime {
     /// The tmp store root — where query-output files are written and read back.
     pub fn tmp_dir(&self) -> &Path {
         &self.storage.tmp_dir
+    }
+
+    /// The plugins directory, `<root>/plugins`.
+    pub fn plugins_dir(&self) -> PathBuf {
+        self.storage.plugins_dir.clone()
     }
 
     /// Drops this runtime and builds a fresh one over the same storage, so a test can
@@ -145,6 +153,7 @@ fn new_root(tag: &str) -> (Arc<TempDir>, Storage) {
         tmp_dir: root.path().join("tmp"),
         // In-memory tables store: independent per runtime, nothing persists.
         db_path: None,
+        plugins_dir: root.path().join("plugins"),
     };
     for dir in [&storage.datasets_dir, &storage.tmp_dir] {
         std::fs::create_dir_all(dir).expect("create storage dir");
@@ -162,6 +171,7 @@ fn base_builder(storage: &Storage) -> RuntimeBuilder {
             RootStore::FileSystem(storage.datasets_dir.clone()),
         )
         .with_tmp_dir_path(storage.tmp_dir.clone())
+        .with_plugins_dir(storage.plugins_dir.clone())
         .with_admin_credentials(ADMIN_USERNAME.to_string(), ADMIN_PASSWORD.to_string());
     if let Some(db_path) = &storage.db_path {
         builder = builder.with_db_path(db_path.clone());

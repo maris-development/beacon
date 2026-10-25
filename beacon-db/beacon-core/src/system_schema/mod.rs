@@ -29,6 +29,7 @@
 mod auth;
 mod comments;
 mod file_stats;
+mod plugins;
 mod table;
 
 pub(crate) use file_stats::{FileStatisticsFunc, FileStatisticsTable};
@@ -90,6 +91,7 @@ impl SystemSchemaProvider {
         session: SessionCell,
         auth: Arc<beacon_auth::AuthContext>,
         file_stats: beacon_file_stats::FileStatsHandle,
+        plugins: Arc<crate::plugins::PluginRegistry>,
     ) -> Self {
         let mut tables: HashMap<String, Arc<dyn TableProvider>> = HashMap::new();
         tables.insert(
@@ -117,6 +119,10 @@ impl SystemSchemaProvider {
         tables.insert(
             "comments".to_string(),
             Arc::new(comments::comments_table(session.clone())),
+        );
+        tables.insert(
+            "plugins".to_string(),
+            Arc::new(plugins::plugins_table(plugins)),
         );
         Self { tables, session }
     }

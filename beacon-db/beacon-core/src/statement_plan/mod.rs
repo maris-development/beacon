@@ -39,7 +39,7 @@ use crate::parser::statement::{
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropIndexStatement, DropSecretStatement, RefreshStatement,
     AnalyzeFilesStatement, RunCrawlerStatement, ShowIndexesStatement,
-    SummarizeStatement,
+    SummarizeStatement, InstallStatement, UninstallStatement,
 };
 
 pub(crate) use authz::{authorize_logical_plan, table_targets};
@@ -264,6 +264,33 @@ pub(crate) fn attach_plan(statement: AttachStatement) -> anyhow::Result<LogicalP
             tls,
         )),
     }))
+}
+
+/// Build the logical plan for `INSTALL <name> FROM '<source>'`.
+pub(crate) fn install_plan(
+    statement: InstallStatement,
+    plugins_dir: Option<std::path::PathBuf>,
+) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::InstallPluginNode {
+            name: statement.name,
+            source: statement.source,
+            plugins_dir,
+        }),
+    })
+}
+
+/// Build the logical plan for `UNINSTALL <name>`.
+pub(crate) fn uninstall_plan(
+    statement: UninstallStatement,
+    plugins_dir: Option<std::path::PathBuf>,
+) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::UninstallPluginNode {
+            name: statement.name,
+            plugins_dir,
+        }),
+    })
 }
 
 /// Build the logical plan for `DETACH <name>`.

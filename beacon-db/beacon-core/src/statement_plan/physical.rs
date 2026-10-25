@@ -481,6 +481,117 @@ side_effect_exec!(DetachExec, "DetachExec", |exec: &DetachExec| {
     }))
 });
 
+/// The plugin registry of `session` and the plugins directory, or an error when plugins are disabled.
+fn plugin_setup(
+    session: &SessionContext,
+    plugins_dir: Option<&std::path::Path>,
+) -> anyhow::Result<(Arc<crate::plugins::PluginRegistry>, std::path::PathBuf)> {
+    let registry = session
+        .state()
+        .config()
+        .get_extension::<crate::plugins::PluginRegistry>();
+    match (registry, plugins_dir) {
+        (Some(registry), Some(dir)) => Ok((registry, dir.to_path_buf())),
+        _ => anyhow::bail!("plugins are disabled: this runtime has no plugins directory"),
+    }
+}
+
+/// Physical node for `INSTALL <name> FROM '<source>'`.
+#[derive(Debug)]
+pub(crate) struct InstallPluginExec {
+    name: String,
+    source: String,
+    plugins_dir: Option<std::path::PathBuf>,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl InstallPluginExec {
+    pub(crate) fn new(
+        name: String,
+        source: String,
+        plugins_dir: Option<std::path::PathBuf>,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            name,
+            source,
+            plugins_dir,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "InstallPluginExec: name={} source={}",
+            self.name, self.source
+        )
+    }
+}
+
+side_effect_exec!(
+    InstallPluginExec,
+    "InstallPluginExec",
+    |exec: &InstallPluginExec| {
+        let session = upgrade_session(&exec.session)?;
+        let name = exec.name.clone();
+        let source = exec.source.clone();
+        let plugins_dir = exec.plugins_dir.clone();
+        Ok(side_effect_stream(async move {
+            let result = async {
+                let (registry, dir) = plugin_setup(&session, plugins_dir.as_deref())?;
+                crate::plugins::loader::install(&session, &registry, &dir, &name, &source).await
+            };
+            result.await.map_err(to_df_err)
+        }))
+    }
+);
+
+/// Physical node for `UNINSTALL <name>`.
+#[derive(Debug)]
+pub(crate) struct UninstallPluginExec {
+    name: String,
+    plugins_dir: Option<std::path::PathBuf>,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl UninstallPluginExec {
+    pub(crate) fn new(
+        name: String,
+        plugins_dir: Option<std::path::PathBuf>,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            name,
+            plugins_dir,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UninstallPluginExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(
+    UninstallPluginExec,
+    "UninstallPluginExec",
+    |exec: &UninstallPluginExec| {
+        let session = upgrade_session(&exec.session)?;
+        let name = exec.name.clone();
+        let plugins_dir = exec.plugins_dir.clone();
+        Ok(side_effect_stream(async move {
+            let result = async {
+                let (registry, dir) = plugin_setup(&session, plugins_dir.as_deref())?;
+                crate::plugins::loader::uninstall(&session, &registry, &dir, &name).await
+            };
+            result.await.map_err(to_df_err)
+        }))
+    }
+);
+
 /// Physical node for `CREATE SECRET <name> (...)`.
 #[derive(Debug)]
 pub(crate) struct CreateSecretExec {

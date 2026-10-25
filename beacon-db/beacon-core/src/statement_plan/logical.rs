@@ -522,6 +522,76 @@ impl UserDefinedLogicalNodeCore for AttachNode {
     }
 }
 
+/// Logical node for `INSTALL <name> FROM '<source>'`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct InstallPluginNode {
+    pub(crate) name: String,
+    pub(crate) source: String,
+    /// The plugins directory of the runtime. `None` when plugins are disabled.
+    pub(crate) plugins_dir: Option<std::path::PathBuf>,
+}
+
+impl UserDefinedLogicalNodeCore for InstallPluginNode {
+    fn name(&self) -> &str {
+        "InstallPlugin"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "InstallPlugin: name={} source={}",
+            self.name, self.source
+        )
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+            source: self.source.clone(),
+            plugins_dir: self.plugins_dir.clone(),
+        })
+    }
+}
+
+/// Logical node for `UNINSTALL <name>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct UninstallPluginNode {
+    pub(crate) name: String,
+    /// The plugins directory of the runtime. `None` when plugins are disabled.
+    pub(crate) plugins_dir: Option<std::path::PathBuf>,
+}
+
+impl UserDefinedLogicalNodeCore for UninstallPluginNode {
+    fn name(&self) -> &str {
+        "UninstallPlugin"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "UninstallPlugin: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+            plugins_dir: self.plugins_dir.clone(),
+        })
+    }
+}
+
 /// Logical node for `DETACH <name>`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct DetachNode {

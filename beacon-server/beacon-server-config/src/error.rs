@@ -37,6 +37,10 @@ pub enum ConfigError {
     #[error("invalid BEACON_SECRETS_KEY: {0}")]
     InvalidSecretsKey(String),
 
+    /// `BEACON_PLUGINS` holds an entry that is not `name=source`.
+    #[error("{0}")]
+    InvalidPlugins(String),
+
     /// A required data directory could not be created.
     #[error("failed to create directory {}: {source}", .path.display())]
     CreateDir {

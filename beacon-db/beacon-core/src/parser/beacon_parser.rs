@@ -15,7 +15,7 @@ use super::statement::{
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropIndexStatement, DropSecretStatement, RefreshStatement,
     AnalyzeFilesStatement, RunCrawlerStatement, ShowIndexesStatement,
-    SummarizeStatement,
+    SummarizeStatement, InstallStatement, UninstallStatement,
 };
 
 /// A parser that extends `DFParser` with custom Beacon SQL syntax.
@@ -101,6 +101,14 @@ impl<'a> BeaconParser<'a> {
 
         if self.is_detach() {
             return self.parse_detach();
+        }
+
+        if self.is_install() {
+            return self.parse_install();
+        }
+
+        if self.is_uninstall() {
+            return self.parse_uninstall();
         }
 
         if self.is_create_secret() {
@@ -479,6 +487,36 @@ impl<'a> BeaconParser<'a> {
         self.df_parser.parser.next_token(); // DETACH
         let name = self.parse_string_value()?;
         Ok(BeaconStatement::Detach(DetachStatement { name }))
+    }
+
+    fn is_install(&self) -> bool {
+        matches!(&self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.value.eq_ignore_ascii_case("INSTALL"))
+    }
+
+    fn is_uninstall(&self) -> bool {
+        matches!(&self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.value.eq_ignore_ascii_case("UNINSTALL"))
+    }
+
+    /// Parse: INSTALL <name> FROM '<source>'
+    fn parse_install(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // INSTALL
+        let name = self.parse_name()?.to_lowercase();
+        self.expect_keyword(Keyword::FROM)?;
+        let source = self
+            .df_parser
+            .parser
+            .parse_literal_string()
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(BeaconStatement::Install(InstallStatement { name, source }))
+    }
+
+    /// Parse: UNINSTALL <name>
+    fn parse_uninstall(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // UNINSTALL
+        let name = self.parse_name()?.to_lowercase();
+        Ok(BeaconStatement::Uninstall(UninstallStatement { name }))
     }
 
     fn is_create_secret(&self) -> bool {
@@ -1537,5 +1575,36 @@ mod tests {
             BeaconParser::new("SHOW SECRETS").unwrap().parse_statement().unwrap(),
             BeaconStatement::ShowSecrets
         ));
+    }
+
+    #[test]
+    fn parses_install() {
+        let sql = "INSTALL Example FROM 'file:///x'";
+        match BeaconParser::new(sql).unwrap().parse_single_statement().unwrap() {
+            BeaconStatement::Install(s) => {
+                assert_eq!((s.name.as_str(), s.source.as_str()), ("example", "file:///x"));
+            }
+            other => panic!("expected INSTALL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_uninstall() {
+        match BeaconParser::new("UNINSTALL Example")
+            .unwrap()
+            .parse_single_statement()
+            .unwrap()
+        {
+            BeaconStatement::Uninstall(s) => assert_eq!(s.name, "example"),
+            other => panic!("expected UNINSTALL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_without_from_fails() {
+        assert!(BeaconParser::new("INSTALL example 'file:///x'")
+            .unwrap()
+            .parse_single_statement()
+            .is_err());
     }
 }
