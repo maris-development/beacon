@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-server/beacon-dap", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-iceberg", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-erddap", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
+members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-server/beacon-dap", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-iceberg", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-erddap", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-plugin-sdk", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
 
 [workspace.package]
 
@@ -68,6 +68,10 @@ deltalake = { git = "https://github.com/delta-io/delta-rs.git", rev = "37ee98273
 iceberg = { git = "https://github.com/apache/iceberg-rust.git", tag = "v0.11.0-rc.2" }
 iceberg-datafusion = { git = "https://github.com/apache/iceberg-rust.git", tag = "v0.11.0-rc.2" }
 datafusion = "^54.1"
+
+datafusion-ffi = "^54.1"
+
+stabby = "72.1.1"
 
 datafusion-datasource = "^54.1"
 
