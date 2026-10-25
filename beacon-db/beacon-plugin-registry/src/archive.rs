@@ -28,6 +28,8 @@ pub fn parse_sha256sums(text: &str) -> anyhow::Result<HashMap<String, String>> {
             .with_context(|| format!("SHA256SUMS line {} is malformed", index + 1))?;
         let name = rest.trim_start();
         let name = name.strip_prefix('*').unwrap_or(name);
+        // `sha256sum ./x.tar.gz` writes the name with a leading `./`.
+        let name = name.strip_prefix("./").unwrap_or(name);
         if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) || name.is_empty() {
             bail!("SHA256SUMS line {} is malformed", index + 1);
         }
@@ -44,6 +46,14 @@ fn check_path(path: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Pax header entries hold metadata only, such as the commit id that `git archive` adds.
+fn is_pax_header(kind: tar::EntryType) -> bool {
+    matches!(
+        kind,
+        tar::EntryType::XGlobalHeader | tar::EntryType::XHeader
+    )
 }
 
 fn gz_entries(archive: &[u8]) -> tar::Archive<flate2::read::GzDecoder<&[u8]>> {
@@ -71,6 +81,9 @@ fn unpack_with_limit(archive: &[u8], dest: &Path, unpacked_limit: u64) -> anyhow
         .context("cannot read archive")?
     {
         let entry = entry.context("cannot read archive entry")?;
+        if is_pax_header(entry.header().entry_type()) {
+            continue;
+        }
         let path = entry.path().context("archive entry has a bad path")?;
         check_path(&path)?;
         unpacked = unpacked.saturating_add(entry.size());
@@ -89,6 +102,9 @@ fn unpack_with_limit(archive: &[u8], dest: &Path, unpacked_limit: u64) -> anyhow
     std::fs::create_dir_all(dest)?;
     for entry in gz_entries(archive).entries()? {
         let mut entry = entry?;
+        if is_pax_header(entry.header().entry_type()) {
+            continue;
+        }
         let target = dest.join(entry.path()?);
         if entry.header().entry_type() == tar::EntryType::Directory {
             std::fs::create_dir_all(&target)?;
@@ -291,6 +307,32 @@ mod tests {
     }
 
     #[test]
+    fn skips_a_pax_global_header() {
+        let dest = tempfile::tempdir().unwrap();
+        // `git archive` writes a global header with the commit id first.
+        let bytes = raw_archive(&[
+            (
+                "pax_global_header",
+                tar::EntryType::XGlobalHeader,
+                None,
+                b"52 comment=0123456789012345678901234567890123456789\n",
+            ),
+            (
+                "beacon-plugin.toml",
+                tar::EntryType::Regular,
+                None,
+                b"a = 1",
+            ),
+        ]);
+        unpack(&bytes, dest.path()).unwrap();
+        assert_eq!(
+            std::fs::read(dest.path().join("beacon-plugin.toml")).unwrap(),
+            b"a = 1"
+        );
+        assert!(!dest.path().join("pax_global_header").exists());
+    }
+
+    #[test]
     fn refuses_too_many_unpacked_bytes() {
         let dest = tempfile::tempdir().unwrap();
         let bytes = raw_archive(&[
@@ -326,10 +368,11 @@ mod tests {
     fn parses_both_sha256sums_forms() {
         let h1 = "a".repeat(64);
         let h2 = "B".repeat(64);
-        let text = format!("{h1}  one.tar.gz\n{h2} *two.tar.gz\n\n");
+        let text = format!("{h1}  one.tar.gz\n{h2} *two.tar.gz\n{h1}  ./three.tar.gz\n\n");
         let map = parse_sha256sums(&text).unwrap();
         assert_eq!(map["one.tar.gz"], h1);
         assert_eq!(map["two.tar.gz"], "b".repeat(64));
+        assert_eq!(map["three.tar.gz"], h1);
         assert!(parse_sha256sums("nothex  x").is_err());
     }
 
@@ -346,7 +389,11 @@ mod tests {
         let v = semver::Version::new(0, 1, 0);
         assert_eq!(
             archive_name("example", &v, true),
-            format!("example-0.1.0-df54-{}.tar.gz", env!("BEACON_TARGET"))
+            format!(
+                "example-0.1.0-df{}-{}.tar.gz",
+                df_major(),
+                env!("BEACON_TARGET")
+            )
         );
         assert_eq!(
             archive_name("example", &v, false),

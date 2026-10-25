@@ -125,14 +125,9 @@ impl PluginManifest {
 
     /// Platform file name of the native library, if the plugin has one.
     pub fn library_file_name(&self) -> Option<String> {
-        self.native.as_ref().map(|n| {
-            format!(
-                "{}{}{}",
-                std::env::consts::DLL_PREFIX,
-                n.library,
-                std::env::consts::DLL_SUFFIX
-            )
-        })
+        self.native
+            .as_ref()
+            .map(|n| crate::native::library_file_name(&n.library))
     }
 }
 

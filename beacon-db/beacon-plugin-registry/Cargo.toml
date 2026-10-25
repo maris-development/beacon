@@ -3,6 +3,10 @@ name = "beacon-plugin-registry"
 version.workspace = true
 edition = "2021"
 rust-version.workspace = true
+description = "Reads, checks, stores and loads Beacon plugins"
+readme = "README.md"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
 
 # Plugin manifest, archive, store and registry. Free of `beacon-core`.
 [dependencies]

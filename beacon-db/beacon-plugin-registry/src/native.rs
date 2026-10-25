@@ -7,6 +7,10 @@ use anyhow::Context as _;
 use beacon_plugin_sdk::datafusion_ffi::{self, util::FFI_Result};
 use beacon_plugin_sdk::{AbiFn, FunctionsFn, ABI_SYMBOL, BEACON_PLUGIN_SDK_ABI, FUNCTIONS_SYMBOL};
 use datafusion::logical_expr::{ScalarUDF, ScalarUDFImpl};
+use parking_lot::Mutex;
+
+/// Every native library that opened. Never dropped: plugin code may still run.
+static LIBRARIES: Mutex<Vec<libloading::Library>> = Mutex::new(Vec::new());
 
 /// The file name of native library `name` on this platform, such as `libexample.so`.
 pub fn library_file_name(name: &str) -> String {
@@ -19,21 +23,15 @@ pub fn library_file_name(name: &str) -> String {
 
 /// Opens the library at `path`, checks its ABI and returns its functions.
 ///
-/// The caller must keep the returned [`libloading::Library`] for the life of the
-/// process, also when a later check fails: the functions point into its code.
-/// A library that fails a check here is never unloaded.
-pub fn load_native(path: &Path) -> anyhow::Result<(libloading::Library, Vec<ScalarUDF>)> {
+/// A library that opens stays loaded until the process stops, also when a check fails:
+/// the functions point into its code, and the library ran code at load.
+pub fn load_native(path: &Path) -> anyhow::Result<Vec<ScalarUDF>> {
     // SAFETY: a plugin library is trusted code that a super-user installed.
     let library = unsafe { libloading::Library::new(path) }
         .with_context(|| format!("cannot open native library {}", path.display()))?;
-    match functions(&library) {
-        Ok(udfs) => Ok((library, udfs)),
-        Err(error) => {
-            // The library ran code at load, so it stays loaded.
-            std::mem::forget(library);
-            Err(error)
-        }
-    }
+    let result = functions(&library);
+    LIBRARIES.lock().push(library);
+    result
 }
 
 fn functions(library: &libloading::Library) -> anyhow::Result<Vec<ScalarUDF>> {
@@ -65,5 +63,29 @@ fn functions(library: &libloading::Library) -> anyhow::Result<Vec<ScalarUDF>> {
             .map(|ffi| ScalarUDF::new_from_shared_impl(Arc::<dyn ScalarUDFImpl>::from(ffi)))
             .collect()),
         FFI_Result::Err(message) => anyhow::bail!("plugin init failed: {message}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_that_is_not_a_library_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(library_file_name("fake"));
+        std::fs::write(&path, b"not a library").unwrap();
+        let err = load_native(&path).unwrap_err().to_string();
+        assert!(err.contains("cannot open native library"), "{err}");
+    }
+
+    #[test]
+    fn library_file_name_uses_the_platform_names() {
+        let expected = format!(
+            "{}x{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        );
+        assert_eq!(library_file_name("x"), expected);
     }
 }

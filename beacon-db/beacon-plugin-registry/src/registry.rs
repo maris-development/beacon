@@ -2,13 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::names::PluginFunctionNames;
 use parking_lot::Mutex;
 
-use crate::{manifest::PluginKind, store::InstallRecord};
-
-/// Every native library that opened. Never dropped: plugin code may still run.
-static LIBRARIES: Mutex<Vec<libloading::Library>> = Mutex::new(Vec::new());
+use crate::{manifest::PluginKind, names::PluginFunctionNames, store::InstallRecord};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginStatus {
@@ -102,11 +98,6 @@ impl PluginRegistry {
     /// The allowed remote source prefixes. Empty allows only `file://`.
     pub fn allowed_sources(&self) -> &[String] {
         &self.allowed_sources
-    }
-
-    /// Keeps `library` loaded until the process stops.
-    pub fn keep_library(&self, library: libloading::Library) {
-        LIBRARIES.lock().push(library);
     }
 
     /// The names and aliases of the loaded native functions, for the federation rule.
