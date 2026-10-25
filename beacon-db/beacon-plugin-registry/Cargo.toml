@@ -1,0 +1,34 @@
+[package]
+name = "beacon-plugin-registry"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+
+# Plugin manifest, archive, store and registry. Free of `beacon-core`.
+[dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+datafusion = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Parse version ranges and `beacon-plugin.toml`.
+semver = { workspace = true }
+toml = { workspace = true }
+# Pack, unpack and checksum plugin archives.
+tar = { workspace = true }
+flate2 = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+# Open native plugins and read their ABI and functions.
+libloading = { workspace = true }
+beacon-plugin-sdk = { path = "../beacon-plugin-sdk" }
+# Parse and read `INSTALL` sources.
+url = { workspace = true }
+tokio = { workspace = true }
+# Fetch remote plugin archives.
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

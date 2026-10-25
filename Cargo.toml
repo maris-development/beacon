@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-server/beacon-dap", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-iceberg", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-erddap", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-plugin-sdk", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
+members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-server/beacon-dap", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-iceberg", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-erddap", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-plugin-registry", "beacon-db/beacon-plugin-sdk", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
 
 [workspace.package]
 
@@ -35,7 +35,12 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-appender = "0.2.4"
 tracing-test = { version = "0.2.5", features = ["no-env-filter"]}
 glob = "0.3.2"
+semver = { version = "1.0", features = ["serde"] }
+toml = "0.8"
 tempfile = "3.15.0"
+tar = "0.4.46"
+flate2 = "1.1.9"
+sha2 = "0.10.9"
 
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 
@@ -72,6 +77,9 @@ datafusion = "^54.1"
 datafusion-ffi = "^54.1"
 
 stabby = "72.1.1"
+
+# Opens native plugin libraries.
+libloading = "0.8"
 
 datafusion-datasource = "^54.1"
 
