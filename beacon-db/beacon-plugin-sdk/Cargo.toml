@@ -1,0 +1,17 @@
+[package]
+name = "beacon-plugin-sdk"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "SDK for Beacon native function plugins"
+readme = "README.md"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+keywords = ["beacon", "datafusion", "plugin", "udf", "sql"]
+categories = ["database", "development-tools"]
+
+# A native plugin depends only on this crate, so its DataFusion versions match Beacon.
+[dependencies]
+datafusion = { workspace = true }
+datafusion-ffi = { workspace = true }
+stabby = { workspace = true }
