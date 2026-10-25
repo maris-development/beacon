@@ -97,10 +97,11 @@ files = ["sql/functions.sql"]
 
 `native::load_native` opens the library and does these checks:
 
-1. The library has the `beacon_plugin_abi` and `beacon_plugin_functions` symbols.
-2. The SDK ABI of the plugin equals `BEACON_PLUGIN_SDK_ABI`.
-3. The DataFusion FFI major version of the plugin equals the version of this build.
-4. The plugin init returns its functions without an error.
+1. The library file for this platform exists: `lib<name>.so`, `<name>.dll` or `lib<name>.dylib`. When it is missing, the error names the files in `lib/`, such as a `.so` file on Windows.
+2. The library has the `beacon_plugin_abi` and `beacon_plugin_functions` symbols.
+3. The SDK ABI of the plugin equals `BEACON_PLUGIN_SDK_ABI`.
+4. The DataFusion FFI major version of the plugin equals the version of this build.
+5. The plugin init returns its functions without an error.
 
 A library that opens stays loaded until the process stops, also when a check fails.
 The functions point into its code, and the library ran code when it opened.
