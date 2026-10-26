@@ -302,7 +302,6 @@ async fn build_runtime(
 
     builder = builder
         .with_plugins_dir(config.data.plugins.clone())
-        .with_plugin_sources(config.plugins.sources.clone())
         .with_startup_plugins(config.plugins.startup.clone());
 
     if config.sql.enable_nd_pipeline {

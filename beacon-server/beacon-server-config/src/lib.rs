@@ -170,8 +170,6 @@ pub struct McpConfig {
 /// Function plugin settings.
 #[derive(Debug, Clone, Default)]
 pub struct PluginConfig {
-    /// Allowed prefixes of remote plugin sources, from `BEACON_PLUGIN_SOURCES`.
-    pub sources: Vec<String>,
     /// `(name, source)` pairs that Beacon installs at startup, from `BEACON_PLUGINS`.
     pub startup: Vec<(String, String)>,
 }
@@ -433,9 +431,6 @@ struct RawConfig {
     max_age: u64,
     #[envconfig(from = "BEACON_MCP_ALLOWED_HOSTS", default = "")]
     mcp_allowed_hosts: String,
-    /// Comma list of allowed remote plugin source prefixes. Empty allows only `file://`.
-    #[envconfig(from = "BEACON_PLUGIN_SOURCES", default = "")]
-    plugin_sources: String,
     /// Comma list of `name=source`. Beacon installs each one at startup if not installed.
     #[envconfig(from = "BEACON_PLUGINS", default = "")]
     plugins: String,
@@ -707,13 +702,6 @@ impl From<RawConfig> for Config {
                     .collect(),
             },
             plugins: PluginConfig {
-                sources: raw
-                    .plugin_sources
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|source| !source.is_empty())
-                    .map(str::to_string)
-                    .collect(),
                 // `Config::load` rejects a bad entry first; this default is never used there.
                 startup: parse_startup_plugins(&raw.plugins).unwrap_or_default(),
             },
@@ -1143,25 +1131,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_plugin_sources_and_startup_plugins() {
+    fn parses_startup_plugins() {
         let defaults = config(&[]);
-        assert!(defaults.plugins.sources.is_empty());
         assert!(defaults.plugins.startup.is_empty());
 
-        let config = config(&[
-            (
-                "BEACON_PLUGIN_SOURCES",
-                " github:maris-development/ , ,https://plugins.example.org/ ",
-            ),
-            (
-                "BEACON_PLUGINS",
-                "Demo=github:maris-development/demo@v1, extra = https://plugins.example.org/x?a=b,",
-            ),
-        ]);
-        assert_eq!(
-            config.plugins.sources,
-            ["github:maris-development/", "https://plugins.example.org/"]
-        );
+        let config = config(&[(
+            "BEACON_PLUGINS",
+            "Demo=github:maris-development/demo@v1, extra = https://plugins.example.org/x?a=b,",
+        )]);
         assert_eq!(
             config.plugins.startup,
             [

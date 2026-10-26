@@ -323,18 +323,6 @@ async fn non_super_user_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn remote_source_is_refused_without_allowlist() {
-    let rt = new_runtime("install-remote").await;
-    for source in [
-        "https://example.org/x/",
-        "github:maris-development/beacon-plugin-example@v0.1.0",
-    ] {
-        let error = sql_error(&rt, &format!("INSTALL demo FROM '{source}'")).await;
-        assert!(error.contains("not allowed"), "{error}");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn archive_with_parent_dir_is_refused() {
     let rt = new_runtime("install-unsafe").await;
     let mut builder = tar::Builder::new(Vec::new());
@@ -359,23 +347,15 @@ async fn archive_with_parent_dir_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn install_from_https_with_allowlist() {
+async fn install_from_https() {
     let archive = demo_archive();
     let file = "demo-0.1.0-any.tar.gz";
     let (dir, _) = release_dir(file, &archive, Some(&sha256_hex(&archive)));
     let server = common::plugins::serve_dir(dir.path().to_path_buf()).await;
     let sql = format!("INSTALL demo FROM '{}/'", server.base_url);
 
-    // The default allowlist is empty.
-    let closed = new_runtime("https-closed").await;
-    let error = sql_error(&closed, &sql).await;
-    assert!(error.contains("not allowed"), "{error}");
-
-    let prefix = server.base_url.clone();
-    let rt = restartable_runtime("https-open", move |b| {
-        b.with_plugin_sources(vec![format!("{prefix}/")])
-    })
-    .await;
+    // Any source is allowed: only a super-user can run INSTALL.
+    let rt = new_runtime("install-https").await;
     rt.sql(&sql).await;
     let rows = plugin_rows(&rt).await;
     assert_eq!(rows[0].0, "demo");
@@ -386,10 +366,6 @@ async fn install_from_https_with_allowlist() {
     );
     assert_eq!(rows[0].3.as_deref(), Some(sha256_hex(&archive).as_str()));
     assert_eq!(scalar_i64(&rt.sql("SELECT demo_double(21)").await), 42);
-
-    // A source outside the allowlist stays refused.
-    let error = sql_error(&rt, "INSTALL other FROM 'github:o/r@v1'").await;
-    assert!(error.contains("not allowed"), "{error}");
 }
 
 /// The `installed_at` stamp in the `install.json` of `name`.

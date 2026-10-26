@@ -85,10 +85,6 @@ letting the server fall back to its own defaults otherwise.
   value: {{ $b.fileStats.enabled | quote }}
 {{- end }}
 {{/* Function plugins */}}
-{{- if $b.pluginSources }}
-- name: BEACON_PLUGIN_SOURCES
-  value: {{ $b.pluginSources | quote }}
-{{- end }}
 {{- if $b.plugins }}
 - name: BEACON_PLUGINS
   value: {{ $b.plugins | quote }}

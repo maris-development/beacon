@@ -98,10 +98,8 @@ beacon:
   fileStats:
     enabled: null            # BEACON_FILE_STATS_ENABLE
 
-  # Function plugins (optional). Both are comma lists.
-  # Allowed remote source prefixes, e.g. "github:maris-development/". Empty allows only file://.
-  pluginSources: ""          # BEACON_PLUGIN_SOURCES
-  # Plugins to install at startup, as name=source, e.g. "demo=github:maris-development/demo@v1".
+  # Function plugins (optional): a comma list of plugins to install at startup,
+  # as name=source, e.g. "demo=github:maris-development/demo@v1".
   plugins: ""                # BEACON_PLUGINS
 
   # CORS (optional). Only set if the admin UI / API is called cross-origin.

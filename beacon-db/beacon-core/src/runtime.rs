@@ -1491,7 +1491,7 @@ impl Runtime {
     /// Checks a plugin archive, unpacks it into `<plugins_dir>/<name>/` and registers
     /// its functions. `source` is recorded as given.
     ///
-    /// It skips the `SHA256SUMS`, allowlist and super-user checks. It exists for tests and
+    /// It skips the `SHA256SUMS` and super-user checks. It exists for tests and
     /// embedders.
     #[doc(hidden)]
     pub async fn install_plugin_archive(

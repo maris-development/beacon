@@ -61,7 +61,6 @@ All settings live under `values.yaml`. The chart maps values to the server's
 | `beacon.flightSql.*` | Arrow Flight SQL endpoint | enabled, `32011` |
 | `beacon.oidc.*` | OIDC auth delegation | disabled |
 | `beacon.s3.*` | Back datasets with an S3 bucket | disabled |
-| `beacon.pluginSources` | `BEACON_PLUGIN_SOURCES`: allowed remote plugin source prefixes, comma list | `""` |
 | `beacon.plugins` | `BEACON_PLUGINS`: plugins to install at startup, `name=source` comma list | `""` |
 | `beacon.extraEnv` / `extraEnvFrom` | Extra env / envFrom | `[]` |
 | `persistence.*` | PVC for `dataDir` (datasets + catalog) | enabled, 20Gi |

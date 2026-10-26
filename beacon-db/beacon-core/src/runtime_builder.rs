@@ -69,8 +69,6 @@ pub struct RuntimeBuilder {
     pub tmp_dir_path: Option<PathBuf>,
     /// The plugins directory, the only store of the plugins. `None` loads no plugins.
     pub plugins_dir: Option<PathBuf>,
-    /// Allowed prefixes of remote plugin sources. Empty allows only `file://`.
-    pub plugin_sources: Vec<String>,
     /// `(name, source)` pairs to install at startup when the name has no registry entry.
     pub startup_plugins: Vec<(String, String)>,
     /// The default datasets store: the URL bare dataset paths resolve against,
@@ -293,12 +291,6 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the allowed prefixes of remote plugin sources.
-    pub fn with_plugin_sources(mut self, prefixes: Vec<String>) -> Self {
-        self.plugin_sources = prefixes;
-        self
-    }
-
     /// Sets the plugins to install at startup, as `(name, source)` pairs.
     pub fn with_startup_plugins(mut self, plugins: Vec<(String, String)>) -> Self {
         self.startup_plugins = plugins;
@@ -345,9 +337,7 @@ impl RuntimeBuilder {
         } = init_auth_context(&self, session_cell.clone()).await?;
         let auth_context = Arc::new(auth_context);
 
-        let plugins = Arc::new(PluginRegistry::with_allowed_sources(
-            self.plugin_sources.clone(),
-        ));
+        let plugins = Arc::new(PluginRegistry::default());
         let (session_ctx, redb_store) = init_session_ctx(
             &self,
             auth_context.clone(),

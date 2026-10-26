@@ -38,7 +38,6 @@ struct State {
 pub struct PluginRegistry {
     state: Mutex<State>,
     native_functions: PluginFunctionNames,
-    allowed_sources: Vec<String>,
 }
 
 /// Marks an install of one plugin name as running until it drops.
@@ -85,19 +84,6 @@ impl PluginRegistry {
             functions,
             armed: true,
         }
-    }
-
-    /// A registry that allows remote sources with these text prefixes.
-    pub fn with_allowed_sources(allowed_sources: Vec<String>) -> Self {
-        Self {
-            allowed_sources,
-            ..Self::default()
-        }
-    }
-
-    /// The allowed remote source prefixes. Empty allows only `file://`.
-    pub fn allowed_sources(&self) -> &[String] {
-        &self.allowed_sources
     }
 
     /// The names and aliases of the loaded native functions, for the federation rule.

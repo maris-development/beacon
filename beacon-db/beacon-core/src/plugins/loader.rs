@@ -22,7 +22,7 @@ use super::{
     manifest::valid_name,
     native::{library_file_name, load_native},
     registry::{ClaimGuard, PluginRegistry},
-    source::{check_allowed, fetch_archive, PluginSource},
+    source::{fetch_archive, PluginSource},
     store::{self, InstallRecord, Listing, TEMP_PREFIX},
     PluginManifest, MANIFEST_FILE,
 };
@@ -348,7 +348,6 @@ pub(crate) async fn install_with_kind(
     let fetched = async {
         anyhow::ensure!(valid_name(name), "invalid plugin name '{name}'");
         let source = PluginSource::parse(source_text)?;
-        check_allowed(source_text, registry.allowed_sources())?;
         let guard = registry.begin_install(name)?;
         let (archive, sha256) = fetch_archive(&source, name).await?;
         Ok((guard, archive, sha256))
