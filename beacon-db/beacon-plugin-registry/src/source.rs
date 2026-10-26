@@ -89,35 +89,6 @@ impl PluginSource {
     }
 }
 
-/// True when `source_text` starts with `prefix` and the match ends at a boundary.
-fn prefix_matches(source_text: &str, prefix: &str) -> bool {
-    let Some(rest) = source_text.strip_prefix(prefix) else {
-        return false;
-    };
-    !prefix.is_empty() && (prefix.ends_with('/') || rest.is_empty() || rest.starts_with(['/', '@']))
-}
-
-/// Refuses a remote source whose text starts with none of the `allow` prefixes.
-pub fn check_allowed(source_text: &str, allow: &[String]) -> anyhow::Result<()> {
-    // Userinfo can hide the real host behind an allowed prefix.
-    if let Ok(url) = url::Url::parse(source_text) {
-        anyhow::ensure!(
-            url.username().is_empty() && url.password().is_none(),
-            "credentials in a plugin source are not allowed"
-        );
-    }
-    if source_text.starts_with("file://")
-        || allow
-            .iter()
-            .any(|prefix| prefix_matches(source_text, prefix))
-    {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "plugin source '{source_text}' is not allowed: add a prefix to BEACON_PLUGIN_SOURCES"
-    )
-}
-
 /// Reads the body of a URL.
 #[async_trait::async_trait]
 pub(crate) trait Fetcher: Send + Sync {
@@ -281,7 +252,6 @@ async fn fetch_remote(
 }
 
 /// Reads the plugin archive of `source` for plugin `name` and returns it with its SHA-256.
-/// The caller checks the allowlist first.
 pub async fn fetch_archive(source: &PluginSource, name: &str) -> anyhow::Result<(Bytes, String)> {
     match source {
         PluginSource::File(path) => {
@@ -569,57 +539,6 @@ mod tests {
         assert_eq!(
             base_url(&source).unwrap().as_str(),
             "https://plugins.example.org/demo/"
-        );
-    }
-
-    #[test]
-    fn allowlist_matches_prefixes() {
-        let allow = vec!["github:maris-development/".to_string()];
-        assert!(check_allowed("github:maris-development/x@v1", &allow).is_ok());
-        let err = check_allowed("github:other/x@v1", &allow)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not allowed"), "{err}");
-        assert!(check_allowed("file:///tmp/x", &[]).is_ok());
-        // A prefix matches only at a boundary.
-        for (source, prefix, ok) in [
-            (
-                "https://plugins.example.org.evil.com/",
-                "https://plugins.example.org",
-                false,
-            ),
-            (
-                "github:maris-development-evil/x@v1",
-                "github:maris-development",
-                false,
-            ),
-            ("http://127.0.0.1:80801/", "http://127.0.0.1:8080", false),
-            (
-                "github:maris-development/x@v1",
-                "github:maris-development",
-                true,
-            ),
-            ("github:o/r@v1", "github:o/r", true),
-            ("http://127.0.0.1:8080/", "http://127.0.0.1:8080", true),
-        ] {
-            let result = check_allowed(source, &[prefix.to_string()]);
-            assert_eq!(result.is_ok(), ok, "{source} against {prefix}");
-        }
-        let err = check_allowed("https://example.org/x/", &[])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not allowed"), "{err}");
-    }
-
-    #[test]
-    fn allowlist_refuses_userinfo() {
-        let allow = ["https://plugins.example.org".to_string()];
-        let err = check_allowed("https://plugins.example.org@evil.com/", &allow)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("credentials in a plugin source are not allowed"),
-            "{err}"
         );
     }
 

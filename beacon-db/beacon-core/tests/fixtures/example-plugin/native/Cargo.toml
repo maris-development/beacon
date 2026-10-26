@@ -1,0 +1,18 @@
+[package]
+name = "example-native"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "example_native"
+crate-type = ["cdylib"]
+
+[features]
+# Reports a wrong DataFusion FFI major, for refusal tests.
+wrong-abi = []
+
+[dependencies]
+beacon-plugin-sdk = { path = "../../../../../beacon-plugin-sdk" }
+
+# Keeps this crate outside the Beacon workspace.
+[workspace]

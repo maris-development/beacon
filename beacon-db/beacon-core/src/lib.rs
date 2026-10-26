@@ -5,6 +5,7 @@ pub mod comments;
 pub mod file_stats;
 pub mod metrics;
 pub mod parser;
+pub mod plugins;
 pub mod query;
 pub mod query_cpu;
 pub mod query_row_limit;

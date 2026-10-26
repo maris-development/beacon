@@ -21,6 +21,8 @@ pub enum BeaconStatement {
     CompactTable(CompactTableStatement),
     Attach(AttachStatement),
     Detach(DetachStatement),
+    Install(InstallStatement),
+    Uninstall(UninstallStatement),
     CreateSecret(CreateSecretStatement),
     DropSecret(DropSecretStatement),
     ShowSecrets,
@@ -70,6 +72,22 @@ pub struct AttachStatement {
 #[derive(Debug, Clone)]
 pub struct DetachStatement {
     /// The attached catalog name to detach.
+    pub name: String,
+}
+
+/// INSTALL <name> FROM '<source>'
+#[derive(Debug, Clone)]
+pub struct InstallStatement {
+    /// The plugin name, in lowercase.
+    pub name: String,
+    /// `file://…`, `https://…` or `github:<owner>/<repo>@<tag>`.
+    pub source: String,
+}
+
+/// UNINSTALL <name>
+#[derive(Debug, Clone)]
+pub struct UninstallStatement {
+    /// The plugin name, in lowercase.
     pub name: String,
 }
 
@@ -380,6 +398,13 @@ impl Display for BeaconStatement {
             // The token, if any, is a credential — never render it.
             Self::Attach(s) => write!(f, "ATTACH '{}' AS {}", s.url, s.name),
             Self::Detach(s) => write!(f, "DETACH {}", s.name),
+            Self::Install(s) => write!(
+                f,
+                "INSTALL {} FROM '{}'",
+                s.name,
+                escape_sql_literal(&s.source)
+            ),
+            Self::Uninstall(s) => write!(f, "UNINSTALL {}", s.name),
             // Secret parameters are credentials — render only the name.
             Self::CreateSecret(s) => write!(f, "CREATE SECRET {}", s.name),
             Self::DropSecret(s) => {

@@ -84,6 +84,11 @@ letting the server fall back to its own defaults otherwise.
 - name: BEACON_FILE_STATS_ENABLE
   value: {{ $b.fileStats.enabled | quote }}
 {{- end }}
+{{/* Function plugins */}}
+{{- if $b.plugins }}
+- name: BEACON_PLUGINS
+  value: {{ $b.plugins | quote }}
+{{- end }}
 {{/* CORS */}}
 {{- if $b.cors.allowedOrigins }}
 - name: BEACON_CORS_ALLOWED_ORIGINS

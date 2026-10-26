@@ -10,7 +10,7 @@
 //! [`load_persisted_functions`] registers each stored function before the
 //! tables and views load.
 
-use std::{any::Any, sync::Arc};
+use std::{any::Any, collections::HashSet, sync::Arc};
 
 use anyhow::Context as _;
 use arrow::{
@@ -46,6 +46,8 @@ use datafusion::{
 };
 use futures::StreamExt as _;
 use object_store::{path::Path, ObjectStore, ObjectStoreExt as _};
+
+use crate::plugins::registry::PluginRegistry;
 
 /// The `db://` folder that holds one `<name>.json` per function.
 const FUNCTIONS_PREFIX: &str = "__functions";
@@ -161,7 +163,7 @@ impl ScalarUDFImpl for SqlMacroFunction {
 }
 
 /// `udf` as a macro function, or `None` for a built-in function.
-fn as_macro(udf: &ScalarUDF) -> Option<&SqlMacroFunction> {
+pub(crate) fn as_macro(udf: &ScalarUDF) -> Option<&SqlMacroFunction> {
     (udf.inner().as_ref() as &dyn Any).downcast_ref::<SqlMacroFunction>()
 }
 
@@ -381,9 +383,27 @@ fn plan_create_function(
     })
 }
 
+/// Plan one `CREATE FUNCTION` statement of a plugin SQL file. Nothing is stored.
+pub(crate) fn plan_plugin_sql(state: &SessionState, definition: &str) -> anyhow::Result<ScalarUDF> {
+    let (function, or_replace) = plan_function(state, definition)?;
+    anyhow::ensure!(
+        !or_replace,
+        "plugin SQL files may hold only CREATE FUNCTION"
+    );
+    Ok(ScalarUDF::new_from_impl(function))
+}
+
+/// The plugin that owns function `name`, if any.
+fn plugin_owner(state: &SessionState, name: &str) -> Option<String> {
+    state
+        .config()
+        .get_extension::<PluginRegistry>()
+        .and_then(|registry| registry.owner_of(name))
+}
+
 /// Whether a scalar, aggregate or window function that is not a macro function
 /// uses `name`.
-fn is_built_in(state: &SessionState, name: &str) -> bool {
+pub(crate) fn is_built_in(state: &SessionState, name: &str) -> bool {
     state
         .scalar_functions()
         .get(name)
@@ -395,6 +415,9 @@ fn is_built_in(state: &SessionState, name: &str) -> bool {
 /// Refuse `name` when a built-in function uses it, or when a macro function
 /// uses it and `or_replace` is false.
 fn check_name(state: &SessionState, name: &str, or_replace: bool) -> anyhow::Result<()> {
+    if let Some(plugin) = plugin_owner(state, name) {
+        anyhow::bail!("'{name}' belongs to plugin '{plugin}'; choose another name");
+    }
     anyhow::ensure!(
         !is_built_in(state, name),
         "'{name}' is a built-in function; choose another name"
@@ -459,6 +482,9 @@ pub(crate) async fn comment_on_function(
     if_exists: bool,
 ) -> anyhow::Result<()> {
     let state = session.state();
+    if let Some(plugin) = plugin_owner(&state, name) {
+        anyhow::bail!("'{name}' belongs to plugin '{plugin}'; a plugin function takes no comment");
+    }
     anyhow::ensure!(
         !is_built_in(&state, name),
         "'{name}' is a built-in function; only SQL functions take a comment"
@@ -485,6 +511,9 @@ pub(crate) async fn drop_function(
     if_exists: bool,
 ) -> anyhow::Result<()> {
     let state = session.state();
+    if let Some(plugin) = plugin_owner(&state, name) {
+        anyhow::bail!("'{name}' belongs to plugin '{plugin}'; use UNINSTALL {plugin}");
+    }
     if is_built_in(&state, name) {
         // A stored function that a newer built-in replaced is removed; the built-in stays.
         let store = function_store(session)?;
@@ -568,6 +597,34 @@ fn register_persisted(
     let function = function.with_comment(persisted.comment.clone());
     session.register_udf(ScalarUDF::new_from_impl(function));
     Ok(())
+}
+
+/// The names of the stored user functions, from the file names under `__functions/`.
+pub(crate) async fn stored_function_names(session: &SessionContext) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let store = match function_store(session) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::error!("Failed to list functions: {error:#}");
+            return names;
+        }
+    };
+    let mut listing = store.list(Some(&Path::from(FUNCTIONS_PREFIX)));
+    while let Some(entry) = listing.next().await {
+        match entry {
+            Ok(meta) => {
+                if let Some(name) = meta
+                    .location
+                    .filename()
+                    .and_then(|file| file.strip_suffix(".json"))
+                {
+                    names.insert(name.to_string());
+                }
+            }
+            Err(error) => tracing::error!("Failed to list functions: {error}"),
+        }
+    }
+    names
 }
 
 /// Register every stored function. A function that fails is logged and skipped,

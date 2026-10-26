@@ -17,7 +17,10 @@ pub use catalog::RemoteCatalogProvider;
 pub use connection::{RemoteConnection, RemoteCredential};
 pub use definition::{BeaconRemoteSqlTable, RemoteTableDefinition, unresolved_schema};
 pub use executor::{BeaconFlightSqlExecutor, apply_pushed_filters};
-pub use federation_rule::{BeaconFederationRule, federation_optimizer_rules};
+pub use federation_rule::{
+    BeaconFederationRule, LocalFunctions, federation_optimizer_rules,
+    federation_optimizer_rules_with,
+};
 pub use geometry_sql::{geometry_literals_in_expr, geometry_literals_to_calls};
 pub use subquery_alias_sql::project_aliased_subqueries;
 

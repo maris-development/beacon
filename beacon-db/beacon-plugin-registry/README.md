@@ -15,7 +15,7 @@ Plugin authors use the `beacon-plugin-sdk` crate.
 |---|---|
 | `manifest` | Parses `beacon-plugin.toml`. Checks the plugin name and the Beacon version range. |
 | `archive` | Packs and unpacks plugin archives. Computes and reads SHA-256 sums. |
-| `source` | Parses `INSTALL` sources. Downloads archives. Checks the allowlist. |
+| `source` | Parses `INSTALL` sources. Downloads archives. |
 | `native` | Opens a native library. Checks its ABI. Reads its functions. |
 | `store` | Reads and writes the plugin folders in the plugins directory. |
 | `registry` | Keeps the state of each plugin and the owner of each function name. |
@@ -83,15 +83,12 @@ files = ["sql/functions.sql"]
 | HTTPS | `https://plugins.example.org/example/0.1.0/` | `SHA256SUMS` in the folder, mandatory |
 | GitHub | `github:my-org/my-plugin@v0.1.0` | the `SHA256SUMS` release asset, mandatory |
 
+- Every source is allowed. Only a super-user can run `INSTALL`, so Beacon has no source allowlist.
 - `source::fetch_archive` picks the native archive for this build first, else the `any` archive.
-- `source::check_allowed` lets `file://` through. A remote source must start with a prefix from the allowlist.
-- A prefix matches only at a boundary: the prefix ends in `/`, the source equals the prefix, or the next character is `/` or `@`.
-- A source with a user name or a password is refused, also in `check_allowed`.
+- A source with a user name or a password is refused, because the source text goes to logs and `install.json`.
 - Plain `http://` works only for the local computer (`127.0.0.1`, `[::1]` or `localhost`).
 - A redirect goes only to `https://`, or to a local `http://` host when the source is local.
 - A download larger than 128 MiB is refused.
-
-`fetch_archive` does not check the allowlist. Call `check_allowed` first.
 
 ## Native libraries
 
@@ -121,7 +118,7 @@ The `registry` records which plugin owns each function name and alias.
 
 The caller in `beacon-core` uses this crate in this order:
 
-1. `PluginSource::parse`, then `check_allowed`, then `registry.begin_install`.
+1. `PluginSource::parse`, then `registry.begin_install`.
 2. `fetch_archive` reads the archive and its SHA-256.
 3. `unpack` into `<plugins_dir>/.tmp-<random>/`, then `PluginManifest::parse` and `check_beacon`.
 4. `load_native` for a native plugin. The caller plans the SQL files.
