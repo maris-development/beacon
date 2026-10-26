@@ -1,12 +1,14 @@
 //! Opens a native plugin library and reads its functions through datafusion-ffi.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::Context as _;
 use beacon_plugin_sdk::datafusion_ffi::{self, util::FFI_Result};
-use beacon_plugin_sdk::{AbiFn, FunctionsFn, ABI_SYMBOL, BEACON_PLUGIN_SDK_ABI, FUNCTIONS_SYMBOL};
-use datafusion::logical_expr::{ScalarUDF, ScalarUDFImpl};
+use beacon_plugin_sdk::scalar_functions::{
+    import_scalar_function, ScalarFunctionsFn, SCALAR_FUNCTIONS_SYMBOL,
+};
+use beacon_plugin_sdk::{AbiFn, ABI_SYMBOL, BEACON_PLUGIN_SDK_ABI};
+use datafusion::logical_expr::ScalarUDF;
 use parking_lot::Mutex;
 
 /// Every native library that opened. Never dropped: plugin code may still run.
@@ -71,8 +73,8 @@ fn functions(library: &libloading::Library) -> anyhow::Result<Vec<ScalarUDF>> {
             .get::<AbiFn>(ABI_SYMBOL)
             .context("the library has no beacon_plugin_abi symbol")?;
         let functions = *library
-            .get::<FunctionsFn>(FUNCTIONS_SYMBOL)
-            .context("the library has no beacon_plugin_functions symbol")?;
+            .get::<ScalarFunctionsFn>(SCALAR_FUNCTIONS_SYMBOL)
+            .context("the library has no beacon_plugin_scalar_functions symbol")?;
         (abi, functions)
     };
     let abi = abi();
@@ -88,10 +90,7 @@ fn functions(library: &libloading::Library) -> anyhow::Result<Vec<ScalarUDF>> {
         abi.ffi_major
     );
     match functions() {
-        FFI_Result::Ok(list) => Ok(list
-            .iter()
-            .map(|ffi| ScalarUDF::new_from_shared_impl(Arc::<dyn ScalarUDFImpl>::from(ffi)))
-            .collect()),
+        FFI_Result::Ok(list) => Ok(list.into_iter().map(import_scalar_function).collect()),
         FFI_Result::Err(message) => anyhow::bail!("plugin init failed: {message}"),
     }
 }

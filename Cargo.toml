@@ -75,6 +75,7 @@ iceberg-datafusion = { git = "https://github.com/apache/iceberg-rust.git", tag =
 datafusion = "^54.1"
 
 datafusion-ffi = "^54.1"
+datafusion-proto = { version = "^54.1", default-features = false }
 
 stabby = "72.1.1"
 

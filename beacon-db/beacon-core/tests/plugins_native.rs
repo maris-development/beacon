@@ -141,3 +141,91 @@ async fn an_alias_collision_fails_the_plugin() {
     assert!(error.contains("example_add_one"), "{error}");
     assert_eq!(f64_of(&rt, "SELECT example_inc(1.0)").await, 11.0);
 }
+
+/// Writes `points.parquet` into the datasets root: two row groups, west then east.
+fn write_points(rt: &TestRuntime) {
+    use std::sync::Arc;
+
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::parquet::file::properties::WriterProperties;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("lon", DataType::Float64, false),
+        Field::new("lat", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+            Arc::new(Float64Array::from(vec![-10.0, -9.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![10.0, 11.0, 52.0, 53.0])),
+        ],
+    )
+    .unwrap();
+    let properties = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(2))
+        .build();
+    let file = std::fs::File::create(rt.datasets_dir().join("points.parquet")).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+async fn plan_text(rt: &TestRuntime, sql: &str) -> String {
+    let batches = rt.sql(sql).await;
+    arrow::util::pretty::pretty_format_batches(&batches)
+        .unwrap()
+        .to_string()
+}
+
+async fn sorted_ids(rt: &TestRuntime, sql: &str) -> Vec<i64> {
+    let mut ids: Vec<i64> = rt
+        .sql(sql)
+        .await
+        .iter()
+        .flat_map(|batch| {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("an Int64 column");
+            ids.values().to_vec()
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_hooks_give_a_pruning_predicate() {
+    let rt = new_runtime("native-hooks").await;
+    install(&rt, example_plugin(false)).await.unwrap();
+    write_points(&rt);
+    let sql = "SELECT id FROM read_parquet('points.parquet') \
+               WHERE example_in_box(lon, lat, 2, 50, 8, 56)";
+    let plan = plan_text(&rt, &format!("EXPLAIN {sql}")).await;
+    assert!(plan.contains("example_in_box("), "{plan}");
+    assert!(plan.contains("lon >= Float64(2)"), "{plan}");
+    assert!(plan.contains("lat <= Float64(56)"), "{plan}");
+    let analyzed = plan_text(&rt, &format!("EXPLAIN ANALYZE {sql}")).await;
+    assert!(
+        analyzed.contains("row_groups_pruned_statistics=2 total → 1 matched"),
+        "{analyzed}"
+    );
+    assert_eq!(sorted_ids(&rt, sql).await, [3, 4]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_native_hook_is_ignored() {
+    let rt = new_runtime("native-bad-hooks").await;
+    install(&rt, example_plugin(false)).await.unwrap();
+    write_points(&rt);
+    let sql = "SELECT id FROM read_parquet('points.parquet') \
+               WHERE example_bad_box(lon, lat, 2, 50, 8, 56)";
+    let plan = plan_text(&rt, &format!("EXPLAIN {sql}")).await;
+    assert!(!plan.contains("lon >= Float64(2)"), "{plan}");
+    assert_eq!(sorted_ids(&rt, sql).await, [3, 4]);
+}

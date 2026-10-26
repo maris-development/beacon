@@ -10,7 +10,8 @@
 //!
 //! A sub-plan that calls a native plugin function also stays local, because the remote may not
 //! have the plugin. The upstream rule has no hook for this, so this rule handles such a node
-//! itself and federates only the sub-plans below it.
+//! itself and federates only the sub-plans below it. A filter with such a call is split first:
+//! its other conjuncts go into a filter below, which goes to the remote.
 
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -18,7 +19,8 @@ use std::sync::Arc;
 
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::error::Result;
-use datafusion::logical_expr::{Expr, LogicalPlan, Projection};
+use datafusion::logical_expr::utils::{conjunction, split_conjunction};
+use datafusion::logical_expr::{Expr, Filter, LogicalPlan, Projection};
 use datafusion::optimizer::optimizer::Optimizer;
 use datafusion::optimizer::{OptimizerConfig, OptimizerRule};
 use datafusion_federation::{FederationOptimizerRule, get_table_source};
@@ -40,20 +42,22 @@ impl LocalFunctions for HashSet<String> {
     }
 }
 
+/// Does `expr` call one of `functions`? Subquery plans are not part of `expr`.
+fn expr_calls_any(expr: &Expr, functions: &dyn LocalFunctions) -> Result<bool> {
+    expr.exists(|e| {
+        Ok(matches!(e, Expr::ScalarFunction(call) if functions.contains(call.func.name())))
+    })
+}
+
 /// Does any node of `plan`, or of its subqueries, call one of `functions`?
 fn calls_any(plan: &LogicalPlan, functions: &dyn LocalFunctions) -> Result<bool> {
     let mut found = false;
     plan.apply_with_subqueries(|node| {
         for expr in node.expressions() {
-            expr.apply(|e| {
-                if let Expr::ScalarFunction(call) = e
-                    && functions.contains(call.func.name())
-                {
-                    found = true;
-                    return Ok(TreeNodeRecursion::Stop);
-                }
-                Ok(TreeNodeRecursion::Continue)
-            })?;
+            if expr_calls_any(&expr, functions)? {
+                found = true;
+                break;
+            }
         }
         Ok(if found {
             TreeNodeRecursion::Stop
@@ -113,6 +117,54 @@ impl BeaconFederationRule {
     }
 }
 
+impl BeaconFederationRule {
+    /// Splits a filter that calls a local function into a local filter above a filter
+    /// with the other conjuncts, and federates the lower filter.
+    ///
+    /// Gives `None` when the filter has only local or only other conjuncts, or when no
+    /// part of the lower filter goes to a remote.
+    fn split_filter(
+        &self,
+        filter: &Filter,
+        config: &dyn OptimizerConfig,
+    ) -> Result<Option<Transformed<LogicalPlan>>> {
+        let mut local = Vec::new();
+        let mut remote = Vec::new();
+        for conjunct in split_conjunction(&filter.predicate) {
+            // A subquery can call a local function in its own plan, so it stays local.
+            if conjunct.contains_outer()
+                || has_subquery(conjunct)?
+                || expr_calls_any(conjunct, self.local_functions.as_ref())?
+            {
+                local.push(conjunct.clone());
+            } else {
+                remote.push(conjunct.clone());
+            }
+        }
+        let (Some(local), Some(remote)) = (conjunction(local), conjunction(remote)) else {
+            return Ok(None);
+        };
+        let lower = LogicalPlan::Filter(Filter::try_new(remote, Arc::clone(&filter.input))?);
+        let lower = self.rewrite(lower, config)?;
+        // Without a remote below, the split only adds a node.
+        if !lower.transformed {
+            return Ok(None);
+        }
+        let upper = Filter::try_new(local, Arc::new(lower.data))?;
+        Ok(Some(Transformed::yes(LogicalPlan::Filter(upper))))
+    }
+}
+
+/// Does `expr` hold a subquery?
+fn has_subquery(expr: &Expr) -> Result<bool> {
+    expr.exists(|e| {
+        Ok(matches!(
+            e,
+            Expr::Exists(_) | Expr::InSubquery(_) | Expr::ScalarSubquery(_)
+        ))
+    })
+}
+
 impl OptimizerRule for BeaconFederationRule {
     fn name(&self) -> &str {
         "beacon_federation"
@@ -131,6 +183,11 @@ impl OptimizerRule for BeaconFederationRule {
             return plan.map_children(|input| self.rewrite(input, config));
         }
         if !self.local_functions.is_empty() && calls_any(&plan, self.local_functions.as_ref())? {
+            if let LogicalPlan::Filter(filter) = &plan
+                && let Some(split) = self.split_filter(filter, config)?
+            {
+                return Ok(split);
+            }
             // This node or one below it calls a plugin function, so only its inputs can go remote.
             return plan
                 .map_children(|input| self.rewrite(input, config))?
@@ -177,6 +234,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use datafusion::datasource::MemTable;
     use datafusion::execution::{SendableRecordBatchStream, SessionStateBuilder};
     use datafusion::logical_expr::{
         ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
@@ -270,6 +328,10 @@ mod tests {
         context
             .register_table("remote_obs", Arc::new(table))
             .unwrap();
+        let local = MemTable::try_new(obs_schema(), vec![vec![]]).unwrap();
+        context
+            .register_table("local_obs", Arc::new(local))
+            .unwrap();
         context.register_udf(ScalarUDF::from(PluginFn {
             signature: Signature::exact(vec![DataType::Float64], Volatility::Immutable),
         }));
@@ -313,6 +375,54 @@ mod tests {
             let (plan, federated) = optimize(Arc::new(plugin_names()), sql).await;
             assert_eq!(federated, [false], "{sql}\n{plan}");
             assert!(calls_any(&plan, &plugin_names()).unwrap(), "{sql}\n{plan}");
+        }
+    }
+
+    /// The federated sub-plans of `plan`, as indented text.
+    fn federated_plans(plan: &LogicalPlan) -> Vec<String> {
+        let mut plans = Vec::new();
+        plan.apply(|node| {
+            if let LogicalPlan::Extension(extension) = node
+                && let Some(node) = extension.node.as_any().downcast_ref::<FederatedPlanNode>()
+            {
+                plans.push(node.plan().display_indent().to_string());
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        plans
+    }
+
+    #[tokio::test]
+    async fn the_other_conjuncts_of_a_plugin_filter_go_to_the_remote() {
+        let sql = "SELECT x FROM remote_obs WHERE plugin_fn(x) > 1 AND x > 5";
+        let (plan, federated) = optimize(Arc::new(plugin_names()), sql).await;
+        assert_eq!(federated, [false], "{plan}");
+        let remote = federated_plans(&plan);
+        assert!(remote[0].contains("x > Float64(5)"), "{plan}");
+        let text = plan.display_indent().to_string();
+        assert!(
+            text.contains("Filter: plugin_fn(remote_obs.x) > Float64(1)\n"),
+            "{plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plugin_filter_on_a_local_table_is_not_split() {
+        let sql = "SELECT x FROM local_obs WHERE plugin_fn(x) > 1 AND x > 5";
+        let (plan, federated) = optimize(Arc::new(plugin_names()), sql).await;
+        assert!(federated.is_empty(), "{plan}");
+        let text = plan.display_indent().to_string();
+        assert_eq!(text.matches("Filter:").count(), 1, "{plan}");
+    }
+
+    #[tokio::test]
+    async fn a_subquery_conjunct_stays_local() {
+        let sql = "SELECT x FROM remote_obs \
+                   WHERE plugin_fn(x) > 1 AND x IN (SELECT x FROM local_obs)";
+        let (plan, _) = optimize(Arc::new(plugin_names()), sql).await;
+        for remote in federated_plans(&plan) {
+            assert!(!remote.contains("local_obs"), "{plan}");
         }
     }
 
