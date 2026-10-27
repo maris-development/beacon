@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use arrow::array::AsArray;
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use beacon_core::comments::COMMENT_METADATA_KEY;
 use beacon_core::runtime::Runtime;
@@ -16,42 +15,6 @@ use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
 use crate::result::run_sql_to_json;
-
-/// The tables in beacon's own schema that `identity` is entitled to see, sorted.
-///
-/// The enumeration cannot be run as `identity` — `information_schema` is
-/// super-user-only — so it goes through `Runtime::visible_tables`, which reads
-/// the catalog as the engine and returns only the tables that identity's roles
-/// grant `Select` on.
-async fn list_table_names(
-    runtime: &Arc<Runtime>,
-    identity: &AuthIdentity,
-) -> anyhow::Result<Vec<String>> {
-    let (default_catalog, default_schema) = runtime.default_catalog_and_schema();
-    let batches = runtime.visible_tables(identity).await?;
-
-    let mut names = Vec::new();
-    for batch in &batches {
-        let column = |name: &str| {
-            batch
-                .column_by_name(name)
-                .and_then(|array| array.as_string_opt::<i32>())
-        };
-        let (Some(catalogs), Some(schemas), Some(tables)) = (
-            column("table_catalog"),
-            column("table_schema"),
-            column("table_name"),
-        ) else {
-            anyhow::bail!("the catalog listing is missing an expected column");
-        };
-        for row in 0..batch.num_rows() {
-            if catalogs.value(row) == default_catalog && schemas.value(row) == default_schema {
-                names.push(tables.value(row).to_string());
-            }
-        }
-    }
-    Ok(names)
-}
 
 /// A table's Arrow schema with its comments, or `None` when the table is
 /// unknown (or `identity` may not read it).
@@ -240,7 +203,7 @@ async fn list_tables_json(
     croissant_base: Option<&str>,
 ) -> anyhow::Result<String> {
     let mut out = Vec::new();
-    for table in list_table_names(runtime, identity).await? {
+    for table in beacon_croissant::readable_tables(runtime, identity).await? {
         let description = table_schema(runtime, &table, identity)
             .await
             .and_then(|schema| table_description(&schema));
