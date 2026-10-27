@@ -106,18 +106,23 @@ unsafe extern "C" fn poll_next_fn<T>(
         return FfiPoll::Ready(FFI_Option::None);
     };
     let _guard = private_data.handle.as_ref().map(Handle::enter);
+    // The item conversion formats the error source, so it runs under the guard too.
     let polled = catch_unwind(AssertUnwindSafe(|| {
-        cx.with_context(|std_cx| inner.poll_next_unpin(std_cx))
+        match cx.with_context(|std_cx| inner.poll_next_unpin(std_cx)) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(item) => Poll::Ready(item.map(FFI_ObjectStoreResult::from)),
+        }
     }));
     match polled {
         Ok(Poll::Pending) => FfiPoll::Pending,
-        Ok(Poll::Ready(Some(item))) => FfiPoll::Ready(FFI_Option::Some(item.into())),
+        Ok(Poll::Ready(Some(item))) => FfiPoll::Ready(FFI_Option::Some(item)),
         Ok(Poll::Ready(None)) => {
             drop_inner(private_data);
             FfiPoll::Ready(FFI_Option::None)
         }
         Err(payload) => {
             drop_inner(private_data);
+            // `panic_error` does not panic.
             FfiPoll::Ready(FFI_Option::Some(FFI_ObjectStoreResult::Err(panic_error(
                 payload,
             ))))
@@ -138,7 +143,11 @@ unsafe extern "C" fn release_fn<T>(stream: &mut FFI_Stream<T>) {
     // SAFETY: `export` made `private_data` with `Box::into_raw`, and the owner releases one time.
     let private_data = unsafe { Box::from_raw(stream.private_data as *mut StreamPrivateData<T>) };
     stream.private_data = std::ptr::null_mut();
-    let _ = catch_unwind(AssertUnwindSafe(move || drop(private_data)));
+    let _ = catch_unwind(AssertUnwindSafe(move || {
+        let handle = private_data.handle.clone();
+        let _guard = handle.as_ref().map(Handle::enter);
+        drop(private_data);
+    }));
 }
 
 impl<T> Stream for FFI_Stream<T> {
@@ -386,6 +395,63 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(items, vec![7]);
+    }
+
+    #[derive(Debug)]
+    struct PanickyDisplay;
+
+    impl std::fmt::Display for PanickyDisplay {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            std::panic::resume_unwind(Box::new("display"))
+        }
+    }
+
+    impl std::error::Error for PanickyDisplay {}
+
+    #[tokio::test]
+    async fn panicking_error_display_is_error() {
+        let inner = stream::iter([Err(Error::NotSupported {
+            source: Box::new(PanickyDisplay),
+        })]);
+        let mut ffi = FFI_Stream::<u32>::new(inner, Handle::current(), ok_item);
+        let item = ffi.next().await.unwrap();
+        match item {
+            Err(error @ Error::Generic { .. }) => {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("panic in object store call: display")
+                );
+            }
+            other => panic!("unexpected item {other:?}"),
+        }
+        assert!(ffi.next().await.is_none());
+    }
+
+    struct RuntimeProbe(Arc<AtomicUsize>);
+
+    impl Drop for RuntimeProbe {
+        fn drop(&mut self) {
+            if Handle::try_current().is_ok() {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[test]
+    fn release_enters_handle() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let entered = Arc::new(AtomicUsize::new(0));
+        let probe = RuntimeProbe(entered.clone());
+        let inner = stream::iter([1u32]).map(move |value| {
+            let _ = &probe;
+            Ok(value)
+        });
+        let ffi = FFI_Stream::<u32>::new(inner, runtime.handle().clone(), ok_item);
+        std::thread::spawn(move || drop(ffi)).join().unwrap();
+        assert_eq!(entered.load(Ordering::SeqCst), 1);
     }
 
     #[test]

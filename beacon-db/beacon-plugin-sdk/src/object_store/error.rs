@@ -1,6 +1,7 @@
 //! Object store errors and results that keep their kind across the plugin boundary.
 
 use std::any::Any;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use ::object_store::Error;
 use stabby::string::String as SString;
@@ -220,13 +221,20 @@ impl<T> FFI_ObjectStoreResult<T> {
 }
 
 /// Returns the error for a panic in an object store call.
-// The extern "C" store functions call this.
-#[allow(dead_code)]
+///
+/// It does not panic. A payload that panics in its text or drop gives a fixed message.
 pub(crate) fn panic_error(payload: Box<dyn Any + Send>) -> FFI_ObjectStoreError {
-    let message = format!(
-        "panic in object store call: {}",
-        panic_message(payload.as_ref())
+    let text = catch_unwind(AssertUnwindSafe(|| panic_message(payload.as_ref()))).unwrap_or_else(
+        |second| {
+            std::mem::forget(second);
+            "unknown panic".to_string()
+        },
     );
+    // A payload drop can panic too; forget the second payload.
+    if let Err(second) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+        std::mem::forget(second);
+    }
+    let message = format!("panic in object store call: {text}");
     FFI_ObjectStoreError::new(FFI_ErrorKind::Generic, "", "", &message)
 }
 
