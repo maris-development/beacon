@@ -9,10 +9,11 @@ pub const CONFORMS_TO: &str = "http://mlcommons.org/croissant/1.1";
 
 /// The `@context` object from Appendix 1 of the Croissant 1.1 specification.
 // The appendix prints a trailing comma after "value"; JSON does not allow it, so it is removed.
+// mlcroissant finds the dataset only as https://schema.org/Dataset, so schema.org uses https.
 const CONTEXT_JSON: &str = r#"{
     "@language": "en",
-    "@vocab": "http://schema.org/",
-    "sc": "http://schema.org/",
+    "@vocab": "https://schema.org/",
+    "sc": "https://schema.org/",
     "cr": "http://mlcommons.org/croissant/",
     "rai": "http://mlcommons.org/croissant/RAI/",
     "dct": "http://purl.org/dc/terms/",
@@ -84,5 +85,13 @@ mod tests {
             assert!(object.contains_key(key), "missing {key}");
         }
         assert_eq!(CONFORMS_TO, "http://mlcommons.org/croissant/1.1");
+    }
+
+    #[test]
+    fn schema_org_uses_https() {
+        let context = context();
+
+        assert_eq!(context["@vocab"], "https://schema.org/");
+        assert_eq!(context["sc"], "https://schema.org/");
     }
 }
