@@ -82,10 +82,11 @@ pub async fn dispatch(
     name: &str,
     args: Map<String, Value>,
     identity: AuthIdentity,
+    croissant_base: Option<&str>,
 ) -> anyhow::Result<String> {
     match name {
-        "list_tables" => list_tables_json(runtime, &identity).await,
-        "describe_table" => describe_table_json(runtime, &args, &identity).await,
+        "list_tables" => list_tables_json(runtime, &identity, croissant_base).await,
+        "describe_table" => describe_table_json(runtime, &args, &identity, croissant_base).await,
         "run_sql" => {
             let sql = args
                 .get("sql")
@@ -236,13 +237,16 @@ fn export_query_recipe(args: &Map<String, Value>) -> anyhow::Result<String> {
 async fn list_tables_json(
     runtime: &Arc<Runtime>,
     identity: &AuthIdentity,
+    croissant_base: Option<&str>,
 ) -> anyhow::Result<String> {
     let mut out = Vec::new();
     for table in list_table_names(runtime, identity).await? {
         let description = table_schema(runtime, &table, identity)
             .await
             .and_then(|schema| table_description(&schema));
-        out.push(json!({ "name": table, "description": description }));
+        let mut entry = json!({ "name": table, "description": description });
+        add_croissant_link(&mut entry, &table, croissant_base);
+        out.push(entry);
     }
     Ok(serde_json::to_string_pretty(&out)?)
 }
@@ -251,6 +255,7 @@ async fn describe_table_json(
     runtime: &Arc<Runtime>,
     args: &Map<String, Value>,
     identity: &AuthIdentity,
+    croissant_base: Option<&str>,
 ) -> anyhow::Result<String> {
     let table = args
         .get("table_name")
@@ -272,11 +277,25 @@ async fn describe_table_json(
             })
         })
         .collect();
-    Ok(serde_json::to_string_pretty(&json!({
+    let mut described = json!({
         "name": table,
         "description": table_description(&schema),
         "columns": columns,
-    }))?)
+    });
+    add_croissant_link(&mut described, table, croissant_base);
+    Ok(serde_json::to_string_pretty(&described)?)
+}
+
+/// Adds the `croissant` URL of `table` to `entry` when Croissant is on.
+///
+/// `croissant_base` is the server root (the public URL, else the base path), with no final `/`.
+fn add_croissant_link(entry: &mut Value, table: &str, croissant_base: Option<&str>) {
+    if let (Some(base), Some(object)) = (croissant_base, entry.as_object_mut()) {
+        object.insert(
+            "croissant".into(),
+            json!(beacon_croissant::dataset_url(base, table)),
+        );
+    }
 }
 
 /// The table comment, from the schema metadata.
@@ -350,6 +369,21 @@ mod tests {
         assert_eq!(column_description(&both).as_deref(), Some("beacon"));
         assert_eq!(column_description(&native).as_deref(), Some("native"));
         assert_eq!(column_description(&none), None);
+    }
+
+    #[test]
+    fn croissant_link_is_added_only_when_set() {
+        let mut linked = json!({ "name": "sea temp", "description": null });
+        let mut plain = linked.clone();
+
+        add_croissant_link(&mut linked, "sea temp", Some("https://b.example.org/beacon"));
+        add_croissant_link(&mut plain, "sea temp", None);
+
+        assert_eq!(
+            linked["croissant"],
+            "https://b.example.org/beacon/api/croissant/sea%20temp"
+        );
+        assert!(plain.get("croissant").is_none(), "{plain}");
     }
 
     #[test]

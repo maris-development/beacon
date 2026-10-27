@@ -17,11 +17,17 @@ use rmcp::{ErrorData, RoleServer};
 #[derive(Clone)]
 pub struct BeaconMcpServer {
     runtime: Arc<Runtime>,
+    croissant_base: Option<Arc<str>>,
 }
 
 impl BeaconMcpServer {
-    pub fn new(runtime: Arc<Runtime>) -> Self {
-        Self { runtime }
+    /// `croissant_base` is the server root for the `croissant` links, or `None` when
+    /// Croissant is off.
+    pub fn new(runtime: Arc<Runtime>, croissant_base: Option<String>) -> Self {
+        Self {
+            runtime,
+            croissant_base: croissant_base.map(Arc::from),
+        }
     }
 }
 
@@ -49,7 +55,15 @@ impl ServerHandler for BeaconMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let args = request.arguments.unwrap_or_default();
         let identity = identity_from_context(&context);
-        match crate::catalog::dispatch(&self.runtime, request.name.as_ref(), args, identity).await {
+        let result = crate::catalog::dispatch(
+            &self.runtime,
+            request.name.as_ref(),
+            args,
+            identity,
+            self.croissant_base.as_deref(),
+        )
+        .await;
+        match result {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             // Surface tool failures as an error result (not a protocol error) so
             // the model can read and react to the message.

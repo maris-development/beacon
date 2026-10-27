@@ -90,14 +90,24 @@ pub fn setup_router(
     // calls execute under the caller's identity (or the anonymous principal when
     // enabled) and per-user RBAC applies at query time.
     let mcp_enabled = flag_on(std::env::var("BEACON_MCP_ENABLED").ok().as_deref());
+    let croissant_enabled = flag_on(std::env::var("BEACON_CROISSANT_ENABLED").ok().as_deref());
     let mut router = client_router.merge(admin_router).merge(alias_router);
     if mcp_enabled {
+        // MCP has no request headers here, so the base path gives a relative link.
+        let croissant_base = croissant_enabled.then(|| {
+            config
+                .server
+                .public_url
+                .clone()
+                .unwrap_or_else(|| base_path.clone())
+        });
         let mcp_router = ::axum::Router::new()
             .route_service(
                 "/mcp",
                 beacon_mcp::streamable_http_service(
                     beacon_runtime.runtime().clone(),
                     &config.mcp.allowed_hosts,
+                    croissant_base,
                 ),
             )
             .layer(::axum::middleware::from_fn_with_state(
@@ -124,7 +134,7 @@ pub fn setup_router(
     // the same `resolve_identity` middleware, so each request runs as the caller. It is not
     // in the OpenAPI document.
     let mut home_croissant = None;
-    if flag_on(std::env::var("BEACON_CROISSANT_ENABLED").ok().as_deref()) {
+    if croissant_enabled {
         let settings = beacon_croissant::CroissantSettings {
             public_url: config.server.public_url.clone(),
             base_path: config.server.base_path.clone(),

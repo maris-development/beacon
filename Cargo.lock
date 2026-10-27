@@ -2136,6 +2136,7 @@ dependencies = [
  "arrow 58.4.0",
  "arrow-json 58.4.0",
  "beacon-core",
+ "beacon-croissant",
  "futures",
  "http",
  "rmcp",
