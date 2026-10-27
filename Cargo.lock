@@ -2217,6 +2217,7 @@ dependencies = [
  "object_store 0.13.2",
  "stabby",
  "tokio",
+ "url",
 ]
 
 [[package]]

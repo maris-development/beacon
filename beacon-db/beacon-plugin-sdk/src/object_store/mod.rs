@@ -11,7 +11,11 @@ mod options;
 
 pub use bytes::FFI_Bytes;
 pub use error::{FFI_ErrorKind, FFI_ObjectStoreError, FFI_ObjectStoreResult};
-pub use options::FFI_ObjectMeta;
+pub use options::{
+    FFI_Attribute, FFI_Attributes, FFI_CopyOptions, FFI_GetOptions, FFI_GetRange,
+    FFI_GetResultMeta, FFI_ListResult, FFI_ObjectMeta, FFI_PutMode, FFI_PutMultipartOptions,
+    FFI_PutOptions, FFI_PutResult, FFI_Range, FFI_RenameOptions, FFI_TagSet,
+};
 
 /// The ABI version of the object store FFI types.
 pub const OBJECT_STORE_FFI_VERSION: u64 = 1;
