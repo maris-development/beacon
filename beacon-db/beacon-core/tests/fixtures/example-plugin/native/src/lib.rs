@@ -127,12 +127,32 @@ fn bad_box() -> ScalarUDF {
         .invoke_arrays(in_box_body)
 }
 
+/// `example_arg_kinds(a, b)` returns `array` or `scalar` per argument, joined with `,`.
+fn arg_kinds() -> ScalarUDF {
+    function("example_arg_kinds")
+        .args([DataType::Float64, DataType::Float64])
+        .returns(DataType::Utf8)
+        .invoke(|args| {
+            let kinds: Vec<&str> = args
+                .iter()
+                .map(|arg| match arg {
+                    ColumnarValue::Array(_) => "array",
+                    ColumnarValue::Scalar(_) => "scalar",
+                })
+                .collect();
+            Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(
+                kinds.join(","),
+            ))))
+        })
+}
+
 fn functions() -> Vec<ScalarUDF> {
     vec![
         add_one(),
         ScalarUDF::from(Panic::new()),
         in_box(),
         bad_box(),
+        arg_kinds(),
     ]
 }
 

@@ -53,6 +53,8 @@ beacon_plugin_sdk::export_plugin!(scalar = functions);
 
 `invoke_arrays` gives the closure arrays only, also for a call such as `add_one(1.5)`.
 Use `invoke` to get each argument as an array or a scalar.
+A literal argument, such as `2.0` in `f(x, 2.0)`, arrives as a `ColumnarValue::Scalar`.
+So the body of `invoke` or of a `ScalarUDFImpl` must accept a scalar for each argument.
 A function is `Immutable` by default. Call `stable()` or `volatile()` to change this.
 For full control, write a `ScalarUDFImpl` and wrap it with `ScalarUDF::from`.
 

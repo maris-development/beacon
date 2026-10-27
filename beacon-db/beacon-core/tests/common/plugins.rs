@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use beacon_core::plugins::archive::{pack_dir, sha256_hex, unpack};
 use beacon_core::plugins::InstallRecord;
@@ -52,18 +52,15 @@ fn fixture_dir() -> PathBuf {
 fn example_library(wrong_abi: bool) -> PathBuf {
     static RIGHT: OnceLock<PathBuf> = OnceLock::new();
     static WRONG: OnceLock<PathBuf> = OnceLock::new();
+    static BUILD: Mutex<()> = Mutex::new(());
     let cell = if wrong_abi { &WRONG } else { &RIGHT };
     cell.get_or_init(|| {
-        let root = repo_root();
-        let folder = if wrong_abi {
-            "plugin-example-wrong-abi"
-        } else {
-            "plugin-example"
-        };
+        // Both variants share one target folder, so the second build reuses the dependencies.
+        let _build = BUILD.lock().unwrap_or_else(|e| e.into_inner());
         let target_dir = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| root.join("target"))
-            .join(folder);
+            .unwrap_or_else(|| repo_root().join("target"))
+            .join("plugin-example");
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut command = Command::new(cargo);
         command
@@ -83,7 +80,14 @@ fn example_library(wrong_abi: bool) -> PathBuf {
             std::env::consts::DLL_PREFIX,
             std::env::consts::DLL_SUFFIX
         );
-        target_dir.join("release").join(file)
+        // Each variant overwrites the build output, so keep a copy per variant.
+        let variant = if wrong_abi { "wrong-abi" } else { "right-abi" };
+        let copy_dir = target_dir.join(variant);
+        std::fs::create_dir_all(&copy_dir).unwrap();
+        let copy = copy_dir.join(&file);
+        std::fs::copy(target_dir.join("release").join(&file), &copy)
+            .expect("copy the example plugin library");
+        copy
     })
     .clone()
 }
