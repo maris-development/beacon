@@ -8,6 +8,7 @@ pub use ::object_store as store;
 mod bytes;
 mod error;
 mod options;
+mod stream;
 
 pub use bytes::FFI_Bytes;
 pub use error::{FFI_ErrorKind, FFI_ObjectStoreError, FFI_ObjectStoreResult};
@@ -16,6 +17,7 @@ pub use options::{
     FFI_GetResultMeta, FFI_ListResult, FFI_ObjectMeta, FFI_PutMode, FFI_PutMultipartOptions,
     FFI_PutOptions, FFI_PutResult, FFI_Range, FFI_RenameOptions, FFI_TagSet,
 };
+pub use stream::{FFI_BytesStream, FFI_MetaStream, FFI_PathStream, FFI_Stream};
 
 /// The ABI version of the object store FFI types.
 pub const OBJECT_STORE_FFI_VERSION: u64 = 1;
