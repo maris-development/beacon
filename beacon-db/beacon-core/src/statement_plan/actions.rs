@@ -224,6 +224,7 @@ pub(crate) async fn create_external_table(
     session: &Arc<SessionContext>,
     cmd: &CreateExternalTable,
 ) -> anyhow::Result<()> {
+    crate::name_rule::check_new_name("Table", cmd.name.table())?;
     if !cmd.or_replace && session.table_exist(cmd.name.clone())? {
         if cmd.if_not_exists {
             return Ok(());
@@ -544,6 +545,7 @@ pub(crate) async fn create_view(
     definition: &Option<String>,
     or_replace: bool,
 ) -> anyhow::Result<()> {
+    crate::name_rule::check_new_name("View", name.table())?;
     if !or_replace && session.table_exist(name.clone())? {
         return Err(crate::schema_persistence::default_table::already_exists_error(
             session,
@@ -591,6 +593,7 @@ pub(crate) async fn create_table(
     definition: Option<String>,
 ) -> anyhow::Result<Option<SendableRecordBatchStream>> {
     let table_name = name.table().to_string();
+    crate::name_rule::check_new_name("Table", &table_name)?;
 
     if session.table_exist(name.clone())? {
         if if_not_exists {

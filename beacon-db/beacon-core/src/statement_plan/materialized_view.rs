@@ -42,6 +42,7 @@ pub(crate) async fn create_materialized_view(
     query_sql: &str,
 ) -> anyhow::Result<()> {
     let table_ref = crate::table_name::table_reference(name);
+    crate::name_rule::check_new_name("Materialized view", table_ref.table())?;
 
     if session_ctx.table_exist(table_ref.clone())? {
         return Err(crate::schema_persistence::default_table::already_exists_error(

@@ -4,6 +4,7 @@ pub mod embedded;
 pub mod comments;
 pub mod file_stats;
 pub mod metrics;
+mod name_rule;
 pub mod parser;
 pub mod plugins;
 pub mod query;
