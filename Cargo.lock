@@ -1859,6 +1859,7 @@ version = "2.1.0-rc.1"
 dependencies = [
  "arrow 58.4.0",
  "beacon-core",
+ "percent-encoding",
  "serde_json",
  "tracing",
 ]
