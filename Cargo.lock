@@ -2207,10 +2207,20 @@ dependencies = [
 name = "beacon-plugin-sdk"
 version = "2.1.0-rc.1"
 dependencies = [
+ "async-ffi",
+ "async-trait",
+ "bytes",
+ "chrono",
  "datafusion 54.1.0",
  "datafusion-ffi",
  "datafusion-proto",
+ "form_urlencoded",
+ "futures",
+ "object_store 0.13.2",
  "stabby",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
