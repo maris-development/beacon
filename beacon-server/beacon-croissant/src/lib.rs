@@ -6,7 +6,9 @@
 pub mod context;
 pub mod document;
 pub mod types;
+pub mod url;
 
 pub use context::{context, CONFORMS_TO};
 pub use document::{catalog, data_url, dataset, dataset_url, CatalogEntry, DATA_FILE};
 pub use types::{CroissantType, ServedColumn, ServedSchema};
+pub use url::{base_url, CroissantSettings};

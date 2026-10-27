@@ -13,6 +13,7 @@ license = "AGPL-3.0-only"
 # PROJ. Cargo unifies features across the graph, so one default-on path turns it back on.
 beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 arrow = { workspace = true }
+axum = { workspace = true }
 percent-encoding = "2.3.2"
 serde_json = { workspace = true }
 tracing = { workspace = true }

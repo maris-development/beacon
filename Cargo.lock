@@ -1858,6 +1858,7 @@ name = "beacon-croissant"
 version = "2.1.0-rc.1"
 dependencies = [
  "arrow 58.4.0",
+ "axum",
  "beacon-core",
  "percent-encoding",
  "serde_json",
