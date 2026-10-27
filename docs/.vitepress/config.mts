@@ -297,6 +297,7 @@ export default defineConfig({
             { text: 'Examples', link: '/docs/2.1.0-rc1/api/querying/examples' },
             { text: 'Exploring the catalog', link: '/docs/2.1.0-rc1/api/exploring-data' },
             { text: 'OPeNDAP (DAP2)', link: '/docs/2.1.0-rc1/api/opendap' },
+            { text: 'Croissant', link: '/docs/2.1.0-rc1/api/croissant' },
           ]
         },
         {

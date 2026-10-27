@@ -47,7 +47,7 @@ pytest -v
 | Env var | Default | Effect |
 | ------- | ------- | ------ |
 | `BEACON_IMAGE` | _(unset)_ | If set, run this image instead of building the local `Dockerfile`. Use `ghcr.io/maris-development/beacon:latest` for fast reruns. |
-| `BEACON_BASE_URL` | _(unset)_ | If set, the RBAC tests (`test_rbac.py`) run against this already-running Beacon instead of Docker — handy for iterating against a local debug build. Also reads `BEACON_ADMIN_USERNAME`/`BEACON_ADMIN_PASSWORD` (default `admin`/`securepassword`). Set `BEACON_AUTH_ENFORCE=true` to also run the enforcement test (it must match the server's config). |
+| `BEACON_BASE_URL` | _(unset)_ | If set, the RBAC tests (`test_rbac.py`) and the Croissant tests (`test_croissant.py`) run against this already-running Beacon instead of Docker — handy for iterating against a local debug build. Also reads `BEACON_ADMIN_USERNAME`/`BEACON_ADMIN_PASSWORD` (default `admin`/`securepassword`). Set `BEACON_AUTH_ENFORCE=true` to also run the enforcement test (it must match the server's config). |
 
 > **Note:** The published image will **fail** the external- and managed-table tests
 > until the HTTP write-path change in `beacon-api` (admin basic-auth → super-user on
@@ -87,13 +87,14 @@ pytest -v
 | `test_iceberg_s3.py` | the same Iceberg table on an **S3 bucket**: a MinIO sidecar plus a Beacon with `BEACON_S3_DATASETS`; reads, an external table, and an assertion that the local datasets directory stays empty |
 | `test_flight_sql.py` | the Arrow **Flight SQL** transport over ADBC: auth handshake, queries, Arrow results, anonymous rejection (optional dep — skipped if `adbc-driver-flightsql` is absent) |
 | `test_remote_federation.py` | beacon-to-beacon `STORED AS REMOTE` federation against a second container (anonymous Flight SQL); pushdown + cross-source join |
+| `test_croissant.py` | the Croissant export (`/api/croissant`) loaded with `mlcroissant`: the document validates with no errors, the records load, the catalog lists the table (optional dep, skipped if `mlcroissant` is absent) |
 
 Several suites spin up **extra containers** from the same image (a second Beacon with a
 different engine / SQL disabled / anonymous Flight / an S3 datasets store, plus PostgreSQL,
 MySQL and MinIO sidecars) via `run_beacon_container` in `conftest.py`, all on the shared
 docker network.
 
-To run the Flight SQL suite, also install the optional deps:
+To run the Flight SQL, DAP2 and Croissant suites, also install the optional deps:
 
 ```bash
 pip install -r requirements-optional.txt
