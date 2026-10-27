@@ -4,6 +4,7 @@
 //! So filter pushdown, file statistics pruning, table providers and remote sources
 //! see plain column predicates and need no knowledge of the function.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use beacon_plugin_sdk::scalar_functions::{hooks_of, HookedUdf, Implied};
@@ -12,11 +13,11 @@ use datafusion::{
     common::{
         config::ConfigOptions,
         tree_node::{Transformed, TreeNode},
-        DFSchema, Result, ScalarValue,
+        Column, DFSchema, Result, ScalarValue,
     },
     execution::TaskContext,
     logical_expr::{
-        expr::ScalarFunction,
+        expr::{Between, ScalarFunction},
         interval_arithmetic::Interval,
         utils::{conjunction, split_conjunction_owned},
         BinaryExpr, Cast, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TryCast,
@@ -68,11 +69,13 @@ fn rewrite_filter(filter: Filter, ctx: &Arc<TaskContext>) -> Result<Transformed<
     let mut changed = false;
     let mut conjuncts = Vec::new();
     let mut extra = Vec::new();
-    for conjunct in split_conjunction_owned(filter.predicate.clone()) {
+    let predicates = split_conjunction_owned(filter.predicate.clone());
+    let intervals = Intervals::new(&schema, &predicates);
+    for conjunct in predicates {
         if hooked_call(&conjunct).is_none() {
             let rewritten = replace_exact(conjunct, ctx)?;
             changed |= rewritten.transformed;
-            extra.extend(propagated(&rewritten.data, &schema));
+            extra.extend(intervals.propagated(&rewritten.data));
             conjuncts.push(rewritten.data);
             continue;
         }
@@ -92,7 +95,7 @@ fn rewrite_filter(filter: Filter, ctx: &Arc<TaskContext>) -> Result<Transformed<
             }
             Some(Implied::Necessary(expr)) => extra.push(expr),
             // The propagate hook is the fallback for a call without a pushdown rule.
-            None => extra.extend(propagated(&conjunct, &schema)),
+            None => extra.extend(intervals.propagated(&conjunct)),
         }
         conjuncts.push(conjunct);
     }
@@ -165,57 +168,197 @@ fn replace_exact(expr: Expr, ctx: &Arc<TaskContext>) -> Result<Transformed<Expr>
     })
 }
 
-/// The column ranges that the `propagate` hook gives for a conjunct such as
-/// `f(x)` or `f(x) > 5`.
-fn propagated(conjunct: &Expr, schema: &DFSchema) -> Vec<Expr> {
-    let Some((hooked, args, output)) = constrained_call(conjunct, schema) else {
-        return Vec::new();
-    };
-    let mut ranges = Vec::new();
-    propagate_into(hooked, args, &output, schema, &mut ranges);
-    ranges
+/// The input intervals of the hooks in one filter.
+struct Intervals<'a> {
+    schema: &'a DFSchema,
+    /// Column ranges from the plain conjuncts of the filter, such as `x >= 0`.
+    known: HashMap<Column, Interval>,
 }
 
-/// Adds the column ranges under `args` when the call output is in `output`.
-///
-/// A nested hooked call gets its argument interval as its own output, so the
-/// ranges reach the columns below it.
-fn propagate_into(
-    hooked: &HookedUdf,
-    args: &[Expr],
-    output: &Interval,
-    schema: &DFSchema,
-    ranges: &mut Vec<Expr>,
-) {
-    let Some(inputs) = args
-        .iter()
-        .map(|arg| interval_of(arg, schema))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return;
-    };
-    let refs: Vec<&Interval> = inputs.iter().collect();
-    let intervals = match hooked.propagate(output, &refs) {
-        Ok(Some(intervals)) => intervals,
-        Ok(None) => return,
-        Err(error) => {
+impl<'a> Intervals<'a> {
+    fn new(schema: &'a DFSchema, conjuncts: &[Expr]) -> Self {
+        let mut known: HashMap<Column, Interval> = HashMap::new();
+        for (column, interval) in conjuncts.iter().filter_map(column_range) {
+            let merged = match known.get(&column) {
+                Some(old) => match old.intersect(&interval) {
+                    Ok(Some(merged)) => merged,
+                    // An empty or mixed-type intersection keeps the old range.
+                    _ => continue,
+                },
+                None => interval,
+            };
+            known.insert(column, merged);
+        }
+        Self { schema, known }
+    }
+
+    /// The column ranges that the `propagate` hook gives for a conjunct such as
+    /// `f(x)` or `f(x) > 5`.
+    fn propagated(&self, conjunct: &Expr) -> Vec<Expr> {
+        let Some((hooked, args, output)) = constrained_call(conjunct, self.schema) else {
+            return Vec::new();
+        };
+        let mut ranges = Vec::new();
+        self.propagate_into(hooked, args, &output, &mut ranges);
+        ranges
+    }
+
+    /// Adds the column ranges under `args` when the call output is in `output`.
+    ///
+    /// A nested hooked call gets its argument interval as its own output, so the
+    /// ranges reach the columns below it.
+    fn propagate_into(
+        &self,
+        hooked: &HookedUdf,
+        args: &[Expr],
+        output: &Interval,
+        ranges: &mut Vec<Expr>,
+    ) {
+        let Some(inputs) = args
+            .iter()
+            .map(|arg| self.interval_of(arg))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
+        let refs: Vec<&Interval> = inputs.iter().collect();
+        let intervals = match hooked.propagate(output, &refs) {
+            Ok(Some(intervals)) => intervals,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    "Ignoring the propagate hook of '{}' for this query: {error}",
+                    hooked.inner().name()
+                );
+                return;
+            }
+        };
+        for ((arg, interval), input) in args.iter().zip(&intervals).zip(&inputs) {
+            // An interval that did not narrow gives no range and no reason to recurse.
+            if interval != input {
+                self.narrow(arg, interval, ranges);
+            }
+        }
+    }
+
+    /// Adds the column ranges that follow from `expr` in `interval`.
+    ///
+    /// Arithmetic with a constant is inverted, so `x + 1` in `[3, 9]` gives `x` in `[2, 8]`.
+    fn narrow(&self, expr: &Expr, interval: &Interval, ranges: &mut Vec<Expr>) {
+        match expr {
+            Expr::Column(_) => ranges.extend(range(expr, interval)),
+            // A cast can lose precision, so the range stays on the cast column.
+            Expr::Cast(Cast { expr: inner, .. }) | Expr::TryCast(TryCast { expr: inner, .. }) => {
+                if matches!(inner.as_ref(), Expr::Column(_)) {
+                    ranges.extend(range(expr, interval));
+                }
+            }
+            Expr::Negative(inner) => {
+                if let Ok(negated) = interval.arithmetic_negate() {
+                    self.narrow(inner, &negated, ranges);
+                }
+            }
+            Expr::BinaryExpr(binary) => {
+                if let Some((inner, interval)) = self.invert(binary, interval) {
+                    self.narrow(inner, &interval, ranges);
+                }
+            }
+            _ => {
+                if let Some((hooked, args)) = hooked_call(expr) {
+                    self.propagate_into(hooked, args, interval, ranges);
+                }
+            }
+        }
+    }
+
+    /// The operand of `binary` that is not constant, and its interval when `binary`
+    /// is in `interval`.
+    fn invert<'e>(
+        &self,
+        binary: &'e BinaryExpr,
+        interval: &Interval,
+    ) -> Option<(&'e Expr, Interval)> {
+        let BinaryExpr { left, op, right } = binary;
+        let (inner, constant_on_right, value) = match (constant(left), constant(right)) {
+            (None, Some(value)) => (left.as_ref(), true, value),
+            (Some(value), None) => (right.as_ref(), false, value),
+            _ => return None,
+        };
+        // Integer division truncates, and a zero factor loses the operand.
+        let zero = ScalarValue::new_zero(&value.data_type()).ok();
+        let scales = self.is_float(inner) && !value.is_null() && zero.as_ref() != Some(&value);
+        let value = Interval::try_new(value.clone(), value).ok()?;
+        let result = match (op, constant_on_right) {
+            (Operator::Plus, _) => interval.sub(&value),
+            (Operator::Minus, true) => interval.add(&value),
+            (Operator::Minus, false) => value.sub(interval),
+            (Operator::Multiply, _) if scales => interval.div(&value),
+            (Operator::Divide, true) if scales => interval.mul(&value),
+            _ => return None,
+        };
+        Some((inner, result.ok()?))
+    }
+
+    fn is_float(&self, expr: &Expr) -> bool {
+        matches!(
+            expr.get_type(self.schema),
+            Ok(DataType::Float16 | DataType::Float32 | DataType::Float64)
+        )
+    }
+
+    /// The interval of `expr`: a point for a constant, the range of a column from
+    /// another conjunct, interval arithmetic, or the `bounds` hook of a hooked call.
+    /// Else the unbounded interval of its type.
+    fn interval_of(&self, expr: &Expr) -> Option<Interval> {
+        if let Some(value) = constant(expr) {
+            return Interval::try_new(value.clone(), value).ok();
+        }
+        let data_type = expr.get_type(self.schema).ok()?;
+        let derived = match expr {
+            Expr::Column(column) => self.known.get(column).cloned(),
+            Expr::Negative(inner) => self
+                .interval_of(inner)
+                .and_then(|interval| interval.arithmetic_negate().ok()),
+            Expr::BinaryExpr(binary) => self.evaluate(binary),
+            _ => self.bounds_of(expr),
+        };
+        // An interval of another type, such as Int64 bounds on a Float64 column, is unusable.
+        match derived {
+            Some(interval) if interval.data_type() == data_type => Some(interval),
+            _ => Interval::make_unbounded(&data_type).ok(),
+        }
+    }
+
+    /// The interval of `left <op> right` for `+`, `-`, and for floats `*` and `/`.
+    fn evaluate(&self, binary: &BinaryExpr) -> Option<Interval> {
+        let BinaryExpr { left, op, right } = binary;
+        let float = self.is_float(left) && self.is_float(right);
+        let (left, right) = (self.interval_of(left)?, self.interval_of(right)?);
+        match op {
+            Operator::Plus => left.add(right),
+            Operator::Minus => left.sub(right),
+            Operator::Multiply if float => left.mul(right),
+            Operator::Divide if float => left.div(right),
+            _ => return None,
+        }
+        .ok()
+    }
+
+    /// The result of the `bounds` hook for a hooked call, with the intervals of its arguments.
+    fn bounds_of(&self, expr: &Expr) -> Option<Interval> {
+        let (hooked, args) = hooked_call(expr)?;
+        let inputs = args
+            .iter()
+            .map(|arg| self.interval_of(arg))
+            .collect::<Option<Vec<_>>>()?;
+        let refs: Vec<&Interval> = inputs.iter().collect();
+        hooked.bounds(&refs).unwrap_or_else(|error| {
             tracing::warn!(
-                "Ignoring the propagate hook of '{}' for this query: {error}",
+                "Ignoring the bounds hook of '{}' for this query: {error}",
                 hooked.inner().name()
             );
-            return;
-        }
-    };
-    for ((arg, interval), input) in args.iter().zip(&intervals).zip(&inputs) {
-        // An interval that did not narrow gives no range and no reason to recurse.
-        if interval == input {
-            continue;
-        }
-        if matches!(arg, Expr::Column(_)) {
-            ranges.extend(range(arg, interval));
-        } else if let Some((nested, nested_args)) = hooked_call(arg) {
-            propagate_into(nested, nested_args, interval, schema, ranges);
-        }
+            None
+        })
     }
 }
 
@@ -235,48 +378,50 @@ fn constrained_call<'a>(
         (Some(call), Some(value)) => (call, *op, value),
         _ => (hooked_call(right)?, op.swap()?, constant(left)?),
     };
+    Some((hooked, args, comparison_interval(op, value)?))
+}
+
+/// The interval of `x` for `x <op> value`.
+fn comparison_interval(op: Operator, value: ScalarValue) -> Option<Interval> {
     if value.is_null() {
         return None;
     }
     let unbounded = ScalarValue::try_from(value.data_type()).ok()?;
     // Closed intervals also hold for `<` and `>`: a wider range is still necessary.
-    let output = match op {
+    match op {
         Operator::Eq => Interval::try_new(value.clone(), value),
         Operator::Gt | Operator::GtEq => Interval::try_new(value, unbounded),
         Operator::Lt | Operator::LtEq => Interval::try_new(unbounded, value),
         _ => return None,
     }
-    .ok()?;
-    Some((hooked, args, output))
+    .ok()
 }
 
-/// The interval of `expr`: a point for a constant, the `bounds` hook for a hooked
-/// call, else the unbounded interval of its type.
-fn interval_of(expr: &Expr, schema: &DFSchema) -> Option<Interval> {
-    if let Some(value) = constant(expr) {
-        return Interval::try_new(value.clone(), value).ok();
+/// The column and its interval for a conjunct such as `x >= 0` or `x BETWEEN 2 AND 8`.
+fn column_range(conjunct: &Expr) -> Option<(Column, Interval)> {
+    match conjunct {
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+            let (column, op, value) = match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(column), other) => (column, *op, constant(other)?),
+                (other, Expr::Column(column)) => (column, op.swap()?, constant(other)?),
+                _ => return None,
+            };
+            Some((column.clone(), comparison_interval(op, value)?))
+        }
+        Expr::Between(Between {
+            expr,
+            negated: false,
+            low,
+            high,
+        }) => {
+            let Expr::Column(column) = expr.as_ref() else {
+                return None;
+            };
+            let interval = Interval::try_new(constant(low)?, constant(high)?).ok()?;
+            Some((column.clone(), interval))
+        }
+        _ => None,
     }
-    if let Some(interval) = bounds_of(expr, schema) {
-        return Some(interval);
-    }
-    Interval::make_unbounded(&expr.get_type(schema).ok()?).ok()
-}
-
-/// The result of the `bounds` hook for a hooked call, with the intervals of its arguments.
-fn bounds_of(expr: &Expr, schema: &DFSchema) -> Option<Interval> {
-    let (hooked, args) = hooked_call(expr)?;
-    let inputs = args
-        .iter()
-        .map(|arg| interval_of(arg, schema))
-        .collect::<Option<Vec<_>>>()?;
-    let refs: Vec<&Interval> = inputs.iter().collect();
-    hooked.bounds(&refs).unwrap_or_else(|error| {
-        tracing::warn!(
-            "Ignoring the bounds hook of '{}' for this query: {error}",
-            hooked.inner().name()
-        );
-        None
-    })
 }
 
 /// `expr >= lower` and `expr <= upper` for the bounded sides of `interval`.
@@ -448,6 +593,29 @@ mod tests {
             })
     }
 
+    /// `gap(a, b)` is `a - b`. Its `propagate` hook uses the interval of each argument.
+    fn gap() -> ScalarUDF {
+        function("gap")
+            .args([DataType::Float64, DataType::Float64])
+            .returns(DataType::Float64)
+            .propagate(|output, args| {
+                let (Some(a), Some(b)) = (
+                    args[0].intersect(args[1].add(output)?)?,
+                    args[1].intersect(args[0].sub(output)?)?,
+                ) else {
+                    return Ok(None);
+                };
+                Ok(Some(vec![a, b]))
+            })
+            .invoke_arrays(|arrays| {
+                let (a, b) = (f64s(&arrays[0]), f64s(&arrays[1]));
+                let gaps: Float64Array = (0..a.len())
+                    .map(|i| Some(a.value(i) - b.value(i)))
+                    .collect();
+                Ok(Arc::new(gaps))
+            })
+    }
+
     /// A session with the rule, the test functions and table `points`: one Parquet
     /// file with two row groups, the first in the west and the second in the east.
     async fn session(dir: &std::path::Path) -> Arc<SessionContext> {
@@ -489,6 +657,7 @@ mod tests {
             flip(),
             half(),
             bad_half(),
+            gap(),
         ] {
             ctx.register_udf(udf);
         }
@@ -627,6 +796,62 @@ mod tests {
         let plan = explain(&ctx, sql).await;
         assert!(plan.contains("points.lon >= Float64(2)"), "{plan}");
         assert!(plan.contains("points.lon <= Float64(8)"), "{plan}");
+        assert_eq!(ids(&ctx, sql).await, [3, 4]);
+    }
+
+    #[tokio::test]
+    async fn propagate_reaches_a_column_through_addition() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = session(dir.path()).await;
+        let sql = "SELECT id FROM points WHERE near_box(lon + 1, lat, 3, 50, 9, 56)";
+        let plan = explain(&ctx, sql).await;
+        // Interval arithmetic rounds outward, so the bounds are 2 and 8 minus and plus one ulp.
+        assert!(plan.contains("points.lon >= Float64(1.99999"), "{plan}");
+        assert!(plan.contains("points.lon <= Float64(8.00000"), "{plan}");
+        let metric = pruned_row_groups(&ctx, sql).await;
+        assert!(metric.contains("2 total → 1 matched"), "{metric}");
+        assert_eq!(ids(&ctx, sql).await, [3, 4]);
+    }
+
+    #[tokio::test]
+    async fn propagate_reaches_a_column_through_multiplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = session(dir.path()).await;
+        let sql = "SELECT id FROM points WHERE near_box(lon * 2, lat, 4, 50, 16, 56)";
+        let plan = explain(&ctx, sql).await;
+        assert!(plan.contains("points.lon >= Float64("), "{plan}");
+        assert!(plan.contains("points.lon <= Float64("), "{plan}");
+        let metric = pruned_row_groups(&ctx, sql).await;
+        assert!(metric.contains("2 total → 1 matched"), "{metric}");
+        assert_eq!(ids(&ctx, sql).await, [3, 4]);
+    }
+
+    #[tokio::test]
+    async fn propagate_gives_a_range_on_a_cast_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = session(dir.path()).await;
+        let sql = "SELECT id FROM points WHERE near_box(CAST(id AS DOUBLE), lat, 3, 50, 9, 56)";
+        let plan = explain(&ctx, sql).await;
+        assert!(
+            plan.contains("points.id >= Int64(3)")
+                || plan.contains("CAST(points.id AS Float64) >= Float64(3)"),
+            "{plan}"
+        );
+        assert_eq!(ids(&ctx, sql).await, [3, 4]);
+    }
+
+    #[tokio::test]
+    async fn another_conjunct_gives_the_input_interval_of_a_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = session(dir.path()).await;
+        let alone = "SELECT id FROM points WHERE gap(lat, lon) > 45";
+        let plan = explain(&ctx, alone).await;
+        assert!(!plan.contains("points.lat >= "), "{plan}");
+        let sql = "SELECT id FROM points WHERE gap(lat, lon) > 45 AND lon >= 0";
+        let plan = explain(&ctx, sql).await;
+        assert!(plan.contains("points.lat >= Float64(44.9999"), "{plan}");
+        let metric = pruned_row_groups(&ctx, sql).await;
+        assert!(metric.contains("2 total → 1 matched"), "{metric}");
         assert_eq!(ids(&ctx, sql).await, [3, 4]);
     }
 
