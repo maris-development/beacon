@@ -16,7 +16,7 @@ use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
 use super::bytes::FFI_Bytes;
-use super::error::FFI_ObjectStoreResult;
+use super::error::{FFI_ObjectStoreResult, STORE};
 use super::export::{drop_quietly, export_entered};
 use super::options::FFI_PutResult;
 
@@ -25,6 +25,8 @@ use super::options::FFI_PutResult;
 /// The exporter builds it with [`FFI_MultipartUpload::new`]. The receiver uses it through
 /// [`ForeignMultipartUpload`]. `Drop` calls `release`. A release before a successful
 /// `complete` or `abort` aborts the upload in the background on the exporter runtime.
+///
+/// Only the FFI functions read or change these fields.
 #[repr(C)]
 pub struct FFI_MultipartUpload {
     /// Uploads one part. Several parts can be in flight at the same time.
@@ -88,7 +90,7 @@ impl Drop for FFI_MultipartUpload {
 
 fn busy_error() -> Error {
     Error::Generic {
-        store: "Plugin",
+        store: STORE,
         source: "multipart upload is busy with complete or abort".into(),
     }
 }

@@ -90,7 +90,7 @@ impl From<FFI_Bytes> for Bytes {
             release: bytes.release,
         };
         if owner.len == 0 {
-            // `data` can be dangling for an empty buffer, so do not read it.
+            // An empty buffer can have an invalid `data` pointer; do not read it.
             drop(owner);
             return Bytes::new();
         }

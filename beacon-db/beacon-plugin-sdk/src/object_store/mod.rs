@@ -26,6 +26,8 @@ pub use options::{
 pub use stream::{FFI_BytesStream, FFI_MetaStream, FFI_PathStream, FFI_Stream};
 
 /// The ABI version of the object store FFI types.
+///
+/// Increase it on any change of a table layout or of the variants of an FFI enum.
 pub const OBJECT_STORE_FFI_VERSION: u64 = 1;
 
 /// Returns [`OBJECT_STORE_FFI_VERSION`].

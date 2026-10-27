@@ -8,6 +8,9 @@ use stabby::string::String as SString;
 
 use crate::panic_safe::panic_message;
 
+/// The store name in the errors that this SDK makes.
+pub(super) const STORE: &str = "Plugin";
+
 /// The `object_store::Error` variant of an [`FFI_ObjectStoreError`].
 ///
 /// The boundary carries the discriminant as a `u32`. `From<u32>` maps an unknown value to `Generic`.
@@ -93,7 +96,7 @@ impl FFI_ObjectStoreError {
     }
 }
 
-/// Returns the static name of a store that `object_store` knows, else `"Plugin"`.
+/// Returns the static name of a store that `object_store` knows, else [`STORE`].
 fn static_store_name(name: &str) -> &'static str {
     match name {
         "S3" => "S3",
@@ -105,7 +108,7 @@ fn static_store_name(name: &str) -> &'static str {
         "Prefix" => "Prefix",
         "Limit" => "Limit",
         "Throttle" => "Throttle",
-        _ => "Plugin",
+        _ => STORE,
     }
 }
 
@@ -370,13 +373,7 @@ mod tests {
             store: "Custom",
             source: "x".into(),
         });
-        assert!(matches!(
-            &back,
-            Error::Generic {
-                store: "Plugin",
-                ..
-            }
-        ));
+        assert!(matches!(&back, Error::Generic { store: STORE, .. }));
 
         let back = round_trip(Error::Generic {
             store: "S3",
@@ -402,13 +399,7 @@ mod tests {
             detail_b: SString::new(),
         };
         let back = Error::from(error);
-        assert!(matches!(
-            &back,
-            Error::Generic {
-                store: "Plugin",
-                ..
-            }
-        ));
+        assert!(matches!(&back, Error::Generic { store: STORE, .. }));
         assert_eq!(source_text(&back), "strange");
         assert_eq!(FFI_ErrorKind::from(99), FFI_ErrorKind::Generic);
         assert_eq!(FFI_ErrorKind::from(6), FFI_ErrorKind::Precondition);
@@ -420,12 +411,6 @@ mod tests {
         assert_eq!(FFI_ErrorKind::from(error.kind), FFI_ErrorKind::Generic);
         assert_eq!(error.message.as_str(), "panic in object store call: oops");
         let back = Error::from(error);
-        assert!(matches!(
-            &back,
-            Error::Generic {
-                store: "Plugin",
-                ..
-            }
-        ));
+        assert!(matches!(&back, Error::Generic { store: STORE, .. }));
     }
 }

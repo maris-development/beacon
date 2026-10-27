@@ -85,8 +85,7 @@ fn receive_metas(metas: FFI_MetaStream) -> BoxStream<'static, Result<ObjectMeta>
         .boxed()
 }
 
-// SAFETY for each call below: the table is live and of this version, and the
-// function pointer matches it.
+// SAFETY for each call below: the live table has this version and matches its pointers.
 #[async_trait]
 impl ObjectStore for ForeignObjectStore {
     async fn put_opts(

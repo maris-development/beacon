@@ -22,6 +22,8 @@ use super::options::FFI_ObjectMeta;
 /// The exporter builds it with [`FFI_Stream::new`] or [`FFI_Stream::new_unentered`].
 /// The receiver polls it as a [`Stream`]. `Drop` calls `release` one time.
 /// After the end or after a panic, each poll gives `None`.
+///
+/// Only the FFI functions read or change these fields.
 #[repr(C)]
 #[derive(Debug)]
 pub struct FFI_Stream<T> {

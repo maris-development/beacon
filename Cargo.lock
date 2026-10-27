@@ -2214,13 +2214,13 @@ dependencies = [
  "datafusion 54.1.0",
  "datafusion-ffi",
  "datafusion-proto",
+ "form_urlencoded",
  "futures",
  "object_store 0.13.2",
  "stabby",
  "tempfile",
  "tokio",
  "tracing",
- "url",
 ]
 
 [[package]]

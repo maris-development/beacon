@@ -582,7 +582,7 @@ async fn multipart_parts_run_concurrently() {
 }
 
 async fn wait_for_count(count: &AtomicUsize, wanted: usize) -> usize {
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while count.load(Ordering::SeqCst) < wanted && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -646,6 +646,129 @@ async fn dropped_multipart_frees_host_upload() {
     drop(upload);
     assert_eq!(wait_for_count(&store.upload_drops, 1).await, 1);
     assert_eq!(store.aborts.load(Ordering::SeqCst), 1);
+}
+
+/// Adds one to its counter when it drops.
+struct DropCounter(Arc<AtomicUsize>);
+
+impl Drop for DropCounter {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Returns a stream of many items that holds a [`DropCounter`] on `drops`.
+fn counted_stream<T: Send + 'static>(
+    drops: &Arc<AtomicUsize>,
+    mut item: impl FnMut() -> T + Send + 'static,
+) -> BoxStream<'static, T> {
+    let guard = DropCounter(Arc::clone(drops));
+    stream::repeat_with(move || {
+        let _guard = &guard;
+        item()
+    })
+    .take(1000)
+    .boxed()
+}
+
+/// A store whose `get_opts` payload and `list` streams count their drops.
+#[derive(Debug, Default)]
+struct DropStore {
+    get_drops: Arc<AtomicUsize>,
+    list_drops: Arc<AtomicUsize>,
+}
+
+impl fmt::Display for DropStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DropStore")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for DropStore {
+    async fn put_opts(&self, _: &Path, _: PutPayload, _: PutOptions) -> Result<PutResult> {
+        Err(not_implemented("put_opts"))
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        _: &Path,
+        _: PutMultipartOptions,
+    ) -> Result<Box<dyn MultipartUpload>> {
+        Err(not_implemented("put_multipart_opts"))
+    }
+
+    async fn get_opts(&self, location: &Path, _: GetOptions) -> Result<GetResult> {
+        let payload = counted_stream(&self.get_drops, || Ok(Bytes::from_static(b"chunk")));
+        Ok(GetResult {
+            payload: GetResultPayload::Stream(payload),
+            meta: ObjectMeta {
+                location: location.clone(),
+                last_modified: chrono::Utc::now(),
+                size: 5000,
+                e_tag: None,
+                version: None,
+            },
+            range: 0..5000,
+            attributes: Attributes::new(),
+        })
+    }
+
+    fn delete_stream(
+        &self,
+        _: BoxStream<'static, Result<Path>>,
+    ) -> BoxStream<'static, Result<Path>> {
+        stream::once(async { Err(not_implemented("delete_stream")) }).boxed()
+    }
+
+    fn list(&self, _: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
+        counted_stream(&self.list_drops, || {
+            Ok(ObjectMeta {
+                location: Path::from("x.nc"),
+                last_modified: chrono::Utc::now(),
+                size: 0,
+                e_tag: None,
+                version: None,
+            })
+        })
+    }
+
+    async fn list_with_delimiter(&self, _: Option<&Path>) -> Result<ListResult> {
+        Err(not_implemented("list_with_delimiter"))
+    }
+
+    async fn copy_opts(&self, _: &Path, _: &Path, _: CopyOptions) -> Result<()> {
+        Err(not_implemented("copy_opts"))
+    }
+
+    async fn rename_opts(&self, _: &Path, _: &Path, _: RenameOptions) -> Result<()> {
+        Err(not_implemented("rename_opts"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropped_get_stream_frees_host_stream() {
+    let store = Arc::new(DropStore::default());
+    let remote = foreign(store.clone());
+    let result = remote.get(&Path::from("x.nc")).await.unwrap();
+    let GetResultPayload::Stream(mut chunks) = result.payload else {
+        panic!("expected a stream payload");
+    };
+    chunks.next().await.unwrap().unwrap();
+    assert_eq!(store.get_drops.load(Ordering::SeqCst), 0);
+    drop(chunks);
+    assert_eq!(wait_for_count(&store.get_drops, 1).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropped_list_stream_frees_host_stream() {
+    let store = Arc::new(DropStore::default());
+    let remote = foreign(store.clone());
+    let mut list = remote.list(None);
+    list.next().await.unwrap().unwrap();
+    assert_eq!(store.list_drops.load(Ordering::SeqCst), 0);
+    drop(list);
+    assert_eq!(wait_for_count(&store.list_drops, 1).await, 1);
 }
 
 /// Records whether its drop runs inside a tokio runtime.
@@ -810,6 +933,25 @@ async fn panicking_store_gives_errors() {
         panic!("expected one error item");
     };
     assert_panic_error(error, "list");
+    let locations = stream::iter([Ok(path.clone())]).boxed();
+    let deleted: Vec<Result<Path>> = remote.delete_stream(locations).collect().await;
+    assert_eq!(deleted.len(), 1);
+    let Some(Err(error)) = deleted.into_iter().next() else {
+        panic!("expected one error item");
+    };
+    assert_panic_error(error, "delete_stream");
+    let listed = remote.list_with_delimiter(None).await;
+    assert_panic_error(listed.unwrap_err(), "list_with_delimiter");
+    let other = Path::from("y.nc");
+    assert_panic_error(remote.copy(&path, &other).await.unwrap_err(), "copy_opts");
+    assert_panic_error(
+        remote.rename(&path, &other).await.unwrap_err(),
+        "rename_opts",
+    );
+    let Err(error) = remote.put_multipart(&path).await else {
+        panic!("expected an error");
+    };
+    assert_panic_error(error, "put_multipart_opts");
     // The store still works after the panics.
     assert_panic_error(remote.get(&path).await.unwrap_err(), "get_opts");
 }

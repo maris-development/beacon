@@ -14,8 +14,7 @@ use datafusion_ffi::ffi_option::FFI_Option;
 use stabby::string::String as SString;
 use stabby::vec::Vec as SVec;
 
-/// The store name in the errors of this module.
-const STORE: &str = "Plugin";
+use super::error::STORE;
 
 /// An [`ObjectMeta`] as FFI data.
 #[repr(C)]
@@ -306,7 +305,7 @@ impl From<&TagSet> for FFI_TagSet {
 impl From<FFI_TagSet> for TagSet {
     fn from(tags: FFI_TagSet) -> Self {
         let mut set = TagSet::default();
-        for (key, value) in url::form_urlencoded::parse(tags.encoded.as_str().as_bytes()) {
+        for (key, value) in form_urlencoded::parse(tags.encoded.as_str().as_bytes()) {
             set.push(&key, &value);
         }
         set
@@ -539,6 +538,9 @@ impl TryFrom<&ListResult> for FFI_ListResult {
     type Error = Error;
 
     /// Fails with `Generic` when a last modified time is outside the `i64` nanosecond range.
+    ///
+    /// One such entry fails the whole listing. The `list` stream instead gives one error item
+    /// for that entry and continues.
     fn try_from(list: &ListResult) -> Result<Self, Error> {
         Ok(Self {
             common_prefixes: list

@@ -19,10 +19,10 @@ use stabby::string::String as SString;
 use stabby::vec::Vec as SVec;
 use tokio::runtime::Handle;
 
-use super::OBJECT_STORE_FFI_VERSION;
 use super::bytes::FFI_Bytes;
-use super::error::{FFI_ObjectStoreResult, panic_error};
+use super::error::{FFI_ObjectStoreResult, STORE, panic_error};
 use super::multipart::FFI_MultipartUpload;
+use super::object_store_ffi_version;
 use super::options::{
     FFI_CopyOptions, FFI_GetOptions, FFI_GetResultMeta, FFI_ListResult, FFI_ObjectMeta,
     FFI_PutMultipartOptions, FFI_PutOptions, FFI_PutResult, FFI_Range, FFI_RenameOptions,
@@ -45,9 +45,11 @@ pub struct FFI_GetResult {
 /// `Arc<dyn ObjectStore>` with `TryFrom`. `Clone` calls `clone`, and `Drop` calls `release`.
 /// The first five fields stay at the same place in every version, so a receiver can refuse
 /// and release a table of another version.
+///
+/// Only the FFI functions read or change these fields.
 #[repr(C)]
 pub struct FFI_ObjectStore {
-    /// Returns the ABI version of the table. See [`OBJECT_STORE_FFI_VERSION`].
+    /// Returns the ABI version of the table. See [`super::OBJECT_STORE_FFI_VERSION`].
     pub version: unsafe extern "C" fn() -> u64,
     /// Identifies the library that made the table. See [`datafusion_ffi::get_library_marker_id`].
     pub library_marker_id: extern "C" fn() -> usize,
@@ -132,7 +134,7 @@ impl FFI_ObjectStore {
     pub fn new(store: Arc<dyn ObjectStore>, handle: Handle) -> Self {
         let private_data = Box::new(StorePrivateData { store, handle });
         Self {
-            version: store_version,
+            version: object_store_ffi_version,
             library_marker_id: datafusion_ffi::get_library_marker_id,
             private_data: Box::into_raw(private_data) as *mut c_void,
             clone: clone_fn,
@@ -174,10 +176,6 @@ impl Drop for FFI_ObjectStore {
         // SAFETY: `release` matches the table, and it ignores a null `private_data`.
         unsafe { (self.release)(self) }
     }
-}
-
-unsafe extern "C" fn store_version() -> u64 {
-    OBJECT_STORE_FFI_VERSION
 }
 
 unsafe extern "C" fn clone_fn(store: &FFI_ObjectStore) -> FFI_ObjectStore {
@@ -232,7 +230,7 @@ impl<T> Future for EnteredFuture<T> {
         let this = self.get_mut();
         let Some(inner) = this.inner.as_mut() else {
             let error = Error::Generic {
-                store: "Plugin",
+                store: STORE,
                 source: "object store future polled after its end".into(),
             };
             return Poll::Ready(FFI_ObjectStoreResult::Err(error.into()));

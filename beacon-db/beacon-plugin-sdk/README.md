@@ -146,7 +146,7 @@ async fn read(table: FFI_ObjectStore) -> Result<usize> {
 - No tokio runtime handle crosses the boundary.
 - The exporter keeps its own runtime handle. Each poll of an exported future or stream enters that runtime.
 - The plugin does not need a runtime for store calls.
-- Do not use tokio I/O, such as `tokio::fs` or `tokio::net`, in plugin code. Build a separate runtime for that I/O.
+- Plugin code that uses tokio I/O, such as `tokio::fs` or `tokio::net`, must build its own runtime.
 - The API is async. To block, call `futures::executor::block_on` on a thread outside a tokio runtime.
 - Do not block inside a tokio runtime.
 
@@ -156,7 +156,7 @@ async fn read(table: FFI_ObjectStore) -> Result<usize> {
 - A dropped get or list stream releases the exporter stream at once.
 - A dropped multipart upload without `complete` or `abort` aborts the upload in the background.
 - `object_store` itself does not abort a dropped upload. The import of a local table keeps that behavior.
-- `put_part` fails while a `complete` or `abort` is pending.
+- On the raw `FFI_MultipartUpload` table, `put_part` fails while a `complete` or `abort` is pending.
 - `http::Extensions` does not cross. The exporter gets an empty map.
 
 ## Rules
