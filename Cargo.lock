@@ -2208,6 +2208,7 @@ name = "beacon-plugin-sdk"
 version = "2.1.0-rc.1"
 dependencies = [
  "async-ffi",
+ "async-trait",
  "bytes",
  "chrono",
  "datafusion 54.1.0",

@@ -103,7 +103,7 @@ fn from_nanos_opt(nanos: FFI_Option<i64>) -> Option<DateTime<Utc>> {
     nanos.into_option().map(DateTime::from_timestamp_nanos)
 }
 
-fn parse_path(location: &str) -> Result<Path, Error> {
+pub(crate) fn parse_path(location: &str) -> Result<Path, Error> {
     Path::parse(location).map_err(|e| Error::Generic {
         store: STORE,
         source: Box::new(e),

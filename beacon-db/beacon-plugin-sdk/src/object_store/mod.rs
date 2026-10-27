@@ -7,11 +7,17 @@ pub use ::object_store as store;
 
 mod bytes;
 mod error;
+mod export;
+mod foreign;
+mod multipart;
 mod options;
 mod stream;
 
 pub use bytes::FFI_Bytes;
 pub use error::{FFI_ErrorKind, FFI_ObjectStoreError, FFI_ObjectStoreResult};
+pub use export::{FFI_GetResult, FFI_ObjectStore};
+pub use foreign::ForeignObjectStore;
+pub use multipart::FFI_MultipartUpload;
 pub use options::{
     FFI_Attribute, FFI_Attributes, FFI_CopyOptions, FFI_GetOptions, FFI_GetRange,
     FFI_GetResultMeta, FFI_ListResult, FFI_ObjectMeta, FFI_PutMode, FFI_PutMultipartOptions,
@@ -28,11 +34,4 @@ pub extern "C" fn object_store_ffi_version() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn object_store_ffi_version_is_one() {
-        assert_eq!(object_store_ffi_version(), 1);
-    }
-}
+mod tests;
