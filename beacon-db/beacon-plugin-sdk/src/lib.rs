@@ -12,7 +12,7 @@ pub use datafusion_proto;
 pub use stabby;
 
 /// The ABI version of this SDK. Beacon refuses a plugin with a different value.
-pub const BEACON_PLUGIN_SDK_ABI: u32 = 2;
+pub const BEACON_PLUGIN_SDK_ABI: u32 = 3;
 
 /// The ABI versions of a plugin, as `beacon_plugin_abi` returns them.
 #[repr(C)]
