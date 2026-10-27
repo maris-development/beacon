@@ -16,17 +16,29 @@ pub struct CroissantSettings {
 /// Gives the absolute URL of the server root, with no final `/`.
 ///
 /// `public_url` wins. Else the URL is `{proto}://{host}{base_path}`. `proto` is the first
-/// `X-Forwarded-Proto` value, else `http`. `host` is the first `X-Forwarded-Host` value,
-/// else `Host`, else `localhost`.
+/// `X-Forwarded-Proto` value if it is `http` or `https`, else `http`. `host` is the first
+/// valid `X-Forwarded-Host` value, else a valid `Host`, else `localhost`.
 pub fn base_url(settings: &CroissantSettings, headers: &HeaderMap) -> String {
     if let Some(public_url) = &settings.public_url {
         return public_url.clone();
     }
-    let proto = first_value(headers, "x-forwarded-proto").unwrap_or("http");
+    let proto = first_value(headers, "x-forwarded-proto")
+        .map(str::to_ascii_lowercase)
+        .filter(|proto| proto == "http" || proto == "https")
+        .unwrap_or_else(|| "http".to_string());
     let host = first_value(headers, "x-forwarded-host")
-        .or_else(|| first_value(headers, "host"))
+        .filter(|host| valid_host(host))
+        .or_else(|| first_value(headers, "host").filter(|host| valid_host(host)))
         .unwrap_or("localhost");
     format!("{proto}://{host}{}", settings.base_path)
+}
+
+/// Refuses a host that could change the path, query or user part of the URL.
+fn valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && !host
+            .chars()
+            .any(|c| matches!(c, '/' | '?' | '#' | '@' | '\\') || c.is_whitespace())
 }
 
 /// The first comma-separated value of a header; a proxy chain appends its own values.
@@ -79,5 +91,25 @@ mod tests {
         let s = settings(None, "");
         let h = headers(&[("host", "localhost:5001")]);
         assert_eq!(base_url(&s, &h), "http://localhost:5001");
+    }
+
+    #[test]
+    fn base_url_refuses_a_bad_proto() {
+        let s = settings(None, "");
+        let h = headers(&[("x-forwarded-proto", "javascript"), ("host", "a.org")]);
+        assert_eq!(base_url(&s, &h), "http://a.org");
+        let h = headers(&[("x-forwarded-proto", "HTTPS"), ("host", "a.org")]);
+        assert_eq!(base_url(&s, &h), "https://a.org");
+    }
+
+    #[test]
+    fn base_url_refuses_a_bad_host() {
+        let s = settings(None, "");
+        for bad in ["evil.org/x", "a?b", "a#b", "user@evil.org", "a\\b", "a b"] {
+            let h = headers(&[("x-forwarded-host", bad), ("host", "good.org")]);
+            assert_eq!(base_url(&s, &h), "http://good.org", "forwarded {bad}");
+            let h = headers(&[("host", bad)]);
+            assert_eq!(base_url(&s, &h), "http://localhost", "host {bad}");
+        }
     }
 }
