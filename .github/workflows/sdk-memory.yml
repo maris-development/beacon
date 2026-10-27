@@ -1,0 +1,79 @@
+name: SDK memory checks
+
+# Checks the unsafe FFI code of the plugin SDK. Only the SDK crate runs, so the jobs stay short.
+on:
+  push:
+    paths:
+      - "beacon-db/beacon-plugin-sdk/**"
+      - "Cargo.lock"
+      - ".github/workflows/sdk-memory.yml"
+  pull_request:
+    paths:
+      - "beacon-db/beacon-plugin-sdk/**"
+      - "Cargo.lock"
+      - ".github/workflows/sdk-memory.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Miri and the sanitizers need nightly. A pinned date keeps a nightly regression out of CI.
+  NIGHTLY: nightly-2026-10-20
+
+jobs:
+  miri:
+    name: Miri (beacon-plugin-sdk)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Cargo loads every workspace member, also the submodule.
+          submodules: recursive
+
+      - name: Install Rust (${{ env.NIGHTLY }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: miri, rust-src
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: miri
+
+      - name: Run Miri
+        # DataFusion reads the clock, which Miri blocks in isolation mode.
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo +${{ env.NIGHTLY }} miri test --locked -p beacon-plugin-sdk --lib
+
+  asan:
+    name: AddressSanitizer (beacon-plugin-sdk)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -Zsanitizer=address
+      ASAN_OPTIONS: detect_leaks=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust (${{ env.NIGHTLY }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: rust-src
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: asan
+
+      # --target keeps the sanitizer out of build scripts and proc macros. build-std instruments std too.
+      - name: Run tests with AddressSanitizer
+        run: >
+          cargo +${{ env.NIGHTLY }} test --locked -p beacon-plugin-sdk --lib
+          -Zbuild-std --target x86_64-unknown-linux-gnu
