@@ -2217,6 +2217,7 @@ dependencies = [
  "futures",
  "object_store 0.13.2",
  "stabby",
+ "tempfile",
  "tokio",
  "tracing",
  "url",

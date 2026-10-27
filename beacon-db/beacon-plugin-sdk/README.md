@@ -116,6 +116,49 @@ library = "example_native"
 files = ["sql/functions.sql"]
 ```
 
+## Object stores
+
+The `object_store` module moves an `object_store::ObjectStore` across the plugin boundary.
+The module re-exports the `object_store` crate as `object_store::store`.
+Use this copy. The SDK pins `object_store` 0.13, the version in Beacon.
+
+- `FFI_ObjectStore` is the FFI table. `FFI_ObjectStore::new(store, handle)` exports an `Arc<dyn ObjectStore>`.
+- `Arc::<dyn ObjectStore>::try_from(table)` imports a table. A table from another library becomes a `ForeignObjectStore`.
+- A table from the same library gives back the original store.
+- The import refuses a table with a different `OBJECT_STORE_FFI_VERSION`.
+
+```rust,no_run
+use std::sync::Arc;
+
+use beacon_plugin_sdk::object_store::FFI_ObjectStore;
+use beacon_plugin_sdk::object_store::store::path::Path;
+use beacon_plugin_sdk::object_store::store::{ObjectStore, ObjectStoreExt, Result};
+
+async fn read(table: FFI_ObjectStore) -> Result<usize> {
+    let store = Arc::<dyn ObjectStore>::try_from(table)?;
+    let bytes = store.get(&Path::from("data/file.nc")).await?.bytes().await?;
+    Ok(bytes.len())
+}
+```
+
+### Runtime
+
+- No tokio runtime handle crosses the boundary.
+- The exporter keeps its own runtime handle. Each poll of an exported future or stream enters that runtime.
+- The plugin does not need a runtime for store calls.
+- Do not use tokio I/O, such as `tokio::fs` or `tokio::net`, in plugin code. Build a separate runtime for that I/O.
+- The API is async. To block, call `futures::executor::block_on` on a thread outside a tokio runtime.
+- Do not block inside a tokio runtime.
+
+### Errors and cleanup
+
+- A panic in the exporter store becomes an `Error::Generic`. The message starts with `panic in object store call:`.
+- A dropped get or list stream releases the exporter stream at once.
+- A dropped multipart upload without `complete` or `abort` aborts the upload in the background.
+- `object_store` itself does not abort a dropped upload. The import of a local table keeps that behavior.
+- `put_part` fails while a `complete` or `abort` is pending.
+- `http::Extensions` does not cross. The exporter gets an empty map.
+
 ## Rules
 
 - Set `panic = "unwind"`. This is the default. The SDK refuses `panic = "abort"` at compile time.

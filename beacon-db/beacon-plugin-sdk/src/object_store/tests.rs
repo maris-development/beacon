@@ -90,14 +90,20 @@ async fn local_marker_returns_original_arc() {
     let ffi = FFI_ObjectStore::new(store.clone(), Handle::current());
     let back = Arc::<dyn ObjectStore>::try_from(ffi).unwrap();
     assert!(Arc::ptr_eq(&store, &back));
+    // The import frees the table, so only `store` and `back` remain.
+    assert_eq!(Arc::strong_count(&store), 2);
+    drop(back);
+    assert_eq!(Arc::strong_count(&store), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_version_is_refused() {
-    let mut ffi = FFI_ObjectStore::new(seeded().await, Handle::current());
+    let store = seeded().await;
+    let mut ffi = FFI_ObjectStore::new(store.clone(), Handle::current());
     ffi.library_marker_id = foreign_marker_id;
     ffi.version = other_version;
     let error = Arc::<dyn ObjectStore>::try_from(ffi).unwrap_err();
+    assert_eq!(Arc::strong_count(&store), 1);
     assert!(matches!(error, Error::NotSupported { .. }));
     assert!(
         error
@@ -306,6 +312,9 @@ struct ChunkStore {
     /// Each part waits until this many parts are in flight.
     parts_in_flight: usize,
     started_parts: Arc<AtomicUsize>,
+    /// Makes `complete` of each upload fail.
+    fail_complete: bool,
+    upload_drops: Arc<AtomicUsize>,
 }
 
 impl ChunkStore {
@@ -324,6 +333,14 @@ struct CountingUpload {
     completes: Arc<AtomicUsize>,
     parts_in_flight: usize,
     started_parts: Arc<AtomicUsize>,
+    fail_complete: bool,
+    drops: Arc<AtomicUsize>,
+}
+
+impl Drop for CountingUpload {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -343,6 +360,12 @@ impl MultipartUpload for CountingUpload {
 
     async fn complete(&mut self) -> Result<PutResult> {
         self.completes.fetch_add(1, Ordering::SeqCst);
+        if self.fail_complete {
+            return Err(Error::Generic {
+                store: "ChunkStore",
+                source: "complete fails".into(),
+            });
+        }
         Ok(PutResult {
             e_tag: None,
             version: None,
@@ -389,6 +412,8 @@ impl ObjectStore for ChunkStore {
             completes: Arc::clone(&self.completes),
             parts_in_flight: self.parts_in_flight,
             started_parts: Arc::clone(&self.started_parts),
+            fail_complete: self.fail_complete,
+            drops: Arc::clone(&self.upload_drops),
         }))
     }
 
@@ -596,6 +621,300 @@ async fn completed_or_aborted_multipart_does_not_abort_on_drop() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(store.completes.load(Ordering::SeqCst), 1);
     assert_eq!(store.aborts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_complete_aborts_on_drop() {
+    let store = Arc::new(ChunkStore {
+        fail_complete: true,
+        ..Default::default()
+    });
+    let remote = foreign(store.clone());
+    let mut upload = remote.put_multipart(&Path::from("x.nc")).await.unwrap();
+    let error = upload.complete().await.unwrap_err();
+    assert!(error.to_string().contains("complete fails"), "{error}");
+    drop(upload);
+    assert_eq!(wait_for_count(&store.aborts, 1).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropped_multipart_frees_host_upload() {
+    let store = Arc::new(ChunkStore::default());
+    let remote = foreign(store.clone());
+    let upload = remote.put_multipart(&Path::from("x.nc")).await.unwrap();
+    assert_eq!(store.upload_drops.load(Ordering::SeqCst), 0);
+    drop(upload);
+    assert_eq!(wait_for_count(&store.upload_drops, 1).await, 1);
+    assert_eq!(store.aborts.load(Ordering::SeqCst), 1);
+}
+
+/// Records whether its drop runs inside a tokio runtime.
+struct RuntimeProbe(Arc<Mutex<Option<bool>>>);
+
+impl Drop for RuntimeProbe {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = Some(Handle::try_current().is_ok());
+    }
+}
+
+/// A store whose `get_opts` never completes and holds a [`RuntimeProbe`].
+#[derive(Debug, Default)]
+struct PendingStore {
+    dropped_in_runtime: Arc<Mutex<Option<bool>>>,
+}
+
+impl fmt::Display for PendingStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PendingStore")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for PendingStore {
+    async fn put_opts(&self, _: &Path, _: PutPayload, _: PutOptions) -> Result<PutResult> {
+        Err(not_implemented("put_opts"))
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        _: &Path,
+        _: PutMultipartOptions,
+    ) -> Result<Box<dyn MultipartUpload>> {
+        Err(not_implemented("put_multipart_opts"))
+    }
+
+    async fn get_opts(&self, _: &Path, _: GetOptions) -> Result<GetResult> {
+        let _probe = RuntimeProbe(Arc::clone(&self.dropped_in_runtime));
+        std::future::pending().await
+    }
+
+    fn delete_stream(
+        &self,
+        _: BoxStream<'static, Result<Path>>,
+    ) -> BoxStream<'static, Result<Path>> {
+        stream::once(async { Err(not_implemented("delete_stream")) }).boxed()
+    }
+
+    fn list(&self, _: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
+        stream::once(async { Err(not_implemented("list")) }).boxed()
+    }
+
+    async fn list_with_delimiter(&self, _: Option<&Path>) -> Result<ListResult> {
+        Err(not_implemented("list_with_delimiter"))
+    }
+
+    async fn copy_opts(&self, _: &Path, _: &Path, _: CopyOptions) -> Result<()> {
+        Err(not_implemented("copy_opts"))
+    }
+
+    async fn rename_opts(&self, _: &Path, _: &Path, _: RenameOptions) -> Result<()> {
+        Err(not_implemented("rename_opts"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropped_pending_get_drops_inner_future_in_handle() {
+    let store = Arc::new(PendingStore::default());
+    let remote = foreign(store.clone());
+    let path = Path::from("x.nc");
+    let mut get = remote.get(&path).boxed();
+    // One poll reaches the pending inner future.
+    assert!((&mut get).now_or_never().is_none());
+    assert!(store.dropped_in_runtime.lock().unwrap().is_none());
+    // The drop runs on a thread outside any runtime.
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            assert!(Handle::try_current().is_err());
+            drop(get);
+        });
+    });
+    assert_eq!(*store.dropped_in_runtime.lock().unwrap(), Some(true));
+}
+
+/// A store that panics in each call.
+#[derive(Debug)]
+struct PanicStore;
+
+impl fmt::Display for PanicStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PanicStore")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for PanicStore {
+    async fn put_opts(&self, _: &Path, _: PutPayload, _: PutOptions) -> Result<PutResult> {
+        panic!("put_opts")
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        _: &Path,
+        _: PutMultipartOptions,
+    ) -> Result<Box<dyn MultipartUpload>> {
+        panic!("put_multipart_opts")
+    }
+
+    async fn get_opts(&self, _: &Path, _: GetOptions) -> Result<GetResult> {
+        panic!("get_opts")
+    }
+
+    fn delete_stream(
+        &self,
+        _: BoxStream<'static, Result<Path>>,
+    ) -> BoxStream<'static, Result<Path>> {
+        panic!("delete_stream")
+    }
+
+    fn list(&self, _: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
+        panic!("list")
+    }
+
+    async fn list_with_delimiter(&self, _: Option<&Path>) -> Result<ListResult> {
+        panic!("list_with_delimiter")
+    }
+
+    async fn copy_opts(&self, _: &Path, _: &Path, _: CopyOptions) -> Result<()> {
+        panic!("copy_opts")
+    }
+
+    async fn rename_opts(&self, _: &Path, _: &Path, _: RenameOptions) -> Result<()> {
+        panic!("rename_opts")
+    }
+}
+
+fn assert_panic_error(error: Error, text: &str) {
+    let Error::Generic { source, .. } = &error else {
+        panic!("expected a Generic error, got {error:?}");
+    };
+    let message = source.to_string();
+    assert!(
+        message.starts_with("panic in object store call:"),
+        "{message}"
+    );
+    assert!(message.contains(text), "{message}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn panicking_store_gives_errors() {
+    let remote = foreign(Arc::new(PanicStore));
+    let path = Path::from("x.nc");
+    assert_panic_error(remote.get(&path).await.unwrap_err(), "get_opts");
+    // `head` goes through `get_opts`.
+    assert_panic_error(remote.head(&path).await.unwrap_err(), "get_opts");
+    let put = remote.put(&path, PutPayload::from_static(b"x")).await;
+    assert_panic_error(put.unwrap_err(), "put_opts");
+    let listed: Vec<Result<ObjectMeta>> = remote.list(None).collect().await;
+    assert_eq!(listed.len(), 1);
+    let Some(Err(error)) = listed.into_iter().next() else {
+        panic!("expected one error item");
+    };
+    assert_panic_error(error, "list");
+    // The store still works after the panics.
+    assert_panic_error(remote.get(&path).await.unwrap_err(), "get_opts");
+}
+
+/// An `InMemory` store whose `get_opts` needs the tokio timer.
+#[derive(Debug, Default)]
+struct SleepStore(InMemory);
+
+impl fmt::Display for SleepStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SleepStore")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for SleepStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> Result<PutResult> {
+        self.0.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> Result<Box<dyn MultipartUpload>> {
+        self.0.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        self.0.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, Result<Path>>,
+    ) -> BoxStream<'static, Result<Path>> {
+        self.0.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
+        self.0.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
+        self.0.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
+        self.0.copy_opts(from, to, options).await
+    }
+
+    async fn rename_opts(&self, from: &Path, to: &Path, options: RenameOptions) -> Result<()> {
+        self.0.rename_opts(from, to, options).await
+    }
+}
+
+#[test]
+fn block_on_outside_runtime() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let path = Path::from("a/1.nc");
+    let store = SleepStore::default();
+    runtime
+        .block_on(store.put(&path, PutPayload::from_static(DATA)))
+        .unwrap();
+    let remote = {
+        let _guard = runtime.enter();
+        foreign(Arc::new(store))
+    };
+    let bytes = std::thread::spawn(move || {
+        assert!(Handle::try_current().is_err());
+        futures::executor::block_on(async {
+            remote.get(&path).await.unwrap().bytes().await.unwrap()
+        })
+    })
+    .join()
+    .unwrap();
+    assert_eq!(&bytes[..], DATA);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_file_system_get() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("x.nc"), DATA).unwrap();
+    let local = ::object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(local);
+    let path = Path::from("x.nc");
+    // The host store gives a `File` payload; it crosses as a stream.
+    let direct = store.get(&path).await.unwrap();
+    assert!(matches!(direct.payload, GetResultPayload::File(..)));
+    let remote = foreign(store);
+    let result = remote.get(&path).await.unwrap();
+    assert!(matches!(result.payload, GetResultPayload::Stream(..)));
+    assert_eq!(&result.bytes().await.unwrap()[..], DATA);
+    let options = GetOptions {
+        range: Some(GetRange::Bounded(2..5)),
+        ..Default::default()
+    };
+    let ranged = remote.get_opts(&path, options).await.unwrap();
+    assert_eq!(&ranged.bytes().await.unwrap()[..], b"234");
 }
 
 #[tokio::test(flavor = "multi_thread")]
