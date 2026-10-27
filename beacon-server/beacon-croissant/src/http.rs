@@ -16,8 +16,8 @@ use beacon_core::{AuthIdentity, TableReference};
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use crate::document::{catalog, dataset, CatalogEntry};
-use crate::tables::readable_tables;
+use crate::document::{catalog, dataset};
+use crate::tables::catalog_entries;
 use crate::types::ServedSchema;
 use crate::url::{base_url, CroissantSettings};
 
@@ -122,26 +122,10 @@ async fn catalog_route(
     Extension(identity): Extension<AuthIdentity>,
     headers: HeaderMap,
 ) -> Response {
-    let names = match readable_tables(&state.runtime, &identity).await {
-        Ok(names) => names,
+    let entries = match catalog_entries(&state.runtime, &identity).await {
+        Ok(entries) => entries,
         Err(error) => return CroissantError::Internal(error.to_string()).into_response(),
     };
-    let mut entries = Vec::with_capacity(names.len());
-    for name in names {
-        let description = match state
-            .runtime
-            .table_arrow_schema(TableReference::bare(name.as_str()), &identity)
-            .await
-        {
-            Ok(schema) => ServedSchema::from_arrow(&schema).table_comment,
-            Err(error) => {
-                // The table stays in the catalog, without a description.
-                tracing::debug!(table = %name, %error, "Croissant catalog entry without schema");
-                None
-            }
-        };
-        entries.push(CatalogEntry { name, description });
-    }
     let base = base_url(&state.settings, &headers);
     json_ld(&catalog(&state.settings.catalog_title, &entries, &base))
 }

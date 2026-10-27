@@ -1,8 +1,21 @@
 //! The server home page: a static index of the surfaces a Beacon server exposes.
 //!
 //! The page itself is `assets/home.html`, compiled into the binary. This module
-//! only fills in its placeholders, once at startup: every value the page shows
-//! (base path, admin UI presence, MCP state) is fixed for the life of the process.
+//! fills in its placeholders once at startup: the base path, admin UI presence
+//! and MCP state are fixed for the life of the process. Only the Croissant
+//! catalog JSON-LD changes per request, see [`HomePage`].
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use ::axum::http::HeaderMap;
+use ::axum::response::Html;
+use beacon_core::runtime::Runtime;
+use beacon_croissant::{base_url, catalog, catalog_entries, CatalogEntry, CroissantSettings};
+use tokio::sync::Mutex;
+
+/// How long the home page keeps the catalog entries. Crawlers load the page often.
+const CATALOG_TTL: Duration = Duration::from_secs(60);
 
 /// The page template, with `{{...}}` placeholders and optional sections.
 const TEMPLATE: &str = include_str!("../../assets/home.html");
@@ -26,7 +39,8 @@ const DOCS_ENTRY: &str = "introduction";
 ///
 /// # Returns
 ///
-/// A complete HTML document. Text taken from the configuration is escaped.
+/// A complete HTML document. Text taken from the configuration is escaped. The
+/// `{{jsonld}}` placeholder stays for [`with_jsonld`].
 pub(crate) fn render(
     title: &str,
     version: &str,
@@ -42,6 +56,90 @@ pub(crate) fn render(
         // Links carry the base path because the root answers on both `/prefix`
         // and `/prefix/`. Relative targets resolve one level up on the first.
         .replace("{{base}}", base_path)
+}
+
+/// Fills the `{{jsonld}}` placeholder of a rendered page.
+///
+/// `Some` gives a `<script type="application/ld+json">` element; `None` gives nothing.
+/// Each `<` in the JSON becomes `<`, so no text in the catalog can end the script.
+pub(crate) fn with_jsonld(page: &str, catalog: Option<&serde_json::Value>) -> String {
+    let script = match catalog {
+        Some(catalog) => format!(
+            "<script type=\"application/ld+json\">{}</script>",
+            catalog.to_string().replace('<', "\\u003c")
+        ),
+        None => String::new(),
+    };
+    page.replace("{{jsonld}}", &script)
+}
+
+/// The home page handler state: the rendered page and, when Croissant is on, its catalog.
+pub(crate) struct HomePage {
+    page: String,
+    catalog: Option<HomeCatalog>,
+}
+
+/// The source of the anonymous Croissant catalog on the home page.
+struct HomeCatalog {
+    runtime: Arc<Runtime>,
+    settings: CroissantSettings,
+    /// Only the entries, never a page: the base URL comes from each request.
+    cache: Mutex<Option<(Instant, Vec<CatalogEntry>)>>,
+}
+
+impl HomePage {
+    /// A home page from a [`render`] output. `croissant` is `None` when Croissant is off.
+    pub(crate) fn new(page: String, croissant: Option<(Arc<Runtime>, CroissantSettings)>) -> Self {
+        let catalog = croissant.map(|(runtime, settings)| HomeCatalog {
+            runtime,
+            settings,
+            cache: Mutex::new(None),
+        });
+        Self { page, catalog }
+    }
+
+    /// The page for one request, with the anonymous catalog when Croissant and
+    /// anonymous access are on.
+    pub(crate) async fn serve(&self, headers: &HeaderMap) -> Html<String> {
+        let document = match &self.catalog {
+            Some(source) if source.runtime.anonymous_enabled() => {
+                source.entries().await.map(|entries| {
+                    let base = base_url(&source.settings, headers);
+                    catalog(&source.settings.catalog_title, &entries, &base)
+                })
+            }
+            _ => None,
+        };
+        Html(with_jsonld(&self.page, document.as_ref()))
+    }
+}
+
+impl HomeCatalog {
+    /// The catalog entries of the anonymous user, at most [`CATALOG_TTL`] old.
+    /// A failure gives `None` and is not kept.
+    async fn entries(&self) -> Option<Vec<CatalogEntry>> {
+        // The lock is held during the query, so parallel requests share one query.
+        let mut cache = self.cache.lock().await;
+        if let Some((loaded, entries)) = cache.as_ref() {
+            if loaded.elapsed() < CATALOG_TTL {
+                return Some(entries.clone());
+            }
+        }
+        let result = match self.runtime.authenticate_anonymous().await {
+            Ok(identity) => catalog_entries(&self.runtime, &identity).await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(entries) => {
+                *cache = Some((Instant::now(), entries.clone()));
+                Some(entries)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "home page served without the Croissant catalog");
+                None
+            }
+        }
+    }
 }
 
 /// Builds the documentation URL for the running version.
@@ -102,7 +200,8 @@ fn escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{docs_directory, docs_url, render, DOCS_ENTRY};
+    use super::{docs_directory, docs_url, render, with_jsonld, DOCS_ENTRY};
+    use beacon_croissant::{catalog, CatalogEntry};
 
     #[test]
     fn optional_sections_follow_what_the_server_mounts() {
@@ -123,7 +222,7 @@ mod tests {
 
     #[test]
     fn every_link_carries_the_base_path() {
-        let page = render("Beacon", "2.0.0", "/beacon", true, true);
+        let page = with_jsonld(&render("Beacon", "2.0.0", "/beacon", true, true), None);
         for href in [
             "/beacon/admin/",
             "/beacon/swagger",
@@ -172,5 +271,34 @@ mod tests {
         let page = render("<script>alert(1)</script>", "2.0.0", "", false, false);
         assert!(!page.contains("<script>alert"));
         assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    #[test]
+    fn script_close_is_escaped() {
+        let entries = [CatalogEntry {
+            name: "obs".to_string(),
+            description: Some("x</script><b>".to_string()),
+        }];
+        let document = catalog("Beacon", &entries, "http://localhost");
+        let page = with_jsonld(
+            &render("Beacon", "2.0.0", "", false, false),
+            Some(&document),
+        );
+
+        assert!(page.contains("<script type=\"application/ld+json\">"));
+        assert_eq!(page.matches(r"</script>").count(), 1);
+        assert_eq!(
+            page.matches("</script>").count(),
+            1,
+            "only the real end tag"
+        );
+        assert!(!page.contains("<b>"));
+    }
+
+    #[test]
+    fn no_catalog_gives_no_script() {
+        let page = with_jsonld(&render("Beacon", "2.0.0", "", false, false), None);
+        assert!(!page.contains("application/ld+json"));
+        assert!(!page.contains("{{jsonld}}"));
     }
 }

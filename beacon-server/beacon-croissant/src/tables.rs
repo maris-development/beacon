@@ -2,7 +2,10 @@
 
 use arrow::array::AsArray;
 use beacon_core::runtime::Runtime;
-use beacon_core::AuthIdentity;
+use beacon_core::{AuthIdentity, TableReference};
+
+use crate::document::CatalogEntry;
+use crate::types::ServedSchema;
 
 /// The tables in the default catalog and schema that `identity` can read, sorted by name.
 ///
@@ -38,4 +41,31 @@ pub async fn readable_tables(
     }
     names.sort();
     Ok(names)
+}
+
+/// The catalog entry of each table that `identity` can read, sorted by name.
+///
+/// The description is the table comment. A table whose schema does not load stays in the
+/// list without a description.
+pub async fn catalog_entries(
+    runtime: &Runtime,
+    identity: &AuthIdentity,
+) -> anyhow::Result<Vec<CatalogEntry>> {
+    let names = readable_tables(runtime, identity).await?;
+    let mut entries = Vec::with_capacity(names.len());
+    for name in names {
+        let description = match runtime
+            .table_arrow_schema(TableReference::bare(name.as_str()), identity)
+            .await
+        {
+            Ok(schema) => ServedSchema::from_arrow(&schema).table_comment,
+            Err(error) => {
+                // The table stays in the catalog, without a description.
+                tracing::debug!(table = %name, %error, "Croissant catalog entry without schema");
+                None
+            }
+        };
+        entries.push(CatalogEntry { name, description });
+    }
+    Ok(entries)
 }

@@ -123,12 +123,14 @@ pub fn setup_router(
     // Croissant (ML dataset metadata), gated by BEACON_CROISSANT_ENABLED (default on). It uses
     // the same `resolve_identity` middleware, so each request runs as the caller. It is not
     // in the OpenAPI document.
+    let mut home_croissant = None;
     if flag_on(std::env::var("BEACON_CROISSANT_ENABLED").ok().as_deref()) {
         let settings = beacon_croissant::CroissantSettings {
             public_url: config.server.public_url.clone(),
             base_path: config.server.base_path.clone(),
             catalog_title: config.api_docs.title.clone(),
         };
+        home_croissant = Some((beacon_runtime.runtime().clone(), settings.clone()));
         let croissant_router =
             beacon_croissant::router::<Arc<Server>>(beacon_runtime.runtime().clone(), settings)
                 .layer(::axum::middleware::from_fn_with_state(
@@ -137,17 +139,18 @@ pub fn setup_router(
                 ));
         router = router.merge(croissant_router);
     }
-    // The home page is fixed once the router is built, so it is rendered here and
-    // leaked as a constant rather than rebuilt per request.
-    let home_page: &'static str = crate::axum::home::render(
-        &config.api_docs.title,
-        BEACON_VERSION,
-        base_path,
-        web_ui.is_some(),
-        // MCP is unreleased, so the home page does not show its address.
-        false,
-    )
-    .leak();
+    // The home page is rendered once here. Each request adds only the anonymous Croissant catalog.
+    let home_page = Arc::new(crate::axum::home::HomePage::new(
+        crate::axum::home::render(
+            &config.api_docs.title,
+            BEACON_VERSION,
+            base_path,
+            web_ui.is_some(),
+            // MCP is unreleased, so the home page does not show its address.
+            false,
+        ),
+        home_croissant,
+    ));
 
     let mut router = router
         .merge(Scalar::with_url("/scalar/", docs.clone()))
@@ -156,7 +159,13 @@ pub fn setup_router(
             get(move || async move { Redirect::to(scalar_redirect) }),
         )
         .route("/api/health", get(health))
-        .route("/", get(move || async move { Html(home_page) }));
+        .route(
+            "/",
+            get(move |headers: HeaderMap| {
+                let home_page = home_page.clone();
+                async move { home_page.serve(&headers).await }
+            }),
+        );
 
     if let Some(web_ui) = web_ui {
         router = router.merge(web_ui);

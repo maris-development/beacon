@@ -359,3 +359,67 @@ async fn urls_follow_the_base_path() {
         "http://localhost/beacon/api/croissant/obs"
     );
 }
+
+/// GET the home page with `Host: host`. Returns the page text.
+async fn home_page(router: &Router, host: &str) -> String {
+    let request = Request::builder()
+        .method("GET")
+        .uri("/")
+        .header(header::HOST, host)
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn home_page_embeds_the_anonymous_catalog() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let page = home_page(&router, "localhost").await;
+
+    assert!(
+        page.contains("<script type=\"application/ld+json\">"),
+        "{page}"
+    );
+    assert!(page.contains("\"@type\":\"DataCatalog\""), "{page}");
+    assert!(
+        page.contains("http://localhost/api/croissant/obs"),
+        "{page}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn home_page_without_anonymous_has_no_catalog() {
+    let mut config = config(false);
+    config.auth.anonymous_enabled = false;
+    let (router, _harness, admin) = router_with(config).await;
+    obs_table(&router, &admin).await;
+
+    let page = home_page(&router, "localhost").await;
+
+    assert!(!page.contains("application/ld+json"), "{page}");
+    assert!(!page.contains("{{jsonld}}"), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn home_page_cache_ignores_the_host() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let first = home_page(&router, "a.example").await;
+    assert!(
+        first.contains("http://a.example/api/croissant/obs"),
+        "{first}"
+    );
+
+    let second = home_page(&router, "b.example").await;
+    assert!(
+        second.contains("http://b.example/api/croissant/"),
+        "{second}"
+    );
+    assert!(!second.contains("a.example"), "{second}");
+}

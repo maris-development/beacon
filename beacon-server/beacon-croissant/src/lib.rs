@@ -15,6 +15,6 @@ pub mod url;
 pub use context::{context, CONFORMS_TO};
 pub use document::{catalog, data_url, dataset, dataset_url, CatalogEntry, DATA_FILE};
 pub use http::{router, CroissantError};
-pub use tables::readable_tables;
+pub use tables::{catalog_entries, readable_tables};
 pub use types::{CroissantType, ServedColumn, ServedSchema};
 pub use url::{base_url, CroissantSettings};
