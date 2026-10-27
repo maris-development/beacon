@@ -28,6 +28,8 @@ use super::options::FFI_PutResult;
 #[repr(C)]
 pub struct FFI_MultipartUpload {
     /// Uploads one part. Several parts can be in flight at the same time.
+    ///
+    /// Fails while a `complete` or `abort` is pending.
     pub put_part: unsafe extern "C" fn(
         upload: &mut Self,
         payload: SVec<FFI_Bytes>,
@@ -119,8 +121,11 @@ unsafe extern "C" fn complete_fn(
             let shared = Arc::clone(&upload.data().upload);
             let finished = Arc::clone(&upload.data().finished);
             async move {
-                let result = shared.lock().await.complete().await?;
+                let mut inner = shared.lock().await;
+                let result = inner.complete().await?;
+                // Set under the lock, so a release task sees it.
                 finished.store(true, Ordering::SeqCst);
+                drop(inner);
                 Ok(FFI_PutResult::from(&result))
             }
             .boxed()
@@ -138,8 +143,11 @@ unsafe extern "C" fn abort_fn(
             let shared = Arc::clone(&upload.data().upload);
             let finished = Arc::clone(&upload.data().finished);
             async move {
-                shared.lock().await.abort().await?;
+                let mut inner = shared.lock().await;
+                inner.abort().await?;
+                // Set under the lock, so a release task sees it.
                 finished.store(true, Ordering::SeqCst);
+                drop(inner);
                 Ok(())
             }
             .boxed()
@@ -162,7 +170,7 @@ unsafe extern "C" fn release_fn(upload: &mut FFI_MultipartUpload) {
             let finished = Arc::clone(&data.finished);
             handle.spawn(async move {
                 let mut upload = shared.lock().await;
-                // A `complete` or `abort` in flight can finish before the lock.
+                // A successful `complete` or `abort` sets `finished` before it frees the lock.
                 if finished.load(Ordering::SeqCst) {
                     return;
                 }
