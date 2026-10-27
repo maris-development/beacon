@@ -1,4 +1,4 @@
-name: SDK memory checks
+name: sdk-asan
 
 # Checks the unsafe FFI code of the plugin SDK. Only the SDK crate runs, so the jobs stay short.
 on:
@@ -6,12 +6,12 @@ on:
     paths:
       - "beacon-db/beacon-plugin-sdk/**"
       - "Cargo.lock"
-      - ".github/workflows/sdk-memory.yml"
+      - ".github/workflows/sdk-asan.yml"
   pull_request:
     paths:
       - "beacon-db/beacon-plugin-sdk/**"
       - "Cargo.lock"
-      - ".github/workflows/sdk-memory.yml"
+      - ".github/workflows/sdk-asan.yml"
   workflow_dispatch:
 
 permissions:
