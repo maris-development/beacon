@@ -113,6 +113,21 @@ mod tests {
     }
 
     #[test]
+    fn object_meta_before_1970_round_trip() {
+        let meta = ObjectMeta {
+            location: Path::from("old"),
+            last_modified: "1969-12-31T23:59:59.5Z".parse::<DateTime<Utc>>().unwrap(),
+            size: 1,
+            e_tag: None,
+            version: None,
+        };
+        let ffi = FFI_ObjectMeta::try_from(&meta).unwrap();
+        assert_eq!(ffi.last_modified_ns, -500_000_000);
+        let back = ObjectMeta::try_from(ffi).unwrap();
+        assert_eq!(back, meta);
+    }
+
+    #[test]
     fn object_meta_out_of_range_time_fails() {
         let meta = ObjectMeta {
             location: Path::from("a"),

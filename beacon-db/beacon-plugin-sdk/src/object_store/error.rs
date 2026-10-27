@@ -8,6 +8,8 @@ use stabby::string::String as SString;
 use crate::panic_safe::panic_message;
 
 /// The `object_store::Error` variant of an [`FFI_ObjectStoreError`].
+///
+/// The boundary carries the discriminant as a `u32`. `From<u32>` maps an unknown value to `Generic`.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -38,14 +40,33 @@ pub enum FFI_ErrorKind {
     UnknownConfigurationKey = 11,
 }
 
+impl From<u32> for FFI_ErrorKind {
+    fn from(value: u32) -> Self {
+        match value {
+            1 => Self::NotFound,
+            2 => Self::InvalidPath,
+            3 => Self::JoinError,
+            4 => Self::NotSupported,
+            5 => Self::AlreadyExists,
+            6 => Self::Precondition,
+            7 => Self::NotModified,
+            8 => Self::NotImplemented,
+            9 => Self::PermissionDenied,
+            10 => Self::Unauthenticated,
+            11 => Self::UnknownConfigurationKey,
+            _ => Self::Generic,
+        }
+    }
+}
+
 /// An `object_store::Error` as FFI data.
 ///
 /// The source error does not cross. Its text is in `message`.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct FFI_ObjectStoreError {
-    /// The error variant.
-    pub kind: FFI_ErrorKind,
+    /// The [`FFI_ErrorKind`] discriminant. An unknown value arrives as `Generic`.
+    pub kind: u32,
     /// The store name, or empty.
     pub store: SString,
     /// The object path, or empty.
@@ -61,7 +82,7 @@ pub struct FFI_ObjectStoreError {
 impl FFI_ObjectStoreError {
     fn new(kind: FFI_ErrorKind, store: &str, path: &str, message: &str) -> Self {
         Self {
-            kind,
+            kind: kind as u32,
             store: SString::from(store),
             path: SString::from(path),
             message: SString::from(message),
@@ -140,7 +161,8 @@ impl From<FFI_ObjectStoreError> for Error {
         use FFI_ErrorKind as K;
         let path = error.path.as_str().to_string();
         let source = error.message.as_str().to_string().into();
-        match error.kind {
+        let kind = FFI_ErrorKind::from(error.kind);
+        match kind {
             K::Generic => Error::Generic {
                 store: static_store_name(error.store.as_str()),
                 source,
@@ -148,7 +170,7 @@ impl From<FFI_ObjectStoreError> for Error {
             K::NotFound => Error::NotFound { path, source },
             K::InvalidPath | K::JoinError => Error::Generic {
                 store: static_store_name(error.store.as_str()),
-                source: format!("{:?}: {}", error.kind, error.message.as_str()).into(),
+                source: format!("{kind:?}: {}", error.message.as_str()).into(),
             },
             K::NotSupported => Error::NotSupported { source },
             K::AlreadyExists => Error::AlreadyExists { path, source },
@@ -362,9 +384,32 @@ mod tests {
     }
 
     #[test]
+    fn unknown_kind_becomes_generic() {
+        let error = FFI_ObjectStoreError {
+            kind: 99,
+            store: SString::new(),
+            path: SString::new(),
+            message: SString::from("strange"),
+            detail_a: SString::new(),
+            detail_b: SString::new(),
+        };
+        let back = Error::from(error);
+        assert!(matches!(
+            &back,
+            Error::Generic {
+                store: "Plugin",
+                ..
+            }
+        ));
+        assert_eq!(source_text(&back), "strange");
+        assert_eq!(FFI_ErrorKind::from(99), FFI_ErrorKind::Generic);
+        assert_eq!(FFI_ErrorKind::from(6), FFI_ErrorKind::Precondition);
+    }
+
+    #[test]
     fn panic_error_keeps_message() {
         let error = panic_error(Box::new("oops"));
-        assert_eq!(error.kind, FFI_ErrorKind::Generic);
+        assert_eq!(FFI_ErrorKind::from(error.kind), FFI_ErrorKind::Generic);
         assert_eq!(error.message.as_str(), "panic in object store call: oops");
         let back = Error::from(error);
         assert!(matches!(
