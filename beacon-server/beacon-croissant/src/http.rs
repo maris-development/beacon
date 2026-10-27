@@ -10,7 +10,7 @@ use axum::routing::get;
 use axum::{Extension, Router};
 use beacon_core::query::output::{Output, OutputFormat};
 use beacon_core::query::Query;
-use beacon_core::query_result::QueryOutput;
+use beacon_core::query_result::{OutputFileKind, QueryOutput};
 use beacon_core::runtime::Runtime;
 use beacon_core::{AuthIdentity, TableReference};
 use futures::StreamExt;
@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use crate::document::{catalog, dataset};
 use crate::tables::catalog_entries;
 use crate::types::ServedSchema;
-use crate::url::{base_url, CroissantSettings};
+use crate::url::{base_url, CroissantSettings, LINK_HEADERS};
 
 /// The media type of the Croissant documents.
 const JSON_LD: &str = "application/ld+json";
@@ -67,14 +67,31 @@ pub fn router<S: Clone + Send + Sync + 'static>(
     runtime: Arc<Runtime>,
     settings: CroissantSettings,
 ) -> Router<S> {
-    Router::new()
+    let links_from_headers = settings.public_url.is_none();
+    let router = Router::new()
         .route("/api/croissant", get(catalog_route))
         .route("/api/croissant/{table}", get(dataset_route))
-        .route("/api/croissant/{table}/data.parquet", get(data_route))
+        .route(
+            "/api/croissant/{table}/data.parquet",
+            get(data_route).head(data_head_route),
+        )
         .with_state(CroissantState {
             runtime,
             settings: Arc::new(settings),
-        })
+        });
+    if links_from_headers {
+        router.layer(axum::middleware::map_response(vary_on_link_headers))
+    } else {
+        router
+    }
+}
+
+/// Tells a shared cache that the links depend on the request host.
+async fn vary_on_link_headers(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .append(header::VARY, HeaderValue::from_static(LINK_HEADERS));
+    response
 }
 
 /// The served schema of `table`, and the reference that found it. An unknown table and a table
@@ -85,7 +102,7 @@ pub(crate) async fn load_schema(
     identity: &AuthIdentity,
     table: &str,
 ) -> Result<(TableReference, ServedSchema), CroissantError> {
-    // The bare name keeps its case. A name with a `.` or a `"` may also be a qualified name.
+    // Try the bare name first, then a qualified name.
     let mut references = vec![TableReference::bare(table)];
     if table.contains(['.', '"']) {
         references.push(TableReference::from(table));
@@ -155,18 +172,61 @@ async fn data_route(
         .unwrap_or_else(IntoResponse::into_response)
 }
 
+/// The headers of the Parquet file, with no query.
+async fn data_head_route(
+    State(state): State<CroissantState>,
+    Extension(identity): Extension<AuthIdentity>,
+    Path(table): Path<String>,
+) -> Response {
+    let head = async {
+        load_data_schema(&state.runtime, &identity, &table).await?;
+        let mut response = Response::new(Body::empty());
+        set_file_headers(
+            response.headers_mut(),
+            OutputFileKind::Parquet.content_type(),
+            &table,
+        )?;
+        Ok::<_, CroissantError>(response)
+    };
+    head.await.unwrap_or_else(IntoResponse::into_response)
+}
+
+/// The schema of `table` for the data route. A table with no served column gives 404.
+async fn load_data_schema(
+    runtime: &Runtime,
+    identity: &AuthIdentity,
+    table: &str,
+) -> Result<(TableReference, ServedSchema), CroissantError> {
+    let (reference, schema) = load_schema(runtime, identity, table).await?;
+    if schema.columns.is_empty() {
+        return Err(CroissantError::NotFound(format!(
+            "table {table:?} has no column that Croissant can describe"
+        )));
+    }
+    Ok((reference, schema))
+}
+
+/// Sets the `Content-Type` and the `Content-Disposition` of the data file of `table`.
+fn set_file_headers(
+    headers: &mut HeaderMap,
+    content_type: &'static str,
+    table: &str,
+) -> Result<(), CroissantError> {
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    let disposition = format!("attachment; filename=\"{}.parquet\"", file_name(table));
+    let disposition = HeaderValue::from_str(&disposition)
+        .map_err(|error| CroissantError::Internal(format!("invalid file name: {error}")))?;
+    headers.insert(header::CONTENT_DISPOSITION, disposition);
+    Ok(())
+}
+
 /// All served columns of `table`, as a Parquet file.
 async fn data_response(
     runtime: &Runtime,
     identity: AuthIdentity,
     table: &str,
 ) -> Result<Response, CroissantError> {
-    let (reference, schema) = load_schema(runtime, &identity, table).await?;
-    if schema.columns.is_empty() {
-        return Err(CroissantError::NotFound(format!(
-            "table {table:?} has no column that Croissant can describe"
-        )));
-    }
+    let (reference, schema) = load_data_schema(runtime, &identity, table).await?;
     let columns: Vec<String> = schema
         .columns
         .iter()
@@ -202,12 +262,7 @@ async fn data_response(
     });
 
     let mut response = Response::new(Body::from_stream(body));
-    let headers = response.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    let disposition = format!("attachment; filename=\"{}.parquet\"", file_name(table));
-    let disposition = HeaderValue::from_str(&disposition)
-        .map_err(|error| CroissantError::Internal(format!("invalid file name: {error}")))?;
-    headers.insert(header::CONTENT_DISPOSITION, disposition);
+    set_file_headers(response.headers_mut(), content_type, table)?;
     Ok(response)
 }
 

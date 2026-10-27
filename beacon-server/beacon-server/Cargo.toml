@@ -87,3 +87,5 @@ tempfile = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 # Reads the Parquet body of the Croissant data route.
 parquet = { workspace = true }
+# `tokio::time::pause` for the home page catalog timeout tests.
+tokio = { workspace = true, features = ["test-util"] }

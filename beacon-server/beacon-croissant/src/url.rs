@@ -2,6 +2,9 @@
 
 use axum::http::HeaderMap;
 
+/// The `Vary` value of a response whose links come from the request headers.
+pub const LINK_HEADERS: &str = "Host, X-Forwarded-Host, X-Forwarded-Proto";
+
 /// Server settings that the Croissant documents need.
 #[derive(Debug, Clone)]
 pub struct CroissantSettings {

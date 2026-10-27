@@ -7,7 +7,7 @@ use serde_json::Value;
 /// The `dct:conformsTo` value of a Croissant 1.1 dataset.
 pub const CONFORMS_TO: &str = "http://mlcommons.org/croissant/1.1";
 
-/// The `@context` object from Appendix 1 of the Croissant 1.1 specification.
+/// The `@context` object from Appendix 1 of the Croissant 1.1 specification, with https schema.org.
 // The appendix prints a trailing comma after "value"; JSON does not allow it, so it is removed.
 // mlcroissant finds the dataset only as https://schema.org/Dataset, so schema.org uses https.
 const CONTEXT_JSON: &str = r#"{

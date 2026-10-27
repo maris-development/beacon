@@ -17,4 +17,4 @@ pub use document::{catalog, data_url, dataset, dataset_url, CatalogEntry, DATA_F
 pub use http::{router, CroissantError};
 pub use tables::{catalog_entries, readable_tables};
 pub use types::{CroissantType, ServedColumn, ServedSchema};
-pub use url::{base_url, CroissantSettings};
+pub use url::{base_url, CroissantSettings, LINK_HEADERS};

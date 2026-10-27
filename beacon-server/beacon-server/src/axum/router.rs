@@ -7,7 +7,7 @@ use ::axum::{
     body::Bytes,
     extract::MatchedPath,
     http::{HeaderMap, HeaderName, HeaderValue, Method, Request},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{any, get},
     Router,
 };
@@ -93,7 +93,7 @@ pub fn setup_router(
     let croissant_enabled = flag_on(std::env::var("BEACON_CROISSANT_ENABLED").ok().as_deref());
     let mut router = client_router.merge(admin_router).merge(alias_router);
     if mcp_enabled {
-        // MCP has no request headers here, so the base path gives a relative link.
+        // Without a public URL, MCP links are relative to the base path.
         let croissant_base = croissant_enabled.then(|| {
             config
                 .server
@@ -130,9 +130,7 @@ pub fn setup_router(
             ));
         router = router.merge(dap_router);
     }
-    // Croissant (ML dataset metadata), gated by BEACON_CROISSANT_ENABLED (default on). It uses
-    // the same `resolve_identity` middleware, so each request runs as the caller. It is not
-    // in the OpenAPI document.
+    // Croissant routes run as the caller, through `resolve_identity`.
     let mut home_croissant = None;
     if croissant_enabled {
         let settings = beacon_croissant::CroissantSettings {
@@ -149,7 +147,7 @@ pub fn setup_router(
                 ));
         router = router.merge(croissant_router);
     }
-    // The home page is rendered once here. Each request adds only the anonymous Croissant catalog.
+    // Each request adds only the anonymous Croissant catalog to the page.
     let home_page = Arc::new(crate::axum::home::HomePage::new(
         crate::axum::home::render(
             &config.api_docs.title,

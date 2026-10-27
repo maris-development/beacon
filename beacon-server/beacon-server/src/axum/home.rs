@@ -5,17 +5,29 @@
 //! and MCP state are fixed for the life of the process. Only the Croissant
 //! catalog JSON-LD changes per request, see [`HomePage`].
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use ::axum::http::HeaderMap;
-use ::axum::response::Html;
+use ::axum::http::header::VARY;
+use ::axum::http::{HeaderMap, HeaderValue};
+use ::axum::response::{Html, IntoResponse, Response};
 use beacon_core::runtime::Runtime;
-use beacon_croissant::{base_url, catalog, catalog_entries, CatalogEntry, CroissantSettings};
+use beacon_croissant::{
+    base_url, catalog, catalog_entries, CatalogEntry, CroissantSettings, LINK_HEADERS,
+};
 use tokio::sync::Mutex;
+use tokio::time::{timeout_at, Instant};
 
 /// How long the home page keeps the catalog entries. Crawlers load the page often.
 const CATALOG_TTL: Duration = Duration::from_secs(60);
+
+/// The longest time that a request waits for a catalog refresh.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The time after a failed refresh before the next try.
+const RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// The page template, with `{{...}}` placeholders and optional sections.
 const TEMPLATE: &str = include_str!("../../assets/home.html");
@@ -61,7 +73,8 @@ pub(crate) fn render(
 /// Fills the `{{jsonld}}` placeholder of a rendered page.
 ///
 /// `Some` gives a `<script type="application/ld+json">` element; `None` gives nothing.
-/// Each `<` in the JSON becomes `<`, so no text in the catalog can end the script.
+/// Each `<` in the JSON becomes the six characters `<`, so no text in the catalog can
+/// end the script.
 pub(crate) fn with_jsonld(page: &str, catalog: Option<&serde_json::Value>) -> String {
     let script = match catalog {
         Some(catalog) => format!(
@@ -76,69 +89,147 @@ pub(crate) fn with_jsonld(page: &str, catalog: Option<&serde_json::Value>) -> St
 /// The home page handler state: the rendered page and, when Croissant is on, its catalog.
 pub(crate) struct HomePage {
     page: String,
-    catalog: Option<HomeCatalog>,
+    catalog: Option<HomeSource>,
 }
 
-/// The source of the anonymous Croissant catalog on the home page.
-struct HomeCatalog {
+/// The home page source of the anonymous Croissant catalog.
+struct HomeSource {
     runtime: Arc<Runtime>,
     settings: CroissantSettings,
+    entries: HomeCatalog,
+}
+
+/// Loads the catalog entries of the anonymous user.
+type Loader = Box<
+    dyn Fn() -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<CatalogEntry>>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// The catalog entries that the home page keeps.
+struct HomeCatalog {
+    loader: Loader,
     /// Only the entries, never a page: the base URL comes from each request.
-    cache: Mutex<Option<(Instant, Vec<CatalogEntry>)>>,
+    state: std::sync::Mutex<CatalogState>,
+    /// Held while a refresh runs, so at most one refresh runs.
+    refresh: Mutex<()>,
+}
+
+#[derive(Default)]
+struct CatalogState {
+    loaded: Option<(Instant, Vec<CatalogEntry>)>,
+    failed: Option<Instant>,
 }
 
 impl HomePage {
     /// A home page from a [`render`] output. `croissant` is `None` when Croissant is off.
     pub(crate) fn new(page: String, croissant: Option<(Arc<Runtime>, CroissantSettings)>) -> Self {
-        let catalog = croissant.map(|(runtime, settings)| HomeCatalog {
-            runtime,
-            settings,
-            cache: Mutex::new(None),
+        let catalog = croissant.map(|(runtime, settings)| {
+            let loader_runtime = runtime.clone();
+            let loader: Loader = Box::new(move || {
+                let runtime = loader_runtime.clone();
+                Box::pin(async move {
+                    let identity = runtime.authenticate_anonymous().await?;
+                    catalog_entries(&runtime, &identity).await
+                })
+            });
+            HomeSource {
+                runtime,
+                settings,
+                entries: HomeCatalog::new(loader),
+            }
         });
         Self { page, catalog }
     }
 
     /// The page for one request, with the anonymous catalog when Croissant and
     /// anonymous access are on.
-    pub(crate) async fn serve(&self, headers: &HeaderMap) -> Html<String> {
+    pub(crate) async fn serve(&self, headers: &HeaderMap) -> Response {
         let document = match &self.catalog {
             Some(source) if source.runtime.anonymous_enabled() => {
-                source.entries().await.map(|entries| {
+                source.entries.entries().await.map(|entries| {
                     let base = base_url(&source.settings, headers);
                     catalog(&source.settings.catalog_title, &entries, &base)
                 })
             }
             _ => None,
         };
-        Html(with_jsonld(&self.page, document.as_ref()))
+        let mut response = Html(with_jsonld(&self.page, document.as_ref())).into_response();
+        if let Some(source) = &self.catalog {
+            if source.settings.public_url.is_none() {
+                response
+                    .headers_mut()
+                    .append(VARY, HeaderValue::from_static(LINK_HEADERS));
+            }
+        }
+        response
     }
 }
 
 impl HomeCatalog {
-    /// The catalog entries of the anonymous user, at most [`CATALOG_TTL`] old.
-    /// A failure gives `None` and is not kept.
-    async fn entries(&self) -> Option<Vec<CatalogEntry>> {
-        // The lock is held during the query, so parallel requests share one query.
-        let mut cache = self.cache.lock().await;
-        if let Some((loaded, entries)) = cache.as_ref() {
-            if loaded.elapsed() < CATALOG_TTL {
-                return Some(entries.clone());
-            }
+    fn new(loader: Loader) -> Self {
+        Self {
+            loader,
+            state: std::sync::Mutex::new(CatalogState::default()),
+            refresh: Mutex::new(()),
         }
-        let result = match self.runtime.authenticate_anonymous().await {
-            Ok(identity) => catalog_entries(&self.runtime, &identity).await,
-            Err(error) => Err(error),
+    }
+
+    /// The catalog entries of the anonymous user, at most [`CATALOG_TTL`] old.
+    ///
+    /// A request waits at most [`REFRESH_TIMEOUT`]. A failed or late refresh gives the
+    /// stale entries, else `None`.
+    async fn entries(&self) -> Option<Vec<CatalogEntry>> {
+        let deadline = Instant::now() + REFRESH_TIMEOUT;
+        if let Some(entries) = self.current() {
+            return entries;
+        }
+        let Ok(_refresh) = timeout_at(deadline, self.refresh.lock()).await else {
+            return self.stale();
         };
+        // An other request can have refreshed while this one waited.
+        if let Some(entries) = self.current() {
+            return entries;
+        }
+        let result = match timeout_at(deadline, (self.loader)()).await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("no answer in {REFRESH_TIMEOUT:?}")),
+        };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         match result {
             Ok(entries) => {
-                *cache = Some((Instant::now(), entries.clone()));
+                state.loaded = Some((Instant::now(), entries.clone()));
+                state.failed = None;
                 Some(entries)
             }
             Err(error) => {
-                tracing::warn!(%error, "home page served without the Croissant catalog");
-                None
+                tracing::warn!(%error, "home page served without a fresh Croissant catalog");
+                // The failure time only delays the next try; the entries stay as they were.
+                state.failed = Some(Instant::now());
+                state.loaded.as_ref().map(|(_, entries)| entries.clone())
             }
         }
+    }
+
+    /// `Some` when no refresh is due: fresh entries, or the stale entries after a recent failure.
+    fn current(&self) -> Option<Option<Vec<CatalogEntry>>> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let stale = state.loaded.as_ref().map(|(_, entries)| entries.clone());
+        if let Some((loaded, _)) = &state.loaded {
+            if loaded.elapsed() < CATALOG_TTL {
+                return Some(stale);
+            }
+        }
+        match state.failed {
+            Some(failed) if failed.elapsed() < RETRY_AFTER => Some(stale),
+            _ => None,
+        }
+    }
+
+    /// The last entries that loaded, of any age.
+    fn stale(&self) -> Option<Vec<CatalogEntry>> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.loaded.as_ref().map(|(_, entries)| entries.clone())
     }
 }
 
@@ -200,8 +291,14 @@ fn escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{docs_directory, docs_url, render, with_jsonld, DOCS_ENTRY};
+    use super::{
+        docs_directory, docs_url, render, with_jsonld, HomeCatalog, Loader, CATALOG_TTL,
+        DOCS_ENTRY, REFRESH_TIMEOUT, RETRY_AFTER,
+    };
     use beacon_croissant::{catalog, CatalogEntry};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn optional_sections_follow_what_the_server_mounts() {
@@ -286,13 +383,90 @@ mod tests {
         );
 
         assert!(page.contains("<script type=\"application/ld+json\">"));
-        assert_eq!(page.matches(r"</script>").count(), 1);
+        assert_eq!(page.matches(r"</script>").count(), 1, "the escaped text");
         assert_eq!(
             page.matches("</script>").count(),
             1,
             "only the real end tag"
         );
         assert!(!page.contains("<b>"));
+    }
+
+    fn entry(name: &str) -> CatalogEntry {
+        CatalogEntry {
+            name: name.to_string(),
+            description: None,
+        }
+    }
+
+    /// A catalog whose loader gives the next item of `results` and counts its calls.
+    /// `None` is a loader that never ends.
+    fn catalog_of(
+        results: Vec<Option<anyhow::Result<Vec<CatalogEntry>>>>,
+    ) -> (HomeCatalog, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let results = Arc::new(std::sync::Mutex::new(VecDeque::from(results)));
+        let counter = calls.clone();
+        let loader: Loader = Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let next = results.lock().unwrap().pop_front().expect("one more load");
+            Box::pin(async move {
+                match next {
+                    Some(result) => result,
+                    None => std::future::pending().await,
+                }
+            })
+        });
+        (HomeCatalog::new(loader), calls)
+    }
+
+    fn names(entries: Option<Vec<CatalogEntry>>) -> Option<Vec<String>> {
+        entries.map(|entries| entries.into_iter().map(|e| e.name).collect())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_refresh_is_not_cached() {
+        let (home, calls) = catalog_of(vec![
+            Some(Err(anyhow::anyhow!("provider down"))),
+            Some(Ok(vec![entry("obs")])),
+        ]);
+
+        assert_eq!(names(home.entries().await), None);
+        tokio::time::advance(RETRY_AFTER).await;
+        assert_eq!(names(home.entries().await), Some(vec!["obs".to_string()]));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_entries_survive_a_failed_refresh() {
+        let (home, calls) = catalog_of(vec![
+            Some(Ok(vec![entry("obs")])),
+            Some(Err(anyhow::anyhow!("provider down"))),
+            Some(Ok(vec![entry("obs2")])),
+        ]);
+        assert_eq!(names(home.entries().await), Some(vec!["obs".to_string()]));
+
+        tokio::time::advance(CATALOG_TTL).await;
+        assert_eq!(names(home.entries().await), Some(vec!["obs".to_string()]));
+        // The back-off keeps the stale entries without a new load.
+        assert_eq!(names(home.entries().await), Some(vec!["obs".to_string()]));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        tokio::time::advance(RETRY_AFTER).await;
+        assert_eq!(names(home.entries().await), Some(vec!["obs2".to_string()]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_loader_gives_the_page_within_the_timeout() {
+        let (home, calls) = catalog_of(vec![None]);
+        let start = tokio::time::Instant::now();
+
+        let (first, second) = tokio::join!(home.entries(), home.entries());
+
+        assert_eq!(names(first), None);
+        assert_eq!(names(second), None);
+        assert_eq!(start.elapsed(), REFRESH_TIMEOUT);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one refresh at a time");
     }
 
     #[test]

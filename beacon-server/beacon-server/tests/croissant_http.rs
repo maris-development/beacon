@@ -360,6 +360,128 @@ async fn urls_follow_the_base_path() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn head_on_data_gives_the_headers_only() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    let head = |uri: &'static str| {
+        let router = router.clone();
+        async move {
+            let request = Request::builder()
+                .method("HEAD")
+                .uri(uri)
+                .header(header::HOST, "localhost")
+                .body(Body::empty())
+                .unwrap();
+            let res = router.oneshot(request).await.unwrap();
+            let status = res.status();
+            let headers = res.headers().clone();
+            let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            (status, headers, body)
+        }
+    };
+
+    let (status, headers, body) = head("/api/croissant/obs/data.parquet").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers[header::CONTENT_TYPE],
+        "application/vnd.apache.parquet"
+    );
+    assert_eq!(
+        headers[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"obs.parquet\""
+    );
+    assert!(body.is_empty());
+
+    let (status, _, _) = head("/api/croissant/nope/data.parquet").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn head_on_data_runs_no_query() {
+    let (router, _harness, admin) = router_with(config(true)).await;
+    anonymous_reads_obs(&router, &admin).await;
+    admin_sql(
+        &router,
+        &admin,
+        "ALTER ROLE public_reader SET query_output_row_limit = 1",
+    )
+    .await;
+    let uri = "/api/croissant/obs/data.parquet";
+
+    let (status, _, body) = get(&router, uri, None).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let request = Request::builder()
+        .method("HEAD")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+/// Every `Vary` value of a response.
+fn vary(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all(header::VARY)
+        .iter()
+        .map(|value| value.to_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn links_from_headers_vary_on_the_host() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    obs_table(&router, &admin).await;
+
+    for uri in [
+        "/",
+        "/api/croissant",
+        "/api/croissant/obs",
+        "/api/croissant/obs/data.parquet",
+    ] {
+        let (status, headers, _) = get(&router, uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(
+            vary(&headers).contains(&"Host, X-Forwarded-Host, X-Forwarded-Proto".to_string()),
+            "{uri}: {:?}",
+            vary(&headers)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_public_url_needs_no_vary() {
+    let mut config = config(false);
+    config.server.public_url = Some("https://b.example.org".to_string());
+    let (router, _harness, admin) = router_with(config).await;
+    obs_table(&router, &admin).await;
+
+    for uri in ["/", "/api/croissant/obs"] {
+        let (status, headers, body) = get(&router, uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(
+            !vary(&headers)
+                .iter()
+                .any(|v| v.contains("X-Forwarded-Host")),
+            "{uri}: {:?}",
+            vary(&headers)
+        );
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("https://b.example.org/api/croissant/obs"),
+            "{uri}"
+        );
+    }
+}
+
 /// GET the home page with `Host: host`. Returns the page text.
 async fn home_page(router: &Router, host: &str) -> String {
     let request = Request::builder()
