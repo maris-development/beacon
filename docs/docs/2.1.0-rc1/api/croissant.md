@@ -63,8 +63,10 @@ for record in ds.records(record_set="argo"):
     print(record["argo/temp"])
 ```
 
-The key of each value is `{table}/{column}`. `mlcroissant` downloads `data.parquet` once, then
-reads the rows from it.
+The key of each value is `{table}/{column}`. Beacon URL-encodes each part of the key. For example,
+the column `a#b` of the table `odd name` has the key `odd%20name/a%23b`. The `record_set` value is
+the URL-encoded table name, for example `odd%20name`. `mlcroissant` downloads `data.parquet` once,
+then reads the rows from it.
 
 To validate a document, use the `mlcroissant` command:
 
@@ -108,9 +110,11 @@ the base path:
 BEACON_PUBLIC_URL=https://beacon.example.org
 ```
 
-When `BEACON_PUBLIC_URL` is not set, Beacon makes the links from the `X-Forwarded-Proto`,
-`X-Forwarded-Host` and `Host` request headers and `BEACON_BASE_PATH`. Behind a proxy, set
-`BEACON_PUBLIC_URL` or make sure that the proxy sends these headers.
+Set `BEACON_PUBLIC_URL` for each public deployment. When `BEACON_PUBLIC_URL` is not set, Beacon
+makes the links from the `X-Forwarded-Proto`, `X-Forwarded-Host` and `Host` request headers and
+`BEACON_BASE_PATH`. Beacon uses the first value of a forwarded header. The responses then send
+`Vary: Host, X-Forwarded-Host, X-Forwarded-Proto`, so that a shared cache keeps one copy for each
+host.
 
 To turn off the Croissant URLs, set `BEACON_CROISSANT_ENABLED=false`. See
 [Configuration](/docs/2.1.0-rc1/server/configuration).
@@ -120,5 +124,10 @@ To turn off the Croissant URLs, set `BEACON_CROISSANT_ENABLED=false`. See
 - The document has no `license`, `creator`, `citeAs` or `datePublished` yet.
 - Beacon serves only flat columns. Lists, structs, maps, binary and union columns are left out.
 - `data.parquet` is one file with all the rows. A large table gives a large file.
+- When the table has more rows than the `query_output_row_limit` of the caller's role,
+  `data.parquet` gives HTTP 400.
+- When `BEACON_PUBLIC_URL` is not set, the MCP `croissant` link is relative to the server root.
+- `/api/croissant/<schema>.<table>` serves a readable table outside the default schema. The catalog
+  does not list these tables.
 - The document has no `sha256` or `md5` checksum. The data is live, so the document sets
   `isLiveDataset` to `true`.
