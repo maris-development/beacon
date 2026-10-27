@@ -95,10 +95,15 @@ files = ["sql/functions.sql"]
 `native::load_native` opens the library and does these checks:
 
 1. The library file for this platform exists: `lib<name>.so`, `<name>.dll` or `lib<name>.dylib`. When it is missing, the error names the files in `lib/`, such as a `.so` file on Windows.
-2. The library has the `beacon_plugin_abi` and `beacon_plugin_functions` symbols.
+2. The library has the `beacon_plugin_abi` and `beacon_plugin_scalar_functions` symbols.
 3. The SDK ABI of the plugin equals `BEACON_PLUGIN_SDK_ABI`.
 4. The DataFusion FFI major version of the plugin equals the version of this build.
 5. The plugin init returns its functions without an error.
+
+`beacon_plugin_scalar_functions` returns one `FFI_ScalarFunction` per function: the `FFI_ScalarUDF`, an `invoke` function and an optional hook table.
+`scalar_functions::import_scalar_function` wraps each function in a `ScalarArgsUdf`, and a function that has a hook table also in a `HookedUdf`.
+`ScalarArgsUdf` calls the function through `invoke`, which keeps each scalar argument as a scalar.
+The `FFI_ScalarUDF` gives the name, the types and the other properties of the function.
 
 A library that opens stays loaded until the process stops, also when a check fails.
 The functions point into its code, and the library ran code when it opened.

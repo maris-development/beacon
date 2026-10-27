@@ -2,11 +2,17 @@
 
 use std::sync::Arc;
 
+use std::fmt;
+
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::Result;
-use datafusion::logical_expr::{ColumnarValue, ScalarUDF, Volatility, create_udf};
+use datafusion::execution::TaskContext;
+use datafusion::logical_expr::interval_arithmetic::Interval;
+use datafusion::logical_expr::{ColumnarValue, Expr, ScalarUDF, Volatility, create_udf};
 use datafusion::scalar::ScalarValue;
+
+use super::hooks::{FunctionHooks, HookedUdf, Implied};
 
 /// Starts a [`FunctionBuilder`] for a function with the given name.
 pub fn function(name: &str) -> FunctionBuilder {
@@ -16,6 +22,51 @@ pub fn function(name: &str) -> FunctionBuilder {
         returns: None,
         aliases: Vec::new(),
         volatility: Volatility::Immutable,
+        hooks: ClosureHooks::default(),
+    }
+}
+
+type ImpliesFn = dyn Fn(&[Expr]) -> Result<Option<Implied>> + Send + Sync;
+type BoundsFn = dyn Fn(&[&Interval]) -> Result<Option<Interval>> + Send + Sync;
+type PropagateFn = dyn Fn(&Interval, &[&Interval]) -> Result<Option<Vec<Interval>>> + Send + Sync;
+
+/// The hooks that a [`FunctionBuilder`] got as closures.
+#[derive(Clone, Default)]
+struct ClosureHooks {
+    implies: Option<Arc<ImpliesFn>>,
+    bounds: Option<Arc<BoundsFn>>,
+    propagate: Option<Arc<PropagateFn>>,
+}
+
+impl ClosureHooks {
+    fn is_empty(&self) -> bool {
+        self.implies.is_none() && self.bounds.is_none() && self.propagate.is_none()
+    }
+}
+
+impl fmt::Debug for ClosureHooks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClosureHooks")
+            .field("implies", &self.implies.is_some())
+            .field("bounds", &self.bounds.is_some())
+            .field("propagate", &self.propagate.is_some())
+            .finish()
+    }
+}
+
+impl FunctionHooks for ClosureHooks {
+    fn implied(&self, args: &[Expr], _ctx: &Arc<TaskContext>) -> Result<Option<Implied>> {
+        self.implies.as_ref().map_or(Ok(None), |f| f(args))
+    }
+
+    fn bounds(&self, args: &[&Interval]) -> Result<Option<Interval>> {
+        self.bounds.as_ref().map_or(Ok(None), |f| f(args))
+    }
+
+    fn propagate(&self, output: &Interval, args: &[&Interval]) -> Result<Option<Vec<Interval>>> {
+        self.propagate
+            .as_ref()
+            .map_or(Ok(None), |f| f(output, args))
     }
 }
 
@@ -29,6 +80,7 @@ pub struct FunctionBuilder {
     returns: Option<DataType>,
     aliases: Vec<String>,
     volatility: Volatility,
+    hooks: ClosureHooks,
 }
 
 impl FunctionBuilder {
@@ -63,10 +115,40 @@ impl FunctionBuilder {
         self
     }
 
+    /// Sets the pushdown rule, see [`FunctionHooks::implied`].
+    ///
+    /// `f` gets the call arguments and returns the predicate that the call implies.
+    pub fn implies<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&[Expr]) -> Result<Option<Implied>> + Send + Sync + 'static,
+    {
+        self.hooks.implies = Some(Arc::new(f));
+        self
+    }
+
+    /// Sets the output bounds hook, see [`FunctionHooks::bounds`].
+    pub fn bounds<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&[&Interval]) -> Result<Option<Interval>> + Send + Sync + 'static,
+    {
+        self.hooks.bounds = Some(Arc::new(f));
+        self
+    }
+
+    /// Sets the constraint propagation hook, see [`FunctionHooks::propagate`].
+    pub fn propagate<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&Interval, &[&Interval]) -> Result<Option<Vec<Interval>>> + Send + Sync + 'static,
+    {
+        self.hooks.propagate = Some(Arc::new(f));
+        self
+    }
+
     /// Builds the function with `f` as its body. `f` gets arrays only.
     ///
-    /// A scalar argument arrives as an array. When every argument is a scalar, as for
-    /// `add_one(1.5)`, the function returns the first value of the result as a scalar.
+    /// A scalar argument arrives as an array of `number_rows` values. When every argument
+    /// is a scalar, as for `add_one(1.5)`, each array has one value, and the function
+    /// returns the first value of the result as a scalar.
     /// So a function without arguments gives one value for all rows. Use
     /// [`FunctionBuilder::invoke`] when that is not correct.
     ///
@@ -112,7 +194,12 @@ impl FunctionBuilder {
             .aliases
             .into_iter()
             .map(|a| &*Box::leak(a.into_boxed_str()));
-        udf.with_aliases(aliases)
+        let udf = udf.with_aliases(aliases);
+        if self.hooks.is_empty() {
+            udf
+        } else {
+            ScalarUDF::from(HookedUdf::new(Arc::new(udf), Arc::new(self.hooks)))
+        }
     }
 }
 
@@ -283,7 +370,7 @@ mod tests {
 
     #[test]
     fn invoke_arrays_crosses_the_ffi() {
-        let udf = crate::tests::foreign_udf_from(make_sum);
+        let udf = crate::scalar_functions::tests::foreign_udf_from(make_sum);
         let result = udf
             .invoke_with_args(sum_args(
                 vec![array(vec![Some(1.0)]), array(vec![Some(2.0)])],
@@ -291,6 +378,30 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(values(result), vec![Some(3.0)]);
+    }
+
+    #[test]
+    fn invoke_arrays_gives_a_scalar_across_the_ffi_for_scalar_arguments() {
+        let udf = crate::scalar_functions::tests::foreign_udf_from(make_sum);
+        let result = udf
+            .invoke_with_args(sum_args(vec![scalar(1.5), scalar(2.0)], 4))
+            .unwrap();
+        assert!(matches!(
+            result,
+            ColumnarValue::Scalar(ScalarValue::Float64(Some(v))) if v == 3.5
+        ));
+    }
+
+    #[test]
+    fn invoke_arrays_expands_a_scalar_across_the_ffi() {
+        let udf = crate::scalar_functions::tests::foreign_udf_from(make_sum);
+        let result = udf
+            .invoke_with_args(sum_args(
+                vec![array(vec![Some(1.0), None, Some(3.0)]), scalar(10.0)],
+                3,
+            ))
+            .unwrap();
+        assert_eq!(values(result), vec![Some(11.0), None, Some(13.0)]);
     }
 
     #[test]
@@ -307,7 +418,7 @@ mod tests {
 
     #[test]
     fn a_helper_function_crosses_the_ffi() {
-        let udf = crate::tests::foreign_udf_from(make_add_one);
+        let udf = crate::scalar_functions::tests::foreign_udf_from(make_add_one);
         assert_eq!(udf.name(), "h_add_one");
         assert_eq!(udf.aliases(), ["h_inc".to_string()]);
         let result = udf.invoke_with_args(call_args()).unwrap();
@@ -316,7 +427,7 @@ mod tests {
 
     #[test]
     fn a_panic_in_the_closure_is_an_error() {
-        let udf = crate::tests::foreign_udf_from(make_panicking);
+        let udf = crate::scalar_functions::tests::foreign_udf_from(make_panicking);
         let err = udf.invoke_with_args(call_args()).unwrap_err();
         assert!(err.to_string().contains("panicked"), "{err}");
         assert!(err.to_string().contains("closure exploded"), "{err}");

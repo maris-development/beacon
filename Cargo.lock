@@ -1816,6 +1816,7 @@ dependencies = [
  "beacon-icechunk",
  "beacon-lance",
  "beacon-plugin-registry",
+ "beacon-plugin-sdk",
  "beacon-redb-store",
  "beacon-sql-databases",
  "bytes",
@@ -2226,6 +2227,7 @@ version = "2.1.0-rc.1"
 dependencies = [
  "datafusion 54.1.0",
  "datafusion-ffi",
+ "datafusion-proto",
  "stabby",
 ]
 

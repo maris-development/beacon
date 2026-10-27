@@ -14,4 +14,5 @@ categories = ["database", "development-tools"]
 [dependencies]
 datafusion = { workspace = true }
 datafusion-ffi = { workspace = true }
+datafusion-proto = { workspace = true }
 stabby = { workspace = true }

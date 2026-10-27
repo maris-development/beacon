@@ -1,3 +1,4 @@
+pub(crate) mod hooks_rule;
 pub(crate) mod loader;
 
 pub use beacon_plugin_registry::manifest::{

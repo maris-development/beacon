@@ -39,6 +39,15 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   default of 65536. In SQL, use the keys `compression.level`, `compression.shuffle` and
   `chunk_rows`. ([#576](https://github.com/maris-development/beacon/issues/576))
 
+### Changed
+
+- **Plugin functions get literal arguments as scalars.** A native plugin function gets each literal
+  argument as `ColumnarValue::Scalar`, not as an array with one copy per row. So a function can
+  require a constant argument, or prepare a constant one time per batch. The plugin SDK ABI is now
+  4. Rebuild each native plugin with the new SDK, because Beacon refuses a plugin with SDK ABI 3. A
+  body that accepts only `ColumnarValue::Array` must also accept a scalar. `invoke_arrays` still
+  gives arrays. ([#612](https://github.com/maris-development/beacon/issues/612))
+
 ## [2.0.2] — 2026-10-13
 
 Beacon 2.0.2 fixes one regression in the JSON query API. A 2.0.1 server upgrades in place.
