@@ -250,6 +250,7 @@ impl FunctionHooks for ForeignFunctionHooks {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use datafusion::arrow::array::BooleanArray;
     use datafusion::arrow::datatypes::DataType;
@@ -303,6 +304,32 @@ mod tests {
             .implies(|_| panic!("implies exploded"))
             .propagate(|_, _| panic!("propagate exploded"))
             .invoke_arrays(|arrays| Ok(Arc::clone(&arrays[0])))
+    }
+
+    /// Hooks that count their drops in `drops`.
+    #[derive(Debug)]
+    struct CountedHooks {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl FunctionHooks for CountedHooks {
+        fn bounds(&self, _args: &[&Interval]) -> Result<Option<Interval>> {
+            Ok(Some(Interval::TRUE_OR_FALSE))
+        }
+    }
+
+    impl Drop for CountedHooks {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counted_table() -> (FFI_FunctionHooks, Arc<AtomicUsize>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let hooks = Arc::new(CountedHooks {
+            drops: Arc::clone(&drops),
+        });
+        (FFI_FunctionHooks::new("t_counted", hooks), drops)
     }
 
     fn plain() -> ScalarUDF {
@@ -481,6 +508,74 @@ mod tests {
             .to_string();
         assert!(err.contains("propagate exploded"), "{err}");
         assert_eq!(hooks.bounds(&[&x]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_panic_in_bounds_is_an_error() {
+        let udf = function("t_bounds_boom")
+            .args([DataType::Float64])
+            .returns(DataType::Boolean)
+            .bounds(|_| panic!("bounds exploded"))
+            .invoke_arrays(|arrays| Ok(Arc::clone(&arrays[0])));
+        let table =
+            FFI_FunctionHooks::new("t_bounds_boom", Arc::clone(hooks_of(&udf).unwrap().hooks()));
+        let hooks = ForeignFunctionHooks::from(table);
+        let x = Interval::make_unbounded(&DataType::Float64).unwrap();
+        let err = hooks.bounds(&[&x]).unwrap_err().to_string();
+        assert!(err.contains("bounds hook"), "{err}");
+        assert!(err.contains("bounds exploded"), "{err}");
+    }
+
+    #[test]
+    fn dropping_the_table_drops_the_hooks_once() {
+        let (table, drops) = counted_table();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(table);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dropping_foreign_hooks_drops_the_hooks_once() {
+        let (table, drops) = counted_table();
+        let hooks = ForeignFunctionHooks::from(table);
+        let x = Interval::make_unbounded(&DataType::Float64).unwrap();
+        assert_eq!(hooks.bounds(&[&x]).unwrap(), Some(Interval::TRUE_OR_FALSE));
+        drop(hooks);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_second_release_does_nothing() {
+        let (mut table, drops) = counted_table();
+        // SAFETY: `release` accepts a table that it released before.
+        unsafe { (table.release)(&mut table) };
+        assert!(table.private_data.is_null());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        // Drop calls `release` a second time.
+        drop(table);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn hooks_work_from_many_threads() {
+        let (table, drops) = counted_table();
+        let hooks = Arc::new(ForeignFunctionHooks::from(table));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let hooks = Arc::clone(&hooks);
+                std::thread::spawn(move || {
+                    let x = Interval::make_unbounded(&DataType::Float64).unwrap();
+                    for _ in 0..8 {
+                        assert_eq!(hooks.bounds(&[&x]).unwrap(), Some(Interval::TRUE_OR_FALSE));
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        drop(hooks);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[test]
