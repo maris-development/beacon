@@ -4,6 +4,7 @@
 compile_error!("beacon plugins need panic = \"unwind\"");
 
 mod panic_safe;
+pub mod object_store;
 pub mod scalar_functions;
 
 pub use datafusion;
