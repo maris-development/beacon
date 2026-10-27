@@ -21,16 +21,17 @@ use stabby::vec::Vec as SVec;
 use super::OBJECT_STORE_FFI_VERSION;
 use super::bytes::FFI_Bytes;
 use super::export::{FFI_GetResult, FFI_ObjectStore};
+use super::multipart::ForeignMultipartUpload;
 use super::options::{
-    FFI_CopyOptions, FFI_GetOptions, FFI_ListResult, FFI_PutOptions, FFI_Range, FFI_RenameOptions,
-    parse_path,
+    FFI_CopyOptions, FFI_GetOptions, FFI_ListResult, FFI_PutMultipartOptions, FFI_PutOptions,
+    FFI_Range, FFI_RenameOptions, parse_path,
 };
 use super::stream::{FFI_MetaStream, FFI_PathStream};
 
 /// An `object_store::ObjectStore` over an [`FFI_ObjectStore`] from another library.
 ///
 /// Every call crosses the table. Build it with `Arc::<dyn ObjectStore>::try_from`.
-pub struct ForeignObjectStore(pub FFI_ObjectStore);
+pub struct ForeignObjectStore(FFI_ObjectStore);
 
 impl TryFrom<FFI_ObjectStore> for Arc<dyn ObjectStore> {
     type Error = Error;
@@ -84,13 +85,6 @@ fn receive_metas(metas: FFI_MetaStream) -> BoxStream<'static, Result<ObjectMeta>
         .boxed()
 }
 
-fn not_implemented(operation: &str) -> Error {
-    Error::NotImplemented {
-        operation: operation.to_string(),
-        implementer: "beacon-plugin-sdk".to_string(),
-    }
-}
-
 // SAFETY for each call below: the table is live and of this version, and the
 // function pointer matches it.
 #[async_trait]
@@ -109,10 +103,14 @@ impl ObjectStore for ForeignObjectStore {
 
     async fn put_multipart_opts(
         &self,
-        _location: &Path,
-        _opts: PutMultipartOptions,
+        location: &Path,
+        opts: PutMultipartOptions,
     ) -> Result<Box<dyn MultipartUpload>> {
-        Err(not_implemented("put_multipart_opts"))
+        let options = FFI_PutMultipartOptions::from(&opts);
+        let future =
+            unsafe { (self.0.put_multipart_opts)(&self.0, path_string(location), options) };
+        let upload = future.await.into_result()?;
+        Ok(Box::new(ForeignMultipartUpload::from(upload)))
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {

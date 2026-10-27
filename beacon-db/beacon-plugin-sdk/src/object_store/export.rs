@@ -8,7 +8,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use ::object_store::{Error, ObjectMeta, ObjectStore, Result};
+use ::bytes::Bytes;
+use ::object_store::{Error, ObjectMeta, ObjectStore, PutPayload, Result};
 use async_ffi::{FfiFuture, FutureExt as _};
 use datafusion_ffi::ffi_option::FFI_Option;
 use futures::future::BoxFuture;
@@ -210,7 +211,7 @@ unsafe extern "C" fn display_fn(store: &FFI_ObjectStore) -> SString {
 }
 
 /// Runs `drop_work` and swallows a panic in it.
-fn drop_quietly(drop_work: impl FnOnce()) {
+pub(super) fn drop_quietly(drop_work: impl FnOnce()) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(drop_work)) {
         // The payload drop can panic too.
         std::mem::forget(payload);
@@ -262,16 +263,21 @@ impl<T> Drop for EnteredFuture<T> {
     }
 }
 
-/// Exports the future that `make` builds from the inner store and the handle.
-fn export_future<T, F>(store: &FFI_ObjectStore, make: F) -> FfiFuture<FFI_ObjectStoreResult<T>>
+/// Exports the future that `make` builds, with the handle from `handle`.
+///
+/// `make` runs inside the handle. A panic in either closure gives a ready error future.
+pub(super) fn export_entered<T, H, F>(handle: H, make: F) -> FfiFuture<FFI_ObjectStoreResult<T>>
 where
     T: Send + 'static,
-    F: FnOnce(Arc<dyn ObjectStore>, Handle) -> BoxFuture<'static, Result<T>>,
+    H: FnOnce() -> Handle,
+    F: FnOnce() -> BoxFuture<'static, Result<T>>,
 {
     let made = catch_unwind(AssertUnwindSafe(|| {
-        let data = store.data();
-        let handle = data.handle.clone();
-        let inner = make(Arc::clone(&data.store), handle.clone());
+        let handle = handle();
+        let inner = {
+            let _guard = handle.enter();
+            make()
+        };
         EnteredFuture {
             inner: Some(inner),
             handle,
@@ -281,6 +287,21 @@ where
     made.unwrap_or_else(|payload| {
         ready(FFI_ObjectStoreResult::Err(panic_error(payload))).into_ffi()
     })
+}
+
+/// Exports the future that `make` builds from the inner store and the handle.
+fn export_future<T, F>(store: &FFI_ObjectStore, make: F) -> FfiFuture<FFI_ObjectStoreResult<T>>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<dyn ObjectStore>, Handle) -> BoxFuture<'static, Result<T>>,
+{
+    export_entered(
+        || store.data().handle.clone(),
+        || {
+            let data = store.data();
+            make(Arc::clone(&data.store), data.handle.clone())
+        },
+    )
 }
 
 /// Exports the listing that `make` builds from the inner store.
@@ -312,13 +333,6 @@ fn parse_prefix(prefix: FFI_Option<SString>) -> Result<Option<::object_store::pa
         .into_option()
         .map(|prefix| parse_path(prefix.as_str()))
         .transpose()
-}
-
-fn not_implemented(operation: &str) -> Error {
-    Error::NotImplemented {
-        operation: operation.to_string(),
-        implementer: "beacon-plugin-sdk".to_string(),
-    }
 }
 
 unsafe extern "C" fn get_opts_fn(
@@ -363,9 +377,14 @@ unsafe extern "C" fn put_opts_fn(
     payload: SVec<FFI_Bytes>,
     options: FFI_PutOptions,
 ) -> FfiFuture<FFI_ObjectStoreResult<FFI_PutResult>> {
-    export_future(store, move |_, _| {
-        drop((location, payload, options));
-        error_future(not_implemented("put_opts"))
+    export_future(store, move |inner, _| {
+        async move {
+            let location = parse_path(location.as_str())?;
+            let payload: PutPayload = payload.into_iter().map(Bytes::from).collect();
+            let result = inner.put_opts(&location, payload, options.into()).await?;
+            Ok(FFI_PutResult::from(&result))
+        }
+        .boxed()
     })
 }
 
@@ -374,9 +393,13 @@ unsafe extern "C" fn put_multipart_opts_fn(
     location: SString,
     options: FFI_PutMultipartOptions,
 ) -> FfiFuture<FFI_ObjectStoreResult<FFI_MultipartUpload>> {
-    export_future(store, move |_, _| {
-        drop((location, options));
-        error_future(not_implemented("put_multipart_opts"))
+    export_future(store, move |inner, handle| {
+        async move {
+            let location = parse_path(location.as_str())?;
+            let upload = inner.put_multipart_opts(&location, options.into()).await?;
+            Ok(FFI_MultipartUpload::new(upload, handle))
+        }
+        .boxed()
     })
 }
 
@@ -385,10 +408,16 @@ unsafe extern "C" fn delete_stream_fn(
     locations: FFI_PathStream,
 ) -> FFI_PathStream {
     let made = catch_unwind(AssertUnwindSafe(|| {
-        let handle = store.data().handle.clone();
-        drop(locations);
-        let deleted = error_stream::<::object_store::path::Path>(not_implemented("delete_stream"));
-        FFI_PathStream::new(deleted, handle, |path| Ok(SString::from(path.as_ref())))
+        let data = store.data();
+        // A store can spawn a task when it starts the deletes.
+        let _guard = data.handle.enter();
+        let locations = locations
+            .map(|location| location.and_then(|location| parse_path(location.as_str())))
+            .boxed();
+        let deleted = data.store.delete_stream(locations);
+        FFI_PathStream::new(deleted, data.handle.clone(), |path| {
+            Ok(SString::from(path.as_ref()))
+        })
     }));
     made.unwrap_or_else(|payload| {
         let error = Error::from(panic_error(payload));
@@ -438,9 +467,13 @@ unsafe extern "C" fn copy_opts_fn(
     to: SString,
     options: FFI_CopyOptions,
 ) -> FfiFuture<FFI_ObjectStoreResult<()>> {
-    export_future(store, move |_, _| {
-        drop((from, to, options));
-        error_future(not_implemented("copy_opts"))
+    export_future(store, move |inner, _| {
+        async move {
+            let from = parse_path(from.as_str())?;
+            let to = parse_path(to.as_str())?;
+            inner.copy_opts(&from, &to, options.try_into()?).await
+        }
+        .boxed()
     })
 }
 
@@ -450,12 +483,12 @@ unsafe extern "C" fn rename_opts_fn(
     to: SString,
     options: FFI_RenameOptions,
 ) -> FfiFuture<FFI_ObjectStoreResult<()>> {
-    export_future(store, move |_, _| {
-        drop((from, to, options));
-        error_future(not_implemented("rename_opts"))
+    export_future(store, move |inner, _| {
+        async move {
+            let from = parse_path(from.as_str())?;
+            let to = parse_path(to.as_str())?;
+            inner.rename_opts(&from, &to, options.try_into()?).await
+        }
+        .boxed()
     })
-}
-
-fn error_future<T: Send + 'static>(error: Error) -> BoxFuture<'static, Result<T>> {
-    ready(Err(error)).boxed()
 }

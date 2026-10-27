@@ -17,7 +17,7 @@ pub use bytes::FFI_Bytes;
 pub use error::{FFI_ErrorKind, FFI_ObjectStoreError, FFI_ObjectStoreResult};
 pub use export::{FFI_GetResult, FFI_ObjectStore};
 pub use foreign::ForeignObjectStore;
-pub use multipart::FFI_MultipartUpload;
+pub use multipart::{FFI_MultipartUpload, ForeignMultipartUpload};
 pub use options::{
     FFI_Attribute, FFI_Attributes, FFI_CopyOptions, FFI_GetOptions, FFI_GetRange,
     FFI_GetResultMeta, FFI_ListResult, FFI_ObjectMeta, FFI_PutMode, FFI_PutMultipartOptions,
