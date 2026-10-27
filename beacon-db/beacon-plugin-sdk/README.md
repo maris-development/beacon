@@ -94,7 +94,9 @@ Then file statistics pruning, table providers and remote sources see plain predi
 - `propagate`: for a filter `f(..)` or `f(..) <op> <literal>`, Beacon adds `col >= low` and `col <= high` for each column argument. Beacon uses it only when `implies` gives no rule.
 - `bounds` and `propagate` also answer DataFusion interval analysis, through `evaluate_bounds` and `propagate_constraints`.
 - Beacon folds a constant argument, such as `CAST(2 AS DOUBLE)`, to a literal before `implies` sees it.
-- An expression crosses the plugin boundary as `datafusion-proto` bytes. It can call only DataFusion built-in functions.
+- Beacon applies the `Exact` rules of calls inside the arguments before `implies` sees them.
+- An expression crosses the plugin boundary as `datafusion-proto` bytes. Both sides decode it with the functions of the Beacon session. So the arguments and the result of `implies` can call any function that Beacon knows, also a function of another plugin.
+- A function from another library is an FFI wrapper. Find it by its name, not with a downcast.
 - A hook that returns `Ok(None)`, an error or a panic gives no answer. The query does not fail.
 - For a `ScalarUDFImpl`, implement `FunctionHooks` and wrap the UDF with `HookedUdf::new`.
 

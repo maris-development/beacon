@@ -219,6 +219,20 @@ async fn native_hooks_give_a_pruning_predicate() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_native_hook_decodes_a_plugin_call_in_its_arguments() {
+    let rt = new_runtime("native-nested-hooks").await;
+    install(&rt, example_plugin(false)).await.unwrap();
+    write_points(&rt);
+    let sql = "SELECT id FROM read_parquet('points.parquet') \
+               WHERE example_in_box(example_add_one(lon), lat, 3, 50, 9, 56)";
+    let plan = plan_text(&rt, &format!("EXPLAIN {sql}")).await;
+    // Only the implied hook gives a predicate on the nested call.
+    assert!(plan.contains(") >= Float64(3)"), "{plan}");
+    assert!(plan.contains("lat <= Float64(56)"), "{plan}");
+    assert_eq!(sorted_ids(&rt, sql).await, [3, 4]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_panicking_native_hook_is_ignored() {
     let rt = new_runtime("native-bad-hooks").await;
     install(&rt, example_plugin(false)).await.unwrap();

@@ -985,7 +985,9 @@ fn build_session_state(
         .with_default_features()
         .with_optimizer_rules(optimizer_rules)
         // After type coercion and before filter pushdown: hooked calls become plain predicates.
-        .with_analyzer_rule(Arc::new(crate::plugins::hooks_rule::FunctionHooksRule))
+        .with_analyzer_rule(Arc::new(crate::plugins::hooks_rule::FunctionHooksRule::new(
+            session_cell.clone(),
+        )))
         .with_query_planner(Arc::new(BeaconQueryPlanner::new(session_cell.clone())));
 
     // Opt-in nd-pipeline optimizers. Appended to (never replacing) the default

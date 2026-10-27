@@ -7,6 +7,7 @@ use std::fmt;
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::Result;
+use datafusion::execution::TaskContext;
 use datafusion::logical_expr::interval_arithmetic::Interval;
 use datafusion::logical_expr::{ColumnarValue, Expr, ScalarUDF, Volatility, create_udf};
 use datafusion::scalar::ScalarValue;
@@ -54,7 +55,7 @@ impl fmt::Debug for ClosureHooks {
 }
 
 impl FunctionHooks for ClosureHooks {
-    fn implied(&self, args: &[Expr]) -> Result<Option<Implied>> {
+    fn implied(&self, args: &[Expr], _ctx: &Arc<TaskContext>) -> Result<Option<Implied>> {
         self.implies.as_ref().map_or(Ok(None), |f| f(args))
     }
 

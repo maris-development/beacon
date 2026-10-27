@@ -4,6 +4,8 @@
 //! So filter pushdown, file statistics pruning, table providers and remote sources
 //! see plain column predicates and need no knowledge of the function.
 
+use std::sync::{Arc, Weak};
+
 use beacon_plugin_sdk::scalar_functions::{hooks_of, HookedUdf, Implied};
 use datafusion::{
     arrow::datatypes::DataType,
@@ -12,6 +14,7 @@ use datafusion::{
         tree_node::{Transformed, TreeNode},
         DFSchema, Result, ScalarValue,
     },
+    execution::TaskContext,
     logical_expr::{
         expr::ScalarFunction,
         interval_arithmetic::Interval,
@@ -19,16 +22,37 @@ use datafusion::{
         BinaryExpr, Cast, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TryCast,
     },
     optimizer::{analyzer::type_coercion::TypeCoercionRewriter, AnalyzerRule},
+    prelude::SessionContext,
 };
 
+use crate::statement_plan::SessionCell;
+
 /// Applies the `implied` and `propagate` hooks to every filter.
-#[derive(Debug, Default)]
-pub(crate) struct FunctionHooksRule;
+#[derive(Debug)]
+pub(crate) struct FunctionHooksRule {
+    session: SessionCell,
+}
+
+impl FunctionHooksRule {
+    /// A rule that decodes hook expressions with the functions of `session`.
+    pub(crate) fn new(session: SessionCell) -> Self {
+        Self { session }
+    }
+
+    fn task_ctx(&self) -> Arc<TaskContext> {
+        match self.session.get().and_then(Weak::upgrade) {
+            Some(session) => session.task_ctx(),
+            // Without a session, hook expressions can use only the built-in functions.
+            None => SessionContext::new().task_ctx(),
+        }
+    }
+}
 
 impl AnalyzerRule for FunctionHooksRule {
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
+        let ctx = self.task_ctx();
         plan.transform_up_with_subqueries(|node| match node {
-            LogicalPlan::Filter(filter) => rewrite_filter(filter),
+            LogicalPlan::Filter(filter) => rewrite_filter(filter, &ctx),
             other => Ok(Transformed::no(other)),
         })
         .map(|transformed| transformed.data)
@@ -39,20 +63,28 @@ impl AnalyzerRule for FunctionHooksRule {
     }
 }
 
-fn rewrite_filter(filter: Filter) -> Result<Transformed<LogicalPlan>> {
+fn rewrite_filter(filter: Filter, ctx: &Arc<TaskContext>) -> Result<Transformed<LogicalPlan>> {
     let schema = filter.input.schema().clone();
     let mut changed = false;
     let mut conjuncts = Vec::new();
     let mut extra = Vec::new();
     for conjunct in split_conjunction_owned(filter.predicate.clone()) {
-        let Some((hooked, args)) = hooked_call(&conjunct) else {
-            let rewritten = replace_exact(conjunct)?;
+        if hooked_call(&conjunct).is_none() {
+            let rewritten = replace_exact(conjunct, ctx)?;
             changed |= rewritten.transformed;
             extra.extend(propagated(&rewritten.data, &schema));
             conjuncts.push(rewritten.data);
             continue;
+        }
+        // The arguments first, so the hook of the call sees their `Exact` rules.
+        let rewritten = conjunct.map_children(|arg| replace_exact(arg, ctx))?;
+        changed |= rewritten.transformed;
+        let conjunct = rewritten.data;
+        let Some((hooked, args)) = hooked_call(&conjunct) else {
+            conjuncts.push(conjunct);
+            continue;
         };
-        match implied(hooked, args) {
+        match implied(hooked, args, ctx) {
             Some(Implied::Exact(expr)) => {
                 changed = true;
                 conjuncts.push(expr);
@@ -62,10 +94,7 @@ fn rewrite_filter(filter: Filter) -> Result<Transformed<LogicalPlan>> {
             // The propagate hook is the fallback for a call without a pushdown rule.
             None => extra.extend(propagated(&conjunct, &schema)),
         }
-        // Only the arguments: the call itself has had its rule.
-        let rewritten = conjunct.map_children(replace_exact)?;
-        changed |= rewritten.transformed;
-        conjuncts.push(rewritten.data);
+        conjuncts.push(conjunct);
     }
     for expr in extra.into_iter().flat_map(split_conjunction_owned) {
         if !conjuncts.contains(&expr) {
@@ -110,12 +139,12 @@ fn constant(expr: &Expr) -> Option<ScalarValue> {
 }
 
 /// The result of the `implied` hook. A hook error gives `None`.
-fn implied(hooked: &HookedUdf, args: &[Expr]) -> Option<Implied> {
+fn implied(hooked: &HookedUdf, args: &[Expr], ctx: &Arc<TaskContext>) -> Option<Implied> {
     let args: Vec<Expr> = args
         .iter()
         .map(|arg| constant(arg).map_or_else(|| arg.clone(), |value| Expr::Literal(value, None)))
         .collect();
-    hooked.implied(&args).unwrap_or_else(|error| {
+    hooked.implied(&args, ctx).unwrap_or_else(|error| {
         tracing::warn!(
             "Ignoring the implied hook of '{}' for this query: {error}",
             hooked.inner().name()
@@ -125,10 +154,10 @@ fn implied(hooked: &HookedUdf, args: &[Expr]) -> Option<Implied> {
 }
 
 /// Replaces each call that has an `Exact` rule.
-fn replace_exact(expr: Expr) -> Result<Transformed<Expr>> {
+fn replace_exact(expr: Expr, ctx: &Arc<TaskContext>) -> Result<Transformed<Expr>> {
     expr.transform_up(|expr| {
         if let Some((hooked, args)) = hooked_call(&expr) {
-            if let Some(Implied::Exact(replacement)) = implied(hooked, args) {
+            if let Some(Implied::Exact(replacement)) = implied(hooked, args, ctx) {
                 return Ok(Transformed::yes(replacement));
             }
         }
@@ -322,9 +351,22 @@ mod tests {
             .invoke_arrays(|_| panic!("is_east must not run"))
     }
 
+    /// `flip(x)` is `-x`. Its `Exact` rule replaces the call.
+    fn flip() -> ScalarUDF {
+        function("flip")
+            .args([DataType::Float64])
+            .returns(DataType::Float64)
+            .implies(|args| {
+                Ok(Some(Implied::Exact(Expr::Negative(Box::new(
+                    args[0].clone(),
+                )))))
+            })
+            .invoke_arrays(|_| panic!("flip must not run"))
+    }
+
     /// A session with the rule, the test functions and table `points`: one Parquet
     /// file with two row groups, the first in the west and the second in the east.
-    async fn session(dir: &std::path::Path) -> SessionContext {
+    async fn session(dir: &std::path::Path) -> Arc<SessionContext> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new("lon", DataType::Float64, false),
@@ -348,12 +390,14 @@ mod tests {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
 
+        let cell = crate::statement_plan::new_session_cell();
         let state = SessionStateBuilder::new()
             .with_default_features()
-            .with_analyzer_rule(Arc::new(FunctionHooksRule))
+            .with_analyzer_rule(Arc::new(FunctionHooksRule::new(cell.clone())))
             .build();
-        let ctx = SessionContext::new_with_state(state);
-        for udf in [in_box(), near_box(), boom_box(), is_east()] {
+        let ctx = Arc::new(SessionContext::new_with_state(state));
+        cell.set(Arc::downgrade(&ctx)).unwrap();
+        for udf in [in_box(), near_box(), boom_box(), is_east(), flip()] {
             ctx.register_udf(udf);
         }
         ctx.register_parquet(
@@ -456,6 +500,17 @@ mod tests {
         let sql = "SELECT id FROM points WHERE is_east(lon)";
         let plan = explain(&ctx, sql).await;
         assert!(!plan.contains("is_east("), "{plan}");
+        assert_eq!(ids(&ctx, sql).await, [3, 4]);
+    }
+
+    #[tokio::test]
+    async fn the_hook_of_a_call_sees_the_exact_rules_of_its_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = session(dir.path()).await;
+        let sql = "SELECT id FROM points WHERE in_box(flip(lon), lat, -8, 50, -2, 56)";
+        let plan = explain(&ctx, sql).await;
+        assert!(!plan.contains("flip("), "{plan}");
+        assert!(plan.contains("(- points.lon) >= Float64(-8)"), "{plan}");
         assert_eq!(ids(&ctx, sql).await, [3, 4]);
     }
 
