@@ -100,8 +100,10 @@ files = ["sql/functions.sql"]
 4. The DataFusion FFI major version of the plugin equals the version of this build.
 5. The plugin init returns its functions without an error.
 
-`beacon_plugin_scalar_functions` returns one `FFI_ScalarFunction` per function: the `FFI_ScalarUDF` and an optional hook table.
-`scalar_functions::import_scalar_function` wraps a function that has a hook table in a `HookedUdf`.
+`beacon_plugin_scalar_functions` returns one `FFI_ScalarFunction` per function: the `FFI_ScalarUDF`, an `invoke` function and an optional hook table.
+`scalar_functions::import_scalar_function` wraps each function in a `ScalarArgsUdf`, and a function that has a hook table also in a `HookedUdf`.
+`ScalarArgsUdf` calls the function through `invoke`, which keeps each scalar argument as a scalar.
+The `FFI_ScalarUDF` gives the name, the types and the other properties of the function.
 
 A library that opens stays loaded until the process stops, also when a check fails.
 The functions point into its code, and the library ran code when it opened.

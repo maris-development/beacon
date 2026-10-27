@@ -163,8 +163,9 @@ impl FunctionBuilder {
 
     /// Builds the function with `f` as its body. `f` gets arrays only.
     ///
-    /// A scalar argument arrives as an array. When every argument is a scalar, as for
-    /// `add_one(1.5)`, the function returns the first value of the result as a scalar.
+    /// A scalar argument arrives as an array of `number_rows` values. When every argument
+    /// is a scalar, as for `add_one(1.5)`, each array has one value, and the function
+    /// returns the first value of the result as a scalar.
     /// So a function without arguments gives one value for all rows. Use
     /// [`FunctionBuilder::invoke`] when that is not correct.
     ///
@@ -398,6 +399,30 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(values(result), vec![Some(3.0)]);
+    }
+
+    #[test]
+    fn invoke_arrays_gives_a_scalar_across_the_ffi_for_scalar_arguments() {
+        let udf = crate::scalar_functions::tests::foreign_udf_from(make_sum);
+        let result = udf
+            .invoke_with_args(sum_args(vec![scalar(1.5), scalar(2.0)], 4))
+            .unwrap();
+        assert!(matches!(
+            result,
+            ColumnarValue::Scalar(ScalarValue::Float64(Some(v))) if v == 3.5
+        ));
+    }
+
+    #[test]
+    fn invoke_arrays_expands_a_scalar_across_the_ffi() {
+        let udf = crate::scalar_functions::tests::foreign_udf_from(make_sum);
+        let result = udf
+            .invoke_with_args(sum_args(
+                vec![array(vec![Some(1.0), None, Some(3.0)]), scalar(10.0)],
+                3,
+            ))
+            .unwrap();
+        assert_eq!(values(result), vec![Some(11.0), None, Some(13.0)]);
     }
 
     #[test]
