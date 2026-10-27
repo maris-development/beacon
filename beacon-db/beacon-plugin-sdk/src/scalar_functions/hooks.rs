@@ -19,6 +19,7 @@ use std::sync::Arc;
 use datafusion::arrow::datatypes::{DataType, FieldRef};
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::{DataFusionError, ExprSchema, Result, ScalarValue};
+use datafusion::execution::TaskContext;
 use datafusion::logical_expr::interval_arithmetic::Interval;
 use datafusion::logical_expr::preimage::PreimageResult;
 use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyContext};
@@ -51,7 +52,12 @@ pub trait FunctionHooks: Debug + Send + Sync {
     /// The predicate that the call `f(args)` implies, or `None`.
     ///
     /// Beacon folds a constant argument, such as `CAST(2 AS DOUBLE)`, to a literal first.
-    fn implied(&self, _args: &[Expr]) -> Result<Option<Implied>> {
+    /// It also applies the `Exact` rules of calls inside the arguments first.
+    ///
+    /// `ctx` has every function that Beacon knows, also the functions of other plugins.
+    /// The arguments and the result can call any of them. A function from another
+    /// library is an FFI wrapper, so find it by its name and not with a downcast.
+    fn implied(&self, _args: &[Expr], _ctx: &Arc<TaskContext>) -> Result<Option<Implied>> {
         Ok(None)
     }
 
@@ -113,8 +119,8 @@ impl HookedUdf {
     }
 
     /// Calls [`FunctionHooks::implied`]. A panic becomes an error.
-    pub fn implied(&self, args: &[Expr]) -> Result<Option<Implied>> {
-        self.guard("implied", || self.hooks.implied(args))
+    pub fn implied(&self, args: &[Expr], ctx: &Arc<TaskContext>) -> Result<Option<Implied>> {
+        self.guard("implied", || self.hooks.implied(args, ctx))
     }
 
     /// Calls [`FunctionHooks::bounds`]. A panic becomes an error.
