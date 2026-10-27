@@ -120,6 +120,23 @@ pub fn setup_router(
             ));
         router = router.merge(dap_router);
     }
+    // Croissant (ML dataset metadata), gated by BEACON_CROISSANT_ENABLED (default on). It uses
+    // the same `resolve_identity` middleware, so each request runs as the caller. It is not
+    // in the OpenAPI document.
+    if flag_on(std::env::var("BEACON_CROISSANT_ENABLED").ok().as_deref()) {
+        let settings = beacon_croissant::CroissantSettings {
+            public_url: config.server.public_url.clone(),
+            base_path: config.server.base_path.clone(),
+            catalog_title: config.api_docs.title.clone(),
+        };
+        let croissant_router =
+            beacon_croissant::router::<Arc<Server>>(beacon_runtime.runtime().clone(), settings)
+                .layer(::axum::middleware::from_fn_with_state(
+                    beacon_runtime.clone(),
+                    crate::axum::auth::resolve_identity,
+                ));
+        router = router.merge(croissant_router);
+    }
     // The home page is fixed once the router is built, so it is rendered here and
     // leaked as a constant rather than rebuilt per request.
     let home_page: &'static str = crate::axum::home::render(

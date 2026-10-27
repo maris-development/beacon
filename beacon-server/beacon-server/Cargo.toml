@@ -85,3 +85,5 @@ beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 tempfile = { workspace = true }
 # `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.
 tower = { version = "0.5", features = ["util"] }
+# Reads the Parquet body of the Croissant data route.
+parquet = { workspace = true }

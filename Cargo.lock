@@ -1857,11 +1857,16 @@ dependencies = [
 name = "beacon-croissant"
 version = "2.1.0-rc.1"
 dependencies = [
+ "anyhow",
  "arrow 58.4.0",
  "axum",
  "beacon-core",
+ "futures",
  "percent-encoding",
  "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -2265,6 +2270,7 @@ dependencies = [
  "datafusion 54.1.0",
  "futures",
  "object_store 0.13.2",
+ "parquet",
  "pprof",
  "prost",
  "serde",
