@@ -73,7 +73,7 @@ pub(crate) fn render(
 /// Fills the `{{jsonld}}` placeholder of a rendered page.
 ///
 /// `Some` gives a `<script type="application/ld+json">` element; `None` gives nothing.
-/// Each `<` in the JSON becomes the six characters `<`, so no text in the catalog can
+/// Each `<` in the JSON becomes the six characters `\u003c`, so no text in the catalog can
 /// end the script.
 pub(crate) fn with_jsonld(page: &str, catalog: Option<&serde_json::Value>) -> String {
     let script = match catalog {
@@ -383,7 +383,11 @@ mod tests {
         );
 
         assert!(page.contains("<script type=\"application/ld+json\">"));
-        assert_eq!(page.matches(r"</script>").count(), 1, "the escaped text");
+        assert_eq!(
+            page.matches(r"\u003c/script>").count(),
+            1,
+            "the escaped text"
+        );
         assert_eq!(
             page.matches("</script>").count(),
             1,
