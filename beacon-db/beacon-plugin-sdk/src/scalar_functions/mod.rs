@@ -4,6 +4,7 @@ mod builder;
 mod hooks;
 pub mod hooks_ffi;
 mod panic_safe_udf;
+pub mod scalar_args;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -18,6 +19,8 @@ pub use builder::{FunctionBuilder, function};
 pub use hooks::{FunctionHooks, HookedUdf, Implied, hooks_of};
 use hooks_ffi::{FFI_FunctionHooks, ForeignFunctionHooks};
 pub use panic_safe_udf::PanicSafeUdf;
+pub use scalar_args::ScalarArgsUdf;
+use scalar_args::{InvokeFn, invoke_fn};
 
 use crate::panic_safe::panic_message;
 
@@ -32,6 +35,8 @@ pub type ScalarFunctionsFn = extern "C" fn() -> FFI_Result<SVec<FFI_ScalarFuncti
 pub struct FFI_ScalarFunction {
     /// The function itself.
     pub udf: FFI_ScalarUDF,
+    /// Calls `udf` and keeps each scalar argument as a scalar, see [`ScalarArgsUdf`].
+    pub invoke: InvokeFn,
     /// The planner hooks of the function, see [`FunctionHooks`].
     pub hooks: FFI_Option<FFI_FunctionHooks>,
 }
@@ -53,9 +58,11 @@ pub fn export_scalar_functions(
                 Some(hooked) => Arc::clone(hooked.inner()),
                 None => Arc::new(udf),
             };
+            // `invoke_fn` reads the private data, so the UDF must not be a foreign UDF.
             let safe = ScalarUDF::from(PanicSafeUdf::new(udf));
             functions.push(FFI_ScalarFunction {
                 udf: FFI_ScalarUDF::from(Arc::new(safe)),
+                invoke: invoke_fn,
                 hooks: hooks.into(),
             });
         }
@@ -74,9 +81,17 @@ pub fn export_scalar_functions(
 }
 
 /// Converts an exported scalar function back to a UDF, with its hooks.
+///
+/// The UDF is a [`ScalarArgsUdf`], in a [`HookedUdf`] when the function has hooks.
 pub fn import_scalar_function(function: FFI_ScalarFunction) -> ScalarUDF {
-    let udf = ScalarUDF::new_from_shared_impl(Arc::<dyn ScalarUDFImpl>::from(&function.udf));
-    match function.hooks {
+    let FFI_ScalarFunction {
+        udf: ffi_udf,
+        invoke,
+        hooks,
+    } = function;
+    let foreign = ScalarUDF::new_from_shared_impl(Arc::<dyn ScalarUDFImpl>::from(&ffi_udf));
+    let udf = ScalarUDF::from(ScalarArgsUdf::new(Arc::new(foreign), ffi_udf, invoke));
+    match hooks {
         FFI_Option::Some(table) => ScalarUDF::from(HookedUdf::new(
             Arc::new(udf),
             Arc::new(ForeignFunctionHooks::from(table)),
@@ -187,18 +202,45 @@ pub(crate) mod tests {
         datafusion_ffi::get_library_marker_id() + 1
     }
 
-    /// Exports the first UDF of `make` and converts it back as a `ForeignScalarUDF`.
-    pub(crate) fn foreign_udf_from(make: fn() -> Vec<ScalarUDF>) -> Arc<dyn ScalarUDFImpl> {
+    /// Exports the only UDF of `make` and imports it as Beacon does.
+    pub(crate) fn foreign_scalar_udf_from(make: fn() -> Vec<ScalarUDF>) -> ScalarUDF {
         let FFI_Result::Ok(functions) = export_scalar_functions(make) else {
             panic!("expected functions");
         };
         assert_eq!(functions.len(), 1);
-        let mut ffi = functions[0].udf.clone();
+        let mut function = functions.into_iter().next().unwrap();
         // A different marker makes the conversion go through the FFI function pointers.
-        ffi.library_marker_id = foreign_marker_id;
-        let udf = Arc::<dyn ScalarUDFImpl>::from(&ffi);
-        assert!(udf.as_ref().is::<datafusion_ffi::udf::ForeignScalarUDF>());
-        udf
+        function.udf.library_marker_id = foreign_marker_id;
+        import_scalar_function(function)
+    }
+
+    /// Like [`foreign_scalar_udf_from`], but returns the outer impl.
+    pub(crate) fn foreign_udf_from(make: fn() -> Vec<ScalarUDF>) -> Arc<dyn ScalarUDFImpl> {
+        Arc::clone(foreign_scalar_udf_from(make).inner())
+    }
+
+    /// Returns `"array"` or `"scalar"` per argument, joined with `,`.
+    pub(crate) fn arg_kinds_body(
+        args: &[ColumnarValue],
+    ) -> datafusion::common::Result<ColumnarValue> {
+        let kinds: Vec<&str> = args
+            .iter()
+            .map(|arg| match arg {
+                ColumnarValue::Array(_) => "array",
+                ColumnarValue::Scalar(_) => "scalar",
+            })
+            .collect();
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(
+            kinds.join(","),
+        ))))
+    }
+
+    /// `t_arg_kinds(a, b)`, see [`arg_kinds_body`].
+    pub(crate) fn arg_kinds() -> ScalarUDF {
+        function("t_arg_kinds")
+            .args([DataType::Float64, DataType::Float64])
+            .returns(DataType::Utf8)
+            .invoke(arg_kinds_body)
     }
 
     fn foreign_udf() -> Arc<dyn ScalarUDFImpl> {

@@ -46,6 +46,14 @@ async fn f64_of(rt: &TestRuntime, sql: &str) -> f64 {
     scalar_f64(&rt.sql(sql).await)
 }
 
+async fn text_of(rt: &TestRuntime, sql: &str) -> String {
+    let batches = rt.sql(sql).await;
+    let column = arrow::compute::cast(batches[0].column(0), &arrow::datatypes::DataType::Utf8)
+        .expect("a text column");
+    let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+    column.value(0).to_string()
+}
+
 /// The status and error of plugin `example` in `beacon.system.plugins`.
 async fn example_status(rt: &TestRuntime) -> (String, Option<String>) {
     let batches = rt
@@ -172,6 +180,17 @@ fn write_points(rt: &TestRuntime) {
     let mut writer = ArrowWriter::try_new(file, schema, Some(properties)).unwrap();
     writer.write(&batch).unwrap();
     writer.close().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_literal_argument_reaches_the_plugin_as_a_scalar() {
+    let rt = new_runtime("native-scalar-args").await;
+    install(&rt, example_plugin(false)).await.unwrap();
+    write_points(&rt);
+    let sql = "SELECT example_arg_kinds(lon, 2.0) FROM read_parquet('points.parquet') LIMIT 1";
+    assert_eq!(text_of(&rt, sql).await, "array,scalar");
+    let sql = "SELECT example_arg_kinds(lon, lat) FROM read_parquet('points.parquet') LIMIT 1";
+    assert_eq!(text_of(&rt, sql).await, "array,array");
 }
 
 async fn plan_text(rt: &TestRuntime, sql: &str) -> String {
