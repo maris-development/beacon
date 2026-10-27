@@ -805,9 +805,17 @@ mod tests {
         let ctx = session(dir.path()).await;
         let sql = "SELECT id FROM points WHERE near_box(lon + 1, lat, 3, 50, 9, 56)";
         let plan = explain(&ctx, sql).await;
-        // Interval arithmetic rounds outward, so the bounds are 2 and 8 minus and plus one ulp.
-        assert!(plan.contains("points.lon >= Float64(1.99999"), "{plan}");
-        assert!(plan.contains("points.lon <= Float64(8.00000"), "{plan}");
+        // On Windows, DataFusion rounds each bound one ulp outward; elsewhere it is exact.
+        assert!(
+            plan.contains("points.lon >= Float64(2)")
+                || plan.contains("points.lon >= Float64(1.99999"),
+            "{plan}"
+        );
+        assert!(
+            plan.contains("points.lon <= Float64(8)")
+                || plan.contains("points.lon <= Float64(8.00000"),
+            "{plan}"
+        );
         let metric = pruned_row_groups(&ctx, sql).await;
         assert!(metric.contains("2 total → 1 matched"), "{metric}");
         assert_eq!(ids(&ctx, sql).await, [3, 4]);
@@ -849,7 +857,12 @@ mod tests {
         assert!(!plan.contains("points.lat >= "), "{plan}");
         let sql = "SELECT id FROM points WHERE gap(lat, lon) > 45 AND lon >= 0";
         let plan = explain(&ctx, sql).await;
-        assert!(plan.contains("points.lat >= Float64(44.9999"), "{plan}");
+        // On Windows, DataFusion rounds the bound one ulp outward; elsewhere it is exact.
+        assert!(
+            plan.contains("points.lat >= Float64(45)")
+                || plan.contains("points.lat >= Float64(44.9999"),
+            "{plan}"
+        );
         let metric = pruned_row_groups(&ctx, sql).await;
         assert!(metric.contains("2 total → 1 matched"), "{metric}");
         assert_eq!(ids(&ctx, sql).await, [3, 4]);
