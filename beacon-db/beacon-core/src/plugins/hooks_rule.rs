@@ -171,30 +171,52 @@ fn propagated(conjunct: &Expr, schema: &DFSchema) -> Vec<Expr> {
     let Some((hooked, args, output)) = constrained_call(conjunct, schema) else {
         return Vec::new();
     };
+    let mut ranges = Vec::new();
+    propagate_into(hooked, args, &output, schema, &mut ranges);
+    ranges
+}
+
+/// Adds the column ranges under `args` when the call output is in `output`.
+///
+/// A nested hooked call gets its argument interval as its own output, so the
+/// ranges reach the columns below it.
+fn propagate_into(
+    hooked: &HookedUdf,
+    args: &[Expr],
+    output: &Interval,
+    schema: &DFSchema,
+    ranges: &mut Vec<Expr>,
+) {
     let Some(inputs) = args
         .iter()
-        .map(|arg| arg_interval(arg, schema))
+        .map(|arg| interval_of(arg, schema))
         .collect::<Option<Vec<_>>>()
     else {
-        return Vec::new();
+        return;
     };
-    let inputs: Vec<&Interval> = inputs.iter().collect();
-    let intervals = match hooked.propagate(&output, &inputs) {
+    let refs: Vec<&Interval> = inputs.iter().collect();
+    let intervals = match hooked.propagate(output, &refs) {
         Ok(Some(intervals)) => intervals,
-        Ok(None) => return Vec::new(),
+        Ok(None) => return,
         Err(error) => {
             tracing::warn!(
                 "Ignoring the propagate hook of '{}' for this query: {error}",
                 hooked.inner().name()
             );
-            return Vec::new();
+            return;
         }
     };
-    args.iter()
-        .zip(&intervals)
-        .filter(|(arg, _)| matches!(arg, Expr::Column(_)))
-        .flat_map(|(arg, interval)| range(arg, interval))
-        .collect()
+    for ((arg, interval), input) in args.iter().zip(&intervals).zip(&inputs) {
+        // An interval that did not narrow gives no range and no reason to recurse.
+        if interval == input {
+            continue;
+        }
+        if matches!(arg, Expr::Column(_)) {
+            ranges.extend(range(arg, interval));
+        } else if let Some((nested, nested_args)) = hooked_call(arg) {
+            propagate_into(nested, nested_args, interval, schema, ranges);
+        }
+    }
 }
 
 /// The hooked call in `expr` and the output interval that `expr` needs.
@@ -228,12 +250,33 @@ fn constrained_call<'a>(
     Some((hooked, args, output))
 }
 
-/// A point interval for a constant argument, else the unbounded interval of its type.
-fn arg_interval(arg: &Expr, schema: &DFSchema) -> Option<Interval> {
-    match constant(arg) {
-        Some(value) => Interval::try_new(value.clone(), value).ok(),
-        None => Interval::make_unbounded(&arg.get_type(schema).ok()?).ok(),
+/// The interval of `expr`: a point for a constant, the `bounds` hook for a hooked
+/// call, else the unbounded interval of its type.
+fn interval_of(expr: &Expr, schema: &DFSchema) -> Option<Interval> {
+    if let Some(value) = constant(expr) {
+        return Interval::try_new(value.clone(), value).ok();
     }
+    if let Some(interval) = bounds_of(expr, schema) {
+        return Some(interval);
+    }
+    Interval::make_unbounded(&expr.get_type(schema).ok()?).ok()
+}
+
+/// The result of the `bounds` hook for a hooked call, with the intervals of its arguments.
+fn bounds_of(expr: &Expr, schema: &DFSchema) -> Option<Interval> {
+    let (hooked, args) = hooked_call(expr)?;
+    let inputs = args
+        .iter()
+        .map(|arg| interval_of(arg, schema))
+        .collect::<Option<Vec<_>>>()?;
+    let refs: Vec<&Interval> = inputs.iter().collect();
+    hooked.bounds(&refs).unwrap_or_else(|error| {
+        tracing::warn!(
+            "Ignoring the bounds hook of '{}' for this query: {error}",
+            hooked.inner().name()
+        );
+        None
+    })
 }
 
 /// `expr >= lower` and `expr <= upper` for the bounded sides of `interval`.
@@ -364,6 +407,47 @@ mod tests {
             .invoke_arrays(|_| panic!("flip must not run"))
     }
 
+    /// `half(x)` is `x / 2`, with `bounds` and `propagate` hooks and no `implies` rule.
+    fn half() -> ScalarUDF {
+        let two = || ScalarValue::from(2.0);
+        function("half")
+            .args([DataType::Float64])
+            .returns(DataType::Float64)
+            .bounds(move |args| {
+                let lower = args[0].lower().div(two())?;
+                let upper = args[0].upper().div(two())?;
+                Ok(Some(Interval::try_new(lower, upper)?))
+            })
+            .propagate(move |output, args| {
+                let lower = output.lower().mul(two())?;
+                let upper = output.upper().mul(two())?;
+                let x = args[0].intersect(Interval::try_new(lower, upper)?)?;
+                Ok(x.map(|x| vec![x]))
+            })
+            .invoke_arrays(|arrays| {
+                let halves: Float64Array = f64s(&arrays[0])
+                    .iter()
+                    .map(|v| v.map(|v| v / 2.0))
+                    .collect();
+                Ok(Arc::new(halves))
+            })
+    }
+
+    /// `bad_half(x)` is `half(x)`, but its `bounds` hook panics.
+    fn bad_half() -> ScalarUDF {
+        function("bad_half")
+            .args([DataType::Float64])
+            .returns(DataType::Float64)
+            .bounds(|_| panic!("bounds exploded"))
+            .invoke_arrays(|arrays| {
+                let halves: Float64Array = f64s(&arrays[0])
+                    .iter()
+                    .map(|v| v.map(|v| v / 2.0))
+                    .collect();
+                Ok(Arc::new(halves))
+            })
+    }
+
     /// A session with the rule, the test functions and table `points`: one Parquet
     /// file with two row groups, the first in the west and the second in the east.
     async fn session(dir: &std::path::Path) -> Arc<SessionContext> {
@@ -397,7 +481,15 @@ mod tests {
             .build();
         let ctx = Arc::new(SessionContext::new_with_state(state));
         cell.set(Arc::downgrade(&ctx)).unwrap();
-        for udf in [in_box(), near_box(), boom_box(), is_east(), flip()] {
+        for udf in [
+            in_box(),
+            near_box(),
+            boom_box(),
+            is_east(),
+            flip(),
+            half(),
+            bad_half(),
+        ] {
             ctx.register_udf(udf);
         }
         ctx.register_parquet(
@@ -511,6 +603,41 @@ mod tests {
         let plan = explain(&ctx, sql).await;
         assert!(!plan.contains("flip("), "{plan}");
         assert!(plan.contains("(- points.lon) >= Float64(-8)"), "{plan}");
+        assert_eq!(ids(&ctx, sql).await, [3, 4]);
+    }
+
+    #[tokio::test]
+    async fn propagate_reaches_a_column_through_a_nested_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = session(dir.path()).await;
+        let sql = "SELECT id FROM points WHERE near_box(half(lon), lat, 1, 50, 4, 56)";
+        let plan = explain(&ctx, sql).await;
+        assert!(plan.contains("points.lon >= Float64(2)"), "{plan}");
+        assert!(plan.contains("points.lon <= Float64(8)"), "{plan}");
+        let metric = pruned_row_groups(&ctx, sql).await;
+        assert!(metric.contains("2 total → 1 matched"), "{metric}");
+        assert_eq!(ids(&ctx, sql).await, [3, 4]);
+    }
+
+    #[tokio::test]
+    async fn bounds_gives_the_interval_of_a_nested_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = session(dir.path()).await;
+        let sql = "SELECT id FROM points WHERE near_box(lon, lat, half(4), 50, half(16), 56)";
+        let plan = explain(&ctx, sql).await;
+        assert!(plan.contains("points.lon >= Float64(2)"), "{plan}");
+        assert!(plan.contains("points.lon <= Float64(8)"), "{plan}");
+        assert_eq!(ids(&ctx, sql).await, [3, 4]);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_bounds_hook_gives_an_unbounded_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = session(dir.path()).await;
+        let sql = "SELECT id FROM points WHERE near_box(lon, lat, bad_half(4), 50, 8, 56)";
+        let plan = explain(&ctx, sql).await;
+        assert!(!plan.contains("points.lon >= "), "{plan}");
+        assert!(plan.contains("points.lon <= Float64(8)"), "{plan}");
         assert_eq!(ids(&ctx, sql).await, [3, 4]);
     }
 

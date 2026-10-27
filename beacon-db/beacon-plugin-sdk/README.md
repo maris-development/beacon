@@ -92,6 +92,7 @@ Then file statistics pruning, table providers and remote sources see plain predi
 - `Implied::Necessary(expr)`: Beacon adds `expr` next to the call. The rule must be correct. A row where the call is true and `expr` is not true disappears from the result.
 - `Implied::Exact(expr)`: Beacon replaces the call with `expr`. Beacon trusts this rule.
 - `propagate`: for a filter `f(..)` or `f(..) <op> <literal>`, Beacon adds `col >= low` and `col <= high` for each column argument. Beacon uses it only when `implies` gives no rule.
+- For an argument that is a call with hooks, such as `f(g(x))`, Beacon calls the `bounds` hook of `g` to get the input interval of `f`. Beacon then calls the `propagate` hook of `g` with the interval that `f` gives for that argument. So the range reaches column `x`, also when `f` and `g` come from different plugins.
 - `bounds` and `propagate` also answer DataFusion interval analysis, through `evaluate_bounds` and `propagate_constraints`.
 - Beacon folds a constant argument, such as `CAST(2 AS DOUBLE)`, to a literal before `implies` sees it.
 - Beacon applies the `Exact` rules of calls inside the arguments before `implies` sees them.
