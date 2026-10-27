@@ -1854,6 +1854,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-croissant"
+version = "2.1.0-rc.1"
+dependencies = [
+ "arrow 58.4.0",
+ "beacon-core",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "beacon-dap"
 version = "2.1.0-rc.1"
 dependencies = [
@@ -2244,6 +2254,7 @@ dependencies = [
  "axum-streams",
  "base64",
  "beacon-core",
+ "beacon-croissant",
  "beacon-dap",
  "beacon-datafusion-ext",
  "beacon-mcp",
