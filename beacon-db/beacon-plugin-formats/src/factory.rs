@@ -2,14 +2,15 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use beacon_plugin_sdk::file_format::FormatFactory;
 use datafusion::catalog::Session;
-use datafusion::common::GetExt;
+use datafusion::common::{GetExt, plan_err};
 use datafusion::datasource::file_format::{FileFormat, FileFormatFactory};
 use datafusion::error::Result;
 
-use crate::format::{ErrorReader, PluginFileFormat};
+use crate::format::{ErrorReader, PluginFileFormat, not_installed};
 use crate::options::plugin_options;
 
 /// Turns one plugin [`FormatFactory`] into a DataFusion and Beacon format factory.
@@ -18,6 +19,8 @@ pub struct PluginFileFormatFactory {
     factory: Arc<dyn FormatFactory>,
     /// The key that DataFusion registers this factory under.
     ext: String,
+    /// Shared by all clones and formats: `false` after the plugin is uninstalled.
+    installed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for PluginFileFormatFactory {
@@ -38,7 +41,21 @@ impl PluginFileFormatFactory {
             .cloned()
             .unwrap_or_else(|| factory.name().to_string())
             .to_ascii_lowercase();
-        Self { factory, ext }
+        Self {
+            factory,
+            ext,
+            installed: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// `false` after the plugin is uninstalled.
+    pub fn is_installed(&self) -> bool {
+        self.installed.load(Ordering::SeqCst)
+    }
+
+    /// Marks the format as uninstalled: every table on it fails from now on.
+    pub fn mark_uninstalled(&self) {
+        self.installed.store(false, Ordering::SeqCst);
     }
 
     /// The same factory, registered under `key`.
@@ -72,6 +89,9 @@ impl PluginFileFormatFactory {
     }
 
     fn format(&self, raw: &HashMap<String, String>) -> Result<PluginFileFormat> {
+        if !self.is_installed() {
+            return plan_err!("{}", not_installed(self.name()));
+        }
         let (options, single_file_output) = plugin_options(raw)?;
         let reader = self
             .factory
@@ -85,6 +105,7 @@ impl PluginFileFormatFactory {
             single_file_output,
             // The file analyzer does not see plugin formats yet.
             statistics: false,
+            installed: Arc::clone(&self.installed),
         })
     }
 }
@@ -114,6 +135,7 @@ impl FileFormatFactory for PluginFileFormatFactory {
                 options: HashMap::new(),
                 single_file_output: None,
                 statistics: false,
+                installed: Arc::clone(&self.installed),
             }),
         }
     }

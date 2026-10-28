@@ -1,5 +1,7 @@
 //! In-process plugin formats for the wrapper tests. They cross the FFI tables
 //! through the foreign path, as a plugin library does.
+// Each test file uses a part of these formats.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

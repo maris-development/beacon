@@ -2,12 +2,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use beacon_plugin_sdk::file_format::{FormatFactory, FormatReader, OutputKind, ScanRequest};
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::Session;
-use datafusion::common::{Statistics, exec_err, not_impl_err};
+use datafusion::common::{Statistics, exec_err, not_impl_err, plan_err};
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSource};
@@ -31,12 +32,14 @@ pub struct PluginFileFormat {
     pub(crate) factory: Arc<dyn FormatFactory>,
     pub(crate) reader: Arc<dyn FormatReader>,
     pub(crate) ext: String,
-    /// The options the plugin got, for the schema cache key.
+    /// The options the plugin got.
     pub(crate) options: HashMap<String, String>,
     #[allow(dead_code)] // read by the write path
     pub(crate) single_file_output: Option<bool>,
     /// Only a format for the file analyzer computes statistics.
     pub(crate) statistics: bool,
+    /// Shared with the factory: `false` after the plugin is uninstalled.
+    pub(crate) installed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for PluginFileFormat {
@@ -56,6 +59,14 @@ impl PluginFileFormat {
 
     fn context(&self, error: DataFusionError) -> DataFusionError {
         error.context(format!("file format {}", self.name()))
+    }
+
+    fn ensure_installed(&self) -> Result<()> {
+        if self.installed.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            plan_err!("{}", not_installed(self.name()))
+        }
     }
 }
 
@@ -98,6 +109,7 @@ impl FileFormat for PluginFileFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> Result<SchemaRef> {
+        self.ensure_installed()?;
         // Bounded like the built-in formats: each call may hold an open file.
         let width = state
             .config_options()
@@ -176,6 +188,7 @@ impl FileFormat for PluginFileFormat {
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.ensure_installed()?;
         match self.factory.output_kind() {
             OutputKind::Flat => {
                 let projection = conf.file_source().projection().cloned();
@@ -226,4 +239,9 @@ impl FileFormat for PluginFileFormat {
             Arc::new(beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening::new()),
         ))
     }
+}
+
+/// The error text for a format whose plugin is uninstalled.
+pub(crate) fn not_installed(name: &str) -> String {
+    format!("file format `{name}` is not installed")
 }
