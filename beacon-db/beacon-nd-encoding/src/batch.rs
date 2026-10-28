@@ -4,11 +4,11 @@
 use arrow::array::{Array, ArrayRef, RecordBatchOptions, UInt64Array};
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use datafusion::common::plan_err;
-use datafusion::error::{DataFusionError, Result};
+use datafusion_common::plan_err;
+use datafusion_common::{DataFusionError, Result};
 
-use super::array::NdArrowArray;
-use super::dimensions::Dimensions;
+use crate::array::NdArrowArray;
+use crate::dimensions::Dimensions;
 
 /// A record batch whose columns are [`NdArrowArray`]s over a shared target
 /// grid. Each column may live on a subset of the target's dimensions (a scalar
@@ -18,7 +18,7 @@ use super::dimensions::Dimensions;
 ///
 /// An optional [`selection`](Self::selection) restricts the batch to a subset of
 /// the target cells (their row-major linear indices). It is how an
-/// [`NdFilterExec`](crate::nd::exec::NdFilterExec) records a predicate without
+/// `NdFilterExec` records a predicate without
 /// moving data: the columns are untouched, and materialization gathers only the
 /// retained cells — the broadcast and the selection fuse into one gather per
 /// column, so the filtered-out cross-product never exists.
@@ -167,7 +167,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Float64Type, Int32Type, Schema};
 
     use super::*;
-    use crate::nd::dimensions::Dimension;
+    use crate::dimensions::Dimension;
 
     fn dims(spec: &[(&str, usize)]) -> Dimensions {
         Dimensions::try_new(

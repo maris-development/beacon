@@ -1,14 +1,14 @@
 //! Named dimensions for N-dimensional Arrow arrays.
 //!
-//! A [`Dimensions`] value describes the logical shape of an [`crate::nd::NdArrowArray`]
+//! A [`Dimensions`] value describes the logical shape of an [`crate::array::NdArrowArray`]
 //! in C-order (row-major, first dimension outermost). Dimension names drive
 //! xarray-style broadcasting: axes are aligned by name, never by position.
 
 use std::fmt;
 use std::sync::Arc;
 
-use datafusion::common::plan_err;
-use datafusion::error::Result;
+use datafusion_common::plan_err;
+use datafusion_common::Result;
 
 /// A single named axis with a fixed size.
 #[derive(Debug, Clone, PartialEq, Eq)]

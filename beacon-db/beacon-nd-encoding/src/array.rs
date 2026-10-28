@@ -2,11 +2,11 @@
 
 use arrow::array::ArrayRef;
 use arrow::datatypes::DataType;
-use datafusion::common::plan_err;
-use datafusion::error::{DataFusionError, Result};
+use datafusion_common::plan_err;
+use datafusion_common::{DataFusionError, Result};
 
-use super::broadcast::BroadcastMap;
-use super::dimensions::Dimensions;
+use crate::broadcast::BroadcastMap;
+use crate::dimensions::Dimensions;
 
 /// A flat Arrow array plus the named C-order dimensions describing its
 /// logical N-dimensional shape.
@@ -86,7 +86,7 @@ mod tests {
     use arrow::datatypes::Int32Type;
 
     use super::*;
-    use crate::nd::dimensions::Dimension;
+    use crate::dimensions::Dimension;
 
     fn dims(spec: &[(&str, usize)]) -> Dimensions {
         Dimensions::try_new(

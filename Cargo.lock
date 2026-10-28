@@ -1884,6 +1884,7 @@ dependencies = [
  "base64",
  "beacon-common",
  "beacon-file-stats",
+ "beacon-nd-encoding",
  "blake3",
  "chrono",
  "datafusion 54.1.0",
@@ -2138,6 +2139,7 @@ dependencies = [
  "arrow-ipc 58.4.0",
  "async-trait",
  "beacon-datafusion-ext",
+ "beacon-nd-encoding",
  "bytemuck",
  "criterion 0.5.1",
  "crossbeam",
@@ -2176,6 +2178,14 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "beacon-nd-encoding"
+version = "2.1.0-rc.1"
+dependencies = [
+ "arrow 58.4.0",
+ "datafusion-common 54.1.0",
 ]
 
 [[package]]

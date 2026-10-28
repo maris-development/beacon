@@ -1,0 +1,12 @@
+[package]
+name = "beacon-nd-encoding"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "N-dimensional Arrow arrays and their beacon.nd record batch encoding"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+[dependencies]
+arrow = { workspace = true }
+datafusion-common = { workspace = true }

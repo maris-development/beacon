@@ -17,12 +17,8 @@
 //!
 //! Filtering and projection operators are layered on top of this spine later.
 
-pub mod array;
-pub mod batch;
-pub mod broadcast;
-pub mod dimensions;
-pub mod encoding;
 pub mod exec;
+pub use beacon_nd_encoding::{array, batch, broadcast, dimensions, encoding};
 pub mod optimizer;
 
 pub use array::NdArrowArray;
