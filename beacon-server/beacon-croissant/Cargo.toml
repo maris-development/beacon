@@ -1,0 +1,24 @@
+[package]
+name = "beacon-croissant"
+version.workspace = true
+edition = "2021"
+
+rust-version.workspace = true
+# The whole repository is AGPL-3.0, from the root LICENSE. This crate restates it because it is
+# publishable, and a published crate needs the field.
+license = "AGPL-3.0-only"
+
+[dependencies]
+# `default-features = false` so a `--no-default-features` build of `beacon-server` really drops
+# PROJ. Cargo unifies features across the graph, so one default-on path turns it back on.
+beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
+anyhow = { workspace = true }
+arrow = { workspace = true }
+axum = { workspace = true }
+futures = { workspace = true }
+percent-encoding = "2.3.2"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }

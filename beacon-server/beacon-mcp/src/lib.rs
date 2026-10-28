@@ -21,19 +21,27 @@ use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 pub use server::BeaconMcpServer;
 
 /// Build the MCP streamable-HTTP tower service, ready to mount in an axum router
-/// (e.g. `Router::route_service("/mcp", beacon_mcp::streamable_http_service(rt, &[]))`).
+/// (e.g. `Router::route_service("/mcp", beacon_mcp::streamable_http_service(rt, &[], None))`).
 ///
 /// # Arguments
 ///
 /// * `runtime` - The runtime that runs every tool call.
 /// * `allowed_hosts` - `Host` values accepted in addition to the loopback hosts,
 ///   as `host` or `host:port`. An entry `*` accepts every host.
+/// * `croissant_base` - The server root for the `croissant` link of each table:
+///   the public URL, else the base path. `None` leaves out the link.
 pub fn streamable_http_service(
     runtime: Arc<Runtime>,
     allowed_hosts: &[String],
+    croissant_base: Option<String>,
 ) -> StreamableHttpService<BeaconMcpServer, LocalSessionManager> {
     StreamableHttpService::new(
-        move || Ok(BeaconMcpServer::new(runtime.clone())),
+        move || {
+            Ok(BeaconMcpServer::new(
+                runtime.clone(),
+                croissant_base.clone(),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         http_config(allowed_hosts),
     )

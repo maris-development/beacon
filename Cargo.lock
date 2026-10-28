@@ -1855,6 +1855,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-croissant"
+version = "2.1.0-rc.1"
+dependencies = [
+ "anyhow",
+ "arrow 58.4.0",
+ "axum",
+ "beacon-core",
+ "futures",
+ "percent-encoding",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "beacon-dap"
 version = "2.1.0-rc.1"
 dependencies = [
@@ -2120,6 +2137,7 @@ dependencies = [
  "arrow 58.4.0",
  "arrow-json 58.4.0",
  "beacon-core",
+ "beacon-croissant",
  "futures",
  "http",
  "rmcp",
@@ -2256,6 +2274,7 @@ dependencies = [
  "axum-streams",
  "base64",
  "beacon-core",
+ "beacon-croissant",
  "beacon-dap",
  "beacon-datafusion-ext",
  "beacon-mcp",
@@ -2264,6 +2283,7 @@ dependencies = [
  "datafusion 54.1.0",
  "futures",
  "object_store 0.13.2",
+ "parquet",
  "pprof",
  "prost",
  "serde",

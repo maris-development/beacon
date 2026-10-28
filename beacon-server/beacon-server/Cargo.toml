@@ -75,6 +75,7 @@ beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
 beacon-mcp = { path = "../beacon-mcp" }
 beacon-dap = { path = "../beacon-dap" }
+beacon-croissant = { path = "../beacon-croissant" }
 
 [dev-dependencies]
 # Tests build runtimes directly via `RuntimeBuilder`, so no test-only feature is
@@ -84,3 +85,7 @@ beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 tempfile = { workspace = true }
 # `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.
 tower = { version = "0.5", features = ["util"] }
+# Reads the Parquet body of the Croissant data route.
+parquet = { workspace = true }
+# `tokio::time::pause` for the home page catalog timeout tests.
+tokio = { workspace = true, features = ["test-util"] }

@@ -98,6 +98,10 @@ pub struct ServerConfig {
     /// `trace`, `debug`, `info`, `warn`, `error`, `off`. From `BEACON_LOG_LEVEL`.
     /// `RUST_LOG` overrides it when set.
     pub log_level: String,
+    /// Absolute URL of the server root, with the base path and no final `/`, e.g.
+    /// `https://example.org/beacon`. From `BEACON_PUBLIC_URL`. `None` builds links
+    /// from the request headers.
+    pub public_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +378,9 @@ struct RawConfig {
     api_threads: usize,
     #[envconfig(from = "BEACON_BASE_PATH", default = "")]
     base_path: String,
+    /// Validated in [`Config::load`].
+    #[envconfig(from = "BEACON_PUBLIC_URL")]
+    public_url: Option<String>,
     /// Directory containing the built admin web UI. Defaults to `web` (resolved
     /// relative to the working directory; `/beacon/web` in the Docker image).
     #[envconfig(from = "BEACON_WEB_UI_DIR", default = "web")]
@@ -653,6 +660,7 @@ impl From<RawConfig> for Config {
                 web_ui_dir: raw.web_ui_dir,
                 max_upload_bytes: raw.max_upload_bytes,
                 log_level: raw.log_level,
+                public_url: raw.public_url,
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
@@ -893,6 +901,21 @@ fn normalize_base_path(raw: &str) -> std::result::Result<String, String> {
     Ok(format!("/{trimmed}"))
 }
 
+/// Trims `BEACON_PUBLIC_URL` and removes each final `/`. A blank value gives `None`.
+///
+/// Errors when the value does not start with `http://` or `https://`, because the
+/// value goes into absolute links as is.
+fn normalize_public_url(raw: &str) -> std::result::Result<Option<String>, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        return Err(format!("'{raw}' must start with 'http://' or 'https://'"));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 impl Config {
     /// Loads the configuration from the environment, normalizing and validating
     /// fields. Returns a descriptive error instead of panicking, so callers can
@@ -920,6 +943,10 @@ impl Config {
             normalize_base_path(&config.server.base_path).map_err(ConfigError::InvalidBasePath)?;
         config.server.log_level =
             normalize_log_level(&config.server.log_level).map_err(ConfigError::InvalidLogLevel)?;
+        config.server.public_url = match config.server.public_url.as_deref() {
+            Some(url) => normalize_public_url(url).map_err(ConfigError::InvalidPublicUrl)?,
+            None => None,
+        };
 
         validate_threads(&config.server)?;
         validate_storage(&config.s3)?;
@@ -1040,8 +1067,9 @@ fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWidening
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_master_key, normalize_base_path, normalize_log_level, parse_startup_plugins,
-        validate_storage, validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
+        decode_master_key, normalize_base_path, normalize_log_level, normalize_public_url,
+        parse_startup_plugins, validate_storage, validate_threads, Config, Hdf5Convention, PathBuf,
+        RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1409,6 +1437,29 @@ mod tests {
     fn unknown_log_level_is_an_error() {
         assert!(normalize_log_level("verbose").is_err());
         assert!(normalize_log_level("").is_err());
+    }
+
+    #[test]
+    fn public_url_is_trimmed_and_checked() {
+        assert_eq!(config(&[]).server.public_url, None);
+        assert_eq!(
+            config(&[("BEACON_PUBLIC_URL", "https://a.org/")])
+                .server
+                .public_url
+                .as_deref(),
+            Some("https://a.org/")
+        );
+        assert_eq!(
+            normalize_public_url("https://a.org/"),
+            Ok(Some("https://a.org".to_string()))
+        );
+        assert_eq!(
+            normalize_public_url(" http://a.org/beacon// "),
+            Ok(Some("http://a.org/beacon".to_string()))
+        );
+        assert_eq!(normalize_public_url("   "), Ok(None));
+        assert!(normalize_public_url("ftp://a.org").is_err());
+        assert!(normalize_public_url("a.org").is_err());
     }
 
     #[test]

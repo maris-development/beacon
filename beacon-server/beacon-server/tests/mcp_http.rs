@@ -266,6 +266,17 @@ async fn describe_table_shows_the_comments() {
     assert_eq!(id["description"], Value::Null, "{described}");
 }
 
+/// With no public URL, the Croissant link is relative to the server root.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_table_links_the_croissant_document() {
+    let (router, _harness, admin) = router_with(config(false)).await;
+    commented_table(&router, &admin, "obs").await;
+
+    let described = call_tool(&router, None, "describe_table", json!({"table_name": "obs"})).await;
+
+    assert_eq!(described["croissant"], "/api/croissant/obs", "{described}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn granted_reader_lists_only_readable_tables_with_their_comments() {
     let (router, _harness, admin) = router_with(config(true)).await;
@@ -287,7 +298,7 @@ async fn granted_reader_lists_only_readable_tables_with_their_comments() {
 
     assert_eq!(
         listed,
-        json!([{"name": "obs", "description": "about obs"}]),
+        json!([{"name": "obs", "description": "about obs", "croissant": "/api/croissant/obs"}]),
         "an ungranted table must not show"
     );
     assert!(secret.get("columns").is_none(), "secret must not be described: {secret}");

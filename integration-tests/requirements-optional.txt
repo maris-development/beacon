@@ -9,3 +9,6 @@ adbc-driver-manager==1.3.0
 #
 # test_dap2.py reads the DAP2 endpoint with pydap. It is skipped when pydap is absent.
 pydap==3.5.11
+#
+# test_croissant.py loads the Croissant export with mlcroissant. It is skipped when mlcroissant is absent.
+mlcroissant==1.1.1

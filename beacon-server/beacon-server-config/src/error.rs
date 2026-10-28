@@ -20,6 +20,10 @@ pub enum ConfigError {
     #[error("invalid BEACON_BASE_PATH: {0}")]
     InvalidBasePath(String),
 
+    /// `BEACON_PUBLIC_URL` does not start with `http://` or `https://`.
+    #[error("invalid BEACON_PUBLIC_URL: {0}")]
+    InvalidPublicUrl(String),
+
     /// Storage settings are internally inconsistent (e.g. S3 enabled without a
     /// bucket name).
     #[error("invalid storage configuration: {0}")]
