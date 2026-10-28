@@ -78,13 +78,13 @@ async fn users_roles_and_grants_survive_a_restart() {
 async fn a_stored_quoted_table_rule_matches_and_revokes_after_a_restart() {
     let rt = restartable_runtime("auth-legacy-quoted", |b| b.with_auth_enforcement(true)).await;
     for statement in [
-        "CREATE TABLE \"with space\" (a BIGINT)",
-        "INSERT INTO \"with space\" VALUES (1)",
+        "CREATE TABLE \"with-hyphen\" (a BIGINT)",
+        "INSERT INTO \"with-hyphen\" VALUES (1)",
         "CREATE ROLE legacy_reader",
         "CREATE USER legacy_alice WITH PASSWORD 'pw'",
         "GRANT ROLE legacy_reader TO USER legacy_alice",
         "INSERT INTO __beacon_role_rules (role, kind, privilege, target_type, target_value) \
-         VALUES ('legacy_reader', 'grant', 'SELECT', 'table', '\"with space\"')",
+         VALUES ('legacy_reader', 'grant', 'SELECT', 'table', '\"with-hyphen\"')",
     ] {
         rt.sql_as(statement, AuthIdentity::system()).await;
     }
@@ -96,18 +96,18 @@ async fn a_stored_quoted_table_rule_matches_and_revokes_after_a_restart() {
         .await
         .unwrap();
     let read = rt
-        .try_sql_as("SELECT * FROM \"with space\"", alice.clone())
+        .try_sql_as("SELECT * FROM \"with-hyphen\"", alice.clone())
         .await
         .expect("the stored rule matches once its quotes are gone");
     assert_eq!(total_rows(&read), 1);
 
     rt.sql_as(
-        "REVOKE SELECT ON TABLE \"with space\" FROM ROLE legacy_reader",
+        "REVOKE SELECT ON TABLE \"with-hyphen\" FROM ROLE legacy_reader",
         AuthIdentity::system(),
     )
     .await;
     let rt = rt.restart().await;
-    let denied = rt.try_sql_as("SELECT * FROM \"with space\"", alice).await;
+    let denied = rt.try_sql_as("SELECT * FROM \"with-hyphen\"", alice).await;
     assert!(
         denied.is_err_and(|e| e.to_string().contains("permission denied")),
         "the revoked rule must not come back after a restart"
