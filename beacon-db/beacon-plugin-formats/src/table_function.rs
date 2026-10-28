@@ -133,7 +133,10 @@ impl TableFunctionImpl for PluginReadFunc {
         let session = args.session();
         let args = args.exprs();
         let Some(state) = session.as_any().downcast_ref::<SessionState>() else {
-            return exec_err!("{}: the session is not a DataFusion SessionState", self.name);
+            return exec_err!(
+                "{}: the session is not a DataFusion SessionState",
+                self.name
+            );
         };
         let Some(listing) = state.config().get_extension::<ListingFactory>() else {
             return exec_err!(

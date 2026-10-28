@@ -20,8 +20,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use futures::{StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::nd::NdPluginSource;
-use crate::nd_partition::encoded_partition_cols;
+use crate::nd::encoded_partition_cols;
 use crate::source::PluginFileSource;
 use beacon_datafusion_ext::nd::encoding::encoded_schema;
 use beacon_datafusion_ext::nd::exec::{NdBroadcastExec, NdSourceExec};
@@ -190,38 +189,31 @@ impl FileFormat for PluginFileFormat {
         conf: FileScanConfig,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         self.ensure_installed()?;
-        match self.factory.output_kind() {
-            OutputKind::Flat => {
-                let projection = conf.file_source().projection().cloned();
-                let source = PluginFileSource::new(
-                    self.name().to_string(),
-                    Arc::clone(&self.reader),
-                    conf.file_source().table_schema().clone(),
-                    Arc::clone(&session_widening(state).strategy),
-                )
-                .with_projection(projection.as_ref());
-                let conf = FileScanConfigBuilder::from(conf)
-                    .with_source(Arc::new(source))
-                    .build();
-                Ok(DataSourceExec::from_data_source(conf))
-            }
+        let kind = self.factory.output_kind();
+        let table_schema = match kind {
+            OutputKind::Flat => conf.file_source().table_schema().clone(),
+            // Every scan column is a `beacon.nd` struct, as for the built-in nd formats.
+            OutputKind::Nd => TableSchema::new(
+                Arc::new(encoded_schema(conf.file_schema())),
+                encoded_partition_cols(conf.table_partition_cols()),
+            ),
+        };
+        let projection = conf.file_source().projection().cloned();
+        let source = PluginFileSource::new(
+            self.name().to_string(),
+            Arc::clone(&self.reader),
+            kind,
+            table_schema,
+            Arc::clone(&session_widening(state).strategy),
+        )
+        .with_projection(projection.as_ref());
+        let conf = FileScanConfigBuilder::from(conf)
+            .with_source(Arc::new(source))
+            .build();
+        let scan: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
+        match kind {
+            OutputKind::Flat => Ok(scan),
             OutputKind::Nd => {
-                // Every scan column is a `beacon.nd` struct, as for the built-in nd formats.
-                let table_schema = TableSchema::new(
-                    Arc::new(encoded_schema(conf.file_schema())),
-                    encoded_partition_cols(conf.table_partition_cols()),
-                );
-                let projection = conf.file_source().projection().cloned();
-                let source = NdPluginSource::new(
-                    self.name().to_string(),
-                    Arc::clone(&self.reader),
-                    table_schema,
-                )
-                .with_projection(projection.as_ref());
-                let conf = FileScanConfigBuilder::from(conf)
-                    .with_source(Arc::new(source))
-                    .build();
-                let scan: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
                 let nd_source = Arc::new(NdSourceExec::try_new(scan)?);
                 Ok(Arc::new(NdBroadcastExec::try_new(nd_source)?))
             }
@@ -232,6 +224,8 @@ impl FileFormat for PluginFileFormat {
         Arc::new(PluginFileSource::new(
             self.name().to_string(),
             Arc::clone(&self.reader),
+            // A placeholder: `create_physical_plan` builds the source for the kind.
+            OutputKind::Flat,
             table_schema,
             Arc::new(beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening::new()),
         ))

@@ -1,231 +1,42 @@
-//! The scan of an nd plugin format: `beacon.nd`-encoded batches.
+//! The parts of a plugin scan that only an nd format needs.
+//!
+//! Each column of an nd scan is a `beacon.nd` struct, one row per nd batch.
 
 use std::sync::Arc;
 
 use beacon_datafusion_ext::nd::encoding::{
-    decode_nd_record_batch_row, logical_schema, nd_batch_count, nd_value_type,
+    decode_nd_array, decode_nd_record_batch_row, encode_nd_array, nd_batch_count, nd_encoded_field,
 };
-use beacon_plugin_sdk::file_format::{FormatReader, ScanRequest};
-use datafusion::arrow::array::{RecordBatch, RecordBatchOptions};
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::config::ConfigOptions;
+use beacon_datafusion_ext::nd::{Dimension, Dimensions, NdArrowArray};
+use datafusion::arrow::array::{Array, ArrayRef, AsArray, RecordBatch, RecordBatchOptions};
+use datafusion::arrow::compute::cast;
+use datafusion::arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use datafusion::datasource::listing::PartitionedFile;
-use datafusion::datasource::physical_plan::{
-    FileOpenFuture, FileOpener, FileScanConfig, FileSource,
-};
-use datafusion::datasource::projection::{ProjectionOpener, SplitProjection};
-use datafusion::datasource::table_schema::TableSchema;
-use datafusion::error::Result;
-use datafusion::physical_expr::projection::ProjectionExprs;
-use datafusion::physical_expr::{PhysicalExpr, conjunction};
-use datafusion::physical_plan::filter_pushdown::{FilterPushdownPropagation, PushedDown};
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::datasource::physical_plan::{FileOpenFuture, FileOpener};
+use datafusion::error::{DataFusionError, Result};
+use datafusion::scalar::ScalarValue;
 use futures::{StreamExt, TryStreamExt};
-use object_store::ObjectStore;
 
-use crate::nd_partition::NdPartitionOpener;
-use crate::opener::{ContextOpener, filters_for};
-use beacon_datafusion_ext::scan_adapt::BatchAdapter;
-use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
+/// The axis of a scan that reads no file column, as for Beacon's built-in nd formats.
+const ROW_AXIS: &str = "row";
 
-/// Reads the files of an nd plugin format.
-///
-/// Each column is a `beacon.nd` struct, one row per nd batch. `ProjectionOpener` adds
-/// the partition columns, and [`NdPartitionOpener`] makes their values rank-0 structs.
-#[derive(Clone)]
-pub struct NdPluginSource {
-    name: String,
-    reader: Arc<dyn FormatReader>,
-    table_schema: TableSchema,
-    projection: SplitProjection,
-    metrics: ExecutionPlanMetricsSet,
-    predicate: Option<Arc<dyn PhysicalExpr>>,
-    batch_size: usize,
+/// Wraps the plugin opener of an nd scan that reads no file column (`COUNT(*)`, or
+/// only partition columns). The plugin reads every column, and each nd batch becomes
+/// a batch of no column with the grid size as its row count.
+pub(crate) struct NdCountOpener {
+    pub(crate) inner: Arc<dyn FileOpener>,
+    /// The schema of no column that the scan reads.
+    pub(crate) schema: SchemaRef,
 }
 
-impl std::fmt::Debug for NdPluginSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NdPluginSource")
-            .field("name", &self.name)
-            .field("predicate", &self.predicate)
-            .finish()
-    }
-}
-
-impl NdPluginSource {
-    /// `table_schema` holds the encoded file schema and partition columns.
-    pub fn new(name: String, reader: Arc<dyn FormatReader>, table_schema: TableSchema) -> Self {
-        Self {
-            name,
-            reader,
-            projection: SplitProjection::unprojected(&table_schema),
-            table_schema,
-            metrics: ExecutionPlanMetricsSet::new(),
-            predicate: None,
-            batch_size: 8192,
-        }
-    }
-
-    /// The same source with a projection that the scan pushed down.
-    pub fn with_projection(mut self, projection: Option<&ProjectionExprs>) -> Self {
-        self.projection = match projection {
-            Some(projection) => SplitProjection::new(self.table_schema.file_schema(), projection),
-            None => SplitProjection::unprojected(&self.table_schema),
-        };
-        self
-    }
-}
-
-impl FileSource for NdPluginSource {
-    fn create_file_opener(
-        &self,
-        object_store: Arc<dyn ObjectStore>,
-        base_config: &FileScanConfig,
-        _partition: usize,
-    ) -> Result<Arc<dyn FileOpener>> {
-        let file_schema = self.table_schema.file_schema();
-        let opener: Arc<dyn FileOpener> = Arc::new(NdPluginOpener {
-            reader: Arc::clone(&self.reader),
-            store: object_store,
-            file_schema: Arc::clone(file_schema),
-            projected: Arc::new(file_schema.project(&self.projection.file_indices)?),
-            predicate: self.predicate.clone(),
-            limit: base_config.limit,
-            batch_size: self.batch_size,
-        });
-        let projected = ProjectionOpener::try_new(self.projection.clone(), opener, file_schema)?;
-        let types = self
-            .table_schema
-            .table_partition_cols()
-            .iter()
-            .map(|field| nd_value_type(field.data_type()))
-            .collect::<Result<_>>()?;
-        let partitioned = Arc::new(NdPartitionOpener {
-            inner: projected,
-            types,
-            no_file_columns: self.projection.file_indices.is_empty(),
-        });
-        Ok(Arc::new(ContextOpener {
-            inner: partitioned,
-            format: self.name.clone(),
-        }))
-    }
-
-    fn table_schema(&self) -> &TableSchema {
-        &self.table_schema
-    }
-
-    fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
-        Arc::new(Self {
-            batch_size,
-            ..self.clone()
-        })
-    }
-
-    fn metrics(&self) -> &ExecutionPlanMetricsSet {
-        &self.metrics
-    }
-
-    fn file_type(&self) -> &str {
-        &self.name
-    }
-
-    fn supports_repartitioning(&self) -> bool {
-        false
-    }
-
-    fn projection(&self) -> Option<&ProjectionExprs> {
-        Some(&self.projection.source)
-    }
-
-    fn try_pushdown_projection(
-        &self,
-        projection: &ProjectionExprs,
-    ) -> Result<Option<Arc<dyn FileSource>>> {
-        let merged = self.projection.source.try_merge(projection)?;
-        Ok(Some(Arc::new(Self {
-            projection: SplitProjection::new(self.table_schema.file_schema(), &merged),
-            ..self.clone()
-        })))
-    }
-
-    fn try_pushdown_filters(
-        &self,
-        filters: Vec<Arc<dyn PhysicalExpr>>,
-        _config: &ConfigOptions,
-    ) -> Result<FilterPushdownPropagation<Arc<dyn FileSource>>> {
-        let predicate = match self.predicate.clone() {
-            Some(existing) => conjunction(std::iter::once(existing).chain(filters.clone())),
-            None => conjunction(filters.clone()),
-        };
-        let source = Self {
-            predicate: Some(predicate),
-            ..self.clone()
-        };
-        // Filters are hints for the plugin: Beacon applies them again.
-        Ok(FilterPushdownPropagation::with_parent_pushdown_result(vec![
-            PushedDown::No;
-            filters.len()
-        ])
-        .with_updated_node(Arc::new(source)))
-    }
-}
-
-/// Opens one file of an nd plugin format, for the file columns of the scan.
-struct NdPluginOpener {
-    reader: Arc<dyn FormatReader>,
-    store: Arc<dyn ObjectStore>,
-    /// The encoded file schema of the table.
-    file_schema: SchemaRef,
-    /// The encoded file columns of the scan.
-    projected: SchemaRef,
-    predicate: Option<Arc<dyn PhysicalExpr>>,
-    limit: Option<usize>,
-    batch_size: usize,
-}
-
-impl FileOpener for NdPluginOpener {
+impl FileOpener for NdCountOpener {
     fn open(&self, file: PartitionedFile) -> Result<FileOpenFuture> {
-        let projected = Arc::clone(&self.projected);
-        // A scan of no column (`COUNT(*)`) still needs the row count of each grid, so it
-        // reads every column of the file.
-        let counting = projected.fields().is_empty();
-        let read_target = if counting {
-            Arc::clone(&self.file_schema)
-        } else {
-            Arc::clone(&projected)
-        };
-        let logical = logical_schema(&read_target)?;
-        let request = ScanRequest {
-            filters: filters_for(self.predicate.as_ref(), &logical),
-            schema: logical,
-            limit: self.limit,
-            batch_size: self.batch_size,
-        };
-        let reader = Arc::clone(&self.reader);
-        let store = Arc::clone(&self.store);
-        let object = file.object_meta;
+        let schema = Arc::clone(&self.schema);
+        let opened = self.inner.open(file)?;
         Ok(Box::pin(async move {
-            let stream = reader.open(store, &object, request).await?;
-            let mut adapter: Option<(SchemaRef, BatchAdapter)> = None;
-            let batches = stream.map(move |batch| -> Result<Vec<RecordBatch>> {
-                let batch = batch?;
-                if counting {
-                    return count_batches(&batch, &projected);
-                }
-                let source = batch.schema();
-                if adapter.as_ref().is_none_or(|(held, _)| held != &source) {
-                    let built = BatchAdapter::try_new(
-                        Arc::clone(&projected),
-                        &source,
-                        &DefaultArrowTypeWidening::new(),
-                    )?;
-                    adapter = Some((source, built));
-                }
-                let (_, adapter) = adapter.as_ref().expect("just settled");
-                Ok(vec![adapter.adapt(&batch)?])
-            });
-            Ok(batches
+            let stream = opened.await?;
+            Ok(stream
+                .map(move |batch| batch.and_then(|batch| count_batches(&batch, &schema)))
                 .map_ok(|batches| futures::stream::iter(batches.into_iter().map(Ok)))
                 .try_flatten()
                 .boxed())
@@ -233,9 +44,8 @@ impl FileOpener for NdPluginOpener {
     }
 }
 
-/// The batches of a scan of no column: one batch of no column per nd batch in `batch`,
-/// with the grid row count as its row count.
-fn count_batches(batch: &RecordBatch, projected: &SchemaRef) -> Result<Vec<RecordBatch>> {
+/// One batch of no column per nd batch in `batch`, with the grid size as its row count.
+fn count_batches(batch: &RecordBatch, schema: &SchemaRef) -> Result<Vec<RecordBatch>> {
     let mut out = Vec::new();
     if batch.num_rows() == 0 {
         return Ok(out);
@@ -244,10 +54,90 @@ fn count_batches(batch: &RecordBatch, projected: &SchemaRef) -> Result<Vec<Recor
         let rows = decode_nd_record_batch_row(batch, row)?.num_rows();
         let options = RecordBatchOptions::new().with_row_count(Some(rows));
         out.push(RecordBatch::try_new_with_options(
-            Arc::clone(projected),
+            Arc::clone(schema),
             Vec::new(),
             &options,
         )?);
     }
     Ok(out)
+}
+
+/// The partition fields of a table, nd-encoded with the nullability that the table
+/// declares.
+pub(crate) fn encoded_partition_cols(cols: &[FieldRef]) -> Vec<FieldRef> {
+    cols.iter()
+        .map(|field| {
+            Arc::new(
+                nd_encoded_field(field.name(), field.data_type())
+                    .with_nullable(field.is_nullable()),
+            )
+        })
+        .collect()
+}
+
+/// Wraps a `ProjectionOpener` of an nd scan.
+///
+/// The partition values of each file become nd-encoded rank-0 structs, so the
+/// literals of `ProjectionOpener` match the encoded partition fields. A rank-0 value
+/// broadcasts onto the grid of the file columns.
+pub(crate) struct NdPartitionOpener {
+    pub(crate) inner: Arc<dyn FileOpener>,
+    /// The logical type of each partition column, in table order.
+    pub(crate) types: Vec<DataType>,
+    /// True when the scan reads no file column.
+    pub(crate) no_file_columns: bool,
+}
+
+impl FileOpener for NdPartitionOpener {
+    fn open(&self, mut file: PartitionedFile) -> Result<FileOpenFuture> {
+        file.partition_values = file
+            .partition_values
+            .iter()
+            .zip(&self.types)
+            .map(|(value, data_type)| encode_scalar(value, data_type))
+            .collect::<Result<_>>()?;
+        let future = self.inner.open(file)?;
+        if !self.no_file_columns {
+            return Ok(future);
+        }
+        Ok(Box::pin(async move {
+            let stream = future.await?;
+            Ok(stream
+                .map(|batch| batch.and_then(|batch| spread_over_rows(&batch)))
+                .boxed())
+        }))
+    }
+}
+
+/// `value` as a one-row `beacon.nd` struct that holds a rank-0 array of `data_type`.
+fn encode_scalar(value: &ScalarValue, data_type: &DataType) -> Result<ScalarValue> {
+    let mut values = value.to_array_of_size(1)?;
+    if values.data_type() != data_type {
+        values = cast(&values, data_type)?;
+    }
+    let encoded = encode_nd_array(&NdArrowArray::try_new(values, Dimensions::scalar())?);
+    Ok(ScalarValue::Struct(Arc::new(encoded.as_struct().clone())))
+}
+
+/// A batch of a scan that reads no file column: one row per grid cell, each with
+/// rank-0 values. Rank-0 columns alone define a grid of one row, so this makes one
+/// nd batch that holds each value over a `row` axis of the cell count.
+fn spread_over_rows(batch: &RecordBatch) -> Result<RecordBatch> {
+    let rows = batch.num_rows();
+    if rows == 0 || batch.num_columns() == 0 {
+        return Ok(batch.clone());
+    }
+    let axis = Dimensions::try_new(vec![Dimension::new(ROW_AXIS, rows)])?;
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| {
+            let value = decode_nd_array(column, 0)?;
+            let value = ScalarValue::try_from_array(value.values().as_ref(), 0)?;
+            let array = NdArrowArray::try_new(value.to_array_of_size(rows)?, axis.clone())?;
+            Ok(encode_nd_array(&array))
+        })
+        .collect::<Result<Vec<ArrayRef>>>()?;
+    RecordBatch::try_new(batch.schema(), columns)
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
 }
