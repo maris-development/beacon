@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use beacon_plugin_sdk::file_format::{FormatFactory, FormatReader, OutputKind, ScanRequest};
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::Session;
-use datafusion::common::{Statistics, exec_err, not_impl_err, plan_err};
+use datafusion::common::{Statistics, exec_err, plan_err};
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSource};
@@ -21,6 +21,7 @@ use futures::{StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::nd::NdPluginSource;
+use crate::nd_partition::encoded_partition_cols;
 use crate::source::PluginFileSource;
 use beacon_datafusion_ext::nd::encoding::encoded_schema;
 use beacon_datafusion_ext::nd::exec::{NdBroadcastExec, NdSourceExec};
@@ -205,22 +206,18 @@ impl FileFormat for PluginFileFormat {
                 Ok(DataSourceExec::from_data_source(conf))
             }
             OutputKind::Nd => {
-                if !conf.table_partition_cols().is_empty() {
-                    return not_impl_err!(
-                        "file format {}: partition columns are not supported for nd plugin formats yet",
-                        self.name()
-                    );
-                }
-                // The scan carries `beacon.nd` structs, as for the built-in nd formats.
-                let table_schema =
-                    TableSchema::new(Arc::new(encoded_schema(conf.file_schema())), Vec::new());
+                // Every scan column is a `beacon.nd` struct, as for the built-in nd formats.
+                let table_schema = TableSchema::new(
+                    Arc::new(encoded_schema(conf.file_schema())),
+                    encoded_partition_cols(conf.table_partition_cols()),
+                );
                 let projection = conf.file_source().projection().cloned();
                 let source = NdPluginSource::new(
                     self.name().to_string(),
                     Arc::clone(&self.reader),
                     table_schema,
                 )
-                .with_projection(projection);
+                .with_projection(projection.as_ref());
                 let conf = FileScanConfigBuilder::from(conf)
                     .with_source(Arc::new(source))
                     .build();

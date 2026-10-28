@@ -11,6 +11,7 @@ mod factory;
 mod format;
 mod install;
 mod nd;
+mod nd_partition;
 mod opener;
 mod options;
 mod source;

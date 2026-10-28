@@ -404,23 +404,60 @@ async fn nd_missing_column_broadcasts_null() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn nd_partition_columns_are_not_supported_yet() {
-    let fx = Fixture::new();
+async fn nd_partition_fixture(fx: &Fixture) {
     fx.put("g/run=x/a.grid", GRID).await;
+    fx.put("g/run=y/b.grid", GRID_SALT).await;
     let (format, _) = grid_text();
     fx.table(format, "g/", &[], vec![("run".to_string(), DataType::Utf8)])
         .await
         .unwrap();
-    let error = fx
-        .sql("SELECT run, time FROM t")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nd_partition_columns_are_broadcast() {
+    let fx = Fixture::new();
+    nd_partition_fixture(&fx).await;
+    let batches = fx
+        .sql("SELECT run, time, depth FROM t ORDER BY time, depth")
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("partition columns are not supported for nd plugin formats yet"),
-        "{error}"
-    );
+        .unwrap();
+    assert_eq!(rows(&batches), 7);
+    let rendered = text(&batches);
+    assert!(rendered.contains("| x   | 2    | 30    |"), "{rendered}");
+    assert!(rendered.contains("| y   | 9    |"), "{rendered}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nd_partition_columns_alone_keep_the_grid_size() {
+    let fx = Fixture::new();
+    nd_partition_fixture(&fx).await;
+    assert_eq!(rows(&fx.sql("SELECT run FROM t").await.unwrap()), 7);
+    let counts = fx
+        .sql("SELECT run, count(*) AS n FROM t GROUP BY run ORDER BY run")
+        .await
+        .unwrap();
+    let rendered = text(&counts);
+    assert!(rendered.contains("| x   | 6 |"), "{rendered}");
+    assert!(rendered.contains("| y   | 1 |"), "{rendered}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nd_partition_filters_with_nd_rules() {
+    let query = "SELECT run, time, temp FROM t WHERE run = 'x' AND temp > 4 ORDER BY temp";
+    let with_rules = Fixture::with_nd_rules();
+    let without = Fixture::new();
+    for fx in [&with_rules, &without] {
+        nd_partition_fixture(fx).await;
+    }
+    let a = with_rules.sql(query).await.unwrap();
+    let b = without.sql(query).await.unwrap();
+    assert_eq!(text(&a), text(&b));
+    assert_eq!(rows(&a), 2);
+    let only_y = with_rules
+        .sql("SELECT time FROM t WHERE run = 'y'")
+        .await
+        .unwrap();
+    assert_eq!(rows(&only_y), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

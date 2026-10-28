@@ -114,3 +114,25 @@ async fn formats_survive_a_restart() {
     );
     assert_eq!(count, 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nd_format_with_partition_columns() {
+    let rt = runtime_with_plugin("formats-nd-partitions").await;
+    write_file(
+        &rt.datasets_dir().join("pgrid/run=a/g.exg"),
+        "2,3\n1,2,3,4,5,6\n",
+    );
+    write_file(&rt.datasets_dir().join("pgrid/run=b/g.exg"), "1,2\n7,8\n");
+    rt.sql("CREATE EXTERNAL TABLE pg STORED AS exgrid PARTITIONED BY (run) LOCATION 'pgrid/'")
+        .await;
+    let counts = text(
+        &rt.sql("SELECT run, count(*) AS n FROM pg GROUP BY run ORDER BY run")
+            .await,
+    );
+    assert!(counts.contains("| a   | 6 |"), "{counts}");
+    assert!(counts.contains("| b   | 2 |"), "{counts}");
+    let sum = rt
+        .sql("SELECT sum(v) AS s FROM pg WHERE run = 'b' AND v > 7")
+        .await;
+    assert!(text(&sum).contains("8.0"), "{}", text(&sum));
+}

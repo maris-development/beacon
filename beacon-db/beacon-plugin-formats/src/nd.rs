@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use beacon_datafusion_ext::nd::encoding::{
-    decode_nd_record_batch_row, logical_schema, nd_batch_count,
+    decode_nd_record_batch_row, logical_schema, nd_batch_count, nd_value_type,
 };
 use beacon_plugin_sdk::file_format::{FormatReader, ScanRequest};
 use datafusion::arrow::array::{RecordBatch, RecordBatchOptions};
@@ -13,6 +13,7 @@ use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{
     FileOpenFuture, FileOpener, FileScanConfig, FileSource,
 };
+use datafusion::datasource::projection::{ProjectionOpener, SplitProjection};
 use datafusion::datasource::table_schema::TableSchema;
 use datafusion::error::Result;
 use datafusion::physical_expr::projection::ProjectionExprs;
@@ -22,17 +23,21 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 
+use crate::nd_partition::NdPartitionOpener;
 use crate::opener::{ContextOpener, filters_for};
 use beacon_datafusion_ext::scan_adapt::BatchAdapter;
 use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
 
-/// Reads the files of an nd plugin format. The scan schema is the encoded table schema.
+/// Reads the files of an nd plugin format.
+///
+/// Each column is a `beacon.nd` struct, one row per nd batch. `ProjectionOpener` adds
+/// the partition columns, and [`NdPartitionOpener`] makes their values rank-0 structs.
 #[derive(Clone)]
 pub struct NdPluginSource {
     name: String,
     reader: Arc<dyn FormatReader>,
     table_schema: TableSchema,
-    projection: Option<ProjectionExprs>,
+    projection: SplitProjection,
     metrics: ExecutionPlanMetricsSet,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     batch_size: usize,
@@ -48,13 +53,13 @@ impl std::fmt::Debug for NdPluginSource {
 }
 
 impl NdPluginSource {
-    /// `table_schema` holds the encoded file schema, and no partition column.
+    /// `table_schema` holds the encoded file schema and partition columns.
     pub fn new(name: String, reader: Arc<dyn FormatReader>, table_schema: TableSchema) -> Self {
         Self {
             name,
             reader,
+            projection: SplitProjection::unprojected(&table_schema),
             table_schema,
-            projection: None,
             metrics: ExecutionPlanMetricsSet::new(),
             predicate: None,
             batch_size: 8192,
@@ -62,8 +67,11 @@ impl NdPluginSource {
     }
 
     /// The same source with a projection that the scan pushed down.
-    pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
-        self.projection = projection;
+    pub fn with_projection(mut self, projection: Option<&ProjectionExprs>) -> Self {
+        self.projection = match projection {
+            Some(projection) => SplitProjection::new(self.table_schema.file_schema(), projection),
+            None => SplitProjection::unprojected(&self.table_schema),
+        };
         self
     }
 }
@@ -75,18 +83,30 @@ impl FileSource for NdPluginSource {
         base_config: &FileScanConfig,
         _partition: usize,
     ) -> Result<Arc<dyn FileOpener>> {
-        let projected = base_config.projected_schema()?;
-        let opener = NdPluginOpener {
+        let file_schema = self.table_schema.file_schema();
+        let opener: Arc<dyn FileOpener> = Arc::new(NdPluginOpener {
             reader: Arc::clone(&self.reader),
             store: object_store,
-            file_schema: Arc::clone(self.table_schema.file_schema()),
-            projected,
+            file_schema: Arc::clone(file_schema),
+            projected: Arc::new(file_schema.project(&self.projection.file_indices)?),
             predicate: self.predicate.clone(),
             limit: base_config.limit,
             batch_size: self.batch_size,
-        };
+        });
+        let projected = ProjectionOpener::try_new(self.projection.clone(), opener, file_schema)?;
+        let types = self
+            .table_schema
+            .table_partition_cols()
+            .iter()
+            .map(|field| nd_value_type(field.data_type()))
+            .collect::<Result<_>>()?;
+        let partitioned = Arc::new(NdPartitionOpener {
+            inner: projected,
+            types,
+            no_file_columns: self.projection.file_indices.is_empty(),
+        });
         Ok(Arc::new(ContextOpener {
-            inner: Arc::new(opener),
+            inner: partitioned,
             format: self.name.clone(),
         }))
     }
@@ -115,19 +135,16 @@ impl FileSource for NdPluginSource {
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {
-        self.projection.as_ref()
+        Some(&self.projection.source)
     }
 
     fn try_pushdown_projection(
         &self,
         projection: &ProjectionExprs,
     ) -> Result<Option<Arc<dyn FileSource>>> {
-        let merged = match &self.projection {
-            Some(existing) => existing.try_merge(projection)?,
-            None => projection.clone(),
-        };
+        let merged = self.projection.source.try_merge(projection)?;
         Ok(Some(Arc::new(Self {
-            projection: Some(merged),
+            projection: SplitProjection::new(self.table_schema.file_schema(), &merged),
             ..self.clone()
         })))
     }
@@ -154,13 +171,13 @@ impl FileSource for NdPluginSource {
     }
 }
 
-/// Opens one file of an nd plugin format. The table has no partition columns.
+/// Opens one file of an nd plugin format, for the file columns of the scan.
 struct NdPluginOpener {
     reader: Arc<dyn FormatReader>,
     store: Arc<dyn ObjectStore>,
     /// The encoded file schema of the table.
     file_schema: SchemaRef,
-    /// The encoded schema the scan reports.
+    /// The encoded file columns of the scan.
     projected: SchemaRef,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     limit: Option<usize>,
