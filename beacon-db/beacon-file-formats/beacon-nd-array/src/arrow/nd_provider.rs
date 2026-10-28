@@ -69,7 +69,7 @@ mod tests {
     use futures::TryStreamExt;
     use indexmap::IndexMap;
 
-    use beacon_datafusion_ext::nd::decode_nd_record_batch;
+    use beacon_datafusion_ext::nd::{NdRecordBatchExt, decode_nd_record_batch};
 
     use crate::arrow::batch::build_dataset_schema;
     use crate::arrow::file_read::{WorkQueue, flat_stream};

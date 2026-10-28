@@ -92,6 +92,29 @@ impl Dimensions {
         self.dims.iter().position(|d| d.name() == name)
     }
 
+    /// Fails when an array of these dimensions cannot broadcast onto `target`:
+    /// each axis must be in `target`, with the same size or with size 1.
+    pub fn check_broadcast_to(&self, target: &Dimensions) -> Result<()> {
+        for dim in self.iter() {
+            let Some(axis) = target.position(dim.name()) else {
+                return plan_err!(
+                    "cannot broadcast {self} to {target}: dimension '{}' is missing from the target",
+                    dim.name()
+                );
+            };
+            let target_size = target.get(axis).size();
+            if dim.size() != target_size && dim.size() != 1 {
+                return plan_err!(
+                    "cannot broadcast {self} to {target}: dimension '{}' has size {} but the target expects {}",
+                    dim.name(),
+                    dim.size(),
+                    target_size
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// C-order (row-major) strides, in elements.
     pub fn c_strides(&self) -> Vec<usize> {
         let mut strides = vec![0usize; self.rank()];
@@ -157,5 +180,17 @@ mod tests {
     #[test]
     fn empty_name_rejected() {
         assert!(Dimensions::try_new(vec![Dimension::new("", 2)]).is_err());
+    }
+
+    #[test]
+    fn broadcast_check_follows_the_rule() {
+        let target = dims(&[("time", 2), ("lat", 3)]);
+        assert!(dims(&[("lat", 3)]).check_broadcast_to(&target).is_ok());
+        assert!(dims(&[("time", 1)]).check_broadcast_to(&target).is_ok());
+        assert!(Dimensions::scalar().check_broadcast_to(&target).is_ok());
+        let missing = dims(&[("depth", 2)]).check_broadcast_to(&target).unwrap_err();
+        assert!(missing.to_string().contains("'depth' is missing"), "{missing}");
+        let size = dims(&[("lat", 2)]).check_broadcast_to(&target).unwrap_err();
+        assert!(size.to_string().contains("has size 2"), "{size}");
     }
 }

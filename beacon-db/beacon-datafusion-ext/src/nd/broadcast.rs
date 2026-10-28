@@ -8,10 +8,10 @@
 //! Arrow `take`.
 
 use arrow::array::UInt64Array;
-use datafusion_common::plan_err;
-use datafusion_common::Result;
+use datafusion::common::plan_err;
+use datafusion::error::Result;
 
-use crate::dimensions::Dimensions;
+use super::dimensions::Dimensions;
 
 /// Broadcast of a source dimension set onto a target dimension set,
 /// represented as one source stride per target axis.
@@ -160,7 +160,7 @@ fn fill_indices(axis_offsets: &[Vec<u64>], axis: usize, base: u64, out: &mut Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dimensions::Dimension;
+    use crate::nd::dimensions::Dimension;
 
     fn dims(spec: &[(&str, usize)]) -> Dimensions {
         Dimensions::try_new(

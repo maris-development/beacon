@@ -117,6 +117,7 @@ impl DatasetSource for DefaultDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use beacon_datafusion_ext::nd::NdRecordBatchExt;
     use crate::{
         NdArray,
         array::{backend::ArrayBackend, backend::mem::InMemoryArrayBackend, subset::ArraySubset},

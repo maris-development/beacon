@@ -422,33 +422,32 @@ mod tests {
         let decoded = decode_nd_record_batch(&encoded).unwrap();
         assert_eq!(decoded.target(), &dims(&[("time", 2), ("lat", 3)]));
 
-        // Materializing the decoded batch matches the original.
-        let expected = nd.materialize().unwrap();
-        let actual = decoded.materialize().unwrap();
-        assert_eq!(actual, expected);
+        // Each decoded column has the values and the dimensions of the original.
+        assert_eq!(decoded.columns().len(), nd.columns().len());
+        for (actual, expected) in decoded.columns().iter().zip(nd.columns()) {
+            assert_eq!(actual.dims(), expected.dims());
+            assert_eq!(actual.values().as_ref(), expected.values().as_ref());
+        }
         assert_eq!(
-            actual.column(2).as_primitive::<Float64Type>().values(),
+            decoded.column(2).values().as_primitive::<Float64Type>().values(),
             &[0.0, 0.1, 0.2, 1.0, 1.1, 1.2]
         );
     }
 
     #[test]
     fn null_struct_column_decodes_to_null_scalar() {
-        // A missing (null-filled) nd column decodes to a rank-0 null scalar and
-        // broadcasts to an all-null column.
+        // A missing (null-filled) nd column decodes to a rank-0 null scalar.
         let null_struct = arrow::array::new_null_array(&nd_encoded_type(&DataType::Float64), 1);
         let decoded = decode_nd_array(&null_struct, 0).unwrap();
         assert_eq!(decoded.dims().rank(), 0);
-        let target = dims(&[("time", 3)]);
-        let out = decoded.materialize(&target).unwrap();
-        assert_eq!(out.len(), 3);
-        assert_eq!(out.null_count(), 3);
+        assert_eq!(decoded.values().len(), 1);
+        assert_eq!(decoded.values().null_count(), 1);
     }
 
     #[test]
     fn zero_column_batch_preserves_row_count() {
-        // COUNT(*)-style zero-column batch → nd batch that materializes to the
-        // same row count with no columns.
+        // COUNT(*)-style zero-column batch → nd batch with the same row count and
+        // no columns.
         let empty = RecordBatch::try_new_with_options(
             Arc::new(Schema::empty()),
             vec![],
@@ -456,15 +455,14 @@ mod tests {
         )
         .unwrap();
         let nd = decode_nd_record_batch(&empty).unwrap();
-        let flat = nd.materialize().unwrap();
-        assert_eq!(flat.num_columns(), 0);
-        assert_eq!(flat.num_rows(), 42);
+        assert!(nd.columns().is_empty());
+        assert_eq!(nd.num_rows(), 42);
     }
 
     #[test]
     fn flat_batch_round_trips_through_nd() {
         // Ragged path: a flat batch wrapped on a synthetic row dim survives
-        // encode → decode → materialize unchanged.
+        // encode → decode: each column keeps its values on one `row` axis.
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Int32, true),
             Field::new("b", DataType::Float64, true),
@@ -479,7 +477,12 @@ mod tests {
         .unwrap();
         let encoded = encode_flat_batch_as_nd(&flat).unwrap();
         let decoded = decode_nd_record_batch(&encoded).unwrap();
-        assert_eq!(decoded.materialize().unwrap(), flat);
+        assert_eq!(decoded.num_rows(), 3);
+        assert_eq!(decoded.target(), &dims(&[("row", 3)]));
+        for (column, expected) in decoded.columns().iter().zip(flat.columns()) {
+            assert_eq!(column.dims(), &dims(&[("row", 3)]));
+            assert_eq!(column.values().as_ref(), expected.as_ref());
+        }
     }
 
     #[test]
@@ -530,7 +533,7 @@ mod tests {
             decoded.target(),
             &dims(&[("time", 2), ("lat", 3), ("depth", 2)])
         );
-        assert_eq!(decoded.materialize().unwrap().num_rows(), 12);
+        assert_eq!(decoded.num_rows(), 12);
     }
 
     #[test]

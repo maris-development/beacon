@@ -291,6 +291,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use beacon_datafusion_ext::nd::NdRecordBatchExt;
     use crate::{schema, test_support};
 
     fn column<'a>(batch: &'a RecordBatch, name: &str) -> &'a ArrayRef {

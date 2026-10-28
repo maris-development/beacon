@@ -10,6 +10,7 @@
 //! boolean predicate the same way and turns it into a grid selection. The two
 //! share [`NdExprColumn`] and [`ProjectMetrics`].
 
+use crate::nd::NdArrowArrayExt;
 use std::collections::HashSet;
 use std::sync::Arc;
 
