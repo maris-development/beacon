@@ -166,6 +166,44 @@ async fn read(table: FFI_ObjectStore) -> Result<usize> {
 - On the raw `FFI_MultipartUpload` table, `put_part` fails while a `complete` or `abort` is pending.
 - `http::Extensions` does not cross. The exporter gets an empty map.
 
+## File formats
+
+The `file_format` module lets a plugin add a file format to Beacon.
+Implement two traits:
+
+- `FormatFactory` describes the format: name, extensions, output kind, `read_<name>` arguments and writer flags.
+- `FormatFactory::create` gets the table options and returns a `FormatReader`.
+- `FormatReader` reads and writes one file in each call.
+
+Export the factories with the `formats` key:
+
+```rust,ignore
+beacon_plugin_sdk::export_plugin!(scalar = functions, formats = file_formats);
+```
+
+Beacon does the work for many files:
+
+- It lists the files and merges their schemas. It widens the types.
+- It casts each column to the table type. It fills a missing column with nulls.
+- It adds the partition columns.
+- It applies the filters again. The filters in `ScanRequest` are hints only.
+- For `COPY ... TO`, it splits the output into files. It calls `write` one time for each output file.
+
+### Output kinds
+
+- `OutputKind::Flat`: the batches have normal Arrow columns.
+- `OutputKind::Nd`: each column is a `beacon.nd` struct. Use `beacon_plugin_sdk::nd` to build an `NdRecordBatch` and call `encode_nd_record_batch`. Beacon broadcasts the arrays to rows.
+
+### Rules for format code
+
+- Do all I/O through the given `ObjectStore`.
+- Do not call `tokio::spawn`, `tokio::time` or `Handle::current()`. The plugin copy of tokio has no runtime there.
+- CPU work in a poll blocks one Beacon worker thread. Keep each poll short.
+- When `WriteRequest::local_path` is set, write the whole output to that path. Beacon uploads it when necessary. Do not write through the store then.
+- When `local_path` is not set, write through the store. Use a multipart upload for a large file.
+- Remove your own spool files, also on an error.
+- A panic in a call, a future or a stream becomes a query error.
+
 ## Rules
 
 - Set `panic = "unwind"`. This is the default. The SDK refuses `panic = "abort"` at compile time.
