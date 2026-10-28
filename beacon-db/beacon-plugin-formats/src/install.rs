@@ -28,11 +28,11 @@ pub fn import_formats(
         .collect()
 }
 
-/// The functions that a format adds: `read_<name>` and `<name>_schema`.
+/// The functions that a format adds: `read_<name>` and `read_<name>_schema`.
 pub fn function_names(format: &PluginFileFormatFactory) -> [String; 2] {
     [
         format!("read_{}", format.name()),
-        format!("{}_schema", format.name()),
+        format!("read_{}_schema", format.name()),
     ]
 }
 
@@ -53,7 +53,7 @@ fn is_free(factory: &Arc<dyn FileFormatFactory>) -> bool {
 /// Checks the names of `formats` against each other and against `state`.
 ///
 /// A name or an extension must be lower case `[a-z0-9_]+`. No key (name or extension)
-/// and no function (`read_<name>`, `<name>_schema`) may already be in use. One failure
+/// and no function (`read_<name>`, `read_<name>_schema`) may already be in use. One failure
 /// refuses all formats.
 pub fn check_formats(state: &SessionState, formats: &[PluginFileFormatFactory]) -> Result<()> {
     let mut seen = HashSet::new();
@@ -86,7 +86,7 @@ pub fn check_formats(state: &SessionState, formats: &[PluginFileFormatFactory]) 
 
 /// Registers `formats` in `ctx`: each key for `STORED AS`, and `read_<name>`.
 ///
-/// Returns the `read_<name>` functions, so that the caller can add `<name>_schema` over
+/// Returns the `read_<name>` functions, so that the caller can add `read_<name>_schema` over
 /// them. Call [`check_formats`] first.
 pub fn install_formats(
     ctx: &SessionContext,
@@ -118,7 +118,7 @@ pub fn install_formats(
 }
 
 /// Removes `formats` from `ctx`. Tables on them fail with "not installed" from now on,
-/// and their keys are free for a new install. The caller removes `<name>_schema`.
+/// and their keys are free for a new install. The caller removes `read_<name>_schema`.
 pub fn uninstall_formats(ctx: &SessionContext, formats: &[PluginFileFormatFactory]) {
     for format in formats {
         format.mark_uninstalled();

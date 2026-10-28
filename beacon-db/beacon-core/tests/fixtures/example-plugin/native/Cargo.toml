@@ -13,6 +13,8 @@ wrong-abi = []
 
 [dependencies]
 beacon-plugin-sdk = { path = "../../../../../beacon-plugin-sdk" }
+async-trait = "0.1"
+futures = "0.3"
 
 # Keeps this crate outside the Beacon workspace.
 [workspace]

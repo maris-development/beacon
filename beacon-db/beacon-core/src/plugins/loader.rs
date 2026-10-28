@@ -198,7 +198,7 @@ pub(crate) fn prepare(
     })
 }
 
-/// Registers the file formats of `plugin`: `STORED AS`, `read_<name>` and `<name>_schema`.
+/// Registers the file formats of `plugin`: `STORED AS`, `read_<name>` and `read_<name>_schema`.
 fn commit_formats(session: &SessionContext, plugin: &str, formats: Vec<PluginFileFormatFactory>) {
     if formats.is_empty() {
         return;
