@@ -1,8 +1,8 @@
 //! Installs the formats of a plugin in a session, and removes them again.
 
 use std::any::Any;
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use beacon_plugin_sdk::file_format::{FFI_FileFormatFactory, import_format_factory};
 use datafusion::common::plan_err;
@@ -89,7 +89,7 @@ pub fn check_formats(state: &SessionState, formats: &[PluginFileFormatFactory]) 
 /// Returns the `read_<name>` functions, so that the caller can add `<name>_schema` over
 /// them. Call [`check_formats`] first.
 pub fn install_formats(
-    ctx: &Arc<SessionContext>,
+    ctx: &SessionContext,
     formats: &[PluginFileFormatFactory],
     handle: Handle,
 ) -> Result<Vec<Arc<PluginReadFunc>>> {
@@ -109,11 +109,7 @@ pub fn install_formats(
     }
     let mut readers = Vec::new();
     for format in formats {
-        let reader = Arc::new(PluginReadFunc::new(
-            format.clone(),
-            handle.clone(),
-            Arc::downgrade(ctx),
-        ));
+        let reader = Arc::new(PluginReadFunc::new(format.clone(), handle.clone()));
         let [read, _] = function_names(format);
         ctx.register_udtf(&read, reader.clone());
         readers.push(reader);
@@ -128,5 +124,34 @@ pub fn uninstall_formats(ctx: &SessionContext, formats: &[PluginFileFormatFactor
         format.mark_uninstalled();
         let [read, _] = function_names(format);
         ctx.deregister_udtf(&read);
+    }
+}
+
+/// The plugin formats of a session, by plugin name, so that an uninstall finds them.
+/// Register one as a session config extension.
+#[derive(Debug, Default)]
+pub struct InstalledFormats(Mutex<HashMap<String, Vec<PluginFileFormatFactory>>>);
+
+impl InstalledFormats {
+    /// Records the formats of `plugin`.
+    pub fn insert(&self, plugin: &str, formats: Vec<PluginFileFormatFactory>) {
+        self.lock().insert(plugin.to_string(), formats);
+    }
+
+    /// Removes and returns the formats of `plugin`.
+    pub fn take(&self, plugin: &str) -> Vec<PluginFileFormatFactory> {
+        self.lock().remove(plugin).unwrap_or_default()
+    }
+
+    /// The names of the formats of `plugin`.
+    pub fn names(&self, plugin: &str) -> Vec<String> {
+        self.lock()
+            .get(plugin)
+            .map(|formats| formats.iter().map(|f| f.name().to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<PluginFileFormatFactory>>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }

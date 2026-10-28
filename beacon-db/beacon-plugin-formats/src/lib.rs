@@ -19,7 +19,8 @@ mod table_function;
 pub use factory::PluginFileFormatFactory;
 pub use format::PluginFileFormat;
 pub use install::{
-    check_formats, function_names, import_formats, install_formats, uninstall_formats,
+    InstalledFormats, check_formats, function_names, import_formats, install_formats,
+    uninstall_formats,
 };
 pub use nd::NdPluginSource;
 pub use options::plugin_options;

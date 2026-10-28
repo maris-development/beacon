@@ -1815,6 +1815,7 @@ dependencies = [
  "beacon-iceberg",
  "beacon-icechunk",
  "beacon-lance",
+ "beacon-plugin-formats",
  "beacon-plugin-registry",
  "beacon-plugin-sdk",
  "beacon-redb-store",

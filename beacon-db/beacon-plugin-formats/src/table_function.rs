@@ -1,7 +1,7 @@
 //! `read_<name>(paths, ...)` for a plugin format.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::table_function::{
@@ -14,7 +14,8 @@ use datafusion::catalog::{TableFunctionArgs, TableFunctionImpl, TableProvider};
 use datafusion::common::{exec_err, plan_err};
 use datafusion::datasource::file_format::FileFormatFactory;
 use datafusion::error::Result;
-use datafusion::prelude::{Expr, SessionContext};
+use datafusion::execution::SessionState;
+use datafusion::prelude::Expr;
 use datafusion::scalar::ScalarValue;
 use tokio::runtime::Handle;
 
@@ -71,21 +72,15 @@ pub fn options_from_args(
 pub struct PluginReadFunc {
     factory: PluginFileFormatFactory,
     runtime_handle: Handle,
-    session_ctx: Weak<SessionContext>,
     name: String,
 }
 
 impl PluginReadFunc {
-    pub fn new(
-        factory: PluginFileFormatFactory,
-        runtime_handle: Handle,
-        session_ctx: Weak<SessionContext>,
-    ) -> Self {
+    pub fn new(factory: PluginFileFormatFactory, runtime_handle: Handle) -> Self {
         let name = format!("read_{}", factory.name());
         Self {
             factory,
             runtime_handle,
-            session_ctx,
             name,
         }
     }
@@ -135,11 +130,11 @@ impl BeaconTableFunctionImpl for PluginReadFunc {
 
 impl TableFunctionImpl for PluginReadFunc {
     fn call_with_args(&self, args: TableFunctionArgs) -> Result<Arc<dyn TableProvider>> {
+        let session = args.session();
         let args = args.exprs();
-        let Some(session_ctx) = self.session_ctx.upgrade() else {
-            return exec_err!("{}: the session context has been dropped", self.name);
+        let Some(state) = session.as_any().downcast_ref::<SessionState>() else {
+            return exec_err!("{}: the session is not a DataFusion SessionState", self.name);
         };
-        let state = session_ctx.state();
         let Some(listing) = state.config().get_extension::<ListingFactory>() else {
             return exec_err!(
                 "{}: the ListingFactory is not registered on the session",
@@ -149,17 +144,17 @@ impl TableFunctionImpl for PluginReadFunc {
         let paths = parse_glob_paths_arg(args, &self.name)?;
         let urls = paths
             .iter()
-            .map(|path| listing.parse_listing_table_url(&state, path))
+            .map(|path| listing.parse_listing_table_url(state, path))
             .collect::<Result<Vec<_>>>()?;
         if urls.is_empty() {
             return plan_err!("{}: no valid glob paths provided", self.name);
         }
         let specs = self.factory.plugin().table_function_args();
         let options = options_from_args(args, &specs, &self.name)?;
-        let format = self.factory.create(&state, &options)?;
+        let format = self.factory.create(state, &options)?;
         let table = tokio::task::block_in_place(|| {
             self.runtime_handle
-                .block_on(FastObjectTable::try_new(&state, format, urls))
+                .block_on(FastObjectTable::try_new(state, format, urls))
         })?;
         Ok(Arc::new(table))
     }
