@@ -46,7 +46,6 @@ geoarrow-array = { workspace = true }
 geoarrow-schema = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
-beacon-nd-encoding = { path = "../beacon-nd-encoding" }
 
 [dev-dependencies]
 tokio = { workspace = true }

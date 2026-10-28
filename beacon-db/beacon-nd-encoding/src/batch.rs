@@ -12,8 +12,8 @@ use crate::dimensions::Dimensions;
 /// A record batch whose columns are [`NdArrowArray`]s over a shared target
 /// grid. Each column may live on a subset of the target's dimensions (a scalar
 /// attribute, a 1-D coordinate, a full-rank data variable, …). Columns stay
-/// un-broadcast until the engine materializes the batch (`NdRecordBatchExt` in
-/// `beacon-datafusion-ext`), which broadcasts each one onto the full target grid.
+/// un-broadcast: the reader of the batch broadcasts each one onto the full target
+/// grid.
 ///
 /// An optional [`selection`](Self::selection) restricts the batch to a subset of
 /// the target cells (their row-major linear indices). It is how an

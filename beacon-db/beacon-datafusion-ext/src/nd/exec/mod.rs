@@ -13,7 +13,6 @@ mod filter_exec;
 mod projection_exec;
 mod source_exec;
 
-use crate::nd::NdRecordBatchExt;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;

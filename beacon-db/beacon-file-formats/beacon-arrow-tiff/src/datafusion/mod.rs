@@ -217,7 +217,6 @@ impl FileFormat for TiffFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beacon_datafusion_ext::nd::NdRecordBatchExt;
     use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
     use datafusion::execution::object_store::ObjectStoreUrl;
     use futures::StreamExt;

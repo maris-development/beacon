@@ -688,7 +688,6 @@ mod tests {
     use futures::TryStreamExt;
 
     use super::*;
-    use beacon_datafusion_ext::nd::NdRecordBatchExt;
     use crate::NdArray;
     use crate::dataset::Dataset;
 

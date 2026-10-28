@@ -215,7 +215,6 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use beacon_datafusion_ext::nd::NdRecordBatchExt;
     use crate::{schema, test_support};
     use beacon_datafusion_ext::nd::NdRecordBatch;
     use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;

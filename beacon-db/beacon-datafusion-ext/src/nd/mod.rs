@@ -17,16 +17,17 @@
 //!
 //! Filtering and projection operators are layered on top of this spine later.
 
-pub mod exec;
+pub mod array;
+pub mod batch;
 pub mod broadcast;
-pub mod materialize;
-pub use beacon_nd_encoding::{array, batch, dimensions, encoding};
+pub mod dimensions;
+pub mod encoding;
+pub mod exec;
 pub mod optimizer;
 
 pub use array::NdArrowArray;
 pub use batch::NdRecordBatch;
 pub use broadcast::BroadcastMap;
-pub use materialize::{NdArrowArrayExt, NdRecordBatchExt};
 pub use dimensions::{Dimension, Dimensions};
 pub use encoding::{
     decode_nd_record_batch, encode_flat_batch_as_nd, encode_nd_record_batch, encoded_schema,

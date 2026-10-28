@@ -14,7 +14,6 @@
 //! gather per column, so the filtered-out cross-product is never materialized —
 //! and every operator above the broadcast sees only the surviving rows.
 
-use crate::nd::NdArrowArrayExt;
 use std::fmt;
 use std::sync::Arc;
 
@@ -262,7 +261,6 @@ mod tests {
     use crate::nd::dimensions::{Dimension, Dimensions};
 
     use super::*;
-    use crate::nd::NdRecordBatchExt;
 
     fn dims(spec: &[(&str, usize)]) -> Dimensions {
         Dimensions::try_new(

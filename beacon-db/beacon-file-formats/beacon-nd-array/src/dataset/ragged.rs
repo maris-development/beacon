@@ -653,7 +653,6 @@ impl Clone for RaggedDataset {
 #[cfg(test)]
 mod source_tests {
     use super::*;
-    use beacon_datafusion_ext::nd::NdRecordBatchExt;
     use crate::array::backend::{ArrayBackend, mem::InMemoryArrayBackend};
     use arrow::array::{Array, Float64Array, StringArray};
     use ndarray::ArrayD;
