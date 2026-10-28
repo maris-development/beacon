@@ -1,6 +1,7 @@
 //! A helper that builds a scalar function from a closure.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use std::fmt;
 
@@ -24,6 +25,22 @@ pub fn function(name: &str) -> FunctionBuilder {
         volatility: Volatility::Immutable,
         hooks: ClosureHooks::default(),
     }
+}
+
+/// Returns `name` as a static string. DataFusion needs static alias names.
+///
+/// Each name is leaked once per process and stays in a static set, so a second
+/// build of the same function does not leak again.
+fn static_name(name: String) -> &'static str {
+    static NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let names = names.get_or_insert_with(HashSet::new);
+    if let Some(known) = names.get(name.as_str()) {
+        return known;
+    }
+    let leaked: &'static str = Box::leak(name.into_boxed_str());
+    names.insert(leaked);
+    leaked
 }
 
 type ImpliesFn = dyn Fn(&[Expr]) -> Result<Option<Implied>> + Send + Sync;
@@ -189,11 +206,7 @@ impl FunctionBuilder {
             );
         };
         let udf = create_udf(&self.name, self.args, returns, self.volatility, Arc::new(f));
-        // DataFusion needs static alias names. The leak is small and happens once at init.
-        let aliases = self
-            .aliases
-            .into_iter()
-            .map(|a| &*Box::leak(a.into_boxed_str()));
+        let aliases: Vec<&'static str> = self.aliases.into_iter().map(static_name).collect();
         let udf = udf.with_aliases(aliases);
         if self.hooks.is_empty() {
             udf
@@ -306,6 +319,14 @@ mod tests {
         };
         let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
         array.iter().collect()
+    }
+
+    #[test]
+    fn an_alias_name_is_leaked_once() {
+        let first = static_name("h_once".to_string());
+        let second = static_name("h_once".to_string());
+        assert_eq!(first, "h_once");
+        assert!(std::ptr::eq(first, second));
     }
 
     #[test]
