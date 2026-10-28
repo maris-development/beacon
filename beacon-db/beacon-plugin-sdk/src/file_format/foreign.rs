@@ -16,12 +16,12 @@ use stabby::string::String as SString;
 use stabby::vec::Vec as SVec;
 use tokio::runtime::Handle;
 
-use super::FILE_FORMAT_FFI_VERSION;
 use super::export::FFI_FileFormat;
 use super::reader::FormatReader;
 use super::statistics::decode_statistics;
 use super::stream::import_batch_stream;
 use super::types::{FFI_ScanRequest, FFI_WriteRequest, ScanRequest, SortKey, WriteRequest};
+use crate::ABI_VERSION;
 use crate::file_format::stream::export_batch_stream_entered;
 use crate::object_store::{FFI_ObjectMeta, FFI_ObjectStore};
 
@@ -36,16 +36,16 @@ pub struct ForeignFormatReader {
 impl ForeignFormatReader {
     /// Returns the original reader when this library made the table.
     ///
-    /// Fails when the table has another [`FILE_FORMAT_FFI_VERSION`].
+    /// Fails when the table has another [`crate::BEACON_PLUGIN_SDK_ABI`].
     pub fn try_new(ffi: FFI_FileFormat, handle: Handle) -> Result<Arc<dyn FormatReader>> {
         if (ffi.library_marker_id)() == datafusion_ffi::get_library_marker_id() {
             return Ok(ffi.local_reader());
         }
         // SAFETY: `version` has the same place in every table version.
         let version = unsafe { (ffi.version)() };
-        if version != FILE_FORMAT_FFI_VERSION {
+        if version != ABI_VERSION {
             return Err(DataFusionError::Plan(format!(
-                "file format FFI version {version} is not supported (want {FILE_FORMAT_FFI_VERSION})"
+                "file format FFI version {version} is not supported (want {ABI_VERSION})"
             )));
         }
         Ok(Arc::new(Self { ffi, handle }))

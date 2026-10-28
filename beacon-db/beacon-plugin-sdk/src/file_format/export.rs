@@ -18,13 +18,13 @@ use object_store::{ObjectMeta, ObjectStore};
 use stabby::string::String as SString;
 use stabby::vec::Vec as SVec;
 
-use super::file_format_ffi_version;
 use super::reader::FormatReader;
 use super::statistics::encode_statistics;
 use super::stream::{export_batch_stream, import_batch_stream};
 use super::types::{FFI_ScanRequest, FFI_SortKey, FFI_WriteRequest, ScanRequest, WriteRequest};
 use crate::object_store::{FFI_ObjectMeta, FFI_ObjectStore};
 use crate::panic_safe::panic_message;
+use crate::sdk_abi_version;
 
 /// A configured file format ([`FormatReader`]) as FFI data.
 ///
@@ -32,7 +32,7 @@ use crate::panic_safe::panic_message;
 /// [`super::ForeignFormatReader`]. Only the FFI functions read or change these fields.
 #[repr(C)]
 pub struct FFI_FileFormat {
-    /// Returns [`super::FILE_FORMAT_FFI_VERSION`] of the exporter. It stays the first field.
+    /// Returns [`crate::BEACON_PLUGIN_SDK_ABI`] of the exporter. It stays the first field.
     pub version: unsafe extern "C" fn() -> u64,
     /// Identifies the library that made the table.
     pub library_marker_id: extern "C" fn() -> usize,
@@ -87,7 +87,7 @@ impl FFI_FileFormat {
     pub fn new(reader: Arc<dyn FormatReader>) -> Self {
         let private_data = Box::new(FormatPrivateData { reader });
         Self {
-            version: file_format_ffi_version,
+            version: sdk_abi_version,
             library_marker_id: datafusion_ffi::get_library_marker_id,
             infer_schema: infer_schema_fn,
             infer_stats: infer_stats_fn,

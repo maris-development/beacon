@@ -58,12 +58,6 @@ fn eval_bool(expr: &Arc<dyn PhysicalExpr>, batch: &RecordBatch) -> BooleanArray 
 }
 
 #[test]
-fn file_format_ffi_version_is_one() {
-    assert_eq!(FILE_FORMAT_FFI_VERSION, 1);
-    assert_eq!(file_format_ffi_version(), 1);
-}
-
-#[test]
 fn output_kind_values() {
     assert_eq!(OutputKind::Flat.to_u32(), 0);
     assert_eq!(OutputKind::Nd.to_u32(), 1);

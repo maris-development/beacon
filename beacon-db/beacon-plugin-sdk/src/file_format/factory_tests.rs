@@ -13,7 +13,7 @@ use datafusion_ffi::get_library_marker_id;
 use datafusion_ffi::util::FFI_Result;
 use futures::stream;
 use object_store::memory::InMemory;
-use object_store::{ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 use tokio::runtime::Handle;
 
 use super::tests::two_columns;
@@ -151,6 +151,22 @@ fn sdk_abi_is_five() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn every_table_reports_the_sdk_abi() {
+    let want = u64::from(crate::BEACON_PLUGIN_SDK_ABI);
+    assert_eq!(crate::sdk_abi_version(), want);
+    let factory = FFI_FileFormatFactory::new(Arc::new(Defaults));
+    assert_eq!(unsafe { (factory.version)() }, want);
+    let format = FFI_FileFormat::new(Arc::new(EmptyReader));
+    assert_eq!(unsafe { (format.version)() }, want);
+    let store = InMemory::new();
+    let upload = store.put_multipart(&"x".into()).await.unwrap();
+    let upload = crate::object_store::FFI_MultipartUpload::new(upload, Handle::current());
+    assert_eq!(unsafe { (upload.version)() }, want);
+    let store = crate::object_store::FFI_ObjectStore::new(Arc::new(store), Handle::current());
+    assert_eq!(unsafe { (store.version)() }, want);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn factory_round_trip() {
     let factory = foreign(Arc::new(PointText::default()));
     assert_eq!(factory.name(), "pointtext");
@@ -242,7 +258,7 @@ async fn wrong_version_is_refused() {
     assert!(
         error
             .to_string()
-            .contains("file format FFI version 2 is not supported (want 1)"),
+            .contains("file format FFI version 2 is not supported (want 5)"),
         "{error}"
     );
 }

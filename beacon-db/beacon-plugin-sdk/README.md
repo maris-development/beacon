@@ -132,7 +132,7 @@ Use this copy. The SDK pins `object_store` 0.13, the version in Beacon.
 - `FFI_ObjectStore` is the FFI table. `FFI_ObjectStore::new(store, handle)` exports an `Arc<dyn ObjectStore>`.
 - `Arc::<dyn ObjectStore>::try_from(table)` imports a table. A table from another library becomes a `ForeignObjectStore`.
 - A table from the same library gives back the original store.
-- The import refuses a table with a different `OBJECT_STORE_FFI_VERSION`.
+- The import refuses a table with a different `BEACON_PLUGIN_SDK_ABI`. All FFI tables of the SDK carry this one version.
 
 ```rust,no_run
 use std::sync::Arc;

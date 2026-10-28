@@ -12,13 +12,13 @@ use stabby::string::String as SString;
 use stabby::vec::Vec as SVec;
 use tokio::runtime::Handle;
 
-use super::FILE_FORMAT_FFI_VERSION;
 use super::export::{FFI_FileFormat, drop_quietly, panic_text};
-use super::file_format_ffi_version;
 use super::foreign::{ForeignFormatReader, into_result};
 use super::reader::FormatReader;
 use super::types::{ArgSpec, FFI_ArgSpec, OutputKind};
+use crate::ABI_VERSION;
 use crate::panic_safe::panic_message;
+use crate::sdk_abi_version;
 
 /// A file format that a plugin exports. Beacon makes one configured format per table.
 pub trait FormatFactory: Send + Sync + 'static {
@@ -81,7 +81,7 @@ pub struct FFI_OptionPair {
 /// Only the FFI functions read or change these fields.
 #[repr(C)]
 pub struct FFI_FileFormatFactory {
-    /// Returns [`FILE_FORMAT_FFI_VERSION`] of the exporter. It stays the first field.
+    /// Returns [`crate::BEACON_PLUGIN_SDK_ABI`] of the exporter. It stays the first field.
     pub version: unsafe extern "C" fn() -> u64,
     /// Identifies the library that made the table.
     pub library_marker_id: extern "C" fn() -> usize,
@@ -165,7 +165,7 @@ impl FFI_FileFormatFactory {
     fn with_info(factory: Arc<dyn FormatFactory>, info: Info) -> Self {
         let private_data = Box::new(FactoryPrivateData { factory, info });
         Self {
-            version: file_format_ffi_version,
+            version: sdk_abi_version,
             library_marker_id: datafusion_ffi::get_library_marker_id,
             name: name_fn,
             extensions: extensions_fn,
@@ -312,7 +312,7 @@ impl fmt::Debug for ForeignFormatFactory {
 
 /// Imports a factory. Returns the original factory when this library made the table.
 ///
-/// Fails on another [`FILE_FORMAT_FFI_VERSION`], an unknown output kind or an unknown
+/// Fails on another [`crate::BEACON_PLUGIN_SDK_ABI`], an unknown output kind or an unknown
 /// argument kind. The configured formats that `create` returns run store I/O on `handle`.
 pub fn import_format_factory(
     ffi: FFI_FileFormatFactory,
@@ -323,9 +323,9 @@ pub fn import_format_factory(
     }
     // SAFETY: `version` has the same place in every table version.
     let version = unsafe { (ffi.version)() };
-    if version != FILE_FORMAT_FFI_VERSION {
+    if version != ABI_VERSION {
         return Err(DataFusionError::Plan(format!(
-            "file format FFI version {version} is not supported (want {FILE_FORMAT_FFI_VERSION})"
+            "file format FFI version {version} is not supported (want {ABI_VERSION})"
         )));
     }
     let kind = (ffi.output_kind)(&ffi);

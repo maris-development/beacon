@@ -15,7 +15,19 @@ pub use datafusion_proto;
 pub use stabby;
 
 /// The ABI version of this SDK. Beacon refuses a plugin with a different value.
+///
+/// It is the one version of all FFI types of the SDK: each table reports it in its
+/// `version` field, and an import refuses a table with another value. Increase it on
+/// any change of a table layout, of an FFI enum value, or of the `beacon.nd` encoding.
 pub const BEACON_PLUGIN_SDK_ABI: u32 = 5;
+
+/// [`BEACON_PLUGIN_SDK_ABI`] as the tables carry it.
+pub(crate) const ABI_VERSION: u64 = BEACON_PLUGIN_SDK_ABI as u64;
+
+/// Returns [`BEACON_PLUGIN_SDK_ABI`]. The `version` field of each FFI table points here.
+pub extern "C" fn sdk_abi_version() -> u64 {
+    ABI_VERSION
+}
 
 /// The ABI versions of a plugin, as `beacon_plugin_abi` returns them.
 #[repr(C)]

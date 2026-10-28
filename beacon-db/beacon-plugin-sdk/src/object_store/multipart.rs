@@ -19,7 +19,7 @@ use super::bytes::FFI_Bytes;
 use super::error::{FFI_ObjectStoreResult, STORE};
 use super::export::{drop_quietly, export_entered};
 use super::options::FFI_PutResult;
-use super::{OBJECT_STORE_FFI_VERSION, object_store_ffi_version};
+use crate::{ABI_VERSION, sdk_abi_version};
 
 /// An `object_store::MultipartUpload` as FFI data.
 ///
@@ -30,7 +30,7 @@ use super::{OBJECT_STORE_FFI_VERSION, object_store_ffi_version};
 /// Only the FFI functions read or change these fields.
 #[repr(C)]
 pub struct FFI_MultipartUpload {
-    /// Returns [`OBJECT_STORE_FFI_VERSION`] of the exporter. It stays the first field.
+    /// Returns [`crate::BEACON_PLUGIN_SDK_ABI`] of the exporter. It stays the first field.
     pub version: unsafe extern "C" fn() -> u64,
     /// Identifies the library that made the table.
     pub library_marker_id: extern "C" fn() -> usize,
@@ -72,7 +72,7 @@ impl FFI_MultipartUpload {
             finished: Arc::new(AtomicBool::new(false)),
         });
         Self {
-            version: object_store_ffi_version,
+            version: sdk_abi_version,
             library_marker_id: datafusion_ffi::get_library_marker_id,
             put_part: put_part_fn,
             complete: complete_fn,
@@ -199,15 +199,15 @@ unsafe extern "C" fn release_fn(upload: &mut FFI_MultipartUpload) {
 pub struct ForeignMultipartUpload(FFI_MultipartUpload);
 
 impl ForeignMultipartUpload {
-    /// Fails with `NotSupported` when the table has another [`OBJECT_STORE_FFI_VERSION`].
+    /// Fails with `NotSupported` when the table has another [`crate::BEACON_PLUGIN_SDK_ABI`].
     /// The refused table is released, so the exporter aborts the upload.
     pub fn try_new(upload: FFI_MultipartUpload) -> Result<Self> {
         // SAFETY: `version` has the same place in every table version.
         let version = unsafe { (upload.version)() };
-        if version != OBJECT_STORE_FFI_VERSION {
+        if version != ABI_VERSION {
             return Err(Error::NotSupported {
                 source: format!(
-                    "multipart upload FFI version {version} is not supported (want {OBJECT_STORE_FFI_VERSION})"
+                    "multipart upload FFI version {version} is not supported (want {ABI_VERSION})"
                 )
                 .into(),
             });

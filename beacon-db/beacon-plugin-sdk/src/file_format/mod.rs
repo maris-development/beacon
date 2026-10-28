@@ -22,17 +22,6 @@ pub use types::{
     ScanRequest, SortKey, WriteRequest,
 };
 
-/// The ABI version of the file format FFI types.
-///
-/// Increase it on any change of a table layout, of an FFI enum value, or of the `beacon.nd`
-/// encoding.
-pub const FILE_FORMAT_FFI_VERSION: u64 = 1;
-
-/// Returns [`FILE_FORMAT_FFI_VERSION`].
-pub extern "C" fn file_format_ffi_version() -> u64 {
-    FILE_FORMAT_FFI_VERSION
-}
-
 #[cfg(test)]
 pub(crate) mod tests;
 
