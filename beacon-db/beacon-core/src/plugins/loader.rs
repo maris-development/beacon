@@ -136,7 +136,7 @@ pub(crate) fn prepare(
     // Native functions first, so the plugin SQL can call them.
     if let Some(native) = &manifest.native {
         let path = dir.join("lib").join(library_file_name(&native.library));
-        for udf in load_native(&path)? {
+        for udf in load_native(&path)?.functions {
             let names = names_of(&udf);
             for name in &names {
                 check_collision(&state, reserved, registry, expected_name, name, &seen)?;
