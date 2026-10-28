@@ -19,6 +19,7 @@ use super::bytes::FFI_Bytes;
 use super::error::{FFI_ObjectStoreResult, STORE};
 use super::export::{drop_quietly, export_entered};
 use super::options::FFI_PutResult;
+use super::{OBJECT_STORE_FFI_VERSION, object_store_ffi_version};
 
 /// An `object_store::MultipartUpload` as FFI data.
 ///
@@ -29,6 +30,10 @@ use super::options::FFI_PutResult;
 /// Only the FFI functions read or change these fields.
 #[repr(C)]
 pub struct FFI_MultipartUpload {
+    /// Returns [`OBJECT_STORE_FFI_VERSION`] of the exporter. It stays the first field.
+    pub version: unsafe extern "C" fn() -> u64,
+    /// Identifies the library that made the table.
+    pub library_marker_id: extern "C" fn() -> usize,
     /// Uploads one part. Several parts can be in flight at the same time.
     ///
     /// Fails while a `complete` or `abort` is pending.
@@ -67,6 +72,8 @@ impl FFI_MultipartUpload {
             finished: Arc::new(AtomicBool::new(false)),
         });
         Self {
+            version: object_store_ffi_version,
+            library_marker_id: datafusion_ffi::get_library_marker_id,
             put_part: put_part_fn,
             complete: complete_fn,
             abort: abort_fn,
@@ -191,9 +198,21 @@ unsafe extern "C" fn release_fn(upload: &mut FFI_MultipartUpload) {
 /// in the background. The receiver does not wait for that abort.
 pub struct ForeignMultipartUpload(FFI_MultipartUpload);
 
-impl From<FFI_MultipartUpload> for ForeignMultipartUpload {
-    fn from(upload: FFI_MultipartUpload) -> Self {
-        Self(upload)
+impl ForeignMultipartUpload {
+    /// Fails with `NotSupported` when the table has another [`OBJECT_STORE_FFI_VERSION`].
+    /// The refused table is released, so the exporter aborts the upload.
+    pub fn try_new(upload: FFI_MultipartUpload) -> Result<Self> {
+        // SAFETY: `version` has the same place in every table version.
+        let version = unsafe { (upload.version)() };
+        if version != OBJECT_STORE_FFI_VERSION {
+            return Err(Error::NotSupported {
+                source: format!(
+                    "multipart upload FFI version {version} is not supported (want {OBJECT_STORE_FFI_VERSION})"
+                )
+                .into(),
+            });
+        }
+        Ok(Self(upload))
     }
 }
 
@@ -259,7 +278,7 @@ mod tests {
 
     fn panicking_upload() -> ForeignMultipartUpload {
         let ffi = FFI_MultipartUpload::new(Box::new(PanicUpload), Handle::current());
-        ForeignMultipartUpload::from(ffi)
+        ForeignMultipartUpload::try_new(ffi).unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread")]

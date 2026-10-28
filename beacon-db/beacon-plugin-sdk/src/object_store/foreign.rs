@@ -109,7 +109,7 @@ impl ObjectStore for ForeignObjectStore {
         let future =
             unsafe { (self.0.put_multipart_opts)(&self.0, path_string(location), options) };
         let upload = future.await.into_result()?;
-        Ok(Box::new(ForeignMultipartUpload::from(upload)))
+        Ok(Box::new(ForeignMultipartUpload::try_new(upload)?))
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
