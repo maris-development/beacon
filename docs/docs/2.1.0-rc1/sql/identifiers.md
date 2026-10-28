@@ -44,6 +44,13 @@ into storage paths, and these characters change the path. A function name holds 
 letters, digits and `_`.
 
 Tables from an earlier version keep their names. You can still query and drop them.
+`CREATE ... IF NOT EXISTS` on such a name does nothing. To give a table an allowed name, copy it
+and drop the old table:
+
+```sql
+CREATE TABLE my_table AS SELECT * FROM "My Table";
+DROP TABLE "My Table";
+```
 
 ## Columns keep the case of the source
 

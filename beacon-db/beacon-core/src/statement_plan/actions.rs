@@ -224,7 +224,6 @@ pub(crate) async fn create_external_table(
     session: &Arc<SessionContext>,
     cmd: &CreateExternalTable,
 ) -> anyhow::Result<()> {
-    crate::name_rule::check_new_name("Table", cmd.name.table())?;
     if !cmd.or_replace && session.table_exist(cmd.name.clone())? {
         if cmd.if_not_exists {
             return Ok(());
@@ -236,6 +235,7 @@ pub(crate) async fn create_external_table(
         )
         .await);
     }
+    crate::name_rule::check_new_name("Table", cmd.name.table())?;
 
     // `STORED AS REMOTE` registers a federated table pointing at another Beacon
     // instance, rather than a listing table over the datasets store.
@@ -593,7 +593,6 @@ pub(crate) async fn create_table(
     definition: Option<String>,
 ) -> anyhow::Result<Option<SendableRecordBatchStream>> {
     let table_name = name.table().to_string();
-    crate::name_rule::check_new_name("Table", &table_name)?;
 
     if session.table_exist(name.clone())? {
         if if_not_exists {
@@ -606,6 +605,7 @@ pub(crate) async fn create_table(
         )
         .await);
     }
+    crate::name_rule::check_new_name("Table", &table_name)?;
 
     let arrow_schema = child.schema();
 
