@@ -65,10 +65,8 @@ mod tests {
 
     #[test]
     fn len_mismatch_rejected() {
-        let result = NdArrowArray::try_new(
-            Arc::new(Int32Array::from(vec![1, 2, 3])),
-            dims(&[("x", 2)]),
-        );
+        let result =
+            NdArrowArray::try_new(Arc::new(Int32Array::from(vec![1, 2, 3])), dims(&[("x", 2)]));
         assert!(result.is_err());
     }
 }

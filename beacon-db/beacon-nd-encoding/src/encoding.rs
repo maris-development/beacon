@@ -78,7 +78,10 @@ pub fn nd_encoded_field(name: &str, value_type: &DataType) -> Field {
 /// geometry column live in that metadata.
 pub fn nd_encoded_field_of(field: &Field) -> Field {
     let mut metadata = field.metadata().clone();
-    metadata.insert("ARROW:extension:name".to_string(), ND_EXTENSION_NAME.to_string());
+    metadata.insert(
+        "ARROW:extension:name".to_string(),
+        ND_EXTENSION_NAME.to_string(),
+    );
     metadata.insert("ARROW:extension:metadata".to_string(), "{}".to_string());
     Field::new(field.name(), nd_encoded_type(field.data_type()), true).with_metadata(metadata)
 }
@@ -97,7 +100,11 @@ pub fn encoded_schema(logical: &Schema) -> Schema {
 
 /// True when `field` is an nd-encoded column.
 pub fn is_nd_encoded(field: &Field) -> bool {
-    field.metadata().get("ARROW:extension:name").map(String::as_str) == Some(ND_EXTENSION_NAME)
+    field
+        .metadata()
+        .get("ARROW:extension:name")
+        .map(String::as_str)
+        == Some(ND_EXTENSION_NAME)
 }
 
 /// Element type carried by an nd-encoded struct type (the `values` list item).
@@ -429,7 +436,11 @@ mod tests {
             assert_eq!(actual.values().as_ref(), expected.values().as_ref());
         }
         assert_eq!(
-            decoded.column(2).values().as_primitive::<Float64Type>().values(),
+            decoded
+                .column(2)
+                .values()
+                .as_primitive::<Float64Type>()
+                .values(),
             &[0.0, 0.1, 0.2, 1.0, 1.1, 1.2]
         );
     }
@@ -497,8 +508,11 @@ mod tests {
         )]));
         assert!(nd_value_type(&bogus).is_err());
         // ...nor one missing `values` entirely.
-        let missing =
-            DataType::Struct(Fields::from(vec![Field::new("other", DataType::Utf8, true)]));
+        let missing = DataType::Struct(Fields::from(vec![Field::new(
+            "other",
+            DataType::Utf8,
+            true,
+        )]));
         assert!(nd_value_type(&missing).is_err());
     }
 
@@ -572,8 +586,7 @@ mod tests {
         assert_eq!(first.num_rows(), 1);
         assert_eq!(second.num_rows(), 1);
 
-        let merged =
-            arrow::compute::concat_batches(&first.schema(), &[first, second]).unwrap();
+        let merged = arrow::compute::concat_batches(&first.schema(), &[first, second]).unwrap();
         assert_eq!(nd_batch_count(&merged), 2);
 
         let rows: Vec<usize> = (0..nd_batch_count(&merged))

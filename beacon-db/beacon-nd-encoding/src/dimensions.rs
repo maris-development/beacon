@@ -7,8 +7,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use datafusion_common::plan_err;
 use datafusion_common::Result;
+use datafusion_common::plan_err;
 
 /// A single named axis with a fixed size.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,10 +170,7 @@ mod tests {
 
     #[test]
     fn duplicate_names_rejected() {
-        let result = Dimensions::try_new(vec![
-            Dimension::new("x", 2),
-            Dimension::new("x", 3),
-        ]);
+        let result = Dimensions::try_new(vec![Dimension::new("x", 2), Dimension::new("x", 3)]);
         assert!(result.is_err());
     }
 
@@ -188,8 +185,13 @@ mod tests {
         assert!(dims(&[("lat", 3)]).check_broadcast_to(&target).is_ok());
         assert!(dims(&[("time", 1)]).check_broadcast_to(&target).is_ok());
         assert!(Dimensions::scalar().check_broadcast_to(&target).is_ok());
-        let missing = dims(&[("depth", 2)]).check_broadcast_to(&target).unwrap_err();
-        assert!(missing.to_string().contains("'depth' is missing"), "{missing}");
+        let missing = dims(&[("depth", 2)])
+            .check_broadcast_to(&target)
+            .unwrap_err();
+        assert!(
+            missing.to_string().contains("'depth' is missing"),
+            "{missing}"
+        );
         let size = dims(&[("lat", 2)]).check_broadcast_to(&target).unwrap_err();
         assert!(size.to_string().contains("has size 2"), "{size}");
     }

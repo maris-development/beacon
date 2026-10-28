@@ -3,8 +3,8 @@
 
 use arrow::array::{Array, UInt64Array};
 use arrow::datatypes::SchemaRef;
-use datafusion_common::plan_err;
 use datafusion_common::Result;
+use datafusion_common::plan_err;
 
 use crate::array::NdArrowArray;
 use crate::dimensions::Dimensions;
@@ -114,7 +114,6 @@ impl NdRecordBatch {
             None => self.target.num_elements(),
         }
     }
-
 }
 
 #[cfg(test)]
@@ -214,9 +213,11 @@ mod tests {
             DataType::Int32,
             true,
         )]));
-        let depth =
-            NdArrowArray::try_new(Arc::new(Int32Array::from(vec![1, 2])), dims(&[("depth", 2)]))
-                .unwrap();
+        let depth = NdArrowArray::try_new(
+            Arc::new(Int32Array::from(vec![1, 2])),
+            dims(&[("depth", 2)]),
+        )
+        .unwrap();
         assert!(NdRecordBatch::try_new(schema, vec![depth], dims(&[("time", 2)])).is_err());
     }
 }
