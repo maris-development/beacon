@@ -11,6 +11,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_plan::RecordBatchStream;
 use datafusion_ffi::record_batch_stream::FFI_RecordBatchStream;
 use futures::{Stream, StreamExt};
+use tokio::runtime::Handle;
 
 use crate::panic_safe::panic_message;
 
@@ -69,12 +70,24 @@ impl Drop for PanicSafeStream {
 /// Exports `stream`. A panic in its poll becomes one error item, and the stream then ends.
 /// A panic in its drop is caught.
 pub fn export_batch_stream(stream: SendableRecordBatchStream) -> FFI_RecordBatchStream {
+    export_with(stream, None)
+}
+
+/// [`export_batch_stream`] for the host: each poll runs inside `handle.enter()`.
+pub fn export_batch_stream_entered(
+    stream: SendableRecordBatchStream,
+    handle: Handle,
+) -> FFI_RecordBatchStream {
+    export_with(stream, Some(handle))
+}
+
+fn export_with(stream: SendableRecordBatchStream, handle: Option<Handle>) -> FFI_RecordBatchStream {
     let schema = stream.schema();
     let safe = PanicSafeStream {
         schema,
         inner: Some(stream),
     };
-    FFI_RecordBatchStream::new(Box::pin(safe), None)
+    FFI_RecordBatchStream::new(Box::pin(safe), handle)
 }
 
 /// Imports a stream from [`export_batch_stream`].

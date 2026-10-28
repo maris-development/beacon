@@ -1,11 +1,17 @@
 //! File format plugins: the FFI tables and the traits that plugin authors implement.
 
+mod export;
+mod foreign;
+mod reader;
 mod statistics;
 mod stream;
 mod types;
 
+pub use export::FFI_FileFormat;
+pub use foreign::ForeignFormatReader;
+pub use reader::FormatReader;
 pub use statistics::{decode_statistics, encode_statistics};
-pub use stream::{export_batch_stream, import_batch_stream};
+pub use stream::{export_batch_stream, export_batch_stream_entered, import_batch_stream};
 pub use types::{
     ArgKind, ArgSpec, FFI_ArgSpec, FFI_ScanRequest, FFI_SortKey, FFI_WriteRequest, OutputKind,
     ScanRequest, SortKey, WriteRequest,
@@ -24,3 +30,6 @@ pub extern "C" fn file_format_ffi_version() -> u64 {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod reader_tests;
