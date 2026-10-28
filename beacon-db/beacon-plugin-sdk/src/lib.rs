@@ -4,12 +4,14 @@
 compile_error!("beacon plugins need panic = \"unwind\"");
 
 mod panic_safe;
+pub mod file_format;
 pub mod object_store;
 pub mod scalar_functions;
 
 pub use datafusion;
 pub use datafusion_ffi;
 pub use datafusion_proto;
+pub use beacon_nd_encoding as nd;
 pub use stabby;
 
 /// The ABI version of this SDK. Beacon refuses a plugin with a different value.

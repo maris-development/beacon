@@ -74,12 +74,12 @@ impl NdRecordBatch {
             if sel.null_count() > 0 {
                 return plan_err!("nd selection must not contain null indices");
             }
-            if let Some(&max) = sel.values().iter().max() {
-                if max >= n {
-                    return plan_err!(
-                        "nd selection index {max} is out of bounds for target grid of {n} cells"
-                    );
-                }
+            if let Some(&max) = sel.values().iter().max()
+                && max >= n
+            {
+                return plan_err!(
+                    "nd selection index {max} is out of bounds for target grid of {n} cells"
+                );
             }
         }
         self.selection = selection;

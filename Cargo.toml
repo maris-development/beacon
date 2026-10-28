@@ -78,6 +78,7 @@ datafusion = "^54.1"
 datafusion-common = "^54.1"
 datafusion-ffi = "^54.1"
 datafusion-proto = { version = "^54.1", default-features = false }
+datafusion-proto-common = "^54.1"
 
 stabby = "72.1.1"
 
