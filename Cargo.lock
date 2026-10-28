@@ -2179,6 +2179,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-nd-encoding"
+version = "2.1.0-rc.1"
+dependencies = [
+ "arrow 58.4.0",
+ "datafusion-common 54.1.0",
+]
+
+[[package]]
 name = "beacon-plugin-registry"
 version = "2.1.0-rc.1"
 dependencies = [
@@ -2209,14 +2217,17 @@ version = "2.1.0-rc.1"
 dependencies = [
  "async-ffi",
  "async-trait",
+ "beacon-nd-encoding",
  "bytes",
  "chrono",
  "datafusion 54.1.0",
  "datafusion-ffi",
  "datafusion-proto",
+ "datafusion-proto-common",
  "form_urlencoded",
  "futures",
  "object_store 0.13.2",
+ "prost",
  "stabby",
  "tempfile",
  "tokio",

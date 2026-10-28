@@ -22,13 +22,13 @@ use tokio::runtime::Handle;
 use super::bytes::FFI_Bytes;
 use super::error::{FFI_ObjectStoreResult, STORE, panic_error};
 use super::multipart::FFI_MultipartUpload;
-use super::object_store_ffi_version;
 use super::options::{
     FFI_CopyOptions, FFI_GetOptions, FFI_GetResultMeta, FFI_ListResult, FFI_ObjectMeta,
     FFI_PutMultipartOptions, FFI_PutOptions, FFI_PutResult, FFI_Range, FFI_RenameOptions,
     parse_path,
 };
 use super::stream::{FFI_BytesStream, FFI_MetaStream, FFI_PathStream, FFI_Stream};
+use crate::sdk_abi_version;
 
 /// The result of a get as FFI data.
 #[repr(C)]
@@ -49,7 +49,7 @@ pub struct FFI_GetResult {
 /// Only the FFI functions read or change these fields.
 #[repr(C)]
 pub struct FFI_ObjectStore {
-    /// Returns the ABI version of the table. See [`super::OBJECT_STORE_FFI_VERSION`].
+    /// Returns the ABI version of the table. See [`crate::BEACON_PLUGIN_SDK_ABI`].
     pub version: unsafe extern "C" fn() -> u64,
     /// Identifies the library that made the table. See [`datafusion_ffi::get_library_marker_id`].
     pub library_marker_id: extern "C" fn() -> usize,
@@ -134,7 +134,7 @@ impl FFI_ObjectStore {
     pub fn new(store: Arc<dyn ObjectStore>, handle: Handle) -> Self {
         let private_data = Box::new(StorePrivateData { store, handle });
         Self {
-            version: object_store_ffi_version,
+            version: sdk_abi_version,
             library_marker_id: datafusion_ffi::get_library_marker_id,
             private_data: Box::into_raw(private_data) as *mut c_void,
             clone: clone_fn,
