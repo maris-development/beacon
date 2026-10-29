@@ -1,6 +1,9 @@
 //! The plugin format wrapper: write path (`COPY ... TO`), through the FFI tables.
 
+use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use arrow::array::{AsArray, RecordBatch};
 use arrow::datatypes::{Int64Type, UInt64Type};
@@ -13,17 +16,21 @@ use datafusion::error::Result;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::TryStreamExt;
+use futures::stream::BoxStream;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt};
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, UploadPart,
+};
 use tokio::runtime::Handle;
 use url::Url;
 
 #[path = "plugin_format/test_formats.rs"]
 mod test_formats;
 
-use test_formats::{LineText, Seen, foreign};
+use test_formats::{LineText, Seen, foreign, foreign_store};
 
 struct Fixture {
     ctx: SessionContext,
@@ -415,4 +422,217 @@ async fn writes_directory_uploads_each_file() {
         "a:Int64,b:Utf8\n1,x\n2,y\n"
     );
     assert!(entries(tmp.path()).is_empty(), "{:?}", entries(tmp.path()));
+}
+
+/// An `InMemory` store whose uploads count `abort` calls. `fail_complete` fails each
+/// `complete`; `fail_parts` fails each part.
+#[derive(Debug, Default)]
+struct WatchedStore {
+    inner: InMemory,
+    aborts: Arc<AtomicUsize>,
+    fail_complete: bool,
+    fail_parts: bool,
+}
+
+impl fmt::Display for WatchedStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WatchedStore")
+    }
+}
+
+#[derive(Debug)]
+struct WatchedUpload {
+    inner: Box<dyn MultipartUpload>,
+    aborts: Arc<AtomicUsize>,
+    fail_complete: bool,
+    fail_parts: bool,
+}
+
+#[async_trait::async_trait]
+impl MultipartUpload for WatchedUpload {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        if self.fail_parts {
+            return Box::pin(async {
+                Err(object_store::Error::Generic {
+                    store: "WatchedStore",
+                    source: "part fails".into(),
+                })
+            });
+        }
+        self.inner.put_part(data)
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        if self.fail_complete {
+            return Err(object_store::Error::Generic {
+                store: "WatchedStore",
+                source: "complete fails".into(),
+            });
+        }
+        self.inner.complete().await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.aborts.fetch_add(1, Ordering::SeqCst);
+        self.inner.abort().await
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for WatchedStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        Ok(Box::new(WatchedUpload {
+            inner: self.inner.put_multipart_opts(location, options).await?,
+            aborts: Arc::clone(&self.aborts),
+            fail_complete: self.fail_complete,
+            fail_parts: self.fail_parts,
+        }))
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// `fx` with `store` registered at `watched://`.
+fn watch(fx: &Fixture, store: Arc<dyn ObjectStore>) {
+    fx.ctx
+        .register_object_store(&Url::parse("watched://").unwrap(), store);
+}
+
+async fn wait_for_count(count: &AtomicUsize, wanted: usize) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while count.load(Ordering::SeqCst) < wanted && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    count.load(Ordering::SeqCst)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writer_error_aborts_the_plugin_upload() {
+    let fx = Fixture::new(writer());
+    let store = Arc::new(WatchedStore::default());
+    // As from a plugin library: the plugin upload crosses the object store FFI.
+    watch(&fx, foreign_store(store.clone()));
+    let error = fx
+        .error(&format!(
+            "COPY ({TWO_ROWS}) TO 'watched:///out/m.ltxt' STORED AS linetext \
+             OPTIONS ('fail_multipart' 'true')"
+        ))
+        .await;
+    assert!(error.contains("write failed"), "{error}");
+    assert_eq!(wait_for_count(&store.aborts, 1).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_aborts_when_complete_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = with_tmp(local_writer(), tmp.path());
+    let store = Arc::new(WatchedStore {
+        fail_complete: true,
+        ..WatchedStore::default()
+    });
+    watch(&fx, store.clone());
+    let error = fx
+        .error(&format!(
+            "COPY ({TWO_ROWS}) TO 'watched:///out/a.ltxt' STORED AS linetext"
+        ))
+        .await;
+    assert!(error.contains("complete fails"), "{error}");
+    assert_eq!(wait_for_count(&store.aborts, 1).await, 1);
+    assert!(entries(tmp.path()).is_empty(), "{:?}", entries(tmp.path()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_aborts_when_a_part_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = with_tmp(local_writer(), tmp.path());
+    let store = Arc::new(WatchedStore {
+        fail_parts: true,
+        ..WatchedStore::default()
+    });
+    watch(&fx, store.clone());
+    let error = fx
+        .error(&format!(
+            "COPY ({TWO_ROWS}) TO 'watched:///out/a.ltxt' STORED AS linetext"
+        ))
+        .await;
+    assert!(error.contains("part fails"), "{error}");
+    assert_eq!(wait_for_count(&store.aborts, 1).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writer_error_removes_the_local_target() {
+    let root = tempfile::tempdir().unwrap();
+    let url = ObjectStoreUrl::parse("local://").unwrap();
+    let roots =
+        LocalStoreRoots::new(root.path().to_path_buf()).with_root(&url, root.path().to_path_buf());
+    let fx = Fixture::with_config(
+        local_writer(),
+        SessionConfig::new().with_extension(Arc::new(roots)),
+    );
+    fx.ctx.register_object_store(
+        &Url::parse("local://").unwrap(),
+        Arc::new(LocalFileSystem::new_with_prefix(root.path()).unwrap()),
+    );
+    let error = fx
+        .error(&format!(
+            "COPY ({TWO_ROWS}) TO 'local:///out/a.ltxt' STORED AS linetext \
+             OPTIONS ('fail_write' 'true')"
+        ))
+        .await;
+    assert!(error.contains("write failed"), "{error}");
+    assert!(!root.path().join("out").join("a.ltxt").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_content_type_is_octet_stream() {
+    let format = PluginFileFormatFactory::new(foreign(Arc::new(writer())));
+    assert_eq!(format.content_type(), "application/octet-stream");
+    let format = PluginFileFormatFactory::new(foreign(Arc::new(LineText {
+        content_type: "text/plain",
+        ..writer()
+    })));
+    assert_eq!(format.content_type(), "text/plain");
 }

@@ -63,9 +63,12 @@ impl PluginFileFormatFactory {
         self.factory.writes_directory()
     }
 
-    /// The MIME type of an output file.
+    /// The MIME type of an output file. An empty type is `application/octet-stream`.
     pub fn content_type(&self) -> String {
-        self.factory.content_type().to_string()
+        match self.factory.content_type() {
+            "" => "application/octet-stream".to_string(),
+            content_type => content_type.to_string(),
+        }
     }
 
     /// The default file extension without the dot: the first extension, else the name.

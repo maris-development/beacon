@@ -19,12 +19,14 @@ use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt, WriteMultipart};
+use object_store::{MultipartUpload, ObjectStore, ObjectStoreExt, PutPayload};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::Receiver;
 
-/// The bytes that an upload reads from a local output file at one time.
+/// The size of one upload part, and of each read from a local output file.
 const UPLOAD_CHUNK: usize = 8 * 1024 * 1024;
 /// The parts of one upload that may be in flight at the same time.
 const UPLOAD_PARTS: usize = 4;
@@ -101,6 +103,7 @@ impl OutputFile {
             return self.call(input, None).await;
         };
         if let Some(target) = local.roots.local_path(&self.store_url, &self.path) {
+            let existed = tokio::fs::try_exists(&target).await.unwrap_or(true);
             let folder = match local.directory {
                 true => Some(target.as_path()),
                 false => target.parent(),
@@ -108,7 +111,16 @@ impl OutputFile {
             if let Some(folder) = folder {
                 tokio::fs::create_dir_all(folder).await?;
             }
-            return self.call(input, Some(target)).await;
+            let result = self.call(input, Some(target.clone())).await;
+            // A failed write must not leave a broken output where a reader finds it.
+            if result.is_err() {
+                let _ = match local.directory {
+                    true if !existed => tokio::fs::remove_dir_all(&target).await,
+                    true => Ok(()),
+                    false => tokio::fs::remove_file(&target).await,
+                };
+            }
+            return result;
         }
         // The temp file or folder goes away on drop: after the upload, on error and on cancel.
         let mut temp = tempfile::Builder::new();
@@ -152,34 +164,55 @@ fn files_under(root: &Path) -> Result<Vec<(PathBuf, Vec<String>)>> {
     Ok(files)
 }
 
-/// Uploads the local `file` to `path` in `store`.
-async fn upload(store: &Arc<dyn ObjectStore>, file: &Path, path: &ObjectPath) -> Result<()> {
-    let mut upload =
-        WriteMultipart::new_with_chunk_size(store.put_multipart(path).await?, UPLOAD_CHUNK);
-    match copy_file(file, &mut upload).await {
-        Ok(()) => {
-            upload.finish().await?;
-            Ok(())
-        }
-        Err(error) => {
-            // The copy error is the one to report.
-            let _ = upload.abort().await;
-            Err(error)
+/// A multipart upload that is aborted if it is dropped before it completes.
+struct UploadGuard(Option<Box<dyn MultipartUpload>>);
+
+impl Drop for UploadGuard {
+    fn drop(&mut self) {
+        if let Some(mut upload) = self.0.take() {
+            // Drop cannot wait, so the abort runs in the background.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = upload.abort().await;
+                });
+            }
         }
     }
 }
 
-async fn copy_file(file: &Path, upload: &mut WriteMultipart) -> Result<()> {
+/// Uploads the local `file` to `path` in `store`.
+async fn upload(store: &Arc<dyn ObjectStore>, file: &Path, path: &ObjectPath) -> Result<()> {
+    let mut guard = UploadGuard(Some(store.put_multipart(path).await?));
+    let upload = guard.0.as_mut().expect("the upload is set above");
     let mut file = tokio::fs::File::open(file).await?;
-    let mut buffer = vec![0; UPLOAD_CHUNK];
+    let mut parts = FuturesUnordered::new();
+    let mut sent = 0;
     loop {
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            return Ok(());
+        let mut chunk = Vec::new();
+        (&mut file)
+            .take(UPLOAD_CHUNK as u64)
+            .read_to_end(&mut chunk)
+            .await?;
+        // A store needs one part at least, so an empty file sends one empty part.
+        if chunk.is_empty() && sent > 0 {
+            break;
         }
-        upload.wait_for_capacity(UPLOAD_PARTS).await?;
-        upload.write(&buffer[..read]);
+        sent += 1;
+        while parts.len() >= UPLOAD_PARTS {
+            parts.next().await.expect("parts is not empty")?;
+        }
+        let last = chunk.len() < UPLOAD_CHUNK;
+        parts.push(upload.put_part(PutPayload::from(chunk)));
+        if last {
+            break;
+        }
     }
+    while let Some(part) = parts.next().await {
+        part?;
+    }
+    upload.complete().await?;
+    guard.0 = None;
+    Ok(())
 }
 
 impl fmt::Debug for PluginFileSink {

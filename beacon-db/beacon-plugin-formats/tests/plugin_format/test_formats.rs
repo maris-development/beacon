@@ -19,6 +19,7 @@ use beacon_plugin_sdk::file_format::{
 };
 use beacon_plugin_sdk::nd::encoding::{encode_nd_record_batch, encoded_schema};
 use beacon_plugin_sdk::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
+use beacon_plugin_sdk::object_store::FFI_ObjectStore;
 use datafusion::common::Statistics;
 use datafusion::common::stats::Precision;
 use datafusion::error::{DataFusionError, Result};
@@ -48,6 +49,14 @@ pub fn foreign_reader(reader: Arc<dyn FormatReader>) -> Arc<dyn FormatReader> {
     ForeignFormatReader::try_new(ffi, Handle::current()).expect("import the reader")
 }
 
+/// Exports `store` and imports it through the foreign path, so that a plugin call on it
+/// crosses the object store FFI, as in a plugin library.
+pub fn foreign_store(store: Arc<dyn ObjectStore>) -> Arc<dyn ObjectStore> {
+    let mut ffi = FFI_ObjectStore::new(store, Handle::current());
+    ffi.library_marker_id = foreign_marker_id;
+    Arc::<dyn ObjectStore>::try_from(ffi).expect("import the store")
+}
+
 /// What the line format saw, shared with the test.
 #[derive(Debug, Default)]
 pub struct Seen {
@@ -61,7 +70,8 @@ pub struct Seen {
 /// per line. Types: `Int32`, `Int64`, `Float64`, `Utf8`. A file with no bytes has no
 /// batch; a file with only the header has one batch of no rows.
 ///
-/// The writer writes the same text. Option `fail_write=true` fails after the first batch.
+/// The writer writes the same text. Option `fail_write=true` fails after the first batch;
+/// `fail_multipart=true` starts a multipart upload, then fails.
 #[derive(Debug, Default)]
 pub struct LineText {
     pub seen: Arc<Seen>,
@@ -72,6 +82,8 @@ pub struct LineText {
     pub wants_local: bool,
     /// One output is a folder with `part-0.ltxt`.
     pub directory: bool,
+    /// The MIME type of an output file.
+    pub content_type: &'static str,
 }
 
 impl FormatFactory for LineText {
@@ -103,6 +115,10 @@ impl FormatFactory for LineText {
         self.directory
     }
 
+    fn content_type(&self) -> &str {
+        self.content_type
+    }
+
     fn create(&self, options: &HashMap<String, String>) -> Result<Arc<dyn FormatReader>> {
         self.seen.options.lock().unwrap().push(options.clone());
         if options.contains_key("bad") {
@@ -113,6 +129,7 @@ impl FormatFactory for LineText {
             panic_poll: options.get("panic_poll").is_some_and(|v| v == "true"),
             fail_open: options.get("fail_open").is_some_and(|v| v == "true"),
             fail_write: options.get("fail_write").is_some_and(|v| v == "true"),
+            fail_multipart: options.get("fail_multipart").is_some_and(|v| v == "true"),
             ordering: self.ordering.clone(),
             directory: self.directory,
         })))
@@ -134,6 +151,7 @@ struct LineReader {
     panic_poll: bool,
     fail_open: bool,
     fail_write: bool,
+    fail_multipart: bool,
     ordering: Vec<SortKey>,
     directory: bool,
 }
@@ -328,6 +346,18 @@ impl FormatReader for LineReader {
                 if let Some(file) = &local_file {
                     std::fs::write(file, "partial")?;
                 }
+                return datafusion::common::exec_err!("write failed");
+            }
+            if self.fail_multipart {
+                // The dropped upload must reach the host store as an abort.
+                let mut upload = store
+                    .put_multipart(&request.path)
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                upload
+                    .put_part(b"part".to_vec().into())
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
                 return datafusion::common::exec_err!("write failed");
             }
         }
