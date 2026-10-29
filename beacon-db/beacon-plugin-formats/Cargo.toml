@@ -1,0 +1,25 @@
+[package]
+name = "beacon-plugin-formats"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Turns file format plugins into DataFusion file formats in Beacon"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+[dependencies]
+beacon-plugin-sdk = { path = "../beacon-plugin-sdk" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-common = { path = "../beacon-common" }
+arrow = { workspace = true }
+datafusion = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+object_store = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+beacon-nd-encoding = { path = "../beacon-nd-encoding" }
+tokio = { workspace = true }
+url = { workspace = true }

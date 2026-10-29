@@ -1,5 +1,7 @@
 //! Example Beacon plugin with scalar functions, two of them with planner hooks.
 
+mod formats;
+
 use std::sync::Arc;
 
 use beacon_plugin_sdk::datafusion::arrow::array::{Array, ArrayRef, BooleanArray, Float64Array};
@@ -160,4 +162,4 @@ fn functions() -> Vec<ScalarUDF> {
 beacon_plugin_sdk::export_plugin!(@abi beacon_plugin_sdk::BEACON_PLUGIN_SDK_ABI, 0, scalar = functions);
 
 #[cfg(not(feature = "wrong-abi"))]
-beacon_plugin_sdk::export_plugin!(scalar = functions);
+beacon_plugin_sdk::export_plugin!(scalar = functions, formats = formats::formats);

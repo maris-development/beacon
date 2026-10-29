@@ -1815,6 +1815,7 @@ dependencies = [
  "beacon-iceberg",
  "beacon-icechunk",
  "beacon-lance",
+ "beacon-plugin-formats",
  "beacon-plugin-registry",
  "beacon-plugin-sdk",
  "beacon-redb-store",
@@ -2184,6 +2185,24 @@ version = "2.1.0-rc.1"
 dependencies = [
  "arrow 58.4.0",
  "datafusion-common 54.1.0",
+]
+
+[[package]]
+name = "beacon-plugin-formats"
+version = "2.1.0-rc.1"
+dependencies = [
+ "arrow 58.4.0",
+ "async-trait",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "beacon-nd-encoding",
+ "beacon-plugin-sdk",
+ "datafusion 54.1.0",
+ "futures",
+ "object_store 0.13.2",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

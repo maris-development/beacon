@@ -4,12 +4,30 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use beacon_plugin_sdk::datafusion_ffi::{self, util::FFI_Result};
+use beacon_plugin_sdk::file_format::{FFI_FileFormatFactory, FileFormatsFn, FILE_FORMATS_SYMBOL};
 use beacon_plugin_sdk::scalar_functions::{
     import_scalar_function, ScalarFunctionsFn, SCALAR_FUNCTIONS_SYMBOL,
 };
 use beacon_plugin_sdk::{AbiFn, ABI_SYMBOL, BEACON_PLUGIN_SDK_ABI};
 use datafusion::logical_expr::ScalarUDF;
 use parking_lot::Mutex;
+
+/// What a native library exports. A library has functions, file formats or both.
+pub struct NativeExports {
+    /// The scalar functions.
+    pub functions: Vec<ScalarUDF>,
+    /// The file format factories. The host imports them with its runtime handle.
+    pub formats: Vec<FFI_FileFormatFactory>,
+}
+
+impl std::fmt::Debug for NativeExports {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeExports")
+            .field("functions", &self.functions.len())
+            .field("formats", &self.formats.len())
+            .finish()
+    }
+}
 
 /// Every native library that opened. Never dropped: plugin code may still run.
 static LIBRARIES: Mutex<Vec<libloading::Library>> = Mutex::new(Vec::new());
@@ -27,14 +45,14 @@ pub fn library_file_name(name: &str) -> String {
 ///
 /// A library that opens stays loaded until the process stops, also when a check fails:
 /// the functions point into its code, and the library ran code at load.
-pub fn load_native(path: &Path) -> anyhow::Result<Vec<ScalarUDF>> {
+pub fn load_native(path: &Path) -> anyhow::Result<NativeExports> {
     if !path.is_file() {
         return Err(missing_library(path));
     }
     // SAFETY: a plugin library is trusted code that a super-user installed.
     let library = unsafe { libloading::Library::new(path) }
         .with_context(|| format!("cannot open native library {}", path.display()))?;
-    let result = functions(&library);
+    let result = exports(&library);
     LIBRARIES.lock().push(library);
     result
 }
@@ -66,16 +84,29 @@ fn missing_library(path: &Path) -> anyhow::Error {
     }
 }
 
-fn functions(library: &libloading::Library) -> anyhow::Result<Vec<ScalarUDF>> {
-    // SAFETY: the SDK exports both symbols with these types.
-    let (abi, functions) = unsafe {
+fn require_exports(has_functions: bool, has_formats: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        has_functions || has_formats,
+        "plugin exports no functions and no file formats"
+    );
+    Ok(())
+}
+
+fn exports(library: &libloading::Library) -> anyhow::Result<NativeExports> {
+    // SAFETY: the SDK exports these symbols with these types.
+    let (abi, functions, formats) = unsafe {
         let abi = *library
             .get::<AbiFn>(ABI_SYMBOL)
             .context("the library has no beacon_plugin_abi symbol")?;
-        let functions = *library
+        let functions = library
             .get::<ScalarFunctionsFn>(SCALAR_FUNCTIONS_SYMBOL)
-            .context("the library has no beacon_plugin_scalar_functions symbol")?;
-        (abi, functions)
+            .ok()
+            .map(|symbol| *symbol);
+        let formats = library
+            .get::<FileFormatsFn>(FILE_FORMATS_SYMBOL)
+            .ok()
+            .map(|symbol| *symbol);
+        (abi, functions, formats)
     };
     let abi = abi();
     anyhow::ensure!(
@@ -89,15 +120,32 @@ fn functions(library: &libloading::Library) -> anyhow::Result<Vec<ScalarUDF>> {
         "plugin built for DataFusion FFI {}, Beacon has {ffi_major}",
         abi.ffi_major
     );
-    match functions() {
-        FFI_Result::Ok(list) => Ok(list.into_iter().map(import_scalar_function).collect()),
-        FFI_Result::Err(message) => anyhow::bail!("plugin init failed: {message}"),
-    }
+    require_exports(functions.is_some(), formats.is_some())?;
+    let functions = match functions.map(|make| make()) {
+        None => Vec::new(),
+        Some(FFI_Result::Ok(list)) => list.into_iter().map(import_scalar_function).collect(),
+        Some(FFI_Result::Err(message)) => anyhow::bail!("plugin init failed: {message}"),
+    };
+    let formats = match formats.map(|make| make()) {
+        None => Vec::new(),
+        Some(FFI_Result::Ok(list)) => list.into_iter().collect(),
+        Some(FFI_Result::Err(message)) => anyhow::bail!("plugin file formats failed: {message}"),
+    };
+    Ok(NativeExports { functions, formats })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_need_functions_or_formats() {
+        let err = require_exports(false, false).unwrap_err().to_string();
+        assert_eq!(err, "plugin exports no functions and no file formats");
+        assert!(require_exports(true, false).is_ok());
+        assert!(require_exports(false, true).is_ok());
+        assert!(require_exports(true, true).is_ok());
+    }
 
     #[test]
     fn a_file_that_is_not_a_library_is_refused() {
