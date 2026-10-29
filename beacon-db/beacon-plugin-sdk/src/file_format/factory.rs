@@ -31,7 +31,7 @@ pub trait FormatFactory: Send + Sync + 'static {
     /// What `open` returns.
     fn output_kind(&self) -> OutputKind;
 
-    /// The positional arguments of `read_<name>` after the paths.
+    /// The fields of the options struct of `read_<name>`, after the paths.
     fn table_function_args(&self) -> Vec<ArgSpec> {
         Vec::new()
     }

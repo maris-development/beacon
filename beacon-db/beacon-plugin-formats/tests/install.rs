@@ -13,6 +13,7 @@ use beacon_plugin_formats::{
     PluginFileFormatFactory, check_formats, install_formats, options_from_args, uninstall_formats,
 };
 use beacon_plugin_sdk::file_format::{ArgKind, ArgSpec, FormatFactory, FormatReader, OutputKind};
+use datafusion::common::DFSchema;
 use datafusion::error::Result;
 use datafusion::prelude::{Expr, SessionConfig, SessionContext, lit};
 use datafusion::scalar::ScalarValue;
@@ -104,15 +105,20 @@ fn text(batches: &[RecordBatch]) -> String {
     pretty_format_batches(batches).unwrap().to_string()
 }
 
-#[test]
-fn arguments_map_to_options() {
+/// The options of `read_aaa('f.a', <options>)`, with `options` planned from SQL.
+fn options_of(options: &str) -> Result<HashMap<String, String>> {
     let specs = Named {
         name: "aaa",
         ext: "a",
     }
     .table_function_args();
-    let args = vec![lit("f.a"), string_list(&["x", "y"]), lit(true), lit("fast")];
-    let options = options_from_args(&args, &specs, "read_aaa").unwrap();
+    let options = SessionContext::new().parse_sql_expr(options, &DFSchema::empty())?;
+    options_from_args(&[lit("f.a"), options], &specs, "read_aaa")
+}
+
+#[test]
+fn struct_fields_map_to_options() {
+    let options = options_of("{mode: 'fast', read_dimensions: ['x', 'y'], skip: true}").unwrap();
     assert_eq!(
         options,
         HashMap::from([
@@ -121,34 +127,69 @@ fn arguments_map_to_options() {
             ("mode".to_string(), "fast".to_string()),
         ])
     );
+    let options = options_of("named_struct('skip', false)").unwrap();
+    assert_eq!(
+        options,
+        HashMap::from([("skip".to_string(), "false".to_string())])
+    );
 }
 
 #[test]
-fn null_and_missing_arguments_give_no_option() {
+fn null_and_missing_options_give_no_option() {
+    assert!(options_of("NULL").unwrap().is_empty());
+    assert!(
+        options_of("{read_dimensions: [], skip: NULL}")
+            .unwrap()
+            .is_empty()
+    );
     let specs = Named {
         name: "aaa",
         ext: "a",
     }
     .table_function_args();
-    let args = vec![lit("f.a"), lit(ScalarValue::Null)];
     assert!(
-        options_from_args(&args, &specs, "read_aaa")
+        options_from_args(&[lit("f.a")], &specs, "read_aaa")
             .unwrap()
             .is_empty()
     );
 }
 
 #[test]
-fn a_wrong_argument_type_is_an_error() {
+fn a_wrong_option_is_an_error() {
+    for (options, message) in [
+        ("{skip: 'yes'}", "read_aaa option `skip` must be a boolean"),
+        ("{mode: 1}", "read_aaa option `mode` must be a string"),
+        (
+            "{read_dimensions: [1, 2]}",
+            "read_aaa option `read_dimensions` must be a list of strings",
+        ),
+        (
+            "{skipp: true}",
+            "read_aaa has no option `skipp`. Valid options: read_dimensions, skip, mode",
+        ),
+        (
+            "true",
+            "read_aaa second argument must be a struct of options",
+        ),
+    ] {
+        let error = options_of(options).unwrap_err().to_string();
+        assert!(error.contains(message), "{options}: {error}");
+    }
+}
+
+#[test]
+fn positional_options_are_an_error() {
     let specs = Named {
         name: "aaa",
         ext: "a",
     }
     .table_function_args();
-    let args = vec![lit("f.a"), string_list(&["x"]), lit("not a bool")];
+    let args = vec![lit("f.a"), string_list(&["x"]), lit(true)];
     let error = options_from_args(&args, &specs, "read_aaa").unwrap_err();
     assert!(
-        error.to_string().contains("read_aaa third argument"),
+        error
+            .to_string()
+            .contains("read_aaa takes the paths and one struct of options"),
         "{error}"
     );
 }
@@ -250,6 +291,14 @@ async fn install_query_and_uninstall() {
         .await
         .unwrap();
     assert!(text(&batches).contains("| 2 |"), "{}", text(&batches));
+    let error = run(
+        &ctx,
+        "SELECT * FROM read_linetext('memory:///d/a.ltxt', {x: true})",
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("read_linetext takes no options"), "{error}");
 
     // A second install of the same names is refused.
     let error = check_formats(&ctx.state(), &formats).unwrap_err();
