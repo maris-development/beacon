@@ -1,0 +1,198 @@
+//! Named dimensions for N-dimensional Arrow arrays.
+//!
+//! A [`Dimensions`] value describes the logical shape of an [`crate::array::NdArrowArray`]
+//! in C-order (row-major, first dimension outermost). Dimension names drive
+//! xarray-style broadcasting: axes are aligned by name, never by position.
+
+use std::fmt;
+use std::sync::Arc;
+
+use datafusion_common::Result;
+use datafusion_common::plan_err;
+
+/// A single named axis with a fixed size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dimension {
+    name: Arc<str>,
+    size: usize,
+}
+
+impl Dimension {
+    pub fn new(name: impl Into<Arc<str>>, size: usize) -> Self {
+        Self {
+            name: name.into(),
+            size,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}
+
+impl fmt::Display for Dimension {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}={}", self.name, self.size)
+    }
+}
+
+/// An ordered list of named axes, C-order. Cheap to clone.
+///
+/// Rank 0 (no axes) describes a scalar: one logical element.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Dimensions {
+    dims: Arc<[Dimension]>,
+}
+
+impl Dimensions {
+    /// Create dimensions, validating that axis names are non-empty and unique.
+    pub fn try_new(dims: Vec<Dimension>) -> Result<Self> {
+        for (i, dim) in dims.iter().enumerate() {
+            if dim.name().is_empty() {
+                return plan_err!("nd dimension at axis {i} has an empty name");
+            }
+            if dims[..i].iter().any(|d| d.name() == dim.name()) {
+                return plan_err!("duplicate nd dimension name '{}'", dim.name());
+            }
+        }
+        Ok(Self { dims: dims.into() })
+    }
+
+    /// Rank-0 dimensions describing a scalar.
+    pub fn scalar() -> Self {
+        Self::default()
+    }
+
+    pub fn rank(&self) -> usize {
+        self.dims.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Dimension> {
+        self.dims.iter()
+    }
+
+    pub fn get(&self, axis: usize) -> &Dimension {
+        &self.dims[axis]
+    }
+
+    pub fn shape(&self) -> Vec<usize> {
+        self.dims.iter().map(|d| d.size()).collect()
+    }
+
+    /// Total number of logical elements (1 for a scalar, 0 if any axis is empty).
+    pub fn num_elements(&self) -> usize {
+        self.dims.iter().map(|d| d.size()).product()
+    }
+
+    pub fn position(&self, name: &str) -> Option<usize> {
+        self.dims.iter().position(|d| d.name() == name)
+    }
+
+    /// Fails when an array of these dimensions cannot broadcast onto `target`:
+    /// each axis must be in `target`, with the same size or with size 1.
+    pub fn check_broadcast_to(&self, target: &Dimensions) -> Result<()> {
+        for dim in self.iter() {
+            let Some(axis) = target.position(dim.name()) else {
+                return plan_err!(
+                    "cannot broadcast {self} to {target}: dimension '{}' is missing from the target",
+                    dim.name()
+                );
+            };
+            let target_size = target.get(axis).size();
+            if dim.size() != target_size && dim.size() != 1 {
+                return plan_err!(
+                    "cannot broadcast {self} to {target}: dimension '{}' has size {} but the target expects {}",
+                    dim.name(),
+                    dim.size(),
+                    target_size
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// C-order (row-major) strides, in elements.
+    pub fn c_strides(&self) -> Vec<usize> {
+        let mut strides = vec![0usize; self.rank()];
+        let mut acc = 1usize;
+        for axis in (0..self.rank()).rev() {
+            strides[axis] = acc;
+            acc = acc.saturating_mul(self.dims[axis].size());
+        }
+        strides
+    }
+}
+
+impl fmt::Display for Dimensions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(")?;
+        for (i, dim) in self.dims.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{dim}")?;
+        }
+        write!(f, ")")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dims(spec: &[(&str, usize)]) -> Dimensions {
+        Dimensions::try_new(
+            spec.iter()
+                .map(|(name, size)| Dimension::new(*name, *size))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn strides_are_c_order() {
+        let d = dims(&[("time", 2), ("lat", 3), ("lon", 4)]);
+        assert_eq!(d.c_strides(), vec![12, 4, 1]);
+        assert_eq!(d.num_elements(), 24);
+    }
+
+    #[test]
+    fn scalar_has_one_element() {
+        let d = Dimensions::scalar();
+        assert_eq!(d.rank(), 0);
+        assert_eq!(d.num_elements(), 1);
+        assert!(d.c_strides().is_empty());
+    }
+
+    #[test]
+    fn duplicate_names_rejected() {
+        let result = Dimensions::try_new(vec![Dimension::new("x", 2), Dimension::new("x", 3)]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_name_rejected() {
+        assert!(Dimensions::try_new(vec![Dimension::new("", 2)]).is_err());
+    }
+
+    #[test]
+    fn broadcast_check_follows_the_rule() {
+        let target = dims(&[("time", 2), ("lat", 3)]);
+        assert!(dims(&[("lat", 3)]).check_broadcast_to(&target).is_ok());
+        assert!(dims(&[("time", 1)]).check_broadcast_to(&target).is_ok());
+        assert!(Dimensions::scalar().check_broadcast_to(&target).is_ok());
+        let missing = dims(&[("depth", 2)])
+            .check_broadcast_to(&target)
+            .unwrap_err();
+        assert!(
+            missing.to_string().contains("'depth' is missing"),
+            "{missing}"
+        );
+        let size = dims(&[("lat", 2)]).check_broadcast_to(&target).unwrap_err();
+        assert!(size.to_string().contains("has size 2"), "{size}");
+    }
+}

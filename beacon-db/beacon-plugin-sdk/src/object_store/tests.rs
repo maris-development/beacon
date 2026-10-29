@@ -30,7 +30,7 @@ extern "C" fn foreign_marker_id() -> usize {
 }
 
 extern "C" fn other_version() -> u64 {
-    2
+    3
 }
 
 /// Exports `store` and imports it through the foreign path.
@@ -79,9 +79,29 @@ fn assert_list_result_eq(left: ListResult, right: ListResult) {
     assert_eq!(left.objects, right.objects);
 }
 
-#[test]
-fn object_store_ffi_version_is_one() {
-    assert_eq!(object_store_ffi_version(), 1);
+#[tokio::test(flavor = "multi_thread")]
+async fn multipart_with_wrong_version_is_refused() {
+    let store = InMemory::new();
+    let upload = store.put_multipart(&Path::from("x.nc")).await.unwrap();
+    let mut ffi = FFI_MultipartUpload::new(upload, Handle::current());
+    ffi.version = other_version;
+    let error = ForeignMultipartUpload::try_new(ffi).unwrap_err();
+    assert!(matches!(error, Error::NotSupported { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("multipart upload FFI version 3 is not supported (want 5)"),
+        "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multipart_with_current_version_is_accepted() {
+    let store = InMemory::new();
+    let upload = store.put_multipart(&Path::from("x.nc")).await.unwrap();
+    let ffi = FFI_MultipartUpload::new(upload, Handle::current());
+    assert_eq!(unsafe { (ffi.version)() }, crate::ABI_VERSION);
+    assert!(ForeignMultipartUpload::try_new(ffi).is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -108,7 +128,7 @@ async fn wrong_version_is_refused() {
     assert!(
         error
             .to_string()
-            .contains("object store FFI version 2 is not supported (want 1)")
+            .contains("object store FFI version 3 is not supported (want 5)")
     );
 }
 

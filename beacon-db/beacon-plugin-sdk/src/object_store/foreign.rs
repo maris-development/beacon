@@ -18,7 +18,6 @@ use futures::stream::BoxStream;
 use stabby::string::String as SString;
 use stabby::vec::Vec as SVec;
 
-use super::OBJECT_STORE_FFI_VERSION;
 use super::bytes::FFI_Bytes;
 use super::export::{FFI_GetResult, FFI_ObjectStore};
 use super::multipart::ForeignMultipartUpload;
@@ -27,6 +26,7 @@ use super::options::{
     FFI_Range, FFI_RenameOptions, parse_path,
 };
 use super::stream::{FFI_MetaStream, FFI_PathStream};
+use crate::ABI_VERSION;
 
 /// An `object_store::ObjectStore` over an [`FFI_ObjectStore`] from another library.
 ///
@@ -38,17 +38,17 @@ impl TryFrom<FFI_ObjectStore> for Arc<dyn ObjectStore> {
 
     /// Returns the original store when this library made the table.
     ///
-    /// Fails with `NotSupported` when the table has another [`OBJECT_STORE_FFI_VERSION`].
+    /// Fails with `NotSupported` when the table has another [`crate::BEACON_PLUGIN_SDK_ABI`].
     fn try_from(store: FFI_ObjectStore) -> Result<Self> {
         if (store.library_marker_id)() == datafusion_ffi::get_library_marker_id() {
             return Ok(store.local_store());
         }
         // SAFETY: `version` has the same place in every table version.
         let version = unsafe { (store.version)() };
-        if version != OBJECT_STORE_FFI_VERSION {
+        if version != ABI_VERSION {
             return Err(Error::NotSupported {
                 source: format!(
-                    "object store FFI version {version} is not supported (want {OBJECT_STORE_FFI_VERSION})"
+                    "object store FFI version {version} is not supported (want {ABI_VERSION})"
                 )
                 .into(),
             });
@@ -109,7 +109,7 @@ impl ObjectStore for ForeignObjectStore {
         let future =
             unsafe { (self.0.put_multipart_opts)(&self.0, path_string(location), options) };
         let upload = future.await.into_result()?;
-        Ok(Box::new(ForeignMultipartUpload::from(upload)))
+        Ok(Box::new(ForeignMultipartUpload::try_new(upload)?))
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {

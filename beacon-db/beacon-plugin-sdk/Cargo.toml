@@ -15,6 +15,9 @@ categories = ["database", "development-tools"]
 datafusion = { workspace = true }
 datafusion-ffi = { workspace = true }
 datafusion-proto = { workspace = true }
+datafusion-proto-common = { workspace = true }
+prost = { workspace = true }
+beacon-nd-encoding = { path = "../beacon-nd-encoding" }
 stabby = { workspace = true }
 # Re-exported to plugins: keep the default and cloud features off.
 object_store = { version = "0.13.1", default-features = false }
