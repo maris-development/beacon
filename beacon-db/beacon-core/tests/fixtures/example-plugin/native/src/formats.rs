@@ -64,10 +64,6 @@ impl FormatFactory for ExFlat {
         true
     }
 
-    fn content_type(&self) -> &str {
-        "text/plain"
-    }
-
     fn create(&self, _: &HashMap<String, String>) -> Result<Arc<dyn FormatReader>> {
         Ok(Arc::new(FlatReader))
     }

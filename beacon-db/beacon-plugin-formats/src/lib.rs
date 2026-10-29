@@ -6,7 +6,8 @@
 //!
 //! It also writes `COPY ... TO` output through a plugin writer.
 //!
-//! Not supported yet: statistics and the crawler.
+//! Not supported yet: statistics, the crawler, a local output path for a writer
+//! (`wants_local_file`), and JSON query output in a plugin format.
 
 mod factory;
 mod format;

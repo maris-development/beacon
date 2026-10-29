@@ -28,9 +28,8 @@ use futures::{StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::nd::encoded_partition_cols;
-use crate::sink::{LocalWrite, PluginFileSink};
+use crate::sink::PluginFileSink;
 use crate::source::PluginFileSource;
-use beacon_datafusion_ext::listing_factory::LocalStoreRoots;
 use beacon_datafusion_ext::nd::encoding::encoded_schema;
 use beacon_datafusion_ext::nd::exec::{NdBroadcastExec, NdSourceExec};
 use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
@@ -255,7 +254,7 @@ impl FileFormat for PluginFileFormat {
     async fn create_writer_physical_plan(
         &self,
         input: Arc<dyn ExecutionPlan>,
-        state: &dyn Session,
+        _state: &dyn Session,
         mut conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -277,20 +276,11 @@ impl FileFormat for PluginFileFormat {
         let requirement = self
             .write_requirement(&input.schema())?
             .or(order_requirements);
-        let local = self.factory.wants_local_file().then(|| LocalWrite {
-            roots: state
-                .config()
-                .get_extension::<LocalStoreRoots>()
-                .map(|roots| roots.as_ref().clone())
-                .unwrap_or_default(),
-            directory: self.factory.writes_directory(),
-        });
         let sink = PluginFileSink::new(
             conf,
             name.to_string(),
             Arc::clone(&self.reader),
             self.factory.split_output(),
-            local,
         );
         Ok(Arc::new(DataSinkExec::new(
             input,

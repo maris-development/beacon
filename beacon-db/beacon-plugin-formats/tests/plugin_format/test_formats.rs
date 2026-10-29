@@ -79,11 +79,6 @@ pub struct LineText {
     /// `true` gives `split_output = false`.
     pub no_split: bool,
     pub ordering: Vec<SortKey>,
-    pub wants_local: bool,
-    /// One output is a folder with `part-0.ltxt`.
-    pub directory: bool,
-    /// The MIME type of an output file.
-    pub content_type: &'static str,
 }
 
 impl FormatFactory for LineText {
@@ -107,18 +102,6 @@ impl FormatFactory for LineText {
         !self.no_split
     }
 
-    fn wants_local_file(&self) -> bool {
-        self.wants_local
-    }
-
-    fn writes_directory(&self) -> bool {
-        self.directory
-    }
-
-    fn content_type(&self) -> &str {
-        self.content_type
-    }
-
     fn create(&self, options: &HashMap<String, String>) -> Result<Arc<dyn FormatReader>> {
         self.seen.options.lock().unwrap().push(options.clone());
         if options.contains_key("bad") {
@@ -131,7 +114,6 @@ impl FormatFactory for LineText {
             fail_write: options.get("fail_write").is_some_and(|v| v == "true"),
             fail_multipart: options.get("fail_multipart").is_some_and(|v| v == "true"),
             ordering: self.ordering.clone(),
-            directory: self.directory,
         })))
     }
 }
@@ -153,7 +135,6 @@ struct LineReader {
     fail_write: bool,
     fail_multipart: bool,
     ordering: Vec<SortKey>,
-    directory: bool,
 }
 
 /// The `linetext` text of `batches`.
@@ -330,22 +311,10 @@ impl FormatReader for LineReader {
         request: WriteRequest,
         mut input: SendableRecordBatchStream,
     ) -> Result<u64> {
-        // A directory output holds one file `part-0.ltxt`.
-        let local_file = request
-            .local_path
-            .as_ref()
-            .map(|path| match self.directory {
-                true => path.join("part-0.ltxt"),
-                false => path.clone(),
-            });
         let mut batches = Vec::new();
         while let Some(batch) = futures::StreamExt::next(&mut input).await {
             batches.push(batch?);
             if self.fail_write {
-                // Leaves a partial file, so that a test sees the cleanup.
-                if let Some(file) = &local_file {
-                    std::fs::write(file, "partial")?;
-                }
                 return datafusion::common::exec_err!("write failed");
             }
             if self.fail_multipart {
@@ -362,15 +331,11 @@ impl FormatReader for LineReader {
             }
         }
         let text = line_text_of(&request.schema, &batches)?;
-        match &local_file {
-            Some(file) => std::fs::write(file, text)?,
+        match &request.local_path {
+            Some(path) => std::fs::write(path, text)?,
             None => {
-                let path = match self.directory {
-                    true => request.path.clone().join("part-0.ltxt"),
-                    false => request.path.clone(),
-                };
                 store
-                    .put(&path, text.into_bytes().into())
+                    .put(&request.path, text.into_bytes().into())
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
             }

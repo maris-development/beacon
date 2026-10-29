@@ -2200,7 +2200,6 @@ dependencies = [
  "datafusion 54.1.0",
  "futures",
  "object_store 0.13.2",
- "tempfile",
  "tokio",
  "tracing",
  "url",

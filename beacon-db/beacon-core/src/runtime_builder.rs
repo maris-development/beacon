@@ -23,7 +23,7 @@ use beacon_auth::{
 use beacon_datafusion_ext::{
     consts::{DEFAULT_DB_STORE_URL_OBJECT_URL, TMP_STORE_URL_OBJECT_URL},
     format_ext::{new_file_format_registry_handle, FileFormatFactoryExt, FileFormatRegistry},
-    listing_factory::{DefaultStore, ListingFactory, LocalStoreRoots, RootStore},
+    listing_factory::{DefaultStore, ListingFactory, RootStore},
     listing_table_factory_ext::ListingTableFactoryExt,
     nd::{NdFilterPushdown, NdProjectionPushdown},
     object_store_registry::LazyObjectStoreRegistry,
@@ -1056,8 +1056,6 @@ fn build_session_config(
         // default datasets store when one is set, otherwise dynamic (schemed paths
         // by their scheme, bare paths against the cwd).
         .with_extension(Arc::new(build_listing_factory(builder)))
-        // Plugin writers that want a local file find the folder of a store here.
-        .with_extension(Arc::new(build_local_store_roots(builder)))
         // The store a `CREATE EXTERNAL TABLE` LOCATION is resolved against.
         .with_extension(Arc::new(ListingTableFactoryExt))
         // Late-filled by `register_file_formats` once the factories exist. The only
@@ -1103,20 +1101,6 @@ fn build_session_config(
 ///   resolve against the cwd, as an embedded database does. This is what a bare builder gets.
 fn build_listing_factory(builder: &RuntimeBuilder) -> ListingFactory {
     ListingFactory::new(builder.default_store.clone())
-}
-
-/// The local folders of the tmp store and of a local default store.
-fn build_local_store_roots(builder: &RuntimeBuilder) -> LocalStoreRoots {
-    let tmp_dir = builder.tmp_dir_path.clone().unwrap_or_else(temp_dir);
-    let mut roots =
-        LocalStoreRoots::new(tmp_dir.clone()).with_root(&TMP_STORE_URL_OBJECT_URL, tmp_dir);
-    // An embedder store instance may not be the local folder.
-    if let (Some(default), None) = (&builder.default_store, &builder.default_store_instance) {
-        if let RootStore::FileSystem(root) = &default.root {
-            roots = roots.with_root(&default.url, root.clone());
-        }
-    }
-    roots
 }
 
 /// Default query memory pool size: 80% of usable RAM.

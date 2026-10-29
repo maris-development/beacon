@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use datafusion::{
     catalog::Session, datasource::listing::ListingTableUrl, error::DataFusionError,
@@ -37,53 +37,6 @@ impl RootStore {
                 format!("{}/{}#mode=bytes", base.trim_end_matches('/'), object_path)
             }
         }
-    }
-}
-
-/// The local folders behind object stores, for writers that need a real file path.
-///
-/// Register one as a session config extension. `file://` needs no entry: its object
-/// paths are absolute.
-#[derive(Debug, Clone, Default)]
-pub struct LocalStoreRoots {
-    tmp_dir: Option<PathBuf>,
-    roots: HashMap<String, PathBuf>,
-}
-
-impl LocalStoreRoots {
-    /// Roots with `tmp_dir` as the folder for temporary output files.
-    pub fn new(tmp_dir: PathBuf) -> Self {
-        Self {
-            tmp_dir: Some(tmp_dir),
-            roots: HashMap::new(),
-        }
-    }
-
-    /// Records that the objects of `store` are files under `root`.
-    pub fn with_root(mut self, store: &ObjectStoreUrl, root: PathBuf) -> Self {
-        self.roots.insert(store.as_str().to_string(), root);
-        self
-    }
-
-    /// The local file of `path` in `store`, or `None` if the store is not local.
-    pub fn local_path(
-        &self,
-        store: &ObjectStoreUrl,
-        path: &object_store::path::Path,
-    ) -> Option<PathBuf> {
-        if let Some(root) = self.roots.get(store.as_str()) {
-            return Some(root.join(path.as_ref()));
-        }
-        // The same rule as `RootStore::to_native_path` for a dynamic local store.
-        store
-            .as_str()
-            .starts_with("file:")
-            .then(|| PathBuf::from("/").join(path.as_ref()))
-    }
-
-    /// The folder for temporary output files.
-    pub fn tmp_dir(&self) -> PathBuf {
-        self.tmp_dir.clone().unwrap_or_else(std::env::temp_dir)
     }
 }
 
@@ -531,46 +484,5 @@ mod tests {
         );
         // Dynamic: the path passes through untouched.
         assert_eq!(ListingFactory::dynamic().rewrite_path("a/b.nc"), "a/b.nc");
-    }
-
-    // ---- LocalStoreRoots --------------------------------------------------
-
-    #[test]
-    fn local_path_of_registered_store() {
-        let tmp = PathBuf::from("/srv/tmp");
-        let roots = LocalStoreRoots::new(tmp.clone())
-            .with_root(&ObjectStoreUrl::parse("tmp://").unwrap(), tmp.clone());
-        assert_eq!(
-            roots.local_path(
-                &ObjectStoreUrl::parse("tmp://").unwrap(),
-                &ObjectPath::from("a/b.x")
-            ),
-            Some(tmp.join("a/b.x"))
-        );
-        assert_eq!(roots.tmp_dir(), tmp);
-    }
-
-    #[test]
-    fn local_path_of_file_store_is_absolute() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("a.x");
-        let path = ObjectPath::from_absolute_path(&file).unwrap();
-        let local = LocalStoreRoots::default()
-            .local_path(&ObjectStoreUrl::parse("file://").unwrap(), &path)
-            .unwrap();
-        assert_eq!(std::path::absolute(local).unwrap(), file);
-    }
-
-    #[test]
-    fn local_path_of_unknown_store_is_none() {
-        let roots = LocalStoreRoots::new(PathBuf::from("/srv/tmp"));
-        assert_eq!(
-            roots.local_path(
-                &ObjectStoreUrl::parse("memory://").unwrap(),
-                &ObjectPath::from("a")
-            ),
-            None
-        );
-        assert_eq!(LocalStoreRoots::default().tmp_dir(), std::env::temp_dir());
     }
 }

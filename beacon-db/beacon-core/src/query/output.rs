@@ -5,7 +5,6 @@
 
 use crate::query::temp_object::TempObject;
 use crate::query_result::{OutputFileKind, QueryOutputFile};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use beacon_arrow_csv::datafusion::DEFAULT_CSV_EXTENSION;
@@ -17,7 +16,6 @@ use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_zarr::datafusion::{ZarrFormatFactory, ZARR_EXTENSION};
-use beacon_plugin_formats::PluginFileFormatFactory;
 use datafusion::catalog::Session;
 use datafusion::prelude::SessionContext;
 use datafusion::{
@@ -58,10 +56,7 @@ impl Output {
         tmp_store_url: &datafusion::execution::object_store::ObjectStoreUrl,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
-        let kind = self
-            .format
-            .file_kind(session)
-            .map_err(|e| DataFusionError::External(e.into()))?;
+        let kind = self.format.file_kind();
         let file_type = self
             .format
             .file_type(session)
@@ -80,7 +75,7 @@ impl Output {
             input_plan,
             location,
             file_type,
-            self.format.copy_options(),
+            Default::default(),
             vec![],
         )?;
 
@@ -127,14 +122,6 @@ pub enum OutputFormat {
     /// Flat Zarr v3 store: each column is a 1-D array over one `obs`
     /// dimension. A store is a directory, so it is returned as a zip archive.
     Zarr,
-    /// A file format from an installed plugin that can write.
-    Plugin {
-        /// The format name.
-        name: String,
-        /// The format options, with bare keys.
-        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        options: HashMap<String, String>,
-    },
 }
 
 /// Format names that select the flat NetCDF output.
@@ -227,31 +214,11 @@ impl serde::Serialize for OutputFormat {
     }
 }
 
-/// The writable plugin format `name`, for a query output.
-fn plugin_output_factory(
-    session: &SessionContext,
-    name: &str,
-) -> anyhow::Result<PluginFileFormatFactory> {
-    let factory = session
-        .state()
-        .get_file_format_factory(name)
-        .and_then(|factory| factory.downcast_ref::<PluginFileFormatFactory>().cloned())
-        .filter(|factory| factory.name() == name)
-        .ok_or_else(|| anyhow::anyhow!("unknown plugin output format `{name}`"))?;
-    if !factory.can_write() {
-        anyhow::bail!("file format {name} cannot write");
-    }
-    if factory.writes_directory() {
-        anyhow::bail!("file format {name} writes a directory, which a query output cannot return");
-    }
-    Ok(factory)
-}
-
 impl OutputFormat {
     /// The [`OutputFileKind`] the result file is tagged with (drives the download
     /// transport's MIME type / filename; both NetCDF variants share one kind).
-    pub fn file_kind(&self, session: &SessionContext) -> anyhow::Result<OutputFileKind> {
-        Ok(match self {
+    pub fn file_kind(&self) -> OutputFileKind {
+        match self {
             OutputFormat::Csv => OutputFileKind::Csv,
             OutputFormat::Ipc => OutputFileKind::Ipc,
             OutputFormat::Parquet => OutputFileKind::Parquet,
@@ -260,33 +227,12 @@ impl OutputFormat {
             OutputFormat::NdNetCDF { .. } => OutputFileKind::NetCDF,
             OutputFormat::Odv(_) => OutputFileKind::Odv,
             OutputFormat::Zarr => OutputFileKind::Zarr,
-            OutputFormat::Plugin { name, .. } => {
-                let factory = plugin_output_factory(session, name)?;
-                OutputFileKind::Plugin {
-                    content_type: factory.content_type(),
-                    extension: format!(".{}", factory.extension()),
-                }
-            }
-        })
-    }
-
-    /// The `COPY` options for this output format: only a plugin format has them.
-    pub fn copy_options(&self) -> HashMap<String, String> {
-        match self {
-            OutputFormat::Plugin { options, .. } => options
-                .iter()
-                .map(|(key, value)| (format!("format.{key}"), value.clone()))
-                .collect(),
-            _ => HashMap::new(),
         }
     }
 
     /// Returns the DataFusion file type for this output format.
     pub fn file_type(&self, session: &SessionContext) -> anyhow::Result<Arc<dyn FileType>> {
         match self {
-            OutputFormat::Plugin { name, .. } => Ok(format_as_file_type(Arc::new(
-                plugin_output_factory(session, name)?,
-            ))),
             OutputFormat::Csv => Ok(format_as_file_type(
                 session
                     .state()
