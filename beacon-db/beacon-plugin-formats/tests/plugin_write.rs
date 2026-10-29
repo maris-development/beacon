@@ -5,13 +5,15 @@ use std::sync::Arc;
 use arrow::array::{AsArray, RecordBatch};
 use arrow::datatypes::{Int64Type, UInt64Type};
 use beacon_datafusion_ext::format_ext::new_file_format_registry_handle;
-use beacon_datafusion_ext::listing_factory::ListingFactory;
+use beacon_datafusion_ext::listing_factory::{ListingFactory, LocalStoreRoots};
 use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
 use beacon_plugin_formats::{PluginFileFormatFactory, install_formats, uninstall_formats};
 use beacon_plugin_sdk::file_format::SortKey;
 use datafusion::error::Result;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::TryStreamExt;
+use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
@@ -302,4 +304,115 @@ async fn uninstalled_format_refuses_copy() {
         ))
         .await;
     assert!(error.contains("is not installed"), "{error}");
+}
+
+fn local_writer() -> LineText {
+    LineText {
+        wants_local: true,
+        ..writer()
+    }
+}
+
+/// The names in `dir`.
+fn entries(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// A fixture whose session knows `tmp` as the tmp folder.
+fn with_tmp(format: LineText, tmp: &std::path::Path) -> Fixture {
+    let config =
+        SessionConfig::new().with_extension(Arc::new(LocalStoreRoots::new(tmp.to_path_buf())));
+    Fixture::with_config(format, config)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wants_local_file_on_local_store_writes_the_target() {
+    let root = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let url = ObjectStoreUrl::parse("local://").unwrap();
+    let roots =
+        LocalStoreRoots::new(tmp.path().to_path_buf()).with_root(&url, root.path().to_path_buf());
+    let fx = Fixture::with_config(
+        local_writer(),
+        SessionConfig::new().with_extension(Arc::new(roots)),
+    );
+    fx.ctx.register_object_store(
+        &Url::parse("local://").unwrap(),
+        Arc::new(LocalFileSystem::new_with_prefix(root.path()).unwrap()),
+    );
+    fx.copy(&format!(
+        "COPY ({TWO_ROWS}) TO 'local:///out/a.ltxt' STORED AS linetext"
+    ))
+    .await
+    .unwrap();
+    let target = root.path().join("out").join("a.ltxt");
+    assert_eq!(
+        fx.seen.writes.lock().unwrap()[0].local_path.as_deref(),
+        Some(target.as_path())
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "a:Int64,b:Utf8\n1,x\n2,y\n"
+    );
+    assert!(entries(tmp.path()).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wants_local_file_on_remote_store_uploads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = with_tmp(local_writer(), tmp.path());
+    fx.copy(&format!(
+        "COPY ({TWO_ROWS}) TO 'memory:///out/a.ltxt' STORED AS linetext"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(fx.text("out/a.ltxt").await, "a:Int64,b:Utf8\n1,x\n2,y\n");
+    let local = fx.seen.writes.lock().unwrap()[0]
+        .local_path
+        .clone()
+        .unwrap();
+    assert!(local.starts_with(tmp.path()), "{local:?}");
+    assert!(entries(tmp.path()).is_empty(), "{:?}", entries(tmp.path()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wants_local_file_upload_cleans_up_on_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = with_tmp(local_writer(), tmp.path());
+    let error = fx
+        .error(&format!(
+            "COPY ({TWO_ROWS}) TO 'memory:///out/a.ltxt' STORED AS linetext \
+             OPTIONS ('fail_write' 'true')"
+        ))
+        .await;
+    assert!(error.contains("write failed"), "{error}");
+    assert!(entries(tmp.path()).is_empty(), "{:?}", entries(tmp.path()));
+    assert!(fx.objects("out").await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_directory_uploads_each_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let format = LineText {
+        directory: true,
+        ..local_writer()
+    };
+    let fx = with_tmp(format, tmp.path());
+    fx.copy(&format!(
+        "COPY ({TWO_ROWS}) TO 'memory:///out/d.ltxt' STORED AS linetext"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        fx.objects("out").await,
+        vec!["out/d.ltxt/part-0.ltxt".to_string()]
+    );
+    assert_eq!(
+        fx.text("out/d.ltxt/part-0.ltxt").await,
+        "a:Int64,b:Utf8\n1,x\n2,y\n"
+    );
+    assert!(entries(tmp.path()).is_empty(), "{:?}", entries(tmp.path()));
 }
