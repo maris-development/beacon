@@ -235,6 +235,7 @@ pub(crate) async fn create_external_table(
         )
         .await);
     }
+    crate::name_rule::check_new_name("Table", cmd.name.table())?;
 
     // `STORED AS REMOTE` registers a federated table pointing at another Beacon
     // instance, rather than a listing table over the datasets store.
@@ -544,6 +545,7 @@ pub(crate) async fn create_view(
     definition: &Option<String>,
     or_replace: bool,
 ) -> anyhow::Result<()> {
+    crate::name_rule::check_new_name("View", name.table())?;
     if !or_replace && session.table_exist(name.clone())? {
         return Err(crate::schema_persistence::default_table::already_exists_error(
             session,
@@ -603,6 +605,7 @@ pub(crate) async fn create_table(
         )
         .await);
     }
+    crate::name_rule::check_new_name("Table", &table_name)?;
 
     let arrow_schema = child.schema();
 

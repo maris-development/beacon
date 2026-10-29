@@ -27,13 +27,29 @@ Lowercase names with underscores need no quotes and no thought. Use `ocean_profi
 A quoted name and an unquoted name follow the same rule. `"MyTable"` and `MyTable` are the same
 table.
 
-Use quotes only for a name that the parser cannot read as one word: a name with a space, a name
+Use quotes only for a name that the parser cannot read as one word: a name with a hyphen, a name
 that starts with a digit, or a reserved word.
 
 ```sql
-CREATE EXTERNAL TABLE "My Table" STORED AS CSV LOCATION 'obs.csv';
+CREATE EXTERNAL TABLE "argo-2024" STORED AS CSV LOCATION 'obs.csv';
 
-SELECT * FROM "My Table"
+SELECT * FROM "argo-2024"
+```
+
+## Allowed characters
+
+A new table, view or materialized view name holds only ASCII letters, digits, `_` and `-`. Beacon
+refuses other characters, for example a space, `.`, `#`, `?`, `/` or `é`. Beacon puts the name
+into storage paths, and these characters change the path. A function name holds only ASCII
+letters, digits and `_`.
+
+Tables from an earlier version keep their names. You can still query and drop them.
+`CREATE ... IF NOT EXISTS` on such a name does nothing. To give a table an allowed name, copy it
+and drop the old table:
+
+```sql
+CREATE TABLE my_table AS SELECT * FROM "My Table";
+DROP TABLE "My Table";
 ```
 
 ## Columns keep the case of the source
