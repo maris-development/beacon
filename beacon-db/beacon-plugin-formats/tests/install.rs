@@ -222,8 +222,8 @@ async fn a_taken_key_is_refused() {
         error.to_string().contains("`csv` is already in use"),
         "{error}"
     );
-    // Two formats of one plugin with the same extension.
-    let error = check_formats(
+    // An extension is not a key: two formats can share one.
+    check_formats(
         &ctx.state(),
         &[
             wrap(Named {
@@ -236,11 +236,7 @@ async fn a_taken_key_is_refused() {
             }),
         ],
     )
-    .unwrap_err();
-    assert!(
-        error.to_string().contains("`same` is already in use"),
-        "{error}"
-    );
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -265,22 +261,26 @@ async fn install_query_and_uninstall() {
     let functions: Vec<String> = readers.iter().map(|r| r.name()).collect();
     assert_eq!(functions, vec!["read_linetext".to_string()]);
 
-    // `STORED AS` by name and by extension.
-    for key in ["linetext", "ltxt"] {
-        ctx.sql(&format!(
-            "CREATE EXTERNAL TABLE t_{key} STORED AS {key} LOCATION 'memory:///d/'"
-        ))
+    // `STORED AS` by name only.
+    ctx.sql("CREATE EXTERNAL TABLE t_linetext STORED AS linetext LOCATION 'memory:///d/'")
         .await
         .unwrap();
-        let batches = ctx
-            .sql(&format!("SELECT sum(a) AS s FROM t_{key}"))
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        assert!(text(&batches).contains("| 3 |"), "{}", text(&batches));
-    }
+    let batches = ctx
+        .sql("SELECT sum(a) AS s FROM t_linetext")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert!(text(&batches).contains("| 3 |"), "{}", text(&batches));
+    assert!(
+        run(
+            &ctx,
+            "CREATE EXTERNAL TABLE t_ext STORED AS ltxt LOCATION 'memory:///d/'"
+        )
+        .await
+        .is_err()
+    );
 
     // `read_<name>`.
     let batches = ctx
