@@ -4,16 +4,18 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::util::display::array_value_to_string;
 use async_trait::async_trait;
 use beacon_plugin_sdk::datafusion_ffi::get_library_marker_id;
 use beacon_plugin_sdk::file_format::{
     FFI_FileFormat, FFI_FileFormatFactory, ForeignFormatReader, FormatFactory, FormatReader,
-    OutputKind, ScanRequest, import_format_factory,
+    OutputKind, ScanRequest, SortKey, WriteRequest, import_format_factory,
 };
 use beacon_plugin_sdk::nd::encoding::{encode_nd_record_batch, encoded_schema};
 use beacon_plugin_sdk::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
@@ -52,14 +54,21 @@ pub struct Seen {
     pub options: Mutex<Vec<HashMap<String, String>>>,
     pub filters: Mutex<Vec<usize>>,
     pub requested: Mutex<Vec<Vec<String>>>,
+    pub writes: Mutex<Vec<WriteSeen>>,
 }
 
 /// `linetext` (`.ltxt`): a header line `name:type,...`, then one comma-separated row
 /// per line. Types: `Int32`, `Int64`, `Float64`, `Utf8`. A file with no bytes has no
 /// batch; a file with only the header has one batch of no rows.
+///
+/// The writer writes the same text. Option `fail_write=true` fails after the first batch.
 #[derive(Debug, Default)]
 pub struct LineText {
     pub seen: Arc<Seen>,
+    pub can_write: bool,
+    /// `true` gives `split_output = false`.
+    pub no_split: bool,
+    pub ordering: Vec<SortKey>,
 }
 
 impl FormatFactory for LineText {
@@ -75,6 +84,14 @@ impl FormatFactory for LineText {
         OutputKind::Flat
     }
 
+    fn can_write(&self) -> bool {
+        self.can_write
+    }
+
+    fn split_output(&self) -> bool {
+        !self.no_split
+    }
+
     fn create(&self, options: &HashMap<String, String>) -> Result<Arc<dyn FormatReader>> {
         self.seen.options.lock().unwrap().push(options.clone());
         if options.contains_key("bad") {
@@ -84,8 +101,19 @@ impl FormatFactory for LineText {
             seen: self.seen.clone(),
             panic_poll: options.get("panic_poll").is_some_and(|v| v == "true"),
             fail_open: options.get("fail_open").is_some_and(|v| v == "true"),
+            fail_write: options.get("fail_write").is_some_and(|v| v == "true"),
+            ordering: self.ordering.clone(),
         })))
     }
+}
+
+/// One `write` call of the line format.
+#[derive(Debug)]
+pub struct WriteSeen {
+    pub path: String,
+    pub schema: SchemaRef,
+    pub local_path: Option<PathBuf>,
+    pub rows: Vec<RecordBatch>,
 }
 
 #[derive(Debug)]
@@ -93,6 +121,30 @@ struct LineReader {
     seen: Arc<Seen>,
     panic_poll: bool,
     fail_open: bool,
+    fail_write: bool,
+    ordering: Vec<SortKey>,
+}
+
+/// The `linetext` text of `batches`.
+pub fn line_text_of(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<String> {
+    let header: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| format!("{}:{}", f.name(), f.data_type()))
+        .collect();
+    let mut text = header.join(",") + "\n";
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            let values = batch
+                .columns()
+                .iter()
+                .map(|c| array_value_to_string(c, row))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            text.push_str(&values.join(","));
+            text.push('\n');
+        }
+    }
+    Ok(text)
 }
 
 fn data_type(name: &str) -> DataType {
@@ -235,6 +287,43 @@ impl FormatReader for LineReader {
             return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
         }
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, items)))
+    }
+
+    fn write_ordering(&self, _: SchemaRef) -> Result<Vec<SortKey>> {
+        Ok(self.ordering.clone())
+    }
+
+    async fn write(
+        &self,
+        store: Arc<dyn ObjectStore>,
+        request: WriteRequest,
+        mut input: SendableRecordBatchStream,
+    ) -> Result<u64> {
+        let mut batches = Vec::new();
+        while let Some(batch) = futures::StreamExt::next(&mut input).await {
+            batches.push(batch?);
+            if self.fail_write {
+                return datafusion::common::exec_err!("write failed");
+            }
+        }
+        let text = line_text_of(&request.schema, &batches)?;
+        match &request.local_path {
+            Some(path) => std::fs::write(path, text)?,
+            None => {
+                store
+                    .put(&request.path, text.into_bytes().into())
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            }
+        }
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        self.seen.writes.lock().unwrap().push(WriteSeen {
+            path: request.path.to_string(),
+            schema: request.schema.clone(),
+            local_path: request.local_path.clone(),
+            rows: batches,
+        });
+        Ok(rows as u64)
     }
 }
 

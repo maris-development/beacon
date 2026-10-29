@@ -4,7 +4,9 @@
 //! does the work for many files: schema merge, type widening, column adaptation, filters
 //! and the scan plan. It also installs the formats of a plugin in a session.
 //!
-//! Not supported yet: statistics, the crawler, and `COPY ... TO`.
+//! It also writes `COPY ... TO` output through a plugin writer.
+//!
+//! Not supported yet: statistics and the crawler.
 
 mod factory;
 mod format;
@@ -12,6 +14,7 @@ mod install;
 mod nd;
 mod opener;
 mod options;
+mod sink;
 mod source;
 mod table_function;
 
