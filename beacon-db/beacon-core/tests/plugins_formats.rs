@@ -33,16 +33,17 @@ async fn sql_error(rt: &TestRuntime, sql: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stored_as_by_name_and_extension() {
+async fn stored_as_by_name_only() {
     let rt = runtime_with_plugin("formats-stored-as").await;
-    for key in ["exflat", "exf"] {
-        rt.sql(&format!(
-            "CREATE EXTERNAL TABLE t_{key} STORED AS {key} LOCATION 'flat/'"
-        ))
+    rt.sql("CREATE EXTERNAL TABLE t STORED AS exflat LOCATION 'flat/'")
         .await;
-        let sum = scalar_i64(&rt.sql(&format!("SELECT sum(a) FROM t_{key}")).await);
-        assert_eq!(sum, 16);
-    }
+    let sum = scalar_i64(&rt.sql("SELECT sum(a) FROM t").await);
+    assert_eq!(sum, 16);
+    sql_error(
+        &rt,
+        "CREATE EXTERNAL TABLE t_ext STORED AS exf LOCATION 'flat/'",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -17,7 +17,7 @@ use crate::options::plugin_options;
 #[derive(Clone)]
 pub struct PluginFileFormatFactory {
     factory: Arc<dyn FormatFactory>,
-    /// The key that DataFusion registers this factory under.
+    /// The file extension of the formats that this factory makes.
     ext: String,
     /// Shared by all clones and formats: `false` after the plugin is uninstalled.
     installed: Arc<AtomicBool>,
@@ -33,7 +33,7 @@ impl std::fmt::Debug for PluginFileFormatFactory {
 }
 
 impl PluginFileFormatFactory {
-    /// Wraps `factory`, under its first extension.
+    /// Wraps `factory`. Its first extension is the file extension.
     pub fn new(factory: Arc<dyn FormatFactory>) -> Self {
         let ext = factory
             .extensions()
@@ -58,14 +58,6 @@ impl PluginFileFormatFactory {
         self.installed.store(false, Ordering::SeqCst);
     }
 
-    /// The same factory, registered under `key`.
-    pub fn with_ext(&self, key: &str) -> Self {
-        Self {
-            ext: key.to_ascii_lowercase(),
-            ..self.clone()
-        }
-    }
-
     /// The format name.
     pub fn name(&self) -> &str {
         self.factory.name()
@@ -76,16 +68,9 @@ impl PluginFileFormatFactory {
         &self.factory
     }
 
-    /// The keys the format answers to: the name, then each extension, lower case.
-    pub fn keys(&self) -> Vec<String> {
-        let mut keys = vec![self.name().to_ascii_lowercase()];
-        keys.extend(
-            self.factory
-                .extensions()
-                .iter()
-                .map(|ext| ext.to_ascii_lowercase()),
-        );
-        keys
+    /// The key the format answers to in `STORED AS`: the name, lower case.
+    pub fn key(&self) -> String {
+        self.name().to_ascii_lowercase()
     }
 
     fn format(&self, raw: &HashMap<String, String>) -> Result<PluginFileFormat> {
@@ -111,8 +96,9 @@ impl PluginFileFormatFactory {
 }
 
 impl GetExt for PluginFileFormatFactory {
+    /// DataFusion registers the factory under this key, so it is the name and not an extension.
     fn get_ext(&self) -> String {
-        self.ext.clone()
+        self.key()
     }
 }
 
