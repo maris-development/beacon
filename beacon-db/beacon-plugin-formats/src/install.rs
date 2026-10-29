@@ -52,9 +52,9 @@ fn is_free(factory: &Arc<dyn FileFormatFactory>) -> bool {
 
 /// Checks the names of `formats` against each other and against `state`.
 ///
-/// A name or an extension must be lower case `[a-z0-9_]+`. No key (name or extension)
-/// and no function (`read_<name>`, `read_<name>_schema`) may already be in use. One failure
-/// refuses all formats.
+/// A name or an extension must be lower case `[a-z0-9_]+`. No name and no function
+/// (`read_<name>`, `read_<name>_schema`) may already be in use. Extensions are not keys,
+/// so two formats can share one. One failure refuses all formats.
 pub fn check_formats(state: &SessionState, formats: &[PluginFileFormatFactory]) -> Result<()> {
     let mut seen = HashSet::new();
     for format in formats {
@@ -66,14 +66,13 @@ pub fn check_formats(state: &SessionState, formats: &[PluginFileFormatFactory]) 
                 );
             }
         }
-        for key in format.keys() {
-            let taken = !seen.insert(key.clone())
-                || state
-                    .get_file_format_factory(&key)
-                    .is_some_and(|existing| !is_free(&existing));
-            if taken {
-                return plan_err!("the file format key `{key}` is already in use");
-            }
+        let key = format.key();
+        let taken = !seen.insert(key.clone())
+            || state
+                .get_file_format_factory(&key)
+                .is_some_and(|existing| !is_free(&existing));
+        if taken {
+            return plan_err!("the file format key `{key}` is already in use");
         }
         for function in function_names(format) {
             if state.table_functions().contains_key(&function) {
@@ -84,7 +83,7 @@ pub fn check_formats(state: &SessionState, formats: &[PluginFileFormatFactory]) 
     Ok(())
 }
 
-/// Registers `formats` in `ctx`: each key for `STORED AS`, and `read_<name>`.
+/// Registers `formats` in `ctx`: the name for `STORED AS`, and `read_<name>`.
 ///
 /// Returns the `read_<name>` functions, so that the caller can add `read_<name>_schema` over
 /// them. Call [`check_formats`] first.
@@ -97,14 +96,12 @@ pub fn install_formats(
         let state_ref = ctx.state_ref();
         let mut state = state_ref.write();
         for format in formats {
-            for key in format.keys() {
-                state.register_file_format(Arc::new(format.with_ext(&key)), true)?;
-                // A plain DataFusion session resolves `STORED AS <key>` through this.
-                state.table_factories_mut().insert(
-                    key.to_ascii_uppercase(),
-                    Arc::new(ListingTableFactory::new()),
-                );
-            }
+            state.register_file_format(Arc::new(format.clone()), true)?;
+            // A plain DataFusion session resolves `STORED AS <name>` through this.
+            state.table_factories_mut().insert(
+                format.key().to_ascii_uppercase(),
+                Arc::new(ListingTableFactory::new()),
+            );
         }
     }
     let mut readers = Vec::new();
