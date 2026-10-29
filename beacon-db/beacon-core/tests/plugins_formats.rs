@@ -136,3 +136,80 @@ async fn nd_format_with_partition_columns() {
         .await;
     assert!(text(&sum).contains("8.0"), "{}", text(&sum));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_plugin_format() {
+    let rt = runtime_with_plugin("formats-copy").await;
+    rt.sql(
+        "COPY (SELECT a, b FROM read_exflat(['flat/a.exf']) ORDER BY a) \
+         TO 'tmp:///copy.exf' STORED AS exflat",
+    )
+    .await;
+    let written = std::fs::read_to_string(rt.tmp_dir().join("copy.exf")).unwrap();
+    assert_eq!(written, "1,x\n2,y\n3,z\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_read_only_plugin_format_fails() {
+    let rt = runtime_with_plugin("formats-copy-read-only").await;
+    let error = sql_error(
+        &rt,
+        "COPY (SELECT 1 AS v) TO 'tmp:///copy.exg' STORED AS exgrid",
+    )
+    .await;
+    assert!(error.contains("cannot write"), "{error}");
+}
+
+/// Runs `SELECT a, b FROM read_exflat(['flat/a.exf'])` with `output`.
+async fn plugin_output(
+    rt: &TestRuntime,
+    output: serde_json::Value,
+) -> anyhow::Result<beacon_core::query_result::QueryOutput> {
+    let mut query = beacon_core::query::Query::sql(
+        "SELECT a, b FROM read_exflat(['flat/a.exf']) ORDER BY a".to_string(),
+    );
+    query.output = Some(serde_json::from_value(output).expect("valid output spec"));
+    Ok(rt
+        .runtime
+        .run_query(query, rt.admin().await)
+        .await?
+        .query_output)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_output_in_plugin_format() {
+    let rt = runtime_with_plugin("formats-json-output").await;
+    let output = plugin_output(
+        &rt,
+        serde_json::json!({ "format": { "plugin": { "name": "exflat" } } }),
+    )
+    .await
+    .unwrap();
+    let beacon_core::query_result::QueryOutput::File(file) = output else {
+        panic!("a plugin output gives a file");
+    };
+    assert_eq!(file.kind().content_type(), "text/plain");
+    assert_eq!(file.kind().suggested_extension(), ".exf");
+    assert_eq!(
+        std::fs::read_to_string(file.path()).unwrap(),
+        "1,x\n2,y\n3,z\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_output_unknown_plugin_format_fails() {
+    let rt = runtime_with_plugin("formats-json-unknown").await;
+    let Err(error) = plugin_output(
+        &rt,
+        serde_json::json!({ "format": { "plugin": { "name": "nope" } } }),
+    )
+    .await
+    else {
+        panic!("an unknown plugin output format is an error");
+    };
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("unknown plugin output format `nope`"),
+        "{error}"
+    );
+}

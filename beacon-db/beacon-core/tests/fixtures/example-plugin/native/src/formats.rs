@@ -1,6 +1,6 @@
 //! Two small file formats for the loader tests.
 //!
-//! - `exflat` (`.exf`): one `a,b` row per line; `a` is an `Int64`, `b` a `Utf8`.
+//! - `exflat` (`.exf`): one `a,b` row per line; `a` is an `Int64`, `b` a `Utf8`. It also writes.
 //! - `exgrid` (`.exg`): line 1 `rows,cols`, line 2 `rows * cols` values in C order. The
 //!   columns are `row` and `col` (the coordinates) and `v` over both, as nd arrays.
 
@@ -12,16 +12,19 @@ use beacon_plugin_sdk::datafusion::arrow::array::{
     Float64Array, Int64Array, RecordBatch, StringArray,
 };
 use beacon_plugin_sdk::datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use beacon_plugin_sdk::datafusion::arrow::util::display::array_value_to_string;
 use beacon_plugin_sdk::datafusion::common::Statistics;
 use beacon_plugin_sdk::datafusion::common::stats::Precision;
 use beacon_plugin_sdk::datafusion::error::{DataFusionError, Result};
 use beacon_plugin_sdk::datafusion::execution::SendableRecordBatchStream;
 use beacon_plugin_sdk::datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use beacon_plugin_sdk::file_format::{FormatFactory, FormatReader, OutputKind, ScanRequest};
+use beacon_plugin_sdk::file_format::{
+    FormatFactory, FormatReader, OutputKind, ScanRequest, WriteRequest,
+};
 use beacon_plugin_sdk::nd::encoding::encode_nd_record_batch;
 use beacon_plugin_sdk::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
 use beacon_plugin_sdk::object_store::store::{ObjectMeta, ObjectStore, ObjectStoreExt};
-use futures::stream;
+use futures::{StreamExt, stream};
 
 async fn read_text(store: &Arc<dyn ObjectStore>, object: &ObjectMeta) -> Result<String> {
     let bytes = store
@@ -55,6 +58,14 @@ impl FormatFactory for ExFlat {
 
     fn output_kind(&self) -> OutputKind {
         OutputKind::Flat
+    }
+
+    fn can_write(&self) -> bool {
+        true
+    }
+
+    fn content_type(&self) -> &str {
+        "text/plain"
     }
 
     fn create(&self, _: &HashMap<String, String>) -> Result<Arc<dyn FormatReader>> {
@@ -116,6 +127,31 @@ impl FormatReader for FlatReader {
         _: ScanRequest,
     ) -> Result<SendableRecordBatchStream> {
         Ok(one_batch(flat_batch(&read_text(&store, object).await?)?))
+    }
+
+    /// Writes one `a,b` line per row: the first two columns, by position.
+    async fn write(
+        &self,
+        store: Arc<dyn ObjectStore>,
+        request: WriteRequest,
+        mut input: SendableRecordBatchStream,
+    ) -> Result<u64> {
+        let mut text = String::new();
+        let mut rows = 0;
+        while let Some(batch) = input.next().await {
+            let batch = batch?;
+            for row in 0..batch.num_rows() {
+                let a = array_value_to_string(batch.column(0), row)?;
+                let b = array_value_to_string(batch.column(1), row)?;
+                text.push_str(&format!("{a},{b}\n"));
+            }
+            rows += batch.num_rows() as u64;
+        }
+        store
+            .put(&request.path, text.into_bytes().into())
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(rows)
     }
 }
 
