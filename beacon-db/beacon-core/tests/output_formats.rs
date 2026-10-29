@@ -448,6 +448,41 @@ fn netcdf_with_default_options_serializes_as_the_name() {
     );
 }
 
+/// A plugin output names the format and gives its options.
+#[test]
+fn plugin_output_parses() {
+    let format = format_of(json!({ "plugin": { "name": "exflat", "options": { "k": "v" } } }))
+        .expect("a plugin format");
+    let OutputFormat::Plugin { name, options } = format else {
+        panic!("not the plugin form: {format:?}");
+    };
+    assert_eq!(name, "exflat");
+    assert_eq!(
+        options,
+        std::collections::HashMap::from([("k".to_string(), "v".to_string())])
+    );
+}
+
+#[test]
+fn plugin_output_options_are_optional() {
+    let format = format_of(json!({ "plugin": { "name": "exflat" } })).expect("a plugin format");
+    assert!(
+        matches!(&format, OutputFormat::Plugin { name, options } if name == "exflat" && options.is_empty()),
+        "{format:?}"
+    );
+}
+
+#[test]
+fn plugin_output_round_trips() {
+    for value in [
+        json!({ "plugin": { "name": "exflat" } }),
+        json!({ "plugin": { "name": "exflat", "options": { "k": "v" } } }),
+    ] {
+        let format = format_of(value.clone()).expect("a plugin format");
+        assert_eq!(serde_json::to_value(format).expect("serializable"), value);
+    }
+}
+
 /// The GeoParquet output takes its point from the columns the request names, also when the
 /// names are not ones the column detection knows.
 #[tokio::test(flavor = "multi_thread")]

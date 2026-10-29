@@ -43,7 +43,8 @@ pub(crate) async fn file_response(
     let handle = tokio::fs::File::open(file.path())
         .await
         .map_err(|error| DapError::Internal(format!("cannot open the result file: {error}")))?;
-    let content_type = file.kind().content_type();
+    let content_type = HeaderValue::from_str(file.kind().content_type())
+        .map_err(|error| DapError::Internal(format!("invalid content type: {error}")))?;
     let filename = format!("{}{}", encode(table), file.kind().suggested_extension());
     // The stream owns the result file, so the file stays on disk until the body ends.
     let body = tokio_util::io::ReaderStream::new(handle).map(move |chunk| {
@@ -53,7 +54,7 @@ pub(crate) async fn file_response(
 
     let mut response = Response::new(Body::from_stream(body));
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(header::CONTENT_TYPE, content_type);
     let disposition = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
         .map_err(|error| DapError::Internal(format!("invalid file name: {error}")))?;
     headers.insert(header::CONTENT_DISPOSITION, disposition);

@@ -31,7 +31,7 @@ pub enum QueryOutput {
 
 /// The concrete format a [`QueryOutputFile`] was written in. Carried for the
 /// transport (MIME type / download filename); the path and size are format-agnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputFileKind {
     Csv,
     Ipc,
@@ -42,11 +42,18 @@ pub enum OutputFileKind {
     Odv,
     /// A Zarr store, packed as a zip archive.
     Zarr,
+    /// A file of a plugin format.
+    Plugin {
+        /// The MIME type that the plugin gives.
+        content_type: String,
+        /// The file extension, with the leading dot.
+        extension: String,
+    },
 }
 
 impl OutputFileKind {
     /// The MIME type a download transport reports for this format.
-    pub fn content_type(&self) -> &'static str {
+    pub fn content_type(&self) -> &str {
         match self {
             OutputFileKind::Csv => "text/csv",
             OutputFileKind::Ipc => "application/vnd.apache.arrow.file",
@@ -58,11 +65,12 @@ impl OutputFileKind {
             OutputFileKind::NetCDF => "application/x-netcdf",
             OutputFileKind::Odv => "application/zip",
             OutputFileKind::Zarr => "application/zip",
+            OutputFileKind::Plugin { content_type, .. } => content_type,
         }
     }
 
     /// The file extension (including the leading dot) for this format's output.
-    pub fn suggested_extension(&self) -> &'static str {
+    pub fn suggested_extension(&self) -> &str {
         match self {
             OutputFileKind::Csv => ".csv",
             OutputFileKind::Ipc => ".arrow",
@@ -72,6 +80,7 @@ impl OutputFileKind {
             OutputFileKind::NetCDF => ".nc",
             OutputFileKind::Odv => ".zip",
             OutputFileKind::Zarr => ".zarr.zip",
+            OutputFileKind::Plugin { extension, .. } => extension,
         }
     }
 }
@@ -91,8 +100,8 @@ impl QueryOutputFile {
         Self { kind, temp }
     }
 
-    pub fn kind(&self) -> OutputFileKind {
-        self.kind
+    pub fn kind(&self) -> &OutputFileKind {
+        &self.kind
     }
 
     pub fn size(&self) -> std::io::Result<u64> {

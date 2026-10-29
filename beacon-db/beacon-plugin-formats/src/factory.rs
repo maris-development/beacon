@@ -53,6 +53,31 @@ impl PluginFileFormatFactory {
         self.installed.load(Ordering::SeqCst)
     }
 
+    /// `true` if the format has a writer.
+    pub fn can_write(&self) -> bool {
+        self.factory.can_write()
+    }
+
+    /// `true` if one output is a set of objects under a prefix.
+    pub fn writes_directory(&self) -> bool {
+        self.factory.writes_directory()
+    }
+
+    /// The MIME type of an output file.
+    pub fn content_type(&self) -> String {
+        self.factory.content_type().to_string()
+    }
+
+    /// The default file extension without the dot: the first extension, else the name.
+    pub fn extension(&self) -> String {
+        self.factory
+            .extensions()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.name().to_string())
+            .to_ascii_lowercase()
+    }
+
     /// Marks the format as uninstalled: every table on it fails from now on.
     pub fn mark_uninstalled(&self) {
         self.installed.store(false, Ordering::SeqCst);
