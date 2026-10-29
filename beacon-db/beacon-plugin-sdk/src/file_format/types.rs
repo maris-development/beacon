@@ -40,7 +40,7 @@ impl OutputKind {
     }
 }
 
-/// The type of one positional argument of `read_<name>`.
+/// The type of one option field of `read_<name>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArgKind {
     /// A string literal.
@@ -72,7 +72,7 @@ impl ArgKind {
     }
 }
 
-/// One positional argument of `read_<name>`, after the paths.
+/// One field of the options struct of `read_<name>(paths, {key: value, ...})`.
 ///
 /// Beacon puts the value into the format options under `option_key`.
 #[derive(Clone, Debug, PartialEq, Eq)]

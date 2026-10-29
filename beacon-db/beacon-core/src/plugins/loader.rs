@@ -29,6 +29,13 @@ use super::{
 use crate::statement_plan::functions::{
     as_macro, is_built_in, plan_plugin_sql, stored_function_names,
 };
+use beacon_functions::file_formats::schema_function::SchemaTableFunc;
+use beacon_functions::file_formats::BeaconTableFunctionImpl as _;
+use beacon_plugin_formats::{
+    check_formats, function_names, import_formats, install_formats, uninstall_formats,
+    InstalledFormats, PluginFileFormatFactory,
+};
+use tokio::runtime::Handle;
 
 /// A plugin that passed every check and has registered nothing yet.
 pub(crate) struct LoadedPlugin {
@@ -36,6 +43,8 @@ pub(crate) struct LoadedPlugin {
     udfs: Vec<ScalarUDF>,
     /// Names and aliases of the native functions.
     native_names: Vec<String>,
+    /// The file formats of the native library.
+    formats: Vec<PluginFileFormatFactory>,
 }
 
 /// The name of `udf` and its aliases.
@@ -133,10 +142,15 @@ pub(crate) fn prepare(
     let mut seen = HashSet::new();
     let mut udfs = Vec::new();
     let mut native_names = Vec::new();
+    let mut formats = Vec::new();
     // Native functions first, so the plugin SQL can call them.
     if let Some(native) = &manifest.native {
         let path = dir.join("lib").join(library_file_name(&native.library));
-        for udf in load_native(&path)? {
+        let exports = load_native(&path)?;
+        formats = import_formats(exports.formats, Handle::current())?;
+        check_formats(&state, &formats)
+            .with_context(|| format!("a file format of plugin '{expected_name}'"))?;
+        for udf in exports.functions {
             let names = names_of(&udf);
             for name in &names {
                 check_collision(&state, reserved, registry, expected_name, name, &seen)?;
@@ -180,7 +194,44 @@ pub(crate) fn prepare(
         manifest,
         udfs,
         native_names,
+        formats,
     })
+}
+
+/// Registers the file formats of `plugin`: `STORED AS`, `read_<name>` and `read_<name>_schema`.
+fn commit_formats(session: &SessionContext, plugin: &str, formats: Vec<PluginFileFormatFactory>) {
+    if formats.is_empty() {
+        return;
+    }
+    let readers = match install_formats(session, &formats, Handle::current()) {
+        Ok(readers) => readers,
+        Err(error) => {
+            tracing::error!("Cannot register the file formats of plugin '{plugin}': {error}");
+            return;
+        }
+    };
+    for reader in readers {
+        let schema = SchemaTableFunc::wrapping(reader);
+        session.register_udtf(&schema.name(), Arc::new(schema));
+    }
+    let names: Vec<&str> = formats.iter().map(|format| format.name()).collect();
+    tracing::info!("Loaded file formats {names:?} of plugin '{plugin}'");
+    if let Some(installed) = session.state().config().get_extension::<InstalledFormats>() {
+        installed.insert(plugin, formats);
+    }
+}
+
+/// Removes the file formats of `plugin` from the session.
+fn uninstall_plugin_formats(session: &SessionContext, plugin: &str) {
+    let Some(installed) = session.state().config().get_extension::<InstalledFormats>() else {
+        return;
+    };
+    let formats = installed.take(plugin);
+    uninstall_formats(session, &formats);
+    for format in &formats {
+        let [_, schema] = function_names(format);
+        session.deregister_udtf(&schema);
+    }
 }
 
 impl LoadedPlugin {
@@ -232,6 +283,7 @@ pub(crate) fn commit(
     for udf in plugin.udfs {
         session.register_udf(udf);
     }
+    commit_formats(session, &record.name, plugin.formats);
     tracing::info!(
         "Loaded plugin '{}' {} with functions {names:?}",
         record.name,
@@ -455,6 +507,7 @@ pub(crate) async fn uninstall(
     for function in &names {
         session.deregister_udf(function);
     }
+    uninstall_plugin_formats(session, name);
     registry.remove_native_functions(&names);
     registry.release_claim(name, &names);
     registry.set_uninstalled(name);

@@ -358,13 +358,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "beacon-nd-encoding"
+version = "2.1.0-rc.1"
+dependencies = [
+ "arrow",
+ "datafusion-common",
+]
+
+[[package]]
 name = "beacon-plugin-sdk"
 version = "2.1.0-rc.1"
 dependencies = [
+ "async-ffi",
+ "async-trait",
+ "beacon-nd-encoding",
+ "bytes",
+ "chrono",
  "datafusion",
  "datafusion-ffi",
  "datafusion-proto",
+ "datafusion-proto-common",
+ "form_urlencoded",
+ "futures",
+ "object_store",
+ "prost",
  "stabby",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1453,7 +1473,9 @@ dependencies = [
 name = "example-native"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "beacon-plugin-sdk",
+ "futures",
 ]
 
 [[package]]
