@@ -31,3 +31,4 @@ arrow-ipc = { workspace = true }
 criterion = { version = "0.5", default-features = false, features = ["rayon", "html_reports"] }
 rand = "0.8"
 tempfile = { workspace = true }
+beacon-nd-execution = { path = "../../beacon-nd-execution" }

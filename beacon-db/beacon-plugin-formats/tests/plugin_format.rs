@@ -24,7 +24,7 @@ use url::Url;
 #[path = "plugin_format/test_formats.rs"]
 mod test_formats;
 
-use beacon_datafusion_ext::nd::{NdFilterPushdown, NdProjectionPushdown};
+use beacon_nd_execution::{NdFilterPushdown, NdProjectionPushdown};
 use datafusion::execution::SessionStateBuilder;
 use test_formats::{GridText, LineText, Seen, foreign};
 

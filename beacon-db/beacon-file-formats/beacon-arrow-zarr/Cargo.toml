@@ -25,6 +25,7 @@ zip = { workspace = true }
 
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-nd-execution = { path = "../../beacon-nd-execution" }
 beacon-common = { path = "../../beacon-common" }
 
 [dev-dependencies]

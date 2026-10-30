@@ -21,9 +21,11 @@ use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::utils::{collect_columns, reassign_expr_columns};
 use datafusion::physical_plan::metrics::Count;
 
-use crate::nd::array::NdArrowArray;
-use crate::nd::batch::NdRecordBatch;
-use crate::nd::dimensions::Dimensions;
+use beacon_nd_encoding::array::NdArrowArray;
+use beacon_nd_encoding::batch::NdRecordBatch;
+use beacon_nd_encoding::dimensions::Dimensions;
+
+use crate::materialize::NdArrowArrayExt;
 
 /// Per-partition counters shared by the footprint-evaluating nd operators.
 pub(super) struct ProjectMetrics {
@@ -181,7 +183,7 @@ mod tests {
     use datafusion::physical_expr::expressions::{binary, col, lit};
     use datafusion::physical_plan::metrics::Count;
 
-    use crate::nd::dimensions::Dimension;
+    use beacon_nd_encoding::dimensions::Dimension;
 
     use super::*;
 

@@ -686,6 +686,7 @@ mod tests {
     use std::sync::Arc;
 
     use futures::TryStreamExt;
+    use beacon_nd_execution::NdRecordBatchExt;
 
     use super::*;
     use crate::NdArray;

@@ -29,7 +29,7 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
-use crate::nd::batch::NdRecordBatch;
+use beacon_nd_encoding::batch::NdRecordBatch;
 
 use super::expr_column::{NdExprColumn, ProjectMetrics};
 use super::{NdBroadcastExec, NdExecutionPlan, SendableNdBatchStream, as_nd_plan};
@@ -250,8 +250,8 @@ mod tests {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::physical_expr::expressions::col;
 
-    use crate::nd::encoding::encoded_schema;
-    use crate::nd::exec::NdSourceExec;
+    use beacon_nd_encoding::encoding::encoded_schema;
+    use crate::exec::NdSourceExec;
 
     use super::*;
 

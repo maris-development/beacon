@@ -18,7 +18,7 @@ use std::time::Instant;
 use beacon_arrow_netcdf::datafusion::{FileAccess, NetcdfFormat};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_datafusion_ext::nd::optimizer::{NdFilterPushdown, NdProjectionPushdown};
+use beacon_nd_execution::optimizer::{NdFilterPushdown, NdProjectionPushdown};
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::physical_plan::ExecutionPlan;

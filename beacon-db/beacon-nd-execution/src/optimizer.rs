@@ -34,7 +34,7 @@ use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::logical_expr::Volatility;
 
-use super::exec::{NdBroadcastExec, NdFilterExec, NdProjectionExec};
+use crate::exec::{NdBroadcastExec, NdFilterExec, NdProjectionExec};
 
 /// Sinks element-wise `ProjectionExec`s below an [`NdBroadcastExec`] into an
 /// [`NdProjectionExec`], so they evaluate before broadcasting.

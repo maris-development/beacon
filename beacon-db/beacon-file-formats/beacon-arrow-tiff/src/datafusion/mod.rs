@@ -199,10 +199,10 @@ impl FileFormat for TiffFormat {
             .build();
 
         let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
-        let nd_source = Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(
+        let nd_source = Arc::new(beacon_nd_execution::exec::NdSourceExec::try_new(
             data_source,
         )?);
-        let broadcast = beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?;
+        let broadcast = beacon_nd_execution::exec::NdBroadcastExec::try_new(nd_source)?;
         Ok(Arc::new(broadcast))
     }
 
@@ -217,6 +217,7 @@ impl FileFormat for TiffFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use beacon_nd_execution::NdRecordBatchExt;
     use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
     use datafusion::execution::object_store::ObjectStoreUrl;
     use futures::StreamExt;

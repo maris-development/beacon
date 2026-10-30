@@ -18,6 +18,7 @@ tokio-util = { workspace = true }
 
 beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-nd-execution = { path = "../../beacon-nd-execution" }
 beacon-nd-array = { path = "../beacon-nd-array" }
 
 # Beacon binary format (git submodule, consumed by path)

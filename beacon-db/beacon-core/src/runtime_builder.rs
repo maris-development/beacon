@@ -25,7 +25,6 @@ use beacon_datafusion_ext::{
     format_ext::{new_file_format_registry_handle, FileFormatFactoryExt, FileFormatRegistry},
     listing_factory::{DefaultStore, ListingFactory, RootStore},
     listing_table_factory_ext::ListingTableFactoryExt,
-    nd::{NdFilterPushdown, NdProjectionPushdown},
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
@@ -34,6 +33,7 @@ use beacon_datafusion_ext::{
     },
 };
 use beacon_functions::register_functions;
+use beacon_nd_execution::{NdFilterPushdown, NdProjectionPushdown};
 use beacon_redb_store::RedbStore;
 use datafusion::{
     execution::{
