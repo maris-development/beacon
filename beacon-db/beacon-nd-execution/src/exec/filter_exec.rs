@@ -29,7 +29,7 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
-use crate::nd::batch::NdRecordBatch;
+use beacon_datafusion_ext::nd::batch::NdRecordBatch;
 
 use super::expr_column::{NdExprColumn, ProjectMetrics};
 use super::{NdBroadcastExec, NdExecutionPlan, SendableNdBatchStream, as_nd_plan};
@@ -257,8 +257,8 @@ mod tests {
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{binary, col, lit};
 
-    use crate::nd::array::NdArrowArray;
-    use crate::nd::dimensions::{Dimension, Dimensions};
+    use beacon_datafusion_ext::nd::array::NdArrowArray;
+    use beacon_datafusion_ext::nd::dimensions::{Dimension, Dimensions};
 
     use super::*;
 

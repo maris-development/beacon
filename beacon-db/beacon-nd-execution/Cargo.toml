@@ -1,0 +1,16 @@
+[package]
+name = "beacon-nd-execution"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Dimension-aware physical operators and optimizer rules for nd arrays"
+
+[dependencies]
+arrow = { workspace = true }
+datafusion = { workspace = true }
+futures = { workspace = true }
+
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+
+[dev-dependencies]
+tokio = { workspace = true }

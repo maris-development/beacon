@@ -31,7 +31,7 @@ use crate::nd::encoded_partition_cols;
 use crate::sink::PluginFileSink;
 use crate::source::PluginFileSource;
 use beacon_datafusion_ext::nd::encoding::encoded_schema;
-use beacon_datafusion_ext::nd::exec::{NdBroadcastExec, NdSourceExec};
+use beacon_nd_execution::exec::{NdBroadcastExec, NdSourceExec};
 use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
 
 /// One configured plugin format: the plugin reader for the options of one table.

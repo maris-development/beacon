@@ -4,7 +4,7 @@
 //! queue (see [`crate::arrow::file_read`]). Each variable is sliced on its own axes,
 //! so a coordinate is read once per chunk rather than once per row of it, and
 //! the broadcast to flat Arrow happens above the scan in
-//! [`beacon_datafusion_ext::nd::exec::NdBroadcastExec`].
+//! `beacon_nd_execution::exec::NdBroadcastExec`.
 
 use std::sync::Arc;
 

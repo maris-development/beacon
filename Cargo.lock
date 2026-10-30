@@ -1441,6 +1441,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-nd-array",
+ "beacon-nd-execution",
  "chrono",
  "datafusion 54.1.0",
  "datafusion-datasource 54.1.0",
@@ -1466,6 +1467,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-nd-array",
+ "beacon-nd-execution",
  "datafusion 54.1.0",
  "datafusion-datasource 54.1.0",
  "futures",
@@ -1534,6 +1536,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-nd-array",
+ "beacon-nd-execution",
  "chrono",
  "datafusion 54.1.0",
  "futures",
@@ -1574,6 +1577,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-nd-array",
+ "beacon-nd-execution",
  "bytemuck",
  "chrono",
  "datafusion 54.1.0",
@@ -1651,6 +1655,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-nd-array",
+ "beacon-nd-execution",
  "bytes",
  "datafusion 54.1.0",
  "futures",
@@ -1673,6 +1678,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-nd-array",
+ "beacon-nd-execution",
  "bytes",
  "datafusion 54.1.0",
  "futures",
@@ -1815,6 +1821,7 @@ dependencies = [
  "beacon-iceberg",
  "beacon-icechunk",
  "beacon-lance",
+ "beacon-nd-execution",
  "beacon-plugin-formats",
  "beacon-plugin-registry",
  "beacon-plugin-sdk",
@@ -2188,6 +2195,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-nd-execution"
+version = "2.1.0-rc.1"
+dependencies = [
+ "arrow 58.4.0",
+ "beacon-datafusion-ext",
+ "datafusion 54.1.0",
+ "futures",
+ "tokio",
+]
+
+[[package]]
 name = "beacon-plugin-formats"
 version = "2.1.0-rc.1"
 dependencies = [
@@ -2196,6 +2214,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-nd-encoding",
+ "beacon-nd-execution",
  "beacon-plugin-sdk",
  "datafusion 54.1.0",
  "futures",

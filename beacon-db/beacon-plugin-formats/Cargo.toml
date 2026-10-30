@@ -10,6 +10,7 @@ repository = "https://github.com/maris-development/beacon"
 [dependencies]
 beacon-plugin-sdk = { path = "../beacon-plugin-sdk" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-nd-execution = { path = "../beacon-nd-execution" }
 beacon-common = { path = "../beacon-common" }
 arrow = { workspace = true }
 datafusion = { workspace = true }

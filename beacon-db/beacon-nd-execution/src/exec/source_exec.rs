@@ -18,7 +18,7 @@ use datafusion::physical_plan::{
 };
 use futures::{StreamExt, TryStreamExt};
 
-use crate::nd::encoding::{decode_nd_record_batch_row, logical_schema, nd_batch_count};
+use beacon_datafusion_ext::nd::encoding::{decode_nd_record_batch_row, logical_schema, nd_batch_count};
 
 use super::{NdBroadcastExec, NdExecutionPlan, SendableNdBatchStream};
 

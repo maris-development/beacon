@@ -18,7 +18,7 @@ use super::dimensions::Dimensions;
 ///
 /// An optional [`selection`](Self::selection) restricts the batch to a subset of
 /// the target cells (their row-major linear indices). It is how an
-/// [`NdFilterExec`](crate::nd::exec::NdFilterExec) records a predicate without
+/// `NdFilterExec` (in `beacon-nd-execution`) records a predicate without
 /// moving data: the columns are untouched, and materialization gathers only the
 /// retained cells — the broadcast and the selection fuse into one gather per
 /// column, so the filtered-out cross-product never exists.

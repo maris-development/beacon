@@ -6,8 +6,9 @@ use beacon_binary_format::{
 };
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt, SchemaOptions};
-use beacon_datafusion_ext::nd::{encoded_schema, exec::nd_scan_plan};
+use beacon_datafusion_ext::nd::encoded_schema;
 use beacon_datafusion_ext::type_widening::{label_by_object, session_widening};
+use beacon_nd_execution::exec::nd_scan_plan;
 use datafusion::{
     catalog::Session,
     common::{GetExt, Statistics},

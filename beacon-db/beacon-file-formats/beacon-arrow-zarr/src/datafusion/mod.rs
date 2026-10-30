@@ -339,7 +339,7 @@ impl ZarrFormat {
 /// The scan carries nd data as `beacon.nd`-encoded struct columns, so
 /// `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it back to the
 /// logical table schema above the scan.
-pub use beacon_datafusion_ext::nd::exec::nd_scan_plan;
+pub use beacon_nd_execution::exec::nd_scan_plan;
 
 #[async_trait::async_trait]
 impl FileFormat for ZarrFormat {
@@ -876,7 +876,7 @@ mod tests {
             .with_config(SessionConfig::new().with_target_partitions(1))
             .with_default_features()
             .with_physical_optimizer_rule(Arc::new(
-                beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
+                beacon_nd_execution::NdProjectionPushdown::new(),
             ))
             .build();
         SessionContext::new_with_state(state)

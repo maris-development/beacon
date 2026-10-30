@@ -14,7 +14,7 @@
 //! The struct field carries the `beacon.nd` Arrow extension type so the intent
 //! survives IPC. Because it is an ordinary Arrow array, an nd batch encoded
 //! this way rides through a `DataSourceExec` (and any other operator) as a
-//! normal `RecordBatch`; [`NdSourceExec`](crate::nd::exec::NdSourceExec) decodes
+//! normal `RecordBatch`; `NdSourceExec` (in `beacon-nd-execution`) decodes
 //! it back into an [`NdRecordBatch`] on the way out.
 
 use std::sync::Arc;
@@ -85,7 +85,7 @@ pub fn nd_encoded_field_of(field: &Field) -> Field {
 
 /// The nd-encoded schema of a logical schema: every field becomes a `beacon.nd`
 /// struct column of the same name. This is the schema a `DataSourceExec` carries
-/// while nd data flows up to [`NdSourceExec`](crate::nd::exec::NdSourceExec).
+/// while nd data flows up to `NdSourceExec` (in `beacon-nd-execution`).
 pub fn encoded_schema(logical: &Schema) -> Schema {
     let fields: Vec<Field> = logical
         .fields()
