@@ -66,6 +66,7 @@ mod tests {
 
     use arrow::compute::concat_batches;
     use arrow::record_batch::RecordBatch;
+    use beacon_nd_execution::NdRecordBatchExt;
     use futures::TryStreamExt;
     use indexmap::IndexMap;
 

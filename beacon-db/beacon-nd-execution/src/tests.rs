@@ -10,8 +10,8 @@ use datafusion::execution::TaskContext;
 use datafusion::physical_plan::ExecutionPlan;
 use futures::TryStreamExt;
 
-use beacon_datafusion_ext::nd::encoding::encode_nd_record_batch;
-use beacon_datafusion_ext::nd::*;
+use beacon_nd_encoding::*;
+use beacon_nd_encoding::encoding::*;
 
 use crate::exec::{NdBroadcastExec, NdSourceExec};
 use crate::optimizer::*;

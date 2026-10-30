@@ -211,6 +211,7 @@ mod tests {
         decode_nd_record_batch, encode_nd_record_batch, encoded_schema,
     };
     use beacon_datafusion_ext::scan_adapt::BatchAdapter;
+    use beacon_nd_execution::NdRecordBatchExt;
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use std::path::Path;
 

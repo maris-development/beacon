@@ -28,7 +28,9 @@ use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use beacon_datafusion_ext::nd::batch::NdRecordBatch;
+use beacon_nd_encoding::batch::NdRecordBatch;
+
+use crate::materialize::NdRecordBatchExt;
 
 pub use broadcast_exec::NdBroadcastExec;
 pub use filter_exec::NdFilterExec;
@@ -159,9 +161,9 @@ mod tests {
     use datafusion::physical_plan::ExecutionPlan;
     use futures::TryStreamExt;
 
-    use beacon_datafusion_ext::nd::array::NdArrowArray;
-    use beacon_datafusion_ext::nd::dimensions::{Dimension, Dimensions};
-    use beacon_datafusion_ext::nd::encoding::encode_nd_record_batch;
+    use beacon_nd_encoding::array::NdArrowArray;
+    use beacon_nd_encoding::dimensions::{Dimension, Dimensions};
+    use beacon_nd_encoding::encoding::encode_nd_record_batch;
 
     use super::*;
 

@@ -10,7 +10,7 @@ arrow = { workspace = true }
 datafusion = { workspace = true }
 futures = { workspace = true }
 
-beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-nd-encoding = { path = "../beacon-nd-encoding" }
 
 [dev-dependencies]
 tokio = { workspace = true }

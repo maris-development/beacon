@@ -1892,6 +1892,7 @@ dependencies = [
  "base64",
  "beacon-common",
  "beacon-file-stats",
+ "beacon-nd-encoding",
  "blake3",
  "chrono",
  "datafusion 54.1.0",
@@ -2146,6 +2147,7 @@ dependencies = [
  "arrow-ipc 58.4.0",
  "async-trait",
  "beacon-datafusion-ext",
+ "beacon-nd-execution",
  "bytemuck",
  "criterion 0.5.1",
  "crossbeam",
@@ -2199,7 +2201,7 @@ name = "beacon-nd-execution"
 version = "2.1.0-rc.1"
 dependencies = [
  "arrow 58.4.0",
- "beacon-datafusion-ext",
+ "beacon-nd-encoding",
  "datafusion 54.1.0",
  "futures",
  "tokio",

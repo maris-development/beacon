@@ -282,6 +282,7 @@ mod tests {
     use arrow::datatypes::SchemaRef;
     use beacon_datafusion_ext::nd::{decode_nd_record_batch, encoded_schema};
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
+    use beacon_nd_execution::NdRecordBatchExt;
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column as ColumnExpr, Literal};
     use datafusion::physical_plan::PhysicalExpr;
