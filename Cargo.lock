@@ -1818,6 +1818,7 @@ dependencies = [
  "beacon-plugin-formats",
  "beacon-plugin-registry",
  "beacon-plugin-sdk",
+ "beacon-plugin-tables",
  "beacon-redb-store",
  "beacon-sql-databases",
  "bytes",

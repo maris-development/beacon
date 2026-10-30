@@ -277,6 +277,18 @@ pub(crate) async fn create_external_table(
     }
 
     let state = session.state();
+    // A `STORED AS` name of a plugin table type goes to the plugin factory.
+    if let Some(installed) = state
+        .config()
+        .get_extension::<beacon_plugin_tables::InstalledTableTypes>()
+    {
+        if let Some(table) =
+            beacon_plugin_tables::create_plugin_table(&state, &installed, cmd).await?
+        {
+            session.register_table(cmd.name.clone(), table)?;
+            return Ok(());
+        }
+    }
     let factory = state
         .config()
         .get_extension::<ListingTableFactoryExt>()

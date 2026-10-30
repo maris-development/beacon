@@ -1065,6 +1065,10 @@ fn build_session_config(
         .with_extension(new_file_format_registry_handle())
         // The file formats of each installed plugin, for an uninstall.
         .with_extension(Arc::new(beacon_plugin_formats::InstalledFormats::default()))
+        // The table types of each installed plugin, for `STORED AS` and an uninstall.
+        .with_extension(Arc::new(
+            beacon_plugin_tables::InstalledTableTypes::default(),
+        ))
         // Recovered by the JSON query compiler (default table, projection pushdown).
         .with_extension(Arc::new(builder.sql.clone()))
         // Recovered when a statement's result stream is built, to merge the small

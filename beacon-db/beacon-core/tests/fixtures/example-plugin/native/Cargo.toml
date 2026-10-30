@@ -15,6 +15,7 @@ wrong-abi = []
 beacon-plugin-sdk = { path = "../../../../../beacon-plugin-sdk" }
 async-trait = "0.1"
 futures = "0.3"
+tokio = { version = "1.47.1", features = ["fs"] }
 
 # Keeps this crate outside the Beacon workspace.
 [workspace]
