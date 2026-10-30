@@ -9,11 +9,12 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider, TableProviderFactory};
 use datafusion::datasource::{MemTable, TableType as DfTableType};
 use datafusion::error::Result;
+use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{
     ColumnarValue, CreateExternalTable, DdlStatement, Expr, LogicalPlan, ScalarUDF,
     TableProviderFilterPushDown, Volatility, col, create_udf, lit,
 };
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties, collect};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::{
@@ -39,6 +40,10 @@ impl TableProvider for Greedy {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
+        // A filter on the value 99999 fails, as a filter that the plugin cannot decode.
+        if filters.iter().any(|f| f.to_string().contains("99999")) {
+            return datafusion::common::plan_err!("cannot decode the filter");
+        }
         Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 
@@ -50,6 +55,15 @@ impl TableProvider for Greedy {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         self.0.scan(state, projection, &[], limit).await
+    }
+
+    async fn insert_into(
+        &self,
+        state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.0.insert_into(state, input, insert_op).await
     }
 }
 
@@ -115,6 +129,8 @@ fn names_are_checked() {
     let none = InstalledTableTypes::default();
     assert!(check_error(&none, &exported(&["Bad-Name"])).contains("lower case"));
     assert!(check_error(&none, &exported(&["erddap"])).contains("built-in table type"));
+    assert!(check_error(&none, &exported(&["postgresql"])).contains("built-in table type"));
+    assert!(check_error(&none, &exported(&["odbc"])).contains("built-in table type"));
     assert!(check_error(&none, &exported(&["parquet"])).contains("file format"));
     assert!(check_error(&none, &exported(&["t", "t"])).contains("twice"));
     let taken = InstalledTableTypes::default();
@@ -234,4 +250,84 @@ async fn the_definition_round_trips_and_rebuilds() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("table type 'greedy' is not loaded"), "{err}");
+}
+
+async fn greedy_table(
+    ctx: &SessionContext,
+    installed: &InstalledTableTypes,
+) -> Arc<dyn TableProvider> {
+    let cmd = command(ctx, "CREATE EXTERNAL TABLE t STORED AS greedy LOCATION 'x'").await;
+    create_plugin_table(&ctx.state(), installed, &cmd)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_insert_writes_every_input_partition() {
+    let installed = Arc::new(InstalledTableTypes::default());
+    installed.insert("p", foreign_types());
+    let ctx = session(installed.clone());
+    let table = greedy_table(&ctx, &installed).await;
+    let schema = table.schema();
+    let part = |value: i64| {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![value]))],
+        )
+        .unwrap()
+    };
+    let source = MemTable::try_new(schema.clone(), vec![vec![part(10)], vec![part(20)]]).unwrap();
+    let state = ctx.state();
+    let input = source.scan(&state, None, &[], None).await.unwrap();
+    assert_eq!(input.output_partitioning().partition_count(), 2);
+    // Beacon runs the insert plan as it is, with no physical optimizer pass.
+    let plan = table
+        .insert_into(&state, input, InsertOp::Append)
+        .await
+        .unwrap();
+    let counts = collect(plan, ctx.task_ctx()).await.unwrap();
+    let count = counts[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(count, 2);
+    ctx.register_table("t", table).unwrap();
+    let sum = ctx
+        .sql("SELECT sum(a) FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let sum = sum[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(sum, 36);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_pushdown_leaves_the_filters_to_beacon() {
+    let installed = Arc::new(InstalledTableTypes::default());
+    installed.insert("p", foreign_types());
+    let ctx = session(installed.clone());
+    let table = greedy_table(&ctx, &installed).await;
+    let host = host_udf().call(vec![col("a")]).gt(lit(1i64));
+    let bad = col("a").eq(lit(99999i64));
+    let answers = table.supports_filters_pushdown(&[&host, &bad]).unwrap();
+    assert_eq!(answers, vec![TableProviderFilterPushDown::Unsupported; 2]);
+    ctx.register_table("t", table).unwrap();
+    let rows = ctx
+        .sql("SELECT a FROM t WHERE a <> 99999")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(rows.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
 }

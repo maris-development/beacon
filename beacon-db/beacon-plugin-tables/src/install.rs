@@ -15,7 +15,15 @@ use parking_lot::Mutex;
 
 /// The `STORED AS` names that Beacon itself handles.
 pub const BUILT_IN_TABLE_TYPES: &[&str] = &[
-    "remote", "delta", "iceberg", "icechunk", "erddap", "postgres", "mysql",
+    "remote",
+    "delta",
+    "iceberg",
+    "icechunk",
+    "erddap",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "odbc",
 ];
 
 /// A table type of a plugin: the `STORED AS` name and the imported factory.

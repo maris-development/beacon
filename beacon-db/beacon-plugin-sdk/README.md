@@ -259,6 +259,7 @@ INSERT INTO readings VALUES (1.5);
 - `DELETE` and `UPDATE` are not available on plugin tables.
 - A name must be lower case `[a-z0-9_]+`. It must not equal a Beacon table type or a file format.
 - Beacon stores the table and calls `create` again at each start. When the plugin is missing, Beacon skips the table and keeps its definition.
+- Beacon stores `LOCATION` and `OPTIONS` as plain text in the table definition. Do not put secrets there that the storage must not see.
 
 ### Rules for table code
 

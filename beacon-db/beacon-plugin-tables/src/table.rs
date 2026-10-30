@@ -12,7 +12,8 @@ use datafusion::error::Result;
 use datafusion::execution::SessionState;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{CreateExternalTable, Expr, TableProviderFilterPushDown};
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 use crate::definition::PluginTableDefinition;
 use crate::filters::pushable;
@@ -88,7 +89,18 @@ impl TableProvider for PluginTable {
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
         let sent: Vec<&Expr> = filters.iter().copied().filter(|f| pushable(f)).collect();
-        let mut answers = self.inner.supports_filters_pushdown(&sent)?.into_iter();
+        let answers = match self.inner.supports_filters_pushdown(&sent) {
+            Ok(answers) => answers,
+            Err(error) => {
+                // A filter that cannot cross the boundary stays with DataFusion.
+                tracing::debug!(
+                    "plugin table '{}' takes no filters: {error}",
+                    self.definition.name
+                );
+                vec![TableProviderFilterPushDown::Unsupported; sent.len()]
+            }
+        };
+        let mut answers = answers.into_iter();
         // Put the plugin answers back in the input order.
         Ok(filters
             .iter()
@@ -121,6 +133,12 @@ impl TableProvider for PluginTable {
         insert_op: InsertOp,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         self.check_installed()?;
+        // A plugin sink can read only partition 0, and Beacon runs no optimizer that merges them.
+        let input = if input.output_partitioning().partition_count() > 1 {
+            Arc::new(CoalescePartitionsExec::new(input)) as Arc<dyn ExecutionPlan>
+        } else {
+            input
+        };
         self.inner.insert_into(state, input, insert_op).await
     }
 }

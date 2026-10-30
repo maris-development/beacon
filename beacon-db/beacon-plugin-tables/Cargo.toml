@@ -16,6 +16,7 @@ async-trait = { workspace = true }
 datafusion = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
+tracing = { workspace = true }
 typetag = { workspace = true }
 
 [dev-dependencies]

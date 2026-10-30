@@ -18,10 +18,36 @@ enum Mode {
     Memory,
     Spawn,
     Panic,
+    PanicScan,
 }
 
 #[derive(Debug)]
 struct TestFactory(Mode);
+
+/// A table whose `scan` panics.
+#[derive(Debug)]
+struct PanicScanTable(Arc<dyn TableProvider>);
+
+#[async_trait]
+impl TableProvider for PanicScanTable {
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        self.0.schema()
+    }
+
+    fn table_type(&self) -> datafusion::datasource::TableType {
+        datafusion::datasource::TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        _projection: Option<&Vec<usize>>,
+        _filters: &[datafusion::logical_expr::Expr],
+        _limit: Option<usize>,
+    ) -> Result<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        panic!("boom scan");
+    }
+}
 
 fn memory_table() -> Arc<dyn TableProvider> {
     let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, true)]));
@@ -44,6 +70,7 @@ impl TableProviderFactory for TestFactory {
             Mode::Memory => {}
             Mode::Spawn => tokio::spawn(async {}).await.unwrap(),
             Mode::Panic => panic!("boom"),
+            Mode::PanicScan => return Ok(Arc::new(PanicScanTable(memory_table()))),
         }
         Ok(memory_table())
     }
@@ -61,6 +88,12 @@ fn one_type(mode: Mode) -> Arc<dyn TableProviderFactory> {
         Mode::Memory => make_tables,
         Mode::Spawn => || vec![TableType::new("spawn", Arc::new(TestFactory(Mode::Spawn)))],
         Mode::Panic => || vec![TableType::new("panic", Arc::new(TestFactory(Mode::Panic)))],
+        Mode::PanicScan => || {
+            vec![TableType::new(
+                "panic_scan",
+                Arc::new(TestFactory(Mode::PanicScan)),
+            )]
+        },
     }) {
         FFI_Result::Ok(exported) => exported,
         FFI_Result::Err(message) => panic!("export failed: {message}"),
@@ -162,6 +195,22 @@ async fn a_panic_in_create_is_an_error() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("boom"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panic_in_scan_is_a_query_error() {
+    let factory = one_type(Mode::PanicScan);
+    let ctx = SessionContext::new();
+    let table = factory
+        .create(&ctx.state(), &create_command())
+        .await
+        .unwrap();
+    ctx.register_table("t", table).unwrap();
+    let err = match ctx.sql("SELECT * FROM t").await {
+        Ok(frame) => frame.collect().await.unwrap_err().to_string(),
+        Err(error) => error.to_string(),
+    };
+    assert!(err.contains("boom scan"), "{err}");
 }
 
 #[test]
