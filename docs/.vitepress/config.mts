@@ -252,7 +252,6 @@ export default defineConfig({
                 { text: 'Object Storage (S3)', link: '/docs/2.1.0-rc1/data-sources/object-storage' },
                 { text: 'SQL Databases', link: '/docs/2.1.0-rc1/data-sources/sql-databases' },
                 { text: 'Remote Tables', link: '/docs/2.1.0-rc1/data-sources/remote-tables' },
-                { text: 'ERDDAP', link: '/docs/2.1.0-rc1/data-sources/erddap' },
                 { text: 'ATTACH another server', link: '/docs/2.1.0-rc1/data-sources/attach' },
                 { text: 'Secrets', link: '/docs/2.1.0-rc1/sql/secrets' },
               ]
@@ -294,7 +293,6 @@ export default defineConfig({
             { text: 'JSON Queries', link: '/docs/2.1.0-rc1/api/querying/json' },
             { text: 'Examples', link: '/docs/2.1.0-rc1/api/querying/examples' },
             { text: 'Exploring the catalog', link: '/docs/2.1.0-rc1/api/exploring-data' },
-            { text: 'OPeNDAP (DAP2)', link: '/docs/2.1.0-rc1/api/opendap' },
           ]
         },
         {
