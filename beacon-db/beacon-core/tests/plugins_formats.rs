@@ -137,3 +137,26 @@ async fn nd_format_with_partition_columns() {
         .await;
     assert!(text(&sum).contains("8.0"), "{}", text(&sum));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_plugin_format() {
+    let rt = runtime_with_plugin("formats-copy").await;
+    rt.sql(
+        "COPY (SELECT a, b FROM read_exflat(['flat/a.exf']) ORDER BY a) \
+         TO 'tmp:///copy.exf' STORED AS exflat",
+    )
+    .await;
+    let written = std::fs::read_to_string(rt.tmp_dir().join("copy.exf")).unwrap();
+    assert_eq!(written, "1,x\n2,y\n3,z\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_to_read_only_plugin_format_fails() {
+    let rt = runtime_with_plugin("formats-copy-read-only").await;
+    let error = sql_error(
+        &rt,
+        "COPY (SELECT 1 AS v) TO 'tmp:///copy.exg' STORED AS exgrid",
+    )
+    .await;
+    assert!(error.contains("cannot write"), "{error}");
+}
