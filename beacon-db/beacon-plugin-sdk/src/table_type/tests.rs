@@ -250,3 +250,63 @@ fn table_option_reads_the_prefixed_key() {
     assert_eq!(table_option(&cmd, "url"), Some("y"));
     assert_eq!(table_option(&cmd, "other"), None);
 }
+
+/// An author runtime that stops without a block, also inside a runtime.
+#[derive(Debug)]
+struct AuthorRuntime(Option<tokio::runtime::Runtime>);
+
+impl Drop for AuthorRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
+/// Fails unless `create` runs on a worker of the author runtime.
+#[derive(Debug)]
+struct AuthorFactory {
+    // The factory owns the author runtime.
+    _runtime: Arc<AuthorRuntime>,
+}
+
+#[async_trait]
+impl TableProviderFactory for AuthorFactory {
+    async fn create(
+        &self,
+        _state: &dyn Session,
+        _cmd: &CreateExternalTable,
+    ) -> Result<Arc<dyn TableProvider>> {
+        let name = tokio::spawn(async { std::thread::current().name().map(str::to_string) })
+            .await
+            .unwrap();
+        assert_eq!(name.as_deref(), Some("author-rt"));
+        Ok(memory_table())
+    }
+}
+
+fn author_tables() -> Vec<TableType> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("author-rt")
+        .build()
+        .unwrap();
+    let handle = runtime.handle().clone();
+    let factory = AuthorFactory {
+        _runtime: Arc::new(AuthorRuntime(Some(runtime))),
+    };
+    vec![TableType::new("author", Arc::new(factory)).with_runtime(handle)]
+}
+
+#[test]
+// Under Miri a multi-thread runtime leaves threads at exit.
+#[cfg_attr(miri, ignore)]
+fn with_runtime_runs_create_in_the_author_runtime() {
+    let FFI_Result::Ok(mut exported) = export_table_types(author_tables) else {
+        panic!("expected types");
+    };
+    let (_, factory) = import_table_type(exported.remove(0).unwrap()).unwrap();
+    let ctx = SessionContext::new();
+    let created = futures::executor::block_on(factory.create(&ctx.state(), &create_command()));
+    assert!(created.is_ok(), "{:?}", created.err());
+}

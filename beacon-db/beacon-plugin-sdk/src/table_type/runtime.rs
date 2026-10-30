@@ -8,7 +8,7 @@ use std::fmt;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
@@ -29,31 +29,71 @@ use tokio::runtime::{Handle, Runtime};
 use crate::file_format::panic_safe_stream;
 use crate::panic_safe::panic_message;
 
-/// The tokio runtime of the plugin. The plugin has its own tokio copy, so the host runtime
-/// does not drive plugin I/O.
-pub(crate) fn plugin_runtime() -> &'static Runtime {
-    static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+/// The runtime and the codec session of one export of table types.
+///
+/// The plugin has its own tokio copy, so the host runtime does not drive plugin I/O.
+/// Each Beacon instance in a process exports the types again and gets its own context.
+/// The factory, its providers, plans and streams keep the context alive.
+pub(crate) struct PluginContext {
+    /// `None` when the author owns the runtime, and after drop.
+    runtime: Option<Runtime>,
+    handle: Handle,
+    session: Arc<dyn TaskContextProvider + Send + Sync>,
+}
+
+impl fmt::Debug for PluginContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PluginContext").finish_non_exhaustive()
+    }
+}
+
+impl PluginContext {
+    /// Starts a runtime and a session with the DataFusion default functions only.
+    pub(crate) fn new() -> Arc<Self> {
         #[cfg(not(miri))]
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         // Miri refuses threads that live to the end, and a current-thread runtime starts none.
         #[cfg(miri)]
         let mut builder = tokio::runtime::Builder::new_current_thread();
-        builder
+        let runtime = builder
             .thread_name("beacon-plugin")
             .enable_all()
             .build()
-            .expect("cannot start the plugin runtime")
-    });
-    &RUNTIME
+            .expect("cannot start the plugin runtime");
+        Arc::new(Self {
+            handle: runtime.handle().clone(),
+            runtime: Some(runtime),
+            session: Arc::new(SessionContext::new()),
+        })
+    }
+
+    /// Uses the runtime of `handle`, which the plugin author owns and stops.
+    pub(crate) fn with_handle(handle: Handle) -> Arc<Self> {
+        Arc::new(Self {
+            runtime: None,
+            handle,
+            session: Arc::new(SessionContext::new()),
+        })
+    }
+
+    pub(crate) fn handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
+    /// The task context provider of the codec. The FFI value holds a weak reference.
+    pub(crate) fn task_ctx_provider(&self) -> FFI_TaskContextProvider {
+        let provider: Arc<dyn TaskContextProvider> = self.session.clone();
+        (&provider).into()
+    }
 }
 
-/// The task context provider of the codec. It has the DataFusion default functions only.
-pub(crate) fn plugin_task_ctx_provider() -> FFI_TaskContextProvider {
-    // The FFI value holds a weak reference, so the static keeps the session alive.
-    static SESSION: LazyLock<Arc<dyn TaskContextProvider + Send + Sync>> =
-        LazyLock::new(|| Arc::new(SessionContext::new()));
-    let provider: Arc<dyn TaskContextProvider> = SESSION.clone();
-    (&provider).into()
+impl Drop for PluginContext {
+    fn drop(&mut self) {
+        // A plain drop blocks, and it panics when the last owner drops inside a runtime.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 fn panic_error(what: &str, payload: &(dyn std::any::Any + Send)) -> DataFusionError {
@@ -83,12 +123,13 @@ impl<T> Future for InRuntime<'_, T> {
     }
 }
 
-/// Runs the future that `make` builds inside the plugin runtime.
+/// Runs the future that `make` builds inside the runtime of `context`.
 async fn in_runtime<'a, T>(
+    context: &PluginContext,
     what: &'static str,
     make: impl FnOnce() -> BoxFuture<'a, Result<T>>,
 ) -> Result<T> {
-    let handle = plugin_runtime().handle().clone();
+    let handle = context.handle();
     let inner = {
         let _guard = handle.enter();
         catch_unwind(AssertUnwindSafe(make))
@@ -110,7 +151,16 @@ fn guarded<T>(what: &'static str, work: impl FnOnce() -> Result<T>) -> Result<T>
 
 /// A factory whose `create` runs inside the plugin runtime.
 #[derive(Debug)]
-pub(crate) struct RuntimeFactory(pub(crate) Arc<dyn TableProviderFactory>);
+pub(crate) struct RuntimeFactory {
+    inner: Arc<dyn TableProviderFactory>,
+    context: Arc<PluginContext>,
+}
+
+impl RuntimeFactory {
+    pub(crate) fn new(inner: Arc<dyn TableProviderFactory>, context: Arc<PluginContext>) -> Self {
+        Self { inner, context }
+    }
+}
 
 #[async_trait]
 impl TableProviderFactory for RuntimeFactory {
@@ -119,28 +169,35 @@ impl TableProviderFactory for RuntimeFactory {
         state: &dyn Session,
         cmd: &CreateExternalTable,
     ) -> Result<Arc<dyn TableProvider>> {
-        let inner = Arc::clone(&self.0);
-        let provider = in_runtime("table create", || inner.create(state, cmd)).await?;
-        Ok(Arc::new(RuntimeProvider(provider)))
+        let inner = Arc::clone(&self.inner);
+        let provider =
+            in_runtime(&self.context, "table create", || inner.create(state, cmd)).await?;
+        Ok(Arc::new(RuntimeProvider {
+            inner: provider,
+            context: Arc::clone(&self.context),
+        }))
     }
 }
 
 /// A provider whose `scan` and `insert_into` run inside the plugin runtime.
 #[derive(Debug)]
-pub(crate) struct RuntimeProvider(pub(crate) Arc<dyn TableProvider>);
+pub(crate) struct RuntimeProvider {
+    inner: Arc<dyn TableProvider>,
+    context: Arc<PluginContext>,
+}
 
 #[async_trait]
 impl TableProvider for RuntimeProvider {
     fn schema(&self) -> SchemaRef {
-        self.0.schema()
+        self.inner.schema()
     }
 
     fn table_type(&self) -> TableType {
-        self.0.table_type()
+        self.inner.table_type()
     }
 
     fn statistics(&self) -> Option<Statistics> {
-        catch_unwind(AssertUnwindSafe(|| self.0.statistics())).unwrap_or(None)
+        catch_unwind(AssertUnwindSafe(|| self.inner.statistics())).unwrap_or(None)
     }
 
     fn supports_filters_pushdown(
@@ -148,7 +205,7 @@ impl TableProvider for RuntimeProvider {
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
         guarded("filter pushdown", || {
-            self.0.supports_filters_pushdown(filters)
+            self.inner.supports_filters_pushdown(filters)
         })
     }
 
@@ -159,11 +216,11 @@ impl TableProvider for RuntimeProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let plan = in_runtime("table scan", || {
-            self.0.scan(state, projection, filters, limit)
+        let plan = in_runtime(&self.context, "table scan", || {
+            self.inner.scan(state, projection, filters, limit)
         })
         .await?;
-        Ok(PanicSafePlan::wrap(plan))
+        Ok(PanicSafePlan::wrap(plan, &self.context))
     }
 
     async fn insert_into(
@@ -172,54 +229,61 @@ impl TableProvider for RuntimeProvider {
         input: Arc<dyn ExecutionPlan>,
         insert_op: InsertOp,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let plan = in_runtime("table insert", || {
-            self.0.insert_into(state, input, insert_op)
+        let plan = in_runtime(&self.context, "table insert", || {
+            self.inner.insert_into(state, input, insert_op)
         })
         .await?;
-        Ok(PanicSafePlan::wrap(plan))
+        Ok(PanicSafePlan::wrap(plan, &self.context))
     }
 }
 
 /// A plan whose `execute` and output streams turn a panic into an error.
-pub(crate) struct PanicSafePlan(Arc<dyn ExecutionPlan>);
+pub(crate) struct PanicSafePlan {
+    inner: Arc<dyn ExecutionPlan>,
+    context: Arc<PluginContext>,
+}
 
 impl PanicSafePlan {
-    fn wrap(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        Arc::new(Self(plan))
+    fn wrap(plan: Arc<dyn ExecutionPlan>, context: &Arc<PluginContext>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(Self {
+            inner: plan,
+            context: Arc::clone(context),
+        })
     }
 }
 
 impl fmt::Debug for PanicSafePlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        self.inner.fmt(f)
     }
 }
 
 impl DisplayAs for PanicSafePlan {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt_as(t, f)
+        self.inner.fmt_as(t, f)
     }
 }
 
 impl ExecutionPlan for PanicSafePlan {
     fn name(&self) -> &str {
-        self.0.name()
+        self.inner.name()
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
-        self.0.properties()
+        self.inner.properties()
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        self.0.children()
+        self.inner.children()
     }
 
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let inner = Arc::clone(&self.0);
-        guarded("plan", || inner.with_new_children(children)).map(Self::wrap)
+        let inner = Arc::clone(&self.inner);
+        guarded("plan", || inner.with_new_children(children))
+            .map(|plan| Self::wrap(plan, &self.context))
     }
 
     fn execute(
@@ -227,14 +291,71 @@ impl ExecutionPlan for PanicSafePlan {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        guarded("plan execute", || self.0.execute(partition, context)).map(panic_safe_stream)
+        let stream = guarded("plan execute", || self.inner.execute(partition, context))?;
+        Ok(Box::pin(KeepAlive {
+            inner: panic_safe_stream(stream),
+            _context: Arc::clone(&self.context),
+        }))
     }
 
     fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
-        catch_unwind(AssertUnwindSafe(|| self.0.metrics())).unwrap_or(None)
+        catch_unwind(AssertUnwindSafe(|| self.inner.metrics())).unwrap_or(None)
     }
 
     fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
-        guarded("plan statistics", || self.0.partition_statistics(partition))
+        guarded("plan statistics", || {
+            self.inner.partition_statistics(partition)
+        })
+    }
+}
+
+/// A stream that keeps the plugin context alive. A stream can outlive its plan.
+struct KeepAlive {
+    // Fields drop in this order: the stream before the runtime.
+    inner: SendableRecordBatchStream,
+    _context: Arc<PluginContext>,
+}
+
+impl futures::Stream for KeepAlive {
+    type Item = Result<datafusion::arrow::array::RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl datafusion::physical_plan::RecordBatchStream for KeepAlive {
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::PluginContext;
+
+    #[test]
+    // Under Miri the runtime has no worker thread to run a spawn.
+    #[cfg_attr(miri, ignore)]
+    fn each_context_has_its_own_runtime() {
+        let first = PluginContext::new();
+        let second = PluginContext::new();
+        assert!(!Arc::ptr_eq(&first, &second));
+        let handle = second.handle();
+        drop(first);
+        // The second runtime still runs after the first one stops.
+        let value = futures::executor::block_on(handle.spawn(async { 7 })).unwrap();
+        assert_eq!(value, 7);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_context_drops_inside_its_own_runtime() {
+        let context = PluginContext::new();
+        let handle = context.handle();
+        // The last owner drops on a worker thread of the runtime itself.
+        futures::executor::block_on(handle.spawn(async move { drop(context) })).unwrap();
     }
 }

@@ -17,10 +17,11 @@ use datafusion_ffi::table_provider_factory::{
 use datafusion_ffi::util::FFI_Result;
 use stabby::string::String as SString;
 use stabby::vec::Vec as SVec;
+use tokio::runtime::Handle;
 
 use crate::panic_safe::panic_message;
 use crate::{ABI_VERSION, sdk_abi_version};
-use runtime::{RuntimeFactory, plugin_runtime, plugin_task_ctx_provider};
+use runtime::{PluginContext, RuntimeFactory};
 
 /// A table type that a plugin exports: the `STORED AS` name and its factory.
 #[derive(Debug, Clone)]
@@ -29,6 +30,8 @@ pub struct TableType {
     pub name: String,
     /// Makes the table of each `CREATE EXTERNAL TABLE`.
     pub factory: Arc<dyn TableProviderFactory>,
+    /// The runtime for the table code. `None` lets the SDK start one for each export.
+    pub runtime: Option<Handle>,
 }
 
 impl TableType {
@@ -37,7 +40,14 @@ impl TableType {
         Self {
             name: name.into(),
             factory,
+            runtime: None,
         }
+    }
+
+    /// Runs the table code in the runtime of `handle`. The author owns and stops it.
+    pub fn with_runtime(mut self, handle: Handle) -> Self {
+        self.runtime = Some(handle);
+        self
     }
 }
 
@@ -58,26 +68,36 @@ pub const TABLE_TYPES_SYMBOL: &[u8] = b"beacon_plugin_table_types\0";
 /// The type of the [`TABLE_TYPES_SYMBOL`] function.
 pub type TableTypesFn = extern "C" fn() -> FFI_Result<SVec<FFI_PluginTableType>>;
 
-fn export_table_type(table_type: TableType) -> FFI_PluginTableType {
-    let factory = Arc::new(RuntimeFactory(table_type.factory));
+fn export_table_type(table_type: TableType, context: &Arc<PluginContext>) -> FFI_PluginTableType {
+    let factory = Arc::new(RuntimeFactory::new(table_type.factory, Arc::clone(context)));
     FFI_PluginTableType {
         version: sdk_abi_version,
         name: SString::from(table_type.name.as_str()),
         factory: FFI_TableProviderFactory::new(
             factory,
-            Some(plugin_runtime().handle().clone()),
-            plugin_task_ctx_provider(),
+            Some(context.handle()),
+            context.task_ctx_provider(),
             None,
         ),
     }
 }
 
 /// Exports the table types that `make` returns. A panic becomes an error.
+///
+/// Each call starts its own plugin runtime, so each Beacon instance in a process has one.
+/// The runtime stops when the last factory, table, plan and stream of the call drops.
+/// A type with [`TableType::with_runtime`] uses that runtime instead.
 pub fn export_table_types(make: fn() -> Vec<TableType>) -> FFI_Result<SVec<FFI_PluginTableType>> {
     let exported = catch_unwind(AssertUnwindSafe(|| {
+        // The SDK starts a runtime only when a type has none.
+        let mut shared: Option<Arc<PluginContext>> = None;
         let mut out = SVec::new();
-        for table_type in make() {
-            out.push(export_table_type(table_type));
+        for mut table_type in make() {
+            let context = match table_type.runtime.take() {
+                Some(handle) => PluginContext::with_handle(handle),
+                None => Arc::clone(shared.get_or_insert_with(PluginContext::new)),
+            };
+            out.push(export_table_type(table_type, &context));
         }
         out
     }));

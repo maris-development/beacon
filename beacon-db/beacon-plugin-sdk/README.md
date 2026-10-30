@@ -265,6 +265,8 @@ INSERT INTO readings VALUES (1.5);
 
 - The table gets no Beacon object store. Open your own connections.
 - The SDK runs `create`, `scan`, `insert_into` and the output streams inside a tokio runtime of the plugin. Tokio I/O, `tokio::spawn` and `tokio::time` work there.
+- Each Beacon instance in a process gets its own runtime, also when the instances share the plugin library. Do not keep state of one instance in a `static`.
+- To control the runtime, such as its thread count, build it in the `tables` function and call `TableType::with_runtime(handle)`. The SDK then starts no runtime for that type. Keep the runtime in your factory, and stop it with `shutdown_background` in `Drop`: the last owner can drop inside a runtime.
 - Filters arrive as DataFusion expressions. Beacon sends only filters that use DataFusion functions. Beacon applies the other filters itself.
 - A panic in a call, a future or a stream becomes a query error.
 
