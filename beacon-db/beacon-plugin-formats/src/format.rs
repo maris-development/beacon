@@ -6,21 +6,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use beacon_plugin_sdk::file_format::{FormatFactory, FormatReader, OutputKind, ScanRequest};
+use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::Session;
-use datafusion::common::{Statistics, exec_err, plan_err};
+use datafusion::common::{Statistics, exec_err, not_impl_err, plan_err};
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
-use datafusion::datasource::physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSource};
+use datafusion::datasource::physical_plan::{
+    FileOutputMode, FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource,
+};
+use datafusion::datasource::sink::DataSinkExec;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::table_schema::TableSchema;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::SendableRecordBatchStream;
+use datafusion::logical_expr::dml::InsertOp;
+use datafusion::physical_expr::expressions::col;
+use datafusion::physical_expr::{LexRequirement, PhysicalSortRequirement};
 use datafusion::physical_plan::ExecutionPlan;
 use futures::{StreamExt, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::nd::encoded_partition_cols;
+use crate::sink::PluginFileSink;
 use crate::source::PluginFileSource;
 use beacon_datafusion_ext::nd::encoding::encoded_schema;
 use beacon_datafusion_ext::nd::exec::{NdBroadcastExec, NdSourceExec};
@@ -34,7 +42,6 @@ pub struct PluginFileFormat {
     pub(crate) ext: String,
     /// The options the plugin got.
     pub(crate) options: HashMap<String, String>,
-    #[allow(dead_code)] // read by the write path
     pub(crate) single_file_output: Option<bool>,
     /// Only a format for the file analyzer computes statistics.
     pub(crate) statistics: bool,
@@ -59,6 +66,30 @@ impl PluginFileFormat {
 
     fn context(&self, error: DataFusionError) -> DataFusionError {
         error.context(format!("file format {}", self.name()))
+    }
+
+    /// The input sort order that the plugin writer asks for, or `None`.
+    fn write_requirement(&self, schema: &SchemaRef) -> Result<Option<LexRequirement>> {
+        let keys = self
+            .reader
+            .write_ordering(Arc::clone(schema))
+            .map_err(|e| self.context(e))?;
+        let mut requirements = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Ok(expr) = col(&key.column, schema) else {
+                return plan_err!(
+                    "file format {}: the write ordering names column `{}`, which is not in the input",
+                    self.name(),
+                    key.column
+                );
+            };
+            let options = SortOptions {
+                descending: key.descending,
+                nulls_first: key.nulls_first,
+            };
+            requirements.push(PhysicalSortRequirement::new(expr, Some(options)));
+        }
+        Ok(LexRequirement::new(requirements))
     }
 
     fn ensure_installed(&self) -> Result<()> {
@@ -218,6 +249,44 @@ impl FileFormat for PluginFileFormat {
                 Ok(Arc::new(NdBroadcastExec::try_new(nd_source)?))
             }
         }
+    }
+
+    async fn create_writer_physical_plan(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        _state: &dyn Session,
+        mut conf: FileSinkConfig,
+        order_requirements: Option<LexRequirement>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.ensure_installed()?;
+        let name = self.name();
+        if !self.factory.can_write() {
+            return not_impl_err!("file format {name} cannot write");
+        }
+        if conf.insert_op != InsertOp::Append {
+            return not_impl_err!("file format {name} supports only COPY and append writes");
+        }
+        if let Some(single) = self.single_file_output {
+            conf.file_output_mode = if single {
+                FileOutputMode::SingleFile
+            } else {
+                FileOutputMode::Directory
+            };
+        }
+        let requirement = self
+            .write_requirement(&input.schema())?
+            .or(order_requirements);
+        let sink = PluginFileSink::new(
+            conf,
+            name.to_string(),
+            Arc::clone(&self.reader),
+            self.factory.split_output(),
+        );
+        Ok(Arc::new(DataSinkExec::new(
+            input,
+            Arc::new(sink),
+            requirement,
+        )))
     }
 
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
