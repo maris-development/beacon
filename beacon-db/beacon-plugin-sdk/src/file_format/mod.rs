@@ -16,6 +16,7 @@ pub use factory::{
 pub use foreign::ForeignFormatReader;
 pub use reader::FormatReader;
 pub use statistics::{decode_statistics, encode_statistics};
+pub(crate) use stream::panic_safe_stream;
 pub use stream::{export_batch_stream, export_batch_stream_entered, import_batch_stream};
 pub use types::{
     ArgKind, ArgSpec, FFI_ArgSpec, FFI_ScanRequest, FFI_SortKey, FFI_WriteRequest, OutputKind,

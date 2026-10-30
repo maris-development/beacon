@@ -7,6 +7,7 @@ pub mod file_format;
 pub mod object_store;
 mod panic_safe;
 pub mod scalar_functions;
+pub mod table_type;
 
 pub use beacon_nd_encoding as nd;
 pub use datafusion;
@@ -19,7 +20,7 @@ pub use stabby;
 /// It is the one version of all FFI types of the SDK: each table reports it in its
 /// `version` field, and an import refuses a table with another value. Increase it on
 /// any change of a table layout, of an FFI enum value, or of the `beacon.nd` encoding.
-pub const BEACON_PLUGIN_SDK_ABI: u32 = 5;
+pub const BEACON_PLUGIN_SDK_ABI: u32 = 6;
 
 /// [`BEACON_PLUGIN_SDK_ABI`] as the tables carry it.
 pub(crate) const ABI_VERSION: u64 = BEACON_PLUGIN_SDK_ABI as u64;
@@ -49,15 +50,16 @@ pub type AbiFn = extern "C" fn() -> BeaconPluginAbi;
 ///
 /// `scalar` names a `fn() -> Vec<ScalarUDF>` that returns the scalar functions.
 /// `formats` names a `fn() -> Vec<Arc<dyn FormatFactory>>` that returns the file formats.
-/// Give one key or both.
+/// `tables` names a `fn() -> Vec<TableType>` that returns the table types.
+/// Give one key or more, in any order.
 ///
 /// ```ignore
-/// beacon_plugin_sdk::export_plugin!(scalar = functions, formats = file_formats);
+/// beacon_plugin_sdk::export_plugin!(scalar = functions, formats = file_formats, tables = table_types);
 /// ```
 #[macro_export]
 macro_rules! export_plugin {
     // Hidden arm: sets the ABI values, for mismatch tests.
-    (@abi $sdk_abi:expr, $ffi_major:expr $(, scalar = $scalar:path)? $(, formats = $formats:path)?) => {
+    (@abi $sdk_abi:expr, $ffi_major:expr $(, $key:ident = $value:path)+ $(,)?) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn beacon_plugin_abi() -> $crate::BeaconPluginAbi {
             $crate::BeaconPluginAbi {
@@ -66,46 +68,47 @@ macro_rules! export_plugin {
             }
         }
 
-        $(
-            #[unsafe(no_mangle)]
-            pub extern "C" fn beacon_plugin_scalar_functions()
-            -> $crate::datafusion_ffi::util::FFI_Result<
-                $crate::stabby::vec::Vec<$crate::scalar_functions::FFI_ScalarFunction>,
-            > {
-                $crate::scalar_functions::export_scalar_functions($scalar)
-            }
-        )?
-
-        $(
-            #[unsafe(no_mangle)]
-            pub extern "C" fn beacon_plugin_file_formats()
-            -> $crate::datafusion_ffi::util::FFI_Result<
-                $crate::stabby::vec::Vec<$crate::file_format::FFI_FileFormatFactory>,
-            > {
-                $crate::file_format::export_file_formats($formats)
-            }
-        )?
+        $( $crate::export_plugin!(@symbol $key $value); )+
     };
-    (scalar = $scalar:path) => {
+    (@symbol scalar $scalar:path) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn beacon_plugin_scalar_functions()
+        -> $crate::datafusion_ffi::util::FFI_Result<
+            $crate::stabby::vec::Vec<$crate::scalar_functions::FFI_ScalarFunction>,
+        > {
+            $crate::scalar_functions::export_scalar_functions($scalar)
+        }
+    };
+    (@symbol formats $formats:path) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn beacon_plugin_file_formats()
+        -> $crate::datafusion_ffi::util::FFI_Result<
+            $crate::stabby::vec::Vec<$crate::file_format::FFI_FileFormatFactory>,
+        > {
+            $crate::file_format::export_file_formats($formats)
+        }
+    };
+    (@symbol tables $tables:path) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn beacon_plugin_table_types()
+        -> $crate::datafusion_ffi::util::FFI_Result<
+            $crate::stabby::vec::Vec<$crate::table_type::FFI_PluginTableType>,
+        > {
+            $crate::table_type::export_table_types($tables)
+        }
+    };
+    (@symbol $other:ident $value:path) => {
+        compile_error!(concat!(
+            "unknown export_plugin! key `",
+            stringify!($other),
+            "`: use scalar, formats or tables"
+        ));
+    };
+    ($($key:ident = $value:path),+ $(,)?) => {
         $crate::export_plugin!(
             @abi $crate::BEACON_PLUGIN_SDK_ABI,
-            $crate::datafusion_ffi::version(),
-            scalar = $scalar
-        );
-    };
-    (formats = $formats:path) => {
-        $crate::export_plugin!(
-            @abi $crate::BEACON_PLUGIN_SDK_ABI,
-            $crate::datafusion_ffi::version(),
-            formats = $formats
-        );
-    };
-    (scalar = $scalar:path, formats = $formats:path) => {
-        $crate::export_plugin!(
-            @abi $crate::BEACON_PLUGIN_SDK_ABI,
-            $crate::datafusion_ffi::version(),
-            scalar = $scalar,
-            formats = $formats
+            $crate::datafusion_ffi::version()
+            $(, $key = $value)+
         );
     };
 }
@@ -119,8 +122,14 @@ mod tests {
     use crate::file_format::factory_tests::make_formats;
     use crate::scalar_functions::ScalarFunctionsFn;
     use crate::scalar_functions::tests::make_functions;
+    use crate::table_type::TableTypesFn;
+    use crate::table_type::tests::make_tables;
 
-    crate::export_plugin!(scalar = make_functions, formats = make_formats);
+    crate::export_plugin!(
+        scalar = make_functions,
+        formats = make_formats,
+        tables = make_tables
+    );
 
     #[test]
     fn export_plugin_generates_the_symbols() {
@@ -131,6 +140,11 @@ mod tests {
             panic!("expected formats");
         };
         assert_eq!(formats.len(), 2);
+        let tables: TableTypesFn = beacon_plugin_table_types;
+        let FFI_Result::Ok(tables) = tables() else {
+            panic!("expected table types");
+        };
+        assert_eq!(tables.len(), 1);
         assert_eq!(
             abi(),
             BeaconPluginAbi {
