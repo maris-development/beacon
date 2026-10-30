@@ -33,7 +33,12 @@ use crate::panic_safe::panic_message;
 /// does not drive plugin I/O.
 pub(crate) fn plugin_runtime() -> &'static Runtime {
     static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
-        tokio::runtime::Builder::new_multi_thread()
+        #[cfg(not(miri))]
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        // Miri refuses threads that live to the end, and a current-thread runtime starts none.
+        #[cfg(miri)]
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder
             .thread_name("beacon-plugin")
             .enable_all()
             .build()

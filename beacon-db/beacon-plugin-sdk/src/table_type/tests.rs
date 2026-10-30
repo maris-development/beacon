@@ -177,6 +177,8 @@ async fn insert_into_reaches_the_plugin_provider() {
 }
 
 #[test]
+// Under Miri the plugin runtime has no worker thread to run the spawn.
+#[cfg_attr(miri, ignore)]
 fn create_runs_inside_the_plugin_runtime() {
     // No tokio runtime on this thread: only the plugin runtime can run the spawn.
     let factory = one_type(Mode::Spawn);
