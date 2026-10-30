@@ -8,16 +8,19 @@ use beacon_plugin_sdk::file_format::{FFI_FileFormatFactory, FileFormatsFn, FILE_
 use beacon_plugin_sdk::scalar_functions::{
     import_scalar_function, ScalarFunctionsFn, SCALAR_FUNCTIONS_SYMBOL,
 };
+use beacon_plugin_sdk::table_type::{FFI_PluginTableType, TableTypesFn, TABLE_TYPES_SYMBOL};
 use beacon_plugin_sdk::{AbiFn, ABI_SYMBOL, BEACON_PLUGIN_SDK_ABI};
 use datafusion::logical_expr::ScalarUDF;
 use parking_lot::Mutex;
 
-/// What a native library exports. A library has functions, file formats or both.
+/// What a native library exports: functions, file formats, table types, or a mix.
 pub struct NativeExports {
     /// The scalar functions.
     pub functions: Vec<ScalarUDF>,
     /// The file format factories. The host imports them with its runtime handle.
     pub formats: Vec<FFI_FileFormatFactory>,
+    /// The table types.
+    pub table_types: Vec<FFI_PluginTableType>,
 }
 
 impl std::fmt::Debug for NativeExports {
@@ -25,6 +28,7 @@ impl std::fmt::Debug for NativeExports {
         f.debug_struct("NativeExports")
             .field("functions", &self.functions.len())
             .field("formats", &self.formats.len())
+            .field("table_types", &self.table_types.len())
             .finish()
     }
 }
@@ -84,17 +88,17 @@ fn missing_library(path: &Path) -> anyhow::Error {
     }
 }
 
-fn require_exports(has_functions: bool, has_formats: bool) -> anyhow::Result<()> {
+fn require_exports(has_functions: bool, has_formats: bool, has_tables: bool) -> anyhow::Result<()> {
     anyhow::ensure!(
-        has_functions || has_formats,
-        "plugin exports no functions and no file formats"
+        has_functions || has_formats || has_tables,
+        "plugin exports no functions, no file formats and no table types"
     );
     Ok(())
 }
 
 fn exports(library: &libloading::Library) -> anyhow::Result<NativeExports> {
     // SAFETY: the SDK exports these symbols with these types.
-    let (abi, functions, formats) = unsafe {
+    let (abi, functions, formats, tables) = unsafe {
         let abi = *library
             .get::<AbiFn>(ABI_SYMBOL)
             .context("the library has no beacon_plugin_abi symbol")?;
@@ -106,7 +110,11 @@ fn exports(library: &libloading::Library) -> anyhow::Result<NativeExports> {
             .get::<FileFormatsFn>(FILE_FORMATS_SYMBOL)
             .ok()
             .map(|symbol| *symbol);
-        (abi, functions, formats)
+        let tables = library
+            .get::<TableTypesFn>(TABLE_TYPES_SYMBOL)
+            .ok()
+            .map(|symbol| *symbol);
+        (abi, functions, formats, tables)
     };
     let abi = abi();
     anyhow::ensure!(
@@ -120,7 +128,7 @@ fn exports(library: &libloading::Library) -> anyhow::Result<NativeExports> {
         "plugin built for DataFusion FFI {}, Beacon has {ffi_major}",
         abi.ffi_major
     );
-    require_exports(functions.is_some(), formats.is_some())?;
+    require_exports(functions.is_some(), formats.is_some(), tables.is_some())?;
     let functions = match functions.map(|make| make()) {
         None => Vec::new(),
         Some(FFI_Result::Ok(list)) => list.into_iter().map(import_scalar_function).collect(),
@@ -131,7 +139,16 @@ fn exports(library: &libloading::Library) -> anyhow::Result<NativeExports> {
         Some(FFI_Result::Ok(list)) => list.into_iter().collect(),
         Some(FFI_Result::Err(message)) => anyhow::bail!("plugin file formats failed: {message}"),
     };
-    Ok(NativeExports { functions, formats })
+    let table_types = match tables.map(|make| make()) {
+        None => Vec::new(),
+        Some(FFI_Result::Ok(list)) => list.into_iter().collect(),
+        Some(FFI_Result::Err(message)) => anyhow::bail!("plugin table types failed: {message}"),
+    };
+    Ok(NativeExports {
+        functions,
+        formats,
+        table_types,
+    })
 }
 
 #[cfg(test)]
@@ -139,12 +156,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exports_need_functions_or_formats() {
-        let err = require_exports(false, false).unwrap_err().to_string();
-        assert_eq!(err, "plugin exports no functions and no file formats");
-        assert!(require_exports(true, false).is_ok());
-        assert!(require_exports(false, true).is_ok());
-        assert!(require_exports(true, true).is_ok());
+    fn exports_need_at_least_one_kind() {
+        let err = require_exports(false, false, false)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "plugin exports no functions, no file formats and no table types"
+        );
+        assert!(require_exports(true, false, false).is_ok());
+        assert!(require_exports(false, true, false).is_ok());
+        assert!(require_exports(false, false, true).is_ok());
     }
 
     #[test]
