@@ -25,7 +25,7 @@ async-ffi = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
-tokio = { version = "1.47.1", default-features = false, features = ["rt", "sync"] }
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
 chrono = { version = "0.4.41", default-features = false }
 form_urlencoded = "1.2.2"
 tracing = { workspace = true }

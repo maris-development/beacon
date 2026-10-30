@@ -1825,6 +1825,7 @@ dependencies = [
  "beacon-plugin-formats",
  "beacon-plugin-registry",
  "beacon-plugin-sdk",
+ "beacon-plugin-tables",
  "beacon-redb-store",
  "beacon-sql-databases",
  "bytes",
@@ -2272,6 +2273,24 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "beacon-plugin-tables"
+version = "2.1.0-rc.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "beacon-datafusion-ext",
+ "beacon-plugin-formats",
+ "beacon-plugin-sdk",
+ "datafusion 54.1.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "typetag",
 ]
 
 [[package]]

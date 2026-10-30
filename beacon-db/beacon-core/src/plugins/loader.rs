@@ -35,6 +35,9 @@ use beacon_plugin_formats::{
     check_formats, function_names, import_formats, install_formats, uninstall_formats,
     InstalledFormats, PluginFileFormatFactory,
 };
+use beacon_plugin_tables::{
+    check_table_types, import_table_types, InstalledTableTypes, PluginTableType,
+};
 use tokio::runtime::Handle;
 
 /// A plugin that passed every check and has registered nothing yet.
@@ -45,6 +48,39 @@ pub(crate) struct LoadedPlugin {
     native_names: Vec<String>,
     /// The file formats of the native library.
     formats: Vec<PluginFileFormatFactory>,
+    /// The table types of the native library.
+    table_types: Vec<PluginTableType>,
+}
+
+/// Checks the table types of a plugin. A file format and a table type never share a name.
+fn check_plugin_table_types(
+    state: &SessionState,
+    plugin: &str,
+    formats: &[PluginFileFormatFactory],
+    table_types: &[PluginTableType],
+) -> anyhow::Result<()> {
+    let installed = state
+        .config()
+        .get_extension::<InstalledTableTypes>()
+        .unwrap_or_default();
+    for format in formats {
+        if let Some((owner, _)) = installed.find(format.name()) {
+            anyhow::bail!(
+                "file format `{}` of plugin '{plugin}' collides with a table type of plugin '{owner}'",
+                format.name()
+            );
+        }
+    }
+    for table_type in table_types {
+        if formats.iter().any(|f| f.name() == table_type.name()) {
+            anyhow::bail!(
+                "table type `{}` of plugin '{plugin}' collides with a file format of the same plugin",
+                table_type.name()
+            );
+        }
+    }
+    check_table_types(state, &installed, table_types)
+        .with_context(|| format!("a table type of plugin '{plugin}'"))
 }
 
 /// The name of `udf` and its aliases.
@@ -143,6 +179,7 @@ pub(crate) fn prepare(
     let mut udfs = Vec::new();
     let mut native_names = Vec::new();
     let mut formats = Vec::new();
+    let mut table_types = Vec::new();
     // Native functions first, so the plugin SQL can call them.
     if let Some(native) = &manifest.native {
         let path = dir.join("lib").join(library_file_name(&native.library));
@@ -150,6 +187,8 @@ pub(crate) fn prepare(
         formats = import_formats(exports.formats, Handle::current())?;
         check_formats(&state, &formats)
             .with_context(|| format!("a file format of plugin '{expected_name}'"))?;
+        table_types = import_table_types(exports.table_types)?;
+        check_plugin_table_types(&state, expected_name, &formats, &table_types)?;
         for udf in exports.functions {
             let names = names_of(&udf);
             for name in &names {
@@ -195,7 +234,37 @@ pub(crate) fn prepare(
         udfs,
         native_names,
         formats,
+        table_types,
     })
+}
+
+/// Registers the table types of `plugin` for `STORED AS`.
+fn commit_table_types(session: &SessionContext, plugin: &str, table_types: Vec<PluginTableType>) {
+    if table_types.is_empty() {
+        return;
+    }
+    let Some(installed) = session
+        .state()
+        .config()
+        .get_extension::<InstalledTableTypes>()
+    else {
+        tracing::error!("Cannot register the table types of plugin '{plugin}': no registry");
+        return;
+    };
+    let names: Vec<&str> = table_types.iter().map(|t| t.name()).collect();
+    tracing::info!("Loaded table types {names:?} of plugin '{plugin}'");
+    installed.insert(plugin, table_types);
+}
+
+/// Removes the table types of `plugin`. Its tables fail from now on.
+fn uninstall_plugin_table_types(session: &SessionContext, plugin: &str) {
+    if let Some(installed) = session
+        .state()
+        .config()
+        .get_extension::<InstalledTableTypes>()
+    {
+        installed.take(plugin);
+    }
 }
 
 /// Registers the file formats of `plugin`: `STORED AS`, `read_<name>` and `read_<name>_schema`.
@@ -284,6 +353,7 @@ pub(crate) fn commit(
         session.register_udf(udf);
     }
     commit_formats(session, &record.name, plugin.formats);
+    commit_table_types(session, &record.name, plugin.table_types);
     tracing::info!(
         "Loaded plugin '{}' {} with functions {names:?}",
         record.name,
@@ -508,6 +578,7 @@ pub(crate) async fn uninstall(
         session.deregister_udf(function);
     }
     uninstall_plugin_formats(session, name);
+    uninstall_plugin_table_types(session, name);
     registry.remove_native_functions(&names);
     registry.release_claim(name, &names);
     registry.set_uninstalled(name);

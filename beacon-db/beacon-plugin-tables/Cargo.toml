@@ -1,0 +1,24 @@
+[package]
+name = "beacon-plugin-tables"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Turns table type plugins into external tables in Beacon"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+[dependencies]
+beacon-plugin-sdk = { path = "../beacon-plugin-sdk" }
+beacon-plugin-formats = { path = "../beacon-plugin-formats" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+datafusion = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+typetag = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true }

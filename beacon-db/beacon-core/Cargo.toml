@@ -78,6 +78,7 @@ beacon-nd-execution = { path = "../beacon-nd-execution" }
 beacon-plugin-registry = { path = "../beacon-plugin-registry" }
 beacon-plugin-sdk = { path = "../beacon-plugin-sdk" }
 beacon-plugin-formats = { path = "../beacon-plugin-formats" }
+beacon-plugin-tables = { path = "../beacon-plugin-tables" }
 beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
 beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
