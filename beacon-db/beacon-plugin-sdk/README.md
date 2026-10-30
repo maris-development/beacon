@@ -1,7 +1,7 @@
 # beacon-plugin-sdk
 
 This crate is the SDK for Beacon native function plugins.
-A native plugin is a dynamic library that adds scalar functions to Beacon.
+A native plugin is a dynamic library that adds scalar functions, file formats or table types to Beacon.
 The plugin depends only on this crate.
 The crate re-exports `datafusion`, `datafusion_ffi`, `datafusion_proto` and `stabby`.
 Use these copies. Then the versions match the version in Beacon.
@@ -202,6 +202,69 @@ Beacon does the work for many files:
 - When `WriteRequest::local_path` is set, write the whole output to that path. Beacon uploads it when necessary. Do not write through the store then.
 - When `local_path` is not set, write through the store. Use a multipart upload for a large file.
 - Remove your own spool files, also on an error.
+- A panic in a call, a future or a stream becomes a query error.
+
+## Table types
+
+The `table_type` module lets a plugin add an external table type, such as a remote catalog or a web service.
+Implement a DataFusion `TableProviderFactory`. Give it a name in a `TableType`.
+Export the types with the `tables` key.
+
+```rust,no_run
+use std::sync::Arc;
+
+use beacon_plugin_sdk::datafusion::arrow::datatypes::{DataType, Field, Schema};
+use beacon_plugin_sdk::datafusion::catalog::{Session, TableProvider, TableProviderFactory};
+use beacon_plugin_sdk::datafusion::datasource::MemTable;
+use beacon_plugin_sdk::datafusion::error::Result;
+use beacon_plugin_sdk::datafusion::logical_expr::CreateExternalTable;
+use beacon_plugin_sdk::table_type::{TableType, table_option};
+
+#[derive(Debug)]
+struct Sensors;
+
+#[async_trait::async_trait]
+impl TableProviderFactory for Sensors {
+    async fn create(
+        &self,
+        _state: &dyn Session,
+        cmd: &CreateExternalTable,
+    ) -> Result<Arc<dyn TableProvider>> {
+        let _url = &cmd.location;
+        let _token = table_option(cmd, "token");
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Float64, true)]));
+        Ok(Arc::new(MemTable::try_new(schema, vec![vec![]])?))
+    }
+}
+
+fn table_types() -> Vec<TableType> {
+    vec![TableType::new("sensors", Arc::new(Sensors))]
+}
+
+beacon_plugin_sdk::export_plugin!(tables = table_types);
+```
+
+The user then creates a table:
+
+```sql
+CREATE EXTERNAL TABLE readings STORED AS sensors
+LOCATION 'https://example.com/api' OPTIONS ('token' 'abc');
+SELECT * FROM readings;
+INSERT INTO readings VALUES (1.5);
+```
+
+- `cmd` has the table name, `LOCATION`, `OPTIONS`, the column list and `PARTITIONED BY`.
+- DataFusion prefixes an option key without a `.` with `format.`. `table_option` reads both forms.
+- `SELECT` calls `scan`. `INSERT INTO` calls `insert_into`. The DataFusion default of `insert_into` refuses the write.
+- `DELETE` and `UPDATE` are not available on plugin tables.
+- A name must be lower case `[a-z0-9_]+`. It must not equal a Beacon table type or a file format.
+- Beacon stores the table and calls `create` again at each start. When the plugin is missing, Beacon skips the table and keeps its definition.
+
+### Rules for table code
+
+- The table gets no Beacon object store. Open your own connections.
+- The SDK runs `create`, `scan`, `insert_into` and the output streams inside a tokio runtime of the plugin. Tokio I/O, `tokio::spawn` and `tokio::time` work there.
+- Filters arrive as DataFusion expressions. Beacon sends only filters that use DataFusion functions. Beacon applies the other filters itself.
 - A panic in a call, a future or a stream becomes a query error.
 
 ## Rules

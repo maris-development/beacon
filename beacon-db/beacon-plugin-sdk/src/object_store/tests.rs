@@ -90,7 +90,7 @@ async fn multipart_with_wrong_version_is_refused() {
     assert!(
         error
             .to_string()
-            .contains("multipart upload FFI version 3 is not supported (want 5)"),
+            .contains("multipart upload FFI version 3 is not supported (want 6)"),
         "{error}"
     );
 }
@@ -128,7 +128,7 @@ async fn wrong_version_is_refused() {
     assert!(
         error
             .to_string()
-            .contains("object store FFI version 3 is not supported (want 5)")
+            .contains("object store FFI version 3 is not supported (want 6)")
     );
 }
 

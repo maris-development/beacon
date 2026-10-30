@@ -82,12 +82,16 @@ pub fn export_batch_stream_entered(
 }
 
 fn export_with(stream: SendableRecordBatchStream, handle: Option<Handle>) -> FFI_RecordBatchStream {
+    FFI_RecordBatchStream::new(panic_safe_stream(stream), handle)
+}
+
+/// Wraps `stream`: a panic in its poll becomes one error item, and a panic in its drop is caught.
+pub(crate) fn panic_safe_stream(stream: SendableRecordBatchStream) -> SendableRecordBatchStream {
     let schema = stream.schema();
-    let safe = PanicSafeStream {
+    Box::pin(PanicSafeStream {
         schema,
         inner: Some(stream),
-    };
-    FFI_RecordBatchStream::new(Box::pin(safe), handle)
+    })
 }
 
 /// Imports a stream from [`export_batch_stream`].
