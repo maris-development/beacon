@@ -3,6 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_plugin_sdk::datafusion_ffi::util::FFI_Result;
+use beacon_plugin_sdk::nd::encoding::{encode_nd_record_batch, nd_encoded_field};
+use beacon_plugin_sdk::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
 use beacon_plugin_sdk::table_type::{TableType, export_table_types};
 use datafusion::arrow::array::{Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -18,7 +20,7 @@ use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties, collect}
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::{
-    InstalledTableTypes, PluginTableDefinition, PluginTableType, check_table_types,
+    InstalledTableTypes, PluginTable, PluginTableDefinition, PluginTableType, check_table_types,
     create_plugin_table, import_table_types,
 };
 
@@ -250,6 +252,207 @@ async fn the_definition_round_trips_and_rebuilds() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("table type 'greedy' is not loaded"), "{err}");
+}
+
+/// A memory table of nd-encoded batches that claims `Exact` for every filter.
+#[derive(Debug)]
+struct NdExact(Arc<dyn TableProvider>);
+
+#[async_trait]
+impl TableProvider for NdExact {
+    fn schema(&self) -> SchemaRef {
+        self.0.schema()
+    }
+
+    fn table_type(&self) -> DfTableType {
+        DfTableType::Base
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> Result<Vec<TableProviderFilterPushDown>> {
+        Ok(vec![TableProviderFilterPushDown::Exact; filters.len()])
+    }
+
+    async fn scan(
+        &self,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.0.scan(state, projection, &[], limit).await
+    }
+}
+
+/// `grid` makes a 2x3 grid: `y` over 2 rows, `x` over 3 columns and `v = y * 10 + x`.
+/// `mixed` makes one nd column and one plain column.
+#[derive(Debug)]
+struct NdFactory {
+    mixed: bool,
+}
+
+fn nd_grid() -> RecordBatch {
+    let dims = |spec: &[(&str, usize)]| {
+        Dimensions::try_new(
+            spec.iter()
+                .map(|(name, size)| Dimension::new(*name, *size))
+                .collect(),
+        )
+        .unwrap()
+    };
+    let logical = Arc::new(Schema::new(vec![
+        Field::new("y", DataType::Int64, true),
+        Field::new("x", DataType::Int64, true),
+        Field::new("v", DataType::Int64, true),
+    ]));
+    let columns = vec![
+        NdArrowArray::try_new(Arc::new(Int64Array::from(vec![1, 2])), dims(&[("y", 2)])).unwrap(),
+        NdArrowArray::try_new(Arc::new(Int64Array::from(vec![1, 2, 3])), dims(&[("x", 3)]))
+            .unwrap(),
+        NdArrowArray::try_new(
+            Arc::new(Int64Array::from(vec![11, 12, 13, 21, 22, 23])),
+            dims(&[("y", 2), ("x", 3)]),
+        )
+        .unwrap(),
+    ];
+    let nd = NdRecordBatch::try_new(logical, columns, dims(&[("y", 2), ("x", 3)])).unwrap();
+    encode_nd_record_batch(&nd).unwrap()
+}
+
+#[async_trait]
+impl TableProviderFactory for NdFactory {
+    async fn create(
+        &self,
+        _state: &dyn Session,
+        _cmd: &CreateExternalTable,
+    ) -> Result<Arc<dyn TableProvider>> {
+        if self.mixed {
+            let schema = Arc::new(Schema::new(vec![
+                nd_encoded_field("y", &DataType::Int64),
+                Field::new("name", DataType::Utf8, true),
+            ]));
+            return Ok(Arc::new(MemTable::try_new(schema, vec![vec![]])?));
+        }
+        let batch = nd_grid();
+        let table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
+        Ok(Arc::new(NdExact(Arc::new(table))))
+    }
+}
+
+/// The `ndgrid` and `ndmixed` types, through the FFI export and import.
+fn foreign_nd_types() -> Vec<PluginTableType> {
+    let FFI_Result::Ok(ffi) = export_table_types(|| {
+        vec![
+            TableType::new("ndgrid", Arc::new(NdFactory { mixed: false })),
+            TableType::new("ndmixed", Arc::new(NdFactory { mixed: true })),
+        ]
+    }) else {
+        panic!("export failed");
+    };
+    import_table_types(ffi.into_iter().collect()).unwrap()
+}
+
+async fn nd_session() -> (Arc<SessionContext>, Arc<InstalledTableTypes>) {
+    let installed = Arc::new(InstalledTableTypes::default());
+    installed.insert("p", foreign_nd_types());
+    (session(installed.clone()), installed)
+}
+
+async fn nd_table(ctx: &SessionContext, installed: &InstalledTableTypes) -> Arc<PluginTable> {
+    let cmd = command(ctx, "CREATE EXTERNAL TABLE g STORED AS ndgrid LOCATION 'x'").await;
+    let table = create_plugin_table(&ctx.state(), installed, &cmd)
+        .await
+        .unwrap()
+        .unwrap();
+    let any: Arc<dyn std::any::Any + Send + Sync> = table;
+    any.downcast::<PluginTable>().unwrap()
+}
+
+async fn sql_i64(ctx: &SessionContext, sql: &str) -> Vec<i64> {
+    let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_nd_table_has_the_logical_schema() {
+    let (ctx, installed) = nd_session().await;
+    let table = nd_table(&ctx, &installed).await;
+    assert!(table.is_nd());
+    let expected = Schema::new(vec![
+        Field::new("y", DataType::Int64, true),
+        Field::new("x", DataType::Int64, true),
+        Field::new("v", DataType::Int64, true),
+    ]);
+    assert_eq!(table.schema().as_ref(), &expected);
+    assert!(table.statistics().is_none());
+    let flat = greedy_table(&ctx, &{
+        let flat = InstalledTableTypes::default();
+        flat.insert("q", foreign_types());
+        flat
+    })
+    .await;
+    let any: Arc<dyn std::any::Any + Send + Sync> = flat;
+    assert!(!any.downcast::<PluginTable>().unwrap().is_nd());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mixed_nd_schema_is_refused() {
+    let (ctx, installed) = nd_session().await;
+    let cmd = command(
+        &ctx,
+        "CREATE EXTERNAL TABLE m STORED AS ndmixed LOCATION 'x'",
+    )
+    .await;
+    let err = create_plugin_table(&ctx.state(), &installed, &cmd)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("mixes beacon.nd columns and plain columns (name)"),
+        "{err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_nd_table_broadcasts_through_the_foreign_path() {
+    let (ctx, installed) = nd_session().await;
+    let table = nd_table(&ctx, &installed).await;
+    ctx.register_table("g", table).unwrap();
+    assert_eq!(
+        sql_i64(&ctx, "SELECT y FROM g WHERE v IS NOT NULL ORDER BY v").await,
+        vec![1, 1, 1, 2, 2, 2]
+    );
+    assert_eq!(
+        sql_i64(&ctx, "SELECT x FROM g WHERE v IS NOT NULL ORDER BY v").await,
+        vec![1, 2, 3, 1, 2, 3]
+    );
+    assert_eq!(sql_i64(&ctx, "SELECT count(*) FROM g").await, vec![6]);
+    assert_eq!(
+        sql_i64(&ctx, "SELECT v FROM g WHERE y = 2 AND x < 3 ORDER BY v").await,
+        vec![21, 22]
+    );
+    // The plugin claims `Exact`, and Beacon filters the rows again.
+    let filter = col("y").eq(lit(2i64));
+    let answers = ctx
+        .table_provider("g")
+        .await
+        .unwrap()
+        .supports_filters_pushdown(&[&filter])
+        .unwrap();
+    assert_eq!(answers, vec![TableProviderFilterPushDown::Inexact]);
 }
 
 async fn greedy_table(

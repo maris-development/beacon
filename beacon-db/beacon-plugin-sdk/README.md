@@ -261,6 +261,42 @@ INSERT INTO readings VALUES (1.5);
 - Beacon stores the table and calls `create` again at each start. When the plugin is missing, Beacon skips the table and keeps its definition.
 - Beacon stores `LOCATION` and `OPTIONS` as plain text in the table definition. Do not put secrets there that the storage must not see.
 
+### nd tables
+
+A table can return gridded data, as an nd file format does.
+Make each column of the provider schema a `beacon.nd` struct. Beacon then broadcasts the arrays to rows.
+
+```rust,ignore
+use beacon_plugin_sdk::nd::encoding::encode_nd_record_batch;
+use beacon_plugin_sdk::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
+
+let y = Dimensions::try_new(vec![Dimension::new("y", 2)])?;
+let x = Dimensions::try_new(vec![Dimension::new("x", 3)])?;
+let grid = Dimensions::try_new(vec![Dimension::new("y", 2), Dimension::new("x", 3)])?;
+let logical = Arc::new(Schema::new(vec![
+    Field::new("lat", DataType::Float64, true),
+    Field::new("lon", DataType::Float64, true),
+    Field::new("v", DataType::Float64, true),
+]));
+let columns = vec![
+    NdArrowArray::try_new(Arc::new(Float64Array::from(vec![50.0, 51.0])), y)?,
+    NdArrowArray::try_new(Arc::new(Float64Array::from(vec![3.0, 4.0, 5.0])), x)?,
+    NdArrowArray::try_new(Arc::new(Float64Array::from(vec![1.0; 6])), grid.clone())?,
+];
+let batch = encode_nd_record_batch(&NdRecordBatch::try_new(logical, columns, grid)?)?;
+// The schema of `batch` is the provider schema. Each row of `batch` is one grid.
+let table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
+```
+
+- Use `nd_encoded_field` or `encoded_schema` to make the provider schema before you have data.
+- All columns are `beacon.nd`, or none. `CREATE EXTERNAL TABLE` refuses a mix.
+- SQL sees the logical schema: `lat`, `lon` and `v` above, as `Float64`.
+- `scan` gets the projection of the query. Return only those columns. An nd batch of fewer columns can have a smaller grid.
+- For `COUNT(*)`, Beacon asks for all columns.
+- Beacon does not send the `LIMIT`. A limit counts rows, not grids.
+- Filters are hints only. Beacon applies all filters again on the rows, also when the plugin answers `Exact`.
+- `INSERT INTO` gives the plugin plain rows of the logical schema, not `beacon.nd` structs.
+
 ### Rules for table code
 
 - The table gets no Beacon object store. Open your own connections.

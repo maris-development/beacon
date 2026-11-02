@@ -1,5 +1,6 @@
 //! Table type plugins through the real loader: the fixture library exports `exkv`
-//! (CSV files in a local folder) and `expanic` (panics in `create`).
+//! (CSV files in a local folder), `expanic` (panics in `create`), `exgridkv` (a 2x3 nd
+//! grid) and `exndmixed` (nd and plain columns).
 
 mod common;
 
@@ -113,4 +114,69 @@ async fn an_uninstall_stops_the_table() {
     install(&rt).await;
     let rt = rt.restart().await;
     assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM t").await), 7);
+}
+
+async fn create_grid(rt: &TestRuntime) {
+    rt.sql("CREATE EXTERNAL TABLE g STORED AS exgridkv LOCATION 'x'")
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_nd_table_broadcasts_the_grid() {
+    let rt = runtime_with_plugin("tables-nd-select").await;
+    create_grid(&rt).await;
+    let batches = rt.sql("SELECT lat, lon, v FROM g").await;
+    assert_eq!(total_rows(&batches), 6);
+    let schema = batches[0].schema();
+    assert_eq!(
+        schema.field(0).data_type(),
+        &arrow::datatypes::DataType::Int64
+    );
+    assert_eq!(
+        schema.field(2).data_type(),
+        &arrow::datatypes::DataType::Float64
+    );
+    // Each lat value repeats over the 3 lon values.
+    let sum = rt.sql("SELECT sum(lat) FROM g WHERE v IS NOT NULL").await;
+    assert_eq!(scalar_i64(&sum), 90);
+    let sum = rt.sql("SELECT sum(lon) FROM g WHERE v IS NOT NULL").await;
+    assert_eq!(scalar_i64(&sum), 12);
+    let sum = rt
+        .sql("SELECT CAST(sum(v - lat - lon) AS BIGINT) FROM g")
+        .await;
+    assert_eq!(scalar_i64(&sum), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_nd_table_counts_the_grid_cells() {
+    let rt = runtime_with_plugin("tables-nd-count").await;
+    create_grid(&rt).await;
+    assert_eq!(scalar_i64(&rt.sql("SELECT count(*) FROM g").await), 6);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_nd_table_filters_on_a_coordinate() {
+    let rt = runtime_with_plugin("tables-nd-filter").await;
+    create_grid(&rt).await;
+    let count = rt.sql("SELECT count(v) FROM g WHERE lat = 20").await;
+    assert_eq!(scalar_i64(&count), 3);
+    let sum = rt
+        .sql("SELECT CAST(sum(v) AS BIGINT) FROM g WHERE lat = 20 AND lon > 1")
+        .await;
+    assert_eq!(scalar_i64(&sum), 45);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mixed_nd_schema_is_refused() {
+    let rt = runtime_with_plugin("tables-nd-mixed").await;
+    let error = sql_error(
+        &rt,
+        "CREATE EXTERNAL TABLE m STORED AS exndmixed LOCATION 'x'",
+    )
+    .await;
+    assert!(
+        error.contains("mixes beacon.nd columns and plain columns"),
+        "{error}"
+    );
+    assert!(error.contains("name"), "{error}");
 }

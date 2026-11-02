@@ -72,6 +72,11 @@ impl ExecutionPlan for NdBroadcastExec {
         vec![&self.input]
     }
 
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        // A `RepartitionExec` child is not nd-aware, so `try_new` refuses it.
+        vec![false]
+    }
+
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
