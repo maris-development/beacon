@@ -1,11 +1,14 @@
 //! Table types: `exkv` keeps CSV files in a local folder, and `expanic` panics in `create`.
+//! `exgridkv` holds a 2x3 nd grid, and `exndmixed` mixes nd and plain columns.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use beacon_plugin_sdk::datafusion::arrow::datatypes::SchemaRef;
+use beacon_plugin_sdk::datafusion::arrow::array::{Float64Array, Int64Array};
+use beacon_plugin_sdk::datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use beacon_plugin_sdk::datafusion::catalog::{Session, TableProvider, TableProviderFactory};
 use beacon_plugin_sdk::datafusion::common::{Result, plan_err};
+use beacon_plugin_sdk::datafusion::datasource::MemTable;
 use beacon_plugin_sdk::datafusion::datasource::TableType as DfTableType;
 use beacon_plugin_sdk::datafusion::datasource::file_format::csv::CsvFormat;
 use beacon_plugin_sdk::datafusion::datasource::listing::{
@@ -16,6 +19,8 @@ use beacon_plugin_sdk::datafusion::logical_expr::{
     CreateExternalTable, Expr, TableProviderFilterPushDown,
 };
 use beacon_plugin_sdk::datafusion::physical_plan::ExecutionPlan;
+use beacon_plugin_sdk::nd::encoding::{encode_nd_record_batch, nd_encoded_field};
+use beacon_plugin_sdk::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
 use beacon_plugin_sdk::table_type::TableType;
 
 /// A CSV listing table that claims `Inexact` for every filter, so Beacon applies them again.
@@ -103,9 +108,74 @@ impl TableProviderFactory for PanicFactory {
     }
 }
 
+/// A memory table of one nd batch: `lat` over `y` (2), `lon` over `x` (3), and `v`
+/// over both, with `v = lat + lon`.
+#[derive(Debug)]
+struct GridFactory;
+
+#[async_trait]
+impl TableProviderFactory for GridFactory {
+    async fn create(
+        &self,
+        _state: &dyn Session,
+        _cmd: &CreateExternalTable,
+    ) -> Result<Arc<dyn TableProvider>> {
+        let dims = |spec: &[(&str, usize)]| {
+            Dimensions::try_new(
+                spec.iter()
+                    .map(|(name, size)| Dimension::new(*name, *size))
+                    .collect(),
+            )
+        };
+        let logical = Arc::new(Schema::new(vec![
+            Field::new("lat", DataType::Int64, true),
+            Field::new("lon", DataType::Int64, true),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let columns = vec![
+            NdArrowArray::try_new(Arc::new(Int64Array::from(vec![10, 20])), dims(&[("y", 2)])?)?,
+            NdArrowArray::try_new(
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                dims(&[("x", 3)])?,
+            )?,
+            NdArrowArray::try_new(
+                Arc::new(Float64Array::from(vec![11.0, 12.0, 13.0, 21.0, 22.0, 23.0])),
+                dims(&[("y", 2), ("x", 3)])?,
+            )?,
+        ];
+        let nd = NdRecordBatch::try_new(logical, columns, dims(&[("y", 2), ("x", 3)])?)?;
+        let batch = encode_nd_record_batch(&nd)?;
+        Ok(Arc::new(MemTable::try_new(
+            batch.schema(),
+            vec![vec![batch]],
+        )?))
+    }
+}
+
+/// An empty memory table with one nd column and one plain column.
+#[derive(Debug)]
+struct MixedFactory;
+
+#[async_trait]
+impl TableProviderFactory for MixedFactory {
+    async fn create(
+        &self,
+        _state: &dyn Session,
+        _cmd: &CreateExternalTable,
+    ) -> Result<Arc<dyn TableProvider>> {
+        let schema = Arc::new(Schema::new(vec![
+            nd_encoded_field("lat", &DataType::Int64),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        Ok(Arc::new(MemTable::try_new(schema, vec![vec![]])?))
+    }
+}
+
 pub fn tables() -> Vec<TableType> {
     vec![
         TableType::new("exkv", Arc::new(KvFactory)),
         TableType::new("expanic", Arc::new(PanicFactory)),
+        TableType::new("exgridkv", Arc::new(GridFactory)),
+        TableType::new("exndmixed", Arc::new(MixedFactory)),
     ]
 }
