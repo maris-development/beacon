@@ -29,20 +29,17 @@ jobs:
       # Report both legs; one failing shouldn't hide the other's result.
       fail-fast: false
       matrix:
-        toolchain: ["1.95", stable]
+        # "1.95" is the declared MSRV (`rust-version` in the workspace Cargo.toml). Building at the
+        # floor is what keeps that claim honest — a post-1.95 feature fails here rather than
+        # silently breaking source builds for anyone on distro Rust.
+        # "stable" is what the released wheels are actually compiled with: maturin-action defaults
+        # to stable inside the manylinux container, and the host builds follow rust-toolchain.toml.
+        # Without this leg a stable-only regression would first surface during a release build.
+        # PRs run only the MSRV leg. The stable leg runs on main and on a manual run.
+        toolchain: ${{ fromJSON(github.event_name == 'pull_request' && '["1.95"]' || '["1.95", "stable"]') }}
         include:
-          # The declared MSRV (`rust-version` in the workspace Cargo.toml). Building at the floor is
-          # what keeps that claim honest — a post-1.95 feature fails here rather than silently
-          # breaking source builds for anyone on distro Rust.
           - toolchain: "1.95"
             lint: true
-          # What the released wheels are actually compiled with: maturin-action defaults to stable
-          # inside the manylinux container, and the host builds follow rust-toolchain.toml. Without
-          # this leg a stable-only regression would first surface during a release build.
-          - toolchain: stable
-            lint: false
-        # PRs run only the MSRV leg. The stable leg runs on main and on a manual run.
-        exclude: ${{ github.event_name == 'pull_request' && fromJSON('[{"toolchain":"stable"}]') || fromJSON('[]') }}
 
     steps:
       - name: Checkout
