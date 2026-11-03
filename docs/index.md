@@ -35,9 +35,9 @@ Point a server at your archive. Connect a client. Write queries.
 ## Choose a version
 
 <div class="dgrid">
-  <a class="dcard" href="docs/2.1.0-rc1/introduction">
+  <a class="dcard" href="docs/2.1.0-rc2/introduction">
     <span class="dcard-head">
-      <span class="dcard-title mono">2.1.0-rc1</span>
+      <span class="dcard-title mono">2.1.0-rc2</span>
       <span class="dcard-tag">Pre-release</span>
     </span>
     <span class="dcard-body">This is the upcoming 2.1 release.</span>

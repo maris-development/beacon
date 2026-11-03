@@ -15,6 +15,18 @@ const UNRELEASED_PAGES: string[] = []
 const isUnreleased = (relativePath: string) =>
   UNRELEASED_PAGES.includes(relativePath)
 
+// Keeps search results of the docs version in the current URL, or of LATEST_VERSION
+// outside a version folder. Pages outside the version folders always match.
+// VitePress sends this function to the browser as source text, without its closure,
+// so the version is written into the source here.
+const searchFilterSource = `
+  const version = (path) => (path.match(/\\/docs\\/(\\d[^/]*)\\//) || [])[1]
+  const current = version(window.location.pathname) || ${JSON.stringify(LATEST_VERSION)}
+  const page = version(result.id)
+  return page === undefined || page === current
+`
+const searchFilter = new Function('result', searchFilterSource) as (result: { id: string }) => boolean
+
 const structuredData = [
   {
     '@context': 'https://schema.org',
@@ -110,7 +122,12 @@ export default defineConfig({
   },
   themeConfig: {
     search: {
-      provider: 'local'
+      provider: 'local',
+      options: {
+        miniSearch: {
+          searchOptions: { filter: searchFilter }
+        }
+      }
     },
     // https://vitepress.dev/reference/default-theme-config
     logo: '/beacon-logo-small.png',
@@ -123,9 +140,9 @@ export default defineConfig({
       {
         text: 'Docs', items: [
           {
-            text: '2.1.0-rc1 (pre-release)',
-            link: '/docs/2.1.0-rc1/introduction',
-            activeMatch: '/docs/2.1.0-rc1/'
+            text: '2.1.0-rc2 (pre-release)',
+            link: '/docs/2.1.0-rc2/introduction',
+            activeMatch: '/docs/2.1.0-rc2/'
           },
           {
             text: '2.0.2 (latest)',
@@ -152,23 +169,22 @@ export default defineConfig({
     ],
 
     sidebar: {
-      '/docs/2.1.0-rc1/': [
+      '/docs/2.1.0-rc2/': [
         {
           text: 'Overview',
           items: [
-            { text: 'Introduction', link: '/docs/2.1.0-rc1/introduction' },
+            { text: 'Introduction', link: '/docs/2.1.0-rc2/introduction' },
             {
               text: 'Quick Start',
-              link: '/docs/2.1.0-rc1/quickstart',
+              link: '/docs/2.1.0-rc2/quickstart',
               collapsed: true,
               items: [
-                { text: 'Deploy a server', link: '/docs/2.1.0-rc1/quickstart#deploy-a-server' },
-                { text: 'Query a server', link: '/docs/2.1.0-rc1/quickstart#query-a-server' },
+                { text: 'Deploy a server', link: '/docs/2.1.0-rc2/quickstart#deploy-a-server' },
+                { text: 'Query a server', link: '/docs/2.1.0-rc2/quickstart#query-a-server' },
               ]
             },
-            { text: 'Concepts', link: '/docs/2.1.0-rc1/concepts' },
-            { text: 'FAQ', link: '/docs/2.1.0-rc1/faq' },
-            { text: 'Upgrade from 1.8.0', link: '/docs/2.1.0-rc1/upgrade' },
+            { text: 'Concepts', link: '/docs/2.1.0-rc2/concepts' },
+            { text: 'FAQ', link: '/docs/2.1.0-rc2/faq' },
           ]
         },
         {
@@ -177,157 +193,160 @@ export default defineConfig({
           items: [
             {
               text: 'Getting Started',
-              link: '/docs/2.1.0-rc1/getting-started',
+              link: '/docs/2.1.0-rc2/getting-started',
               collapsed: true,
               items: [
-                { text: 'Quick Start', link: '/docs/2.1.0-rc1/getting-started#quick-start' },
-                { text: 'Local', link: '/docs/2.1.0-rc1/getting-started#local' },
-                { text: 'S3 / Object Storage', link: '/docs/2.1.0-rc1/getting-started#s3-compatible-object-storage' },
-                { text: 'Kubernetes', link: '/docs/2.1.0-rc1/getting-started#kubernetes' },
+                { text: 'Quick Start', link: '/docs/2.1.0-rc2/getting-started#quick-start' },
+                { text: 'Local', link: '/docs/2.1.0-rc2/getting-started#local' },
+                { text: 'S3 / Object Storage', link: '/docs/2.1.0-rc2/getting-started#s3-compatible-object-storage' },
+                { text: 'Kubernetes', link: '/docs/2.1.0-rc2/getting-started#kubernetes' },
               ]
             },
-            { text: 'Configuration', link: '/docs/2.1.0-rc1/server/configuration' },
-            { text: 'Access Control', link: '/docs/2.1.0-rc1/security/access-control' },
+            { text: 'Configuration', link: '/docs/2.1.0-rc2/server/configuration' },
+            { text: 'Access Control', link: '/docs/2.1.0-rc2/security/access-control' },
             {
               text: 'Performance Tuning',
-              link: '/docs/2.1.0-rc1/server/performance-tuning',
+              link: '/docs/2.1.0-rc2/server/performance-tuning',
               collapsed: true,
               items: [
-                { text: 'Query engine', link: '/docs/2.1.0-rc1/server/performance-tuning#beacon-query-engine-settings' },
-                { text: 'File statistics', link: '/docs/2.1.0-rc1/internals/file-statistics' },
-                { text: 'NetCDF', link: '/docs/2.1.0-rc1/server/performance-tuning#netcdf-tuning' },
-                { text: 'HDF5', link: '/docs/2.1.0-rc1/server/performance-tuning#hdf5-pure-rust-reader' },
-                { text: 'Zarr', link: '/docs/2.1.0-rc1/server/performance-tuning#zarr-predicate-pushdown' },
-                { text: 'Atlas', link: '/docs/2.1.0-rc1/server/performance-tuning#atlas-tuning' },
+                { text: 'Query engine', link: '/docs/2.1.0-rc2/server/performance-tuning#beacon-query-engine-settings' },
+                { text: 'File statistics', link: '/docs/2.1.0-rc2/internals/file-statistics' },
+                { text: 'NetCDF', link: '/docs/2.1.0-rc2/server/performance-tuning#netcdf-tuning' },
+                { text: 'HDF5', link: '/docs/2.1.0-rc2/server/performance-tuning#hdf5-pure-rust-reader' },
+                { text: 'Zarr', link: '/docs/2.1.0-rc2/server/performance-tuning#zarr-predicate-pushdown' },
+                { text: 'Atlas', link: '/docs/2.1.0-rc2/server/performance-tuning#atlas-tuning' },
               ]
             },
-            { text: 'Storage internals', link: '/docs/2.1.0-rc1/internals/storage' },
-            { text: 'Troubleshooting', link: '/docs/2.1.0-rc1/troubleshooting' },
+            { text: 'Storage internals', link: '/docs/2.1.0-rc2/internals/storage' },
+            { text: 'Troubleshooting', link: '/docs/2.1.0-rc2/troubleshooting' },
           ]
         },
         {
           text: 'Server Setup',
           collapsed: false,
           items: [
-            { text: 'Overview', link: '/docs/2.1.0-rc1/server/' },
+            { text: 'Overview', link: '/docs/2.1.0-rc2/server/' },
             {
               text: 'Datasets & Formats',
-              link: '/docs/2.1.0-rc1/server/datasets',
+              link: '/docs/2.1.0-rc2/server/datasets',
               collapsed: true,
               items: [
-                { text: 'All formats', link: '/docs/2.1.0-rc1/formats/' },
-                { text: 'Inspect a schema', link: '/docs/2.1.0-rc1/formats/inspect-a-schema' },
-                { text: 'Parquet', link: '/docs/2.1.0-rc1/formats/parquet' },
-                { text: 'GeoParquet', link: '/docs/2.1.0-rc1/formats/geoparquet' },
-                { text: 'CSV / TSV', link: '/docs/2.1.0-rc1/formats/csv' },
-                { text: 'Arrow IPC', link: '/docs/2.1.0-rc1/formats/arrow' },
-                { text: 'NetCDF', link: '/docs/2.1.0-rc1/formats/netcdf' },
-                { text: 'HDF5', link: '/docs/2.1.0-rc1/formats/hdf5' },
-                { text: 'Zarr', link: '/docs/2.1.0-rc1/formats/zarr' },
-                { text: 'Atlas', link: '/docs/2.1.0-rc1/formats/atlas' },
-                { text: 'GeoTIFF / COG', link: '/docs/2.1.0-rc1/formats/geotiff' },
-                { text: 'BBF', link: '/docs/2.1.0-rc1/formats/bbf' },
-                { text: 'Delta Lake', link: '/docs/2.1.0-rc1/formats/delta-lake' },
-                { text: 'Apache Iceberg', link: '/docs/2.1.0-rc1/formats/iceberg' },
-                { text: 'Icechunk', link: '/docs/2.1.0-rc1/formats/icechunk' },
-                { text: 'ODV ASCII', link: '/docs/2.1.0-rc1/formats/odv' },
+                { text: 'All formats', link: '/docs/2.1.0-rc2/formats/' },
+                { text: 'Inspect a schema', link: '/docs/2.1.0-rc2/formats/inspect-a-schema' },
+                { text: 'Parquet', link: '/docs/2.1.0-rc2/formats/parquet' },
+                { text: 'GeoParquet', link: '/docs/2.1.0-rc2/formats/geoparquet' },
+                { text: 'CSV / TSV', link: '/docs/2.1.0-rc2/formats/csv' },
+                { text: 'Arrow IPC', link: '/docs/2.1.0-rc2/formats/arrow' },
+                { text: 'NetCDF', link: '/docs/2.1.0-rc2/formats/netcdf' },
+                { text: 'HDF5', link: '/docs/2.1.0-rc2/formats/hdf5' },
+                { text: 'Zarr', link: '/docs/2.1.0-rc2/formats/zarr' },
+                { text: 'Atlas', link: '/docs/2.1.0-rc2/formats/atlas' },
+                { text: 'GeoTIFF / COG', link: '/docs/2.1.0-rc2/formats/geotiff' },
+                { text: 'BBF', link: '/docs/2.1.0-rc2/formats/bbf' },
+                { text: 'Delta Lake', link: '/docs/2.1.0-rc2/formats/delta-lake' },
+                { text: 'Apache Iceberg', link: '/docs/2.1.0-rc2/formats/iceberg' },
+                { text: 'Icechunk', link: '/docs/2.1.0-rc2/formats/icechunk' },
+                { text: 'ODV ASCII', link: '/docs/2.1.0-rc2/formats/odv' },
               ]
             },
             {
               text: 'Tables & Views',
-              link: '/docs/2.1.0-rc1/data-sources/',
+              link: '/docs/2.1.0-rc2/data-sources/',
               collapsed: true,
               items: [
-                { text: 'External Tables', link: '/docs/2.1.0-rc1/data-sources/external-tables' },
-                { text: 'Managed Tables', link: '/docs/2.1.0-rc1/sql/managed-tables' },
-                { text: 'Views', link: '/docs/2.1.0-rc1/server/view' },
-                { text: 'Materialized Views', link: '/docs/2.1.0-rc1/sql/create-materialized-view' },
-                { text: 'Crawlers', link: '/docs/2.1.0-rc1/server/crawlers' },
-                { text: 'Comments', link: '/docs/2.1.0-rc1/sql/comment-on' },
+                { text: 'External Tables', link: '/docs/2.1.0-rc2/data-sources/external-tables' },
+                { text: 'Managed Tables', link: '/docs/2.1.0-rc2/sql/managed-tables' },
+                { text: 'Views', link: '/docs/2.1.0-rc2/server/view' },
+                { text: 'Materialized Views', link: '/docs/2.1.0-rc2/sql/create-materialized-view' },
+                { text: 'Crawlers', link: '/docs/2.1.0-rc2/server/crawlers' },
+                { text: 'Comments', link: '/docs/2.1.0-rc2/sql/comment-on' },
               ]
             },
             {
               text: 'Other Sources',
               collapsed: true,
               items: [
-                { text: 'Object Storage (S3)', link: '/docs/2.1.0-rc1/data-sources/object-storage' },
-                { text: 'SQL Databases', link: '/docs/2.1.0-rc1/data-sources/sql-databases' },
-                { text: 'Remote Tables', link: '/docs/2.1.0-rc1/data-sources/remote-tables' },
-                { text: 'ERDDAP', link: '/docs/2.1.0-rc1/data-sources/erddap' },
-                { text: 'ATTACH another server', link: '/docs/2.1.0-rc1/data-sources/attach' },
-                { text: 'Secrets', link: '/docs/2.1.0-rc1/sql/secrets' },
+                { text: 'Object Storage (S3)', link: '/docs/2.1.0-rc2/data-sources/object-storage' },
+                { text: 'SQL Databases', link: '/docs/2.1.0-rc2/data-sources/sql-databases' },
+                { text: 'Remote Tables', link: '/docs/2.1.0-rc2/data-sources/remote-tables' },
+                { text: 'ERDDAP', link: '/docs/2.1.0-rc2/data-sources/erddap' },
+                { text: 'ATTACH another server', link: '/docs/2.1.0-rc2/data-sources/attach' },
+                { text: 'Secrets', link: '/docs/2.1.0-rc2/sql/secrets' },
               ]
             },
+            { text: 'Plugins', link: '/docs/2.1.0-rc2/server/plugins' },
           ]
         },
         {
           text: 'SQL Reference',
           collapsed: true,
           items: [
-            { text: 'Overview', link: '/docs/2.1.0-rc1/sql/' },
-            { text: 'Identifiers & Case', link: '/docs/2.1.0-rc1/sql/identifiers' },
-            { text: 'SELECT', link: '/docs/2.1.0-rc1/sql/select' },
-            { text: 'WHERE', link: '/docs/2.1.0-rc1/sql/where' },
-            { text: 'GROUP BY', link: '/docs/2.1.0-rc1/sql/group-by' },
-            { text: 'JOIN', link: '/docs/2.1.0-rc1/sql/join' },
-            { text: 'UNION BY NAME', link: '/docs/2.1.0-rc1/sql/union-by-name' },
-            { text: 'CREATE TABLE', link: '/docs/2.1.0-rc1/sql/managed-tables' },
-            { text: 'CREATE EXTERNAL TABLE', link: '/docs/2.1.0-rc1/sql/create-external-table' },
-            { text: 'CREATE VIEW', link: '/docs/2.1.0-rc1/sql/create-view' },
-            { text: 'CREATE MATERIALIZED VIEW', link: '/docs/2.1.0-rc1/sql/create-materialized-view' },
-            { text: 'CREATE FUNCTION', link: '/docs/2.1.0-rc1/sql/create-function' },
-            { text: 'COMMENT ON', link: '/docs/2.1.0-rc1/sql/comment-on' },
-            { text: 'Remote Tables & ATTACH', link: '/docs/2.1.0-rc1/sql/remote-tables' },
-            { text: 'CREATE SECRET', link: '/docs/2.1.0-rc1/sql/secrets' },
-            { text: 'SUMMARIZE', link: '/docs/2.1.0-rc1/sql/summarize' },
-            { text: 'Table Functions', link: '/docs/2.1.0-rc1/sql/table-functions' },
-            { text: 'Introspection', link: '/docs/2.1.0-rc1/sql/table-functions-utility' },
-            { text: 'Function Reference', link: '/docs/2.1.0-rc1/sql/function-reference' },
-            { text: 'Spatial Functions', link: '/docs/2.1.0-rc1/sql/spatial-functions' },
+            { text: 'Overview', link: '/docs/2.1.0-rc2/sql/' },
+            { text: 'Identifiers & Case', link: '/docs/2.1.0-rc2/sql/identifiers' },
+            { text: 'SELECT', link: '/docs/2.1.0-rc2/sql/select' },
+            { text: 'WHERE', link: '/docs/2.1.0-rc2/sql/where' },
+            { text: 'GROUP BY', link: '/docs/2.1.0-rc2/sql/group-by' },
+            { text: 'JOIN', link: '/docs/2.1.0-rc2/sql/join' },
+            { text: 'UNION BY NAME', link: '/docs/2.1.0-rc2/sql/union-by-name' },
+            { text: 'CREATE TABLE', link: '/docs/2.1.0-rc2/sql/managed-tables' },
+            { text: 'CREATE EXTERNAL TABLE', link: '/docs/2.1.0-rc2/sql/create-external-table' },
+            { text: 'CREATE VIEW', link: '/docs/2.1.0-rc2/sql/create-view' },
+            { text: 'CREATE MATERIALIZED VIEW', link: '/docs/2.1.0-rc2/sql/create-materialized-view' },
+            { text: 'CREATE FUNCTION', link: '/docs/2.1.0-rc2/sql/create-function' },
+            { text: 'COMMENT ON', link: '/docs/2.1.0-rc2/sql/comment-on' },
+            { text: 'Remote Tables & ATTACH', link: '/docs/2.1.0-rc2/sql/remote-tables' },
+            { text: 'CREATE SECRET', link: '/docs/2.1.0-rc2/sql/secrets' },
+            { text: 'INSTALL (Plugins)', link: '/docs/2.1.0-rc2/sql/plugins' },
+            { text: 'SUMMARIZE', link: '/docs/2.1.0-rc2/sql/summarize' },
+            { text: 'Table Functions', link: '/docs/2.1.0-rc2/sql/table-functions' },
+            { text: 'Introspection', link: '/docs/2.1.0-rc2/sql/table-functions-utility' },
+            { text: 'Function Reference', link: '/docs/2.1.0-rc2/sql/function-reference' },
+            { text: 'Spatial Functions', link: '/docs/2.1.0-rc2/sql/spatial-functions' },
           ]
         },
         {
           text: 'REST API',
           collapsed: true,
           items: [
-            { text: 'Overview', link: '/docs/2.1.0-rc1/api/' },
-            { text: 'Querying', link: '/docs/2.1.0-rc1/api/querying/' },
-            { text: 'SQL Queries', link: '/docs/2.1.0-rc1/api/querying/sql' },
-            { text: 'JSON Queries', link: '/docs/2.1.0-rc1/api/querying/json' },
-            { text: 'Examples', link: '/docs/2.1.0-rc1/api/querying/examples' },
-            { text: 'Exploring the catalog', link: '/docs/2.1.0-rc1/api/exploring-data' },
-            { text: 'OPeNDAP (DAP2)', link: '/docs/2.1.0-rc1/api/opendap' },
+            { text: 'Overview', link: '/docs/2.1.0-rc2/api/' },
+            { text: 'Querying', link: '/docs/2.1.0-rc2/api/querying/' },
+            { text: 'SQL Queries', link: '/docs/2.1.0-rc2/api/querying/sql' },
+            { text: 'JSON Queries', link: '/docs/2.1.0-rc2/api/querying/json' },
+            { text: 'Examples', link: '/docs/2.1.0-rc2/api/querying/examples' },
+            { text: 'Exploring the catalog', link: '/docs/2.1.0-rc2/api/exploring-data' },
+            { text: 'OPeNDAP (DAP2)', link: '/docs/2.1.0-rc2/api/opendap' },
           ]
         },
         {
           text: 'Connect',
           collapsed: true,
           items: [
-            { text: 'Python SDK', link: '/docs/2.1.0-rc1/connect/python' },
-            { text: 'TypeScript SDK', link: '/docs/2.1.0-rc1/connect/typescript' },
-            { text: 'CLI', link: '/docs/2.1.0-rc1/connect/cli' },
-            { text: 'Web Admin UI', link: '/docs/2.1.0-rc1/connect/web-admin-ui' },
-            { text: 'DataGrip / JDBC', link: '/docs/2.1.0-rc1/connect/datagrip' },
-            { text: 'Python ADBC', link: '/docs/2.1.0-rc1/connect/python-adbc' },
+            { text: 'Python SDK', link: '/docs/2.1.0-rc2/connect/python' },
+            { text: 'TypeScript SDK', link: '/docs/2.1.0-rc2/connect/typescript' },
+            { text: 'CLI', link: '/docs/2.1.0-rc2/connect/cli' },
+            { text: 'Web Admin UI', link: '/docs/2.1.0-rc2/connect/web-admin-ui' },
+            { text: 'DataGrip / JDBC', link: '/docs/2.1.0-rc2/connect/datagrip' },
+            { text: 'Python ADBC', link: '/docs/2.1.0-rc2/connect/python-adbc' },
           ]
         },
         {
           text: 'Scientific Data',
           collapsed: true,
           items: [
-            { text: 'How It Works', link: '/docs/2.1.0-rc1/how-it-works' },
-            { text: 'Arrays to tables', link: '/docs/2.1.0-rc1/arrays-to-tables' },
-            { text: 'CF decoding', link: '/docs/2.1.0-rc1/cf-decoding' },
-            { text: 'Coming from xarray', link: '/docs/2.1.0-rc1/coming-from-xarray' },
+            { text: 'How It Works', link: '/docs/2.1.0-rc2/how-it-works' },
+            { text: 'Arrays to tables', link: '/docs/2.1.0-rc2/arrays-to-tables' },
+            { text: 'CF decoding', link: '/docs/2.1.0-rc2/cf-decoding' },
+            { text: 'Coming from xarray', link: '/docs/2.1.0-rc2/coming-from-xarray' },
             {
               text: 'Guides',
-              link: '/docs/2.1.0-rc1/guides/',
+              link: '/docs/2.1.0-rc2/guides/',
               collapsed: true,
               items: [
-                { text: 'Query a File Collection', link: '/docs/2.1.0-rc1/guides/query-a-collection' },
-                { text: 'Query Data on S3', link: '/docs/2.1.0-rc1/guides/query-s3' },
-                { text: 'Export Query Results', link: '/docs/2.1.0-rc1/guides/export-results' },
-                { text: 'Speed Up Slow Queries', link: '/docs/2.1.0-rc1/guides/speed-up-queries' },
+                { text: 'Query a File Collection', link: '/docs/2.1.0-rc2/guides/query-a-collection' },
+                { text: 'Query Data on S3', link: '/docs/2.1.0-rc2/guides/query-s3' },
+                { text: 'Export Query Results', link: '/docs/2.1.0-rc2/guides/export-results' },
+                { text: 'Speed Up Slow Queries', link: '/docs/2.1.0-rc2/guides/speed-up-queries' },
+                { text: 'Write a Plugin', link: '/docs/2.1.0-rc2/guides/write-a-plugin' },
               ]
             },
           ]
