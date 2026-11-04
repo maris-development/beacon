@@ -2,7 +2,20 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+  workflow_dispatch:
+
+# A new push to a PR stops the old run. Runs on main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -16,17 +29,17 @@ jobs:
       # Report both legs; one failing shouldn't hide the other's result.
       fail-fast: false
       matrix:
+        # "1.95" is the declared MSRV (`rust-version` in the workspace Cargo.toml). Building at the
+        # floor is what keeps that claim honest — a post-1.95 feature fails here rather than
+        # silently breaking source builds for anyone on distro Rust.
+        # "stable" is what the released wheels are actually compiled with: maturin-action defaults
+        # to stable inside the manylinux container, and the host builds follow rust-toolchain.toml.
+        # Without this leg a stable-only regression would first surface during a release build.
+        # PRs run only the MSRV leg. The stable leg runs on main and on a manual run.
+        toolchain: ${{ fromJSON(github.event_name == 'pull_request' && '["1.95"]' || '["1.95", "stable"]') }}
         include:
-          # The declared MSRV (`rust-version` in the workspace Cargo.toml). Building at the floor is
-          # what keeps that claim honest — a post-1.95 feature fails here rather than silently
-          # breaking source builds for anyone on distro Rust.
           - toolchain: "1.95"
             lint: true
-          # What the released wheels are actually compiled with: maturin-action defaults to stable
-          # inside the manylinux container, and the host builds follow rust-toolchain.toml. Without
-          # this leg a stable-only regression would first surface during a release build.
-          - toolchain: stable
-            lint: false
 
     steps:
       - name: Checkout

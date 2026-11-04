@@ -3,6 +3,7 @@ name: sdk-asan
 # Checks the unsafe FFI code of the plugin SDK. Only the SDK crate runs, so the jobs stay short.
 on:
   push:
+    branches: [main]
     paths:
       - "beacon-db/beacon-plugin-sdk/**"
       - "Cargo.lock"
@@ -13,6 +14,11 @@ on:
       - "Cargo.lock"
       - ".github/workflows/sdk-asan.yml"
   workflow_dispatch:
+
+# A new push to a PR stops the old run. Runs on main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
