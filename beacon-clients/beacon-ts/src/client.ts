@@ -10,7 +10,7 @@ import {
 import { parseCsv } from "./csv.js";
 import { Http, type ClientOptions } from "./http.js";
 import { QueryBuilder } from "./query-builder.js";
-import { responseByteStream } from "./stream.js";
+import { openByteStream } from "./stream.js";
 import type {
   CatalogsView,
   From,
@@ -153,8 +153,9 @@ export class BeaconClient {
     const decoder = await getArrowDecoder();
     const res = await this.queryRaw(query, undefined, signal);
     const queryId = res.headers.get(QUERY_ID_HEADER);
-    const batches = await decoder.readStream(responseByteStream(res));
-    return { queryId, batches };
+    const body = openByteStream(res);
+    const batches = await decoder.readStream(body.chunks);
+    return { queryId, batches: closeBodyOnExit(batches, body.cancel) };
   }
 
   /**
@@ -356,6 +357,45 @@ export class BeaconClient {
       return false;
     }
   }
+}
+
+/**
+ * Iterates `batches` and cancels the response body when the consumer stops. The
+ * Arrow reader reads ahead, so its own `return()` waits for the next server chunk.
+ * An explicit iterator, because a generator skips its cleanup on a `return()`
+ * before the first `next()`.
+ */
+function closeBodyOnExit(
+  batches: AsyncIterable<ArrowRecordBatch>,
+  cancel: () => void,
+): AsyncIterableIterator<ArrowRecordBatch> {
+  const it = batches[Symbol.asyncIterator]();
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    cancel();
+    Promise.resolve(it.return?.()).catch(() => {});
+  };
+  return {
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    async next() {
+      try {
+        const next = await it.next();
+        if (next.done) close();
+        return next;
+      } catch (err) {
+        close();
+        throw err;
+      }
+    },
+    async return() {
+      close();
+      return { done: true, value: undefined };
+    },
+  };
 }
 
 /** Builds the `/api/query` request body from any accepted query input. */
