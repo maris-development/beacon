@@ -58,7 +58,8 @@ impl BeaconTableFunctionImpl for ReadNetCDFFunc {
         Some(
             "Reads NetCDF files from specified glob paths. The optional second argument lists \
              the dimensions to read. The optional third argument, a boolean, skips a file that \
-             does not fit that list instead of failing the query."
+             does not fit that list instead of failing the query. The optional fourth argument, \
+             a boolean, skips a file the reader cannot open instead of failing the query."
                 .to_string(),
         )
     }
@@ -80,6 +81,7 @@ impl BeaconTableFunctionImpl for ReadNetCDFFunc {
                 true,
             ),
             Field::new("skip_unbroadcastable", DataType::Boolean, true),
+            Field::new("skip_invalid_files", DataType::Boolean, true),
         ])
     }
 }
@@ -121,6 +123,14 @@ impl ReadNetCDFFunc {
             "third",
             "skip the files that cannot broadcast",
         )?;
+        // Optional fourth argument: skip a file the reader cannot open.
+        let skip_invalid_files = beacon_common::table_function::parse_bool_arg(
+            args,
+            3,
+            &self.name,
+            "fourth",
+            "skip the files the reader cannot open",
+        )?;
 
         tracing::debug!("read_netcdf glob paths: {:?}", glob_paths);
 
@@ -145,6 +155,9 @@ impl ReadNetCDFFunc {
         }
         if let Some(skip) = skip_unbroadcastable {
             format_options.insert("skip_unbroadcastable".to_string(), skip.to_string());
+        }
+        if let Some(skip) = skip_invalid_files {
+            format_options.insert("skip_invalid_files".to_string(), skip.to_string());
         }
 
         let factory = state

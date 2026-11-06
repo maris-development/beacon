@@ -162,19 +162,37 @@ impl NetcdfInput {
 /// With `skip_unbroadcastable`, a file the list does not fit gets an empty
 /// schema, the same way the scan reads no row from it.
 ///
+/// With `skip_invalid_files`, a file the reader cannot open gets an empty
+/// schema and a warning, the same way the scan reads no row from it.
+///
 /// A repeated inference of the same file is answered by the schema cache of
 /// [`beacon_datafusion_ext::format_ext`], above this function, so this one
 /// always opens the file.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be opened and `skip_invalid_files`
+/// is off, or when its dimensions or types do not convert to Arrow.
 pub async fn fetch_schema(
     input: NetcdfInput,
     read_dimensions: Option<Vec<String>>,
     skip_unbroadcastable: bool,
+    skip_invalid_files: bool,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
-    let dataset = input.open().await.map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!(
-            "Failed to open NetCDF dataset for schema inference: {e}"
-        ))
-    })?;
+    // The input moves into `open`, so keep its location only when a skip needs it.
+    let location = skip_invalid_files.then(|| input.location());
+    let dataset = match (input.open().await, location) {
+        (Ok(dataset), _) => dataset,
+        (Err(e), Some(location)) => {
+            tracing::warn!(file = %location, error = %e, "skipping an unreadable NetCDF file");
+            return Ok(Arc::new(arrow::datatypes::Schema::empty()));
+        }
+        (Err(e), None) => {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "Failed to open NetCDF dataset for schema inference: {e}"
+            )))
+        }
+    };
 
     // A skipped file gives the table no column.
     let Some(dataset) = beacon_nd_array::dataset::project_read_dimensions_or_skip(
