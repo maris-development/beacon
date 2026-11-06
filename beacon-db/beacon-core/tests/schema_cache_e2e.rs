@@ -199,6 +199,34 @@ async fn netcdf_files_answer_from_the_cache_too() {
     assert!(rows.contains("TEMP"), "{rows}");
 }
 
+/// A restart rebuilds an external table from the cache. The tables load at
+/// startup, so the cache must be open before they do, or every file is opened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_rebuilds_external_tables_from_the_cache() {
+    let root = tempfile::tempdir().unwrap();
+    for i in 0..3 {
+        write_netcdf(&root.path().join(format!("datasets/argo/{i}.nc")), i as f64);
+    }
+    let first = runtime(root.path(), true).await;
+    query(
+        &first,
+        "CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/*.nc'",
+    )
+    .await;
+    query(&first, "ANALYZE FILES").await;
+    // The redb file stays locked while its runtime lives.
+    drop(first);
+
+    let restarted = runtime(root.path(), true).await;
+    assert_eq!(
+        delta(SchemaCacheCounters::default(), counters(&restarted)),
+        (3, 0),
+        "the startup rebuild opened no file"
+    );
+    let rows = query(&restarted, "SELECT \"TEMP\" FROM argo").await;
+    assert!(rows.contains("TEMP"), "{rows}");
+}
+
 /// The point of keying per file rather than per table: a collection that gained
 /// one file derives one schema, not the whole collection's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
