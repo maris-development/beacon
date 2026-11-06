@@ -374,6 +374,11 @@ impl RuntimeBuilder {
             file_formats.clone(),
         );
 
+        // Before the tables load, so a rebuilt external table reads its schema
+        // from the cache instead of opening every file. The timer starts below.
+        let file_stats =
+            init_file_stats(&self, &session_ctx, session_cell.clone(), redb_store).await?;
+
         // Install the persistent schema provider and load the tables already in the
         // tables store into the catalog. This must run before `ensure_tables` below:
         // on a restart the auth `__beacon_*` tables already exist in the store, and
@@ -416,7 +421,9 @@ impl RuntimeBuilder {
 
         init_crawler_manager(&self, &session_ctx, session_cell.clone(), file_formats).await?;
 
-        let file_stats = init_file_stats(&self, &session_ctx, session_cell, redb_store).await?;
+        if let Some(service) = &file_stats {
+            service.start();
+        }
 
         // Event-driven external-table refresh was removed; external tables become
         // current on an explicit `REFRESH` only.
@@ -442,9 +449,9 @@ impl RuntimeBuilder {
     }
 }
 
-/// Builds the file-statistics service and starts its timer.
+/// Builds the file-statistics service and publishes its store on the session.
 ///
-/// `None` when the subsystem is off, or when there is no on-disk database: the
+/// The caller starts the service timer. `None` when the subsystem is off, or when there is no on-disk database: the
 /// registry needs redb tables, and an in-memory store has none to offer.
 async fn init_file_stats(
     builder: &RuntimeBuilder,
@@ -496,7 +503,6 @@ async fn init_file_stats(
         datasets,
         builder.file_stats.clone(),
     );
-    service.start();
 
     // Publish the store so a scan can prune against it. Only now, once it is
     // openable: a handle filled with a half-built store would have scans pruning

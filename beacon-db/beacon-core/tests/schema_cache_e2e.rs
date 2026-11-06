@@ -199,6 +199,94 @@ async fn netcdf_files_answer_from_the_cache_too() {
     assert!(rows.contains("TEMP"), "{rows}");
 }
 
+/// A netCDF string variable has no range, but its schema is cached all the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_netcdf_string_variable_is_cached_without_a_range() {
+    use arrow::array::StringArray;
+    use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+    use beacon_arrow_netcdf::writer::ArrowRecordBatchWriter;
+
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("datasets/ship/a.nc");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("TEMP", DataType::Float64, false),
+        Field::new("PLATFORM", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Float64Array::from(vec![4.0, 9.0])),
+            Arc::new(StringArray::from(vec!["ALPHA", "BRAVO"])),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema).unwrap();
+    writer.write_record_batch(batch).unwrap();
+    writer.finish().unwrap();
+
+    let runtime = runtime(root.path(), true).await;
+    query(&runtime, "ANALYZE FILES").await;
+
+    let ranges = query(
+        &runtime,
+        "SELECT column, min, max FROM file_statistics('ship/a.nc') ORDER BY column",
+    )
+    .await;
+    assert!(ranges.contains("TEMP"), "the float has a range:\n{ranges}");
+    assert!(
+        !ranges.contains("PLATFORM"),
+        "the string has no range:\n{ranges}"
+    );
+
+    let before = counters(&runtime);
+    let rows = query(
+        &runtime,
+        "SELECT \"PLATFORM\" FROM read_netcdf('ship/*.nc') ORDER BY \"PLATFORM\"",
+    )
+    .await;
+    assert_eq!(
+        delta(before, counters(&runtime)),
+        (1, 0),
+        "the schema with the string came from the cache"
+    );
+    assert!(rows.contains("ALPHA") && rows.contains("BRAVO"), "{rows}");
+}
+
+/// A netCDF external table reads its schema from the cache on create and on
+/// restart. The tables load at startup, so the cache must be open before they do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_rebuilds_external_tables_from_the_cache() {
+    let root = tempfile::tempdir().unwrap();
+    for i in 0..3 {
+        write_netcdf(&root.path().join(format!("datasets/argo/{i}.nc")), i as f64);
+    }
+    let first = runtime(root.path(), true).await;
+    query(&first, "ANALYZE FILES").await;
+    let before = counters(&first);
+    query(
+        &first,
+        "CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/*.nc'",
+    )
+    .await;
+    assert_eq!(
+        delta(before, counters(&first)),
+        (3, 0),
+        "the create opened no file"
+    );
+    // The redb file stays locked while its runtime lives.
+    drop(first);
+
+    let restarted = runtime(root.path(), true).await;
+    assert_eq!(
+        delta(SchemaCacheCounters::default(), counters(&restarted)),
+        (3, 0),
+        "the startup rebuild opened no file"
+    );
+    let rows = query(&restarted, "SELECT \"TEMP\" FROM argo").await;
+    assert!(rows.contains("TEMP"), "{rows}");
+}
+
 /// The point of keying per file rather than per table: a collection that gained
 /// one file derives one schema, not the whole collection's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
