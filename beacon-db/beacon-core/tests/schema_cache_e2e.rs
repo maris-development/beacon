@@ -199,8 +199,8 @@ async fn netcdf_files_answer_from_the_cache_too() {
     assert!(rows.contains("TEMP"), "{rows}");
 }
 
-/// A restart rebuilds an external table from the cache. The tables load at
-/// startup, so the cache must be open before they do, or every file is opened.
+/// A netCDF external table reads its schema from the cache on create and on
+/// restart. The tables load at startup, so the cache must be open before they do.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_rebuilds_external_tables_from_the_cache() {
     let root = tempfile::tempdir().unwrap();
@@ -208,12 +208,18 @@ async fn a_restart_rebuilds_external_tables_from_the_cache() {
         write_netcdf(&root.path().join(format!("datasets/argo/{i}.nc")), i as f64);
     }
     let first = runtime(root.path(), true).await;
+    query(&first, "ANALYZE FILES").await;
+    let before = counters(&first);
     query(
         &first,
         "CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/*.nc'",
     )
     .await;
-    query(&first, "ANALYZE FILES").await;
+    assert_eq!(
+        delta(before, counters(&first)),
+        (3, 0),
+        "the create opened no file"
+    );
     // The redb file stays locked while its runtime lives.
     drop(first);
 
