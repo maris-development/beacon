@@ -1,0 +1,35 @@
+# Beacon and Beacon Studio together.
+# Docs: https://maris-development.github.io/beacon/docs/2.1.0-rc2/beacon-studio
+# Run `docker compose up -d --build`. Open Studio at http://localhost:8080.
+# In Studio, add the Beacon node http://localhost:5001.
+services:
+    beacon:
+        image: ghcr.io/maris-development/beacon:v2.1.0-rc2
+        container_name: beacon
+        restart: unless-stopped
+        ports:
+            - "5001:5001"   # HTTP API, also used by Studio
+            - "32011:32011" # Arrow Flight SQL
+        environment:
+            - BEACON_ADMIN_USERNAME=admin
+            - BEACON_ADMIN_PASSWORD=securepassword
+            # The browser calls Beacon from the Studio origin.
+            - BEACON_CORS_ALLOWED_ORIGINS=${STUDIO_ORIGIN:-http://localhost:8080}
+        volumes:
+            - ./datasets:/beacon/data/datasets
+            - ./tables:/beacon/data/tables
+            - ./logs:/beacon/logs
+
+    studio:
+        # Studio has no image. The Dockerfile builds it from the Git repository.
+        build:
+            context: ./studio
+            args:
+                STUDIO_REF: ${STUDIO_REF:-main}
+                STUDIO_BRAND: ${STUDIO_BRAND:-default}
+        container_name: beacon-studio
+        restart: unless-stopped
+        ports:
+            - "8080:80"
+        depends_on:
+            - beacon
