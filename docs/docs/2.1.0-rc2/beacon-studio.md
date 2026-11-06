@@ -138,6 +138,29 @@ The example serves plain HTTP on `localhost`. For a public deployment:
   [Secure your instance](/docs/2.1.0-rc2/getting-started#local).
 - **Pin `STUDIO_REF`** to a commit, so that a new build gives the same Studio.
 
+### Beacon below a path
+
+Beacon can run below a path, for example `https://example.org/beacon-api`. Studio supports this.
+Add the full URL with the path as the node. Studio adds the path to each request.
+
+Use one of these two setups:
+
+- **Beacon serves the path.** Set
+  [`BEACON_BASE_PATH`](/docs/2.1.0-rc2/server/configuration#server) to the path, for example
+  `BEACON_BASE_PATH=/beacon-api`. The proxy sends the path to Beacon without a change.
+- **The proxy removes the path.** Keep `BEACON_BASE_PATH` empty. The proxy removes `/beacon-api`
+  before it sends the request to Beacon.
+
+For the first setup, add this line to the `environment` list of the `beacon` service:
+
+```yaml
+- BEACON_BASE_PATH=/beacon-api
+```
+
+The node URL in Studio is then `http://localhost:5001/beacon-api`.
+
+### Studio below a path
+
 To serve Studio below a path, for example `/studio`, build it with `BASE_PATH`. See the
 [Studio README](https://github.com/maris-development/beacon-studio#building). The nginx configuration
 of this example serves Studio at the root path only.
