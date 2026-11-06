@@ -30,6 +30,17 @@ use object_store::ObjectMeta;
 
 use super::reader::{FileAccess, NetcdfInput};
 
+/// Which files a scan reads past instead of failing the query.
+///
+/// `Copy`, so each opener and file task takes its own copy without a clone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SkipFiles {
+    /// Skip a file that does not fit `read_dimensions`.
+    unbroadcastable: bool,
+    /// Skip a file the reader cannot open.
+    invalid: bool,
+}
+
 /// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
 ///
 /// Integrates the `beacon_arrow_netcdf` reader with DataFusion's file scan
@@ -40,8 +51,7 @@ pub struct NetCDFSource {
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     read_dimensions: Option<Vec<String>>,
-    /// Skip a file that does not fit `read_dimensions`, instead of failing.
-    skip_unbroadcastable: bool,
+    skip: SkipFiles,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// Projection pushed down by the scan, applied on top of the table schema.
@@ -65,7 +75,7 @@ impl NetCDFSource {
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             read_dimensions,
-            skip_unbroadcastable: false,
+            skip: SkipFiles::default(),
             batch_size: usize::MAX,
             predicate: None,
             projection: None,
@@ -75,7 +85,13 @@ impl NetCDFSource {
 
     /// The same source, skipping the files that cannot broadcast when `skip`.
     pub fn with_skip_unbroadcastable(mut self, skip: bool) -> Self {
-        self.skip_unbroadcastable = skip;
+        self.skip.unbroadcastable = skip;
+        self
+    }
+
+    /// The same source, skipping the files the reader cannot open when `skip`.
+    pub fn with_skip_invalid_files(mut self, skip: bool) -> Self {
+        self.skip.invalid = skip;
         self
     }
 
@@ -107,7 +123,7 @@ impl FileSource for NetCDFSource {
             self.access.clone(),
             projected_schema,
             self.read_dimensions.clone(),
-            self.skip_unbroadcastable,
+            self.skip,
             self.batch_size,
             self.predicate.clone(),
             self.execution_plan_metrics.clone(),
@@ -240,8 +256,7 @@ impl FileSource for NetCDFSource {
 struct NetCDFOpener {
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
-    /// Skip a file that does not fit `read_dimensions`, instead of failing.
-    skip_unbroadcastable: bool,
+    skip: SkipFiles,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// This partition's counters, registered once. See [`ReadMetrics::new`].
@@ -268,7 +283,7 @@ impl NetCDFOpener {
         access: FileAccess,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
-        skip_unbroadcastable: bool,
+        skip: SkipFiles,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ExecutionPlanMetricsSet,
@@ -283,7 +298,7 @@ impl NetCDFOpener {
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
             read_dimensions: read_dimensions.clone(),
-            skip_unbroadcastable,
+            skip,
             batch_size,
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
@@ -295,7 +310,7 @@ impl NetCDFOpener {
             files,
             projected_schema,
             read_dimensions,
-            skip_unbroadcastable,
+            skip,
             batch_size,
             predicate,
             read_metrics,
@@ -323,7 +338,7 @@ impl NetCDFOpener {
         object: ObjectMeta,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
-        skip_unbroadcastable: bool,
+        skip: SkipFiles,
         batch_size: usize,
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
@@ -331,8 +346,7 @@ impl NetCDFOpener {
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
-            let Some(dataset) =
-                Self::open_dataset(input, object, read_dimensions, skip_unbroadcastable).await?
+            let Some(dataset) = Self::open_dataset(input, object, read_dimensions, skip).await?
             else {
                 planning.files_skipped.add(1);
                 return Ok(FileRead::skipped());
@@ -359,20 +373,31 @@ impl NetCDFOpener {
 
     /// Open the file and narrow it to the dimensions this scan reads on.
     ///
-    /// `None` when the file does not fit the dimension list and
-    /// `skip_unbroadcastable` says to read past it.
+    /// `None` when `skip` says to read past the file: it does not fit the
+    /// dimension list, or the reader cannot open it.
     async fn open_dataset(
         input: NetcdfInput,
         object: ObjectMeta,
         read_dimensions: Option<Vec<String>>,
-        skip_unbroadcastable: bool,
+        skip: SkipFiles,
     ) -> datafusion::error::Result<Option<beacon_nd_array::dataset::AnyDataset>> {
-        let dataset = input.open().await.map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to open NetCDF dataset {}: {e}",
-                object.location,
-            ))
-        })?;
+        let dataset = match input.open().await {
+            Ok(dataset) => dataset,
+            Err(e) if skip.invalid => {
+                tracing::warn!(
+                    file = %object.location,
+                    error = %e,
+                    "skipping an unreadable NetCDF file"
+                );
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to open NetCDF dataset {}: {e}",
+                    object.location,
+                )))
+            }
+        };
 
         // Apply dimension projection before deriving the file schema. When no
         // explicit dimensions were requested, fall back to the dataset's
@@ -381,7 +406,7 @@ impl NetCDFOpener {
         beacon_nd_array::dataset::project_read_dimensions_or_skip(
             dataset,
             read_dimensions,
-            skip_unbroadcastable,
+            skip.unbroadcastable,
             None,
         )
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
@@ -397,7 +422,7 @@ struct NetCDFFiles {
     object_store: Arc<dyn object_store::ObjectStore>,
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
-    skip_unbroadcastable: bool,
+    skip: SkipFiles,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
@@ -423,7 +448,7 @@ impl OpenFile for NetCDFFiles {
             input,
             file.object_meta.clone(),
             self.read_dimensions.clone(),
-            self.skip_unbroadcastable,
+            self.skip,
         )
         .await?
         else {
@@ -480,7 +505,7 @@ impl FileOpener for NetCDFOpener {
             file.object_meta,
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
-            self.skip_unbroadcastable,
+            self.skip,
             self.batch_size,
             metrics,
             self.predicate.clone(),
