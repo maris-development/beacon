@@ -953,6 +953,40 @@ mod reader_backend_tests {
         );
     }
 
+    /// A file the reader cannot open gives unknown statistics, not an error.
+    #[tokio::test]
+    async fn infer_stats_on_an_invalid_file_is_unknown() {
+        // `put` and `head` live on this extension trait.
+        use object_store::ObjectStoreExt;
+
+        let ctx = session();
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let location = object_store::path::Path::from("argo/broken.nc");
+        store
+            .put(&location, b"not a netcdf file".to_vec().into())
+            .await
+            .expect("the in-memory store accepts the object");
+        let object = store
+            .head(&location)
+            .await
+            .expect("the object was just written");
+        let object_store: Arc<dyn ObjectStore> = store;
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("TEMP", arrow::datatypes::DataType::Float64, true),
+        ]));
+
+        let statistics = format_on(ReaderBackend::Oxcdf)
+            .with_enable_statistics(true)
+            .infer_stats(&ctx.state(), &object_store, schema, &object)
+            .await
+            .expect("an unreadable file still answers");
+
+        assert_eq!(statistics.column_statistics.len(), 1);
+        let temp = &statistics.column_statistics[0];
+        assert!(temp.min_value.get_value().is_none());
+        assert!(temp.max_value.get_value().is_none());
+    }
+
     /// What a statistics backfill actually costs per file.
     ///
     /// Run it with:

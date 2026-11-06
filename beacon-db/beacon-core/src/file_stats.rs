@@ -187,10 +187,13 @@ impl FileAnalyzer for FormatFileAnalyzer {
             .await
             .map_err(|e| FileStatsError::Format(format!("schema for {}: {e}", record.path)))?;
 
-        let statistics = format
-            .infer_stats(&state, &store, schema.clone(), &object)
-            .await
-            .map_err(|e| FileStatsError::Format(format!("statistics for {}: {e}", record.path)))?;
+        let statistics = statistics_or_unknown(
+            format
+                .infer_stats(&state, &store, schema.clone(), &object)
+                .await,
+            &schema,
+            &record.path,
+        );
 
         // Keep the schema this analysis just derived. The read is already paid
         // for, and without this every query over the file derives it again — 83%
@@ -218,6 +221,31 @@ impl FileAnalyzer for FormatFileAnalyzer {
         );
         Ok(analysis)
     }
+}
+
+/// The statistics of a file, or unknown ones when the format failed to make them.
+///
+/// Unknown statistics are always correct: no file is pruned. The file then still
+/// counts as analyzed, so its schema goes into the cache.
+///
+/// # Arguments
+///
+/// * `result` - What `infer_stats` returned
+/// * `schema` - The file's own schema, which unknown statistics must cover
+/// * `path` - The file, for the log line
+///
+/// # Returns
+///
+/// The statistics, or [`Statistics::new_unknown`] over `schema` on an error
+fn statistics_or_unknown(
+    result: datafusion::error::Result<Statistics>,
+    schema: &SchemaRef,
+    path: &str,
+) -> Statistics {
+    result.unwrap_or_else(|error| {
+        tracing::warn!(path, %error, "no statistics for this file; recording it unknown");
+        Statistics::new_unknown(schema)
+    })
 }
 
 /// The environment switch that turns on the Rust reader for `format`.
@@ -878,6 +906,37 @@ mod tests {
             Field::new("TEMP", DataType::Float64, true),
             Field::new("PSAL", DataType::Float64, true),
         ]))
+    }
+
+    /// A statistics error gives unknown ranges for every column, not a failed file.
+    #[test]
+    fn a_statistics_error_records_unknown_ranges() {
+        let schema = schema();
+        let failed = Err(datafusion::error::DataFusionError::Execution(
+            "the reader broke".to_string(),
+        ));
+
+        let statistics = statistics_or_unknown(failed, &schema, "argo/a.nc");
+
+        assert_eq!(statistics.column_statistics.len(), 2, "one per column");
+        assert!(statistics
+            .column_statistics
+            .iter()
+            .all(|column| column.min_value == Precision::Absent
+                && column.max_value == Precision::Absent));
+        let analysis = to_analysis("netcdf", &schema, &statistics);
+        assert!(analysis.columns.is_empty(), "no range is stored");
+    }
+
+    /// Statistics that the format made pass through unchanged.
+    #[test]
+    fn statistics_without_an_error_pass_through() {
+        let schema = schema();
+        let made = Statistics::new_unknown(&schema).with_num_rows(Precision::Exact(7));
+
+        let statistics = statistics_or_unknown(Ok(made.clone()), &schema, "argo/a.nc");
+
+        assert_eq!(statistics, made);
     }
 
     /// The latch behind the once-per-pass reason. Every file of a pass asks it;
