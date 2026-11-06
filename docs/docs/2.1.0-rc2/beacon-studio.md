@@ -13,6 +13,19 @@ web app. Each browser calls the Beacon API directly over HTTP.
 
 This chapter deploys Beacon and Studio together with Docker Compose.
 
+## Get the Studio source
+
+The source of Studio is on GitHub:
+[github.com/maris-development/beacon-studio](https://github.com/maris-development/beacon-studio).
+The Compose example below clones it for you. To build or change Studio yourself, clone it:
+
+```bash
+git clone https://github.com/maris-development/beacon-studio.git
+```
+
+The [Studio README](https://github.com/maris-development/beacon-studio#readme) gives the
+development and build steps.
+
 ## Studio and the admin UI
 
 Beacon includes the [admin web UI](/docs/2.1.0-rc2/connect/web-admin-ui) at `/admin`. Studio does
@@ -39,7 +52,14 @@ It runs two services:
 
 ### 1. Get the files
 
-Clone the Beacon repository. Or copy the three files below into one folder:
+Clone the Beacon repository and open the example folder:
+
+```bash
+git clone https://github.com/maris-development/beacon.git
+cd beacon/examples/beacon-studio
+```
+
+Or copy the three files below into one folder:
 
 ```
 beacon-studio/

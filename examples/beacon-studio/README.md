@@ -13,6 +13,14 @@ docker compose up -d --build
 
 Change the admin credentials in `docker-compose.yml` before you expose Beacon.
 
+The Studio source is on GitHub:
+<https://github.com/maris-development/beacon-studio>. To build or change Studio
+yourself, clone it:
+
+```bash
+git clone https://github.com/maris-development/beacon-studio.git
+```
+
 For the settings, production use and troubleshooting, see the
 [Beacon Studio chapter](https://maris-development.github.io/beacon/docs/2.1.0-rc2/beacon-studio)
 of the documentation.
