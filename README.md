@@ -127,6 +127,11 @@ There is a
 [terminal client](https://maris-development.github.io/beacon/docs/2.0.2/connect/cli), and an
 Arrow Flight SQL endpoint for JDBC and ADBC tools.
 
+[Beacon Studio](https://github.com/maris-development/beacon-studio) is a web app that shows
+the data on maps, in tables and in charts.
+[`examples/beacon-studio`](examples/beacon-studio) runs Beacon and Studio together with
+Docker Compose.
+
 ## Next steps
 
 | | |
