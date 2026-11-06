@@ -191,6 +191,9 @@ impl FileFormatFactory for NetCDFFormatFactory {
         if let Some(value) = format_option(format_options, "skip_unbroadcastable") {
             options.skip_unbroadcastable = parse_bool_option("skip_unbroadcastable", value)?;
         }
+        if let Some(value) = format_option(format_options, "skip_invalid_files") {
+            options.skip_invalid_files = parse_bool_option("skip_invalid_files", value)?;
+        }
         options.writer.apply_format_options(format_options)?;
         // Parsed here only so a bad value is an error at `CREATE EXTERNAL
         // TABLE` rather than at the first analysis pass. The value itself is
@@ -326,6 +329,10 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
     /// answered from the other's entry. netcdf-c stays reachable as a fallback,
     /// so one runtime still serves tables on both.
     ///
+    /// `skip_invalid_files` is in the key when it is set, because it turns an
+    /// unreadable file into an empty schema. A table without it must still get
+    /// the error. Without the option the key is the same as for older entries.
+    ///
     /// Nothing else is. The resolver only says how to reach the bytes, and the
     /// statistics switch only decides whether ranges are computed. Neither
     /// changes a field or a type.
@@ -342,14 +349,16 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         if format.options.read_dimensions.is_some() {
             return None;
         }
-        Some(
-            SchemaOptions::new(NETCDF_EXTENSION)
-                .str(match format.reader_backend() {
-                    ReaderBackend::NetcdfC => "netcdf-c",
-                    ReaderBackend::Oxcdf => "oxcdf",
-                })
-                .finish(),
-        )
+        let options = SchemaOptions::new(NETCDF_EXTENSION).str(match format.reader_backend() {
+            ReaderBackend::NetcdfC => "netcdf-c",
+            ReaderBackend::Oxcdf => "oxcdf",
+        });
+        let options = if format.options.skip_invalid_files {
+            options.str("skip_invalid_files")
+        } else {
+            options
+        };
+        Some(options.finish())
     }
 }
 
@@ -446,13 +455,25 @@ impl FileFormat for NetcdfFormat {
             .execution
             .meta_fetch_concurrency
             .max(1);
-        let schemas: Vec<SchemaRef> = futures::stream::iter(inputs)
-            .map(|input| {
+        // An index, not a borrowed `ObjectMeta`: `async_trait` rejects a closure
+        // argument that holds a reference.
+        let schemas: Vec<SchemaRef> = futures::stream::iter(inputs.into_iter().enumerate())
+            .map(|(index, input)| async move {
+                // A glob can match many files, so the error names the bad one.
                 reader::fetch_schema(
                     input,
                     self.options.read_dimensions.clone(),
                     self.options.skip_unbroadcastable,
+                    self.options.skip_invalid_files,
                 )
+                .await
+                .map_err(|e| {
+                    exec_datafusion_err!(
+                        "Failed to infer the schema of NetCDF file '{}': {}",
+                        objects[index].location,
+                        e.message()
+                    )
+                })
             })
             .buffered(width)
             .try_collect()
@@ -559,6 +580,7 @@ impl FileFormat for NetcdfFormat {
             table_schema,
         )
         .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
+        .with_skip_invalid_files(self.options.skip_invalid_files)
         .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -651,7 +673,8 @@ impl FileFormat for NetcdfFormat {
                 self.options.read_dimensions.clone(),
                 table_schema,
             )
-            .with_skip_unbroadcastable(self.options.skip_unbroadcastable),
+            .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
+            .with_skip_invalid_files(self.options.skip_invalid_files),
         )
     }
 }
@@ -891,6 +914,42 @@ mod reader_backend_tests {
                 .iter()
                 .all(|column| column.min_value.get_value().is_none()),
             "enable_statistics=false must still mean no statistics"
+        );
+    }
+
+    /// One bad file in a glob must be named, so the user can find it.
+    #[tokio::test]
+    async fn infer_schema_names_the_invalid_file() {
+        // `put` and `head` live on this extension trait.
+        use object_store::ObjectStoreExt;
+
+        let ctx = session();
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let location = object_store::path::Path::from("argo/broken.nc");
+        store
+            .put(&location, b"not a netcdf file".to_vec().into())
+            .await
+            .expect("the in-memory store accepts the object");
+        let object = store
+            .head(&location)
+            .await
+            .expect("the object was just written");
+        let object_store: Arc<dyn ObjectStore> = store;
+
+        let error = format_on(ReaderBackend::Oxcdf)
+            .infer_schema(&ctx.state(), &object_store, &[object])
+            .await
+            .expect_err("random bytes are not a NetCDF file");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("'argo/broken.nc'"),
+            "the error must name the file: {message}"
+        );
+        assert_eq!(
+            message.matches("Execution error").count(),
+            1,
+            "the error must not repeat its prefix: {message}"
         );
     }
 
@@ -1531,20 +1590,85 @@ mod reader_backend_tests {
         assert_eq!(read, rows_in_one_file(&ctx, "lat").await, "the gridded file alone");
     }
 
-    /// `OPTIONS ('skip_unbroadcastable' 'true')` reaches the format.
+    /// A file the reader cannot open fails the table and names the file.
+    /// With `skip_invalid_files`, the scan reads past it.
     #[tokio::test]
-    async fn the_factory_reads_the_skip_option() {
+    async fn the_skip_option_reads_past_a_file_the_reader_cannot_open() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(test_file(GRIDDED_FILE), dir.path().join(GRIDDED_FILE)).unwrap();
+        std::fs::write(dir.path().join("broken.nc"), b"not a netcdf file").unwrap();
+        let ctx = session();
+
+        // Act
+        let error = table_with_options(&ctx, NetcdfOptions::default(), dir.path())
+            .await
+            .expect_err("random bytes are not a NetCDF file")
+            .to_string();
+        let lenient = NetcdfOptions {
+            skip_invalid_files: true,
+            ..NetcdfOptions::default()
+        };
+        let table = table_with_options(&ctx, lenient, dir.path()).await.unwrap();
+        ctx.register_table("mixed", table).unwrap();
+        let batches = ctx
+            .sql("SELECT lat FROM mixed")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let read: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+
+        // Assert
+        assert!(error.contains("broken.nc"), "the error must name the file: {error}");
+        assert_eq!(read, rows_in_one_file(&ctx, "lat").await, "the gridded file alone");
+    }
+
+    /// The `OPTIONS` of `CREATE EXTERNAL TABLE` reach the format.
+    #[tokio::test]
+    async fn the_factory_reads_the_skip_options() {
         let factory = factory();
         let ctx = SessionContext::new();
-        let options = HashMap::from([("skip_unbroadcastable".to_string(), "true".to_string())]);
+        let options = HashMap::from([
+            ("skip_unbroadcastable".to_string(), "true".to_string()),
+            ("skip_invalid_files".to_string(), "true".to_string()),
+        ]);
 
         let format = factory.create(&ctx.state(), &options).unwrap();
         let format = format.downcast_ref::<NetcdfFormat>().unwrap();
         assert!(format.options.skip_unbroadcastable);
+        assert!(format.options.skip_invalid_files);
 
         let default = factory.create(&ctx.state(), &HashMap::new()).unwrap();
         let default = default.downcast_ref::<NetcdfFormat>().unwrap();
         assert!(!default.options.skip_unbroadcastable);
+        assert!(!default.options.skip_invalid_files);
+    }
+
+    /// A skipped file caches an empty schema, so the option must change the key.
+    /// Without the option the key stays the same as for older cache entries.
+    #[test]
+    fn skip_invalid_files_changes_the_schema_cache_key() {
+        let factory = factory();
+        let format = |skip_invalid_files| {
+            NetcdfFormat::new(
+                Arc::new(ListingFactory::dynamic()),
+                NetcdfOptions {
+                    skip_invalid_files,
+                    ..NetcdfOptions::default()
+                },
+            )
+            .with_access(FileAccess::Oxcdf)
+        };
+        let expected_default = SchemaOptions::new(NETCDF_EXTENSION).str("oxcdf").finish();
+
+        let strict = factory.schema_options_fingerprint(&format(false));
+        let lenient = factory.schema_options_fingerprint(&format(true));
+
+        assert_eq!(strict, Some(expected_default));
+        assert!(lenient.is_some());
+        assert_ne!(strict, lenient);
     }
 
     /// The rows one copy of `GRIDDED_FILE` contributes to `column`.

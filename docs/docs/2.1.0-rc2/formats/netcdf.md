@@ -10,6 +10,7 @@ description: Read NetCDF files with read_netcdf(). Beacon streams chunks, shows 
 read_netcdf(glob_paths)
 read_netcdf(glob_paths, dimensions)
 read_netcdf(glob_paths, dimensions, skip_unbroadcastable)
+read_netcdf(glob_paths, dimensions, skip_unbroadcastable, skip_invalid_files)
 ```
 
 Beacon reads the NetCDF files that match one or more glob patterns.
@@ -23,6 +24,8 @@ when the files hold variables with different dimensions.
 
 The optional `skip_unbroadcastable` argument sets what Beacon does with a file that does not fit the list. Beacon fails the query by default. Set it to true to skip the file instead. Beacon writes a warning and reads the next file.
 
+The optional `skip_invalid_files` argument sets what Beacon does with a file that the reader cannot open. An example is a damaged file. Beacon fails the query by default, and the error names the file. Set the argument to true to skip the file instead. Beacon writes a warning and reads the next file.
+
 ```sql
 SELECT time, latitude, longitude, temperature
 FROM read_netcdf('argo/**/*.nc')
@@ -30,6 +33,10 @@ FROM read_netcdf('argo/**/*.nc')
 -- With explicit dimension columns
 SELECT *
 FROM read_netcdf(['argo/**/*.nc'], ['time', 'pressure'])
+
+-- Skip the files that the reader cannot open
+SELECT *
+FROM read_netcdf(['argo/**/*.nc'], NULL, NULL, true)
 ```
 
 ## Inspect the schema
@@ -185,13 +192,14 @@ full read model.
 
 ### `OPTIONS`
 
-`STORED AS NC` takes four keys for a read. The keys for a write are in
+`STORED AS NC` takes five keys for a read. The keys for a write are in
 [NetCDF output options](#netcdf-output-options).
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `read_dimensions` | List of dimension names | The default grid of each file | The dimensions the table reads. Beacon returns a variable only if the list holds every dimension of that variable. |
 | `skip_unbroadcastable` | Boolean | `false` | Skip a file that does not fit `read_dimensions`. Beacon writes a warning and reads the next file. Without it the query fails. |
+| `skip_invalid_files` | Boolean | `false` | Skip a file that the reader cannot open. Beacon writes a warning and reads the next file. Without it the query fails, and the error names the file. |
 | `use_rust_reader` | Boolean | `true` (`BEACON_NETCDF_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library needs anonymous access to a bucket. |
 | `enable_statistics` | Boolean | `true` (`BEACON_NETCDF_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_NETCDF_ENABLE_STATISTICS` to turn the column ranges off. |
 

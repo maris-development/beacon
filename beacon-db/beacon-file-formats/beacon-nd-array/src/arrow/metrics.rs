@@ -34,8 +34,9 @@ pub struct ReadMetrics {
     pub chunks_pruned: Count,
     /// Rows those chunks held.
     pub rows_pruned: Count,
-    /// Files `skip_unbroadcastable` skipped because they did not fit the
-    /// dimension list. Recorded by the partition that opened the file.
+    /// Files a scan skipped: `skip_unbroadcastable` for a file that did not fit
+    /// the dimension list, `skip_invalid_files` for a file the reader could not
+    /// open. Recorded by the partition that opened the file.
     pub files_skipped: Count,
 }
 
