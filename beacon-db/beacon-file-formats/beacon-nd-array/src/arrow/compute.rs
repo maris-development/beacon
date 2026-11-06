@@ -227,4 +227,10 @@ mod tests {
         let nd = make_nd(vec!["a".to_string(), "b".to_string()], None);
         assert!(value_range(&nd).await.is_none());
     }
+
+    #[tokio::test]
+    async fn test_binary_returns_none() {
+        let nd = make_nd(vec![vec![0u8, 1], vec![255u8]], None);
+        assert!(value_range(&nd).await.is_none());
+    }
 }

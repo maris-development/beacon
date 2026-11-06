@@ -195,4 +195,12 @@ mod tests {
         assert_eq!(col.min_value, Precision::Absent);
         assert_eq!(col.max_value, Precision::Absent);
     }
+
+    #[tokio::test]
+    async fn test_binary_returns_unknown() {
+        let nd = make_nd(vec![vec![0u8, 1], vec![255u8]], None);
+        let col = column_stats_for_array(&nd).await.unwrap();
+        assert_eq!(col.min_value, Precision::Absent);
+        assert_eq!(col.max_value, Precision::Absent);
+    }
 }
