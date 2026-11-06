@@ -114,15 +114,14 @@ Set these variables in the shell or in a `.env` file next to `docker-compose.yml
 
 | Variable | Default | Description |
 | - | - | - |
-| `STUDIO_ORIGIN` | `http://localhost:8080` | The origin of Studio in the browser. Beacon accepts cross-origin calls from this origin only. |
 | `STUDIO_REF` | `main` | The Git branch, tag or commit of Studio to build. |
 | `STUDIO_BRAND` | `default` | The [brand](https://github.com/maris-development/beacon-studio/blob/main/src/brands/default/README.md) of Studio: fonts, colors, logo, text and links. |
 
 Run `docker compose up -d --build` again after a change to `STUDIO_REF` or `STUDIO_BRAND`. These
 values go into the Studio build.
 
-`STUDIO_ORIGIN` sets [`BEACON_CORS_ALLOWED_ORIGINS`](/docs/2.1.0-rc2/server/configuration#cors). Set
-it to each origin that serves Studio. Separate two origins with a comma.
+The browser calls Beacon from the Studio origin. Beacon allows calls from each origin by default, so
+the example needs no CORS setting.
 
 ## Production
 
@@ -130,7 +129,10 @@ The example serves plain HTTP on `localhost`. For a public deployment:
 
 - **Use HTTPS.** Put a reverse proxy, for example nginx or Traefik, in front of both services. Give
   each service its own host name, for example `beacon.example.org` and `studio.example.org`.
-- **Set `STUDIO_ORIGIN`** to the public origin of Studio, for example `https://studio.example.org`.
+- **Limit the CORS origins.** Set
+  [`BEACON_CORS_ALLOWED_ORIGINS`](/docs/2.1.0-rc2/server/configuration#cors) to the public origin of
+  Studio, for example `https://studio.example.org`. Then other web sites cannot call Beacon from
+  the browser of a user. Separate two origins with a comma.
 - **Add the public URL** of Beacon as the node in Studio, for example `https://beacon.example.org`.
 - **Change the admin credentials** in `docker-compose.yml`. See
   [Secure your instance](/docs/2.1.0-rc2/getting-started#local).
@@ -160,12 +162,12 @@ the [Studio repository](https://github.com/maris-development/beacon-studio#build
 **Studio shows the node as offline.** Open `http://localhost:5001/api/health` in the browser. If the
 page does not open, Beacon does not run, or the port is wrong. Run `docker compose logs beacon`.
 
-**The browser console shows a CORS error.** The origin of Studio is not in `STUDIO_ORIGIN`. This
-occurs when you open Studio through another host name or port, for example `http://127.0.0.1:8080`.
-Set `STUDIO_ORIGIN` to that origin. Then run `docker compose up -d`.
+**The browser console shows a CORS error.** The origin of Studio is not in
+`BEACON_CORS_ALLOWED_ORIGINS`. This occurs only when you set that variable. Add the origin that
+opens Studio, for example `http://127.0.0.1:8080`. Then run `docker compose up -d`.
 
 **`npm ci` fails in the Studio build.** The Studio lock file needs npm 11. Keep the `node:24-alpine`
 base image in `studio/Dockerfile`.
 
 **Port `5001` or `8080` is in use.** Change the left port of the mapping, for example
-`"9080:80"`. Then also change `STUDIO_ORIGIN`, or the node URL in Studio.
+`"9080:80"`. For a new Beacon port, also change the node URL in Studio.

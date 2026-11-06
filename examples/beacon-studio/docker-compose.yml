@@ -13,8 +13,6 @@ services:
         environment:
             - BEACON_ADMIN_USERNAME=admin
             - BEACON_ADMIN_PASSWORD=securepassword
-            # The browser calls Beacon from the Studio origin.
-            - BEACON_CORS_ALLOWED_ORIGINS=${STUDIO_ORIGIN:-http://localhost:8080}
         volumes:
             - ./datasets:/beacon/data/datasets
             - ./tables:/beacon/data/tables
