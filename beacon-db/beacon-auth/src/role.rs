@@ -125,6 +125,79 @@ pub const QUERY_OUTPUT_ROW_LIMIT: &str = "query_output_row_limit";
 /// The longest key a role setting can have.
 const MAX_SETTING_KEY_LEN: usize = 64;
 
+/// A query operation that a role can forbid, with `ALTER ROLE <role> SET <key> = false`.
+///
+/// Every operation is allowed by default. The keys are `query_allow_<operation>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum QueryOperation {
+    /// Any join, also `FROM a, b` and `INTERSECT` / `EXCEPT`.
+    Join,
+    /// `GROUP BY` and `DISTINCT`. An aggregate without `GROUP BY` stays allowed.
+    GroupBy,
+    /// Window functions (`OVER (...)`).
+    Window,
+    /// `ORDER BY` without a `LIMIT`. A sort with a `LIMIT` stays allowed.
+    OrderBy,
+    /// `UNION` and `UNION ALL`.
+    Union,
+    /// A subquery in an expression: `IN (SELECT ...)`, `EXISTS`, a scalar subquery.
+    Subquery,
+    /// A recursive CTE (`WITH RECURSIVE`).
+    Recursive,
+    /// `UNNEST`.
+    Unnest,
+}
+
+impl QueryOperation {
+    /// Every operation a role can forbid.
+    pub const ALL: [QueryOperation; 8] = [
+        QueryOperation::Join,
+        QueryOperation::GroupBy,
+        QueryOperation::Window,
+        QueryOperation::OrderBy,
+        QueryOperation::Union,
+        QueryOperation::Subquery,
+        QueryOperation::Recursive,
+        QueryOperation::Unnest,
+    ];
+
+    /// The role setting key that allows or forbids this operation.
+    pub fn setting_key(&self) -> &'static str {
+        match self {
+            QueryOperation::Join => "query_allow_join",
+            QueryOperation::GroupBy => "query_allow_group_by",
+            QueryOperation::Window => "query_allow_window",
+            QueryOperation::OrderBy => "query_allow_order_by",
+            QueryOperation::Union => "query_allow_union",
+            QueryOperation::Subquery => "query_allow_subquery",
+            QueryOperation::Recursive => "query_allow_recursive",
+            QueryOperation::Unnest => "query_allow_unnest",
+        }
+    }
+
+    /// The operation whose setting key is `key`.
+    pub fn from_setting_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|operation| operation.setting_key() == key)
+    }
+}
+
+impl Display for QueryOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            QueryOperation::Join => "JOIN",
+            QueryOperation::GroupBy => "GROUP BY",
+            QueryOperation::Window => "window functions",
+            QueryOperation::OrderBy => "ORDER BY without LIMIT",
+            QueryOperation::Union => "UNION",
+            QueryOperation::Subquery => "subqueries",
+            QueryOperation::Recursive => "recursive queries",
+            QueryOperation::Unnest => "UNNEST",
+        })
+    }
+}
+
 /// Checks a role setting and returns the key and value to store.
 ///
 /// A key is free: any name of ASCII letters, digits, `_` and `.`, such as `wms.max_tiles`. The
@@ -136,9 +209,19 @@ pub fn normalize_setting(key: &str, value: &str) -> anyhow::Result<(String, Stri
     let value = match key.as_str() {
         QUERY_CPU_LIMIT_MS => normalize_limit(&key, value, "milliseconds")?,
         QUERY_OUTPUT_ROW_LIMIT => normalize_limit(&key, value, "rows")?,
+        _ if QueryOperation::from_setting_key(&key).is_some() => normalize_bool(&key, value)?,
         _ => value.to_string(),
     };
     Ok((key, value))
+}
+
+/// Checks the value of an on/off setting: `true` or `false`, in any case.
+fn normalize_bool(key: &str, value: &str) -> anyhow::Result<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok("true".to_string()),
+        "false" => Ok("false".to_string()),
+        _ => anyhow::bail!("{key} takes true or false, got '{value}'"),
+    }
 }
 
 /// Checks the value of a limit setting: a whole number, where `0` means no limit.
@@ -428,6 +511,16 @@ impl RoleProvider {
     /// See [`Self::most_generous_limit`].
     pub fn query_output_row_limit(&self, roles: &[String]) -> Option<u64> {
         self.most_generous_limit(roles, QUERY_OUTPUT_ROW_LIMIT)
+    }
+
+    /// Whether `roles` allow `operation` in a query.
+    ///
+    /// The most generous role wins, as roles add access: one role that sets the key to `true`
+    /// allows the operation. A role without the key does not count, and when no role sets it,
+    /// the operation is allowed.
+    pub fn operation_allowed(&self, roles: &[String], operation: QueryOperation) -> bool {
+        let values = self.settings_for(roles, operation.setting_key());
+        values.is_empty() || values.iter().any(|(_, value)| value == "true")
     }
 
     /// The limit setting `key` that `roles` give, or `None` when no role sets it.
@@ -1296,6 +1389,41 @@ mod tests {
         assert_eq!(normalize_setting(QUERY_OUTPUT_ROW_LIMIT, "1000000").unwrap().1, "1000000");
         let error = normalize_setting(QUERY_OUTPUT_ROW_LIMIT, "1M").unwrap_err();
         assert!(error.to_string().contains("whole number of rows"), "{error}");
+    }
+
+    #[test]
+    fn an_operation_key_takes_true_or_false() {
+        let key = QueryOperation::Join.setting_key();
+        assert_eq!(normalize_setting(key, " FALSE ").unwrap().1, "false");
+        assert_eq!(normalize_setting("QUERY_ALLOW_JOIN", "True").unwrap().1, "true");
+        let error = normalize_setting(key, "no").unwrap_err();
+        assert!(error.to_string().contains("true or false"), "{error}");
+        for operation in QueryOperation::ALL {
+            assert_eq!(
+                QueryOperation::from_setting_key(operation.setting_key()),
+                Some(operation)
+            );
+        }
+    }
+
+    /// One role that allows an operation wins. A role without the key does not count.
+    #[tokio::test]
+    async fn the_most_generous_role_allows_an_operation() {
+        let provider = RoleProvider::new();
+        for name in ["strict", "open", "plain"] {
+            provider.create_role(name).await.unwrap();
+        }
+        let join = QueryOperation::Join;
+        provider.set_setting("strict", join.setting_key(), "false").await.unwrap();
+        provider.set_setting("open", join.setting_key(), "true").await.unwrap();
+        let roles = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+        assert!(!provider.operation_allowed(&roles(&["strict"]), join));
+        assert!(!provider.operation_allowed(&roles(&["strict", "plain"]), join));
+        assert!(provider.operation_allowed(&roles(&["strict", "open"]), join));
+        assert!(provider.operation_allowed(&roles(&["plain"]), join));
+        assert!(provider.operation_allowed(&roles(&[]), join));
+        assert!(provider.operation_allowed(&roles(&["strict"]), QueryOperation::Window));
     }
 
     /// The row limit and the CPU limit are separate keys with the same rule.

@@ -27,6 +27,6 @@ pub use password::{hash_password, verify_password};
 pub use provider::{AuthProvider, Authenticated, StoredUser, UserDirectory, UserRecord};
 pub use role::{
     decode_target, encode_target, normalize_setting, normalize_setting_key, rule_kind,
-    ConcreteTarget, Privilege, PrivilegeRule, PrivilegeTarget, Role, RoleProvider, RoleStore,
-    QUERY_CPU_LIMIT_MS, QUERY_OUTPUT_ROW_LIMIT,
+    ConcreteTarget, Privilege, PrivilegeRule, PrivilegeTarget, QueryOperation, Role, RoleProvider,
+    RoleStore, QUERY_CPU_LIMIT_MS, QUERY_OUTPUT_ROW_LIMIT,
 };
