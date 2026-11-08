@@ -132,6 +132,7 @@ pub fn session_widening(session: &dyn Session) -> Arc<ArrowTypeWidening> {
 }
 
 /// The rule a merge applies.
+#[typetag::serde]
 pub trait ArrowTypeWideningStrategy: std::fmt::Debug + Send + Sync {
     /// Merge `schemas` into one, in the order given. Report both sources for a
     /// column that two of them type in two families.
@@ -158,7 +159,7 @@ pub trait ArrowTypeWideningStrategy: std::fmt::Debug + Send + Sync {
 }
 
 /// What the merge does with a column that no type holds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TypeConflict {
     /// Refuse the merge. The error names the column, both types and both
     /// sources.
@@ -178,6 +179,20 @@ impl TypeConflict {
             "keep_first" | "keep-first" | "first" => Ok(Self::KeepFirst),
             other => Err(other.to_string()),
         }
+    }
+}
+
+/// The strategy that `name` names, with `on_conflict`, or `name` itself when it names none.
+///
+/// The names are `default` and `numpy`. An empty name is `default`.
+pub fn strategy_by_name(
+    name: &str,
+    on_conflict: TypeConflict,
+) -> Result<Arc<dyn ArrowTypeWideningStrategy>, String> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "default" | "" => Ok(Arc::new(DefaultArrowTypeWidening { on_conflict })),
+        "numpy" => Ok(Arc::new(NumpyArrowTypeWidening { on_conflict })),
+        other => Err(other.to_string()),
     }
 }
 
@@ -454,12 +469,13 @@ mod tests {
     fn an_order_sensitive_strategy_sees_every_schema() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        #[derive(Debug)]
+        #[derive(Debug, serde::Serialize, serde::Deserialize)]
         struct CountingStrategy {
             calls: AtomicUsize,
             seen: AtomicUsize,
         }
 
+        #[typetag::serde]
         impl ArrowTypeWideningStrategy for CountingStrategy {
             fn merge_schemas(&self, schemas: &[LabeledSchema]) -> Result<SchemaRef, ArrowError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);

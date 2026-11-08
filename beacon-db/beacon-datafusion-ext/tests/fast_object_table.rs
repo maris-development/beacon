@@ -619,9 +619,10 @@ async fn the_caller_can_name_the_merge_rule() {
     /// A rule of its own: keep the first type seen for a column instead of
     /// refusing the second. Order-sensitive by construction, so it says so and
     /// the merge folds it over every schema in order.
-    #[derive(Debug)]
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
     struct FirstTypeWins;
 
+    #[typetag::serde]
     impl ArrowTypeWideningStrategy for FirstTypeWins {
         fn merge_schemas(
             &self,
@@ -700,7 +701,11 @@ async fn the_caller_can_name_the_merge_rule() {
     .await
     .unwrap();
     assert_eq!(
-        first_wins.schema().field_with_name("v").unwrap().data_type(),
+        first_wins
+            .schema()
+            .field_with_name("v")
+            .unwrap()
+            .data_type(),
         &DataType::Int32
     );
 }

@@ -7,11 +7,18 @@ use std::sync::Arc;
 
 use beacon_file_stats::{FileId, FileStatsStore, ObservedFile};
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::catalog::Session;
+use datafusion::common::DFSchema;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{FileGroup, FileScanConfig};
 use datafusion::datasource::source::DataSourceExec;
+use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::utils::collect_columns;
+use datafusion::physical_optimizer::pruning::PruningPredicate;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::metrics::MetricBuilder;
+use datafusion::prelude::Expr;
 
 /// Everything needed to drop files a predicate rules out.
 ///
@@ -32,6 +39,117 @@ impl fmt::Debug for Pruning {
             .field("predicate", &self.predicate)
             .finish()
     }
+}
+
+impl Pruning {
+    /// The prune a scan over `schema` with `filters` applies, or `None` when no prune pays off.
+    ///
+    /// A predicate compiles on the CPU alone. The check after it costs one index
+    /// lookup per predicate column. A predicate that names no interned column
+    /// cannot drop a file. A prune for such a predicate buys one segment read and
+    /// gains nothing.
+    pub fn for_scan(state: &dyn Session, schema: &SchemaRef, filters: &[Expr]) -> Option<Self> {
+        if filters.is_empty() {
+            return None;
+        }
+        let store = beacon_file_stats::try_file_stats_from_session(state)?;
+        let predicate = physical_predicate(state, schema, filters)?;
+        let columns = predicate_columns(&predicate, schema)?;
+        if !knows_any(&store, &columns) {
+            return None;
+        }
+        Some(Self {
+            store,
+            predicate,
+            table_schema: Arc::clone(schema),
+        })
+    }
+}
+
+/// Drop the files that `filters` rule out from a scan `plan` over `schema`.
+///
+/// This is the one prune entry point for a table provider. It returns `plan`
+/// unchanged when no prune pays off. It records the counters that
+/// `EXPLAIN ANALYZE` shows under the scan node.
+pub async fn prune_scan(
+    state: &dyn Session,
+    schema: &SchemaRef,
+    filters: &[Expr],
+    plan: Arc<dyn ExecutionPlan>,
+) -> Arc<dyn ExecutionPlan> {
+    let Some(pruning) = Pruning::for_scan(state, schema, filters) else {
+        return plan;
+    };
+    let (plan, counts) = prune_plan(plan, &pruning).await;
+    if let Some((considered, dropped)) = counts {
+        record_counters(&plan, considered, dropped);
+    }
+    plan
+}
+
+/// Report the prune result where people look.
+///
+/// `DataSourceExec` and its `FileSource` share one `ExecutionPlanMetricsSet`
+/// through an `Arc`. A registration on the built scan therefore shows these
+/// counters under that node in `EXPLAIN ANALYZE`. The report needs no extra plan
+/// node, so it blocks no later repartition and no limit pushdown.
+///
+/// The code finds the scan through the chain of single children. An nd format
+/// returns a stack. netCDF and HDF5 return decode and broadcast nodes above their
+/// scan.
+fn record_counters(plan: &Arc<dyn ExecutionPlan>, considered: usize, dropped: usize) {
+    let mut node: &dyn ExecutionPlan = plan.as_ref();
+    loop {
+        if let Some(exec) = node.downcast_ref::<DataSourceExec>() {
+            let Some(config) = exec.data_source().downcast_ref::<FileScanConfig>() else {
+                return;
+            };
+            let metrics = datafusion::datasource::source::DataSource::metrics(config);
+            MetricBuilder::new(&metrics)
+                .global_counter("file_stats_files_considered")
+                .add(considered);
+            MetricBuilder::new(&metrics)
+                .global_counter("file_stats_files_pruned")
+                .add(dropped);
+            return;
+        }
+        let children = node.children();
+        let [child] = children[..] else { return };
+        node = child.as_ref();
+    }
+}
+
+/// The predicate `filters` form, as one physical expression over `schema`.
+fn physical_predicate(
+    state: &dyn Session,
+    schema: &SchemaRef,
+    filters: &[Expr],
+) -> Option<Arc<dyn PhysicalExpr>> {
+    let predicate = conjunction(filters.iter().cloned())?;
+    let df_schema = DFSchema::try_from(schema.as_ref().clone()).ok()?;
+    state.create_physical_expr(predicate, &df_schema).ok()
+}
+
+/// The columns that a predicate compares. `None` means the prune engine cannot
+/// use the shape of the predicate.
+fn predicate_columns(predicate: &Arc<dyn PhysicalExpr>, schema: &SchemaRef) -> Option<Vec<String>> {
+    let pruning = PruningPredicate::try_new(Arc::clone(predicate), Arc::clone(schema)).ok()?;
+    let columns: Vec<String> = collect_columns(pruning.orig_expr())
+        .into_iter()
+        .map(|column| column.name().to_string())
+        .collect();
+    (!columns.is_empty()).then_some(columns)
+}
+
+/// Whether the registry holds any predicate column.
+///
+/// The check costs one lookup per column. A predicate over unknown columns cannot
+/// drop a file. A segment read to learn that costs the whole price of a prune and
+/// gains nothing.
+fn knows_any(store: &FileStatsStore, columns: &[String]) -> bool {
+    columns
+        .iter()
+        .any(|name| matches!(store.registry().column_id(name), Ok(Some(_))))
 }
 
 /// What one prune did, for the counters `EXPLAIN ANALYZE` shows.

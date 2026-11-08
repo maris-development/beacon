@@ -8,7 +8,6 @@ pub mod format_ext;
 pub mod format_options;
 pub mod listing_factory;
 pub mod located_table;
-pub mod listing_table_factory_ext;
 pub mod listing_url_resolver;
 pub mod nd;
 pub mod object_store_registry;

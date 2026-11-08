@@ -16,7 +16,7 @@ pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::CrawlerConfig;
 pub use beacon_common::FileStatsConfig;
 pub use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, TypeConflict};
-use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, NumpyArrowTypeWidening};
+use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, strategy_by_name};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -1024,17 +1024,13 @@ fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWidening
         );
         TypeConflict::Fail
     });
-    match strategy.trim().to_ascii_lowercase().as_str() {
-        "default" | "" => Arc::new(DefaultArrowTypeWidening { on_conflict }),
-        "numpy" => Arc::new(NumpyArrowTypeWidening { on_conflict }),
-        other => {
-            tracing::warn!(
-                "BEACON_TYPE_WIDENING_STRATEGY names no strategy: '{other}'. \
-                 The strategies are 'default' and 'numpy'. Taking 'default'."
-            );
-            Arc::new(DefaultArrowTypeWidening { on_conflict })
-        }
-    }
+    strategy_by_name(strategy, on_conflict).unwrap_or_else(|other| {
+        tracing::warn!(
+            "BEACON_TYPE_WIDENING_STRATEGY names no strategy: '{other}'. \
+             The strategies are 'default' and 'numpy'. Taking 'default'."
+        );
+        Arc::new(DefaultArrowTypeWidening { on_conflict })
+    })
 }
 
 #[cfg(test)]

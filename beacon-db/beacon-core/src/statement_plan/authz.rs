@@ -18,8 +18,9 @@ use beacon_datafusion_ext::{
     fast_object::FastObjectTable,
     listing_factory::ListingFactory,
     located_table::LocatedTable,
-    table_ext::{ExternalTable, INTERNAL_TABLE_PREFIX},
+    table_ext::INTERNAL_TABLE_PREFIX,
 };
+use beacon_external_table::ExternalTable;
 use datafusion::{
     catalog::TableProvider,
     common::tree_node::TreeNodeRecursion,
@@ -194,7 +195,7 @@ fn provider_locations(provider: &dyn TableProvider) -> Option<Vec<Location>> {
         return Some(listing_locations(table.inner()));
     }
     if let Some(external) = provider.downcast_ref::<ExternalTable>() {
-        return Some(listing_locations(external.inner().inner()));
+        return Some(listing_locations(&external.listing_table()));
     }
     if let Some(listing) = provider.downcast_ref::<ListingTable>() {
         return Some(listing_locations(listing));

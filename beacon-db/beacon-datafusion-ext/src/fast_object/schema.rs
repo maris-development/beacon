@@ -165,7 +165,7 @@ async fn empty_listing_error(
 ///
 /// `false` when the listing itself fails: a listing that fails is not an empty
 /// listing.
-pub(crate) async fn lists_no_file(
+pub async fn lists_no_file(
     state: &dyn Session,
     options: &ListingOptions,
     url: &ListingTableUrl,

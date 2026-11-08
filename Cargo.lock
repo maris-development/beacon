@@ -1816,6 +1816,7 @@ dependencies = [
  "beacon-datafusion-ext",
  "beacon-delta",
  "beacon-erddap",
+ "beacon-external-table",
  "beacon-file-stats",
  "beacon-functions",
  "beacon-iceberg",
@@ -1986,6 +1987,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-external-table"
+version = "2.1.0-rc.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "beacon-datafusion-ext",
+ "datafusion 54.1.0",
+ "futures",
+ "object_store 0.13.2",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "typetag",
+]
+
+[[package]]
 name = "beacon-file-stats"
 version = "2.1.0-rc.2"
 dependencies = [
@@ -2031,6 +2051,7 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-delta",
+ "beacon-external-table",
  "beacon-iceberg",
  "beacon-icechunk",
  "chrono",

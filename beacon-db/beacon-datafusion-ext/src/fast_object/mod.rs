@@ -77,6 +77,6 @@ pub mod prune;
 pub mod schema;
 pub mod table;
 
-pub use prune::{Pruned, Pruning, prune_file_groups, prune_plan};
+pub use prune::{Pruned, Pruning, prune_file_groups, prune_plan, prune_scan};
 pub use schema::infer_url_schemas;
 pub use table::FastObjectTable;

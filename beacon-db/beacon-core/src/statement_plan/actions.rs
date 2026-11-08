@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use beacon_datafusion_ext::{
-    listing_table_factory_ext::ListingTableFactoryExt,
     remote::{unresolved_schema, RemoteTableDefinition},
     table_ext::{MaterializedView, TableDefinition},
 };
@@ -291,7 +290,7 @@ pub(crate) async fn create_external_table(
     }
     let factory = state
         .config()
-        .get_extension::<ListingTableFactoryExt>()
+        .get_extension::<beacon_external_table::ExternalTableFactory>()
         .ok_or_else(|| anyhow::anyhow!("Listing-table factory is not registered on the session"))?;
     let created = factory.create(&state, cmd).await?;
     session.register_table(cmd.name.clone(), created)?;

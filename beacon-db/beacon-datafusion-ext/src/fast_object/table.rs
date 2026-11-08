@@ -6,28 +6,23 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use beacon_file_stats::FileStatsStore;
 use datafusion::{
     arrow::datatypes::{Schema, SchemaRef},
     catalog::{Session, TableProvider},
-    common::{Constraints, DFSchema, Statistics, plan_datafusion_err},
+    common::{Constraints, Statistics, plan_datafusion_err},
     datasource::{
         TableType,
         file_format::FileFormat,
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
-        physical_plan::FileScanConfig,
-        source::DataSourceExec,
     },
     error::DataFusionError,
     execution::SessionState,
-    logical_expr::{LogicalPlan, TableProviderFilterPushDown, dml::InsertOp, utils::conjunction},
-    physical_expr::utils::collect_columns,
-    physical_optimizer::pruning::PruningPredicate,
-    physical_plan::{ExecutionPlan, metrics::MetricBuilder},
+    logical_expr::{LogicalPlan, TableProviderFilterPushDown, dml::InsertOp},
+    physical_plan::ExecutionPlan,
     prelude::Expr,
 };
 
-use super::prune::{Pruning, prune_plan};
+use super::prune::prune_scan;
 use crate::type_widening::{ArrowTypeWideningStrategy, session_widening};
 
 /// A table over objects. It is a listing table that prunes before it scans.
@@ -199,14 +194,7 @@ impl TableProvider for FastObjectTable {
         // directory into the groups that their reader opens. A prune before the
         // plan would drop the analysed root marker of a store and keep its
         // unanalysed children. The format would then read one child as a store.
-        let Some(pruning) = self.pruning(state, filters) else {
-            return Ok(plan);
-        };
-        let (plan, counts) = prune_plan(plan, &pruning).await;
-        if let Some((considered, dropped)) = counts {
-            record_counters(&plan, considered, dropped);
-        }
-        Ok(plan)
+        Ok(prune_scan(state, &self.schema(), filters, plan).await)
     }
 
     fn supports_filters_pushdown(
@@ -237,99 +225,4 @@ impl TableProvider for FastObjectTable {
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         self.inner.insert_into(state, input, insert_op).await
     }
-}
-
-impl FastObjectTable {
-    /// The prune that this scan applies, or `None` when no prune pays off.
-    ///
-    /// A predicate compiles on the CPU alone. The check after it costs one index
-    /// lookup per predicate column. A predicate that names no interned column
-    /// cannot drop a file. A prune for such a predicate buys one segment read and
-    /// gains nothing.
-    fn pruning(&self, state: &dyn Session, filters: &[Expr]) -> Option<Pruning> {
-        if filters.is_empty() {
-            return None;
-        }
-        let store = beacon_file_stats::try_file_stats_from_session(state)?;
-        let schema = self.schema();
-        let columns = predicate_columns(state, &schema, filters)?;
-        if !knows_any(&store, &columns) {
-            return None;
-        }
-        Some(Pruning {
-            store,
-            predicate: physical_predicate(state, &schema, filters)?,
-            table_schema: schema,
-        })
-    }
-}
-
-/// Report the prune result where people look.
-///
-/// `DataSourceExec` and its `FileSource` share one `ExecutionPlanMetricsSet`
-/// through an `Arc`. A registration on the built scan therefore shows these
-/// counters under that node in `EXPLAIN ANALYZE`. The report needs no extra plan
-/// node, so it blocks no later repartition and no limit pushdown.
-///
-/// The code finds the scan through the chain of single children. An nd format
-/// returns a stack. netCDF and HDF5 return decode and broadcast nodes above their
-/// scan.
-fn record_counters(plan: &Arc<dyn ExecutionPlan>, considered: usize, dropped: usize) {
-    let mut node: &dyn ExecutionPlan = plan.as_ref();
-    loop {
-        if let Some(exec) = node.downcast_ref::<DataSourceExec>() {
-            let Some(config) = exec.data_source().downcast_ref::<FileScanConfig>() else {
-                return;
-            };
-            let metrics = datafusion::datasource::source::DataSource::metrics(config);
-            MetricBuilder::new(&metrics)
-                .global_counter("file_stats_files_considered")
-                .add(considered);
-            MetricBuilder::new(&metrics)
-                .global_counter("file_stats_files_pruned")
-                .add(dropped);
-            return;
-        }
-        let children = node.children();
-        let [child] = children[..] else { return };
-        node = child.as_ref();
-    }
-}
-
-/// The predicate `filters` form, as one physical expression over `schema`.
-fn physical_predicate(
-    state: &dyn Session,
-    schema: &SchemaRef,
-    filters: &[Expr],
-) -> Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>> {
-    let predicate = conjunction(filters.iter().cloned())?;
-    let df_schema = DFSchema::try_from(schema.as_ref().clone()).ok()?;
-    state.create_physical_expr(predicate, &df_schema).ok()
-}
-
-/// The columns that a predicate compares. `None` means the prune engine cannot
-/// use the shape of the predicate.
-fn predicate_columns(
-    state: &dyn Session,
-    schema: &SchemaRef,
-    filters: &[Expr],
-) -> Option<Vec<String>> {
-    let predicate = physical_predicate(state, schema, filters)?;
-    let pruning = PruningPredicate::try_new(predicate, Arc::clone(schema)).ok()?;
-    let columns: Vec<String> = collect_columns(pruning.orig_expr())
-        .into_iter()
-        .map(|column| column.name().to_string())
-        .collect();
-    (!columns.is_empty()).then_some(columns)
-}
-
-/// Whether the registry holds any predicate column.
-///
-/// The check costs one lookup per column. A predicate over unknown columns cannot
-/// drop a file. A segment read to learn that costs the whole price of a prune and
-/// gains nothing.
-fn knows_any(store: &FileStatsStore, columns: &[String]) -> bool {
-    columns
-        .iter()
-        .any(|name| matches!(store.registry().column_id(name), Ok(Some(_))))
 }

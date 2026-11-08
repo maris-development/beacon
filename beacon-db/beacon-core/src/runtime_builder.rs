@@ -24,7 +24,6 @@ use beacon_datafusion_ext::{
     consts::{DEFAULT_DB_STORE_URL_OBJECT_URL, TMP_STORE_URL_OBJECT_URL},
     format_ext::{new_file_format_registry_handle, FileFormatFactoryExt, FileFormatRegistry},
     listing_factory::{DefaultStore, ListingFactory, RootStore},
-    listing_table_factory_ext::ListingTableFactoryExt,
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
@@ -1057,7 +1056,7 @@ fn build_session_config(
         // by their scheme, bare paths against the cwd).
         .with_extension(Arc::new(build_listing_factory(builder)))
         // The store a `CREATE EXTERNAL TABLE` LOCATION is resolved against.
-        .with_extension(Arc::new(ListingTableFactoryExt))
+        .with_extension(Arc::new(beacon_external_table::ExternalTableFactory))
         // Late-filled by `register_file_formats` once the factories exist. The only
         // route back to a format's `FileFormatFactoryExt` — DataFusion's own
         // registry erases the `Ext` type — which the external-table builder needs

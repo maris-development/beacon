@@ -19,7 +19,7 @@ use super::common::{
 use super::{ArrowTypeWideningStrategy, LabeledSchema, TypeConflict};
 
 /// Merges the schemas of a table with the rules of the [module docs](self).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NumpyArrowTypeWidening {
     /// What the merge does with a column that no type holds.
     pub on_conflict: TypeConflict,
@@ -41,6 +41,7 @@ impl NumpyArrowTypeWidening {
     }
 }
 
+#[typetag::serde]
 impl ArrowTypeWideningStrategy for NumpyArrowTypeWidening {
     fn is_order_independent(&self) -> bool {
         // The set decides, and a chunk result hides the set.

@@ -16,7 +16,7 @@
 //! ranges. It reads the schema cache instead of each file.
 //!
 //! A scan does not compute the statistics itself. `FastObjectTable` and
-//! `ListingTableFactoryExt` both set `with_collect_stat(false)`. A scan that
+//! `ExternalTableBuilder` both set `with_collect_stat(false)`. A scan that
 //! computed them for each file made a plan over 16k files take minutes. A
 //! server with this subsystem off therefore prunes no file.
 //!

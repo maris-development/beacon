@@ -16,7 +16,8 @@ use std::{collections::HashMap, sync::Arc};
 use arrow::datatypes::Schema;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
-use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, TableDefinition};
+use beacon_datafusion_ext::table_ext::TableDefinition;
+use beacon_external_table::{ExternalTable, ExternalTableDefinition};
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
@@ -149,6 +150,17 @@ impl CrawlEngine {
                         partition_cols: cand.partition_cols.clone(),
                         options,
                         if_not_exists: false,
+                        schema_source: beacon_external_table::SchemaSource::Inferred,
+                        refresh_policy: beacon_external_table::RefreshPolicy::default(),
+                        type_widening: Arc::new(
+                            beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening::new(),
+                        ),
+                        parallel_schema_inference: false,
+                        skip_invalid_files_on_inference: false,
+                        skip_invalid_files_on_scan: false,
+                        use_listing_cache: false,
+                        use_statistics_pruning: false,
+                        use_statistics_cache: false,
                     })
                 }
                 None => {
@@ -208,9 +220,10 @@ async fn object_paths(session_ctx: &SessionContext, pattern: &str) -> anyhow::Re
 
 /// The crawler that registered `provider`, when a crawler did.
 fn crawler_owner(provider: &dyn TableProvider) -> Option<String> {
-    let options = if let Some(external) = provider.downcast_ref::<ExternalTable>() {
-        &external.definition().options
-    } else if let Some(delta) = provider.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
+    if let Some(external) = provider.downcast_ref::<ExternalTable>() {
+        return external.definition().options.get(CRAWLER_OWNER_OPTION).cloned();
+    }
+    let options = if let Some(delta) = provider.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
         &delta.definition().options
     } else if let Some(iceberg) = provider.downcast_ref::<beacon_iceberg::BeaconIcebergTable>() {
         &iceberg.definition().options
