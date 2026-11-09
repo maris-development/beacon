@@ -5,11 +5,10 @@
 use std::fmt::{self, Formatter};
 use std::sync::Arc;
 
-use beacon_file_stats::{FileId, FileStatsStore, ObservedFile};
+use beacon_file_stats::{FileId, FileStatsStore, ObservedFile, prune_tasks, resolve_trusted_ids};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::Session;
 use datafusion::common::DFSchema;
-use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{FileGroup, FileScanConfig};
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::logical_expr::utils::conjunction;
@@ -159,19 +158,6 @@ pub struct Pruned {
     pub dropped: usize,
 }
 
-/// Candidates below which pruning stays one call.
-///
-/// A chunk pays for a task, its own id lookups and its own segment reads. Below
-/// this the whole list is decided in one call, which is what a collection of
-/// ordinary size wants.
-const PRUNE_CHUNK: usize = 65_536;
-
-/// How many prune tasks to run at once.
-fn prune_tasks(candidates: usize) -> usize {
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    (candidates / PRUNE_CHUNK).clamp(1, cores)
-}
-
 /// Drop the files a predicate rules out from a planned scan.
 ///
 /// The format decides its own file list — Zarr and Atlas expand a store
@@ -275,7 +261,7 @@ fn rebuild_over_scan(
 ///
 /// A path the registry has never seen has no statistics and is kept: a
 /// partially analyzed store must not lose files. So is a path whose record no
-/// longer describes the object the scan listed — see [`resolve_ids`]. Every
+/// longer describes the object the scan listed — see [`resolve_trusted_ids`]. Every
 /// failure keeps the whole list for the same reason, which is what makes this
 /// infallible.
 ///
@@ -285,11 +271,11 @@ fn rebuild_over_scan(
 pub async fn prune_file_groups(pruning: &Pruning, groups: Vec<FileGroup>) -> Pruned {
     let files: Vec<ObservedFile> = groups
         .iter()
-        .flat_map(|group| group.iter().map(observed))
+        .flat_map(|group| group.iter().map(|file| ObservedFile::from(&file.object_meta)))
         .collect();
     let considered = files.len();
 
-    let Some(ids) = resolve_ids(pruning, files).await else {
+    let Some(ids) = resolve_trusted_ids(&pruning.store, files).await else {
         return Pruned {
             groups,
             considered,
@@ -342,93 +328,6 @@ pub async fn prune_file_groups(pruning: &Pruning, groups: Vec<FileGroup>) -> Pru
         considered,
         dropped,
     }
-}
-
-/// What a scan already knows about one file it planned to read.
-///
-/// The listing filled this in, so comparing it against the record costs no
-/// request. `last_modified` is truncated to milliseconds, the precision
-/// discovery interns.
-fn observed(file: &PartitionedFile) -> ObservedFile {
-    let meta = &file.object_meta;
-    ObservedFile::new(
-        meta.location.as_ref(),
-        meta.size,
-        meta.last_modified.timestamp_millis(),
-    )
-    .with_e_tag(meta.e_tag.clone())
-}
-
-/// Whether a listing filled this entry's metadata in at all.
-///
-/// A format that plans its own entries may state only their paths. Zarr expands
-/// a store into the group keys its reader opens, and Icechunk into the keys of a
-/// snapshot, and both build an entry with `PartitionedFile::new`, which stamps
-/// the Unix epoch as the modification time and carries no etag. No listing
-/// reports that pair, so it is the signature of an entry that says nothing about
-/// the object behind it — and an entry that says nothing cannot contradict the
-/// record. Such a file is trusted as it always was, and the collector's pass
-/// stays its only check. Atlas is the other way round: it carries the marker's
-/// own metadata into every entry it plans, so the comparison applies in full.
-fn states_metadata(observed: &ObservedFile) -> bool {
-    observed.e_tag.is_some() || observed.last_modified_millis != 0
-}
-
-/// Every candidate's file id, in the caller's order, `None` where nothing may
-/// rule the file out.
-///
-/// Three things read as unknown. A path the registry has never seen. A path
-/// whose record describes a different object — a different etag, or a different
-/// size and modification time — which is why the metadata is carried here at
-/// all: a file rewritten after its analysis keeps the state `Analyzed` until
-/// the next collector pass, and its segment rows still describe the old
-/// content, so pruning on them drops rows the query asked for. That pass runs
-/// every `BEACON_FILE_STATS_INTERVAL_SECS`, and over a store Beacon never lists
-/// it never runs at all, so the query makes the comparison itself. Third, a
-/// failed lookup, which drops the whole batch.
-///
-/// Looking a file up is a redb read with no await in it, so this runs on
-/// blocking threads, in chunks. `None` for the whole batch means the lookup
-/// failed and the caller keeps every file.
-///
-/// Each chunk opens its own read transaction, so a file interned between two of
-/// them is resolved by the later one. That fails open: a freshly interned file
-/// has no rows in any segment yet, so pruning reads its statistics as unknown
-/// and keeps it.
-async fn resolve_ids(pruning: &Pruning, files: Vec<ObservedFile>) -> Option<Vec<Option<FileId>>> {
-    let tasks = prune_tasks(files.len());
-    let size = files.len().div_ceil(tasks.max(1));
-
-    let mut lookups = Vec::with_capacity(tasks);
-    for chunk in files.chunks(size) {
-        let chunk: Vec<ObservedFile> = chunk.to_vec();
-        let store = Arc::clone(&pruning.store);
-        lookups.push(tokio::task::spawn_blocking(move || {
-            let resolved = store.registry().resolve_observed(&chunk).ok()?;
-            Some(
-                resolved
-                    .into_iter()
-                    .zip(&chunk)
-                    .map(|(found, file)| {
-                        let found = found?;
-                        // The record is trusted unless this entry carries
-                        // metadata of its own that disagrees with it.
-                        (found.unchanged || !states_metadata(file)).then_some(found.id)
-                    })
-                    .collect::<Vec<Option<FileId>>>(),
-            )
-        }));
-    }
-
-    let mut ids = Vec::with_capacity(files.len());
-    for lookup in lookups {
-        match lookup.await {
-            Ok(Some(chunk)) => ids.extend(chunk),
-            // A failed lookup or a panicked task keeps every file.
-            _ => return None,
-        }
-    }
-    Some(ids)
 }
 
 /// The candidates that survive the predicate, ascending.
@@ -575,49 +474,14 @@ mod tests {
         assert!(node.is::<DataSourceExec>());
     }
 
-    /// Only an entry a listing filled in may contradict the record. One a
-    /// format planned itself states a path and nothing more.
+    /// An entry a format planned itself states a path and nothing more.
     #[test]
-    fn only_a_listed_entry_states_metadata() {
-        let planned = PartitionedFile::new("store.zarr/zarr.json", 1024);
+    fn a_planned_entry_states_no_metadata() {
+        let planned = datafusion::datasource::listing::PartitionedFile::new("store.zarr/zarr.json", 1024);
+        let observed = ObservedFile::from(&planned.object_meta);
         assert!(
-            !states_metadata(&observed(&planned)),
+            !beacon_file_stats::resolve::states_metadata(&observed),
             "the epoch and no etag is what `PartitionedFile::new` stamps"
-        );
-
-        let listed = PartitionedFile::from(object_meta(1_700_000_000_000, None));
-        assert!(states_metadata(&observed(&listed)));
-        assert_eq!(observed(&listed).last_modified_millis, 1_700_000_000_000);
-
-        // An etag alone is enough, whatever the modification time says.
-        let tagged = PartitionedFile::from(object_meta(0, Some("v1".into())));
-        assert!(states_metadata(&observed(&tagged)));
-        assert_eq!(observed(&tagged).e_tag.as_deref(), Some("v1"));
-    }
-
-    fn object_meta(millis: i64, e_tag: Option<String>) -> object_store::ObjectMeta {
-        object_store::ObjectMeta {
-            location: object_store::path::Path::from("obs/a.parquet"),
-            last_modified: chrono::DateTime::from_timestamp_millis(millis).unwrap(),
-            size: 1024,
-            e_tag,
-            version: None,
-        }
-    }
-
-    /// Chunking is decided by candidate count, and only above the threshold.
-    #[test]
-    fn pruning_stays_one_call_until_it_is_worth_splitting() {
-        assert_eq!(prune_tasks(0), 1);
-        assert_eq!(prune_tasks(1_000), 1, "an ordinary collection is one call");
-        assert_eq!(prune_tasks(PRUNE_CHUNK - 1), 1);
-
-        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-        assert_eq!(prune_tasks(PRUNE_CHUNK * 4), 4.min(cores));
-        assert_eq!(
-            prune_tasks(PRUNE_CHUNK * 1_000),
-            cores,
-            "never more tasks than the machine has"
         );
     }
 }

@@ -83,13 +83,17 @@ pub const SKIP_INVALID_FILES_ON_INFERENCE_OPTION: &str = "skip_invalid_files_on_
 /// The `OPTIONS` key that skips a file that a scan cannot read: `true` or `false` (default).
 pub const SKIP_INVALID_FILES_ON_SCAN_OPTION: &str = "skip_invalid_files_on_scan";
 
+/// The `OPTIONS` key that prunes the files of a scan with the file statistics: `true` or `false` (default).
+pub const USE_STATISTICS_PRUNING_OPTION: &str = "use_statistics_pruning";
+
 /// The table options that Beacon reads. They are not format options.
-const TABLE_OPTIONS: [&str; 5] = [
+const TABLE_OPTIONS: [&str; 6] = [
     TYPE_WIDENING_OPTION,
     TYPE_WIDENING_ON_CONFLICT_OPTION,
     PARALLEL_SCHEMA_INFERENCE_OPTION,
     SKIP_INVALID_FILES_ON_INFERENCE_OPTION,
     SKIP_INVALID_FILES_ON_SCAN_OPTION,
+    USE_STATISTICS_PRUNING_OPTION,
 ];
 
 /// Where the schema of an external table comes from.
@@ -423,6 +427,7 @@ mod tests {
                 ("format.parallel_schema_inference", "true"),
                 ("format.skip_invalid_files_on_inference", "true"),
                 ("skip_invalid_files_on_scan", "true"),
+                ("format.use_statistics_pruning", "true"),
                 ("format.has_header", "true"),
             ]),
             ..definition()
@@ -430,6 +435,13 @@ mod tests {
         let options = definition.format_options();
         assert_eq!(options.len(), 1);
         assert_eq!(options["format.has_header"], "true");
+    }
+
+    #[test]
+    fn statistics_pruning_is_off_without_the_option() {
+        assert!(!bool_table_option(&options(&[]), USE_STATISTICS_PRUNING_OPTION).unwrap());
+        let on = options(&[("format.use_statistics_pruning", "true")]);
+        assert!(bool_table_option(&on, USE_STATISTICS_PRUNING_OPTION).unwrap());
     }
 
     #[test]

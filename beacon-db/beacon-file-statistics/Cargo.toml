@@ -1,0 +1,35 @@
+[package]
+name = "beacon-file-statistics"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+
+# Beacon's side of the file statistics store: the analyzer that reads files
+# through the format registry, the background service, and the statistics
+# provider of external tables. The storage engine itself is `beacon-file-stats`.
+
+[dependencies]
+anyhow = { workspace = true }
+arrow = { workspace = true }
+async-trait = { workspace = true }
+crossbeam = { workspace = true }
+beacon-arrow-hdf5 = { path = "../beacon-file-formats/beacon-arrow-hdf5" }
+beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
+beacon-common = { path = "../beacon-common" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-external-table = { path = "../beacon-external-table" }
+beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
+chrono = { workspace = true }
+datafusion = { workspace = true }
+futures = { workspace = true }
+object_store = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

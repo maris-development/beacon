@@ -450,7 +450,7 @@ async fn init_file_stats(
     session_ctx: &Arc<SessionContext>,
     session_cell: SessionCell,
     redb_store: Option<RedbStore>,
-) -> anyhow::Result<Option<Arc<crate::file_stats::FileStatsService>>> {
+) -> anyhow::Result<Option<Arc<beacon_file_statistics::FileStatsService>>> {
     if !builder.file_stats.enable {
         return Ok(None);
     }
@@ -484,11 +484,11 @@ async fn init_file_stats(
         .await?,
     );
 
-    let analyzer = Arc::new(crate::file_stats::FormatFileAnalyzer::new(
+    let analyzer = Arc::new(beacon_file_statistics::FormatFileAnalyzer::new(
         session_cell.clone(),
         datasets.clone(),
     ));
-    let service = crate::file_stats::FileStatsService::new(
+    let service = beacon_file_statistics::FileStatsService::new(
         store,
         analyzer,
         session_cell,
@@ -510,7 +510,7 @@ async fn init_file_stats(
     if let Some(handle) = session_ctx
         .state()
         .config()
-        .get_extension::<std::sync::OnceLock<Arc<crate::file_stats::FileStatsService>>>()
+        .get_extension::<std::sync::OnceLock<Arc<beacon_file_statistics::FileStatsService>>>()
     {
         let _ = handle.set(service.clone());
     }
@@ -1012,6 +1012,7 @@ fn build_session_config(
 ) -> anyhow::Result<SessionConfig> {
     // Plan-time code reaches these settings through the SessionConfig extensions,
     // where no `Runtime` handle is available.
+    let file_stats = beacon_file_stats::new_file_stats_handle();
     let mut config = SessionConfig::new()
         // Beacon's tables live in `beacon.public`; the schema is later replaced by
         // the PersistentSchemaProvider.
@@ -1034,11 +1035,11 @@ fn build_session_config(
         // Late-filled by `init_file_stats`, and left empty when the subsystem is
         // off. A scan reads it to prune its file list; empty simply means no
         // pruning, which is always a correct answer.
-        .with_extension(beacon_file_stats::new_file_stats_handle())
+        .with_extension(Arc::clone(&file_stats))
         // Late-filled by `init_file_stats`. `ANALYZE FILES` reaches the service
         // through this; an empty handle is what makes that statement say the
         // subsystem is off rather than silently doing nothing.
-        .with_extension(crate::file_stats::new_file_stats_service_handle())
+        .with_extension(beacon_file_statistics::new_file_stats_service_handle())
         .with_extension(secrets_store.clone())
         // The rule for every schema merge in this process. Each format merges
         // the files behind one URL. `FastObjectTable` merges the URLs behind one
@@ -1075,6 +1076,16 @@ fn build_session_config(
         .with_extension(Arc::new(CoalesceSqlStream::new(
             builder.sql.stream_coalesce,
         )));
+    // The registry keys files by their path in the datasets store, so only that store has statistics.
+    if let Some(default) = &builder.default_store {
+        let provider = beacon_file_statistics::FileStatsStatisticsProvider::new(
+            file_stats,
+            default.url.clone(),
+        );
+        config = config.with_extension(Arc::new(
+            beacon_external_table::statistics_cache::ExternalTableStatistics(Arc::new(provider)),
+        ));
+    }
     config
         .options_mut()
         .execution

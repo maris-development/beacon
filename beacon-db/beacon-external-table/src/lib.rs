@@ -25,8 +25,11 @@
 //! [`ExternalTable`] lists the files of its DataFusion `ListingTable`. An
 //! [`ExternalTableStatisticsProvider`](statistics_cache::ExternalTableStatisticsProvider)
 //! then drops the files that its statistics rule out. The format plans the
-//! scan over the kept files only. The `read_*` table functions prune through
-//! `FastObjectTable` and the file statistics store.
+//! scan over the kept files only. The scan prunes only when the table sets the
+//! `use_statistics_pruning` option. A table without its own provider takes the
+//! [`ExternalTableStatistics`](statistics_cache::ExternalTableStatistics)
+//! session extension. Beacon fills it with the file statistics store
+//! (crate `beacon-file-statistics`).
 //!
 //! The scan config gets the `PhysicalExprAdapterFactory` of the table type
 //! widening strategy. DataFusion's Parquet source reads it. The other formats

@@ -56,7 +56,7 @@ pub struct Runtime {
 
     /// The background file-statistics service, when enabled. Held so the runtime
     /// owns its timer: dropping the runtime aborts it.
-    pub(crate) file_stats: Option<Arc<crate::file_stats::FileStatsService>>,
+    pub(crate) file_stats: Option<Arc<beacon_file_statistics::FileStatsService>>,
 
     /// The installed function plugins. The session config holds the same registry.
     pub(crate) plugins: Arc<crate::plugins::PluginRegistry>,
@@ -1484,7 +1484,7 @@ mod crawler_sql_tests {
 impl Runtime {
     /// The background file-statistics service, when the subsystem is enabled and
     /// this runtime has a database file to keep the registry in.
-    pub fn file_stats(&self) -> Option<&Arc<crate::file_stats::FileStatsService>> {
+    pub fn file_stats(&self) -> Option<&Arc<beacon_file_statistics::FileStatsService>> {
         self.file_stats.as_ref()
     }
 

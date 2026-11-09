@@ -114,3 +114,15 @@ impl ObservedFile {
         self
     }
 }
+
+impl From<&object_store::ObjectMeta> for ObservedFile {
+    /// What a listing reported. `last_modified` drops to milliseconds, the precision the registry keeps.
+    fn from(meta: &object_store::ObjectMeta) -> Self {
+        Self::new(
+            meta.location.as_ref(),
+            meta.size,
+            meta.last_modified.timestamp_millis(),
+        )
+        .with_e_tag(meta.e_tag.clone())
+    }
+}

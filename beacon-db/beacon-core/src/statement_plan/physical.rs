@@ -1340,7 +1340,7 @@ impl ExecutionPlan for AnalyzeFilesExec {
             let handle = session
                 .state()
                 .config()
-                .get_extension::<std::sync::OnceLock<Arc<crate::file_stats::FileStatsService>>>()
+                .get_extension::<std::sync::OnceLock<Arc<beacon_file_statistics::FileStatsService>>>()
                 .and_then(|handle| handle.get().cloned());
             let Some(service) = handle else {
                 return Err(datafusion::error::DataFusionError::Plan(

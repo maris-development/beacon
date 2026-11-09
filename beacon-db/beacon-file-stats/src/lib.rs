@@ -54,6 +54,7 @@ pub mod pruning;
 #[cfg(feature = "datafusion")]
 pub mod handle;
 pub mod registry;
+pub mod resolve;
 pub mod scalar;
 pub mod schema_cache;
 pub mod segment;
@@ -66,10 +67,11 @@ pub use collector::{
 pub use error::{FileStatsError, Result};
 pub use manifest::{Manifest, SegmentEntry};
 #[cfg(feature = "datafusion")]
-pub use pruning::{FileStatsPruningStatistics, prune_files};
+pub use pruning::{FileStatsPruningStatistics, prune_files, pruning_statistics};
 #[cfg(feature = "datafusion")]
 pub use handle::{FileStatsHandle, new_file_stats_handle, try_file_stats_from_session};
 pub use registry::{AnalyzedFile, ReconcileReport, Registry, ResolvedFile};
+pub use resolve::{prune_tasks, resolve_trusted_ids};
 pub use scalar::{StatScalar, super_type};
 pub use schema_cache::{
     Counters as SchemaCacheCounters, Digest, FileKey, Lookup, SchemaCache, Stamp, stamp_object,

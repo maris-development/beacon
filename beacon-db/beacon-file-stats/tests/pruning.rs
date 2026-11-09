@@ -13,6 +13,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use beacon_file_stats::segment::ColumnStat;
 use beacon_file_stats::{
     FileId, FileStatsStore, ObservedFile, Registry, SegmentBuilder, StatScalar, prune_files,
+    pruning_statistics,
 };
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::PhysicalExpr;
@@ -461,4 +462,48 @@ async fn chunked_pruning_matches_pruning_the_whole_list() {
             "the concatenation stays ascending, so it can be binary-searched"
         );
     }
+}
+
+/// One container per candidate, in candidate order. A candidate without a row reads as unknown.
+#[tokio::test]
+async fn pruning_statistics_has_one_container_per_candidate() {
+    use arrow::array::AsArray;
+    use arrow::datatypes::Float64Type;
+    use datafusion::common::Column;
+    use datafusion::common::pruning::PruningStatistics;
+
+    let (store, _dir) = store().await;
+    let ids = seed_temp(&store, &[(0.0, 5.0), (10.0, 20.0)]).await;
+    let unseeded = store
+        .registry()
+        .intern_files(&[ObservedFile::new("argo/2024/new.nc", 1, 1)])
+        .unwrap()[0];
+    let candidates = [ids[0], ids[1], unseeded];
+
+    let statistics = pruning_statistics(&store, &schema(), &candidates)
+        .await
+        .unwrap()
+        .expect("TEMP has statistics");
+
+    assert_eq!(statistics.num_containers(), 3);
+    let max = statistics.max_values(&Column::from_name("TEMP")).unwrap();
+    let max: Vec<Option<f64>> = max.as_primitive::<Float64Type>().iter().collect();
+    assert_eq!(max, [Some(5.0), Some(20.0), None]);
+    // The schema also names PSAL, which the store holds no statistics for.
+    assert!(statistics.max_values(&Column::from_name("PSAL")).is_none());
+}
+
+/// A schema whose columns the store does not know yields nothing to prune with.
+#[tokio::test]
+async fn pruning_statistics_without_known_columns_is_none() {
+    let (store, _dir) = store().await;
+    let ids = seed_temp(&store, &[(0.0, 5.0)]).await;
+    let psal_only: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+        "PSAL",
+        DataType::Float64,
+        true,
+    )]));
+
+    let statistics = pruning_statistics(&store, &psal_only, &ids).await.unwrap();
+    assert!(statistics.is_none());
 }

@@ -8,7 +8,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 use datafusion::{
-    arrow::datatypes::{Field, FieldRef, SchemaRef},
+    arrow::datatypes::{Field, FieldRef, Schema, SchemaRef},
     catalog::{Session, TableProvider},
     common::{DFSchema, Result, Statistics, project_schema},
     datasource::{
@@ -22,6 +22,7 @@ use datafusion::{
     },
     execution::object_store::ObjectStoreUrl,
     logical_expr::utils::conjunction,
+    physical_expr::utils::collect_columns,
     physical_optimizer::pruning::PruningPredicate,
     physical_plan::{ExecutionPlan, empty::EmptyExec, metrics::MetricBuilder},
     prelude::Expr,
@@ -161,6 +162,35 @@ async fn list_files(
     Ok(listings.into_iter().flatten().collect())
 }
 
+/// Lists all files of `table` and gives them to `provider` to refresh their statistics.
+///
+/// # Errors
+///
+/// Returns an error when the object store is not registered, the listing fails
+/// or the provider fails.
+pub(crate) async fn invalidate_table_files(
+    session: &dyn Session,
+    table: &ListingTable,
+    provider: &dyn ExternalTableStatisticsProvider,
+) -> anyhow::Result<()> {
+    let Some(first_url) = table.table_paths().first() else {
+        return Ok(());
+    };
+    let store = session.runtime_env().object_store(first_url)?;
+    let files = list_files(
+        session,
+        store.as_ref(),
+        table.table_paths(),
+        &[],
+        table.options(),
+    )
+    .await?;
+    let objects: Vec<ObjectMeta> = files.into_iter().map(|file| file.object_meta).collect();
+    provider
+        .invalidate_objects(first_url.object_store(), store, &objects)
+        .await
+}
+
 /// The file source of the format, over the file schema and the partition columns.
 fn file_source(
     options: &ListingOptions,
@@ -208,7 +238,7 @@ pub(crate) async fn prune_files(
             store_url.clone(),
             &objects,
             type_widening,
-            Arc::clone(table_schema),
+            predicate_schema(&predicate, table_schema),
         )
         .await;
     let (returned, statistics) = match fetched {
@@ -263,6 +293,23 @@ fn pruning_predicate(
     let predicate = session.create_physical_expr(predicate, &df_schema).ok()?;
     let pruning = PruningPredicate::try_new(predicate, Arc::clone(schema)).ok()?;
     (!pruning.always_true()).then_some(pruning)
+}
+
+/// The columns of `schema` that `predicate` reads, in schema order.
+///
+/// A provider fetches statistics per column, so a wide table must not ask for all columns.
+fn predicate_schema(predicate: &PruningPredicate, schema: &SchemaRef) -> SchemaRef {
+    let names: HashSet<String> = collect_columns(predicate.orig_expr())
+        .into_iter()
+        .map(|column| column.name().to_string())
+        .collect();
+    let fields: Vec<FieldRef> = schema
+        .fields()
+        .iter()
+        .filter(|field| names.contains(field.name()))
+        .cloned()
+        .collect();
+    Arc::new(Schema::new(fields))
 }
 
 /// Adds the prune counters to the file scan, so that `EXPLAIN ANALYZE` shows them.
@@ -357,6 +404,8 @@ mod tests {
         wrong_count: bool,
         /// The `Debug` form of the strategy of the last fetch.
         seen_type_widening: parking_lot::Mutex<Option<String>>,
+        /// The column names of the schema of the last fetch.
+        seen_columns: parking_lot::Mutex<Vec<String>>,
     }
 
     impl TestProvider {
@@ -381,10 +430,15 @@ mod tests {
             _store_url: ObjectStoreUrl,
             objects: &[ObjectMeta],
             type_widening: Arc<dyn ArrowTypeWideningStrategy>,
-            _schema: SchemaRef,
+            schema: SchemaRef,
         ) -> BoxFuture<'static, anyhow::Result<(Vec<ObjectMeta>, SharedPruningStatistics)>>
         {
             *self.seen_type_widening.lock() = Some(format!("{type_widening:?}"));
+            *self.seen_columns.lock() = schema
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect();
             if self.fail {
                 return Box::pin(async { Err(anyhow!("the store is down")) });
             }
@@ -407,11 +461,7 @@ mod tests {
             Box::pin(async move { Ok((objects, statistics)) })
         }
 
-        fn refresh(&self) -> BoxFuture<'static, anyhow::Result<()>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn refresh_objects(
+        fn invalidate_objects(
             &self,
             _store_url: ObjectStoreUrl,
             _store: Arc<dyn ObjectStore>,
@@ -419,10 +469,22 @@ mod tests {
         ) -> BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async { Ok(()) })
         }
+
+        fn register_store(
+            &self,
+            store_url: ObjectStoreUrl,
+            store: Arc<dyn ObjectStore>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
     }
 
     fn schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![Field::new("temp", DataType::Float64, true)]))
+        Arc::new(Schema::new(vec![Field::new(
+            "temp",
+            DataType::Float64,
+            true,
+        )]))
     }
 
     fn files(names: &[&str]) -> Vec<PartitionedFile> {
@@ -510,6 +572,28 @@ mod tests {
         assert_eq!(dropped, 0);
     }
 
+    #[tokio::test]
+    async fn the_provider_gets_only_the_predicate_columns() {
+        let provider = TestProvider::with_ranges(&[("a.csv", 0.0, 5.0)]);
+        let wide: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("depth", DataType::Float64, true),
+            Field::new("temp", DataType::Float64, true),
+            Field::new("psal", DataType::Float64, true),
+        ]));
+        let session = SessionContext::new().state();
+        prune_files(
+            &session,
+            &provider,
+            Arc::new(DefaultArrowTypeWidening::new()),
+            &ObjectStoreUrl::local_filesystem(),
+            &wide,
+            &[col("temp").gt(lit(10.0))],
+            files(&["a.csv"]),
+        )
+        .await;
+        assert_eq!(*provider.seen_columns.lock(), ["temp"]);
+    }
+
     /// Two CSV files: `a.csv` holds 1 and 5, `b.csv` holds 20 and 30.
     fn csv_table(dir: &std::path::Path) -> ListingTable {
         std::fs::write(dir.join("a.csv"), "temp\n1.0\n5.0\n").unwrap();
@@ -554,10 +638,13 @@ mod tests {
 
     #[tokio::test]
     async fn the_scan_reads_only_the_kept_files() {
-        let provider: Arc<dyn ExternalTableStatisticsProvider> = Arc::new(
-            TestProvider::with_ranges(&[("a.csv", 1.0, 5.0), ("b.csv", 20.0, 30.0)]),
-        );
-        let (rows, pruned) = scan_rows(Some(&provider), Arc::new(DefaultArrowTypeWidening::new())).await;
+        let provider: Arc<dyn ExternalTableStatisticsProvider> =
+            Arc::new(TestProvider::with_ranges(&[
+                ("a.csv", 1.0, 5.0),
+                ("b.csv", 20.0, 30.0),
+            ]));
+        let (rows, pruned) =
+            scan_rows(Some(&provider), Arc::new(DefaultArrowTypeWidening::new())).await;
         // The scan returns all rows of the kept file; a filter above it removes rows.
         assert_eq!(rows, 2);
         assert_eq!(pruned, Some(1));
@@ -610,8 +697,9 @@ mod tests {
             column.data_type().clone(),
             true,
         )]));
-        let batch = datafusion::arrow::array::RecordBatch::try_new(Arc::clone(&schema), vec![column])
-            .unwrap();
+        let batch =
+            datafusion::arrow::array::RecordBatch::try_new(Arc::clone(&schema), vec![column])
+                .unwrap();
         let file = std::fs::File::create(path).unwrap();
         let mut writer =
             datafusion::parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
@@ -624,8 +712,14 @@ mod tests {
         type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> Result<Vec<datafusion::arrow::array::RecordBatch>> {
         let dir = tempfile::tempdir().unwrap();
-        write_parquet(&dir.path().join("a.parquet"), Arc::new(datafusion::arrow::array::Int32Array::from(vec![1])));
-        write_parquet(&dir.path().join("b.parquet"), Arc::new(datafusion::arrow::array::StringArray::from(vec!["abc"])));
+        write_parquet(
+            &dir.path().join("a.parquet"),
+            Arc::new(datafusion::arrow::array::Int32Array::from(vec![1])),
+        );
+        write_parquet(
+            &dir.path().join("b.parquet"),
+            Arc::new(datafusion::arrow::array::StringArray::from(vec!["abc"])),
+        );
         let url = ListingTableUrl::parse(format!("{}/", dir.path().display())).unwrap();
         let options = ListingOptions::new(Arc::new(
             datafusion::datasource::file_format::parquet::ParquetFormat::default(),

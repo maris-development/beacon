@@ -1817,6 +1817,7 @@ dependencies = [
  "beacon-delta",
  "beacon-erddap",
  "beacon-external-table",
+ "beacon-file-statistics",
  "beacon-file-stats",
  "beacon-functions",
  "beacon-iceberg",
@@ -2004,6 +2005,33 @@ dependencies = [
  "tokio",
  "tracing",
  "typetag",
+]
+
+[[package]]
+name = "beacon-file-statistics"
+version = "2.1.0-rc.2"
+dependencies = [
+ "anyhow",
+ "arrow 58.4.0",
+ "async-trait",
+ "beacon-arrow-hdf5",
+ "beacon-arrow-netcdf",
+ "beacon-arrow-parquet",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "beacon-external-table",
+ "beacon-file-stats",
+ "chrono",
+ "crossbeam",
+ "datafusion 54.1.0",
+ "futures",
+ "object_store 0.13.2",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]

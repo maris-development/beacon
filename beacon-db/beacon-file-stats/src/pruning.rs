@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array};
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::datatypes::{DataType, FieldRef, Schema, SchemaRef};
 use datafusion::common::Column;
 use datafusion::common::pruning::PruningStatistics;
 use datafusion::physical_expr::PhysicalExpr;
@@ -57,6 +57,17 @@ impl std::fmt::Debug for FileStatsPruningStatistics {
             .field("rows", &self.rows)
             .field("columns", &self.columns.len())
             .finish()
+    }
+}
+
+impl FileStatsPruningStatistics {
+    /// Statistics with no containers. A prune over them keeps every file.
+    pub fn empty() -> Self {
+        Self {
+            rows: 0,
+            columns: HashMap::new(),
+            counts: ContainerCounts::new(0, std::iter::empty()),
+        }
     }
 }
 
@@ -129,20 +140,58 @@ async fn try_prune(
     if referenced.is_empty() {
         return Ok(None);
     }
+    // Only the predicate columns: a wide table schema would read a block per column.
+    let fields: Vec<FieldRef> = referenced
+        .iter()
+        .filter_map(|column| schema.field_with_name(column.name()).ok())
+        .map(|field| Arc::new(field.clone()))
+        .collect();
+    let projected: SchemaRef = Arc::new(Schema::new(fields));
 
+    let Some(statistics) = pruning_statistics(store, &projected, candidates).await? else {
+        return Ok(None);
+    };
+    let Ok(mask) = pruning_predicate.prune(&statistics) else {
+        return Ok(None);
+    };
+
+    let kept: Vec<FileId> = candidates
+        .iter()
+        .zip(mask)
+        .filter_map(|(id, keep)| keep.then_some(*id))
+        .collect();
+    Ok(Some(kept))
+}
+
+/// The statistics of every column of `schema` for `candidates`, one container per candidate.
+///
+/// `candidates` must be ascending. Container `i` describes `candidates[i]`. A
+/// candidate without trusted statistics reads as unknown, which keeps it.
+///
+/// Returns `None` when the store holds no usable statistics for any column of
+/// `schema`. Give a schema with only the columns you need: each column costs
+/// one block read per segment.
+///
+/// # Errors
+///
+/// Returns the store error of a failed registry read.
+pub async fn pruning_statistics(
+    store: &FileStatsStore,
+    schema: &SchemaRef,
+    candidates: &[FileId],
+) -> crate::Result<Option<FileStatsPruningStatistics>> {
+    if candidates.is_empty() || schema.fields().is_empty() {
+        return Ok(None);
+    }
     let range = (candidates[0], candidates[candidates.len() - 1]);
 
     // The predicate's columns are independent, so fetch them together rather
     // than in a queue. A three-column `WHERE` otherwise costs three times one
     // column's segment reads purely because they were written as a loop.
-    let wanted: Vec<(String, DataType)> = referenced
+    let wanted: Vec<(String, DataType)> = schema
+        .fields()
         .iter()
-        .filter_map(|column| {
-            schema
-                .field_with_name(column.name())
-                .ok()
-                .map(|field| (column.name().to_string(), field.data_type().clone()))
-        })
+        .map(|field| (field.name().clone(), field.data_type().clone()))
         .collect();
 
     let fetched: Vec<(String, DataType, Vec<ColumnStats>)> =
@@ -220,21 +269,11 @@ async fn try_prune(
     }
 
     let counts = ContainerCounts::new(candidates.len(), columns.values().map(|c| &c.row_count));
-    let statistics = FileStatsPruningStatistics {
+    Ok(Some(FileStatsPruningStatistics {
         rows: candidates.len(),
         columns,
         counts,
-    };
-    let Ok(mask) = pruning_predicate.prune(&statistics) else {
-        return Ok(None);
-    };
-
-    let kept: Vec<FileId> = candidates
-        .iter()
-        .zip(mask)
-        .filter_map(|(id, keep)| keep.then_some(*id))
-        .collect();
-    Ok(Some(kept))
+    }))
 }
 
 /// Fold every segment's rows for one column onto the candidate rows.

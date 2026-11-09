@@ -18,9 +18,12 @@ use datafusion::{
 use crate::{
     ExternalTable, ExternalTableDefinition, ExternalTableSpec, RefreshPolicy, SchemaSource,
     spec::{resolve_schema_and_partition_cols, with_default_glob},
-    statistics_cache::ExternalTableStatisticsProvider,
+    statistics_cache::{ExternalTableStatistics, ExternalTableStatisticsProvider},
     bool_table_option,
-    definition::{SKIP_INVALID_FILES_ON_INFERENCE_OPTION, SKIP_INVALID_FILES_ON_SCAN_OPTION},
+    definition::{
+        SKIP_INVALID_FILES_ON_INFERENCE_OPTION, SKIP_INVALID_FILES_ON_SCAN_OPTION,
+        USE_STATISTICS_PRUNING_OPTION,
+    },
     parallel_schema_inference_from_options, type_widening_from_options,
 };
 
@@ -95,7 +98,7 @@ impl ExternalTableBuilder {
                 SKIP_INVALID_FILES_ON_SCAN_OPTION,
             )?,
             use_listing_cache: false,
-            use_statistics_pruning: false,
+            use_statistics_pruning: bool_table_option(&cmd.options, USE_STATISTICS_PRUNING_OPTION)?,
             use_statistics_cache: false,
         };
         Ok(Self::new(definition)
@@ -131,6 +134,7 @@ impl ExternalTableBuilder {
     /// Sets the statistics provider that prunes the files of a scan.
     ///
     /// The scan uses it only when the definition sets `use_statistics_pruning`.
+    /// Without this call, the table takes the [`ExternalTableStatistics`] session extension.
     pub fn with_statistics_provider(
         mut self,
         provider: Arc<dyn ExternalTableStatisticsProvider>,
@@ -161,11 +165,17 @@ impl ExternalTableBuilder {
             self.definition.schema_source = SchemaSource::Inferred;
         }
         self.definition.schema = schema;
+        let statistics_provider = self.statistics_provider.or_else(|| {
+            session
+                .config()
+                .get_extension::<ExternalTableStatistics>()
+                .map(|extension| Arc::clone(&extension.0))
+        });
         Ok(ExternalTable::new(
             self.definition,
             spec,
             table,
-            self.statistics_provider,
+            statistics_provider,
         ))
     }
 

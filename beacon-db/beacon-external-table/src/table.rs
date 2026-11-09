@@ -18,7 +18,8 @@ use object_store::path::Path as ObjectPath;
 use parking_lot::RwLock;
 
 use crate::{
-    ExternalTableDefinition, ExternalTableSpec, scan::scan_with_statistics,
+    ExternalTableDefinition, ExternalTableSpec,
+    scan::{invalidate_table_files, scan_with_statistics},
     statistics_cache::ExternalTableStatisticsProvider,
 };
 
@@ -128,10 +129,18 @@ impl ExternalTable {
         let infer = definition.schema_inferred();
         let (table, schema) = self.spec.build_table(session, &definition, infer).await?;
         definition.schema = schema;
+        let prune = definition.use_statistics_pruning;
+        let table = Arc::new(table);
         *self.state.write() = State {
             definition,
-            table: Arc::new(table),
+            table: Arc::clone(&table),
         };
+        // The provider queues new and changed files, so the next scans can prune them.
+        if let Some(provider) = self.statistics_provider.as_ref().filter(|_| prune)
+            && let Err(error) = invalidate_table_files(session, &table, provider.as_ref()).await
+        {
+            tracing::warn!(%error, "the statistics provider did not get the refreshed files");
+        }
         Ok(())
     }
 }
