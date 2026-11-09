@@ -42,7 +42,7 @@ pub struct ExternalTableDefinition {
     /// Whether schema inference skips a file that it cannot read, and merges the other files.
     #[serde(default)]
     pub skip_invalid_files_on_inference: bool,
-    /// Whether a scan ignores a stream error, and returns the rows it can read.
+    /// Whether a scan skips a file that it cannot read, and continues with the next file.
     #[serde(default)]
     pub skip_invalid_files_on_scan: bool,
     /// Whether `schema` was declared or inferred. A refresh infers an inferred schema again.
@@ -80,7 +80,7 @@ pub const PARALLEL_SCHEMA_INFERENCE_OPTION: &str = "parallel_schema_inference";
 
 /// The `OPTIONS` key that skips a file that schema inference cannot read: `true` or `false` (default).
 pub const SKIP_INVALID_FILES_ON_INFERENCE_OPTION: &str = "skip_invalid_files_on_inference";
-/// The `OPTIONS` key that ignores stream errors in a scan: `true` or `false` (default).
+/// The `OPTIONS` key that skips a file that a scan cannot read: `true` or `false` (default).
 pub const SKIP_INVALID_FILES_ON_SCAN_OPTION: &str = "skip_invalid_files_on_scan";
 
 /// The table options that Beacon reads. They are not format options.

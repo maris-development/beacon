@@ -642,6 +642,12 @@ async fn the_caller_can_name_the_merge_rule() {
         fn is_order_independent(&self) -> bool {
             false
         }
+
+        fn physical_expr_adapter_factory(
+            &self,
+        ) -> Arc<dyn datafusion::physical_expr_adapter::PhysicalExprAdapterFactory> {
+            Arc::new(datafusion::physical_expr_adapter::DefaultPhysicalExprAdapterFactory)
+        }
     }
 
     let fixture = fixture().await;

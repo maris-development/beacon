@@ -15,6 +15,7 @@ use std::sync::Arc;
 use arrow_schema::{ArrowError, DataType, Schema, SchemaRef};
 use datafusion::catalog::Session;
 use datafusion::datasource::physical_plan::FileOpener;
+use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use object_store::ObjectMeta;
 
 mod common;
@@ -156,6 +157,11 @@ pub trait ArrowTypeWideningStrategy: std::fmt::Debug + Send + Sync {
         let _ = (source, target);
         false
     }
+
+    /// The adapter that maps the columns of one file onto the table schema
+    /// with this strategy. A scan sets it as the `PhysicalExprAdapterFactory`
+    /// of its `FileScanConfig`.
+    fn physical_expr_adapter_factory(&self) -> Arc<dyn PhysicalExprAdapterFactory>;
 }
 
 /// What the merge does with a column that no type holds.
@@ -485,6 +491,10 @@ mod tests {
 
             fn is_order_independent(&self) -> bool {
                 false
+            }
+
+            fn physical_expr_adapter_factory(&self) -> Arc<dyn PhysicalExprAdapterFactory> {
+                Arc::new(datafusion::physical_expr_adapter::DefaultPhysicalExprAdapterFactory)
             }
         }
 

@@ -15,6 +15,8 @@ use super::common::{
     self, Resolved, StatedTypes, finer_unit, incompatible_types, integer_join, wider, zone_join,
 };
 use super::{ArrowTypeWideningStrategy, LabeledSchema, TypeConflict};
+use crate::scan_adapt::lenient_cast_adapter_factory;
+use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 
 /// Merges the schemas of a table with the rules of the [module docs](self).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -41,6 +43,10 @@ impl DefaultArrowTypeWidening {
 
 #[typetag::serde]
 impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
+    fn physical_expr_adapter_factory(&self) -> Arc<dyn PhysicalExprAdapterFactory> {
+        lenient_cast_adapter_factory(Arc::new(*self))
+    }
+
     fn is_order_independent(&self) -> bool {
         // `KeepFirst` reads the order: the first type wins.
         matches!(self.on_conflict, TypeConflict::Fail)
@@ -681,5 +687,25 @@ mod tests {
                 "{left:?} v {right:?}"
             );
         }
+    }
+
+    const STRATEGY: DefaultArrowTypeWidening = DefaultArrowTypeWidening::keeping_first_type();
+
+    #[test]
+    fn the_adapter_widens_a_file_column() {
+        let file: arrow::array::ArrayRef = Arc::new(arrow::array::Int32Array::from(vec![1, 2]));
+        let read = crate::scan_adapt::adapt_column(&STRATEGY, file, DataType::Int64).unwrap();
+        let read = read.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        assert_eq!(read.values(), &[1, 2]);
+    }
+
+    #[test]
+    fn the_adapter_reads_a_value_of_another_family_as_null() {
+        let file: arrow::array::ArrayRef =
+            Arc::new(arrow::array::StringArray::from(vec!["abc", "7"]));
+        let read = crate::scan_adapt::adapt_column(&STRATEGY, file, DataType::Int64).unwrap();
+        let read = read.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        assert!(arrow::array::Array::is_null(read, 0));
+        assert_eq!(read.value(1), 7);
     }
 }

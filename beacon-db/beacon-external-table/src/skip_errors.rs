@@ -1,9 +1,9 @@
-//! [`SkipErrorsExec`]: a scan wrapper that ignores stream errors.
+//! [`SkipErrorsExec`]: the fallback skip for a plan without a file scan.
 //!
-//! A `FileStream` ends its partition after the first error. This node only
-//! removes the error from the stream, so the files after a bad file in the same
-//! partition are not read. The query then returns the rows that the scan read
-//! before the error.
+//! [`with_skip_errors`](crate::skip_errors_source::with_skip_errors) skips per
+//! file inside a file scan. A plan without a file scan gets this node. It only
+//! removes an error from the stream. Its input can end after the error, so the
+//! data after a bad file can be lost.
 
 use std::{fmt, sync::Arc};
 

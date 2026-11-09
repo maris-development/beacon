@@ -29,11 +29,18 @@ use datafusion::{
 use futures::{TryStreamExt, future::try_join_all};
 use object_store::{ObjectMeta, ObjectStore, path::Path as ObjectPath};
 
-use crate::statistics_cache::ExternalTableStatisticsProvider;
+use crate::{
+    skip_errors_source::with_skip_errors, statistics_cache::ExternalTableStatisticsProvider,
+};
 
 /// Plans a scan of `table` and prunes its files with `provider`.
 ///
-/// `provider` gets `type_widening`, the strategy of the table.
+/// `provider` gets `type_widening`, the strategy of the table. The scan config
+/// gets the adapter of `type_widening`. Only a format that reads the
+/// `PhysicalExprAdapterFactory` of its config uses it, which is Parquet.
+///
+/// With `skip_errors`, a file that the scan cannot read ends, and the scan
+/// continues with the next file.
 ///
 /// Without a provider, the scan reads all listed files. A filter on partition
 /// columns only prunes the listing, as in a DataFusion `ListingTable`.
@@ -42,6 +49,7 @@ pub(crate) async fn scan_with_statistics(
     table: &ListingTable,
     provider: Option<&Arc<dyn ExternalTableStatisticsProvider>>,
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    skip_errors: bool,
     projection: Option<&Vec<usize>>,
     filters: &[Expr],
     limit: Option<usize>,
@@ -77,7 +85,7 @@ pub(crate) async fn scan_with_statistics(
             prune_files(
                 session,
                 provider.as_ref(),
-                type_widening,
+                Arc::clone(&type_widening),
                 &store_url,
                 &table_schema,
                 &data_filters,
@@ -101,8 +109,14 @@ pub(crate) async fn scan_with_statistics(
         .with_projection_indices(projection.cloned())?
         .with_limit(limit)
         .with_output_ordering(output_ordering)
+        .with_expr_adapter(Some(type_widening.physical_expr_adapter_factory()))
         .build();
     let plan = options.format.create_physical_plan(session, config).await?;
+    let plan = if skip_errors {
+        with_skip_errors(plan)
+    } else {
+        plan
+    };
 
     if provider.is_some() {
         record_counters(&plan, considered, pruned);
@@ -522,6 +536,7 @@ mod tests {
             &table,
             provider,
             type_widening,
+            false,
             None,
             &[col("temp").gt(lit(10.0))],
             None,
@@ -556,6 +571,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_scan_config_holds_the_adapter_of_the_table_strategy() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = csv_table(dir.path());
+        let state = SessionContext::new().state();
+        let plan = scan_with_statistics(
+            &state,
+            &table,
+            None,
+            Arc::new(DefaultArrowTypeWidening::new()),
+            false,
+            None,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        let exec = plan.downcast_ref::<DataSourceExec>().unwrap();
+        let config = exec.data_source().downcast_ref::<FileScanConfig>().unwrap();
+        assert!(config.expr_adapter_factory.is_some());
+    }
+
+    #[tokio::test]
     async fn the_provider_gets_the_table_strategy() {
         let provider = Arc::new(TestProvider::with_ranges(&[("a.csv", 1.0, 5.0)]));
         let dynamic: Arc<dyn ExternalTableStatisticsProvider> = provider.clone();
@@ -565,5 +602,65 @@ mod tests {
             provider.seen_type_widening.lock().as_deref(),
             Some("NumpyArrowTypeWidening { on_conflict: Fail }")
         );
+    }
+
+    fn write_parquet(path: &std::path::Path, column: ArrayRef) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "temp",
+            column.data_type().clone(),
+            true,
+        )]));
+        let batch = datafusion::arrow::array::RecordBatch::try_new(Arc::clone(&schema), vec![column])
+            .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer =
+            datafusion::parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// `a.parquet` holds `Int32` 1, `b.parquet` holds `Utf8` "abc". The table declares `Int32`.
+    async fn parquet_scan(
+        type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    ) -> Result<Vec<datafusion::arrow::array::RecordBatch>> {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), Arc::new(datafusion::arrow::array::Int32Array::from(vec![1])));
+        write_parquet(&dir.path().join("b.parquet"), Arc::new(datafusion::arrow::array::StringArray::from(vec!["abc"])));
+        let url = ListingTableUrl::parse(format!("{}/", dir.path().display())).unwrap();
+        let options = ListingOptions::new(Arc::new(
+            datafusion::datasource::file_format::parquet::ParquetFormat::default(),
+        ))
+        .with_file_extension(".parquet");
+        let declared = Arc::new(Schema::new(vec![Field::new("temp", DataType::Int32, true)]));
+        let config = ListingTableConfig::new(url)
+            .with_listing_options(options)
+            .with_schema(declared);
+        let table = ListingTable::try_new(config).unwrap();
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+        let plan =
+            scan_with_statistics(&state, &table, None, type_widening, false, None, &[], None)
+                .await?;
+        collect(plan, ctx.task_ctx()).await
+    }
+
+    #[tokio::test]
+    async fn parquet_reads_a_value_of_another_family_as_null_with_the_table_strategy() {
+        let batches = parquet_scan(Arc::new(DefaultArrowTypeWidening::keeping_first_type()))
+            .await
+            .unwrap();
+        let mut values: Vec<Option<i32>> = batches
+            .iter()
+            .flat_map(|batch| {
+                let column = batch.column(0);
+                let column = column
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int32Array>()
+                    .unwrap();
+                column.iter().collect::<Vec<_>>()
+            })
+            .collect();
+        values.sort();
+        assert_eq!(values, [None, Some(1)]);
     }
 }

@@ -19,7 +19,6 @@ use parking_lot::RwLock;
 
 use crate::{
     ExternalTableDefinition, ExternalTableSpec, scan::scan_with_statistics,
-    skip_errors::SkipErrorsExec,
     statistics_cache::ExternalTableStatisticsProvider,
 };
 
@@ -196,18 +195,12 @@ impl TableProvider for ExternalTable {
             &table,
             provider,
             type_widening,
+            skip_errors,
             projection,
             filters,
             limit,
         )
         .await
-        .map(|plan| {
-            if skip_errors {
-                Arc::new(SkipErrorsExec::new(plan)) as Arc<dyn ExecutionPlan>
-            } else {
-                plan
-            }
-        })
     }
 
     fn supports_filters_pushdown(
