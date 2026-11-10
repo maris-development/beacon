@@ -4,26 +4,25 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 
-# Beacon's side of the file statistics store: the analyzer that reads files
-# through the format registry, the background service, and the statistics
-# provider of external tables. The storage engine itself is `beacon-file-stats`.
+# The file statistics pipeline: discovery, queue, process, sink, store and fetch.
+# Statistics are keyed by a stable stamp of each object version, and stored in
+# redb tables.
 
 [dependencies]
 anyhow = { workspace = true }
 arrow = { workspace = true }
-async-trait = { workspace = true }
-crossbeam = { workspace = true }
-beacon-arrow-hdf5 = { path = "../beacon-file-formats/beacon-arrow-hdf5" }
-beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
-beacon-common = { path = "../beacon-common" }
+# A stored statistic keeps its `DataType` through serde.
+arrow-schema = { workspace = true, features = ["serde"] }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-external-table = { path = "../beacon-external-table" }
-beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
-chrono = { workspace = true }
+bincode = { workspace = true }
 datafusion = { workspace = true }
+flume = { workspace = true }
 futures = { workspace = true }
 object_store = { workspace = true }
 parking_lot = { workspace = true }
+redb = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -31,5 +30,11 @@ xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
+chrono = { workspace = true }
+criterion = { version = "0.5", default-features = false, features = ["rayon", "html_reports"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "statistics"
+harness = false
