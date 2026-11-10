@@ -150,6 +150,58 @@ async fn copy_to_plugin_format() {
     assert_eq!(written, "1,x\n2,y\n3,z\n");
 }
 
+/// A plugin format table keeps file statistics, but the analyzer does not ask a
+/// plugin format for its statistics yet: `exflat` gives a row count, Beacon records none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_format_table_keeps_statistics_without_values() {
+    let rt = runtime_with_plugin("formats-statistics").await;
+    rt.sql(
+        "CREATE EXTERNAL TABLE t STORED AS exflat LOCATION 'flat/' \
+         OPTIONS ('use_statistics_pruning' 'true')",
+    )
+    .await;
+
+    rt.runtime
+        .file_stats()
+        .expect("file statistics are on")
+        .refresh("t")
+        .await
+        .expect("the refresh runs");
+
+    let files = scalar_i64(&rt.sql("SELECT count(*) FROM table_statistics('t')").await);
+    let empty = scalar_i64(
+        &rt.sql(
+            "SELECT count(*) FROM table_statistics('t') \
+             WHERE NOT _failed AND _row_count IS NULL",
+        )
+        .await,
+    );
+    assert_eq!((files, empty), (2, 2));
+    // No range prunes a file, so the answer stays complete.
+    assert_eq!(
+        scalar_i64(&rt.sql("SELECT sum(a) FROM t WHERE a > 5").await),
+        10
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_format_table_skips_a_file_it_cannot_read() {
+    let rt = runtime_with_plugin("formats-skip-invalid").await;
+    write_file(&rt.datasets_dir().join("mixed/a.exf"), "1,x\n");
+    write_file(&rt.datasets_dir().join("mixed/bad.exf"), "no comma\n");
+    rt.sql("CREATE EXTERNAL TABLE strict STORED AS exflat LOCATION 'mixed/'")
+        .await;
+    rt.sql(
+        "CREATE EXTERNAL TABLE lenient STORED AS exflat LOCATION 'mixed/' \
+         OPTIONS ('skip_invalid_files_on_scan' 'true')",
+    )
+    .await;
+
+    let error = sql_error(&rt, "SELECT sum(a) FROM strict").await;
+    assert!(error.contains("bad exflat line"), "{error}");
+    assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM lenient").await), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn copy_to_read_only_plugin_format_fails() {
     let rt = runtime_with_plugin("formats-copy-read-only").await;

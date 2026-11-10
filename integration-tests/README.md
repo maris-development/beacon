@@ -87,6 +87,7 @@ pytest -v
 | `test_iceberg_s3.py` | the same Iceberg table on an **S3 bucket**: a MinIO sidecar plus a Beacon with `BEACON_S3_DATASETS`; reads, an external table, and an assertion that the local datasets directory stays empty |
 | `test_flight_sql.py` | the Arrow **Flight SQL** transport over ADBC: auth handshake, queries, Arrow results, anonymous rejection (optional dep — skipped if `adbc-driver-flightsql` is absent) |
 | `test_remote_federation.py` | beacon-to-beacon `STORED AS REMOTE` federation against a second container (anonymous Flight SQL); pushdown + cross-source join |
+| `test_file_statistics.py` | file statistics of external tables (`use_statistics_pruning`): background refresh, pruning metrics, `table_statistics()`, background `ANALYZE FILES`, crawler option, `OR REPLACE`/`DROP`, restart survival, statistics off; own containers |
 
 Several suites spin up **extra containers** from the same image (a second Beacon with a
 different engine / SQL disabled / anonymous Flight / an S3 datasets store, plus PostgreSQL,

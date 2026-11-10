@@ -12,10 +12,11 @@ use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_datafusion_ext::{
     consts::DEFAULT_DB_STORE_URL_OBJECT_URL,
     table_ext::{
-        ExternalTable, MaterializedView, MaterializedViewDefinition, TableDefinition,
+        MaterializedView, MaterializedViewDefinition, TableDefinition,
         MATERIALIZED_VIEW_PREFIX,
     },
 };
+use beacon_external_table::ExternalTable;
 use datafusion::{
     dataframe::DataFrameWriteOptions,
     parquet::arrow::ArrowWriter,
@@ -99,6 +100,8 @@ pub(crate) async fn refresh_table(
 
     if let Some(external) = provider.downcast_ref::<ExternalTable>() {
         external.refresh(&session_ctx.state()).await?;
+        // Register the same provider again: this stores the new inferred schema.
+        session_ctx.register_table(crate::table_name::table_reference(name), provider.clone())?;
     } else if provider.is::<MaterializedView>() {
         refresh_materialized_view(session_ctx, name).await?;
     } else {

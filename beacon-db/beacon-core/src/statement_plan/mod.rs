@@ -217,12 +217,11 @@ pub(crate) fn run_crawler_plan(statement: RunCrawlerStatement) -> LogicalPlan {
     })
 }
 
-/// Build the logical plan for `ANALYZE FILES ['<prefix>'] [FORCE]`.
+/// Build the logical plan for `ANALYZE FILES [<table>]`.
 pub(crate) fn analyze_files_plan(statement: AnalyzeFilesStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::AnalyzeFilesNode::new(
-            statement.prefix,
-            statement.force,
+            statement.table.as_ref().map(object_name_value),
         )),
     })
 }

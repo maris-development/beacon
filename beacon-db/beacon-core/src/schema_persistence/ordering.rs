@@ -297,7 +297,8 @@ mod tests {
 
     #[tokio::test]
     async fn ordered_definition_views_follow_table_scan_dependencies() {
-        use beacon_datafusion_ext::table_ext::{ExternalTableDefinition, ViewTableDefinition};
+        use beacon_datafusion_ext::table_ext::ViewTableDefinition;
+        use beacon_external_table::ExternalTableDefinition;
 
         let mut tables: HashMap<String, Arc<dyn TableDefinition>> = HashMap::new();
 
@@ -310,6 +311,17 @@ mod tests {
             partition_cols: vec![],
             options: HashMap::new(),
             if_not_exists: false,
+            schema_source: beacon_external_table::SchemaSource::Inferred,
+            refresh_policy: beacon_external_table::RefreshPolicy::default(),
+            type_widening: Arc::new(
+                beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening::new(),
+            ),
+            parallel_schema_inference: false,
+            skip_invalid_files_on_inference: false,
+            skip_invalid_files_on_scan: false,
+            use_listing_cache: false,
+            use_statistics_pruning: false,
+            use_statistics_cache: false,
         };
 
         let view_a = ViewTableDefinition {

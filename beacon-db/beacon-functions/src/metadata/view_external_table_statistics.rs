@@ -26,7 +26,8 @@ use arrow::{
     array::{BooleanArray, BooleanBuilder, RecordBatch, StringArray, UInt64Array},
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
-use beacon_datafusion_ext::{stats_cache::BeaconFileStatisticsCache, table_ext::ExternalTable};
+use beacon_datafusion_ext::stats_cache::BeaconFileStatisticsCache;
+use beacon_external_table::ExternalTable;
 use datafusion::{
     catalog::{TableFunctionImpl, TableProvider},
     common::{plan_datafusion_err, plan_err},
@@ -147,7 +148,7 @@ impl TableFunctionImpl for ViewExternalTableStatisticsFunc {
                         plan_datafusion_err!("'{table_name}' is not an external table")
                     })?;
 
-                let listing_table = external.inner();
+                let listing_table = external.listing_table();
                 let schema = listing_table.schema();
 
                 // List every file that belongs to this listing table. Each

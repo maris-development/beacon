@@ -52,9 +52,6 @@ secrecy = { workspace = true }
 base64 = { workspace = true }
 
 tracing = { workspace=true}
-# `file_statistics('argo/**')` matches registry paths with the same globbing the
-# `read_*` functions use for object paths.
-glob = { workspace = true }
 # Local dependencies
 beacon-auth = { path = "../beacon-auth" }
 beacon-common = { path = "../beacon-common" }
@@ -74,6 +71,7 @@ beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-external-table = { path = "../beacon-external-table" }
 beacon-nd-execution = { path = "../beacon-nd-execution" }
 beacon-plugin-registry = { path = "../beacon-plugin-registry" }
 beacon-plugin-sdk = { path = "../beacon-plugin-sdk" }
@@ -86,7 +84,7 @@ beacon-icechunk = { path = "../beacon-file-formats/beacon-icechunk" }
 beacon-erddap = { path = "../beacon-file-formats/beacon-erddap" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
 beacon-redb-store = { path = "../beacon-redb-store" }
-beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
+beacon-file-statistics = { path = "../beacon-file-statistics" }
 
 # Reads the thread CPU clock for the per-query CPU budget.
 [target.'cfg(unix)'.dependencies]

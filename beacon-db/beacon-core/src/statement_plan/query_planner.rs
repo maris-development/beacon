@@ -213,8 +213,7 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
 
         if let Some(analyze) = any.downcast_ref::<logical::AnalyzeFilesNode>() {
             return Ok(Some(Arc::new(physical::AnalyzeFilesExec::new(
-                analyze.prefix.clone(),
-                analyze.force,
+                analyze.table.clone(),
                 session,
             ))));
         }
