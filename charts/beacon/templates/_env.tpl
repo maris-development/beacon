@@ -17,6 +17,10 @@ letting the server fall back to its own defaults otherwise.
 - name: BEACON_LOG_LEVEL
   value: {{ $b.logLevel | quote }}
 {{- end }}
+{{- if $b.logOutput }}
+- name: BEACON_LOG_OUTPUT
+  value: {{ $b.logOutput | quote }}
+{{- end }}
 {{- if $b.dataDir }}
 - name: BEACON_DATA_DIR
   value: {{ $b.dataDir | quote }}

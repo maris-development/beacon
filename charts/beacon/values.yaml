@@ -52,6 +52,7 @@ beacon:
   # URL prefix for all routes, e.g. "/beacon". Empty serves at "/".
   basePath: ""
   logLevel: "info"           # trace|debug|info|warn|error|off
+  logOutput: "both"          # stdout|file|both
   # Root data directory inside the container. datasets/ and tables/ derive
   # from this unless overridden by Beacon.
   dataDir: "/beacon/data"

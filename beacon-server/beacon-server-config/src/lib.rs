@@ -98,6 +98,51 @@ pub struct ServerConfig {
     /// `trace`, `debug`, `info`, `warn`, `error`, `off`. From `BEACON_LOG_LEVEL`.
     /// `RUST_LOG` overrides it when set.
     pub log_level: String,
+    /// Where the server writes its logs. From `BEACON_LOG_OUTPUT`.
+    pub log_output: LogOutput,
+}
+
+/// Destinations for the server logs, set by `BEACON_LOG_OUTPUT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogOutput {
+    /// Only standard output.
+    Stdout,
+    /// Only the rolling log file in `logs/`.
+    File,
+    /// Standard output and the rolling log file.
+    Both,
+}
+
+impl LogOutput {
+    /// Returns `true` when the logs go to standard output.
+    pub fn to_stdout(self) -> bool {
+        matches!(self, LogOutput::Stdout | LogOutput::Both)
+    }
+
+    /// Returns `true` when the logs go to the rolling log file.
+    pub fn to_file(self) -> bool {
+        matches!(self, LogOutput::File | LogOutput::Both)
+    }
+}
+
+/// Values accepted by `BEACON_LOG_OUTPUT`.
+const LOG_OUTPUTS: [&str; 3] = ["stdout", "file", "both"];
+
+impl std::str::FromStr for LogOutput {
+    type Err = String;
+
+    /// Parses a `BEACON_LOG_OUTPUT` value. Case and surrounding spaces do not matter.
+    fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "stdout" => Ok(LogOutput::Stdout),
+            "file" => Ok(LogOutput::File),
+            "both" => Ok(LogOutput::Both),
+            _ => Err(format!(
+                "`{raw}` is not a log output; expected one of {}",
+                LOG_OUTPUTS.join(", ")
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +379,9 @@ struct RawConfig {
     /// stops the process instead of silently logging at the default level.
     #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
     log_level: String,
+    /// Log destinations. Validated in [`Config::load`], like `log_level`.
+    #[envconfig(from = "BEACON_LOG_OUTPUT", default = "both")]
+    log_output: String,
 
     //VM Settings
     /// Query memory pool size, in **megabytes**.
@@ -653,6 +701,8 @@ impl From<RawConfig> for Config {
                 web_ui_dir: raw.web_ui_dir,
                 max_upload_bytes: raw.max_upload_bytes,
                 log_level: raw.log_level,
+                // `Config::load` rejects a bad value before this mapping runs.
+                log_output: raw.log_output.parse().unwrap_or(LogOutput::Both),
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
@@ -902,6 +952,9 @@ impl Config {
         // Capture the secrets key before `raw` is consumed; decode/validate below.
         let secrets_key_b64 = raw.secrets_key.clone();
         parse_startup_plugins(&raw.plugins).map_err(ConfigError::InvalidPlugins)?;
+        raw.log_output
+            .parse::<LogOutput>()
+            .map_err(ConfigError::InvalidLogOutput)?;
         // Same, for the one case the deprecation warning below has to distinguish:
         // the S3 store turned on by the old variable alone.
         let s3_via_deprecated_name = raw.s3_data_lake_deprecated && !raw.s3_datasets;
@@ -1041,7 +1094,7 @@ fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWidening
 mod tests {
     use super::{
         decode_master_key, normalize_base_path, normalize_log_level, parse_startup_plugins,
-        validate_storage, validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
+        validate_storage, validate_threads, Config, Hdf5Convention, LogOutput, PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1409,6 +1462,29 @@ mod tests {
     fn unknown_log_level_is_an_error() {
         assert!(normalize_log_level("verbose").is_err());
         assert!(normalize_log_level("").is_err());
+    }
+
+    #[test]
+    fn log_output_defaults_to_both() {
+        let output = config(&[]).server.log_output;
+        assert_eq!(output, LogOutput::Both);
+        assert!(output.to_stdout() && output.to_file());
+    }
+
+    #[test]
+    fn log_output_selects_the_destinations() {
+        let output = |value| config(&[("BEACON_LOG_OUTPUT", value)]).server.log_output;
+        assert_eq!(output("stdout"), LogOutput::Stdout);
+        assert_eq!(output(" FILE "), LogOutput::File);
+        assert!(output("stdout").to_stdout() && !output("stdout").to_file());
+        assert!(!output("file").to_stdout() && output("file").to_file());
+    }
+
+    /// A typo must stop the server, not quietly write to the wrong place.
+    #[test]
+    fn unknown_log_output_is_an_error() {
+        assert!("stderr".parse::<LogOutput>().is_err());
+        assert!("".parse::<LogOutput>().is_err());
     }
 
     #[test]
