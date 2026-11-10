@@ -171,7 +171,7 @@ LOCATION 'experiments/';
 | `read_dimensions` | List of dimension names | The default grid of each file | The dimensions the table reads. Beacon returns a dataset only if the list holds every dimension of that dataset. |
 | `skip_unbroadcastable` | Boolean | `false` | Skip a file that does not fit `read_dimensions`. Beacon writes a warning and reads the next file. Without it the query fails. |
 | `use_rust_reader` | Boolean | `true` (`BEACON_HDF5_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library reads no nested group and no compound dataset, and it needs anonymous access to a bucket. |
-| `enable_statistics` | Boolean | `true` (`BEACON_HDF5_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per file, not per table. Set `BEACON_HDF5_ENABLE_STATISTICS` to turn the column ranges off. |
+| `enable_statistics` | Boolean | `true` (`BEACON_HDF5_ENABLE_STATISTICS`) | Compute the column ranges of each file for the [file statistics](/docs/2.1.0-rc2/internals/file-statistics) of this table. With `false`, the table records no range and prunes no file. |
 | `unify_phony_dimensions` | Boolean | `true` (`BEACON_HDF5_UNIFY_PHONY_DIMENSIONS`) | Give every unnamed axis one name per length, over the whole file, so two groups broadcast together. Set it to `false` to keep one dimension per length per group. |
 | `convention` | `none` | `none` (`BEACON_HDF5_CONVENTION`) | The vendor layout the table reads on top of the container. |
 

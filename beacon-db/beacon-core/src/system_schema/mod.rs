@@ -28,14 +28,12 @@
 
 mod auth;
 mod comments;
-mod file_stats;
 mod plugins;
 mod table;
+mod table_statistics;
 
-pub(crate) use file_stats::{FileStatisticsFunc, FileStatisticsTable};
-
-/// The name `file_statistics(path)` is registered under.
-pub const FILE_STATISTICS_FUNCTION: &str = "file_statistics";
+pub use table_statistics::TABLE_STATISTICS_FUNCTION;
+pub(crate) use table_statistics::{TableStatisticsFunc, TableStatisticsTable};
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -90,7 +88,6 @@ impl SystemSchemaProvider {
     pub fn new(
         session: SessionCell,
         auth: Arc<beacon_auth::AuthContext>,
-        file_stats: beacon_file_stats::FileStatsHandle,
         plugins: Arc<crate::plugins::PluginRegistry>,
     ) -> Self {
         let mut tables: HashMap<String, Arc<dyn TableProvider>> = HashMap::new();
@@ -105,16 +102,6 @@ impl SystemSchemaProvider {
         tables.insert(
             "role_settings".to_string(),
             Arc::new(auth::role_settings_table(auth)),
-        );
-        // The handle is late-filled, so these read whatever the subsystem has
-        // at query time -- including nothing, when it never started.
-        tables.insert(
-            "file_stats".to_string(),
-            Arc::new(file_stats::file_stats_table(file_stats.clone())),
-        );
-        tables.insert(
-            "file_stats_segments".to_string(),
-            Arc::new(file_stats::segments_table(file_stats)),
         );
         tables.insert(
             "comments".to_string(),

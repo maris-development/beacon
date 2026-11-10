@@ -28,8 +28,12 @@
 //! scan over the kept files only. The scan prunes only when the table sets the
 //! `use_statistics_pruning` option. A table without its own provider takes the
 //! [`ExternalTableStatistics`](statistics_cache::ExternalTableStatistics)
-//! session extension. Beacon fills it with the file statistics store
+//! session extension. Beacon fills it with the file statistics engine
 //! (crate `beacon-file-statistics`).
+//!
+//! A table with pruning registers with its provider on each build and each
+//! refresh. The options `statistics_columns` and `statistics_refresh_interval`
+//! choose the columns and the refresh interval of its statistics.
 //!
 //! The scan config gets the `PhysicalExprAdapterFactory` of the table type
 //! widening strategy. DataFusion's Parquet source reads it. The other formats
@@ -51,8 +55,8 @@ pub mod table;
 pub use builder::ExternalTableBuilder;
 pub use definition::{
     ExternalTableDefinition, RefreshPolicy, SchemaSource, bool_table_option,
-    parallel_schema_inference_from_options,
-    type_widening_from_options,
+    parallel_schema_inference_from_options, statistics_columns_from_options,
+    statistics_refresh_interval_from_options, type_widening_from_options,
 };
 pub use factory::ExternalTableFactory;
 pub use spec::ExternalTableSpec;

@@ -7,7 +7,7 @@ use beacon_datafusion_ext::{
 };
 use datafusion::{
     catalog::{Session, TableProvider},
-    common::{Constraints, Result, ToDFSchema, config_datafusion_err, plan_err},
+    common::{Constraints, DataFusionError, Result, ToDFSchema, config_datafusion_err, plan_err},
     datasource::{file_format::FileFormat, listing::ListingOptions},
     execution::SessionState,
     logical_expr::{CreateExternalTable, SortExpr},
@@ -17,14 +17,15 @@ use datafusion::{
 
 use crate::{
     ExternalTable, ExternalTableDefinition, ExternalTableSpec, RefreshPolicy, SchemaSource,
-    spec::{resolve_schema_and_partition_cols, with_default_glob},
-    statistics_cache::{ExternalTableStatistics, ExternalTableStatisticsProvider},
     bool_table_option,
     definition::{
         SKIP_INVALID_FILES_ON_INFERENCE_OPTION, SKIP_INVALID_FILES_ON_SCAN_OPTION,
         USE_STATISTICS_PRUNING_OPTION,
     },
-    parallel_schema_inference_from_options, type_widening_from_options,
+    parallel_schema_inference_from_options,
+    spec::{resolve_schema_and_partition_cols, with_default_glob},
+    statistics_cache::{ExternalTableStatistics, ExternalTableStatisticsProvider},
+    type_widening_from_options,
 };
 
 /// Builds an [`ExternalTable`] from a stored definition or from a
@@ -39,6 +40,9 @@ pub struct ExternalTableBuilder {
     constraints: Constraints,
     column_defaults: HashMap<String, Expr>,
     statistics_provider: Option<Arc<dyn ExternalTableStatisticsProvider>>,
+    /// Whether a failed statistics registration fails the build. A `CREATE` sets
+    /// it; a table that Beacon loads at startup loads without its statistics.
+    strict_statistics: bool,
 }
 
 impl std::fmt::Debug for ExternalTableBuilder {
@@ -49,6 +53,7 @@ impl std::fmt::Debug for ExternalTableBuilder {
             .field("constraints", &self.constraints)
             .field("column_defaults", &self.column_defaults)
             .field("statistics_provider", &self.statistics_provider.is_some())
+            .field("strict_statistics", &self.strict_statistics)
             .finish()
     }
 }
@@ -62,6 +67,7 @@ impl ExternalTableBuilder {
             constraints: Constraints::default(),
             column_defaults: HashMap::new(),
             statistics_provider: None,
+            strict_statistics: false,
         }
     }
 
@@ -101,10 +107,14 @@ impl ExternalTableBuilder {
             use_statistics_pruning: bool_table_option(&cmd.options, USE_STATISTICS_PRUNING_OPTION)?,
             use_statistics_cache: false,
         };
-        Ok(Self::new(definition)
-            .with_order(cmd.order_exprs.clone())
-            .with_constraints(cmd.constraints.clone())
-            .with_column_defaults(cmd.column_defaults.clone()))
+        // A CREATE reports a statistics problem, such as too many columns, as its error.
+        Ok(Self {
+            strict_statistics: true,
+            ..Self::new(definition)
+        }
+        .with_order(cmd.order_exprs.clone())
+        .with_constraints(cmd.constraints.clone())
+        .with_column_defaults(cmd.column_defaults.clone()))
     }
 
     /// Sets the sort order of the files (`WITH ORDER`).
@@ -148,13 +158,15 @@ impl ExternalTableBuilder {
         &self.definition
     }
 
-    /// Resolves the format, the location and the schema, and builds the table.
+    /// Resolves the format, the location and the schema, builds the table, and
+    /// registers it with its statistics provider when it prunes with statistics.
     ///
     /// # Errors
     ///
     /// Returns an error when the format is unknown, the location does not
     /// parse, the partitions do not match the files, the schema cannot be
-    /// inferred, or a `WITH ORDER` column is not in the schema.
+    /// inferred, or a `WITH ORDER` column is not in the schema. A table from
+    /// a `CREATE` also fails when its statistics registration fails.
     pub async fn build(mut self, session: &dyn Session) -> Result<ExternalTable> {
         let spec = self.spec(session).await?;
         // A stored schema, declared or inferred, needs no file read.
@@ -171,12 +183,18 @@ impl ExternalTableBuilder {
                 .get_extension::<ExternalTableStatistics>()
                 .map(|extension| Arc::clone(&extension.0))
         });
-        Ok(ExternalTable::new(
-            self.definition,
-            spec,
-            table,
-            statistics_provider,
-        ))
+        let table = ExternalTable::new(self.definition, spec, table, statistics_provider);
+        if let Err(error) = table.register_statistics().await {
+            if self.strict_statistics {
+                return Err(DataFusionError::External(error.into()));
+            }
+            tracing::warn!(
+                table = table.definition().name.as_str(),
+                error = format!("{error:#}"),
+                "the table loads without statistics pruning"
+            );
+        }
+        Ok(table)
     }
 
     /// Resolves the definition into the spec that a refresh builds from.
@@ -279,4 +297,160 @@ fn as_session_state(session: &dyn Session) -> Result<&SessionState> {
         .as_any()
         .downcast_ref::<SessionState>()
         .ok_or_else(|| config_datafusion_err!("an external table needs a SessionState"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use datafusion::{
+        arrow::datatypes::{DataType, Field, Schema},
+        prelude::{SessionConfig, SessionContext},
+    };
+
+    use super::*;
+    use crate::scan::tests::TestProvider;
+
+    /// A session that resolves a location by its own scheme, as a local path here.
+    fn session() -> SessionContext {
+        SessionContext::new_with_config(
+            SessionConfig::new().with_extension(Arc::new(ListingFactory::new(None))),
+        )
+    }
+
+    /// A CSV table over `dir` with pruning, a declared `temp` column and `options`.
+    fn definition(dir: &std::path::Path, options: &[(&str, &str)]) -> ExternalTableDefinition {
+        std::fs::write(dir.join("a.csv"), "temp\n1.0\n").expect("a csv file");
+        let mut options: HashMap<String, String> = options
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        options.insert("format.has_header".to_string(), "true".to_string());
+        ExternalTableDefinition {
+            name: "obs".to_string(),
+            location: format!("{}/", dir.display()),
+            file_type: "csv".to_string(),
+            schema: Arc::new(Schema::new(vec![Field::new(
+                "temp",
+                DataType::Float64,
+                true,
+            )])),
+            schema_source: SchemaSource::Declared,
+            definition: None,
+            partition_cols: Vec::new(),
+            options,
+            if_not_exists: false,
+            refresh_policy: RefreshPolicy::default(),
+            type_widening: type_widening_from_options(&HashMap::new()).expect("a strategy"),
+            parallel_schema_inference: false,
+            skip_invalid_files_on_inference: false,
+            skip_invalid_files_on_scan: false,
+            use_listing_cache: false,
+            use_statistics_pruning: true,
+            use_statistics_cache: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_table_with_pruning_registers_its_statistics() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let provider = Arc::new(TestProvider::default());
+        let definition = definition(
+            dir.path(),
+            &[
+                ("format.statistics_columns", "temp"),
+                ("statistics_refresh_interval", "60"),
+            ],
+        );
+
+        // Act
+        ExternalTableBuilder::new(definition)
+            .with_statistics_provider(provider.clone())
+            .build(&session().state())
+            .await
+            .expect("the table builds");
+
+        // Assert
+        let registrations = provider.registrations.lock();
+        let [registration] = registrations.as_slice() else {
+            panic!("one registration, got {}", registrations.len());
+        };
+        assert_eq!(registration.table, "obs");
+        assert_eq!(registration.file_type, "csv");
+        assert_eq!(registration.columns, Some(vec!["temp".to_string()]));
+        assert_eq!(registration.refresh_interval, Duration::from_secs(60));
+        assert_eq!(registration.schema.field(0).name(), "temp");
+        assert_eq!(registration.urls.len(), 1);
+        assert!(
+            !registration
+                .format_options
+                .contains_key("format.statistics_columns"),
+            "the statistics options are no format options"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_registration_fails_a_create_but_not_a_load() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let provider = Arc::new(TestProvider::refusing());
+        let builder = ExternalTableBuilder::new(definition(dir.path(), &[]))
+            .with_statistics_provider(provider);
+
+        let loaded = builder.clone().build(&session().state()).await;
+        let created = ExternalTableBuilder {
+            strict_statistics: true,
+            ..builder
+        }
+        .build(&session().state())
+        .await;
+
+        assert!(loaded.is_ok(), "a stored table loads without statistics");
+        let error = created.expect_err("a create fails").to_string();
+        assert!(error.contains("too many statistics columns"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_refresh_registers_again_and_a_drop_deletes_the_statistics() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let provider = Arc::new(TestProvider::default());
+        let ctx = session();
+        let table = ExternalTableBuilder::new(definition(dir.path(), &[]))
+            .with_statistics_provider(provider.clone())
+            .build(&ctx.state())
+            .await
+            .expect("the table builds");
+
+        // Act
+        table
+            .refresh(&ctx.state())
+            .await
+            .expect("the table refreshes");
+        table.drop_statistics().await.expect("the statistics drop");
+
+        // Assert
+        assert_eq!(provider.registrations.lock().len(), 2);
+        assert_eq!(*provider.dropped.lock(), ["obs"]);
+    }
+
+    #[tokio::test]
+    async fn a_table_without_pruning_does_not_register() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let provider = Arc::new(TestProvider::default());
+        let definition = ExternalTableDefinition {
+            use_statistics_pruning: false,
+            ..definition(dir.path(), &[])
+        };
+
+        let table = ExternalTableBuilder::new(definition)
+            .with_statistics_provider(provider.clone())
+            .build(&session().state())
+            .await
+            .expect("the table builds");
+        table.drop_statistics().await.expect("nothing to drop");
+
+        assert!(provider.registrations.lock().is_empty());
+        assert!(provider.dropped.lock().is_empty());
+    }
 }

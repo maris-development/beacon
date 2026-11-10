@@ -1,6 +1,6 @@
 //! The stored form of an external table.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use beacon_datafusion_ext::{
     format_options::{format_option, parse_bool_option},
@@ -85,15 +85,25 @@ pub const SKIP_INVALID_FILES_ON_SCAN_OPTION: &str = "skip_invalid_files_on_scan"
 
 /// The `OPTIONS` key that prunes the files of a scan with the file statistics: `true` or `false` (default).
 pub const USE_STATISTICS_PRUNING_OPTION: &str = "use_statistics_pruning";
+/// The `OPTIONS` key that names the statistics columns, separated by commas.
+/// Without it, the statistics cover each column that can hold a range.
+pub const STATISTICS_COLUMNS_OPTION: &str = "statistics_columns";
+/// The `OPTIONS` key that sets the time in seconds between two statistics refreshes.
+pub const STATISTICS_REFRESH_INTERVAL_OPTION: &str = "statistics_refresh_interval";
+
+/// The time between two statistics refreshes without the refresh option.
+pub const DEFAULT_STATISTICS_REFRESH_INTERVAL: Duration = Duration::from_secs(900);
 
 /// The table options that Beacon reads. They are not format options.
-const TABLE_OPTIONS: [&str; 6] = [
+const TABLE_OPTIONS: [&str; 8] = [
     TYPE_WIDENING_OPTION,
     TYPE_WIDENING_ON_CONFLICT_OPTION,
     PARALLEL_SCHEMA_INFERENCE_OPTION,
     SKIP_INVALID_FILES_ON_INFERENCE_OPTION,
     SKIP_INVALID_FILES_ON_SCAN_OPTION,
     USE_STATISTICS_PRUNING_OPTION,
+    STATISTICS_COLUMNS_OPTION,
+    STATISTICS_REFRESH_INTERVAL_OPTION,
 ];
 
 /// Where the schema of an external table comes from.
@@ -190,6 +200,48 @@ pub fn parallel_schema_inference_from_options(options: &HashMap<String, String>)
 /// Returns an error when the value is not a boolean.
 pub fn bool_table_option(options: &HashMap<String, String>, key: &str) -> Result<bool> {
     format_option(options, key).map_or(Ok(false), |value| parse_bool_option(key, value))
+}
+
+/// The statistics columns that `options` name, or `None` without the option.
+///
+/// # Errors
+///
+/// Returns an error when the option names no column.
+pub fn statistics_columns_from_options(
+    options: &HashMap<String, String>,
+) -> Result<Option<Vec<String>>> {
+    let Some(value) = format_option(options, STATISTICS_COLUMNS_OPTION) else {
+        return Ok(None);
+    };
+    let columns: Vec<String> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|column| !column.is_empty())
+        .map(str::to_string)
+        .collect();
+    if columns.is_empty() {
+        return plan_err!("the option '{STATISTICS_COLUMNS_OPTION}' names no column");
+    }
+    Ok(Some(columns))
+}
+
+/// The time between two statistics refreshes that `options` set. The default is 900 seconds.
+///
+/// # Errors
+///
+/// Returns an error when the value is not a positive number of seconds.
+pub fn statistics_refresh_interval_from_options(
+    options: &HashMap<String, String>,
+) -> Result<Duration> {
+    let Some(value) = format_option(options, STATISTICS_REFRESH_INTERVAL_OPTION) else {
+        return Ok(DEFAULT_STATISTICS_REFRESH_INTERVAL);
+    };
+    match value.trim().parse::<u64>() {
+        Ok(seconds) if seconds > 0 => Ok(Duration::from_secs(seconds)),
+        _ => plan_err!(
+            "the option '{STATISTICS_REFRESH_INTERVAL_OPTION}' needs a positive number of seconds, not '{value}'"
+        ),
+    }
 }
 
 fn default_type_widening() -> Arc<dyn ArrowTypeWideningStrategy> {
@@ -428,6 +480,8 @@ mod tests {
                 ("format.skip_invalid_files_on_inference", "true"),
                 ("skip_invalid_files_on_scan", "true"),
                 ("format.use_statistics_pruning", "true"),
+                ("statistics_columns", "temp"),
+                ("format.statistics_refresh_interval", "60"),
                 ("format.has_header", "true"),
             ]),
             ..definition()
@@ -442,6 +496,39 @@ mod tests {
         assert!(!bool_table_option(&options(&[]), USE_STATISTICS_PRUNING_OPTION).unwrap());
         let on = options(&[("format.use_statistics_pruning", "true")]);
         assert!(bool_table_option(&on, USE_STATISTICS_PRUNING_OPTION).unwrap());
+    }
+
+    #[test]
+    fn statistics_columns_split_on_commas() {
+        assert_eq!(
+            statistics_columns_from_options(&options(&[])).unwrap(),
+            None
+        );
+        let named = options(&[("format.statistics_columns", " TIME, DEPTH ,")]);
+        assert_eq!(
+            statistics_columns_from_options(&named).unwrap(),
+            Some(vec!["TIME".to_string(), "DEPTH".to_string()])
+        );
+        assert!(
+            statistics_columns_from_options(&options(&[("statistics_columns", " , ")])).is_err()
+        );
+    }
+
+    #[test]
+    fn the_refresh_interval_is_positive_seconds() {
+        assert_eq!(
+            statistics_refresh_interval_from_options(&options(&[])).unwrap(),
+            DEFAULT_STATISTICS_REFRESH_INTERVAL
+        );
+        let minute = options(&[("statistics_refresh_interval", "60")]);
+        assert_eq!(
+            statistics_refresh_interval_from_options(&minute).unwrap(),
+            Duration::from_secs(60)
+        );
+        for bad in ["0", "-5", "soon"] {
+            let bad = options(&[("statistics_refresh_interval", bad)]);
+            assert!(statistics_refresh_interval_from_options(&bad).is_err());
+        }
     }
 
     #[test]

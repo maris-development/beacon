@@ -366,15 +366,11 @@ impl UserDefinedLogicalNodeCore for RunCrawlerNode {
     }
 }
 
-/// The report `ANALYZE FILES` returns.
+/// The report `ANALYZE FILES` returns: one row for each table with a requested refresh.
 pub(crate) fn analyze_files_arrow_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
-        Field::new("discovered", DataType::UInt64, false),
-        Field::new("requeued", DataType::UInt64, false),
-        Field::new("analyzed", DataType::UInt64, false),
-        Field::new("failed", DataType::UInt64, false),
-        Field::new("segments", DataType::UInt64, false),
-        Field::new("pending", DataType::UInt64, false),
+        Field::new("table", DataType::Utf8, false),
+        Field::new("status", DataType::Utf8, false),
     ]))
 }
 
@@ -388,16 +384,16 @@ fn analyze_files_df_schema() -> &'static DFSchemaRef {
     })
 }
 
-/// Logical node for `ANALYZE FILES ['<prefix>'] [FORCE]`.
+/// Logical node for `ANALYZE FILES [<table>]`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct AnalyzeFilesNode {
-    pub(crate) prefix: Option<String>,
-    pub(crate) force: bool,
+    /// The table to refresh. `None` refreshes each table with statistics.
+    pub(crate) table: Option<String>,
 }
 
 impl AnalyzeFilesNode {
-    pub(crate) fn new(prefix: Option<String>, force: bool) -> Self {
-        Self { prefix, force }
+    pub(crate) fn new(table: Option<String>) -> Self {
+        Self { table }
     }
 }
 
@@ -415,16 +411,11 @@ impl UserDefinedLogicalNodeCore for AnalyzeFilesNode {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "AnalyzeFiles: prefix={:?} force={}",
-            self.prefix, self.force
-        )
+        write!(f, "AnalyzeFiles: table={:?}", self.table)
     }
     fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
         Ok(Self {
-            prefix: self.prefix.clone(),
-            force: self.force,
+            table: self.table.clone(),
         })
     }
 }

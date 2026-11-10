@@ -17,7 +17,8 @@ use arrow::datatypes::Schema;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::table_ext::TableDefinition;
-use beacon_external_table::{ExternalTable, ExternalTableDefinition};
+use beacon_external_table::definition::USE_STATISTICS_PRUNING_OPTION;
+use beacon_external_table::{bool_table_option, ExternalTable, ExternalTableDefinition};
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
@@ -140,6 +141,14 @@ impl CrawlEngine {
                 Some(cand) => {
                     let mut options = def.options.clone();
                     options.insert(owner.0, owner.1);
+                    let use_statistics_pruning =
+                        match bool_table_option(&options, USE_STATISTICS_PRUNING_OPTION) {
+                            Ok(prune) => prune,
+                            Err(error) => {
+                                report.failed.push((name, error.to_string()));
+                                continue;
+                            }
+                        };
                     Box::new(ExternalTableDefinition {
                         name: name.clone(),
                         location: cand.location(),
@@ -159,7 +168,7 @@ impl CrawlEngine {
                         skip_invalid_files_on_inference: false,
                         skip_invalid_files_on_scan: false,
                         use_listing_cache: false,
-                        use_statistics_pruning: false,
+                        use_statistics_pruning,
                         use_statistics_cache: false,
                     })
                 }

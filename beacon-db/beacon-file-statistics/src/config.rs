@@ -1,72 +1,92 @@
-//! The settings of the file statistics pipeline.
+//! The settings of the file statistics engine.
 
-use std::time::Duration;
-
-/// The settings of the file statistics pipeline.
-#[derive(Debug, Clone, PartialEq)]
+/// The settings of the file statistics engine.
+///
+/// Two limits keep the background work off most cores:
+/// [`concurrency`](Self::concurrency) caps the file analyses over all tables,
+/// and [`max_refreshes`](Self::max_refreshes) caps the tables that refresh at
+/// the same time. The other tables wait for a free slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    num_threads: usize,
-    walk_interval: Duration,
-    queue_capacity: usize,
-    batch_size: usize,
-    batch_age: Duration,
+    concurrency: usize,
+    max_refreshes: usize,
+    write_batch: usize,
+    compaction_fragments: usize,
 }
 
 impl Config {
-    /// The number of analyzer workers.
-    pub fn num_threads(&self) -> usize {
-        self.num_threads
+    /// The most file analyses that run at the same time, over all tables.
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
     }
 
-    /// The time from the start of one store walk to the start of the next.
-    pub fn walk_interval(&self) -> Duration {
-        self.walk_interval
+    /// The most tables that refresh at the same time.
+    pub fn max_refreshes(&self) -> usize {
+        self.max_refreshes
     }
 
-    /// The number of tasks the queue holds before a walk waits.
-    pub fn queue_capacity(&self) -> usize {
-        self.queue_capacity
-    }
-
-    /// The number of files that makes a full batch for one commit.
-    pub fn batch_size(&self) -> usize {
-        self.batch_size
-    }
-
-    /// The longest time an analyzed file waits before its batch is committed.
-    pub fn batch_age(&self) -> Duration {
-        self.batch_age
-    }
-
-    /// Sets the number of analyzer workers.
-    pub fn with_num_threads(mut self, num_threads: usize) -> Self {
-        self.num_threads = num_threads;
+    /// Sets the most tables that refresh at the same time. Zero gives one.
+    pub fn with_max_refreshes(mut self, max_refreshes: usize) -> Self {
+        self.max_refreshes = max_refreshes.max(1);
         self
     }
 
-    /// Sets the time from the start of one store walk to the start of the next.
-    pub fn with_walk_interval(mut self, walk_interval: Duration) -> Self {
-        self.walk_interval = walk_interval;
+    /// The number of files that one write to a statistics table holds.
+    pub fn write_batch(&self) -> usize {
+        self.write_batch
+    }
+
+    /// The number of fragments above which a refresh compacts a statistics table.
+    pub fn compaction_fragments(&self) -> usize {
+        self.compaction_fragments
+    }
+
+    /// Sets the most file analyses that run at the same time. Zero gives one.
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
         self
     }
 
-    /// Sets the longest time an analyzed file waits before its batch is committed.
-    pub fn with_batch_age(mut self, batch_age: Duration) -> Self {
-        self.batch_age = batch_age;
+    /// Sets the number of files that one write holds. Zero gives one.
+    pub fn with_write_batch(mut self, write_batch: usize) -> Self {
+        self.write_batch = write_batch.max(1);
+        self
+    }
+
+    /// Sets the number of fragments above which a refresh compacts a statistics table.
+    pub fn with_compaction_fragments(mut self, compaction_fragments: usize) -> Self {
+        self.compaction_fragments = compaction_fragments;
         self
     }
 }
 
 impl Default for Config {
-    /// One worker for each core, a walk each 15 minutes, 1024 queued tasks, and
-    /// a commit for each 1024 files or 30 seconds.
+    /// One analysis for each 4 cores (at least 2), 2 tables that refresh at a
+    /// time, writes of 4096 files, and compaction above 16 fragments.
     fn default() -> Self {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         Self {
-            num_threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
-            walk_interval: Duration::from_secs(900),
-            queue_capacity: 1024,
-            batch_size: 1024,
-            batch_age: Duration::from_secs(30),
+            concurrency: (cores / 4).max(2),
+            max_refreshes: 2,
+            write_batch: 4096,
+            compaction_fragments: 16,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_defaults_leave_most_cores_free() {
+        let config = Config::default();
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+
+        assert!(config.concurrency() >= 2);
+        assert!(config.concurrency() <= cores.max(2));
+        assert_eq!(config.max_refreshes(), 2);
+        assert_eq!(Config::default().with_max_refreshes(0).max_refreshes(), 1);
+        assert_eq!(Config::default().with_concurrency(0).concurrency(), 1);
     }
 }

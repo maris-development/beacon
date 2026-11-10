@@ -147,31 +147,18 @@ impl<'a> BeaconParser<'a> {
             && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "FILES")
     }
 
-    /// Parse: ANALYZE FILES ['<prefix>'] [FORCE]
+    /// Parse: ANALYZE FILES [<table>]
     fn parse_analyze_files(&mut self) -> Result<BeaconStatement> {
         self.df_parser.parser.next_token(); // ANALYZE
         self.df_parser.parser.next_token(); // FILES
 
-        let prefix = match &self.df_parser.parser.peek_token().token {
-            Token::SingleQuotedString(value) => {
-                let value = value.clone();
-                self.df_parser.parser.next_token();
-                Some(value)
-            }
-            _ => None,
+        let table = match &self.df_parser.parser.peek_token().token {
+            Token::EOF | Token::SemiColon => None,
+            _ => Some(self.parse_object_name()?),
         };
 
-        let force = matches!(
-            &self.df_parser.parser.peek_token().token,
-            Token::Word(w) if w.value.to_uppercase() == "FORCE"
-        );
-        if force {
-            self.df_parser.parser.next_token();
-        }
-
         Ok(BeaconStatement::AnalyzeFiles(AnalyzeFilesStatement {
-            prefix,
-            force,
+            table,
         }))
     }
 

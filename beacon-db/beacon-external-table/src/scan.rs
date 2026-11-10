@@ -20,7 +20,6 @@ use datafusion::{
         source::DataSourceExec,
         table_schema::TableSchema,
     },
-    execution::object_store::ObjectStoreUrl,
     logical_expr::utils::conjunction,
     physical_expr::utils::collect_columns,
     physical_optimizer::pruning::PruningPredicate,
@@ -28,17 +27,20 @@ use datafusion::{
     prelude::Expr,
 };
 use futures::{TryStreamExt, future::try_join_all};
-use object_store::{ObjectMeta, ObjectStore, path::Path as ObjectPath};
+use object_store::{ObjectMeta, ObjectStore};
 
 use crate::{
     skip_errors_source::with_skip_errors, statistics_cache::ExternalTableStatisticsProvider,
 };
 
-/// Plans a scan of `table` and prunes its files with `provider`.
+/// The statistics provider of a scan, with the name of the table it keeps the statistics under.
+pub(crate) type ScanStatistics<'a> = (&'a dyn ExternalTableStatisticsProvider, &'a str);
+
+/// Plans a scan of `table` and prunes its files with the provider of `statistics`.
 ///
-/// `provider` gets `type_widening`, the strategy of the table. The scan config
-/// gets the adapter of `type_widening`. Only a format that reads the
-/// `PhysicalExprAdapterFactory` of its config uses it, which is Parquet.
+/// The scan config gets the adapter of `type_widening`, the strategy of the
+/// table. Only a format that reads the `PhysicalExprAdapterFactory` of its
+/// config uses it, which is Parquet.
 ///
 /// With `skip_errors`, a file that the scan cannot read ends, and the scan
 /// continues with the next file.
@@ -48,7 +50,7 @@ use crate::{
 pub(crate) async fn scan_with_statistics(
     session: &dyn Session,
     table: &ListingTable,
-    provider: Option<&Arc<dyn ExternalTableStatisticsProvider>>,
+    statistics: Option<ScanStatistics<'_>>,
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     skip_errors: bool,
     projection: Option<&Vec<usize>>,
@@ -81,18 +83,9 @@ pub(crate) async fn scan_with_statistics(
     .await?;
 
     let considered = files.len();
-    let (files, pruned) = match provider {
-        Some(provider) if !data_filters.is_empty() => {
-            prune_files(
-                session,
-                provider.as_ref(),
-                Arc::clone(&type_widening),
-                &store_url,
-                &table_schema,
-                &data_filters,
-                files,
-            )
-            .await
+    let (files, pruned) = match statistics {
+        Some((provider, name)) if !data_filters.is_empty() => {
+            prune_files(session, provider, name, &table_schema, &data_filters, files).await
         }
         _ => (files, 0),
     };
@@ -119,7 +112,7 @@ pub(crate) async fn scan_with_statistics(
         plan
     };
 
-    if provider.is_some() {
+    if statistics.is_some() {
         record_counters(&plan, considered, pruned);
     }
     Ok(plan)
@@ -162,35 +155,6 @@ async fn list_files(
     Ok(listings.into_iter().flatten().collect())
 }
 
-/// Lists all files of `table` and gives them to `provider` to refresh their statistics.
-///
-/// # Errors
-///
-/// Returns an error when the object store is not registered, the listing fails
-/// or the provider fails.
-pub(crate) async fn invalidate_table_files(
-    session: &dyn Session,
-    table: &ListingTable,
-    provider: &dyn ExternalTableStatisticsProvider,
-) -> anyhow::Result<()> {
-    let Some(first_url) = table.table_paths().first() else {
-        return Ok(());
-    };
-    let store = session.runtime_env().object_store(first_url)?;
-    let files = list_files(
-        session,
-        store.as_ref(),
-        table.table_paths(),
-        &[],
-        table.options(),
-    )
-    .await?;
-    let objects: Vec<ObjectMeta> = files.into_iter().map(|file| file.object_meta).collect();
-    provider
-        .invalidate_objects(first_url.object_store(), store, &objects)
-        .await
-}
-
 /// The file source of the format, over the file schema and the partition columns.
 fn file_source(
     options: &ListingOptions,
@@ -212,15 +176,14 @@ fn file_source(
         .file_source(TableSchema::new(file_schema, partition_fields))
 }
 
-/// Drops the files that the statistics of `provider` rule out for `filters`.
+/// Drops the files that the statistics of `provider` for table `name` rule out for `filters`.
 ///
 /// Returns the kept files and the number of dropped files. A file without
 /// statistics stays. Each failure keeps all files: a prune must never lose rows.
 pub(crate) async fn prune_files(
     session: &dyn Session,
     provider: &dyn ExternalTableStatisticsProvider,
-    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
-    store_url: &ObjectStoreUrl,
+    name: &str,
     table_schema: &SchemaRef,
     filters: &[Expr],
     files: Vec<PartitionedFile>,
@@ -232,27 +195,22 @@ pub(crate) async fn prune_files(
         return (files, 0);
     };
 
-    let objects: Vec<ObjectMeta> = files.iter().map(|file| file.object_meta.clone()).collect();
+    let objects: Vec<&ObjectMeta> = files.iter().map(|file| &file.object_meta).collect();
     let fetched = provider
-        .fetch_statistics(
-            store_url.clone(),
-            &objects,
-            type_widening,
-            predicate_schema(&predicate, table_schema),
-        )
+        .fetch_statistics(name, &objects, predicate_schema(&predicate, table_schema))
         .await;
-    let (returned, statistics) = match fetched {
-        Ok(fetched) => fetched,
+    let statistics = match fetched {
+        Ok(statistics) => statistics,
         Err(error) => {
             tracing::debug!(%error, "the statistics provider failed; keeping all files");
             return (files, 0);
         }
     };
-    if statistics.num_containers() != returned.len() {
+    if statistics.num_containers() != files.len() {
         tracing::debug!(
             containers = statistics.num_containers(),
-            objects = returned.len(),
-            "the statistics do not match the returned objects; keeping all files"
+            files = files.len(),
+            "the statistics do not match the files; keeping all files"
         );
         return (files, 0);
     }
@@ -264,19 +222,11 @@ pub(crate) async fn prune_files(
         }
     };
 
-    let ruled_out: HashSet<&ObjectPath> = returned
-        .iter()
-        .zip(&keep)
-        .filter(|(_, keep)| !**keep)
-        .map(|(object, _)| &object.location)
-        .collect();
-    if ruled_out.is_empty() {
-        return (files, 0);
-    }
     let before = files.len();
     let kept: Vec<PartitionedFile> = files
         .into_iter()
-        .filter(|file| !ruled_out.contains(&file.object_meta.location))
+        .zip(keep)
+        .filter_map(|(file, keep)| keep.then_some(file))
         .collect();
     let dropped = before - kept.len();
     (kept, dropped)
@@ -338,7 +288,7 @@ fn record_counters(plan: &Arc<dyn ExecutionPlan>, considered: usize, pruned: usi
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
 
     use anyhow::anyhow;
@@ -354,10 +304,10 @@ mod tests {
     };
     use futures::future::BoxFuture;
 
-    use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, NumpyArrowTypeWidening};
+    use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
 
     use super::*;
-    use crate::statistics_cache::SharedPruningStatistics;
+    use crate::statistics_cache::{SharedPruningStatistics, StatisticsRegistration};
 
     /// Statistics for one column, `temp`.
     struct TempStatistics {
@@ -398,18 +348,22 @@ mod tests {
 
     /// A provider with a `temp` range per file name.
     #[derive(Default)]
-    struct TestProvider {
+    pub(crate) struct TestProvider {
         ranges: HashMap<&'static str, (f64, f64)>,
         fail: bool,
         wrong_count: bool,
-        /// The `Debug` form of the strategy of the last fetch.
-        seen_type_widening: parking_lot::Mutex<Option<String>>,
-        /// The column names of the schema of the last fetch.
-        seen_columns: parking_lot::Mutex<Vec<String>>,
+        /// The registrations the provider got, in order.
+        pub(crate) registrations: parking_lot::Mutex<Vec<StatisticsRegistration>>,
+        /// Whether `register_table` refuses each table.
+        refuse: bool,
+        /// The tables the provider dropped.
+        pub(crate) dropped: parking_lot::Mutex<Vec<String>>,
+        /// The table name and the column names of the last fetch.
+        seen: parking_lot::Mutex<Option<(String, Vec<String>)>>,
     }
 
     impl TestProvider {
-        fn with_ranges(ranges: &[(&'static str, f64, f64)]) -> Self {
+        pub(crate) fn with_ranges(ranges: &[(&'static str, f64, f64)]) -> Self {
             Self {
                 ranges: ranges
                     .iter()
@@ -418,64 +372,67 @@ mod tests {
                 ..Self::default()
             }
         }
+
+        /// A provider that refuses each registration.
+        pub(crate) fn refusing() -> Self {
+            Self {
+                refuse: true,
+                ..Self::default()
+            }
+        }
     }
 
     impl ExternalTableStatisticsProvider for TestProvider {
-        fn is_stale(&self) -> BoxFuture<'static, bool> {
-            Box::pin(async { false })
+        fn register_table(
+            &self,
+            registration: StatisticsRegistration,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            self.registrations.lock().push(registration);
+            let refuse = self.refuse;
+            Box::pin(async move {
+                if refuse {
+                    return Err(anyhow!("too many statistics columns"));
+                }
+                Ok(())
+            })
+        }
+
+        fn drop_table(&self, table: &str) -> BoxFuture<'static, anyhow::Result<()>> {
+            self.dropped.lock().push(table.to_string());
+            Box::pin(async { Ok(()) })
         }
 
         fn fetch_statistics(
             &self,
-            _store_url: ObjectStoreUrl,
-            objects: &[ObjectMeta],
-            type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+            table: &str,
+            objects: &[&ObjectMeta],
             schema: SchemaRef,
-        ) -> BoxFuture<'static, anyhow::Result<(Vec<ObjectMeta>, SharedPruningStatistics)>>
-        {
-            *self.seen_type_widening.lock() = Some(format!("{type_widening:?}"));
-            *self.seen_columns.lock() = schema
+        ) -> BoxFuture<'static, anyhow::Result<SharedPruningStatistics>> {
+            let columns = schema
                 .fields()
                 .iter()
                 .map(|field| field.name().clone())
                 .collect();
+            *self.seen.lock() = Some((table.to_string(), columns));
             if self.fail {
                 return Box::pin(async { Err(anyhow!("the store is down")) });
             }
-            let returned: Vec<(ObjectMeta, (f64, f64))> = objects
+            // An object without a range reads as null, so the prune keeps it.
+            let ranges: Vec<Option<(f64, f64)>> = objects
                 .iter()
-                .filter_map(|object| {
+                .map(|object| {
                     let name = object.location.filename()?;
-                    self.ranges.get(name).map(|range| (object.clone(), *range))
+                    self.ranges.get(name).copied()
                 })
                 .collect();
-            let min = Float64Array::from_iter_values(returned.iter().map(|(_, r)| r.0));
-            let max = Float64Array::from_iter_values(returned.iter().map(|(_, r)| r.1));
-            let containers = returned.len() + usize::from(self.wrong_count);
+            let min = Float64Array::from_iter(ranges.iter().map(|range| range.map(|r| r.0)));
+            let max = Float64Array::from_iter(ranges.iter().map(|range| range.map(|r| r.1)));
             let statistics: SharedPruningStatistics = Arc::new(TempStatistics {
                 min: Arc::new(min),
                 max: Arc::new(max),
-                containers,
+                containers: objects.len() + usize::from(self.wrong_count),
             });
-            let objects = returned.into_iter().map(|(object, _)| object).collect();
-            Box::pin(async move { Ok((objects, statistics)) })
-        }
-
-        fn invalidate_objects(
-            &self,
-            _store_url: ObjectStoreUrl,
-            _store: Arc<dyn ObjectStore>,
-            _objects: &[ObjectMeta],
-        ) -> BoxFuture<'static, anyhow::Result<()>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn register_store(
-            &self,
-            store_url: ObjectStoreUrl,
-            store: Arc<dyn ObjectStore>,
-        ) -> BoxFuture<'static, anyhow::Result<()>> {
-            Box::pin(async { Ok(()) })
+            Box::pin(async move { Ok(statistics) })
         }
     }
 
@@ -506,8 +463,7 @@ mod tests {
         prune_files(
             &session,
             provider,
-            Arc::new(DefaultArrowTypeWidening::new()),
-            &ObjectStoreUrl::local_filesystem(),
+            "obs",
             &schema(),
             &[col("temp").gt(lit(10.0))],
             files(names),
@@ -528,6 +484,18 @@ mod tests {
         let provider = TestProvider::with_ranges(&[("a.csv", 0.0, 5.0)]);
         let (kept, dropped) = prune(&provider, &["a.csv", "c.csv"]).await;
         assert_eq!(names(&kept), ["c.csv"]);
+        assert_eq!(dropped, 1);
+    }
+
+    #[tokio::test]
+    async fn the_prune_keeps_the_order_of_the_files() {
+        let provider = TestProvider::with_ranges(&[
+            ("a.csv", 20.0, 30.0),
+            ("b.csv", 0.0, 5.0),
+            ("c.csv", 40.0, 50.0),
+        ]);
+        let (kept, dropped) = prune(&provider, &["c.csv", "b.csv", "x.csv", "a.csv"]).await;
+        assert_eq!(names(&kept), ["c.csv", "x.csv", "a.csv"]);
         assert_eq!(dropped, 1);
     }
 
@@ -561,8 +529,7 @@ mod tests {
         let (kept, dropped) = prune_files(
             &session,
             &provider,
-            Arc::new(DefaultArrowTypeWidening::new()),
-            &ObjectStoreUrl::local_filesystem(),
+            "obs",
             &schema(),
             &[lit(true)],
             files(&["a.csv"]),
@@ -573,7 +540,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_provider_gets_only_the_predicate_columns() {
+    async fn the_provider_gets_the_table_name_and_only_the_predicate_columns() {
         let provider = TestProvider::with_ranges(&[("a.csv", 0.0, 5.0)]);
         let wide: SchemaRef = Arc::new(Schema::new(vec![
             Field::new("depth", DataType::Float64, true),
@@ -584,14 +551,16 @@ mod tests {
         prune_files(
             &session,
             &provider,
-            Arc::new(DefaultArrowTypeWidening::new()),
-            &ObjectStoreUrl::local_filesystem(),
+            "obs",
             &wide,
             &[col("temp").gt(lit(10.0))],
             files(&["a.csv"]),
         )
         .await;
-        assert_eq!(*provider.seen_columns.lock(), ["temp"]);
+        assert_eq!(
+            *provider.seen.lock(),
+            Some(("obs".to_string(), vec!["temp".to_string()]))
+        );
     }
 
     /// Two CSV files: `a.csv` holds 1 and 5, `b.csv` holds 20 and 30.
@@ -608,7 +577,7 @@ mod tests {
     }
 
     async fn scan_rows(
-        provider: Option<&Arc<dyn ExternalTableStatisticsProvider>>,
+        provider: Option<&dyn ExternalTableStatisticsProvider>,
         type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     ) -> (usize, Option<usize>) {
         let dir = tempfile::tempdir().unwrap();
@@ -618,7 +587,7 @@ mod tests {
         let plan = scan_with_statistics(
             &state,
             &table,
-            provider,
+            provider.map(|provider| (provider, "obs")),
             type_widening,
             false,
             None,
@@ -638,11 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_scan_reads_only_the_kept_files() {
-        let provider: Arc<dyn ExternalTableStatisticsProvider> =
-            Arc::new(TestProvider::with_ranges(&[
-                ("a.csv", 1.0, 5.0),
-                ("b.csv", 20.0, 30.0),
-            ]));
+        let provider = TestProvider::with_ranges(&[("a.csv", 1.0, 5.0), ("b.csv", 20.0, 30.0)]);
         let (rows, pruned) =
             scan_rows(Some(&provider), Arc::new(DefaultArrowTypeWidening::new())).await;
         // The scan returns all rows of the kept file; a filter above it removes rows.
@@ -677,18 +642,6 @@ mod tests {
         let exec = plan.downcast_ref::<DataSourceExec>().unwrap();
         let config = exec.data_source().downcast_ref::<FileScanConfig>().unwrap();
         assert!(config.expr_adapter_factory.is_some());
-    }
-
-    #[tokio::test]
-    async fn the_provider_gets_the_table_strategy() {
-        let provider = Arc::new(TestProvider::with_ranges(&[("a.csv", 1.0, 5.0)]));
-        let dynamic: Arc<dyn ExternalTableStatisticsProvider> = provider.clone();
-        let numpy: Arc<dyn ArrowTypeWideningStrategy> = Arc::new(NumpyArrowTypeWidening::new());
-        scan_rows(Some(&dynamic), numpy).await;
-        assert_eq!(
-            provider.seen_type_widening.lock().as_deref(),
-            Some("NumpyArrowTypeWidening { on_conflict: Fail }")
-        );
     }
 
     fn write_parquet(path: &std::path::Path, column: ArrayRef) {

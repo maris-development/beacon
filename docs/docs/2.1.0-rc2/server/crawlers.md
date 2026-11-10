@@ -60,7 +60,8 @@ CREATE [ OR REPLACE ] CRAWLER <name>
 | `table_naming` | `leaf_prefix` | `leaf_prefix` uses the last part of the prefix. `crawler_prefixed` gives `<crawler>_<leaf>`. |
 
 The crawler copies any **other** key in `WITH (...)` into the format `OPTIONS` of each table that it
-finds. `'read_dimensions' 'lat,lon'` for NetCDF is an example.
+finds. `'read_dimensions' 'lat,lon'` for NetCDF is an example. `'use_statistics_pruning' 'true'`
+gives each table [file statistics](/docs/2.1.0-rc2/internals/file-statistics).
 
 ```sql
 CREATE CRAWLER profiles

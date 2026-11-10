@@ -196,9 +196,7 @@ impl AuthMode {
 /// Everything an embedder can configure at open time.
 ///
 /// Defaults are chosen for an interactive, single-user embedding: auth off, crawlers available,
-/// dataset paths resolved dynamically by their own scheme (or against the cwd). Dynamic mode
-/// keeps file statistics off. That subsystem needs a datasets store, whatever
-/// [`Self::file_stats`] says.
+/// dataset paths resolved dynamically by their own scheme (or against the cwd).
 #[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
     /// Whether RBAC applies. Defaults to [`AuthMode::Disabled`].
@@ -213,13 +211,11 @@ pub struct OpenOptions {
     /// Crawler subsystem config. Enabled by default; nothing is scheduled until a crawler
     /// exists, so this costs an empty database nothing.
     pub crawlers: CrawlerConfig,
-    /// File statistics config. On by default, as on the server. The same store holds the
-    /// schema cache, which a cold query reads instead of each file.
+    /// File statistics config. On by default, as on the server. Only an external table with
+    /// the option `use_statistics_pruning` gets statistics.
     ///
-    /// The subsystem needs a database file and a [`Self::datasets`] store. An in-memory
-    /// database leaves it off. A dynamic-mode database leaves it off.
-    ///
-    /// Set [`FileStatsConfig::enable`] to false to keep a pass off your archive.
+    /// An in-memory database keeps the statistics in memory, so they are built again on
+    /// each open.
     pub file_stats: FileStatsConfig,
     /// Where bare dataset paths resolve. `None` leaves the runtime in dynamic mode: paths
     /// resolve by their own scheme (`s3://`, `https://`) or against the current directory.

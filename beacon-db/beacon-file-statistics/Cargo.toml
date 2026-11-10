@@ -4,25 +4,20 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 
-# The file statistics pipeline: discovery, queue, process, sink, store and fetch.
-# Statistics are keyed by a stable stamp of each object version, and stored in
-# redb tables.
+# File statistics for external tables: one Lance statistics table for each
+# table that prunes its scans with statistics.
 
 [dependencies]
 anyhow = { workspace = true }
 arrow = { workspace = true }
-# A stored statistic keeps its `DataType` through serde.
-arrow-schema = { workspace = true, features = ["serde"] }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-external-table = { path = "../beacon-external-table" }
-bincode = { workspace = true }
+beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 datafusion = { workspace = true }
-flume = { workspace = true }
 futures = { workspace = true }
+lance = { workspace = true }
 object_store = { workspace = true }
 parking_lot = { workspace = true }
-redb = { workspace = true }
-serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -30,6 +25,7 @@ xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
+bytes = { workspace = true }
 chrono = { workspace = true }
 criterion = { version = "0.5", default-features = false, features = ["rayon", "html_reports"] }
 tempfile = { workspace = true }

@@ -1,3 +1,5 @@
+//! The source of the statistics of one file.
+
 use arrow::datatypes::SchemaRef;
 use datafusion::{
     common::Statistics, datasource::file_format::FileFormat, prelude::SessionContext,

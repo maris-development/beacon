@@ -267,29 +267,22 @@ then registers them as external tables.
 
 ## File statistics
 
-Beacon records the value range of each column in each file. A query then prunes the files that
-cannot match. See [File statistics](/docs/2.1.0-rc2/internals/file-statistics).
+An external table with the option `use_statistics_pruning` keeps the value range of each column in
+each file. A query on the table then prunes the files that cannot match. See
+[File statistics](/docs/2.1.0-rc2/internals/file-statistics).
 
-Beacon enables this feature by default. The pure-Rust readers are the default for netCDF and HDF5
-(see [File formats](#file-formats)). Beacon records a real range for those formats. A server that
-reads netCDF or HDF5 through the netCDF-C library records no range.
+The pure-Rust readers are the default for netCDF and HDF5 (see [File formats](#file-formats)).
+Beacon records a real range for those formats. A server that reads netCDF or HDF5 through the
+netCDF-C library records no range.
 
-The first pass runs one interval after startup, not at startup. Run `ANALYZE FILES` to fill the
-store now. Set `BEACON_FILE_STATS_ON_STARTUP=true` to collect at each boot.
+Each table sets its own refresh interval with `statistics_refresh_interval`. These variables apply
+to all tables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_FILE_STATS_ENABLE` | `true` | Master switch. When `false`, Beacon finds nothing, reads nothing and starts no background task. The same store holds the schema cache. A server with `false` reads the schema of each file again on each cold query. |
-| `BEACON_FILE_STATS_INTERVAL_SECS` | `900` | The seconds between two passes. The first pass runs one interval after startup, not at startup. A restart starts the interval again, so a server that restarts more often than this never runs a pass. Set `BEACON_FILE_STATS_ON_STARTUP=true` there. |
-| `BEACON_FILE_STATS_ON_STARTUP` | `false` | Collect at each boot, and do not wait for the first tick. Beacon finds the files and reads every one that has no statistics, in the background. The server answers queries while this runs. The timer continues after it. The pass holds the database file while it runs. A process that closes a database and opens the same file again then gets a lock error. Keep this flag off there. |
-| `BEACON_FILE_STATS_CONCURRENCY` | one quarter of the cores, minimum 2 | The files that Beacon reads at the same time. A pass uses part of the machine, so it does not compete with queries. Increase this value above your core count for data in object storage. |
-| `BEACON_FILE_STATS_BATCH_FILES` | `10000` | The files that Beacon reads in one pass. This value limits the memory of one pass. |
-| `BEACON_FILE_STATS_TARGET_GROUP_FILES` | `10000` | The files that one segment covers. A small value prunes more for a rare column. It also adds segments to read for a common column. |
-| `BEACON_FILE_STATS_MIN_GROUP_FILES` | `500` | Beacon does not split a group below this size, even across folders. |
-| `BEACON_FILE_STATS_PREFIX_DEPTH` | *(derived)* | The folder depth for a group. Leave this variable unset. Beacon derives the depth from your paths and handles roots of different shapes. |
-| `BEACON_FILE_STATS_SCAN_PREFIX` | *(all files)* | Beacon finds files under this prefix of the datasets store only. |
-| `BEACON_FILE_STATS_DISCOVERY_CHUNK` | `10000` | The files that Beacon registers in one transaction. Beacon does not hold a large listing in memory. |
-| `BEACON_FILE_STATS_SCHEMA_CACHE` | `true` | Beacon keeps the schema it reads from each file. A later query then reads the schema instead of the file. A pass derives every schema anyway, so this costs one write. Set it to `false` to take the cache out of the query path and keep the ranges. |
+| `BEACON_FILE_STATS_ENABLE` | `true` | Master switch. When `false`, no table keeps statistics, Beacon starts no background task, and `ANALYZE FILES` is an error. |
+| `BEACON_FILE_STATS_CONCURRENCY` | one quarter of the cores, minimum 2 | The files that Beacon reads at the same time, over all tables. The refreshes use part of the machine, so they do not compete with queries. Increase this value above your core count for data in object storage. |
+| `BEACON_FILE_STATS_MAX_REFRESHES` | `2` | The tables that refresh their statistics at the same time. The other tables wait for a free slot. |
 
 ## CORS
 

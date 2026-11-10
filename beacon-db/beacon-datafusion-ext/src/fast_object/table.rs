@@ -1,7 +1,6 @@
 //! [`FastObjectTable`]: the `TableProvider`.
 //!
-//! The type wraps a `ListingTable`. It prunes inside `scan`. See the
-//! [module docs](super).
+//! The type wraps a `ListingTable`. See the [module docs](super).
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -22,10 +21,9 @@ use datafusion::{
     prelude::Expr,
 };
 
-use super::prune::prune_scan;
 use crate::type_widening::{ArrowTypeWideningStrategy, session_widening};
 
-/// A table over objects. It is a listing table that prunes before it scans.
+/// A table over objects: a listing table whose schema merges the schemas of its URLs.
 ///
 /// A clone costs what a listing table clone costs. It copies one configuration
 /// and some `Arc` values, and it touches no file. `MaterializedView` holds one
@@ -67,11 +65,10 @@ impl FastObjectTable {
             // marker of a directory format.
             .with_file_extension("")
             .with_target_partitions(state.config_options().execution.target_partitions)
-            .with_collect_stat(false); // We rely on the statistics store, not the listing table, to collect stats.
+            // Per-file statistics at plan time cost minutes over a large collection.
+            .with_collect_stat(false);
 
-        // One schema per URL, each named after its URL. The schema cache answers
-        // where it can. The merge below does not change. The cache decides the
-        // source of a schema. It does not decide how the URLs combine.
+        // One schema per URL, each named after its URL.
         let schemas = super::schema::infer_url_schemas(state, &options, &urls).await?;
 
         let schema = widening
@@ -91,8 +88,8 @@ impl FastObjectTable {
     /// `try_new` covers a `read_*` scan. Such a scan knows one format and some
     /// URLs. A `CREATE EXTERNAL TABLE` knows more. It states a schema, partition
     /// columns, a sort order, constraints, column defaults and a statistics
-    /// cache, and it builds its own listing table for them. This method adds a
-    /// prune to that table and keeps every other part of it.
+    /// cache, and it builds its own listing table for them. This method keeps
+    /// each part of that table.
     pub fn from_listing_table(inner: ListingTable) -> Self {
         Self { inner }
     }
@@ -186,15 +183,7 @@ impl TableProvider for FastObjectTable {
         // `WITH ORDER` table promises. The split of groups by statistics, which
         // keeps that order. The expression adapter. The predicate that a format
         // pushes into its own reader.
-        let plan = self.inner.scan(state, projection, filters, limit).await?;
-
-        // Then drop the files that the predicate excludes, from the list of the
-        // format. The format decides that list. netCDF and HDF5 stack decode and
-        // broadcast nodes over their scan. Zarr and Atlas expand a store
-        // directory into the groups that their reader opens. A prune before the
-        // plan would drop the analysed root marker of a store and keep its
-        // unanalysed children. The format would then read one child as a store.
-        Ok(prune_scan(state, &self.schema(), filters, plan).await)
+        self.inner.scan(state, projection, filters, limit).await
     }
 
     fn supports_filters_pushdown(
@@ -203,8 +192,7 @@ impl TableProvider for FastObjectTable {
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
         // The answer of the listing table, unchanged. It reports `Exact` for a
         // filter that partition directories settle. It reports `Inexact` for every
-        // other filter. A prune here removes whole files, never rows. It therefore
-        // cannot make an exact filter inexact.
+        // other filter.
         self.inner.supports_filters_pushdown(filters)
     }
 

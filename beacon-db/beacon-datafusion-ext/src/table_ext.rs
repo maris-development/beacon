@@ -200,11 +200,6 @@ impl TableDefinition for ViewTableDefinition {
 /// Wraps a [`FastObjectTable`] over the persisted Parquet, mirroring how
 /// [`ExternalTable`] does. The wrapper is the downcast target used by catalog
 /// persistence and by refresh/drop detection.
-///
-/// Going through [`FastObjectTable`] rather than the listing table directly is
-/// what gives a view's own files the same file-statistics pruning every other
-/// listing-backed table gets. A view large enough to be worth materializing is
-/// large enough to be worth pruning.
 #[derive(Clone, Debug)]
 pub struct MaterializedView {
     definition: MaterializedViewDefinition,

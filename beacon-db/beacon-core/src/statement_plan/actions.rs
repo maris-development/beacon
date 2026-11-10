@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anyhow::Context;
 use beacon_datafusion_ext::{
     remote::{unresolved_schema, RemoteTableDefinition},
     table_ext::{MaterializedView, TableDefinition},
@@ -56,6 +57,20 @@ pub(crate) async fn drop_table(
     });
 
     session.deregister_table(name.clone())?;
+
+    // The file statistics of an external table go with it.
+    let external = provider
+        .as_ref()
+        .and_then(|provider| provider.downcast_ref::<beacon_external_table::ExternalTable>());
+    if let Some(external) = external {
+        if let Err(error) = external.drop_statistics().await {
+            tracing::warn!(
+                table = %name,
+                error = format!("{error:#}"),
+                "the table is dropped, but its file statistics stay"
+            );
+        }
+    }
 
     if let Some(prefix) = materialized_prefix {
         delete_tables_prefix(session, &prefix).await;
@@ -219,7 +234,44 @@ pub(crate) async fn show_secrets(
 /// Errors if a table with `cmd.name` already exists. `IF NOT EXISTS` keeps the
 /// existing table instead, and `OR REPLACE` overwrites it. The guard covers every
 /// `STORED AS` variant below, so no variant replaces a table the user did not drop.
+///
+/// `OR REPLACE` deletes the file statistics of the old table when the new table
+/// keeps none. A new table with statistics takes over the rows of the old one.
 pub(crate) async fn create_external_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+) -> anyhow::Result<()> {
+    let replaced = if cmd.or_replace {
+        session.table_provider(cmd.name.clone()).await.ok()
+    } else {
+        None
+    };
+    register_external_table(session, cmd).await?;
+
+    let Some(old) = replaced
+        .as_ref()
+        .and_then(|provider| provider.downcast_ref::<beacon_external_table::ExternalTable>())
+    else {
+        return Ok(());
+    };
+    let new = session.table_provider(cmd.name.clone()).await?;
+    let keeps_statistics = new
+        .downcast_ref::<beacon_external_table::ExternalTable>()
+        .is_some_and(|table| table.definition().use_statistics_pruning);
+    if !keeps_statistics {
+        if let Err(error) = old.drop_statistics().await {
+            tracing::warn!(
+                table = %cmd.name,
+                error = format!("{error:#}"),
+                "the table is replaced, but the file statistics of the old table stay"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Builds the table of `cmd` for its `STORED AS` type and registers it.
+async fn register_external_table(
     session: &Arc<SessionContext>,
     cmd: &CreateExternalTable,
 ) -> anyhow::Result<()> {
@@ -957,6 +1009,76 @@ pub(crate) async fn show_create_table(
         ],
     )?;
     Ok(batch)
+}
+
+/// `ANALYZE FILES [<table>]`: request a background refresh of the file
+/// statistics of `table`, or of each table with statistics when `table` is `None`.
+///
+/// A refresh can run for hours, so this does not wait for it.
+///
+/// # Returns
+///
+/// One row for each table: `started`, or `queued` behind a refresh that runs now.
+///
+/// # Errors
+///
+/// Returns an error when file statistics are off, or `table` has no statistics.
+pub(crate) async fn analyze_files(
+    session: &Arc<SessionContext>,
+    table: Option<&str>,
+) -> anyhow::Result<arrow::record_batch::RecordBatch> {
+    use arrow::array::{ArrayRef, StringArray};
+
+    let engine = session
+        .state()
+        .config()
+        .get_extension::<beacon_file_statistics::FileStatistics>()
+        .context(
+            "file statistics are not enabled on this runtime; set BEACON_FILE_STATS_ENABLE=true",
+        )?;
+    let tables = match table {
+        Some(table) => vec![statistics_name(session, &engine, table).await?],
+        None => engine.tables(),
+    };
+    let statuses = tables
+        .iter()
+        .map(|table| Ok(engine.request_refresh(table)?.as_str()))
+        .collect::<anyhow::Result<Vec<&str>>>()?;
+
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        super::logical::analyze_files_arrow_schema(),
+        vec![
+            Arc::new(StringArray::from(tables)) as ArrayRef,
+            Arc::new(StringArray::from(statuses)),
+        ],
+    )?;
+    Ok(batch)
+}
+
+/// The name the statistics of the external table `table` are registered under:
+/// the name of its `CREATE EXTERNAL TABLE` statement.
+async fn statistics_name(
+    session: &Arc<SessionContext>,
+    engine: &beacon_file_statistics::FileStatistics,
+    table: &str,
+) -> anyhow::Result<String> {
+    let provider = session
+        .table_provider(crate::table_name::table_reference(table))
+        .await?;
+    let external = provider
+        .downcast_ref::<beacon_external_table::ExternalTable>()
+        .with_context(|| {
+            format!("'{table}' is not an external table, so it has no file statistics")
+        })?;
+    let name = external.definition().name;
+    if !engine.tables().contains(&name) {
+        anyhow::bail!(
+            "the table '{table}' has no file statistics; set the table option \
+             '{}' to 'true'",
+            beacon_external_table::definition::USE_STATISTICS_PRUNING_OPTION
+        );
+    }
+    Ok(name)
 }
 
 /// `COMPACT TABLE <table> [WITH (...)]`: merge a Lance table's small fragments

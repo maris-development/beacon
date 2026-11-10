@@ -120,8 +120,8 @@ scan keeps. Any other predicate reads every row group.
 `geoparquet_row_groups_pruned` and `geoparquet_files_pruned`.
 
 A GeoParquet file also reports its row count and a range per plain column, from the file metadata.
-So `beacon.system.file_stats` holds a range, and file pruning drops a file before the row group
-step runs. A geometry column reports no range: a range is one minimum and one maximum value, and a
+So a table with `use_statistics_pruning` holds a range, and file pruning drops a file before the row
+group step runs. See [File statistics](/docs/2.1.0-rc2/internals/file-statistics). A geometry column reports no range: a range is one minimum and one maximum value, and a
 bounding box is neither.
 
 ## As an external table

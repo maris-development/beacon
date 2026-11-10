@@ -400,7 +400,7 @@ fn strip_default_scheme(factory: &ListingFactory, pattern: &str) -> String {
 /// Matched on the scan's schema so it catches the read however it is reached —
 /// through a subquery, a view, or a rewrite (`SHOW TABLES` becomes a scan of
 /// `information_schema.tables`) — and on the provider for the one metadata
-/// surface that has no schema name, the `file_statistics` table function.
+/// surface that has no schema name, the `table_statistics` table function.
 fn metadata_surface_touched(plan: &LogicalPlan) -> Option<String> {
     let mut found = None;
     let _ = plan.apply_with_subqueries(|node| {
@@ -411,17 +411,13 @@ fn metadata_surface_touched(plan: &LogicalPlan) -> Option<String> {
                     return Ok(TreeNodeRecursion::Stop);
                 }
             }
-            // `file_statistics(...)` is the same metadata, reached through a
-            // table function. A function has no schema in the plan — its scan is
-            // named after the function itself — so the check above cannot see it
-            // and the provider is matched instead.
-            if source_as_provider(&scan.source).is_ok_and(|provider| {
-                provider
-                    .is::<crate::system_schema::FileStatisticsTable>()
-            }) {
+            // A table function has no schema in the plan, so the provider is matched.
+            if source_as_provider(&scan.source)
+                .is_ok_and(|provider| provider.is::<crate::system_schema::TableStatisticsTable>())
+            {
                 found = Some(format!(
                     "the {} table function",
-                    crate::system_schema::FILE_STATISTICS_FUNCTION
+                    crate::system_schema::TABLE_STATISTICS_FUNCTION
                 ));
                 return Ok(TreeNodeRecursion::Stop);
             }

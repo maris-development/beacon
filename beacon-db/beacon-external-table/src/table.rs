@@ -1,10 +1,11 @@
 //! [`ExternalTable`]: the `TableProvider`.
 
-use std::{borrow::Cow, fmt, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, fmt, sync::Arc};
 
+use anyhow::Context;
 use async_trait::async_trait;
 use datafusion::{
-    arrow::datatypes::SchemaRef,
+    arrow::datatypes::{FieldRef, Schema, SchemaRef},
     catalog::{Session, TableProvider},
     common::{Constraints, Result, Statistics, not_impl_err},
     datasource::{
@@ -19,8 +20,9 @@ use parking_lot::RwLock;
 
 use crate::{
     ExternalTableDefinition, ExternalTableSpec,
-    scan::{invalidate_table_files, scan_with_statistics},
-    statistics_cache::ExternalTableStatisticsProvider,
+    scan::scan_with_statistics,
+    statistics_cache::{ExternalTableStatisticsProvider, StatisticsRegistration},
+    statistics_columns_from_options, statistics_refresh_interval_from_options,
 };
 
 /// An external table over a set of files.
@@ -129,19 +131,90 @@ impl ExternalTable {
         let infer = definition.schema_inferred();
         let (table, schema) = self.spec.build_table(session, &definition, infer).await?;
         definition.schema = schema;
-        let prune = definition.use_statistics_pruning;
-        let table = Arc::new(table);
         *self.state.write() = State {
             definition,
-            table: Arc::clone(&table),
+            table: Arc::new(table),
         };
-        // The provider queues new and changed files, so the next scans can prune them.
-        if let Some(provider) = self.statistics_provider.as_ref().filter(|_| prune)
-            && let Err(error) = invalidate_table_files(session, &table, provider.as_ref()).await
-        {
-            tracing::warn!(%error, "the statistics provider did not get the refreshed files");
-        }
-        Ok(())
+        // The registration carries the new schema, and makes the provider refresh now.
+        self.register_statistics()
+            .await
+            .context("the table is refreshed, but its statistics registration failed")
+    }
+
+    /// The registration of the table with a statistics provider, from the current state.
+    ///
+    /// The schema leaves out the partition columns: a file holds no statistics for them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the statistics options of the table are not valid.
+    pub fn statistics_registration(&self) -> Result<StatisticsRegistration> {
+        let current = self.state.read();
+        let definition = &current.definition;
+        let partition_columns: HashSet<&str> = current
+            .table
+            .options()
+            .table_partition_cols
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let table_schema = current.table.schema();
+        let fields: Vec<FieldRef> = table_schema
+            .fields()
+            .iter()
+            .filter(|field| !partition_columns.contains(field.name().as_str()))
+            .cloned()
+            .collect();
+        Ok(StatisticsRegistration {
+            table: definition.name.clone(),
+            store_url: self.spec.url.object_store(),
+            urls: current.table.table_paths().clone(),
+            file_type: definition.file_type.to_lowercase(),
+            format_options: definition.format_options(),
+            schema: Arc::new(Schema::new_with_metadata(
+                fields,
+                table_schema.metadata().clone(),
+            )),
+            columns: statistics_columns_from_options(&definition.options)?,
+            refresh_interval: statistics_refresh_interval_from_options(&definition.options)?,
+            type_widening: Arc::clone(&definition.type_widening),
+        })
+    }
+
+    /// Registers the table with its statistics provider, when the table prunes with statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the statistics options are not valid, or the provider refuses the table.
+    pub(crate) async fn register_statistics(&self) -> anyhow::Result<()> {
+        let Some(provider) = self.pruning_provider() else {
+            return Ok(());
+        };
+        provider
+            .register_table(self.statistics_registration()?)
+            .await
+    }
+
+    /// Stops the statistics refresh of the table, and deletes its statistics.
+    ///
+    /// A drop of the table calls this. A table without statistics pruning does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider cannot delete the statistics.
+    pub async fn drop_statistics(&self) -> anyhow::Result<()> {
+        let Some(provider) = self.pruning_provider() else {
+            return Ok(());
+        };
+        // The name is read before the await, so no lock is held across it.
+        let name = self.state.read().definition.name.clone();
+        provider.drop_table(&name).await
+    }
+
+    /// The statistics provider, when the table prunes with statistics.
+    fn pruning_provider(&self) -> Option<Arc<dyn ExternalTableStatisticsProvider>> {
+        let prune = self.state.read().definition.use_statistics_pruning;
+        self.statistics_provider.clone().filter(|_| prune)
     }
 }
 
@@ -189,20 +262,23 @@ impl TableProvider for ExternalTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let (table, prune, type_widening, skip_errors) = {
+        let (table, name, type_widening, skip_errors) = {
             let current = self.state.read();
             (
                 Arc::clone(&current.table),
-                current.definition.use_statistics_pruning,
+                current.definition.name.clone(),
                 Arc::clone(&current.definition.type_widening),
                 current.definition.skip_invalid_files_on_scan,
             )
         };
-        let provider = self.statistics_provider.as_ref().filter(|_| prune);
+        let provider = self.pruning_provider();
+        let statistics = provider
+            .as_deref()
+            .map(|provider| (provider, name.as_str()));
         scan_with_statistics(
             state,
             &table,
-            provider,
+            statistics,
             type_widening,
             skip_errors,
             projection,

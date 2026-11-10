@@ -1,16 +1,13 @@
 //! End-to-end tests for [`FastObjectTable`].
 //!
-//! Real Parquet objects in an in-memory store, with a real file-statistics
-//! store behind the pruning. Pruning happens before the scan is built, so the
-//! plan's own file groups are what the scan will read — which is what most of
-//! these assert on, alongside the rows that come out.
+//! Real Parquet objects in an in-memory store. The plan's own file groups are
+//! what the scan will read — which is what most of these assert on, alongside
+//! the rows that come out.
 
 use std::sync::Arc;
 
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::type_widening::ArrowTypeWidening;
-use beacon_file_stats::segment::{ColumnStat, SegmentBuilder};
-use beacon_file_stats::{FileState, FileStatsStore, ObservedFile, Registry, StatScalar};
 use datafusion::arrow::array::{Float64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::TableProvider;
@@ -21,43 +18,27 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties, collect};
-use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
+use datafusion::prelude::{SessionConfig, SessionContext};
 use object_store::memory::InMemory;
-use object_store::{ObjectStore, ObjectStoreExt, path::Path};
+use object_store::{ObjectStoreExt, path::Path};
 
 const STORE_URL: &str = "test://stats/";
 
 struct Fixture {
     ctx: SessionContext,
-    stats: Arc<FileStatsStore>,
     objects: Arc<InMemory>,
-    _dir: tempfile::TempDir,
 }
 
-/// A session with a file-statistics store and an in-memory object store at
-/// `test://stats/`.
+/// A session with an in-memory object store at `test://stats/`.
 async fn fixture() -> Fixture {
     fixture_with(None).await
 }
 
 /// The same, with a fixed partition target where a test needs one.
 async fn fixture_with(target_partitions: Option<usize>) -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
-    let registry = Arc::new(Registry::open(dir.path().join("registry.redb")).unwrap());
-    let segments: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let stats = Arc::new(
-        FileStatsStore::open(registry, segments, Path::from("segments"))
-            .await
-            .unwrap(),
-    );
-
-    let handle = beacon_file_stats::new_file_stats_handle();
-    handle.set(stats.clone()).ok();
-    let mut config = SessionConfig::new()
-        .with_extension(handle)
-        // `FastObjectTable` merges its schemas through this. `RuntimeBuilder`
-        // registers it for a server; a session built here registers it itself.
-        .with_extension(ArrowTypeWidening::default_extension());
+    // `FastObjectTable` merges its schemas through this. `RuntimeBuilder`
+    // registers it for a server; a session built here registers it itself.
+    let mut config = SessionConfig::new().with_extension(ArrowTypeWidening::default_extension());
     if let Some(partitions) = target_partitions {
         config = config.with_target_partitions(partitions);
     }
@@ -69,21 +50,15 @@ async fn fixture_with(target_partitions: Option<usize>) -> Fixture {
         objects.clone(),
     );
 
-    Fixture {
-        ctx,
-        stats,
-        objects,
-        _dir: dir,
-    }
+    Fixture { ctx, objects }
 }
 
 fn value_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)]))
 }
 
-/// Write one Parquet object holding `values` in column `v`, and return what a
-/// listing would have observed about it.
-async fn put_parquet(objects: &InMemory, path: &str, values: &[f64]) -> ObservedFile {
+/// Write one Parquet object holding `values` in column `v`.
+async fn put_parquet(objects: &InMemory, path: &str, values: &[f64]) {
     let batch = RecordBatch::try_new(
         value_schema(),
         vec![Arc::new(Float64Array::from(values.to_vec()))],
@@ -95,47 +70,6 @@ async fn put_parquet(objects: &InMemory, path: &str, values: &[f64]) -> Observed
     writer.close().unwrap();
 
     objects.put(&Path::from(path), bytes.into()).await.unwrap();
-    let meta = objects.head(&Path::from(path)).await.unwrap();
-    ObservedFile::new(path, meta.size, meta.last_modified.timestamp_millis())
-        .with_e_tag(meta.e_tag.clone())
-}
-
-/// Register `files` and record each as analyzed with its `v` range, the way a
-/// collector pass would have.
-async fn analyze(stats: &FileStatsStore, files: &[(ObservedFile, &[f64])]) {
-    let observed: Vec<ObservedFile> = files.iter().map(|(file, _)| file.clone()).collect();
-    let ids = stats.registry().intern_files(&observed).unwrap();
-    let column = stats.registry().intern_columns(&["v"]).unwrap()[0];
-
-    let mut builder = SegmentBuilder::new();
-    for (id, (file, values)) in ids.iter().zip(files) {
-        stats
-            .registry()
-            .mark_analyzed(
-                *id,
-                "parquet",
-                Some(values.len() as u64),
-                Some(file.size),
-                1,
-            )
-            .unwrap();
-        let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        builder.push_file(
-            *id,
-            [(
-                column,
-                ColumnStat {
-                    min: StatScalar::F64(min),
-                    max: StatScalar::F64(max),
-                    null_count: Some(0),
-                    row_count: Some(values.len() as u64),
-                    data_type: DataType::Float64,
-                },
-            )],
-        );
-    }
-    stats.commit_segment(builder).await.unwrap();
 }
 
 async fn table(ctx: &SessionContext, urls: &[&str]) -> FastObjectTable {
@@ -173,9 +107,6 @@ fn scan_config(plan: &Arc<dyn ExecutionPlan>) -> &FileScanConfig {
 }
 
 /// The files the plan will read, in order.
-///
-/// Pruning ran before the config was built, so this is the survivors — not the
-/// listing.
 fn planned_files(plan: &Arc<dyn ExecutionPlan>) -> Vec<String> {
     let mut paths: Vec<String> = scan_config(plan)
         .file_groups
@@ -184,12 +115,6 @@ fn planned_files(plan: &Arc<dyn ExecutionPlan>) -> Vec<String> {
         .collect();
     paths.sort();
     paths
-}
-
-fn counter(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Option<usize> {
-    plan.metrics()?
-        .sum_by_name(name)
-        .map(|value| value.as_usize())
 }
 
 async fn rows(plan: Arc<dyn ExecutionPlan>, ctx: &SessionContext) -> usize {
@@ -219,129 +144,7 @@ async fn a_scan_reads_the_listing() {
         vec!["obs/a.parquet", "obs/b.parquet"],
         "the listing, in path order"
     );
-    assert_eq!(
-        counter(&plan, "file_stats_files_considered"),
-        None,
-        "no predicate means no pruning to report"
-    );
     assert_eq!(rows(plan, &fixture.ctx).await, 5);
-}
-
-/// The point of the refactor: a `WHERE` on a recorded column drops files before
-/// the scan is built, so the plan itself carries only the survivors.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_predicate_prunes_before_the_scan_is_built() {
-    let fixture = fixture().await;
-    let a = put_parquet(&fixture.objects, "obs/a.parquet", &[1.0, 2.0, 3.0]).await;
-    let b = put_parquet(&fixture.objects, "obs/b.parquet", &[100.0, 200.0]).await;
-    analyze(
-        &fixture.stats,
-        &[(a, &[1.0, 2.0, 3.0]), (b, &[100.0, 200.0])],
-    )
-    .await;
-
-    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
-    let filters = vec![col("v").gt(lit(50.0))];
-    let plan = table
-        .scan(&fixture.ctx.state(), None, &filters, None)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        planned_files(&plan),
-        vec!["obs/b.parquet"],
-        "the file that cannot match never reaches the scan"
-    );
-    assert_eq!(counter(&plan, "file_stats_files_considered"), Some(2));
-    assert_eq!(counter(&plan, "file_stats_files_pruned"), Some(1));
-    assert_eq!(rows(plan, &fixture.ctx).await, 2);
-}
-
-/// Every file ruled out leaves nothing to scan.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_predicate_that_rules_out_everything_scans_nothing() {
-    let fixture = fixture().await;
-    let a = put_parquet(&fixture.objects, "obs/a.parquet", &[1.0]).await;
-    analyze(&fixture.stats, &[(a, &[1.0])]).await;
-
-    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
-    let filters = vec![col("v").gt(lit(500.0))];
-    let plan = table
-        .scan(&fixture.ctx.state(), None, &filters, None)
-        .await
-        .unwrap();
-
-    assert_eq!(rows(plan, &fixture.ctx).await, 0);
-}
-
-/// A file the collector has never seen has no statistics, so nothing may rule
-/// it out.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_file_without_statistics_is_never_dropped() {
-    let fixture = fixture().await;
-    let a = put_parquet(&fixture.objects, "obs/a.parquet", &[1.0]).await;
-    analyze(&fixture.stats, &[(a, &[1.0])]).await;
-    // Written after the pass, so it is in no segment.
-    put_parquet(&fixture.objects, "obs/fresh.parquet", &[999.0]).await;
-
-    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
-    let filters = vec![col("v").gt(lit(500.0))];
-    let plan = table
-        .scan(&fixture.ctx.state(), None, &filters, None)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        planned_files(&plan),
-        vec!["obs/fresh.parquet"],
-        "the analyzed file is ruled out, the unanalyzed one survives"
-    );
-    assert_eq!(rows(plan, &fixture.ctx).await, 1);
-}
-
-/// A file rewritten after its analysis has statistics that describe content it
-/// no longer holds, so nothing may rule it out either.
-///
-/// No collector pass runs here, which is the window the query path has to cover
-/// on its own: the record still says `Analyzed`, and the segment still carries
-/// the old range. The scan's own listing is what settles it.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_file_changed_since_its_analysis_is_never_dropped() {
-    let fixture = fixture().await;
-    let a = put_parquet(&fixture.objects, "obs/a.parquet", &[1.0]).await;
-    let b = put_parquet(&fixture.objects, "obs/b.parquet", &[2.0]).await;
-    analyze(&fixture.stats, &[(a.clone(), &[1.0]), (b, &[2.0])]).await;
-
-    // The same path, now holding a value the recorded range rules out.
-    let rewritten = put_parquet(&fixture.objects, "obs/a.parquet", &[999.0]).await;
-    assert_ne!(rewritten, a, "the listing reports the object as changed");
-    let id = fixture
-        .stats
-        .registry()
-        .file_id("obs/a.parquet")
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        fixture.stats.registry().record(id).unwrap().unwrap().state,
-        FileState::Analyzed,
-        "no pass has noticed the change yet"
-    );
-
-    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
-    let filters = vec![col("v").gt(lit(500.0))];
-    let plan = table
-        .scan(&fixture.ctx.state(), None, &filters, None)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        planned_files(&plan),
-        vec!["obs/a.parquet"],
-        "the changed file survives; the unchanged one is ruled out"
-    );
-    assert_eq!(counter(&plan, "file_stats_files_considered"), Some(2));
-    assert_eq!(counter(&plan, "file_stats_files_pruned"), Some(1));
-    assert_eq!(rows(plan, &fixture.ctx).await, 1, "the new row is returned");
 }
 
 /// The scan is DataFusion's own, so everything it does to one — repartitioning
@@ -471,53 +274,6 @@ async fn a_hundred_files_fill_the_partition_budget() {
         "the listing table's grouping fills the budget"
     );
     assert_eq!(rows(plan, &fixture.ctx).await, 100);
-}
-
-/// Pruning keeps exactly the matching files across many of them, and the plan
-/// carries only those.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pruning_keeps_exactly_the_matching_files() {
-    let fixture = fixture_with(Some(4)).await;
-
-    let mut written = Vec::new();
-    for index in 0..200 {
-        let value = if index % 10 == 0 { 900.0 } else { index as f64 };
-        written.push((
-            put_parquet(
-                &fixture.objects,
-                &format!("obs/{index:05}.parquet"),
-                &[value],
-            )
-            .await,
-            value,
-        ));
-    }
-    let analyzed: Vec<(ObservedFile, &[f64])> = written
-        .iter()
-        .map(|(file, value)| {
-            (
-                file.clone(),
-                if *value >= 900.0 {
-                    &[900.0f64][..]
-                } else {
-                    &[0.0f64][..]
-                },
-            )
-        })
-        .collect();
-    analyze(&fixture.stats, &analyzed).await;
-
-    let table = table(&fixture.ctx, &["test://stats/obs/"]).await;
-    let filters = vec![col("v").gt(lit(500.0))];
-    let plan = table
-        .scan(&fixture.ctx.state(), None, &filters, None)
-        .await
-        .unwrap();
-
-    assert_eq!(planned_files(&plan).len(), 20, "a tenth of the files match");
-    assert_eq!(counter(&plan, "file_stats_files_considered"), Some(200));
-    assert_eq!(counter(&plan, "file_stats_files_pruned"), Some(180));
-    assert_eq!(rows(plan, &fixture.ctx).await, 20);
 }
 
 /// Write one Parquet object with an arbitrary schema, for the tests that care
