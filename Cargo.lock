@@ -9334,8 +9334,8 @@ checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
 
 [[package]]
 name = "oxcdf"
-version = "0.4.0"
-source = "git+https://github.com/robinskil/oxcdf.git#f52e3fe3879a62784ba14dd4c7b3102abbb98ef7"
+version = "0.5.0"
+source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.5.0#ba966a81b810ff83d9dd114582fed9bcc64bca1e"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9348,8 +9348,8 @@ dependencies = [
 
 [[package]]
 name = "oxcdf-hdf5"
-version = "0.4.0"
-source = "git+https://github.com/robinskil/oxcdf.git#f52e3fe3879a62784ba14dd4c7b3102abbb98ef7"
+version = "0.5.0"
+source = "git+https://github.com/robinskil/oxcdf.git?tag=v0.5.0#ba966a81b810ff83d9dd114582fed9bcc64bca1e"
 dependencies = [
  "async-trait",
  "bytes",
