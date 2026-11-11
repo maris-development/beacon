@@ -114,7 +114,7 @@ full read model.
 | --- | --- | --- | --- |
 | `read_dimensions` | List of dimension names | The default grid of each store | The dimensions the table reads. Beacon returns an array only if the list holds every dimension of that array. |
 | `skip_unbroadcastable` | Boolean | `false` | Skip a group that does not fit `read_dimensions`. Beacon writes a warning and reads the next group. Without it the query fails. |
-| `enable_statistics` | Boolean | `true` (`BEACON_ZARR_ENABLE_STATISTICS`) | Accepted, and without effect today. Beacon rejects a value that is not a boolean, and then reads the server setting alone: `ANALYZE FILES` resolves a format per store, not per table. Set `BEACON_ZARR_ENABLE_STATISTICS` to turn the column ranges off. |
+| `enable_statistics` | Boolean | `true` (`BEACON_ZARR_ENABLE_STATISTICS`) | Compute the column ranges of each file for the [file statistics](/docs/2.1.0-rc2/internals/file-statistics) of this table. With `false`, the table records no range and prunes no file. |
 
 ```sql
 CREATE EXTERNAL TABLE sst_zarr

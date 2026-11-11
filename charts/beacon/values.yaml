@@ -97,7 +97,7 @@ beacon:
     enabled: null            # BEACON_CRAWLER_ENABLE
     defaultIntervalSecs: null
   fileStats:
-    enabled: null            # BEACON_FILE_STATS_ENABLE
+    enabled: null            # BEACON_FILE_STATS_ENABLE; a table turns statistics on with use_statistics_pruning
 
   # Function plugins (optional): a comma list of plugins to install at startup,
   # as name=source, e.g. "demo=github:maris-development/demo@v1".

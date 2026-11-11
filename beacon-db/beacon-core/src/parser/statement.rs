@@ -306,32 +306,21 @@ impl Display for RunCrawlerStatement {
     }
 }
 
-/// ANALYZE FILES ['<prefix>'] [FORCE]
+/// ANALYZE FILES [<table>]
 ///
-/// Runs the background statistics pass now, rather than waiting for its timer.
-/// The collector takes `batch_files` per tick every `interval_secs`, so a fresh
-/// store is hours from being useful; this is how an operator backfills one
-/// prefix and sees the result.
-///
-/// `FORCE` re-analyzes files that are already analyzed. Nothing else does: a
-/// file whose content has not changed is not re-queued, so after turning on a
-/// reader that can finally produce ranges (netCDF's, say) every file looks
-/// up to date and would stay barren without this.
+/// Refreshes the file statistics of one external table, or of each table with
+/// statistics, now. The background refresh waits for the refresh interval of the table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzeFilesStatement {
-    /// Restrict to paths under this prefix. `None` means the whole store.
-    pub prefix: Option<String>,
-    pub force: bool,
+    /// The table to refresh. `None` refreshes each table with statistics.
+    pub table: Option<ObjectName>,
 }
 
 impl Display for AnalyzeFilesStatement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ANALYZE FILES")?;
-        if let Some(prefix) = &self.prefix {
-            write!(f, " '{prefix}'")?;
-        }
-        if self.force {
-            write!(f, " FORCE")?;
+        if let Some(table) = &self.table {
+            write!(f, " {table}")?;
         }
         Ok(())
     }

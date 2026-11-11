@@ -41,12 +41,35 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **File statistics belong to an external table.** Set `'use_statistics_pruning' 'true'` in the
+  `OPTIONS` of a table. Beacon then keeps one statistics table for it in `beacon.db`, and a query on
+  the table prunes the files that cannot match. A refresh reads only the new and changed files.
+  `statistics_columns` names the columns, and a table with more than 1,000 range columns needs it.
+  `statistics_refresh_interval` sets the seconds between two refreshes, 900 by default.
+  `ANALYZE FILES [<table>]` starts a background refresh of one table or of each table, and returns
+  at once with one row per table: `started` or `queued`.
+  `table_statistics('<table>')` shows the statistics to the super-user. `DROP TABLE` deletes them.
+  `BEACON_FILE_STATS_MAX_REFRESHES`, 2 by default, limits the tables that refresh at the same time.
+  The `enable_statistics` option of a NetCDF, HDF5 or Zarr table now has effect. See
+  [File statistics](docs/docs/2.1.0-rc2/internals/file-statistics.md).
 - **Plugin functions get literal arguments as scalars.** A native plugin function gets each literal
   argument as `ColumnarValue::Scalar`, not as an array with one copy per row. So a function can
   require a constant argument, or prepare a constant one time per batch. The plugin SDK ABI is now
   4. Rebuild each native plugin with the new SDK, because Beacon refuses a plugin with SDK ABI 3. A
   body that accepts only `ColumnarValue::Array` must also accept a scalar. `invoke_arrays` still
   gives arrays. ([#612](https://github.com/maris-development/beacon/issues/612))
+
+### Removed
+
+- **The datasets-wide file statistics.** `beacon.system.file_stats`, `beacon.system.file_stats_segments`
+  and `file_statistics(path)` are gone. A query on them now fails with "not found". Use
+  `table_statistics('<table>')`. The `read_*()` functions
+  no longer prune on file statistics, and the schema cache is gone. `ANALYZE FILES '<prefix>'` and
+  `ANALYZE FILES FORCE` are gone. The variables `BEACON_FILE_STATS_INTERVAL_SECS`,
+  `BEACON_FILE_STATS_ON_STARTUP`, `BEACON_FILE_STATS_BATCH_FILES`,
+  `BEACON_FILE_STATS_TARGET_GROUP_FILES`, `BEACON_FILE_STATS_MIN_GROUP_FILES`,
+  `BEACON_FILE_STATS_PREFIX_DEPTH`, `BEACON_FILE_STATS_SCAN_PREFIX`,
+  `BEACON_FILE_STATS_DISCOVERY_CHUNK` and `BEACON_FILE_STATS_SCHEMA_CACHE` have no effect.
 
 ## [2.0.2] — 2026-10-13
 

@@ -86,13 +86,13 @@ address form. Every listing and every read on object storage costs network laten
 File statistics record the lowest and the highest value of each column in each file. A query with a
 `WHERE` clause then prunes each file that cannot hold a match. Beacon does not open that file.
 
-- `BEACON_FILE_STATS_ENABLE` is `true` by default. Keep it on.
-- A pass runs every 15 minutes. The first pass runs one interval after startup.
-- Set `BEACON_FILE_STATS_ON_STARTUP=true`, or run `ANALYZE FILES`, to fill the statistics earlier.
+- Set `'use_statistics_pruning' 'true'` in the `OPTIONS` of an external table that you filter often.
+- A table refreshes its statistics every 15 minutes. `statistics_refresh_interval` changes this.
+- Run `ANALYZE FILES` to start a refresh now. It runs in the background.
+- `BEACON_FILE_STATS_MAX_REFRESHES` limits the tables that refresh at the same time.
 - A netCDF or HDF5 file supplies a range only through the pure-Rust reader.
 
-The [File statistics](/docs/2.1.0-rc2/internals/file-statistics) chapter tells how to check the result
-and how to investigate one file.
+The [File statistics](/docs/2.1.0-rc2/internals/file-statistics) chapter tells how to check the result.
 
 ## NetCDF Tuning
 
@@ -110,7 +110,8 @@ format such as Zarr. Your access pattern decides the gain. A scan returns batche
 ### Statistics of each file
 
 `BEACON_NETCDF_ENABLE_STATISTICS` controls the statistics of each file. Beacon uses them to prune a
-query. The default is `true`. Keep it on. Switch it off only to debug the pruning.
+query on a table with `use_statistics_pruning`. The default is `true`. Keep it on. Switch it off only
+to debug the pruning.
 
 Statistics also need the pure-Rust reader below. That reader is the default. The netCDF-C library
 holds one lock for each call in the process. Beacon computes the statistics through one thread, and
@@ -195,8 +196,8 @@ N-dimensional engine. Beacon reads the filters of your query. It then does two t
 - It slices the one-dimensional coordinate arrays to your ranges. Examples are `time`, `latitude`
   and `longitude`.
 
-You configure nothing. You declare no `statistics_columns`. You compute no statistics first. Read the
-store and filter it. The engine does the rest.
+You configure nothing. You set no table option. You compute no statistics first. Read the store and
+filter it. The engine does the rest.
 
 ### SQL
 
