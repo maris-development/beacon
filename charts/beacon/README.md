@@ -53,6 +53,7 @@ All settings live under `values.yaml`. The chart maps values to the server's
 | `beacon.port` | HTTP API + admin UI port | `5001` |
 | `beacon.basePath` | URL prefix for all routes | `""` |
 | `beacon.logLevel` | `trace`…`error`/`off` | `info` |
+| `beacon.logOutput` | `stdout`, `file` or `both` | `both` |
 | `beacon.dataDir` | Data root in-container | `/beacon/data` |
 | `beacon.admin.adminUsername` | Admin user | `admin` |
 | `beacon.admin.adminPassword` | Admin password (random if empty) | `""` |

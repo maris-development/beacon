@@ -132,6 +132,33 @@ SELECT path FROM view_external_table_statistics('ocean_profiles')
 WHERE cached = false
 ```
 
+## `table_statistics`
+
+```text
+table_statistics(table_name)
+```
+
+Returns the [file statistics](/docs/2.1.0-rc2/internals/file-statistics) of an external table with
+`use_statistics_pruning`. These are the statistics that a query on the table prunes on. Returns one
+row for each file. Only the super-user can call it.
+
+| Column | Type | Description |
+| ------ | ---- | ----------- |
+| `_stamp` | `UINT64` | A hash of the store, the path, the modification time and the size |
+| `_path` | `TEXT` | The file, relative to its store |
+| `_size` | `UINT64` | The file size in bytes |
+| `_last_modified` | `TIMESTAMP` | The modification time |
+| `_failed` | `BOOLEAN` | `true` if Beacon could not read the file |
+| `_row_count` | `UINT64` | The row count. `NULL` if the format reported none. |
+| one column for each statistics column | `STRUCT` | `min`, `max` and `null_count`, in the type of the table column |
+
+```sql
+SELECT _path, "TEMP"['min'], "TEMP"['max'] FROM table_statistics('ocean_profiles')
+
+-- Find files with no range for TEMP
+SELECT _path FROM table_statistics('ocean_profiles') WHERE "TEMP"['min'] IS NULL
+```
+
 ## `view_statistics_cache`
 
 ```text

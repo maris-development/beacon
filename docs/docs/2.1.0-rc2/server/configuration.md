@@ -23,6 +23,7 @@ See [S3 object storage](#s3-object-storage).
 | `BEACON_WORKER_THREADS` | `8` | Number of threads of the query runtime. This runtime plans and runs queries, and hosts the crawlers and the file statistics. |
 | `BEACON_API_THREADS` | `4` | Number of threads of the API runtime. This runtime serves HTTP and Flight SQL. A long query does not block it. |
 | `BEACON_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error`, or `off`. Case does not matter. The level applies to all Beacon crates. At `debug` and `trace`, loud dependencies such as DataFusion, Arrow, `object_store`, and hyper stay at `info`. An unknown value stops the server at startup. |
+| `BEACON_LOG_OUTPUT` | `both` | Where Beacon writes its logs: `stdout`, `file`, or `both`. Case does not matter. `file` writes only the rolling log file. See [Log files](#log-files). An unknown value stops the server at startup. |
 | `RUST_LOG` | _(unset)_ | Full log filter, in [`tracing-subscriber` EnvFilter](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (e.g. `debug,datafusion=trace`). It replaces `BEACON_LOG_LEVEL`. Use it to see the dependency logs that `BEACON_LOG_LEVEL` holds back. An invalid value prints a warning, and Beacon uses `BEACON_LOG_LEVEL`. |
 | `BEACON_BASE_PATH` | _(empty)_ | Optional URL path prefix for the home page, the HTTP API, the OpenAPI document and the Swagger UI (e.g. `/beacon`). Useful behind a reverse proxy. Normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character causes Beacon to exit at startup with a descriptive error. |
 | `BEACON_WEB_UI_DIR` | `web` | Directory holding the built admin web UI. Served at `{BEACON_BASE_PATH}/admin` when the directory exists, and skipped otherwise. Resolved relative to the working directory (`/beacon/web` in the Docker image). |
@@ -174,10 +175,20 @@ With Docker, mount the subdirectories that you want to keep. Two examples are
 
 ## Log files
 
-Beacon writes each log line to two places at the same time:
+By default, Beacon writes each log line to two places at the same time:
 
 - **stdout**, which Docker collects. Read it with `docker logs -f beacon`.
 - a **rolling log file** in the `logs/` directory.
+
+Set `BEACON_LOG_OUTPUT` to select the places:
+
+| Value | stdout | Log file |
+| --- | --- | --- |
+| `both` (default) | Yes | Yes |
+| `stdout` | Yes | No |
+| `file` | No | Yes |
+
+With `stdout`, Beacon does not create the `logs/` directory. Use `stdout` in a container when the platform collects the logs.
 
 The file name carries the date, for example `logs/beacon.log.2026-08-19`. Beacon starts a new file
 each day. Beacon never deletes an old file. Remove old files yourself.
@@ -188,8 +199,8 @@ directory. In the Docker image the working directory is `/beacon`, so the files 
 `/beacon/logs/`.
 :::
 
-`BEACON_LOG_LEVEL` and `RUST_LOG` control how much Beacon writes. See [Server](#server). The file
-and stdout always get the same lines. The file holds no ANSI colour codes.
+`BEACON_LOG_LEVEL` and `RUST_LOG` control how much Beacon writes. See [Server](#server). When both
+places are on, the file and stdout get the same lines. The file holds no ANSI colour codes.
 
 ### Write the log files to your machine
 
@@ -267,29 +278,22 @@ then registers them as external tables.
 
 ## File statistics
 
-Beacon records the value range of each column in each file. A query then prunes the files that
-cannot match. See [File statistics](/docs/2.1.0-rc2/internals/file-statistics).
+An external table with the option `use_statistics_pruning` keeps the value range of each column in
+each file. A query on the table then prunes the files that cannot match. See
+[File statistics](/docs/2.1.0-rc2/internals/file-statistics).
 
-Beacon enables this feature by default. The pure-Rust readers are the default for netCDF and HDF5
-(see [File formats](#file-formats)). Beacon records a real range for those formats. A server that
-reads netCDF or HDF5 through the netCDF-C library records no range.
+The pure-Rust readers are the default for netCDF and HDF5 (see [File formats](#file-formats)).
+Beacon records a real range for those formats. A server that reads netCDF or HDF5 through the
+netCDF-C library records no range.
 
-The first pass runs one interval after startup, not at startup. Run `ANALYZE FILES` to fill the
-store now. Set `BEACON_FILE_STATS_ON_STARTUP=true` to collect at each boot.
+Each table sets its own refresh interval with `statistics_refresh_interval`. These variables apply
+to all tables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_FILE_STATS_ENABLE` | `true` | Master switch. When `false`, Beacon finds nothing, reads nothing and starts no background task. The same store holds the schema cache. A server with `false` reads the schema of each file again on each cold query. |
-| `BEACON_FILE_STATS_INTERVAL_SECS` | `900` | The seconds between two passes. The first pass runs one interval after startup, not at startup. A restart starts the interval again, so a server that restarts more often than this never runs a pass. Set `BEACON_FILE_STATS_ON_STARTUP=true` there. |
-| `BEACON_FILE_STATS_ON_STARTUP` | `false` | Collect at each boot, and do not wait for the first tick. Beacon finds the files and reads every one that has no statistics, in the background. The server answers queries while this runs. The timer continues after it. The pass holds the database file while it runs. A process that closes a database and opens the same file again then gets a lock error. Keep this flag off there. |
-| `BEACON_FILE_STATS_CONCURRENCY` | one quarter of the cores, minimum 2 | The files that Beacon reads at the same time. A pass uses part of the machine, so it does not compete with queries. Increase this value above your core count for data in object storage. |
-| `BEACON_FILE_STATS_BATCH_FILES` | `10000` | The files that Beacon reads in one pass. This value limits the memory of one pass. |
-| `BEACON_FILE_STATS_TARGET_GROUP_FILES` | `10000` | The files that one segment covers. A small value prunes more for a rare column. It also adds segments to read for a common column. |
-| `BEACON_FILE_STATS_MIN_GROUP_FILES` | `500` | Beacon does not split a group below this size, even across folders. |
-| `BEACON_FILE_STATS_PREFIX_DEPTH` | *(derived)* | The folder depth for a group. Leave this variable unset. Beacon derives the depth from your paths and handles roots of different shapes. |
-| `BEACON_FILE_STATS_SCAN_PREFIX` | *(all files)* | Beacon finds files under this prefix of the datasets store only. |
-| `BEACON_FILE_STATS_DISCOVERY_CHUNK` | `10000` | The files that Beacon registers in one transaction. Beacon does not hold a large listing in memory. |
-| `BEACON_FILE_STATS_SCHEMA_CACHE` | `true` | Beacon keeps the schema it reads from each file. A later query then reads the schema instead of the file. A pass derives every schema anyway, so this costs one write. Set it to `false` to take the cache out of the query path and keep the ranges. |
+| `BEACON_FILE_STATS_ENABLE` | `true` | Master switch. When `false`, no table keeps statistics, Beacon starts no background task, and `ANALYZE FILES` is an error. |
+| `BEACON_FILE_STATS_CONCURRENCY` | one quarter of the cores, minimum 2 | The files that Beacon reads at the same time, over all tables. The refreshes use part of the machine, so they do not compete with queries. Increase this value above your core count for data in object storage. |
+| `BEACON_FILE_STATS_MAX_REFRESHES` | `2` | The tables that refresh their statistics at the same time. The other tables wait for a free slot. |
 
 ## Store cache
 

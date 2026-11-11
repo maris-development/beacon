@@ -54,4 +54,5 @@ beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
 beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
 beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-external-table = { path = "../beacon-external-table" }
 datafusion-spatial = { workspace=true }

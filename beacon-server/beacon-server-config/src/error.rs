@@ -29,6 +29,10 @@ pub enum ConfigError {
     #[error("invalid BEACON_LOG_LEVEL: {0}")]
     InvalidLogLevel(String),
 
+    /// `BEACON_LOG_OUTPUT` was set to something other than `stdout`, `file` or `both`.
+    #[error("invalid BEACON_LOG_OUTPUT: {0}")]
+    InvalidLogOutput(String),
+
     /// `BEACON_WORKER_THREADS` or `BEACON_API_THREADS` was set to zero.
     #[error("invalid thread count: {0}")]
     InvalidThreads(String),

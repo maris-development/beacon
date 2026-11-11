@@ -17,7 +17,7 @@ pub use beacon_common::CrawlerConfig;
 pub use beacon_common::FileStatsConfig;
 pub use beacon_object_store_cache::StoreCacheConfig;
 pub use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, TypeConflict};
-use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, NumpyArrowTypeWidening};
+use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, strategy_by_name};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -100,6 +100,51 @@ pub struct ServerConfig {
     /// `trace`, `debug`, `info`, `warn`, `error`, `off`. From `BEACON_LOG_LEVEL`.
     /// `RUST_LOG` overrides it when set.
     pub log_level: String,
+    /// Where the server writes its logs. From `BEACON_LOG_OUTPUT`.
+    pub log_output: LogOutput,
+}
+
+/// Destinations for the server logs, set by `BEACON_LOG_OUTPUT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogOutput {
+    /// Only standard output.
+    Stdout,
+    /// Only the rolling log file in `logs/`.
+    File,
+    /// Standard output and the rolling log file.
+    Both,
+}
+
+impl LogOutput {
+    /// Returns `true` when the logs go to standard output.
+    pub fn to_stdout(self) -> bool {
+        matches!(self, LogOutput::Stdout | LogOutput::Both)
+    }
+
+    /// Returns `true` when the logs go to the rolling log file.
+    pub fn to_file(self) -> bool {
+        matches!(self, LogOutput::File | LogOutput::Both)
+    }
+}
+
+/// Values accepted by `BEACON_LOG_OUTPUT`.
+const LOG_OUTPUTS: [&str; 3] = ["stdout", "file", "both"];
+
+impl std::str::FromStr for LogOutput {
+    type Err = String;
+
+    /// Parses a `BEACON_LOG_OUTPUT` value. Case and surrounding spaces do not matter.
+    fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "stdout" => Ok(LogOutput::Stdout),
+            "file" => Ok(LogOutput::File),
+            "both" => Ok(LogOutput::Both),
+            _ => Err(format!(
+                "`{raw}` is not a log output; expected one of {}",
+                LOG_OUTPUTS.join(", ")
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -336,6 +381,9 @@ struct RawConfig {
     /// stops the process instead of silently logging at the default level.
     #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
     log_level: String,
+    /// Log destinations. Validated in [`Config::load`], like `log_level`.
+    #[envconfig(from = "BEACON_LOG_OUTPUT", default = "both")]
+    log_output: String,
 
     //VM Settings
     /// Query memory pool size, in **megabytes**.
@@ -548,59 +596,24 @@ struct RawConfig {
     #[envconfig(from = "BEACON_CRAWLER_DEFAULT_INTERVAL_SECS", default = "900")]
     crawler_default_interval_secs: u64,
 
-    // File statistics subsystem
+    // File statistics of external tables
     //
-    // A pass records the column range of each file. A query then skips a file
-    // that its predicate cannot match.
+    // An external table with the option `use_statistics_pruning` keeps the
+    // column range of each file. A query then skips a file that its predicate
+    // cannot match. The table sets its own refresh interval.
     //
-    // On by default. netcdf-c reports no range, because it holds one lock for
-    // each call in the process. Both Rust readers are the default now, so a
-    // pass records a real range. The same store holds the schema cache. With
-    // the subsystem off, a query reads the schema of each file again.
-    //
-    // Set it to false for an archive of formats that supply no range. ODV, CSV
-    // and TIFF record zero columns, so a pass costs and returns nothing.
+    // On by default. When false, no table keeps statistics.
     #[envconfig(from = "BEACON_FILE_STATS_ENABLE", default = "true")]
     file_stats_enable: bool,
-    #[envconfig(from = "BEACON_FILE_STATS_INTERVAL_SECS", default = "900")]
-    file_stats_interval_secs: u64,
-    /// Collect at boot. Do not wait for the first tick.
-    ///
-    /// Set it for a fresh server, or for one that restarts more often than the
-    /// interval. The first tick is one interval after boot, and the interval
-    /// starts again on each boot. Such a server holds no statistics at all.
-    ///
-    /// Off by default. The pass holds the database file while it reads a batch.
-    /// A caller that drops a runtime and opens the same file again gets a lock
-    /// error. A server that exits does not see this, and can set the flag.
-    #[envconfig(from = "BEACON_FILE_STATS_ON_STARTUP", default = "false")]
-    file_stats_on_startup: bool,
-    /// Files analyzed at once. Empty takes a quarter of the cores, which leaves
-    /// room for queries. Raise it well above the core count for datasets in
-    /// object storage, where the work is waiting rather than parsing.
+    /// Files analyzed at once, over all tables. Empty takes a quarter of the
+    /// cores, which leaves room for queries. Raise it well above the core count
+    /// for datasets in object storage, where the work is waiting rather than parsing.
     #[envconfig(from = "BEACON_FILE_STATS_CONCURRENCY")]
     file_stats_concurrency: Option<usize>,
-    #[envconfig(from = "BEACON_FILE_STATS_BATCH_FILES", default = "10000")]
-    file_stats_batch_files: usize,
-    #[envconfig(from = "BEACON_FILE_STATS_TARGET_GROUP_FILES", default = "10000")]
-    file_stats_target_group_files: usize,
-    #[envconfig(from = "BEACON_FILE_STATS_MIN_GROUP_FILES", default = "500")]
-    file_stats_min_group_files: usize,
-    /// Fix the segment grouping at this directory depth. Leave unset: the
-    /// derivation handles roots of differing shape, which one depth cannot.
-    #[envconfig(from = "BEACON_FILE_STATS_PREFIX_DEPTH")]
-    file_stats_prefix_depth: Option<usize>,
-    #[envconfig(from = "BEACON_FILE_STATS_SCAN_PREFIX", default = "")]
-    file_stats_scan_prefix: String,
-    #[envconfig(from = "BEACON_FILE_STATS_DISCOVERY_CHUNK", default = "10000")]
-    file_stats_discovery_chunk: usize,
-    /// Keep the schema of each file, so a query reads it instead of the file.
-    /// On by default. A pass computes each schema already, and dropped it
-    /// before. Only a pass writes an entry, so this flag does nothing while
-    /// `BEACON_FILE_STATS_ENABLE` is false. Set it to false to remove the cache
-    /// from the query path, and keep the ranges.
-    #[envconfig(from = "BEACON_FILE_STATS_SCHEMA_CACHE", default = "true")]
-    file_stats_schema_cache: bool,
+    /// Tables that refresh their statistics at the same time. The other tables
+    /// wait for a free slot.
+    #[envconfig(from = "BEACON_FILE_STATS_MAX_REFRESHES", default = "2")]
+    file_stats_max_refreshes: usize,
 
     /// Answer `list` and `head` calls on the datasets store from memory.
     ///
@@ -675,6 +688,8 @@ impl From<RawConfig> for Config {
                 web_ui_dir: raw.web_ui_dir,
                 max_upload_bytes: raw.max_upload_bytes,
                 log_level: raw.log_level,
+                // `Config::load` rejects a bad value before this mapping runs.
+                log_output: raw.log_output.parse().unwrap_or(LogOutput::Both),
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
@@ -750,19 +765,11 @@ impl From<RawConfig> for Config {
             },
             file_stats: FileStatsConfig {
                 enable: raw.file_stats_enable,
-                interval_secs: raw.file_stats_interval_secs,
-                on_startup: raw.file_stats_on_startup,
                 concurrency: raw
                     .file_stats_concurrency
                     .filter(|n| *n > 0)
                     .unwrap_or_else(beacon_common::file_stats_config::default_concurrency),
-                batch_files: raw.file_stats_batch_files.max(1),
-                target_group_files: raw.file_stats_target_group_files.max(1),
-                min_group_files: raw.file_stats_min_group_files,
-                prefix_depth: raw.file_stats_prefix_depth,
-                scan_prefix: raw.file_stats_scan_prefix.clone(),
-                discovery_chunk: raw.file_stats_discovery_chunk.max(1),
-                schema_cache: raw.file_stats_schema_cache,
+                max_refreshes: raw.file_stats_max_refreshes.max(1),
             },
             store_cache: StoreCacheConfig {
                 enable: raw.store_cache_enable,
@@ -932,6 +939,9 @@ impl Config {
         // Capture the secrets key before `raw` is consumed; decode/validate below.
         let secrets_key_b64 = raw.secrets_key.clone();
         parse_startup_plugins(&raw.plugins).map_err(ConfigError::InvalidPlugins)?;
+        raw.log_output
+            .parse::<LogOutput>()
+            .map_err(ConfigError::InvalidLogOutput)?;
         // Same, for the one case the deprecation warning below has to distinguish:
         // the S3 store turned on by the old variable alone.
         let s3_via_deprecated_name = raw.s3_data_lake_deprecated && !raw.s3_datasets;
@@ -1054,24 +1064,20 @@ fn type_widening(strategy: &str, on_conflict: &str) -> Arc<dyn ArrowTypeWidening
         );
         TypeConflict::Fail
     });
-    match strategy.trim().to_ascii_lowercase().as_str() {
-        "default" | "" => Arc::new(DefaultArrowTypeWidening { on_conflict }),
-        "numpy" => Arc::new(NumpyArrowTypeWidening { on_conflict }),
-        other => {
-            tracing::warn!(
-                "BEACON_TYPE_WIDENING_STRATEGY names no strategy: '{other}'. \
-                 The strategies are 'default' and 'numpy'. Taking 'default'."
-            );
-            Arc::new(DefaultArrowTypeWidening { on_conflict })
-        }
-    }
+    strategy_by_name(strategy, on_conflict).unwrap_or_else(|other| {
+        tracing::warn!(
+            "BEACON_TYPE_WIDENING_STRATEGY names no strategy: '{other}'. \
+             The strategies are 'default' and 'numpy'. Taking 'default'."
+        );
+        Arc::new(DefaultArrowTypeWidening { on_conflict })
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         decode_master_key, normalize_base_path, normalize_log_level, parse_startup_plugins,
-        validate_storage, validate_threads, Config, Hdf5Convention, PathBuf, RawConfig,
+        validate_storage, validate_threads, Config, Hdf5Convention, LogOutput, PathBuf, RawConfig,
     };
     use envconfig::Envconfig;
     use std::collections::HashMap;
@@ -1404,21 +1410,29 @@ mod tests {
         );
     }
 
-    /// Statistics default on. The collection at boot does not. It holds the
-    /// database file after a drop, so it stays off until teardown waits for it.
+    /// Statistics default on, with two table refreshes at a time.
     #[test]
-    fn statistics_default_on_and_the_startup_collection_stays_opt_in() {
-        assert!(config(&[]).file_stats.enable);
-        assert!(!config(&[]).file_stats.on_startup);
-        assert!(
-            config(&[("BEACON_FILE_STATS_ON_STARTUP", "true")])
-                .file_stats
-                .on_startup
-        );
+    fn statistics_default_on_with_two_refreshes() {
+        let defaults = config(&[]).file_stats;
+        assert!(defaults.enable);
+        assert_eq!(defaults.max_refreshes, 2);
         assert!(
             !config(&[("BEACON_FILE_STATS_ENABLE", "false")])
                 .file_stats
                 .enable
+        );
+        assert_eq!(
+            config(&[("BEACON_FILE_STATS_MAX_REFRESHES", "4")])
+                .file_stats
+                .max_refreshes,
+            4
+        );
+        assert_eq!(
+            config(&[("BEACON_FILE_STATS_MAX_REFRESHES", "0")])
+                .file_stats
+                .max_refreshes,
+            1,
+            "zero refreshes would stop each refresh"
         );
     }
 
@@ -1459,6 +1473,29 @@ mod tests {
     fn unknown_log_level_is_an_error() {
         assert!(normalize_log_level("verbose").is_err());
         assert!(normalize_log_level("").is_err());
+    }
+
+    #[test]
+    fn log_output_defaults_to_both() {
+        let output = config(&[]).server.log_output;
+        assert_eq!(output, LogOutput::Both);
+        assert!(output.to_stdout() && output.to_file());
+    }
+
+    #[test]
+    fn log_output_selects_the_destinations() {
+        let output = |value| config(&[("BEACON_LOG_OUTPUT", value)]).server.log_output;
+        assert_eq!(output("stdout"), LogOutput::Stdout);
+        assert_eq!(output(" FILE "), LogOutput::File);
+        assert!(output("stdout").to_stdout() && !output("stdout").to_file());
+        assert!(!output("file").to_stdout() && output("file").to_file());
+    }
+
+    /// A typo must stop the server, not quietly write to the wrong place.
+    #[test]
+    fn unknown_log_output_is_an_error() {
+        assert!("stderr".parse::<LogOutput>().is_err());
+        assert!("".parse::<LogOutput>().is_err());
     }
 
     #[test]

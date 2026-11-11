@@ -156,8 +156,17 @@ The rules are the same for every format:
 
 Most keys have a server-wide default. The
 [File formats](/docs/2.1.0-rc2/server/configuration#file-formats) settings hold those defaults. A
-table option wins over the default of the server. The one exception is `enable_statistics`: Beacon
-validates it and then reads the server setting alone. See the format page of each key.
+table option wins over the default of the server. See the format page of each key.
+
+### Keys of each table
+
+These keys apply to a table of each file format:
+
+| Key | Default | Description |
+| --- | ------- | ----------- |
+| `use_statistics_pruning` | `false` | Keep the [file statistics](/docs/2.1.0-rc2/internals/file-statistics) of this table, and prune the files of a query on them. |
+| `statistics_columns` | each column with a range | The columns to keep a range for, separated by a comma. A table with more than 1,000 range columns needs this key. |
+| `statistics_refresh_interval` | `900` | The seconds between two refreshes of the statistics of this table. |
 
 ### Keys of each format
 
@@ -178,7 +187,8 @@ validates it and then reads the server setting alone. See the format page of eac
 
 ## `DROP TABLE`
 
-`DROP TABLE` removes a table from the catalog. Beacon does not delete the files.
+`DROP TABLE` removes a table from the catalog. Beacon does not delete the files. It deletes the file
+statistics of the table.
 
 ```sql
 DROP TABLE argo

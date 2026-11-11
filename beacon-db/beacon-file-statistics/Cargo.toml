@@ -1,0 +1,36 @@
+[package]
+name = "beacon-file-statistics"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+
+# File statistics for external tables: one Lance statistics table for each
+# table that prunes its scans with statistics.
+
+[dependencies]
+anyhow = { workspace = true }
+arrow = { workspace = true }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-external-table = { path = "../beacon-external-table" }
+beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
+datafusion = { workspace = true }
+futures = { workspace = true }
+lance = { workspace = true }
+object_store = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
+bytes = { workspace = true }
+chrono = { workspace = true }
+criterion = { version = "0.5", default-features = false, features = ["rayon", "html_reports"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "statistics"
+harness = false

@@ -2,7 +2,6 @@ mod auth_store;
 pub mod crawler;
 pub mod embedded;
 pub mod comments;
-pub mod file_stats;
 pub mod metrics;
 mod name_rule;
 pub mod parser;

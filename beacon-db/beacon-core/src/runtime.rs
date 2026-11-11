@@ -54,9 +54,9 @@ pub struct Runtime {
     /// (writes, DDL/DML, and beacon's side-effecting extension statements) is refused.
     pub(crate) read_only: bool,
 
-    /// The background file-statistics service, when enabled. Held so the runtime
-    /// owns its timer: dropping the runtime aborts it.
-    pub(crate) file_stats: Option<Arc<crate::file_stats::FileStatsService>>,
+    /// The file-statistics engine, when enabled. The session config holds the
+    /// same engine; dropping the runtime stops its refresh tasks.
+    pub(crate) file_stats: Option<beacon_file_statistics::FileStatistics>,
 
     /// The installed function plugins. The session config holds the same registry.
     pub(crate) plugins: Arc<crate::plugins::PluginRegistry>,
@@ -1482,9 +1482,8 @@ mod crawler_sql_tests {
 // no SQL-builder function left to unit test.
 
 impl Runtime {
-    /// The background file-statistics service, when the subsystem is enabled and
-    /// this runtime has a database file to keep the registry in.
-    pub fn file_stats(&self) -> Option<&Arc<crate::file_stats::FileStatsService>> {
+    /// The file-statistics engine, when the subsystem is enabled.
+    pub fn file_stats(&self) -> Option<&beacon_file_statistics::FileStatistics> {
         self.file_stats.as_ref()
     }
 
