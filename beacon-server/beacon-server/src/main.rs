@@ -129,7 +129,7 @@ async fn serve_http(router: ::axum::Router, addr: std::net::SocketAddr) -> anyho
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        tracing_panic::panic_hook(info); // ERROR event -> stdout + rolling log file
+        tracing_panic::panic_hook(info); // ERROR event -> the BEACON_LOG_OUTPUT destinations
         default_hook(info); // preserve default stderr output
     }));
 }
@@ -185,14 +185,26 @@ fn log_filter(level: &str) -> String {
     }
 }
 
-/// Configures stdout and rolling-file tracing subscribers for the API process.
+/// Configures the stdout and rolling-file tracing subscribers for the API process.
 ///
+/// `BEACON_LOG_OUTPUT` (through `config`) selects stdout, the file, or both.
 /// `RUST_LOG` takes precedence when it is set, for the full `EnvFilter` syntax.
 /// `BEACON_LOG_LEVEL` (through `config`) sets the level otherwise. Returns the
 /// filter it applied, for the startup log.
 fn setup_tracing(config: &beacon_server_config::Config) -> String {
-    let file_appender = tracing_appender::rolling::daily("logs", "beacon.log");
-    let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
+    let output = config.server.log_output;
+
+    let stdout_layer = output.to_stdout().then(tracing_subscriber::fmt::layer);
+    let file_layer = output.to_file().then(|| {
+        let file_appender = tracing_appender::rolling::daily("logs", "beacon.log");
+        let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+        // The non-blocking writer must outlive the subscriber, so keep the guard for
+        // the lifetime of the process.
+        std::mem::forget(guard);
+        tracing_subscriber::fmt::layer()
+            .with_writer(file_writer)
+            .with_ansi(false)
+    });
 
     let default_filter = log_filter(&config.server.log_level);
     let filter = match std::env::var("RUST_LOG") {
@@ -207,13 +219,9 @@ fn setup_tracing(config: &beacon_server_config::Config) -> String {
     let applied = filter.to_string();
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::fmt::layer().with_writer(file_writer).with_ansi(false))
+        .with(stdout_layer)
+        .with(file_layer)
         .init();
-
-    // The non-blocking writer must outlive the subscriber, so keep the guard for the
-    // lifetime of the process.
-    std::mem::forget(_guard);
 
     applied
 }

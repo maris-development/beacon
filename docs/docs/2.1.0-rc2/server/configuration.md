@@ -23,6 +23,7 @@ See [S3 object storage](#s3-object-storage).
 | `BEACON_WORKER_THREADS` | `8` | Number of threads of the query runtime. This runtime plans and runs queries, and hosts the crawlers and the file statistics. |
 | `BEACON_API_THREADS` | `4` | Number of threads of the API runtime. This runtime serves HTTP and Flight SQL. A long query does not block it. |
 | `BEACON_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error`, or `off`. Case does not matter. The level applies to all Beacon crates. At `debug` and `trace`, loud dependencies such as DataFusion, Arrow, `object_store`, and hyper stay at `info`. An unknown value stops the server at startup. |
+| `BEACON_LOG_OUTPUT` | `both` | Where Beacon writes its logs: `stdout`, `file`, or `both`. Case does not matter. `file` writes only the rolling log file. See [Log files](#log-files). An unknown value stops the server at startup. |
 | `RUST_LOG` | _(unset)_ | Full log filter, in [`tracing-subscriber` EnvFilter](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (e.g. `debug,datafusion=trace`). It replaces `BEACON_LOG_LEVEL`. Use it to see the dependency logs that `BEACON_LOG_LEVEL` holds back. An invalid value prints a warning, and Beacon uses `BEACON_LOG_LEVEL`. |
 | `BEACON_BASE_PATH` | _(empty)_ | Optional URL path prefix for the home page, the HTTP API, the OpenAPI document and the Swagger UI (e.g. `/beacon`). Useful behind a reverse proxy. Normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character causes Beacon to exit at startup with a descriptive error. |
 | `BEACON_WEB_UI_DIR` | `web` | Directory holding the built admin web UI. Served at `{BEACON_BASE_PATH}/admin` when the directory exists, and skipped otherwise. Resolved relative to the working directory (`/beacon/web` in the Docker image). |
@@ -174,10 +175,20 @@ With Docker, mount the subdirectories that you want to keep. Two examples are
 
 ## Log files
 
-Beacon writes each log line to two places at the same time:
+By default, Beacon writes each log line to two places at the same time:
 
 - **stdout**, which Docker collects. Read it with `docker logs -f beacon`.
 - a **rolling log file** in the `logs/` directory.
+
+Set `BEACON_LOG_OUTPUT` to select the places:
+
+| Value | stdout | Log file |
+| --- | --- | --- |
+| `both` (default) | Yes | Yes |
+| `stdout` | Yes | No |
+| `file` | No | Yes |
+
+With `stdout`, Beacon does not create the `logs/` directory. Use `stdout` in a container when the platform collects the logs.
 
 The file name carries the date, for example `logs/beacon.log.2026-08-19`. Beacon starts a new file
 each day. Beacon never deletes an old file. Remove old files yourself.
@@ -188,8 +199,8 @@ directory. In the Docker image the working directory is `/beacon`, so the files 
 `/beacon/logs/`.
 :::
 
-`BEACON_LOG_LEVEL` and `RUST_LOG` control how much Beacon writes. See [Server](#server). The file
-and stdout always get the same lines. The file holds no ANSI colour codes.
+`BEACON_LOG_LEVEL` and `RUST_LOG` control how much Beacon writes. See [Server](#server). When both
+places are on, the file and stdout get the same lines. The file holds no ANSI colour codes.
 
 ### Write the log files to your machine
 
