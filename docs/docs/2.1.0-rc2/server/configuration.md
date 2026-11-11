@@ -291,6 +291,46 @@ store now. Set `BEACON_FILE_STATS_ON_STARTUP=true` to collect at each boot.
 | `BEACON_FILE_STATS_DISCOVERY_CHUNK` | `10000` | The files that Beacon registers in one transaction. Beacon does not hold a large listing in memory. |
 | `BEACON_FILE_STATS_SCHEMA_CACHE` | `true` | Beacon keeps the schema it reads from each file. A later query then reads the schema instead of the file. A pass derives every schema anyway, so this costs one write. Set it to `false` to take the cache out of the query path and keep the ranges. |
 
+## Store cache
+
+The store cache keeps the file list and the file metadata of the datasets store in memory. A query
+then does not list the store again. This helps most with S3 and with large local folders. The cache
+does not hold file data.
+
+Beacon disables this feature by default. With the cache on, these rules apply:
+
+- An upload or a delete through Beacon shows in the next query.
+- A file that a different program changes shows after the sync interval.
+- A local datasets folder has a file watcher. A change then shows in less than one second. The
+  watcher starts in the background, so a large folder does not delay the server start.
+- A network file system (NFS, SMB, CephFS, Lustre, SSHFS) reports no changes from other machines.
+  Beacon detects it and starts no watcher. The sync interval applies there. The program that
+  writes the files can report each change with the events endpoint.
+- An admin can report a change with `POST /api/admin/store-cache/events`. An admin can compare
+  the full cache with the store with `POST /api/admin/store-cache/sync`.
+- Paths with a `_delta_log` folder always read the store.
+
+`GET /api/admin/store-cache` returns the size and the counters of the cache.
+
+The body of `POST /api/admin/store-cache/events` is a JSON list. Each event tells Beacon where to
+look. Beacon then reads the store, so a repeated event is safe.
+
+```json
+[
+  { "type": "changed", "path": "argo/2024/profile_001.nc" },
+  { "type": "prefix_changed", "path": "argo/2025" },
+  { "type": "resync" }
+]
+```
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_STORE_CACHE_ENABLE` | `false` | Master switch for the datasets store. |
+| `BEACON_STORE_CACHE_SYNC_INTERVAL_SECS` | `300` | The seconds between two comparisons of the cache with the store. Each comparison lists each cached folder one time. The minimum is `1`. |
+| `BEACON_STORE_CACHE_MAX_ENTRIES` | `2000000` | The maximum number of files in the cache. One file uses approximately 250 bytes. A folder with more files stays without a cache. |
+| `BEACON_STORE_CACHE_WATCH` | `true` | Start a file watcher for a local datasets folder. A network file system gets no watcher. Linux limits the number of watched folders with `fs.inotify.max_user_watches`. |
+| `BEACON_STORE_CACHE_REMOTE` | `false` | Also cache the S3, GCS and Azure stores that a query opens by URL. These caches have no admin endpoint. They use the sync interval only. |
+
 ## CORS
 
 | Variable | Default | Description |

@@ -25,7 +25,7 @@ use beacon_datafusion_ext::{
     format_ext::{new_file_format_registry_handle, FileFormatFactoryExt, FileFormatRegistry},
     listing_factory::{DefaultStore, ListingFactory, RootStore},
     listing_table_factory_ext::ListingTableFactoryExt,
-    object_store_registry::LazyObjectStoreRegistry,
+    object_store_registry::{LazyObjectStoreRegistry, StoreCacheConfig},
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
     type_widening::{
@@ -100,6 +100,8 @@ pub struct RuntimeBuilder {
 
     pub crawler: CrawlerConfig,
     pub file_stats: beacon_common::FileStatsConfig,
+    /// Metadata cache for remote stores that queries open by URL. Off by default.
+    pub store_cache: Option<StoreCacheConfig>,
 
     pub netcdf: NetcdfConfig,
     pub hdf5: Hdf5Config,
@@ -207,6 +209,15 @@ impl RuntimeBuilder {
     /// `FileStatsConfig::enable = false` builds a runtime with no collector.
     pub fn with_file_stats(mut self, file_stats: beacon_common::FileStatsConfig) -> Self {
         self.file_stats = file_stats;
+        self
+    }
+
+    /// Configures the metadata cache for remote stores that queries open by URL.
+    ///
+    /// The datasets store is not wrapped here: its owner wraps it before
+    /// [`Self::with_default_object_store`].
+    pub fn with_store_cache(mut self, store_cache: StoreCacheConfig) -> Self {
+        self.store_cache = Some(store_cache);
         self
     }
 
@@ -1153,7 +1164,10 @@ fn runtime_env_builder(
     // An injected default store is *not* registered here: it is registered by
     // `register_object_stores` under the configured datasets URL, so queries, the
     // crawler and `init_tables` all address the same object.
-    let object_store_registry = LazyObjectStoreRegistry::new(secrets_store);
+    let mut object_store_registry = LazyObjectStoreRegistry::new(secrets_store);
+    if let Some(store_cache) = &builder.store_cache {
+        object_store_registry = object_store_registry.with_store_cache(store_cache.clone());
+    }
 
     let runtime_env_builder = RuntimeEnvBuilder::new()
         .with_disk_manager_builder(DiskManagerBuilder::default())

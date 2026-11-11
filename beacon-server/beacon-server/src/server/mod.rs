@@ -27,6 +27,9 @@ use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
 use beacon_core::settings::{SqlSettings, SqlStreamCoalesceSettings};
 use beacon_datafusion_ext::listing_factory::RootStore;
+use beacon_object_store_cache::{
+    CacheHandle, CachedObjectStore, LocalWatcher, head_uncached, watch_local,
+};
 use beacon_server_config::Config;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use object_store::ObjectStore;
@@ -40,9 +43,13 @@ pub const DATASETS_STORE_URL: &str = "datasets://";
 pub struct Server {
     config: Arc<Config>,
     /// The datasets store. The same instance is registered on the runtime, so an
-    /// upload through [`Self::store`] is visible to the next query with no cache
-    /// or listing to invalidate between them.
+    /// upload through [`Self::store`] is visible to the next query. With the
+    /// store cache on, that instance is the cache, and a write updates it.
     store: Arc<dyn ObjectStore>,
+    /// Handle to the store cache. `None` when the cache is off.
+    store_cache: Option<CacheHandle>,
+    /// Sends file changes of a local datasets folder to the store cache.
+    _store_watcher: Option<LocalWatcher>,
     runtime: Arc<Runtime>,
     /// Chunked uploads in flight. In memory: a multipart write cannot outlive the
     /// process that opened it.
@@ -62,6 +69,11 @@ impl Server {
     /// temporary directory; there is no separate in-memory mode.
     pub async fn open(config: Arc<Config>, query_runtime: Handle) -> anyhow::Result<Self> {
         let (store, root) = build_datasets_store(&config)?;
+        let (store, store_cache) = CachedObjectStore::wrap(store, &config.store_cache);
+        let store_watcher = match &store_cache {
+            Some(handle) => watch_datasets(&config, handle),
+            None => None,
+        };
         let store_url =
             ObjectStoreUrl::parse(DATASETS_STORE_URL).context("invalid datasets store URL")?;
 
@@ -72,6 +84,8 @@ impl Server {
         Ok(Self {
             config,
             store,
+            store_cache,
+            _store_watcher: store_watcher,
             runtime: Arc::new(runtime),
             uploads: uploads::UploadSessions::default(),
         })
@@ -158,7 +172,8 @@ impl Server {
         if !overwrite {
             // Checked up front so a client is not told to upload gigabytes before
             // discovering the destination is taken.
-            match object_store::ObjectStoreExt::head(self.store.as_ref(), &path).await {
+            // Read the store, not the cache: a file the cache does not know must block the upload.
+            match head_uncached(self.store.as_ref(), &path).await {
                 Ok(_) => return Err(files::FileError::AlreadyExists(path.to_string())),
                 Err(object_store::Error::NotFound { .. }) => {}
                 Err(e) => return Err(e.into()),
@@ -208,6 +223,23 @@ impl Server {
     pub fn store(&self) -> &Arc<dyn ObjectStore> {
         &self.store
     }
+
+    /// Handle to the store cache. `None` when `BEACON_STORE_CACHE_ENABLE` is off.
+    pub fn store_cache(&self) -> Option<&CacheHandle> {
+        self.store_cache.as_ref()
+    }
+}
+
+/// Start the file watcher for a local datasets folder.
+///
+/// The start runs in the background, so a large folder tree does not delay the
+/// server. A network file system gets no watcher: the periodic sync still runs.
+fn watch_datasets(config: &Config, handle: &CacheHandle) -> Option<LocalWatcher> {
+    let cache = &config.store_cache;
+    if !cache.watch_local || config.s3.datasets_on_s3 {
+        return None;
+    }
+    Some(watch_local(handle.clone(), &config.data.datasets, cache.debounce))
 }
 
 /// Build the datasets store: the bucket named by `BEACON_S3_BUCKET` when
@@ -283,6 +315,7 @@ async fn build_runtime(
         .with_vm_memory_limit(config.runtime.vm_memory_size.saturating_mul(1024 * 1024))
         .with_crawler(config.crawler.clone())
         .with_file_stats(config.file_stats.clone())
+        .with_store_cache(config.store_cache.clone())
         .with_netcdf_config(config.netcdf.clone())
         .with_hdf5_config(config.hdf5.clone())
         .with_zarr_config(config.zarr.clone())
