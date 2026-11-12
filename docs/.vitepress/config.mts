@@ -327,6 +327,7 @@ export default defineConfig({
             { text: 'Web Admin UI', link: '/docs/2.1.0-rc2/connect/web-admin-ui' },
             { text: 'DataGrip / JDBC', link: '/docs/2.1.0-rc2/connect/datagrip' },
             { text: 'Python ADBC', link: '/docs/2.1.0-rc2/connect/python-adbc' },
+            { text: 'MCP server (beta)', link: '/docs/2.1.0-rc2/connect/mcp' },
           ]
         },
         {
