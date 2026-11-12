@@ -1,9 +1,10 @@
-//! [`SkipErrorsExec`]: the fallback skip for a plan without a file scan.
+//! [`ScanErrorPolicy`], and [`ScanErrorsExec`]: the fallback for a plan without a file scan.
 //!
-//! [`with_skip_errors`](crate::skip_errors_source::with_skip_errors) skips per
-//! file inside a file scan. A plan without a file scan gets this node. It only
-//! removes an error from the stream. Its input can end after the error, so the
-//! data after a bad file can be lost.
+//! [`with_scan_errors`](crate::scan_errors_source::with_scan_errors) handles
+//! errors per file inside a file scan. A plan without a file scan gets this
+//! node. It knows no file, so a failed scan names only the table and the file
+//! type. A skip only removes an error from the stream. Its input can end after
+//! the error, so the data after a bad file can be lost.
 
 use std::{fmt, sync::Arc};
 
@@ -26,41 +27,78 @@ use datafusion::{
 };
 use futures::{StreamExt, future::ready};
 
-/// Passes the batches of its input through and drops each error.
+use crate::error::{ErrorContext, ScanPhase};
+
+/// What a scan does with the error of a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnScanError {
+    /// The error gets the table, the file type and the file, and fails the scan.
+    Fail,
+    /// The file ends at its error, and the scan continues with the next file.
+    Skip,
+}
+
+/// The error context of a table and what its scan does with an error.
+#[derive(Debug, Clone)]
+pub(crate) struct ScanErrorPolicy {
+    context: ErrorContext,
+    on_error: OnScanError,
+}
+
+impl ScanErrorPolicy {
+    pub(crate) fn new(context: ErrorContext, on_error: OnScanError) -> Self {
+        Self { context, on_error }
+    }
+
+    pub(crate) fn context(&self) -> &ErrorContext {
+        &self.context
+    }
+
+    pub(crate) fn on_error(&self) -> OnScanError {
+        self.on_error
+    }
+}
+
+/// Passes the batches of its input through and handles each error with its policy.
 ///
 /// The node changes no schema, partitioning or order. Filters, projections
 /// and limits pass through it to the scan.
 #[derive(Debug, Clone)]
-pub(crate) struct SkipErrorsExec {
+pub(crate) struct ScanErrorsExec {
     input: Arc<dyn ExecutionPlan>,
+    policy: ScanErrorPolicy,
     properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
 }
 
-impl SkipErrorsExec {
-    pub(crate) fn new(input: Arc<dyn ExecutionPlan>) -> Self {
+impl ScanErrorsExec {
+    pub(crate) fn new(input: Arc<dyn ExecutionPlan>, policy: ScanErrorPolicy) -> Self {
         let properties = Arc::clone(input.properties());
         Self {
             input,
+            policy,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
         }
     }
 
     fn with_input(&self, input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        Arc::new(Self::new(input))
+        Arc::new(Self::new(input, self.policy.clone()))
     }
 }
 
-impl DisplayAs for SkipErrorsExec {
+impl DisplayAs for ScanErrorsExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SkipErrorsExec")
+        match self.policy.on_error() {
+            OnScanError::Fail => write!(f, "ScanErrorsExec"),
+            OnScanError::Skip => write!(f, "ScanErrorsExec: skip_errors=true"),
+        }
     }
 }
 
-impl ExecutionPlan for SkipErrorsExec {
+impl ExecutionPlan for ScanErrorsExec {
     fn name(&self) -> &str {
-        "SkipErrorsExec"
+        "ScanErrorsExec"
     }
 
     fn schema(&self) -> SchemaRef {
@@ -88,7 +126,7 @@ impl ExecutionPlan for SkipErrorsExec {
         mut children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if children.len() != 1 {
-            return internal_err!("SkipErrorsExec needs exactly one child");
+            return internal_err!("ScanErrorsExec needs exactly one child");
         }
         Ok(self.with_input(children.swap_remove(0)))
     }
@@ -100,12 +138,24 @@ impl ExecutionPlan for SkipErrorsExec {
     ) -> Result<SendableRecordBatchStream> {
         let schema = self.input.schema();
         let stream = self.input.execute(partition, context)?;
+        let context = self.policy.context().clone();
+        if self.policy.on_error() == OnScanError::Fail {
+            let stream =
+                stream.map(move |item| item.map_err(|error| context.error(ScanPhase::Read, None, error)));
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
+        }
         let skipped = MetricBuilder::new(&self.metrics).global_counter("skipped_stream_errors");
         let stream = stream.filter_map(move |item| {
             ready(match item {
                 Ok(batch) => Some(Ok(batch)),
                 Err(error) => {
-                    tracing::warn!(partition, %error, "skipping a scan error of an external table");
+                    tracing::warn!(
+                        table = context.table(),
+                        file_type = context.file_type(),
+                        partition,
+                        %error,
+                        "skipping a scan error of an external table"
+                    );
                     skipped.add(1);
                     None
                 }
@@ -174,6 +224,11 @@ mod tests {
     };
 
     use super::*;
+    use crate::error::ExternalTableError;
+
+    fn policy(on_error: OnScanError) -> ScanErrorPolicy {
+        ScanErrorPolicy::new(ErrorContext::new("obs", "csv"), on_error)
+    }
 
     /// One partition over `a.csv` (two good rows) and then `b.csv` (a bad row count).
     async fn scan(dir: &std::path::Path, ctx: &SessionContext) -> Arc<dyn ExecutionPlan> {
@@ -207,8 +262,10 @@ mod tests {
     async fn the_wrapper_returns_the_rows_before_the_error() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = SessionContext::new();
-        let plan: Arc<dyn ExecutionPlan> =
-            Arc::new(SkipErrorsExec::new(scan(dir.path(), &ctx).await));
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(ScanErrorsExec::new(
+            scan(dir.path(), &ctx).await,
+            policy(OnScanError::Skip),
+        ));
         let batches = collect(Arc::clone(&plan), ctx.task_ctx()).await.unwrap();
         let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
         assert_eq!(rows, 2);
@@ -217,5 +274,21 @@ mod tests {
             .and_then(|metrics| metrics.sum_by_name("skipped_stream_errors"))
             .map(|value| value.as_usize());
         assert_eq!(skipped, Some(1));
+    }
+
+    #[tokio::test]
+    async fn the_wrapper_adds_the_table_and_the_file_type_to_a_failed_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SessionContext::new();
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(ScanErrorsExec::new(
+            scan(dir.path(), &ctx).await,
+            policy(OnScanError::Fail),
+        ));
+        let error = collect(plan, ctx.task_ctx()).await.unwrap_err();
+        let found = ExternalTableError::find(&error).expect("an external table error");
+        assert_eq!(found.table, "obs");
+        assert_eq!(found.file_type, "csv");
+        assert_eq!(found.phase, ScanPhase::Read);
+        assert_eq!(found.object, None);
     }
 }
