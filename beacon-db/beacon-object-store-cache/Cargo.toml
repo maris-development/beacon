@@ -5,25 +5,18 @@ edition = "2024"
 
 rust-version.workspace = true
 
-[features]
-# File system watcher that sends change events to the cache.
-watch = ["dep:notify"]
-
 [dependencies]
 object_store = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
-parking_lot = { workspace = true }
+crossbeam-skiplist = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
-notify = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The `integration` feature exposes the object_store conformance suite.
 object_store = { workspace = true, features = ["integration"] }
-tempfile = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

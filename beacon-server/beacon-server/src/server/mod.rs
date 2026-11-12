@@ -27,9 +27,7 @@ use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
 use beacon_core::settings::{SqlSettings, SqlStreamCoalesceSettings};
 use beacon_datafusion_ext::listing_factory::RootStore;
-use beacon_object_store_cache::{
-    CacheHandle, CachedObjectStore, LocalWatcher, head_uncached, watch_local,
-};
+use beacon_object_store_cache::{CacheHandle, CachedObjectStore, head_uncached};
 use beacon_server_config::Config;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use object_store::ObjectStore;
@@ -48,8 +46,6 @@ pub struct Server {
     store: Arc<dyn ObjectStore>,
     /// Handle to the store cache. `None` when the cache is off.
     store_cache: Option<CacheHandle>,
-    /// Sends file changes of a local datasets folder to the store cache.
-    _store_watcher: Option<LocalWatcher>,
     runtime: Arc<Runtime>,
     /// Chunked uploads in flight. In memory: a multipart write cannot outlive the
     /// process that opened it.
@@ -70,10 +66,6 @@ impl Server {
     pub async fn open(config: Arc<Config>, query_runtime: Handle) -> anyhow::Result<Self> {
         let (store, root) = build_datasets_store(&config)?;
         let (store, store_cache) = CachedObjectStore::wrap(store, &config.store_cache);
-        let store_watcher = match &store_cache {
-            Some(handle) => watch_datasets(&config, handle),
-            None => None,
-        };
         let store_url =
             ObjectStoreUrl::parse(DATASETS_STORE_URL).context("invalid datasets store URL")?;
 
@@ -85,7 +77,6 @@ impl Server {
             config,
             store,
             store_cache,
-            _store_watcher: store_watcher,
             runtime: Arc::new(runtime),
             uploads: uploads::UploadSessions::default(),
         })
@@ -228,18 +219,6 @@ impl Server {
     pub fn store_cache(&self) -> Option<&CacheHandle> {
         self.store_cache.as_ref()
     }
-}
-
-/// Start the file watcher for a local datasets folder.
-///
-/// The start runs in the background, so a large folder tree does not delay the
-/// server. A network file system gets no watcher: the periodic sync still runs.
-fn watch_datasets(config: &Config, handle: &CacheHandle) -> Option<LocalWatcher> {
-    let cache = &config.store_cache;
-    if !cache.watch_local || config.s3.datasets_on_s3 {
-        return None;
-    }
-    Some(watch_local(handle.clone(), &config.data.datasets, cache.debounce))
 }
 
 /// Build the datasets store: the bucket named by `BEACON_S3_BUCKET` when

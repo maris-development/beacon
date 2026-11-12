@@ -1,4 +1,4 @@
-//! HTTP tests for the datasets store cache: stale until an event, write-through
+//! HTTP tests for the datasets store cache: stale until a sync, write-through
 //! for uploads and deletes, and the admin endpoints.
 
 mod common;
@@ -12,17 +12,16 @@ use ::axum::{
     Router,
 };
 use common::basic;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tower::ServiceExt;
 
 use beacon_server::axum::setup_router;
 
-/// Server config with the store cache on. No watcher and a long interval, so
-/// only an event or a write through the server can change the cache.
+/// Server config with the store cache on. A long interval, so only a sync
+/// request or a write through the server can change the cache.
 fn cached_config() -> beacon_server_config::Config {
     let mut config = common::config(false);
     config.store_cache.enable = true;
-    config.store_cache.watch_local = false;
     config.store_cache.sync_interval = Duration::from_secs(3600);
     config
 }
@@ -75,25 +74,17 @@ async fn total(router: &Router) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn external_files_show_after_an_event_and_uploads_show_at_once() {
+async fn external_files_show_after_a_sync_and_uploads_show_at_once() {
     let (router, _harness, cfg, admin) = app(cached_config()).await;
     place_external(&cfg, "obs/a.parquet");
     assert_eq!(total(&router).await, 1);
 
-    // A file from a different program stays hidden until an event reports it.
+    // A file from a different program stays hidden until a sync finds it.
     place_external(&cfg, "obs/b.parquet");
     assert_eq!(total(&router).await, 1, "the cache answers the listing");
-    let events = json!([{ "type": "changed", "path": "obs/b.parquet" }]);
-    let (status, report) = send(
-        &router,
-        "POST",
-        "/api/admin/store-cache/events",
-        Some(&admin),
-        Body::from(events.to_string()),
-    )
-    .await;
+    let (status, report) = send(&router, "POST", "/api/admin/store-cache/sync", Some(&admin), Body::empty()).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(report["applied"], 1);
+    assert_eq!(report["synced"], true);
     assert_eq!(total(&router).await, 2);
 
     // An upload through the server shows at once.
@@ -115,14 +106,6 @@ async fn external_files_show_after_an_event_and_uploads_show_at_once() {
     assert!(status.is_success(), "delete failed: {status}");
     assert_eq!(total(&router).await, 3);
 
-    // A sync finds the file that no event reported.
-    place_external(&cfg, "obs/e.parquet");
-    assert_eq!(total(&router).await, 3);
-    let (status, report) = send(&router, "POST", "/api/admin/store-cache/sync", Some(&admin), Body::empty()).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(report["synced"].as_u64().unwrap() >= 1);
-    assert_eq!(total(&router).await, 4);
-
     let (status, cache) = send(&router, "GET", "/api/admin/store-cache", Some(&admin), Body::empty()).await;
     assert_eq!(status, StatusCode::OK);
     assert!(cache["hits"].as_u64().unwrap() > 0, "status: {cache}");
@@ -130,10 +113,9 @@ async fn external_files_show_after_an_event_and_uploads_show_at_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_watcher_reports_external_files() {
+async fn the_background_sync_finds_external_files() {
     let mut config = cached_config();
-    config.store_cache.watch_local = true;
-    config.store_cache.debounce = Duration::from_millis(50);
+    config.store_cache.sync_interval = Duration::from_secs(1);
     let (router, _harness, cfg, _admin) = app(config).await;
     place_external(&cfg, "obs/a.parquet");
     assert_eq!(total(&router).await, 1);
@@ -145,7 +127,7 @@ async fn the_watcher_reports_external_files() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("the watcher did not report the new file");
+    panic!("the background sync did not find the new file");
 }
 
 #[tokio::test(flavor = "multi_thread")]

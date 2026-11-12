@@ -1,30 +1,38 @@
-//! Sorted in-memory index of object metadata.
+//! Sorted lock-free index of object metadata.
+//!
+//! One skip list holds all objects of the store in path order. A read, a
+//! write and the background sync use it at the same time, and no call waits
+//! for a lock.
 //!
 //! Keys are object paths as strings. `-` and `.` sort before `/`, so the
 //! children of prefix `p` are the keys that start with `p/`, not a `Path` range.
 
-use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
+use crossbeam_skiplist::SkipMap;
+use crossbeam_skiplist::map::Entry as Node;
 use object_store::ObjectMeta;
-use tokio::time::Instant;
 
 /// One object. `meta: None` is a tombstone for a deleted object.
 #[derive(Debug)]
-pub(crate) struct Entry {
-    pub meta: Option<ObjectMeta>,
-    pub seq: u64,
+struct Entry {
+    meta: Option<ObjectMeta>,
+    /// Sequence number of the last source read that gave this metadata.
+    seq: AtomicU64,
 }
 
-/// A prefix that the cache listed completely from the source.
-#[derive(Debug)]
-pub(crate) struct Cover {
-    pub synced_seq: u64,
-    pub synced_at: Instant,
-    /// Milliseconds since the cache start, set on each read.
-    pub last_used: AtomicU64,
+impl Entry {
+    fn new(meta: Option<ObjectMeta>, seq: u64) -> Self {
+        Self {
+            meta,
+            seq: AtomicU64::new(seq),
+        }
+    }
+
+    fn seq(&self) -> u64 {
+        self.seq.load(Ordering::SeqCst)
+    }
 }
 
 /// Position of a range scan.
@@ -64,159 +72,82 @@ pub(crate) fn range_start(prefix: &str) -> String {
     }
 }
 
-/// True when `key` is an object below folder `prefix`.
-pub(crate) fn is_under(key: &str, prefix: &str) -> bool {
-    prefix.is_empty()
-        || (key.len() > prefix.len()
-            && key.starts_with(prefix)
-            && key.as_bytes()[prefix.len()] == b'/')
-}
-
-/// The root, then each parent folder of `key`. With `inclusive`, `key` too.
-pub(crate) fn ancestors(key: &str, inclusive: bool) -> impl Iterator<Item = &str> {
-    let parents = key.match_indices('/').map(move |(at, _)| &key[..at]);
-    let own = (inclusive && !key.is_empty()).then_some(key);
-    std::iter::once("").chain(parents).chain(own)
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct Index {
-    entries: BTreeMap<String, Entry>,
-    covers: BTreeMap<String, Cover>,
+    entries: SkipMap<String, Entry>,
+    /// Sequence number of the last source listing. Zero means no listing.
+    synced_seq: AtomicU64,
 }
 
 impl Index {
+    /// Number of objects, without tombstones.
     pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.iter().filter(|node| node.value().meta.is_some()).count()
     }
 
-    pub(crate) fn cover_prefixes(&self) -> Vec<String> {
-        self.covers.keys().cloned().collect()
+    /// True when the index holds a full listing of the source.
+    pub(crate) fn is_synced(&self) -> bool {
+        self.synced_seq.load(Ordering::SeqCst) != 0
     }
 
-    pub(crate) fn get(&self, key: &str) -> Option<&Entry> {
-        self.entries.get(key)
-    }
-
-    fn cover_of(&self, key: &str, inclusive: bool) -> Option<&Cover> {
-        ancestors(key, inclusive).find_map(|prefix| self.covers.get(prefix))
-    }
-
-    /// True when a cover holds `key`, at any age.
-    pub(crate) fn has_cover(&self, key: &str, inclusive: bool) -> bool {
-        self.cover_of(key, inclusive).is_some()
-    }
-
-    /// True when a cover with a recent sync holds `key`. Marks the cover as read.
-    pub(crate) fn is_fresh(&self, key: &str, inclusive: bool, max_age: Duration, used: u64) -> bool {
-        let fresh = ancestors(key, inclusive)
-            .filter_map(|prefix| self.covers.get(prefix))
-            .find(|cover| cover.synced_at.elapsed() <= max_age);
-        if let Some(cover) = fresh {
-            cover.last_used.store(used, Ordering::Relaxed);
-        }
-        fresh.is_some()
+    /// The metadata of `key`. `None` for an unknown or deleted object.
+    pub(crate) fn get(&self, key: &str) -> Option<ObjectMeta> {
+        self.entries.get(key).and_then(|node| node.value().meta.clone())
     }
 
     /// Store one change. The change with the highest sequence number wins.
-    pub(crate) fn upsert(&mut self, key: &str, meta: Option<ObjectMeta>, seq: u64) {
+    pub(crate) fn upsert(&self, key: &str, meta: Option<ObjectMeta>, seq: u64) {
         let newest = match self.entries.get(key) {
-            Some(entry) => entry.seq,
-            None => self.cover_of(key, false).map_or(0, |cover| cover.synced_seq),
+            Some(node) => node.value().seq(),
+            None => self.synced_seq.load(Ordering::SeqCst),
         };
         if seq >= newest {
-            self.entries.insert(key.to_string(), Entry { meta, seq });
+            self.entries
+                .compare_insert(key.to_string(), Entry::new(meta, seq), |known| known.seq() <= seq);
         }
     }
 
-    /// Replace all objects below `prefix` with a source listing taken at `seq`.
+    /// Make the index equal to a full source listing taken at `seq`.
     ///
     /// Changes with a higher sequence number stay.
-    pub(crate) fn commit(&mut self, prefix: &str, seq: u64, snapshot: Vec<ObjectMeta>) {
-        let start = range_start(prefix);
-        let old: Vec<String> = self
-            .scan(&start, &Cursor::begin(&start, None))
-            .filter(|(_, entry)| entry.seq <= seq)
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in old {
-            self.entries.remove(&key);
-        }
+    pub(crate) fn commit(&self, seq: u64, snapshot: Vec<ObjectMeta>) {
         for meta in snapshot {
-            self.entries
-                .entry(meta.location.as_ref().to_string())
-                .or_insert(Entry { meta: Some(meta), seq });
+            let key = meta.location.as_ref();
+            match self.entries.get(key) {
+                Some(node) if node.value().seq() > seq => {}
+                // An object without a change keeps its node.
+                Some(node) if node.value().meta.as_ref() == Some(&meta) => {
+                    node.value().seq.fetch_max(seq, Ordering::SeqCst);
+                }
+                _ => {
+                    let key = key.to_string();
+                    self.entries
+                        .compare_insert(key, Entry::new(Some(meta), seq), |known| known.seq() <= seq);
+                }
+            }
         }
-    }
-
-    /// Record that `prefix` is complete as of `seq`. Covers below it merge into it.
-    pub(crate) fn set_cover(&mut self, prefix: &str, seq: u64, used: u64) {
-        self.covers.retain(|other, _| !is_under(other, prefix));
-        let last_used = self
-            .covers
-            .get(prefix)
-            .map_or(used, |cover| cover.last_used.load(Ordering::Relaxed));
-        self.covers.insert(
-            prefix.to_string(),
-            Cover {
-                synced_seq: seq,
-                synced_at: Instant::now(),
-                last_used: AtomicU64::new(last_used),
-            },
-        );
-    }
-
-    /// Drop the cover that holds `key` and the objects only that cover held.
-    pub(crate) fn uncover(&mut self, key: &str, inclusive: bool) {
-        let prefix = ancestors(key, inclusive)
-            .find(|prefix| self.covers.contains_key(*prefix))
-            .map(str::to_string);
-        if let Some(prefix) = prefix {
-            self.covers.remove(&prefix);
-            self.purge_uncovered(&prefix);
+        // An older entry is not in the listing: the source no longer has the object.
+        for node in &self.entries {
+            if node.value().seq() < seq {
+                node.remove();
+            }
         }
+        self.synced_seq.fetch_max(seq, Ordering::SeqCst);
     }
 
-    /// Remove the objects below `prefix` that no cover holds.
-    pub(crate) fn purge_uncovered(&mut self, prefix: &str) {
-        let start = range_start(prefix);
-        let stray: Vec<String> = self
-            .scan(&start, &Cursor::begin(&start, None))
-            .filter(|(key, _)| !self.has_cover(key, false))
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in stray {
-            self.entries.remove(&key);
-        }
-    }
-
-    /// Drop each cover that no call read since `oldest_use`.
-    pub(crate) fn evict_idle(&mut self, oldest_use: u64) {
-        let idle: Vec<String> = self
-            .covers
-            .iter()
-            .filter(|(_, cover)| cover.last_used.load(Ordering::Relaxed) < oldest_use)
-            .map(|(prefix, _)| prefix.clone())
-            .collect();
-        for prefix in idle {
-            self.covers.remove(&prefix);
-            self.purge_uncovered(&prefix);
-        }
-    }
-
-    pub(crate) fn clear(&mut self) {
+    pub(crate) fn clear(&self) {
+        self.synced_seq.store(0, Ordering::SeqCst);
         self.entries.clear();
-        self.covers.clear();
     }
 
-    fn scan<'a>(
+    fn scan<'a, 'c>(
         &'a self,
-        start: &'a str,
-        cursor: &Cursor,
-    ) -> impl Iterator<Item = (&'a String, &'a Entry)> + use<'a> {
+        start: &'c str,
+        cursor: &'c Cursor,
+    ) -> impl Iterator<Item = Node<'a, String, Entry>> + use<'a, 'c> {
         self.entries
             .range::<str, _>((cursor.bound(), Bound::Unbounded))
-            .take_while(move |(key, _)| key.starts_with(start))
+            .take_while(move |node| node.key().starts_with(start))
     }
 
     /// Read at most `limit` keys below `start`. Returns the live objects and the next position.
@@ -224,13 +155,13 @@ impl Index {
         let mut objects = Vec::new();
         let mut last = None;
         let mut scanned = 0;
-        for (key, entry) in self.scan(start, cursor).take(limit) {
+        for node in self.scan(start, cursor).take(limit) {
             scanned += 1;
-            last = Some(key);
-            objects.extend(entry.meta.clone());
+            objects.extend(node.value().meta.clone());
+            last = Some(node);
         }
         let next = match last {
-            Some(key) if scanned == limit => Cursor::After(key.clone()),
+            Some(node) if scanned == limit => Cursor::After(node.key().clone()),
             _ => Cursor::Done,
         };
         (objects, next)
@@ -242,9 +173,13 @@ impl Index {
         let mut folders = Vec::new();
         let mut objects = Vec::new();
         let mut cursor = Cursor::begin(&start, None);
-        while let Some((key, entry)) = self.scan(&start, &cursor).next() {
+        loop {
+            let Some(node) = self.scan(&start, &cursor).next() else {
+                break;
+            };
+            let key = node.key();
             let folder_end = key[start.len()..].find('/').map(|at| start.len() + at);
-            cursor = match (folder_end, &entry.meta) {
+            cursor = match (folder_end, &node.value().meta) {
                 (Some(end), Some(_)) => {
                     folders.push(key[..end].to_string());
                     // `0` is the character after `/`: this skips the folder content.
@@ -263,22 +198,63 @@ impl Index {
 
 #[cfg(test)]
 mod tests {
+    use chrono::DateTime;
+    use object_store::path::Path;
+
     use super::*;
 
-    #[test]
-    fn ancestors_lists_root_and_parents() {
-        let all: Vec<&str> = ancestors("a/b/c", false).collect();
-        assert_eq!(all, ["", "a", "a/b"]);
-        let own: Vec<&str> = ancestors("a/b", true).collect();
-        assert_eq!(own, ["", "a", "a/b"]);
-        assert_eq!(ancestors("", true).collect::<Vec<_>>(), [""]);
+    fn meta(key: &str, size: u64) -> ObjectMeta {
+        ObjectMeta {
+            location: Path::from(key),
+            last_modified: DateTime::UNIX_EPOCH,
+            size,
+            e_tag: None,
+            version: None,
+        }
+    }
+
+    fn listed(index: &Index, prefix: &str) -> Vec<String> {
+        let start = range_start(prefix);
+        let (objects, _) = index.chunk(&start, &Cursor::begin(&start, None), usize::MAX);
+        objects.iter().map(|meta| meta.location.to_string()).collect()
     }
 
     #[test]
-    fn is_under_needs_a_segment_boundary() {
-        assert!(is_under("p/x", "p"));
-        assert!(!is_under("p-x", "p"));
-        assert!(!is_under("p", "p"));
-        assert!(is_under("anything", ""));
+    fn a_prefix_needs_a_segment_boundary() {
+        let index = Index::default();
+        index.commit(1, vec![meta("p/a", 1), meta("p-x/b", 1), meta("p/c/d", 1), meta("q", 1)]);
+        assert_eq!(listed(&index, "p"), ["p/a", "p/c/d"]);
+        assert_eq!(listed(&index, ""), ["p-x/b", "p/a", "p/c/d", "q"]);
+        let (folders, objects) = index.delimited("");
+        assert_eq!(folders, ["p-x", "p"]);
+        assert_eq!(objects.len(), 1);
+    }
+
+    #[test]
+    fn a_commit_replaces_older_entries_and_keeps_newer_changes() {
+        let index = Index::default();
+        assert!(!index.is_synced());
+        index.commit(1, vec![meta("p/a", 1), meta("p/b", 1)]);
+        assert!(index.is_synced());
+
+        // A write and a delete arrive after the listing with number 3 started.
+        index.upsert("p/new", Some(meta("p/new", 1)), 4);
+        index.upsert("p/a", None, 5);
+        index.commit(3, vec![meta("p/a", 1), meta("p/c", 1)]);
+        assert_eq!(listed(&index, "p"), ["p/c", "p/new"]);
+
+        index.commit(6, vec![meta("p/c", 9)]);
+        assert_eq!(listed(&index, "p"), ["p/c"]);
+        assert_eq!(index.get("p/c").unwrap().size, 9);
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn a_change_older_than_the_listing_has_no_effect() {
+        let index = Index::default();
+        index.commit(5, vec![meta("p/a", 1)]);
+        index.upsert("p/old", Some(meta("p/old", 1)), 3);
+        index.upsert("p/a", None, 4);
+        assert_eq!(listed(&index, "p"), ["p/a"]);
     }
 }

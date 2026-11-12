@@ -1,20 +1,20 @@
 //! Shared state of one cached store.
+//!
+//! The state has no lock around its data. The index is a lock-free sorted
+//! map, so a read does not wait for a write or for the background sync.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
-use futures::future::{BoxFuture, Shared};
 use object_store::path::Path;
 use object_store::{Error, GetOptions, ObjectMeta, ObjectStore};
-use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::config::StoreCacheConfig;
-use crate::index::{Index, is_under};
+use crate::index::Index;
 
 /// Marker in `GetOptions::extensions` that sends a call to the source.
 #[derive(Debug, Clone, Copy, Default)]
@@ -32,16 +32,6 @@ pub async fn head_uncached(
     Ok(store.get_opts(location, options).await?.meta)
 }
 
-/// Result of the first listing of a prefix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FillOutcome {
-    Filled,
-    TooLarge,
-    Failed,
-}
-
-pub(crate) type SharedFill = Shared<BoxFuture<'static, FillOutcome>>;
-
 #[derive(Debug, Default)]
 pub(crate) struct Counters {
     pub hits: AtomicU64,
@@ -49,7 +39,8 @@ pub(crate) struct Counters {
     pub bypassed: AtomicU64,
     pub sync_errors: AtomicU64,
     pub last_sync_ms: AtomicU64,
-    pub last_sync: Mutex<Option<DateTime<Utc>>>,
+    /// End time of the last sync in Unix milliseconds. Zero means no sync.
+    pub last_sync: AtomicI64,
 }
 
 /// Counters and sizes of one cache.
@@ -57,11 +48,11 @@ pub(crate) struct Counters {
 pub struct CacheStatus {
     /// Objects in the cache.
     pub entries: usize,
-    /// Prefixes that the cache holds completely.
-    pub covered: Vec<String>,
+    /// True when the cache holds a full listing of the store.
+    pub synced: bool,
     /// Calls answered from the cache.
     pub hits: u64,
-    /// Calls that started a first listing of a prefix.
+    /// Calls that waited for a listing of the store.
     pub misses: u64,
     /// Calls sent to the source.
     pub bypassed: u64,
@@ -76,14 +67,14 @@ pub struct CacheStatus {
 pub(crate) struct CacheState {
     pub inner: Arc<dyn ObjectStore>,
     pub config: StoreCacheConfig,
-    pub index: RwLock<Index>,
+    pub index: Index,
     seq: AtomicU64,
-    /// First listings in flight, by prefix.
-    pub fills: Mutex<HashMap<String, SharedFill>>,
-    /// Prefixes over the entry limit, with the time of the last attempt.
-    pub too_large: Mutex<HashMap<String, Instant>>,
-    pub sync_task: Mutex<Option<JoinHandle<()>>>,
-    /// Held during a sync pass, so only one pass runs.
+    /// End of the last good sync, in milliseconds since the cache start. Zero means no sync.
+    synced_ms: AtomicU64,
+    /// Time of the last read, in milliseconds since the cache start.
+    used_ms: AtomicU64,
+    pub sync_task: OnceLock<JoinHandle<()>>,
+    /// Held during a listing of the source, so only one listing runs.
     pub sync_lock: tokio::sync::Mutex<()>,
     created: Instant,
     pub counters: Counters,
@@ -100,7 +91,7 @@ impl std::fmt::Debug for CacheState {
 
 impl Drop for CacheState {
     fn drop(&mut self) {
-        if let Some(task) = self.sync_task.lock().take() {
+        if let Some(task) = self.sync_task.get() {
             task.abort();
         }
     }
@@ -111,11 +102,11 @@ impl CacheState {
         Self {
             inner,
             config,
-            index: RwLock::default(),
+            index: Index::default(),
             seq: AtomicU64::new(1),
-            fills: Mutex::default(),
-            too_large: Mutex::default(),
-            sync_task: Mutex::default(),
+            synced_ms: AtomicU64::new(0),
+            used_ms: AtomicU64::new(0),
+            sync_task: OnceLock::new(),
             sync_lock: tokio::sync::Mutex::default(),
             created: Instant::now(),
             counters: Counters::default(),
@@ -142,55 +133,49 @@ impl CacheState {
             .any(|segment| self.config.bypass_segments.iter().any(|skip| skip == segment))
     }
 
-    /// True when a cover with a recent sync holds `key`.
-    pub(crate) fn is_fresh(&self, key: &str, inclusive: bool) -> bool {
-        self.index
-            .read()
-            .is_fresh(key, inclusive, self.config.max_age(), self.now_ms())
+    /// True when the index holds a listing with a recent sync. Records the read.
+    pub(crate) fn is_fresh(&self) -> bool {
+        let now = self.now_ms();
+        self.used_ms.store(now, Ordering::Relaxed);
+        let synced = self.synced_ms.load(Ordering::Relaxed);
+        let max_age = u64::try_from(self.config.max_age().as_millis()).unwrap_or(u64::MAX);
+        synced != 0 && self.index.is_synced() && now.saturating_sub(synced) <= max_age
     }
 
-    /// True when the index keeps changes of `key`: below a cover or a listing in flight.
-    pub(crate) fn records(&self, key: &str) -> bool {
-        if self.index.read().has_cover(key, false) {
-            return true;
-        }
-        self.fills.lock().keys().any(|prefix| is_under(key, prefix))
+    /// Milliseconds since the last read.
+    pub(crate) fn idle_ms(&self) -> u64 {
+        self.now_ms().saturating_sub(self.used_ms.load(Ordering::Relaxed))
     }
 
-    /// True when a listing of `prefix` went over the entry limit a short time ago.
-    pub(crate) fn is_too_large(&self, prefix: &str) -> bool {
-        // Only the same prefix counts: a folder below it can fit the limit.
-        self.too_large
-            .lock()
-            .get(prefix)
-            .is_some_and(|at| at.elapsed() < self.config.interval())
+    /// Record a good sync that ended now.
+    pub(crate) fn mark_synced(&self) {
+        self.synced_ms.store(self.now_ms().max(1), Ordering::Relaxed);
+    }
+
+    /// Make the next read list the source again.
+    pub(crate) fn mark_stale(&self) {
+        self.synced_ms.store(0, Ordering::Relaxed);
     }
 
     pub(crate) fn upsert(&self, key: &str, meta: Option<ObjectMeta>, seq: u64) {
-        self.index.write().upsert(key, meta, seq);
+        self.index.upsert(key, meta, seq);
     }
 
     /// Record that `location` is gone.
     pub(crate) fn tombstone(&self, location: &Path) {
-        let key = location.as_ref();
-        if self.records(key) {
-            self.upsert(key, None, self.next_seq());
-        }
+        self.upsert(location.as_ref(), None, self.next_seq());
     }
 
     /// Read `location` from the source and store the result.
     pub(crate) async fn refresh(&self, location: &Path) {
         let key = location.as_ref();
-        if !self.records(key) {
-            return;
-        }
         let seq = self.next_seq();
         match head_uncached(self.inner.as_ref(), location).await {
             Ok(meta) => self.upsert(key, Some(meta), seq),
             Err(Error::NotFound { .. }) => self.upsert(key, None, seq),
             Err(error) => {
-                tracing::warn!(path = key, %error, "store cache: metadata read failed, prefix dropped");
-                self.index.write().uncover(key, false);
+                tracing::warn!(path = key, %error, "store cache: metadata read failed, cache marked stale");
+                self.mark_stale();
             }
         }
     }
@@ -198,11 +183,9 @@ impl CacheState {
     /// Correct the index with metadata that a read from the source returned.
     pub(crate) fn observe(&self, key: &str, meta: &ObjectMeta, seq: u64) {
         // `last_modified` is not compared: its precision differs between list and get.
-        let same = self.index.read().get(key).is_some_and(|entry| {
-            entry.meta.as_ref().is_some_and(|known| {
-                known.size == meta.size
-                    && (known.e_tag.is_none() || meta.e_tag.is_none() || known.e_tag == meta.e_tag)
-            })
+        let same = self.index.get(key).is_some_and(|known| {
+            known.size == meta.size
+                && (known.e_tag.is_none() || meta.e_tag.is_none() || known.e_tag == meta.e_tag)
         });
         if !same {
             self.upsert(key, Some(meta.clone()), seq);
@@ -210,29 +193,20 @@ impl CacheState {
     }
 
     pub(crate) fn status(&self) -> CacheStatus {
-        let (entries, covered) = {
-            let index = self.index.read();
-            (index.len(), index.cover_prefixes())
-        };
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        let last_sync = match self.counters.last_sync.load(Ordering::Relaxed) {
+            0 => None,
+            millis => DateTime::from_timestamp_millis(millis),
+        };
         CacheStatus {
-            entries,
-            covered,
+            entries: self.index.len(),
+            synced: self.index.is_synced(),
             hits: load(&self.counters.hits),
             misses: load(&self.counters.misses),
             bypassed: load(&self.counters.bypassed),
-            last_sync: *self.counters.last_sync.lock(),
+            last_sync,
             last_sync_ms: load(&self.counters.last_sync_ms),
             sync_errors: load(&self.counters.sync_errors),
         }
-    }
-}
-
-/// Object path for an index key. The root has no path.
-pub(crate) fn to_path(key: &str) -> Option<Path> {
-    if key.is_empty() {
-        None
-    } else {
-        Path::parse(key).ok()
     }
 }

@@ -625,12 +625,6 @@ struct RawConfig {
     /// Seconds between two comparisons of the cache with the store.
     #[envconfig(from = "BEACON_STORE_CACHE_SYNC_INTERVAL_SECS", default = "300")]
     store_cache_sync_interval_secs: u64,
-    /// Maximum number of objects in the cache. A larger folder stays without a cache.
-    #[envconfig(from = "BEACON_STORE_CACHE_MAX_ENTRIES", default = "2000000")]
-    store_cache_max_entries: usize,
-    /// Watch a local datasets folder for changes. Network file systems send no events.
-    #[envconfig(from = "BEACON_STORE_CACHE_WATCH", default = "true")]
-    store_cache_watch: bool,
     /// Also cache the remote stores that queries open by URL.
     #[envconfig(from = "BEACON_STORE_CACHE_REMOTE", default = "false")]
     store_cache_remote: bool,
@@ -774,8 +768,6 @@ impl From<RawConfig> for Config {
             store_cache: StoreCacheConfig {
                 enable: raw.store_cache_enable,
                 sync_interval: std::time::Duration::from_secs(raw.store_cache_sync_interval_secs.max(1)),
-                max_entries: raw.store_cache_max_entries,
-                watch_local: raw.store_cache_watch,
                 remote: raw.store_cache_remote,
                 ..StoreCacheConfig::default()
             },
@@ -1441,18 +1433,13 @@ mod tests {
         let default = config(&[]).store_cache;
         assert!(!default.enable);
         assert!(!default.remote);
-        assert!(default.watch_local);
         assert_eq!(default.sync_interval.as_secs(), 300);
         let set = config(&[
             ("BEACON_STORE_CACHE_ENABLE", "true"),
             ("BEACON_STORE_CACHE_SYNC_INTERVAL_SECS", "0"),
-            ("BEACON_STORE_CACHE_MAX_ENTRIES", "10"),
-            ("BEACON_STORE_CACHE_WATCH", "false"),
         ])
         .store_cache;
         assert!(set.enable);
-        assert!(!set.watch_local);
-        assert_eq!(set.max_entries, 10);
         assert_eq!(set.sync_interval.as_secs(), 1, "the minimum is 1 second");
     }
 

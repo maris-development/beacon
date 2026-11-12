@@ -54,7 +54,6 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Server>>, utoipa::openapi::Ope
         .routes(routes!(datasets::abort_upload))
         .routes(routes!(datasets::dataset_storage))
         .routes(routes!(store_cache::store_cache_status))
-        .routes(routes!(store_cache::store_cache_events))
         .routes(routes!(store_cache::store_cache_sync))
         .routes(routes!(tables::list_table_config))
         .routes(routes!(tables::get_table_definition))

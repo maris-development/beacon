@@ -73,7 +73,7 @@ beacon-server-config = { path = "../beacon-server-config" }
 # turns PROJ on, and `--no-default-features` here reaches all the way down.
 beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
-beacon-object-store-cache = { path = "../../beacon-db/beacon-object-store-cache", features = ["watch"] }
+beacon-object-store-cache = { path = "../../beacon-db/beacon-object-store-cache" }
 beacon-mcp = { path = "../beacon-mcp" }
 beacon-dap = { path = "../beacon-dap" }
 

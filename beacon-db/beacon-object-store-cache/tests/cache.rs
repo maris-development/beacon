@@ -33,11 +33,12 @@ async fn second_list_reads_the_index() {
 
     assert_eq!(paths(&store, Some("p")).await, first);
     assert_eq!(paths(&store, Some("p/sub")).await, ["p/sub/b"]);
-    assert_eq!(source.lists(), 1, "a covered prefix does not list the source");
+    assert_eq!(paths(&store, Some("p-x")).await, ["p-x/c"]);
+    assert_eq!(source.lists(), 1, "one listing of the source fills the full cache");
 }
 
 #[tokio::test]
-async fn head_below_a_cover_reads_the_index() {
+async fn head_after_a_listing_reads_the_index() {
     let source = seeded().await;
     let store = cached(&source, &config());
     paths(&store, None).await;
@@ -49,13 +50,13 @@ async fn head_below_a_cover_reads_the_index() {
     assert_eq!(source.gets(), 0);
 
     let status = store.handle().status();
-    assert_eq!(status.covered, [""]);
+    assert!(status.synced);
     assert_eq!(status.entries, 5);
     assert!(status.hits >= 2);
 }
 
 #[tokio::test]
-async fn head_outside_a_cover_reads_the_source() {
+async fn head_before_a_listing_reads_the_source() {
     let source = seeded().await;
     let store = cached(&source, &config());
     store.head(&Path::from("p/a")).await.unwrap();
@@ -127,35 +128,14 @@ async fn a_dropped_caller_does_not_stop_the_first_listing() {
     source.release.notify_one();
     let handle = store.handle();
     for _ in 0..200 {
-        if !handle.status().covered.is_empty() {
+        if handle.status().synced {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(handle.status().covered, [""]);
+    assert!(handle.status().synced);
     assert_eq!(paths(&store, None).await.len(), 5);
     assert_eq!(source.lists(), 1);
-}
-
-#[tokio::test]
-async fn a_prefix_over_the_limit_reads_the_source() {
-    let source = seeded().await;
-    let small = StoreCacheConfig {
-        max_entries: 2,
-        ..config()
-    };
-    let store = cached(&source, &small);
-
-    assert_eq!(paths(&store, None).await.len(), 5);
-    assert!(store.handle().status().covered.is_empty());
-    assert_eq!(store.handle().status().entries, 0);
-    let before = source.lists();
-    assert_eq!(paths(&store, None).await.len(), 5);
-    assert_eq!(source.lists(), before + 1, "no second attempt to fill the cache");
-
-    // A smaller prefix fits the limit.
-    assert_eq!(paths(&store, Some("p")).await.len(), 2);
-    assert_eq!(store.handle().status().covered, ["p"]);
 }
 
 #[tokio::test]

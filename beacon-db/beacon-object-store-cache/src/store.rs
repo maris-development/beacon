@@ -15,7 +15,7 @@ use object_store::{
 };
 
 use crate::config::StoreCacheConfig;
-use crate::event::CacheHandle;
+use crate::handle::CacheHandle;
 use crate::index::{Cursor, range_start};
 use crate::state::{CacheBypass, CacheState};
 use crate::upload::CachedUpload;
@@ -25,9 +25,9 @@ const LIST_CHUNK: usize = 1024;
 
 /// An `ObjectStore` that answers `list` and `head` calls from memory.
 ///
-/// The first listing of a prefix reads the source. Later listings below that
-/// prefix read the index. Writes through this store update the index at once.
-/// A periodic sync finds changes that a different program made.
+/// The first listing reads the full source. Later listings read the index.
+/// Writes through this store update the index at once. A background sync
+/// finds changes that a different program made.
 #[derive(Debug, Clone)]
 pub struct CachedObjectStore(pub(crate) Arc<CacheState>);
 
@@ -50,7 +50,7 @@ impl CachedObjectStore {
         (Arc::new(cached), Some(handle))
     }
 
-    /// Handle that sends events to this cache and reads its status.
+    /// Handle that reads the status of this cache and starts a sync.
     pub fn handle(&self) -> CacheHandle {
         CacheHandle(Arc::downgrade(&self.0))
     }
@@ -74,7 +74,7 @@ impl CachedObjectStore {
             return source(&state);
         }
         stream::once(async move {
-            if state.ensure_covered(&key).await {
+            if state.ensure_synced().await {
                 indexed(state, key, offset_key)
             } else {
                 source(&state)
@@ -96,17 +96,14 @@ fn indexed(
     stream::try_unfold(cursor, move |cursor| {
         let step = match cursor {
             Cursor::Done => Ok(None),
-            cursor => {
-                let index = state.index.read();
-                if index.has_cover(&prefix, true) {
-                    Ok(Some(index.chunk(&start, &cursor, LIST_CHUNK)))
-                } else {
-                    Err(Error::Generic {
-                        store: "CachedObjectStore",
-                        source: "the cache dropped the prefix during the listing".into(),
-                    })
-                }
+            // A clear removes the objects, so the listing cannot continue.
+            cursor if state.index.is_synced() => {
+                Ok(Some(state.index.chunk(&start, &cursor, LIST_CHUNK)))
             }
+            _ => Err(Error::Generic {
+                store: "CachedObjectStore",
+                source: "the cache dropped its index during the listing".into(),
+            }),
         };
         std::future::ready(step)
     })
@@ -169,10 +166,9 @@ impl ObjectStore for CachedObjectStore {
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
         let state = &self.0;
         let key = location.as_ref();
-        if is_plain_head(&options) && !state.bypasses(key) && state.is_fresh(key, false) {
+        if is_plain_head(&options) && !state.bypasses(key) && state.is_fresh() {
             CacheState::count(&state.counters.hits);
-            let known = state.index.read().get(key).and_then(|entry| entry.meta.clone());
-            return match known {
+            return match state.index.get(key) {
                 Some(meta) => Ok(GetResult {
                     payload: GetResultPayload::Stream(stream::empty().boxed()),
                     range: 0..meta.size,
@@ -186,7 +182,7 @@ impl ObjectStore for CachedObjectStore {
             };
         }
         CacheState::count(&state.counters.bypassed);
-        let tracked = options.version.is_none() && state.records(key);
+        let tracked = options.version.is_none();
         let seq = state.next_seq();
         let result = state.inner.get_opts(location, options).await;
         if tracked {
@@ -234,10 +230,10 @@ impl ObjectStore for CachedObjectStore {
             CacheState::count(&state.counters.bypassed);
             return state.inner.list_with_delimiter(prefix).await;
         }
-        if !state.ensure_covered(&key).await {
+        if !state.ensure_synced().await {
             return state.inner.list_with_delimiter(prefix).await;
         }
-        let (folders, objects) = state.index.read().delimited(&key);
+        let (folders, objects) = state.index.delimited(&key);
         let common_prefixes = folders
             .iter()
             .map(Path::parse)

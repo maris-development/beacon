@@ -52,6 +52,7 @@ typetag = "0.2.19"
 indexmap = {version = "2.7.1", features = ["serde"]}
 chrono = { version = "0.4.41", features = ["serde"] }
 crossbeam = "0.8.4"
+crossbeam-skiplist = "0.1.3"
 moka = {version = "0.12.10", features = ["future", "sync"]}
 
 lru = "0.18.2"
