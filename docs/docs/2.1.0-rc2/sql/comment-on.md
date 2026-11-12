@@ -55,6 +55,10 @@ can find each fact:
   `Quality flag (SeaDataNet L20): 1 good, 4 bad`.
 - Write each fact one time. Do not repeat the column name or the data type: the schema gives them.
 
+An AI agent on the [MCP server](/docs/2.1.0-rc2/connect/mcp) <Badge type="warning" text="beta" />
+also reads the comments. The comments are the only source that tells the agent what a table and
+its columns hold.
+
 A view can carry its own comments. Use it to describe a subset of a table:
 
 ```sql
@@ -135,6 +139,14 @@ SELECT table_name, column_name, comment FROM beacon.system.comments;
 
 `column_name` is `NULL` for a table comment. This table also shows the comment of a column that no
 longer exists.
+
+### Over MCP <Badge type="warning" text="beta" />
+
+The [MCP server](/docs/2.1.0-rc2/connect/mcp) gives the comments to an AI agent:
+
+- `list_tables` gives each table with its table comment.
+- `describe_table` gives the table comment and each column with its column comment. A column
+  without a comment gives the `description` metadata of the file, if the file has it.
 
 ### Where the comments do not show
 

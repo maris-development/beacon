@@ -57,6 +57,13 @@ Beacon evaluates a grant for a **read** only. A read is a table scan or a file
 scan. Beacon controls the writes, the DDL and the DML separately. They always need
 the super-user.
 
+### MCP is read-only <Badge type="warning" text="beta" />
+
+The [MCP server](/docs/2.1.0-rc2/connect/mcp) runs each tool call as the caller, with the roles of
+the caller. It removes the super-user status, so DDL and DML always fail over MCP. The super-user
+has no roles. With `BEACON_AUTH_ENFORCE=true`, the super-user therefore reads no table over MCP.
+Use a user with read grants for an AI agent.
+
 ### Metadata schemas are the super-user's
 
 Two schemas describe the server. They hold no user data. A read of either one

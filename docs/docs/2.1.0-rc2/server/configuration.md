@@ -153,6 +153,16 @@ Beacon serves each table as a DAP2 dataset under `/dap`. See [OPeNDAP (DAP2)](/d
 | --- | --- | --- |
 | `BEACON_DAP_ENABLED` | `true` | Serve the DAP2 endpoint. `false`, `0` or `off` turns it off. |
 
+## MCP server <Badge type="warning" text="beta" />
+
+Beacon serves the Model Context Protocol at `/mcp`. The MCP server is in development. See
+[MCP server](/docs/2.1.0-rc2/connect/mcp).
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_MCP_ENABLED` | `true` | Serve the MCP endpoint. `false`, `0` or `off` turns it off. |
+| `BEACON_MCP_ALLOWED_HOSTS` | _(empty)_ | Comma-separated `Host` values that `/mcp` accepts in addition to the loopback hosts. `*` accepts every host. |
+
 ## Storage and data directories
 
 Beacon keeps all local state under one root directory.
