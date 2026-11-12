@@ -39,15 +39,18 @@
 //! widening strategy. DataFusion's Parquet source reads it. The other formats
 //! adapt each file with the strategy of the session.
 //!
-//! With `skip_invalid_files_on_scan`, a file that the scan cannot open or read
-//! ends at its error, and the scan continues with the next file.
+//! A scan error is an [`ExternalTableError`]. It names the table, the file
+//! type, the step that failed and the file. With `skip_invalid_files_on_scan`,
+//! a file that the scan cannot open or read ends at its error, and the scan
+//! continues with the next file.
 
 pub mod builder;
 pub mod definition;
+pub mod error;
 pub mod factory;
 mod scan;
-mod skip_errors;
-mod skip_errors_source;
+mod scan_errors;
+mod scan_errors_source;
 pub mod spec;
 pub mod statistics_cache;
 pub mod table;
@@ -58,6 +61,7 @@ pub use definition::{
     parallel_schema_inference_from_options, statistics_columns_from_options,
     statistics_refresh_interval_from_options, type_widening_from_options,
 };
+pub use error::{ExternalTableError, ScanPhase};
 pub use factory::ExternalTableFactory;
 pub use spec::ExternalTableSpec;
 pub use table::ExternalTable;

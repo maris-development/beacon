@@ -1,13 +1,16 @@
-//! Per-file error skip for a file scan.
+//! Per-file error handling for a file scan.
+//!
+//! [`ScanErrorsFileSource`] wraps the format source at the morselizer, where
+//! each error belongs to one file. With [`OnScanError::Fail`], the error gets
+//! the table, the file type and the file, and fails the scan. With
+//! [`OnScanError::Skip`], the error ends only that file.
 //!
 //! A `FileStream` stops its partition after the first error, and DataFusion 54
-//! gives a `FileScanConfig` no way to set `OnError::Skip`. [`SkipErrorsFileSource`]
-//! wraps the format source one level lower, at the morselizer. An error to open,
-//! plan or read one file ends only that file. The `FileStream` then continues
-//! with the next file of the partition.
+//! gives a `FileScanConfig` no way to set `OnError::Skip`. The skip at the
+//! morselizer lets the `FileStream` continue with the next file of the partition.
 //!
-//! [`with_skip_errors`] puts the wrapper into a planned scan. A plan without a
-//! file scan gets [`SkipErrorsExec`] above it.
+//! [`with_scan_errors`] puts the wrapper into a planned scan. A plan without a
+//! file scan gets [`ScanErrorsExec`] above it.
 
 use std::{fmt, sync::Arc};
 
@@ -33,55 +36,70 @@ use datafusion_datasource::morsel::{Morsel, MorselPlan, MorselPlanner, Morselize
 use futures::{StreamExt, future::ready, stream::BoxStream};
 use object_store::ObjectStore;
 
-use crate::skip_errors::SkipErrorsExec;
+use crate::{
+    error::ScanPhase,
+    scan_errors::{OnScanError, ScanErrorPolicy, ScanErrorsExec},
+};
 
-/// The name of the counter that `EXPLAIN ANALYZE` shows on the scan.
+/// The name of the counter that `EXPLAIN ANALYZE` shows on a scan that skips.
 pub(crate) const SKIPPED_FILE_ERRORS: &str = "skipped_file_errors";
 
-/// Puts [`SkipErrorsFileSource`] into the file scan of `plan`.
+/// Puts [`ScanErrorsFileSource`] into the file scan of `plan`.
 ///
 /// The walk follows single children down, because an nd format puts decode and
 /// broadcast nodes above its scan. Each node above rebuilds from its new child.
-pub(crate) fn with_skip_errors(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-    match wrap_file_scan(&plan) {
+pub(crate) fn with_scan_errors(
+    plan: Arc<dyn ExecutionPlan>,
+    policy: ScanErrorPolicy,
+) -> Arc<dyn ExecutionPlan> {
+    match wrap_file_scan(&plan, &policy) {
         Some(wrapped) => wrapped,
         None => {
-            tracing::debug!("no file scan found to skip errors in; skipping stream errors above the plan");
-            Arc::new(SkipErrorsExec::new(plan))
+            tracing::debug!("no file scan found; handling stream errors above the plan");
+            Arc::new(ScanErrorsExec::new(plan, policy))
         }
     }
 }
 
-fn wrap_file_scan(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
+fn wrap_file_scan(
+    plan: &Arc<dyn ExecutionPlan>,
+    policy: &ScanErrorPolicy,
+) -> Option<Arc<dyn ExecutionPlan>> {
     if let Some(exec) = plan.downcast_ref::<DataSourceExec>() {
         let mut config = exec.data_source().downcast_ref::<FileScanConfig>()?.clone();
-        if !config.file_source.is::<SkipErrorsFileSource>() {
-            config.file_source = SkipErrorsFileSource::wrap(Arc::clone(&config.file_source));
+        if !config.file_source.is::<ScanErrorsFileSource>() {
+            config.file_source =
+                ScanErrorsFileSource::wrap(Arc::clone(&config.file_source), policy.clone());
         }
         return Some(DataSourceExec::from_data_source(config));
     }
     let children = plan.children();
     let [child] = children[..] else { return None };
-    let child = wrap_file_scan(child)?;
+    let child = wrap_file_scan(child, policy)?;
     Arc::clone(plan).with_new_children(vec![child]).ok()
 }
 
-/// A format source whose files end on an error, and do not fail the scan.
+/// A format source that handles the error of each file with a [`ScanErrorPolicy`].
 ///
 /// All other behavior comes from the inner source. Each method that returns a
-/// new source wraps that source again, so a pushdown keeps the skip.
+/// new source wraps that source again, so a pushdown keeps the policy.
 #[derive(Clone)]
-pub(crate) struct SkipErrorsFileSource {
+pub(crate) struct ScanErrorsFileSource {
     inner: Arc<dyn FileSource>,
+    policy: ScanErrorPolicy,
 }
 
-impl SkipErrorsFileSource {
-    pub(crate) fn wrap(inner: Arc<dyn FileSource>) -> Arc<dyn FileSource> {
-        Arc::new(Self { inner })
+impl ScanErrorsFileSource {
+    pub(crate) fn wrap(inner: Arc<dyn FileSource>, policy: ScanErrorPolicy) -> Arc<dyn FileSource> {
+        Arc::new(Self { inner, policy })
+    }
+
+    fn rewrap(&self, inner: Arc<dyn FileSource>) -> Arc<dyn FileSource> {
+        Self::wrap(inner, self.policy.clone())
     }
 }
 
-impl FileSource for SkipErrorsFileSource {
+impl FileSource for ScanErrorsFileSource {
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
@@ -101,8 +119,14 @@ impl FileSource for SkipErrorsFileSource {
         let inner = self
             .inner
             .create_morselizer(object_store, base_config, partition)?;
-        let skipped = MetricBuilder::new(self.inner.metrics()).global_counter(SKIPPED_FILE_ERRORS);
-        Ok(Box::new(SkipErrorsMorselizer { inner, skipped }))
+        let skipped = (self.policy.on_error() == OnScanError::Skip).then(|| {
+            MetricBuilder::new(self.inner.metrics()).global_counter(SKIPPED_FILE_ERRORS)
+        });
+        Ok(Box::new(ScanErrorsMorselizer {
+            inner,
+            policy: self.policy.clone(),
+            skipped,
+        }))
     }
 
     fn table_schema(&self) -> &TableSchema {
@@ -110,7 +134,7 @@ impl FileSource for SkipErrorsFileSource {
     }
 
     fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
-        Self::wrap(self.inner.with_batch_size(batch_size))
+        self.rewrap(self.inner.with_batch_size(batch_size))
     }
 
     fn filter(&self) -> Option<Arc<dyn PhysicalExpr>> {
@@ -131,7 +155,10 @@ impl FileSource for SkipErrorsFileSource {
 
     fn fmt_extra(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         self.inner.fmt_extra(t, f)?;
-        write!(f, ", skip_errors=true")
+        if self.policy.on_error() == OnScanError::Skip {
+            write!(f, ", skip_errors=true")?;
+        }
+        Ok(())
     }
 
     fn supports_repartitioning(&self) -> bool {
@@ -154,7 +181,7 @@ impl FileSource for SkipErrorsFileSource {
         Ok(repartitioned.map(|mut config| {
             // An inner source can build its config with itself as the source.
             if !config.file_source.is::<Self>() {
-                config.file_source = Self::wrap(config.file_source);
+                config.file_source = self.rewrap(config.file_source);
             }
             config
         }))
@@ -166,7 +193,7 @@ impl FileSource for SkipErrorsFileSource {
         config: &ConfigOptions,
     ) -> Result<FilterPushdownPropagation<Arc<dyn FileSource>>> {
         let mut propagation = self.inner.try_pushdown_filters(filters, config)?;
-        propagation.updated_node = propagation.updated_node.map(Self::wrap);
+        propagation.updated_node = propagation.updated_node.map(|source| self.rewrap(source));
         Ok(propagation)
     }
 
@@ -178,7 +205,7 @@ impl FileSource for SkipErrorsFileSource {
         Ok(self
             .inner
             .try_pushdown_sort(order, eq_properties)?
-            .map(Self::wrap))
+            .map(|source| self.rewrap(source)))
     }
 
     fn reorder_files(&self, files: Vec<PartitionedFile>) -> Vec<PartitionedFile> {
@@ -192,72 +219,91 @@ impl FileSource for SkipErrorsFileSource {
         Ok(self
             .inner
             .try_pushdown_projection(projection)?
-            .map(Self::wrap))
+            .map(|source| self.rewrap(source)))
     }
 }
 
-/// The file and the counter that an error is reported against.
+/// The file, the policy and the skip counter that an error is handled with.
 #[derive(Debug, Clone)]
-struct SkipContext {
+struct FileContext {
+    policy: ScanErrorPolicy,
     path: Arc<str>,
-    skipped: Count,
+    skipped: Option<Count>,
 }
 
-impl SkipContext {
-    fn skip(&self, error: &DataFusionError) {
-        tracing::warn!(file = %self.path, %error, "skipping a file that the scan cannot read");
-        self.skipped.add(1);
-    }
-}
-
-#[derive(Debug)]
-struct SkipErrorsMorselizer {
-    inner: Box<dyn Morselizer>,
-    skipped: Count,
-}
-
-impl Morselizer for SkipErrorsMorselizer {
-    fn plan_file(&self, file: PartitionedFile) -> Result<Box<dyn MorselPlanner>> {
-        let context = SkipContext {
-            path: file.object_meta.location.as_ref().into(),
-            skipped: self.skipped.clone(),
-        };
-        Ok(match self.inner.plan_file(file) {
-            Ok(inner) => Box::new(SkipErrorsPlanner { inner, context }),
-            Err(error) => {
-                context.skip(&error);
-                Box::new(EmptyPlanner)
-            }
-        })
-    }
-}
-
-#[derive(Debug)]
-struct SkipErrorsPlanner {
-    inner: Box<dyn MorselPlanner>,
-    context: SkipContext,
-}
-
-impl MorselPlanner for SkipErrorsPlanner {
-    fn plan(self: Box<Self>) -> Result<Option<MorselPlan>> {
-        let Self { inner, context } = *self;
-        match inner.plan() {
-            Ok(plan) => Ok(plan.map(|plan| wrap_plan(plan, &context))),
-            Err(error) => {
-                context.skip(&error);
-                Ok(None)
+impl FileContext {
+    /// Returns the error with its context, or `None` when the policy skips the file.
+    fn handle(&self, phase: ScanPhase, error: DataFusionError) -> Option<DataFusionError> {
+        match self.policy.on_error() {
+            OnScanError::Fail => Some(self.policy.context().error(phase, Some(&self.path), error)),
+            OnScanError::Skip => {
+                tracing::warn!(
+                    table = self.policy.context().table(),
+                    file_type = self.policy.context().file_type(),
+                    %phase,
+                    file = %self.path,
+                    %error,
+                    "skipping a file that the scan cannot read"
+                );
+                if let Some(skipped) = &self.skipped {
+                    skipped.add(1);
+                }
+                None
             }
         }
     }
 }
 
+#[derive(Debug)]
+struct ScanErrorsMorselizer {
+    inner: Box<dyn Morselizer>,
+    policy: ScanErrorPolicy,
+    skipped: Option<Count>,
+}
+
+impl Morselizer for ScanErrorsMorselizer {
+    fn plan_file(&self, file: PartitionedFile) -> Result<Box<dyn MorselPlanner>> {
+        let context = FileContext {
+            policy: self.policy.clone(),
+            path: file.object_meta.location.as_ref().into(),
+            skipped: self.skipped.clone(),
+        };
+        match self.inner.plan_file(file) {
+            Ok(inner) => Ok(Box::new(ScanErrorsPlanner { inner, context })),
+            Err(error) => match context.handle(ScanPhase::Open, error) {
+                Some(error) => Err(error),
+                None => Ok(Box::new(EmptyPlanner)),
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ScanErrorsPlanner {
+    inner: Box<dyn MorselPlanner>,
+    context: FileContext,
+}
+
+impl MorselPlanner for ScanErrorsPlanner {
+    fn plan(self: Box<Self>) -> Result<Option<MorselPlan>> {
+        let Self { inner, context } = *self;
+        match inner.plan() {
+            Ok(plan) => Ok(plan.map(|plan| wrap_plan(plan, &context))),
+            Err(error) => match context.handle(ScanPhase::Open, error) {
+                Some(error) => Err(error),
+                None => Ok(None),
+            },
+        }
+    }
+}
+
 /// Wraps each morsel, planner and pending planner of `plan`.
-fn wrap_plan(mut plan: MorselPlan, context: &SkipContext) -> MorselPlan {
+fn wrap_plan(mut plan: MorselPlan, context: &FileContext) -> MorselPlan {
     let morsels = plan
         .take_morsels()
         .into_iter()
         .map(|inner| {
-            Box::new(SkipErrorsMorsel {
+            Box::new(ScanErrorsMorsel {
                 inner,
                 context: context.clone(),
             }) as Box<dyn Morsel>
@@ -267,7 +313,7 @@ fn wrap_plan(mut plan: MorselPlan, context: &SkipContext) -> MorselPlan {
         .take_ready_planners()
         .into_iter()
         .map(|inner| {
-            Box::new(SkipErrorsPlanner {
+            Box::new(ScanErrorsPlanner {
                 inner,
                 context: context.clone(),
             }) as Box<dyn MorselPlanner>
@@ -279,13 +325,15 @@ fn wrap_plan(mut plan: MorselPlan, context: &SkipContext) -> MorselPlan {
     if let Some(pending) = plan.take_pending_planner() {
         let context = context.clone();
         wrapped.set_pending_planner(async move {
-            Ok(match pending.await {
-                Ok(inner) => Box::new(SkipErrorsPlanner { inner, context }) as Box<dyn MorselPlanner>,
-                Err(error) => {
-                    context.skip(&error);
-                    Box::new(EmptyPlanner) as Box<dyn MorselPlanner>
+            match pending.await {
+                Ok(inner) => {
+                    Ok(Box::new(ScanErrorsPlanner { inner, context }) as Box<dyn MorselPlanner>)
                 }
-            })
+                Err(error) => match context.handle(ScanPhase::Open, error) {
+                    Some(error) => Err(error),
+                    None => Ok(Box::new(EmptyPlanner) as Box<dyn MorselPlanner>),
+                },
+            }
         });
     }
     wrapped
@@ -302,24 +350,21 @@ impl MorselPlanner for EmptyPlanner {
 }
 
 #[derive(Debug)]
-struct SkipErrorsMorsel {
+struct ScanErrorsMorsel {
     inner: Box<dyn Morsel>,
-    context: SkipContext,
+    context: FileContext,
 }
 
-impl Morsel for SkipErrorsMorsel {
+impl Morsel for ScanErrorsMorsel {
     fn into_stream(self: Box<Self>) -> BoxStream<'static, Result<datafusion::arrow::array::RecordBatch>> {
         let Self { inner, context } = *self;
-        // The first error ends this morsel. The batches before it stay.
+        // A skipped error ends this morsel. The batches before it stay.
         inner
             .into_stream()
             .scan((), move |_, item| {
                 ready(match item {
                     Ok(batch) => Some(Ok(batch)),
-                    Err(error) => {
-                        context.skip(&error);
-                        None
-                    }
+                    Err(error) => context.handle(ScanPhase::Read, error).map(Err),
                 })
             })
             .boxed()
@@ -343,6 +388,11 @@ mod tests {
     };
 
     use super::*;
+    use crate::error::{ErrorContext, ExternalTableError, ScanPhase};
+
+    fn policy(on_error: OnScanError) -> ScanErrorPolicy {
+        ScanErrorPolicy::new(ErrorContext::new("obs", "csv"), on_error)
+    }
 
     fn schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -402,7 +452,7 @@ mod tests {
     async fn the_scan_skips_the_bad_file_and_reads_the_next_files() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = SessionContext::new();
-        let plan = with_skip_errors(scan(dir.path(), &ctx, None).await);
+        let plan = with_scan_errors(scan(dir.path(), &ctx, None).await, policy(OnScanError::Skip));
         assert!(plan.is::<DataSourceExec>(), "the scan itself is wrapped");
 
         let batches = collect(Arc::clone(&plan), ctx.task_ctx()).await.unwrap();
@@ -414,7 +464,7 @@ mod tests {
     async fn the_skip_survives_a_projection() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = SessionContext::new();
-        let plan = with_skip_errors(scan(dir.path(), &ctx, Some(&vec![0])).await);
+        let plan = with_scan_errors(scan(dir.path(), &ctx, Some(&vec![0])).await, policy(OnScanError::Skip));
         let batches = collect(plan, ctx.task_ctx()).await.unwrap();
         assert_eq!(batches[0].num_columns(), 1);
         assert_eq!(temps(&batches), [1.0, 2.0, 4.0]);
@@ -426,7 +476,7 @@ mod tests {
         let ctx = SessionContext::new();
         let plan: Arc<dyn ExecutionPlan> =
             Arc::new(CoalescePartitionsExec::new(scan(dir.path(), &ctx, None).await));
-        let plan = with_skip_errors(plan);
+        let plan = with_scan_errors(plan, policy(OnScanError::Skip));
         assert!(plan.is::<CoalescePartitionsExec>());
         let batches = collect(plan, ctx.task_ctx()).await.unwrap();
         assert_eq!(temps(&batches), [1.0, 2.0, 4.0]);
@@ -435,6 +485,37 @@ mod tests {
     #[test]
     fn a_plan_without_a_file_scan_gets_the_exec_fallback() {
         let plan: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(schema()));
-        assert!(with_skip_errors(plan).is::<SkipErrorsExec>());
+        assert!(with_scan_errors(plan, policy(OnScanError::Skip)).is::<ScanErrorsExec>());
+    }
+
+    #[tokio::test]
+    async fn a_failed_scan_names_the_table_the_file_type_and_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SessionContext::new();
+        let plan = with_scan_errors(scan(dir.path(), &ctx, None).await, policy(OnScanError::Fail));
+        assert!(plan.is::<DataSourceExec>(), "the scan itself is wrapped");
+
+        let error = collect(Arc::clone(&plan), ctx.task_ctx()).await.unwrap_err();
+        let found = ExternalTableError::find(&error).expect("an external table error");
+        assert_eq!(found.table, "obs");
+        assert_eq!(found.file_type, "csv");
+        assert_eq!(found.phase, ScanPhase::Read);
+        let object = found.object.as_deref().expect("the failed file");
+        assert!(object.ends_with("b.csv"), "{object}");
+        assert_eq!(skipped(&plan), None, "a scan that fails counts no skip");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_gone_fails_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SessionContext::new();
+        let plan = with_scan_errors(scan(dir.path(), &ctx, None).await, policy(OnScanError::Fail));
+        std::fs::remove_file(dir.path().join("a.csv")).unwrap();
+        std::fs::remove_file(dir.path().join("b.csv")).unwrap();
+
+        let error = collect(plan, ctx.task_ctx()).await.unwrap_err();
+        let found = ExternalTableError::find(&error).expect("an external table error");
+        let object = found.object.as_deref().expect("the failed file");
+        assert!(object.ends_with("a.csv"), "{object}");
     }
 }

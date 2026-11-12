@@ -30,7 +30,8 @@ use futures::{TryStreamExt, future::try_join_all};
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::{
-    skip_errors_source::with_skip_errors, statistics_cache::ExternalTableStatisticsProvider,
+    error::ScanPhase, scan_errors::ScanErrorPolicy, scan_errors_source::with_scan_errors,
+    statistics_cache::ExternalTableStatisticsProvider,
 };
 
 /// The statistics provider of a scan, with the name of the table it keeps the statistics under.
@@ -42,8 +43,10 @@ pub(crate) type ScanStatistics<'a> = (&'a dyn ExternalTableStatisticsProvider, &
 /// table. Only a format that reads the `PhysicalExprAdapterFactory` of its
 /// config uses it, which is Parquet.
 ///
-/// With `skip_errors`, a file that the scan cannot read ends, and the scan
-/// continues with the next file.
+/// `errors` decides what a file that the scan cannot read does: it fails the
+/// scan with the table, the file type and the file, or it ends and the scan
+/// continues with the next file. A list or plan failure always fails the scan
+/// with the table and the file type.
 ///
 /// Without a provider, the scan reads all listed files. A filter on partition
 /// columns only prunes the listing, as in a DataFusion `ListingTable`.
@@ -52,7 +55,7 @@ pub(crate) async fn scan_with_statistics(
     table: &ListingTable,
     statistics: Option<ScanStatistics<'_>>,
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
-    skip_errors: bool,
+    errors: ScanErrorPolicy,
     projection: Option<&Vec<usize>>,
     filters: &[Expr],
     limit: Option<usize>,
@@ -70,7 +73,11 @@ pub(crate) async fn scan_with_statistics(
         return empty();
     };
     let store_url = first_url.object_store();
-    let store = session.runtime_env().object_store(first_url)?;
+    let list_error = |error| errors.context().error(ScanPhase::List, None, error);
+    let store = session
+        .runtime_env()
+        .object_store(first_url)
+        .map_err(list_error)?;
 
     let (partition_filters, data_filters) = split_filters(options, filters);
     let files = list_files(
@@ -80,7 +87,8 @@ pub(crate) async fn scan_with_statistics(
         &partition_filters,
         options,
     )
-    .await?;
+    .await
+    .map_err(list_error)?;
 
     let considered = files.len();
     let (files, pruned) = match statistics {
@@ -105,12 +113,12 @@ pub(crate) async fn scan_with_statistics(
         .with_output_ordering(output_ordering)
         .with_expr_adapter(Some(type_widening.physical_expr_adapter_factory()))
         .build();
-    let plan = options.format.create_physical_plan(session, config).await?;
-    let plan = if skip_errors {
-        with_skip_errors(plan)
-    } else {
-        plan
-    };
+    let plan = options
+        .format
+        .create_physical_plan(session, config)
+        .await
+        .map_err(|error| errors.context().error(ScanPhase::Plan, None, error))?;
+    let plan = with_scan_errors(plan, errors);
 
     if statistics.is_some() {
         record_counters(&plan, considered, pruned);
@@ -307,7 +315,16 @@ pub(crate) mod tests {
     use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
 
     use super::*;
-    use crate::statistics_cache::{SharedPruningStatistics, StatisticsRegistration};
+    use crate::{
+        error::{ErrorContext, ExternalTableError},
+        scan_errors::OnScanError,
+        statistics_cache::{SharedPruningStatistics, StatisticsRegistration},
+    };
+
+    /// The policy of a table `obs` that fails on a file error.
+    fn fail_policy(file_type: &str) -> ScanErrorPolicy {
+        ScanErrorPolicy::new(ErrorContext::new("obs", file_type), OnScanError::Fail)
+    }
 
     /// Statistics for one column, `temp`.
     struct TempStatistics {
@@ -589,7 +606,7 @@ pub(crate) mod tests {
             &table,
             provider.map(|provider| (provider, "obs")),
             type_widening,
-            false,
+            fail_policy("csv"),
             None,
             &[col("temp").gt(lit(10.0))],
             None,
@@ -632,7 +649,7 @@ pub(crate) mod tests {
             &table,
             None,
             Arc::new(DefaultArrowTypeWidening::new()),
-            false,
+            fail_policy("csv"),
             None,
             &[],
             None,
@@ -642,6 +659,39 @@ pub(crate) mod tests {
         let exec = plan.downcast_ref::<DataSourceExec>().unwrap();
         let config = exec.data_source().downcast_ref::<FileScanConfig>().unwrap();
         assert!(config.expr_adapter_factory.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_store_that_is_not_registered_fails_in_the_list_phase() {
+        let url = ListingTableUrl::parse("s3://no-such-bucket/data/").unwrap();
+        let options = ListingOptions::new(Arc::new(CsvFormat::default())).with_file_extension(".csv");
+        let config = ListingTableConfig::new(url)
+            .with_listing_options(options)
+            .with_schema(schema());
+        let table = ListingTable::try_new(config).unwrap();
+        let state = SessionContext::new().state();
+
+        let error = scan_with_statistics(
+            &state,
+            &table,
+            None,
+            Arc::new(DefaultArrowTypeWidening::new()),
+            fail_policy("csv"),
+            None,
+            &[],
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        let found = ExternalTableError::find(&error).expect("an external table error");
+        assert_eq!(found.table, "obs");
+        assert_eq!(found.phase, ScanPhase::List);
+        assert_eq!(found.object, None);
+        assert!(
+            error.to_string().contains("external table 'obs' (csv): cannot list the files"),
+            "{error}"
+        );
     }
 
     fn write_parquet(path: &std::path::Path, column: ArrayRef) {
@@ -685,9 +735,17 @@ pub(crate) mod tests {
         let table = ListingTable::try_new(config).unwrap();
         let ctx = SessionContext::new();
         let state = ctx.state();
-        let plan =
-            scan_with_statistics(&state, &table, None, type_widening, false, None, &[], None)
-                .await?;
+        let plan = scan_with_statistics(
+            &state,
+            &table,
+            None,
+            type_widening,
+            fail_policy("parquet"),
+            None,
+            &[],
+            None,
+        )
+        .await?;
         collect(plan, ctx.task_ctx()).await
     }
 

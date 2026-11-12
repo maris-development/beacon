@@ -20,7 +20,9 @@ use parking_lot::RwLock;
 
 use crate::{
     ExternalTableDefinition, ExternalTableSpec,
+    error::ErrorContext,
     scan::scan_with_statistics,
+    scan_errors::{OnScanError, ScanErrorPolicy},
     statistics_cache::{ExternalTableStatisticsProvider, StatisticsRegistration},
     statistics_columns_from_options, statistics_refresh_interval_from_options,
 };
@@ -262,13 +264,20 @@ impl TableProvider for ExternalTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let (table, name, type_widening, skip_errors) = {
+        let (table, name, type_widening, errors) = {
             let current = self.state.read();
+            let definition = &current.definition;
+            let on_error = if definition.skip_invalid_files_on_scan {
+                OnScanError::Skip
+            } else {
+                OnScanError::Fail
+            };
+            let context = ErrorContext::new(&definition.name, &definition.file_type.to_lowercase());
             (
                 Arc::clone(&current.table),
-                current.definition.name.clone(),
-                Arc::clone(&current.definition.type_widening),
-                current.definition.skip_invalid_files_on_scan,
+                definition.name.clone(),
+                Arc::clone(&definition.type_widening),
+                ScanErrorPolicy::new(context, on_error),
             )
         };
         let provider = self.pruning_provider();
@@ -280,7 +289,7 @@ impl TableProvider for ExternalTable {
             &table,
             statistics,
             type_widening,
-            skip_errors,
+            errors,
             projection,
             filters,
             limit,
