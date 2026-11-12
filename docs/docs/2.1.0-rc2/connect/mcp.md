@@ -72,7 +72,11 @@ A request without credentials runs as the `anonymous` user when anonymous access
 
 Each tool call runs as the caller. The roles of the caller set which tables `list_tables` shows and
 which rows the queries read. MCP is always read-only. The super-user also cannot run DDL or DML
-over MCP. See [Access Control](/docs/2.1.0-rc2/security/access-control).
+over MCP.
+
+The super-user has no roles. With `BEACON_AUTH_ENFORCE=true`, the super-user therefore reads no
+table over MCP. Use a user with read grants for an AI agent. See
+[Access Control](/docs/2.1.0-rc2/security/access-control#mcp-is-read-only).
 
 ## Allowed hosts
 
