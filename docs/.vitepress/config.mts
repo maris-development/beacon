@@ -318,6 +318,17 @@ export default defineConfig({
           ]
         },
         {
+          text: 'Beacon Studio',
+          collapsed: true,
+          items: [
+            { text: 'Overview', link: '/docs/2.1.0-rc2/beacon-studio' },
+            { text: 'Deploy with Beacon', link: '/docs/2.1.0-rc2/beacon-studio#deploy-beacon-and-studio-together' },
+            { text: 'Settings', link: '/docs/2.1.0-rc2/beacon-studio#settings' },
+            { text: 'Production', link: '/docs/2.1.0-rc2/beacon-studio#production' },
+            { text: 'Troubleshooting', link: '/docs/2.1.0-rc2/beacon-studio#troubleshooting' },
+          ]
+        },
+        {
           text: 'Connect',
           collapsed: true,
           items: [
