@@ -123,6 +123,12 @@ impl PersistentSchemaProvider {
         self.inner.register_table(name, table)
     }
 
+    /// The names of all tables, also the internal `__beacon_*` tables that
+    /// [`SchemaProvider::table_names`] hides.
+    pub fn all_table_names(&self) -> Vec<String> {
+        self.inner.table_names()
+    }
+
     /// Register the in-memory stand-in for `name`, the configured default table.
     ///
     /// A no-op when `name` already holds a table, so a table the user created

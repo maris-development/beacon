@@ -30,6 +30,7 @@ mod auth;
 mod comments;
 mod plugins;
 mod table;
+mod table_sizes;
 mod table_statistics;
 
 pub use table_statistics::TABLE_STATISTICS_FUNCTION;
@@ -84,7 +85,7 @@ pub struct SystemSchemaProvider {
 impl SystemSchemaProvider {
     /// Builds the schema over the runtime's live state: the auth context that
     /// owns users and roles, and the session through which `query_metrics`
-    /// resolves to its managed table.
+    /// resolves to its managed table and `table_sizes` reads the catalog.
     pub fn new(
         session: SessionCell,
         auth: Arc<beacon_auth::AuthContext>,
@@ -106,6 +107,10 @@ impl SystemSchemaProvider {
         tables.insert(
             "comments".to_string(),
             Arc::new(comments::comments_table(session.clone())),
+        );
+        tables.insert(
+            "table_sizes".to_string(),
+            Arc::new(table_sizes::table_sizes_table(session.clone())),
         );
         tables.insert(
             "plugins".to_string(),

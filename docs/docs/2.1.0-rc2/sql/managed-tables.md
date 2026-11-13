@@ -246,3 +246,32 @@ DESCRIBE measurements;
 
 SHOW INDEXES ON measurements;   -- Lance tables
 ```
+
+## Show the table sizes
+
+`beacon.system.table_sizes` has one row for each managed table. Use it to find the tables that fill
+`beacon.db`. Only a super-user can read it.
+
+```sql
+SELECT table_name, row_count, bytes_on_disk
+FROM beacon.system.table_sizes
+ORDER BY bytes_on_disk DESC;
+```
+
+| Column | Value |
+| --- | --- |
+| `table_name` | The table name. |
+| `engine` | The storage engine. The value is `lance`. |
+| `row_count` | The rows in the latest version. |
+| `fragment_count` | The fragments in the latest version. |
+| `version_count` | The versions that the table holds. |
+| `bytes_on_disk` | The bytes of all files of the table. |
+
+`bytes_on_disk` includes the old versions, the indexes and the manifests. `COMPACT TABLE` deletes
+the old versions and decreases this value.
+
+The table also shows the internal tables of Beacon. Their names start with `__beacon_`. For example,
+`__beacon_query_metrics` holds the recorded query metrics.
+
+Beacon measures each table when you query `beacon.system.table_sizes`. The query time increases
+with the number of tables and files.

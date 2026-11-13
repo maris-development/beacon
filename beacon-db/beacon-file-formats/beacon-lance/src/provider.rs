@@ -77,7 +77,10 @@ impl LanceTable {
 
 /// Open the latest dataset version at `uri` (resolved through `session`'s
 /// object-store registry).
-async fn open_dataset(uri: &str, session: Arc<LanceSession>) -> DataFusionResult<Arc<Dataset>> {
+pub(crate) async fn open_dataset(
+    uri: &str,
+    session: Arc<LanceSession>,
+) -> DataFusionResult<Arc<Dataset>> {
     let dataset = DatasetBuilder::from_uri(uri)
         .with_session(session)
         .load()

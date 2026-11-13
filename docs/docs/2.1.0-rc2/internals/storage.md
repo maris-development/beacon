@@ -63,6 +63,9 @@ A managed table supports `ALTER TABLE`, indexes and the usual DDL. See
 [Managed Tables](/docs/2.1.0-rc2/sql/managed-tables) in the SQL reference. It gives the full
 statement grammar, the index types and the limitations.
 
+All managed tables share `beacon.db`. To see the size of each table, query
+[`beacon.system.table_sizes`](/docs/2.1.0-rc2/sql/managed-tables#show-the-table-sizes).
+
 A common pattern runs an expensive scan once, then queries the result many times:
 
 ```sql
