@@ -422,6 +422,11 @@ impl RuntimeBuilder {
             .config()
             .get_extension::<beacon_file_statistics::FileStatistics>()
             .map(|engine| engine.as_ref().clone());
+        let query_gate = session_ctx
+            .state()
+            .config()
+            .get_extension::<crate::query_gate::QueryGate>()
+            .ok_or_else(|| anyhow::anyhow!("the query gate is not registered on the session"))?;
 
         // Event-driven external-table refresh was removed; external tables become
         // current on an explicit `REFRESH` only.
@@ -435,6 +440,7 @@ impl RuntimeBuilder {
             executor: QueryExecutor::new(runtime_handle),
             session_ctx,
             query_metrics,
+            query_gate,
             auth: auth_context,
             auth_enforce: self.auth_enforce,
             read_only: self.read_only,
@@ -565,8 +571,15 @@ async fn init_session_ctx(
 ) -> anyhow::Result<Arc<SessionContext>> {
     // An in-memory database keeps its tables, and the statistics of its
     // external tables, in memory.
-    let db_store: Arc<dyn ObjectStore> = match &builder.db_path {
-        Some(db_path) => Arc::new(RedbStore::open(db_path)?),
+    let redb_store = builder
+        .db_path
+        .as_ref()
+        .map(RedbStore::open)
+        .transpose()?
+        .map(Arc::new);
+    let db_store: Arc<dyn ObjectStore> = match &redb_store {
+        // `Arc<RedbStore>` to `Arc<dyn ObjectStore>` is an unsized coercion.
+        Some(store) => Arc::<RedbStore>::clone(store),
         None => Arc::new(object_store::memory::InMemory::new()),
     };
 
@@ -586,7 +599,13 @@ async fn init_session_ctx(
         runtime_handle,
     )?
     // Statement planning reads function owners from here.
-    .with_extension(plugins.clone());
+    .with_extension(plugins.clone())
+    .with_extension(Arc::new(crate::query_gate::QueryGate::default()));
+    // `VACUUM` rewrites this store. A read-only runtime gets no handle to it.
+    let config = match redb_store {
+        Some(store) if !builder.read_only => config.with_extension(store),
+        Some(_) | None => config,
+    };
     let runtime_env = runtime_env_builder(builder, secrets_store.clone())?;
 
     let session_state = build_session_state(

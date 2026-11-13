@@ -95,6 +95,11 @@ impl<'a> BeaconParser<'a> {
             return self.parse_compact_table();
         }
 
+        if self.is_vacuum() {
+            self.df_parser.parser.next_token(); // VACUUM
+            return Ok(BeaconStatement::Vacuum);
+        }
+
         if self.is_attach() {
             return self.parse_attach();
         }
@@ -414,6 +419,17 @@ impl<'a> BeaconParser<'a> {
         let t2 = &self.df_parser.parser.peek_nth_token(1).token;
         matches!(t1, Token::Word(w) if w.value.to_uppercase() == "COMPACT")
             && matches!(t2, Token::Word(w) if w.keyword == Keyword::TABLE)
+    }
+
+    /// Whether the statement is the single word `VACUUM`.
+    ///
+    /// `VACUUM` is not a reserved word, so a statement with more tokens goes to
+    /// DataFusion.
+    fn is_vacuum(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.value.to_uppercase() == "VACUUM")
+            && matches!(t2, Token::EOF | Token::SemiColon)
     }
 
     /// Parse: COMPACT TABLE <table> [WITH (k 'v', ...)]
@@ -1393,6 +1409,35 @@ mod tests {
             assert!(
                 matches!(p.parse_statement().unwrap(), BeaconStatement::DFStatement(_)),
                 "`{sql}` should be a DataFusion statement"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_vacuum() {
+        for sql in ["VACUUM", "vacuum;"] {
+            let mut p = BeaconParser::new(sql).unwrap();
+            assert!(
+                matches!(p.parse_statement().unwrap(), BeaconStatement::Vacuum),
+                "`{sql}` should be a VACUUM statement"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vacuum_display_roundtrip() {
+        let stmt = BeaconParser::new("VACUUM").unwrap().parse_statement().unwrap();
+        assert_eq!(stmt.to_string(), "VACUUM");
+    }
+
+    /// `VACUUM` is not a reserved word: only the single word is beacon's.
+    #[test]
+    fn test_vacuum_does_not_shadow_standard_sql() {
+        for sql in ["SELECT vacuum FROM t", "SELECT * FROM vacuum", "VACUUM obs"] {
+            let mut p = BeaconParser::new(sql).unwrap();
+            assert!(
+                !matches!(p.parse_statement(), Ok(BeaconStatement::Vacuum)),
+                "`{sql}` should not be a VACUUM statement"
             );
         }
     }

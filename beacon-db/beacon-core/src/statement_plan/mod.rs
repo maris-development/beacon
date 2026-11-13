@@ -556,6 +556,13 @@ pub(crate) fn compact_table_plan(statement: CompactTableStatement) -> LogicalPla
     })
 }
 
+/// Build the logical plan for `VACUUM`.
+pub(crate) fn vacuum_plan() -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::VacuumNode),
+    })
+}
+
 /// Plan and execute a beacon statement logical plan through the single
 /// `create_physical_plan` -> `execute_stream` pipeline, coalescing the result the
 /// same way the legacy statement executor does.
