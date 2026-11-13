@@ -48,6 +48,7 @@ async fn system_tables_are_listed_in_information_schema() {
             "query_metrics",
             "role_settings",
             "roles",
+            "table_sizes",
             "users"
         ],
         "the system schema should expose exactly these tables"
@@ -208,6 +209,63 @@ async fn query_metrics_capture_the_logical_plans() {
     }
 }
 
+/// `table_sizes` reports the figures of a managed table after each write.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sizes_reports_a_managed_table() {
+    let rt = runtime("system-schema-table-sizes").await;
+    rt.sql("CREATE TABLE sized (id BIGINT)").await;
+    rt.sql("INSERT INTO sized VALUES (1), (2), (3)").await;
+    rt.sql("INSERT INTO sized VALUES (4), (5)").await;
+
+    let batches = rt
+        .sql(
+            "SELECT engine, row_count, fragment_count, version_count, bytes_on_disk \
+             FROM beacon.system.table_sizes WHERE table_name = 'sized'",
+        )
+        .await;
+
+    assert_eq!(total_rows(&batches), 1, "one row for the table");
+    let batch = &batches[0];
+    let figure = |column: usize| {
+        batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("the figure is UInt64")
+            .value(0)
+    };
+    assert_eq!(batch.column(0).as_string::<i32>().value(0), "lance");
+    assert_eq!((figure(1), figure(2), figure(3)), (5, 2, 3));
+    assert!(figure(4) > 0, "the table holds bytes");
+}
+
+/// `table_sizes` shows the internal tables and leaves out tables that Beacon
+/// does not store.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sizes_lists_internal_tables_and_no_views() {
+    let rt = runtime("system-schema-table-sizes-scope").await;
+    rt.sql("CREATE TABLE zeta (id BIGINT)").await;
+    rt.sql("CREATE TABLE alpha (id BIGINT)").await;
+    rt.sql("CREATE VIEW alpha_view AS SELECT id FROM alpha")
+        .await;
+
+    let batches = rt
+        .sql("SELECT table_name FROM beacon.system.table_sizes")
+        .await;
+
+    let names = common::column_strings(&batches, 0);
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "the rows are in name order");
+    assert!(names.iter().any(|name| name == "alpha"));
+    assert!(names.iter().any(|name| name == "zeta"));
+    assert!(
+        names.iter().any(|name| name.starts_with("__beacon_")),
+        "the internal tables are listed: {names:?}"
+    );
+    assert!(!names.iter().any(|name| name == "alpha_view"));
+}
+
 /// The system schema is read-only: it rejects `CREATE TABLE` into it.
 #[tokio::test(flavor = "multi_thread")]
 async fn system_schema_rejects_writes() {
@@ -290,6 +348,7 @@ async fn system_schema_is_super_user_only_even_without_enforcement() {
         // The rest of the schema is no more readable: query_metrics carries the
         // text and plans of what other users ran.
         "SELECT count(*) FROM beacon.system.query_metrics",
+        "SELECT * FROM beacon.system.table_sizes",
         // Reached indirectly: the gate matches the scan, not the statement shape.
         "SELECT count(*) FROM (SELECT * FROM beacon.system.users)",
     ] {

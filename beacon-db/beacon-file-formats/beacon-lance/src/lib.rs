@@ -24,6 +24,7 @@ pub mod io;
 pub mod mutate;
 mod provider;
 pub mod sink;
+pub mod size;
 pub mod warehouse;
 
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub use index::{
 pub use io::WriteKind;
 pub use mutate::{delete_rows, update_rows};
 pub use provider::LanceTable;
+pub use size::{TableSize, table_size};
 pub use warehouse::{BEACON_NAMESPACE, LanceWarehouse, beacon_namespace};
 
 /// Create a new, empty Lance table at the warehouse location for
