@@ -1177,6 +1177,54 @@ impl UserDefinedLogicalNodeCore for CompactTableNode {
     }
 }
 
+/// The report `VACUUM` returns.
+pub(crate) fn vacuum_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("size_before_bytes", DataType::UInt64, false),
+                Field::new("size_after_bytes", DataType::UInt64, false),
+            ]))
+        })
+        .clone()
+}
+
+fn vacuum_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(vacuum_arrow_schema().as_ref().clone())
+                .expect("VACUUM schema is valid"),
+        )
+    })
+}
+
+/// Logical node for `VACUUM`. Produces the size report, so it carries that schema.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct VacuumNode;
+
+impl UserDefinedLogicalNodeCore for VacuumNode {
+    fn name(&self) -> &str {
+        "Vacuum"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        vacuum_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Vacuum")
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
 /// A native row mutation, derived best-effort at lowering time. When present and
 /// the target is a Lance table, it is applied via Lance's native `delete`/update
 /// (deletion vectors / fragment rewrite) instead of the copy-on-write `input`.

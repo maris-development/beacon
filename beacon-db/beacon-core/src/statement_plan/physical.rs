@@ -29,6 +29,7 @@ use super::{
     actions, crawler, functions,
     logical::{
         analyze_files_arrow_schema, compact_table_arrow_schema, count_arrow_schema,
+        vacuum_arrow_schema,
         run_crawler_arrow_schema, show_crawlers_arrow_schema, show_create_function_arrow_schema,
         show_create_table_arrow_schema,
         show_indexes_arrow_schema, show_secrets_arrow_schema, AlterTableSpec, CommentTarget,
@@ -1755,6 +1756,60 @@ impl ExecutionPlan for CompactTableExec {
                 .map_err(to_df_err)
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
+
+/// Physical node for `VACUUM`. Produces one report row.
+#[derive(Debug)]
+pub(crate) struct VacuumExec {
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl VacuumExec {
+    pub(crate) fn new(session: SessionCell) -> Self {
+        Self {
+            session,
+            cache: Arc::new(plan_properties(vacuum_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for VacuumExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VacuumExec")
+    }
+}
+
+impl ExecutionPlan for VacuumExec {
+    fn name(&self) -> &str {
+        "VacuumExec"
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let stream = futures::stream::once(async move {
+            actions::vacuum(&session).await.map_err(to_df_err)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            vacuum_arrow_schema(),
+            stream,
+        )))
     }
 }
 

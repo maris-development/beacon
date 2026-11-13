@@ -19,6 +19,7 @@ pub enum BeaconStatement {
     DropIndex(DropIndexStatement),
     ShowIndexes(ShowIndexesStatement),
     CompactTable(CompactTableStatement),
+    Vacuum,
     Attach(AttachStatement),
     Detach(DetachStatement),
     Install(InstallStatement),
@@ -384,6 +385,7 @@ impl Display for BeaconStatement {
             Self::DropIndex(s) => write!(f, "{s}"),
             Self::ShowIndexes(s) => write!(f, "{s}"),
             Self::CompactTable(s) => write!(f, "{s}"),
+            Self::Vacuum => write!(f, "VACUUM"),
             // The token, if any, is a credential — never render it.
             Self::Attach(s) => write!(f, "ATTACH '{}' AS {}", s.url, s.name),
             Self::Detach(s) => write!(f, "DETACH {}", s.name),

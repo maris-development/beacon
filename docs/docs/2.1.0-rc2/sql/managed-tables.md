@@ -13,7 +13,7 @@ managed table supports `UPDATE`, `DELETE`, schema changes with `ALTER TABLE` and
 The table definition and the data survive a restart.
 
 A managed table needs write access. `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE INDEX`,
-`DROP INDEX` and `COMPACT TABLE` need admin credentials. Anonymous access stays read-only.
+`DROP INDEX`, `COMPACT TABLE` and `VACUUM` need admin credentials. Anonymous access stays read-only.
 
 ::: tip Names keep their case
 A table name means exactly what you write. `MyTable` and `mytable` are two different tables.
@@ -211,6 +211,38 @@ A query opens one version, and reads the files of that version until the query s
 with a short age can delete those files first. Use `'0s'` only when no query runs.
 :::
 
+## `VACUUM`
+
+`COMPACT TABLE` and `DROP TABLE` release space inside `beacon.db`. Beacon uses that space again for
+new data, but the file keeps its size on disk. `VACUUM` writes the live data into a new file and
+replaces `beacon.db` with it. The file then has its live size.
+
+```sql
+VACUUM;
+```
+
+The statement returns one report row:
+
+| Column | Meaning |
+| --- | --- |
+| `size_before_bytes` | The size of `beacon.db` before the run. |
+| `size_after_bytes` | The size of `beacon.db` after the run. |
+
+Run `COMPACT TABLE` first. `VACUUM` keeps all data that a table still points to, and that includes
+the old versions.
+
+::: warning `VACUUM` needs the database for itself
+- `VACUUM` needs admin credentials.
+- `VACUUM` fails if a different query runs. It does not wait.
+- A query that arrives during the run fails with the error `a VACUUM is in progress`.
+- A catalog request, for example a table list, waits until the run stops.
+- The disk needs free space for a second copy of the live data.
+- An in-memory database and a read-only database do not support `VACUUM`.
+:::
+
+The run time increases with the live size of the file. If the run fails, Beacon keeps the original
+file.
+
 ## `DROP TABLE`
 
 `DROP TABLE` removes a managed table. It also **deletes the data of the table**. An external table
@@ -230,7 +262,8 @@ DROP TABLE IF EXISTS measurements;
 - **Lance write model**: `INSERT` streams directly into the table. `DELETE` and `UPDATE` are native,
   through deletion vectors and fragment rewrites. `ALTER` needs no rebuild. Each write commits a new
   dataset version. A reader always sees a consistent snapshot. Nothing shrinks on its own. Run
-  `COMPACT TABLE` to merge the fragments and to release the space.
+  `COMPACT TABLE` to merge the fragments and to release the space inside `beacon.db`. Then run
+  `VACUUM` to decrease the size of the file on disk.
 - **Iceberg write model**: `DELETE` and `UPDATE` are copy-on-write. `ALTER` rebuilds the table. Use
   Iceberg for a table of moderate size with few schema changes, not for frequent row changes.
 - **Scope**: `ALTER` supports `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN` and `ALTER COLUMN TYPE` on
