@@ -143,3 +143,67 @@ async fn queries_work_again_after_a_vacuum() {
 
     assert_eq!(common::total_rows(&rt.sql("SELECT 1").await), 1);
 }
+
+/// All rows of `sql` as one batch, so a comparison does not depend on the batch borders.
+async fn one_batch(rt: &TestRuntime, sql: &str) -> RecordBatch {
+    let batches = rt.sql(sql).await;
+    datafusion::arrow::compute::concat_batches(&batches[0].schema(), &batches)
+        .expect("concat the result batches")
+}
+
+/// Array values are large blobs with offsets inside their Lance file, and an
+/// index is a set of files next to the data. A vacuum moves all of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn vacuum_keeps_array_columns_and_indexes() {
+    const ROWS: i64 = 10;
+    const ARRAY_LEN: i64 = 20_000;
+    let dir = TempDir::new().unwrap();
+    let (rt, _db_path) = file_runtime(&dir, false).await;
+
+    rt.sql("CREATE TABLE a (id BIGINT, platform VARCHAR, vals DOUBLE[])")
+        .await;
+    for id in 0..ROWS {
+        let vals = (0..ARRAY_LEN)
+            .map(|i| format!("{}.5", id * ARRAY_LEN + i))
+            .collect::<Vec<_>>()
+            .join(",");
+        rt.sql(&format!(
+            "INSERT INTO a VALUES ({id}, 'p{}', make_array({vals}))",
+            id % 2
+        ))
+        .await;
+    }
+    rt.sql("CREATE INDEX id_idx ON a (id) USING btree").await;
+    rt.sql("CREATE INDEX platform_idx ON a (platform) USING bitmap")
+        .await;
+    // Row 3 is one of the five 'p1' rows.
+    rt.sql("DELETE FROM a WHERE id = 3").await;
+    rt.sql("COMPACT TABLE a WITH ('cleanup_older_than' '0s')")
+        .await;
+    let all_rows = "SELECT * FROM a ORDER BY id";
+    let by_index = "SELECT id, vals[20000] AS last FROM a WHERE id = 7";
+    let indexes = "SHOW INDEXES ON a";
+    let rows_before = one_batch(&rt, all_rows).await;
+    let lookup_before = one_batch(&rt, by_index).await;
+    let indexes_before = one_batch(&rt, indexes).await;
+
+    let report = rt.sql("VACUUM").await;
+
+    assert!(report_value(&report, "size_after_bytes") < report_value(&report, "size_before_bytes"));
+    assert_eq!(rows_before.num_rows() as i64, ROWS - 1);
+    assert_eq!(one_batch(&rt, all_rows).await, rows_before);
+    assert_eq!(lookup_before.num_rows(), 1);
+    assert_eq!(one_batch(&rt, by_index).await, lookup_before);
+    assert_eq!(one_batch(&rt, indexes).await, indexes_before);
+    assert_eq!(
+        common::scalar_i64(&rt.sql("SELECT count(*) FROM a WHERE platform = 'p1'").await),
+        4
+    );
+    // A write after the vacuum updates the data and both indexes.
+    rt.sql("INSERT INTO a VALUES (100, 'p1', make_array(1.5, 2.5))")
+        .await;
+    assert_eq!(
+        common::scalar_i64(&rt.sql("SELECT count(*) FROM a WHERE id = 100").await),
+        1
+    );
+}
