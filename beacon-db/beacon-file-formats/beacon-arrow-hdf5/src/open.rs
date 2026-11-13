@@ -23,7 +23,7 @@ pub async fn open_dataset(
     object: &ObjectMeta,
     options: ReadOptions,
 ) -> anyhow::Result<AnyDataset> {
-    crate::reader::open_dataset(store.clone(), object.location.clone(), options).await
+    crate::reader::open_object(store.clone(), object, options).await
 }
 
 /// Fetch the Arrow schema for an HDF5 object by opening the dataset and

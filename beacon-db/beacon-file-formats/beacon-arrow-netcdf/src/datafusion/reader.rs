@@ -96,7 +96,7 @@ impl FileAccess {
             }
             FileAccess::Oxcdf => Ok(NetcdfInput::Oxcdf {
                 store: store.clone(),
-                path: object.location.clone(),
+                object: object.clone(),
             }),
         }
     }
@@ -116,8 +116,9 @@ pub enum NetcdfInput {
     Oxcdf {
         /// The store the object lives in.
         store: Arc<dyn ObjectStore>,
-        /// The object, relative to that store.
-        path: object_store::path::Path,
+        /// The object, relative to that store. Its size spares the reader a
+        /// `head` request.
+        object: ObjectMeta,
     },
 }
 
@@ -134,7 +135,7 @@ impl NetcdfInput {
     pub fn location(&self) -> String {
         match self {
             NetcdfInput::NetcdfC(path) => path.clone(),
-            NetcdfInput::Oxcdf { path, .. } => path.to_string(),
+            NetcdfInput::Oxcdf { object, .. } => object.location.to_string(),
         }
     }
 
@@ -142,8 +143,8 @@ impl NetcdfInput {
     pub async fn open(self) -> anyhow::Result<AnyDataset> {
         match self {
             NetcdfInput::NetcdfC(path) => crate::reader::open_dataset(path).await,
-            NetcdfInput::Oxcdf { store, path } => {
-                crate::oxcdf_reader::open_dataset(store, path).await
+            NetcdfInput::Oxcdf { store, object } => {
+                crate::oxcdf_reader::open_object(store, &object).await
             }
         }
     }

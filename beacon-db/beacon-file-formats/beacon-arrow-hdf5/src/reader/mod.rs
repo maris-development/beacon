@@ -68,4 +68,4 @@ pub mod compound;
 /// High-level reader that opens an object and returns a dataset.
 pub mod open;
 
-pub use open::{open_dataset, read_arrays};
+pub use open::{open_dataset, open_object, read_arrays};
