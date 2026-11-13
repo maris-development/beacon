@@ -15,6 +15,7 @@ pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_arrow_zarr::ZarrConfig;
 pub use beacon_common::CrawlerConfig;
 pub use beacon_common::FileStatsConfig;
+pub use beacon_object_store_cache::StoreCacheConfig;
 pub use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, TypeConflict};
 use beacon_datafusion_ext::type_widening::{DefaultArrowTypeWidening, strategy_by_name};
 
@@ -35,6 +36,7 @@ pub struct Config {
     pub zarr: ZarrConfig,
     pub crawler: CrawlerConfig,
     pub file_stats: FileStatsConfig,
+    pub store_cache: StoreCacheConfig,
     pub api_docs: ApiDocsConfig,
     /// Resolved data-directory paths (root + sub-directories).
     pub data: DataDirsConfig,
@@ -613,6 +615,20 @@ struct RawConfig {
     #[envconfig(from = "BEACON_FILE_STATS_MAX_REFRESHES", default = "2")]
     file_stats_max_refreshes: usize,
 
+    /// Answer `list` and `head` calls on the datasets store from memory.
+    ///
+    /// Off by default. With the cache on, a file that a different program
+    /// adds shows after the sync interval, not in the next query. Uploads
+    /// and deletes through Beacon show at once.
+    #[envconfig(from = "BEACON_STORE_CACHE_ENABLE", default = "false")]
+    store_cache_enable: bool,
+    /// Seconds between two comparisons of the cache with the store.
+    #[envconfig(from = "BEACON_STORE_CACHE_SYNC_INTERVAL_SECS", default = "300")]
+    store_cache_sync_interval_secs: u64,
+    /// Also cache the remote stores that queries open by URL.
+    #[envconfig(from = "BEACON_STORE_CACHE_REMOTE", default = "false")]
+    store_cache_remote: bool,
+
     // OpenAPI documentation metadata
     #[envconfig(from = "BEACON_API_TITLE", default = "Beacon Rest API")]
     api_title: String,
@@ -748,6 +764,12 @@ impl From<RawConfig> for Config {
                     .filter(|n| *n > 0)
                     .unwrap_or_else(beacon_common::file_stats_config::default_concurrency),
                 max_refreshes: raw.file_stats_max_refreshes.max(1),
+            },
+            store_cache: StoreCacheConfig {
+                enable: raw.store_cache_enable,
+                sync_interval: std::time::Duration::from_secs(raw.store_cache_sync_interval_secs.max(1)),
+                remote: raw.store_cache_remote,
+                ..StoreCacheConfig::default()
             },
             crawler: CrawlerConfig {
                 enable: raw.crawler_enable,
@@ -1404,6 +1426,21 @@ mod tests {
             1,
             "zero refreshes would stop each refresh"
         );
+    }
+
+    #[test]
+    fn store_cache_defaults_off_and_reads_its_settings() {
+        let default = config(&[]).store_cache;
+        assert!(!default.enable);
+        assert!(!default.remote);
+        assert_eq!(default.sync_interval.as_secs(), 300);
+        let set = config(&[
+            ("BEACON_STORE_CACHE_ENABLE", "true"),
+            ("BEACON_STORE_CACHE_SYNC_INTERVAL_SECS", "0"),
+        ])
+        .store_cache;
+        assert!(set.enable);
+        assert_eq!(set.sync_interval.as_secs(), 1, "the minimum is 1 second");
     }
 
     #[test]

@@ -305,6 +305,36 @@ to all tables:
 | `BEACON_FILE_STATS_CONCURRENCY` | one quarter of the cores, minimum 2 | The files that Beacon reads at the same time, over all tables. The refreshes use part of the machine, so they do not compete with queries. Increase this value above your core count for data in object storage. |
 | `BEACON_FILE_STATS_MAX_REFRESHES` | `2` | The tables that refresh their statistics at the same time. The other tables wait for a free slot. |
 
+## Store cache
+
+The store cache keeps the file list and the file metadata of the datasets store in memory. A query
+then does not list the store again. This helps most with S3 and with large local folders. The cache
+does not hold file data.
+
+Beacon disables this feature by default. With the cache on, these rules apply:
+
+- The first query lists the full datasets store one time. Later queries read the cache.
+- An upload or a delete through Beacon shows in the next query.
+- A file that a different program changes shows after the sync interval. A background task
+  compares the cache with the store at each interval. This applies to local folders, network
+  file systems and S3.
+- An admin can compare the full cache with the store at once with
+  `POST /api/admin/store-cache/sync`.
+- Paths with a `_delta_log` folder always read the store.
+- The cache holds all files of the store and has no size limit. One file uses approximately
+  250 bytes of memory.
+
+`GET /api/admin/store-cache` returns the size and the counters of the cache.
+
+[Performance Tuning](/docs/2.1.0-rc2/server/performance-tuning#store-cache) tells when the cache
+helps and how to set the sync interval.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_STORE_CACHE_ENABLE` | `false` | Master switch for the datasets store. |
+| `BEACON_STORE_CACHE_SYNC_INTERVAL_SECS` | `300` | The seconds between two comparisons of the cache with the store. Each comparison lists the full store one time. The minimum is `1`. |
+| `BEACON_STORE_CACHE_REMOTE` | `false` | Also cache the S3, GCS and Azure stores that a query opens by URL. These caches have no admin endpoint. Each cache lists its full bucket, so do not use this setting with a very large bucket. |
+
 ## CORS
 
 | Variable | Default | Description |

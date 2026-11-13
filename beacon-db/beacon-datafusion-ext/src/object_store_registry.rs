@@ -12,6 +12,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use beacon_object_store_cache::CachedObjectStore;
+pub use beacon_object_store_cache::StoreCacheConfig;
 use datafusion::common::exec_datafusion_err;
 use datafusion::execution::object_store::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
@@ -29,6 +31,8 @@ use crate::secrets::{Secret, SecretStore};
 pub struct LazyObjectStoreRegistry {
     inner: DefaultObjectStoreRegistry,
     secrets: Arc<SecretStore>,
+    /// Cache settings for lazily built cloud stores. `None` leaves them without a cache.
+    store_cache: Option<StoreCacheConfig>,
 }
 
 impl LazyObjectStoreRegistry {
@@ -40,7 +44,16 @@ impl LazyObjectStoreRegistry {
         Self {
             inner: DefaultObjectStoreRegistry::new(),
             secrets,
+            store_cache: None,
         }
+    }
+
+    /// Put a metadata cache in front of each lazily built S3, GCS and Azure store.
+    ///
+    /// The cache is on only when `config.enable` and `config.remote` are set.
+    pub fn with_store_cache(mut self, config: StoreCacheConfig) -> Self {
+        self.store_cache = (config.enable && config.remote).then_some(config);
+        self
     }
 
     /// The secret store this registry consults; mutate it to add/remove
@@ -78,7 +91,10 @@ impl ObjectStoreRegistry for LazyObjectStoreRegistry {
         // matching secret (or the environment chain if none applies).
         let key = store_key_url(url);
         let secret = self.secrets.resolve(url);
-        let store = build_object_store(&key, secret.as_ref())?;
+        let mut store = build_object_store(&key, secret.as_ref())?;
+        if let Some(config) = self.store_cache.as_ref().filter(|_| is_cloud_scheme(key.scheme())) {
+            store = Arc::new(CachedObjectStore::new(store, config));
+        }
         self.inner.register_store(&key, store.clone());
         tracing::debug!(
             store = %key,
@@ -87,6 +103,14 @@ impl ObjectStoreRegistry for LazyObjectStoreRegistry {
         );
         Ok(store)
     }
+}
+
+/// True for the bucket stores that list by prefix. HTTP and local stores stay without a cache.
+fn is_cloud_scheme(scheme: &str) -> bool {
+    matches!(
+        scheme,
+        "s3" | "s3a" | "gs" | "az" | "azure" | "abfs" | "abfss" | "wasb" | "wasbs" | "adl"
+    )
 }
 
 /// The `scheme://authority` key an [`ObjectStoreRegistry`] uses to identify a
@@ -206,6 +230,28 @@ mod tests {
         // ...and a second returns the cached instance (same Arc).
         let second = registry.get_store(&url).unwrap();
         assert!(Arc::ptr_eq(&first, &second), "store was not cached");
+    }
+
+    #[test]
+    fn store_cache_wraps_cloud_stores_only() {
+        let on = StoreCacheConfig {
+            enable: true,
+            remote: true,
+            ..StoreCacheConfig::default()
+        };
+        let registry = LazyObjectStoreRegistry::new(Arc::new(SecretStore::new())).with_store_cache(on);
+        let name = |url: &str| registry.get_store(&Url::parse(url).unwrap()).unwrap().to_string();
+        assert!(name("s3://bucket/a").starts_with("CachedObjectStore("));
+        assert!(!name("https://example.org/a").starts_with("CachedObjectStore("));
+
+        // `remote` off leaves the stores as they are.
+        let off = StoreCacheConfig {
+            enable: true,
+            ..StoreCacheConfig::default()
+        };
+        let registry = LazyObjectStoreRegistry::new(Arc::new(SecretStore::new())).with_store_cache(off);
+        let store = registry.get_store(&Url::parse("s3://bucket/a").unwrap()).unwrap();
+        assert!(!store.to_string().starts_with("CachedObjectStore("));
     }
 
     #[test]

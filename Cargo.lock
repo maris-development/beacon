@@ -1892,6 +1892,7 @@ dependencies = [
  "base64",
  "beacon-common",
  "beacon-nd-encoding",
+ "beacon-object-store-cache",
  "blake3",
  "chrono",
  "datafusion 54.1.0",
@@ -2227,6 +2228,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-object-store-cache"
+version = "2.1.0-rc.2"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "crossbeam-skiplist",
+ "futures",
+ "object_store 0.13.2",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "beacon-plugin-formats"
 version = "2.1.0-rc.2"
 dependencies = [
@@ -2347,6 +2363,7 @@ dependencies = [
  "beacon-dap",
  "beacon-datafusion-ext",
  "beacon-mcp",
+ "beacon-object-store-cache",
  "beacon-server-config",
  "bytes",
  "datafusion 54.1.0",
@@ -2388,6 +2405,7 @@ dependencies = [
  "beacon-arrow-zarr",
  "beacon-common",
  "beacon-datafusion-ext",
+ "beacon-object-store-cache",
  "envconfig",
  "object_store 0.13.2",
  "thiserror 2.0.20",

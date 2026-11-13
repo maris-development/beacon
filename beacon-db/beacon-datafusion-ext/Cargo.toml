@@ -45,6 +45,7 @@ geoarrow-array = { workspace = true }
 geoarrow-schema = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
+beacon-object-store-cache = { path = "../beacon-object-store-cache" }
 beacon-nd-encoding = { path = "../beacon-nd-encoding" }
 
 [dev-dependencies]
