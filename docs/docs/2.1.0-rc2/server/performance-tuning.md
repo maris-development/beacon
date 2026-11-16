@@ -80,6 +80,69 @@ address form. Every listing and every read on object storage costs network laten
 - Put Beacon near the object store in the network. This gives better performance.
 - Are the listings slow? Then use a [crawler](/docs/2.1.0-rc2/server/crawlers). It keeps the
   catalog current in the background. Beacon then does not scan at query time.
+- Does a query on file paths list the store each time? Then use the [store cache](#store-cache).
+
+## Store cache
+
+The store cache keeps the file list and the file metadata of the datasets store in memory. A query
+then sends no listing request and no metadata request to the store. The cache does not hold file
+data.
+
+Beacon disables the cache by default. Set `BEACON_STORE_CACHE_ENABLE=true` to use it.
+
+### When the cache helps
+
+A listing costs most where each folder needs a network request. Use the cache in these cases:
+
+- The datasets store is an S3-compatible bucket.
+- The datasets folder is on a network file system, such as NFS, SMB or CephFS.
+- The datasets folder holds a large number of files or folders.
+- Queries use glob paths, such as `argo/**/*.nc`, and run often.
+
+The cache gives a small gain for a small folder on a local disk. The operating system already
+keeps that folder list in memory.
+
+### How the cache works
+
+- The first query lists the full datasets store one time. This query is slower than the others.
+- Later queries read the file list and the file metadata from memory.
+- An upload or a delete through Beacon shows in the next query.
+- A background task lists the full store at each sync interval. A file that a different program
+  changes shows after that sync.
+
+### `BEACON_STORE_CACHE_SYNC_INTERVAL_SECS`
+
+This value sets the seconds between two listings of the full store. The default is `300`.
+
+- A lower value shows external changes sooner. It also sends more listing requests to the store.
+- A higher value decreases the load on the store. Use it for a large tree on a network file
+  system, where each listing is a metadata load on the file server.
+- Do you know when the files change? Then keep a high value, and call
+  `POST /api/admin/store-cache/sync` after each change. The change then shows at once.
+
+### Memory
+
+The cache holds all files of the store. One file uses approximately 250 bytes. A store with
+10 million files uses approximately 2.5 GB. The cache has no size limit, so calculate this value
+before you enable the cache for a very large store.
+
+This memory is outside `BEACON_VM_MEMORY_SIZE`. The two values add up.
+
+### Remote stores
+
+`BEACON_STORE_CACHE_REMOTE=true` also caches the S3, GCS and Azure stores that a query opens by
+URL. Each of these caches lists its full bucket. Do not use this setting with a very large bucket
+that holds data for other programs too.
+
+### Check the result
+
+`GET /api/admin/store-cache` returns the counters of the cache. A `hits` value that increases with each query
+shows that queries read the cache. `bypassed` counts the calls that go to the store, and each read
+of file data is one of them. `last_sync_ms` gives the duration of the last
+listing of the store. Keep the sync interval much longer than this duration.
+
+[Store cache](/docs/2.1.0-rc2/server/configuration#store-cache) in the configuration chapter
+gives the full list of rules and variables.
 
 ## File statistics
 

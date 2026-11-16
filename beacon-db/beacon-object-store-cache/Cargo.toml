@@ -1,0 +1,22 @@
+[package]
+name = "beacon-object-store-cache"
+version.workspace = true
+edition = "2024"
+
+rust-version.workspace = true
+
+[dependencies]
+object_store = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+crossbeam-skiplist = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The `integration` feature exposes the object_store conformance suite.
+object_store = { workspace = true, features = ["integration"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

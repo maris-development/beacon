@@ -18,6 +18,7 @@
 //! delete a file a table still depends on — belongs to the caller, which can see
 //! the catalog through the runtime.
 
+use beacon_object_store_cache::head_uncached;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use object_store::{path::Path, GetResult, ObjectStore, ObjectStoreExt, WriteMultipart};
@@ -150,7 +151,8 @@ where
     S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
 {
     if !overwrite {
-        match store.head(path).await {
+        // Read the store, not the cache: a file the cache does not know must block the upload.
+        match head_uncached(store, path).await {
             Ok(_) => return Err(FileError::AlreadyExists(path.to_string())),
             Err(object_store::Error::NotFound { .. }) => {}
             Err(e) => return Err(e.into()),
@@ -195,7 +197,7 @@ pub async fn download_dataset(store: &dyn ObjectStore, path: &Path) -> Result<Ge
 /// rather than a silent success. The caller is responsible for any dependency
 /// check (e.g. tables backed by this file) before invoking this.
 pub async fn delete_dataset(store: &dyn ObjectStore, path: &Path) -> Result<(), FileError> {
-    match store.head(path).await {
+    match head_uncached(store, path).await {
         Ok(_) => {}
         Err(object_store::Error::NotFound { .. }) => {
             return Err(FileError::NotFound(path.to_string()))
