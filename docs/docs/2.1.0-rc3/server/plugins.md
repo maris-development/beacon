@@ -1,8 +1,14 @@
 ---
-description: Extend a Beacon server with plugins. Add SQL functions, native functions, file formats and table types. Start a new plugin from the beacon-plugin-template repository.
+description: Beta. Extend a Beacon server with plugins. Add SQL functions, native functions, file formats and table types. Start a new plugin from the beacon-plugin-template repository.
 ---
 
-# Plugins
+# Plugins <Badge type="warning" text="beta" />
+
+::: warning Beta. In development
+Plugins are in development. The plugin format, the SQL statements and the SDK can change in a
+new release without notice. Do not build production workflows on them yet. Report problems in the
+[Beacon issue tracker](https://github.com/maris-development/beacon/issues).
+:::
 
 A plugin adds features to a running Beacon server. You do not build a new Beacon release, and you do
 not change the server image.

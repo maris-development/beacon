@@ -1,8 +1,14 @@
 ---
-description: Add functions, file formats and table types to Beacon with INSTALL and UNINSTALL. Install a plugin from a file, a web server or a GitHub release.
+description: Beta. Add functions, file formats and table types to Beacon with INSTALL and UNINSTALL. Install a plugin from a file, a web server or a GitHub release.
 ---
 
-# Plugins
+# Plugins <Badge type="warning" text="beta" />
+
+::: warning Beta. In development
+Plugins are in development. The plugin format, the SQL statements and the SDK can change in a
+new release without notice. Do not build production workflows on them yet. Report problems in the
+[Beacon issue tracker](https://github.com/maris-development/beacon/issues).
+:::
 
 A plugin adds features to Beacon. You do not build a new Beacon release.
 

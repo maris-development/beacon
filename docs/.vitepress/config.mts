@@ -274,7 +274,7 @@ export default defineConfig({
                 { text: 'Secrets', link: '/docs/2.1.0-rc3/sql/secrets' },
               ]
             },
-            { text: 'Plugins', link: '/docs/2.1.0-rc3/server/plugins' },
+            { text: 'Plugins (beta)', link: '/docs/2.1.0-rc3/server/plugins' },
           ]
         },
         {
@@ -296,7 +296,7 @@ export default defineConfig({
             { text: 'COMMENT ON', link: '/docs/2.1.0-rc3/sql/comment-on' },
             { text: 'Remote Tables & ATTACH', link: '/docs/2.1.0-rc3/sql/remote-tables' },
             { text: 'CREATE SECRET', link: '/docs/2.1.0-rc3/sql/secrets' },
-            { text: 'INSTALL (Plugins)', link: '/docs/2.1.0-rc3/sql/plugins' },
+            { text: 'INSTALL (Plugins, beta)', link: '/docs/2.1.0-rc3/sql/plugins' },
             { text: 'SUMMARIZE', link: '/docs/2.1.0-rc3/sql/summarize' },
             { text: 'Table Functions', link: '/docs/2.1.0-rc3/sql/table-functions' },
             { text: 'Introspection', link: '/docs/2.1.0-rc3/sql/table-functions-utility' },
@@ -314,7 +314,6 @@ export default defineConfig({
             { text: 'JSON Queries', link: '/docs/2.1.0-rc3/api/querying/json' },
             { text: 'Examples', link: '/docs/2.1.0-rc3/api/querying/examples' },
             { text: 'Exploring the catalog', link: '/docs/2.1.0-rc3/api/exploring-data' },
-            { text: 'OPeNDAP (DAP2)', link: '/docs/2.1.0-rc3/api/opendap' },
           ]
         },
         {
@@ -347,7 +346,7 @@ export default defineConfig({
                 { text: 'Query Data on S3', link: '/docs/2.1.0-rc3/guides/query-s3' },
                 { text: 'Export Query Results', link: '/docs/2.1.0-rc3/guides/export-results' },
                 { text: 'Speed Up Slow Queries', link: '/docs/2.1.0-rc3/guides/speed-up-queries' },
-                { text: 'Write a Plugin', link: '/docs/2.1.0-rc3/guides/write-a-plugin' },
+                { text: 'Write a Plugin (beta)', link: '/docs/2.1.0-rc3/guides/write-a-plugin' },
               ]
             },
           ]

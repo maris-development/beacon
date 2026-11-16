@@ -70,7 +70,7 @@ rejects that `CREATE`. Beacon never writes plaintext.
 | --- | --- | --- |
 | `BEACON_SECRETS_KEY` | _(none)_ | Base64-encoded **32-byte** key (e.g. `openssl rand -base64 32`). If set, it must decode to exactly 32 bytes or Beacon exits at startup. Losing or changing it makes previously stored credentials undecryptable, recreate those tables with the new key. |
 
-## Plugins
+## Plugins <Badge type="warning" text="beta" />
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -144,14 +144,6 @@ SQL authenticates with a bearer token. The HTTP API works differently.
 | `BEACON_FLIGHT_SQL_TOKEN_TTL_SECS` | `3600` | Lifetime (seconds) of an issued session token. |
 | `BEACON_FLIGHT_SQL_STATEMENT_TTL_SECS` | `300` | Lifetime (seconds) of a server-side statement handle. |
 | `BEACON_FLIGHT_SQL_PREPARED_STATEMENT_TTL_SECS` | `900` | Lifetime (seconds) of a prepared-statement handle. |
-
-## OPeNDAP (DAP2)
-
-Beacon serves each table as a DAP2 dataset under `/dap`. See [OPeNDAP (DAP2)](/docs/2.1.0-rc3/api/opendap).
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `BEACON_DAP_ENABLED` | `true` | Serve the DAP2 endpoint. `false`, `0` or `off` turns it off. |
 
 ## MCP server <Badge type="warning" text="beta" />
 

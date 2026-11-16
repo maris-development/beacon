@@ -1,8 +1,14 @@
 ---
-description: Write a Beacon plugin with SQL functions, native functions, file formats or table types. Pack it, test it on a local server and release it on GitHub.
+description: Beta. Write a Beacon plugin with SQL functions, native functions, file formats or table types. Pack it, test it on a local server and release it on GitHub.
 ---
 
-# Write a plugin
+# Write a plugin <Badge type="warning" text="beta" />
+
+::: warning Beta. In development
+Plugins are in development. The plugin format, the SQL statements and the SDK can change in a
+new release without notice. Do not build production workflows on them yet. Report problems in the
+[Beacon issue tracker](https://github.com/maris-development/beacon/issues).
+:::
 
 A plugin adds functions, file formats or table types to Beacon. This guide shows how to write,
 pack, test and release one. To install a plugin, read [Plugins](/docs/2.1.0-rc3/sql/plugins).
