@@ -51,7 +51,7 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   `table_statistics('<table>')` shows the statistics to the super-user. `DROP TABLE` deletes them.
   `BEACON_FILE_STATS_MAX_REFRESHES`, 2 by default, limits the tables that refresh at the same time.
   The `enable_statistics` option of a NetCDF, HDF5 or Zarr table now has effect. See
-  [File statistics](docs/docs/2.1.0-rc2/internals/file-statistics.md).
+  [File statistics](docs/docs/2.1.0-rc3/internals/file-statistics.md).
 - **Plugin functions get literal arguments as scalars.** A native plugin function gets each literal
   argument as `ColumnarValue::Scalar`, not as an array with one copy per row. So a function can
   require a constant argument, or prepare a constant one time per batch. The plugin SDK ABI is now
