@@ -64,15 +64,27 @@ impl From<SchemaRef> for LabeledSchema {
     }
 }
 
-/// Name each schema after the object at the same index. A schema past the end
-/// of `objects` gets no name.
+/// Name each schema after the object at the same index, and put the schemas in
+/// path order. A schema past the end of `objects` gets no name and comes last.
+///
+/// A merge follows the order of its sources. The path order makes the result
+/// the same for each listing order.
 pub fn label_by_object(objects: &[ObjectMeta], schemas: &[SchemaRef]) -> Vec<LabeledSchema> {
-    schemas
-        .iter()
-        .enumerate()
-        .map(|(index, schema)| match objects.get(index) {
-            Some(object) => LabeledSchema::new(Arc::clone(schema), object.location.as_ref()),
-            None => LabeledSchema::unlabeled(Arc::clone(schema)),
+    let mut order: Vec<usize> = (0..schemas.len()).collect();
+    // The sort is stable, so the schemas without an object keep their order.
+    order.sort_by(
+        |&left, &right| match (objects.get(left), objects.get(right)) {
+            (Some(left), Some(right)) => left.location.cmp(&right.location),
+            (left, right) => left.is_none().cmp(&right.is_none()),
+        },
+    );
+    order
+        .into_iter()
+        .map(|index| match objects.get(index) {
+            Some(object) => {
+                LabeledSchema::new(Arc::clone(&schemas[index]), object.location.as_ref())
+            }
+            None => LabeledSchema::unlabeled(Arc::clone(&schemas[index])),
         })
         .collect()
 }
@@ -315,6 +327,35 @@ mod tests {
             ArrowError::SchemaError(message) => message,
             other => panic!("expected SchemaError, got {other:?}"),
         }
+    }
+
+    fn object(path: &str) -> ObjectMeta {
+        ObjectMeta {
+            location: object_store::path::Path::from(path),
+            last_modified: Default::default(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        }
+    }
+
+    /// A local file system lists in no fixed order. The merge order must not
+    /// follow it.
+    #[test]
+    fn labels_follow_the_path_order_and_not_the_listing_order() {
+        let objects = [object("dir/b.csv"), object("dir/a.csv")];
+        let schemas = [
+            schema_ref(&[("of_b", DataType::Utf8)]),
+            schema_ref(&[("of_a", DataType::Float64)]),
+            schema_ref(&[("no_object", DataType::Int64)]),
+        ];
+
+        let labeled = label_by_object(&objects, &schemas);
+
+        let labels: Vec<_> = labeled.iter().map(|l| l.label.as_deref()).collect();
+        assert_eq!(labels, [Some("dir/a.csv"), Some("dir/b.csv"), None]);
+        let first_fields: Vec<_> = labeled.iter().map(|l| names(&l.schema)[0]).collect();
+        assert_eq!(first_fields, ["of_a", "of_b", "no_object"]);
     }
 
     #[test]
