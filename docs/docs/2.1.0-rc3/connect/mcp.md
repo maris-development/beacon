@@ -1,5 +1,5 @@
 ---
-description: Beta. Connect an AI agent to Beacon over the Model Context Protocol (MCP). The agent lists tables, reads their comments and runs read-only SQL.
+description: Beta. Connect an AI agent to Beacon over the Model Context Protocol (MCP). Describe the tables with COMMENT ON, and let the AI Agent query them.
 ---
 
 # MCP server <Badge type="warning" text="beta" />
@@ -10,101 +10,75 @@ new release without notice. Do not build production workflows on it yet. Report 
 [Beacon issue tracker](https://github.com/maris-development/beacon/issues).
 :::
 
-Beacon is a Model Context Protocol (MCP) server. An MCP client, for example Claude Code or Claude
-Desktop, connects an AI agent to Beacon. The agent then finds the tables, reads what each table
-and column holds, and runs read-only SQL.
+Beacon is queryable by agents over the Model Context Protocol (MCP). An AI agent can directly connect to Beacon's MCP Server, discover the tables and
+run read-only SQL.
 
-The agent learns the meaning of the data from the table and column comments. Add comments with
-[`COMMENT ON`](/docs/2.1.0-rc3/sql/comment-on) before you connect an agent. A table needs no other
-MCP configuration.
+The agent knows only what the comments tell it. The procedure thus has two parts:
 
-## Endpoint
+1. [Prepare the server](#prepare-the-server): add comments and give the agent context.
+2. [Connect an agent](#connect-an-agent): add the endpoint to the MCP client.
+
+## Prepare the server
+
+### 1. Describe the tables
+
+Add a comment to each table and each column that provides the agent of context. A table needs no other MCP
+configuration.
+
+```sql
+COMMENT ON TABLE ctd IS 'CTD casts in the North Sea, 2024. One row per depth level. Source: RV Pelagia';
+COMMENT ON COLUMN ctd.depth IS 'Depth below the sea surface. Unit: m';
+COMMENT ON COLUMN ctd.temp IS 'Sea water temperature (ITS-90). Unit: degC';
+COMMENT ON COLUMN ctd.qc IS 'Quality flag (SeaDataNet L20): 1 good, 4 bad';
+```
+
+Only the super-user can set a comment. The agent reads the comments as follows:
+
+- The table comment tells the agent what the table consists of.
+- The column comment tells the agent what a column holds. Give the unit and the code list.
+- A column without a comment shows the `description` metadata of the source file, if the file has
+  it.
+
+Create a view with its own comment to give the agent a subset of a table. See
+[`COMMENT ON`](/docs/2.1.0-rc3/sql/comment-on) for the full syntax and for more guidelines.
+
+### 2. Allow the public host name
 
 Beacon serves MCP at `/mcp` with the streamable HTTP transport. With a base path, the endpoint is
 `{BEACON_BASE_PATH}/mcp`.
 
-```
-http://localhost:5001/mcp
-```
+By default, `/mcp` accepts only requests with a loopback `Host` header: `localhost`, `127.0.0.1`
+and `::1`. Another `Host` gets `403 Forbidden`. This protects against DNS rebinding.
 
-The endpoint is on by default. Set `BEACON_MCP_ENABLED=false` to turn it off.
-
-## Tools
-
-The tool set is fixed. Each tool is read-only.
-
-| Tool | Arguments | Result |
-| --- | --- | --- |
-| `list_tables` | _(none)_ | The tables that the caller can read, each with its table comment. |
-| `describe_table` | `table_name` | The table comment and the columns. Each column has a name, a data type, nullability and a description. |
-| `run_sql` | `sql` | The rows as JSON. Maximum 1000 rows. |
-| `export_query` | `sql`, `format` | A recipe to download the full result as a file. The tool does not run the query. |
-
-### Column descriptions
-
-`describe_table` gives the column comment as the description. A column without a comment gives
-the `description` metadata of the source file, if the file has it.
-
-### Row limit of `run_sql`
-
-`run_sql` returns a preview. A result with more than 1000 rows stops at 1000 rows. The response
-then is an object with `"truncated": true`, the rows and a hint to use `export_query`.
-
-### Recipe of `export_query`
-
-`export_query` accepts a statement that starts with `SELECT` or `WITH`. `format` is `parquet`
-(the default), `arrow` or `csv`. The tool returns:
-
-- The `POST /api/query` request that gives the file.
-- A Python script that sends the request and reads the file into a pandas DataFrame.
-
-The script has the placeholders `BEACON_URL` and `AUTH`. Replace them with the server address and
-your credentials. Large results thus go into a file and not into the context of the agent.
-
-## Access control
-
-MCP uses the same authentication as the HTTP API. Send an `Authorization` header:
-
-- `Basic <base64 username:password>`
-- `Bearer <token>`, for example an OIDC token
-
-A request without credentials runs as the `anonymous` user when anonymous access is on.
-
-Each tool call runs as the caller. The roles of the caller set which tables `list_tables` shows and
-which rows the queries read. MCP is always read-only. The super-user also cannot run DDL or DML
-over MCP.
-
-The super-user has no roles. With `BEACON_AUTH_ENFORCE=true`, the super-user therefore reads no
-table over MCP. Use a user with read grants for an AI agent. See
-[Access Control](/docs/2.1.0-rc3/security/access-control#mcp-is-read-only).
-
-## Allowed hosts
-
-Against DNS rebinding, `/mcp` accepts only requests with a loopback `Host` header: `localhost`,
-`127.0.0.1` and `::1`. A request with another `Host` gets `403 Forbidden`.
-
-Behind a public name, add the name to `BEACON_MCP_ALLOWED_HOSTS`:
+Add the public name of the server to `BEACON_MCP_ALLOWED_HOSTS`:
 
 ```bash
 BEACON_MCP_ALLOWED_HOSTS=beacon.example.org,beacon.example.org:8443
 ```
 
-- An entry is a host or a `host:port`.
-- The loopback hosts stay allowed.
-- The entry `*` accepts every host. This turns the check off.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_MCP_ENABLED` | `true` | Serve the MCP endpoint. `false`, `0` or `off` turns it off. |
+| `BEACON_MCP_ALLOWED_HOSTS` | _(empty)_ | Comma-separated `Host` values that `/mcp` accepts in addition to the loopback hosts. An entry is a host or a `host:port`. `*` accepts every host. |
 
-## Connect a client
+## Connect an agent
+
+MCP uses the same authentication as the HTTP API. Send the credentials of the agent user in an
+`Authorization` header:
+
+- `Basic <base64 of username:password>`
+- `Bearer <token>`, for example an OIDC token
 
 ### Claude Code
 
 ```bash
-claude mcp add --transport http beacon http://localhost:5001/mcp
+claude mcp add --transport http beacon https://beacon.example.org/mcp --header "Authorization: Basic <base64>"
 ```
 
-Add a header for a server that needs credentials:
+A local server with anonymous access needs no header:
 
 ```bash
-claude mcp add --transport http beacon https://beacon.example.org/mcp --header "Authorization: Bearer <token>"
+claude mcp add --transport http beacon http://localhost:5001/mcp
 ```
 
 ### Other clients
@@ -125,15 +99,26 @@ Most clients take a JSON configuration. Give the URL and, if necessary, the head
 
 The field names are different in each client. Refer to the documentation of your client.
 
-## Configuration
+### Do a test of the connection
 
-| Variable | Default | Description |
+Ask the agent which tables it can read. The agent calls `list_tables` and shows each table with
+its comment.
+
+- An empty list means that the user has no read grant.
+- A table without a description means that the table has no comment.
+
+## What the agent can do
+
+The tool set is fixed. Each tool is read-only and reads only the tables in the default schema.
+
+| Tool | Arguments | Result |
 | --- | --- | --- |
-| `BEACON_MCP_ENABLED` | `true` | Serve the MCP endpoint. `false`, `0` or `off` turns it off. |
-| `BEACON_MCP_ALLOWED_HOSTS` | _(empty)_ | Comma-separated `Host` values that `/mcp` accepts in addition to the loopback hosts. `*` accepts every host. |
+| `list_tables` | _(none)_ | The tables that the caller can read, each with its table comment. |
+| `describe_table` | `table_name` | The table comment and the columns. Each column has a name, a data type, nullability and a description. |
+| `run_sql` | `sql` | The rows as JSON. A result with more than 1000 rows stops at 1000 rows and has `"truncated": true`. |
+| `export_query` | `sql`, `format` | A `POST /api/query` request and a Python script that download the full result as a file. The tool does not run the query. |
 
-## Limits
+`export_query` accepts a `SELECT` or `WITH` statement. `format` is `parquet` (the default),
+`arrow` or `csv`. Large results thus go into a file and not into the context of the agent.
 
-- The tools read only the tables in the default schema.
-- The Beacon home page does not show the MCP endpoint.
-- A tool error returns as a tool result with the error text, so the agent can read it.
+A tool error returns as a tool result with the error text, so the agent can read it.
