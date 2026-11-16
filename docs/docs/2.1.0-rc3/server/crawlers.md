@@ -1,11 +1,11 @@
 # Crawlers
 
 ```sql
-CREATE CRAWLER argo
-ON 'argo/'
+CREATE CRAWLER cruises
+ON 'cruises/'
 WITH ('format' 'parquet', 'schedule' '15m');
 
-RUN CRAWLER argo;
+RUN CRAWLER cruises;
 ```
 
 A **crawler** finds the datasets in the storage of Beacon. It registers them as
@@ -45,7 +45,7 @@ CREATE [ OR REPLACE ] CRAWLER <name>
 - **`<name>`**: a unique crawler name. A name that exists gives an error.
 - **`OR REPLACE`**: replace the crawler with the same name. Beacon stops its old triggers.
 - **`ON '<prefix>'`**: the storage prefix to scan, relative to the datasets root, for example
-  `argo/`. It equals the `target_prefix` option.
+  `cruises/`. It equals the `target_prefix` option.
 - **`WITH (...)`**: the key and value options. They use the same form as
   `CREATE EXTERNAL TABLE … OPTIONS (…)`.
 
@@ -62,10 +62,12 @@ CREATE [ OR REPLACE ] CRAWLER <name>
 The crawler copies any **other** key in `WITH (...)` into the format `OPTIONS` of each table that it
 finds. `'read_dimensions' 'lat,lon'` for NetCDF is an example. `'use_statistics_pruning' 'true'`
 gives each table [file statistics](/docs/2.1.0-rc3/internals/file-statistics).
+`'skip_invalid_files_on_scan' 'true'` lets each table skip a file that a query cannot read. See
+[Keys of each table](/docs/2.1.0-rc3/sql/create-external-table#keys-of-each-table).
 
 ```sql
 CREATE CRAWLER profiles
-ON 'argo/'
+ON 'cruises/'
 WITH (
   'format'            'parquet,nc',
   'detect_partitions' 'true',
@@ -111,16 +113,16 @@ Removes the crawler definition and stops its triggers. **Beacon keeps the tables
 `detect_partitions` is on by default. The crawler then recognizes a Hive-style directory partition:
 
 ```
-argo/year=2024/month=01/part-0.parquet
-argo/year=2024/month=02/part-1.parquet
-argo/year=2025/month=01/part-2.parquet
+cruises/year=2024/month=01/part-0.parquet
+cruises/year=2024/month=02/part-1.parquet
+cruises/year=2025/month=01/part-2.parquet
 ```
 
 These files become one table with a partition by `year` and `month`. The crawler adds the partition
 columns to the table schema. Beacon can then prune the partitions:
 
 ```sql
-SELECT count(*) FROM argo WHERE year = '2024' AND month = '01';
+SELECT * FROM cruises WHERE year = '2024' AND month = '01';
 ```
 
 The crawler groups the files with the same format and the same base prefix into one table. It reads
@@ -129,8 +131,8 @@ the partition columns from the `key=value` parts of the path.
 ## Table naming
 
 The crawler names a group after the **last part** of its base prefix. The files under
-`data/argo_floats/…` therefore give a table named `argo_floats`. Set `table_naming` to
-`crawler_prefixed` to add the crawler name, as in `<crawler>_argo_floats`. The crawler converts each
+`data/cruise_tracks/…` therefore give a table named `cruise_tracks`. Set `table_naming` to
+`crawler_prefixed` to add the crawler name, as in `<crawler>_cruise_tracks`. The crawler converts each
 name into a valid SQL identifier. It also resolves a name conflict in the same way each time.
 
 ## Ownership

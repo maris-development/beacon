@@ -62,7 +62,7 @@ across the 400 levels. See [Arrays to tables](/docs/2.1.0-rc3/arrays-to-tables).
 Check the size:
 
 ```sql
-SELECT count(*) AS rows FROM read_netcdf('argo/2024/01/*.nc');
+SELECT count(TEMP) AS rows FROM read_netcdf('argo/2024/01/*.nc');
 ```
 
 | rows |

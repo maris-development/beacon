@@ -63,7 +63,7 @@ contain `since`, as in `days since 1950-01-01`.
 Check what the file declares:
 
 ```sql
-SELECT DISTINCT "time.units" FROM read_netcdf('argo/*.nc');
+SELECT DISTINCT "time.units" FROM read_netcdf('cruises/*.nc');
 ```
 
 ### The read fails on the calendar
@@ -118,8 +118,8 @@ datasets store is that bucket. See [NetCDF](/docs/2.1.0-rc3/formats/netcdf).
 Check the pattern reaches into subdirectories. `*` stops at one level. `**` recurses:
 
 ```sql
-SELECT count(*) FROM read_netcdf('argo/*.nc');      -- only argo/
-SELECT count(*) FROM read_netcdf('argo/**/*.nc');   -- every level below argo/
+SELECT * FROM read_parquet('cruises/*.parquet');      -- only cruises/
+SELECT * FROM read_parquet('cruises/**/*.parquet');   -- every level below cruises/
 ```
 
 ### A column has two types across the files
@@ -128,19 +128,30 @@ A collection can type one column as a number in one file and as a string in anot
 both, so the table answers no query:
 
 ```
-Incompatible types for field 'platform': Int32 in 'argo/2019.nc' vs Utf8 in 'argo/2020.nc'
+Incompatible types for field 'platform': Int32 in 'cruises/2019.nc' vs Utf8 in 'cruises/2020.nc'
 ```
 
 The message names the column, both types and both files. Fix the files, or drop the column from the
-table, or keep the type of the first file:
+table, or keep the type of the first file. An external table takes the rule from its own `OPTIONS`:
+
+```sql
+CREATE OR REPLACE EXTERNAL TABLE cruises
+STORED AS NC
+LOCATION 'cruises/**/*.nc'
+OPTIONS ('type_widening_on_conflict' 'keep_first')
+```
+
+The key `type_widening` takes `default` or `numpy` in the same way. See
+[Schema inference](/docs/2.1.0-rc3/sql/create-external-table#schema-inference). A `read_*()`
+function takes the rule from the server:
 
 ```bash
 BEACON_TYPE_WIDENING_ON_CONFLICT=keep_first
 ```
 
 The table then reports the type of the first file. Every other file casts to it, and a value that
-type cannot hold reads as `NULL`. The first file is the first in listing order, so a store that
-lists in two orders reports two types. A numeric pair, such as `Int32` beside `Float64`, widens
+type cannot hold reads as `NULL`. The first file of an external table is the first in path order.
+A numeric pair, such as `Int32` beside `Float64`, widens
 either way. A CSV collection parses every column as text under this setting and casts it afterwards,
 because a CSV file states no types.
 
@@ -157,6 +168,20 @@ listing order does not change the result. The numpy strategy also joins a boolea
 those pairs. A number beside a timestamp stays a conflict under both strategies, and
 `BEACON_TYPE_WIDENING_ON_CONFLICT` settles it. See
 [Configuration](/docs/2.1.0-rc3/server/configuration#query-engine).
+
+### One invalid file fails each query on a table
+
+A collection can hold a file that Beacon cannot read. A query on the external table then fails, and
+the error names the file:
+
+```
+external table 'cruises' (netcdf): cannot read file 'cruises/2019/a.nc': ...
+```
+
+Repair or delete the file. To query the other files without it, set
+`'skip_invalid_files_on_scan' 'true'` in the `OPTIONS` of the table. If `CREATE EXTERNAL TABLE`
+fails on the file, also set `'skip_invalid_files_on_inference' 'true'`. See
+[Skip invalid files](/docs/2.1.0-rc3/sql/create-external-table#skip-invalid-files).
 
 ### New files do not appear
 

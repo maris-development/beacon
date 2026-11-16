@@ -31,10 +31,10 @@ Beacon resolves `LOCATION` against its storage root. Give a folder or a glob pat
 
 ```sql
 -- Entire folder
-CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/'
+CREATE EXTERNAL TABLE cruises STORED AS NC LOCATION 'cruises/'
 
 -- Explicit glob
-CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
+CREATE EXTERNAL TABLE cruises STORED AS NC LOCATION 'cruises/**/*.nc'
 ```
 
 ## Formats
@@ -88,9 +88,9 @@ behaviour and for geometry queries.
 Beacon skips the registration if the table name already exists. Beacon returns no error:
 
 ```sql
-CREATE EXTERNAL TABLE IF NOT EXISTS argo
+CREATE EXTERNAL TABLE IF NOT EXISTS cruises
 STORED AS NC
-LOCATION 'argo/**/*.nc'
+LOCATION 'cruises/**/*.nc'
 ```
 
 ## `OR REPLACE`
@@ -98,9 +98,9 @@ LOCATION 'argo/**/*.nc'
 Register the table again. Beacon overwrites the existing definition:
 
 ```sql
-CREATE OR REPLACE EXTERNAL TABLE argo
+CREATE OR REPLACE EXTERNAL TABLE cruises
 STORED AS NC
-LOCATION 'argo/**/*.nc'
+LOCATION 'cruises/**/*.nc'
 ```
 
 ## `PARTITIONED BY`
@@ -138,9 +138,9 @@ directories, so a path holds no partition value.
 the table definition, so a restart keeps them:
 
 ```sql
-CREATE EXTERNAL TABLE argo
+CREATE EXTERNAL TABLE cruises
 STORED AS NC
-LOCATION 'argo/**/*.nc'
+LOCATION 'cruises/**/*.nc'
 OPTIONS ('read_dimensions' 'time,latitude,longitude')
 ```
 
@@ -167,12 +167,93 @@ These keys apply to a table of each file format:
 | `use_statistics_pruning` | `false` | Keep the [file statistics](/docs/2.1.0-rc3/internals/file-statistics) of this table, and prune the files of a query on them. |
 | `statistics_columns` | each column with a range | The columns to keep a range for, separated by a comma. A table with more than 1,000 range columns needs this key. |
 | `statistics_refresh_interval` | `900` | The seconds between two refreshes of the statistics of this table. |
+| `skip_invalid_files_on_scan` | `false` | Skip a file that a query cannot open or read. Without it the query fails, and the error names the file. See [Skip invalid files](#skip-invalid-files). |
+| `skip_invalid_files_on_inference` | `false` | Skip a file that schema inference cannot read. Without it `CREATE EXTERNAL TABLE` fails, and the error names the file. See [Skip invalid files](#skip-invalid-files). |
+| `parallel_schema_inference` | `false` | Infer the schemas of the files on parallel tasks. See [Schema inference](#schema-inference). |
+| `type_widening` | `default` | The rule that merges a column with two types across the files: `default` or `numpy`. See [Schema inference](#schema-inference). |
+| `type_widening_on_conflict` | `fail` | What the merge does with two types that the rule cannot merge: `fail` or `keep_first`. See [Schema inference](#schema-inference). |
+
+A value that a key of this table cannot read is an error. `'type_widening' 'polars'` is an example.
+
+### Skip invalid files
+
+A collection can hold a file that Beacon cannot read. A damaged file is an example. By default, that
+file fails each query that reads it:
+
+```
+external table 'cruises' (netcdf): cannot read file 'cruises/2019/a.nc': ...
+```
+
+The error names the table, the file type and the file. It also tells if the open or the read of the
+file failed. Two keys skip such a file:
+
+```sql
+CREATE EXTERNAL TABLE cruises
+STORED AS NC
+LOCATION 'cruises/**/*.nc'
+OPTIONS (
+  'skip_invalid_files_on_inference' 'true',
+  'skip_invalid_files_on_scan' 'true'
+)
+```
+
+| Key | Applies to | Effect |
+| --- | ---------- | ------ |
+| `skip_invalid_files_on_inference` | `CREATE EXTERNAL TABLE` and [`REFRESH`](#refresh) | Beacon merges the schemas of the files that it can read. The statement fails only if Beacon can read no file. |
+| `skip_invalid_files_on_scan` | Each query on the table | The file ends at its error. The query continues with the next file. |
+
+The two keys do not depend on each other. A table with only `skip_invalid_files_on_inference` still
+fails a query that reads the invalid file.
+
+Beacon writes a `warn` log line for each file that it skips. The line names the file and the error.
+`EXPLAIN ANALYZE` shows the number of files that a query skipped as `skipped_file_errors`.
+
+::: warning A skip removes rows without an error
+A query on a table with `skip_invalid_files_on_scan` returns no error for an invalid file. The result
+does not hold the rows of that file. A read can fail after the first rows of a file. The result then
+keeps those first rows. Examine the server log to find the files that Beacon skipped.
+:::
+
+A schema inference always skips an empty file. This needs no key.
+
+### Schema inference
+
+Beacon infers the schema of a table from its files when you create the table. It reads the schema of
+each file and merges the schemas in path order. Beacon stores the result with the table definition.
+[`REFRESH`](#refresh) infers the schema again.
+
+Two files can give one column two types. `type_widening` sets the rule that merges them:
+
+- `default` widens inside one type family: a wider integer, a finer timestamp, a longer string.
+- `numpy` promotes as `numpy.result_type` does. A number beside a string reads as text.
+
+`type_widening_on_conflict` sets what Beacon does with two types that the rule cannot merge:
+
+- `fail` refuses the table. The error names the column, the two types and the two files.
+- `keep_first` keeps the type of the first file in path order. Beacon casts each other file to that
+  type. A value that the type cannot hold reads as `NULL`.
+
+```sql
+CREATE EXTERNAL TABLE cruises
+STORED AS NC
+LOCATION 'cruises/**/*.nc'
+OPTIONS ('type_widening' 'numpy', 'type_widening_on_conflict' 'keep_first')
+```
+
+An external table takes these two rules from its own `OPTIONS`. The server variables
+`BEACON_TYPE_WIDENING_STRATEGY` and `BEACON_TYPE_WIDENING_ON_CONFLICT` do not change them.
+[Configuration](/docs/2.1.0-rc3/server/configuration#query-engine) gives the full rule of each
+value.
+
+By default, one task infers the schemas of the files. The file reads overlap, but the CPU work uses
+one core. `'parallel_schema_inference' 'true'` gives each file its own task, so the CPU work uses
+more cores. Set it for a table with many files. The merged schema does not change.
 
 ### Keys of each format
 
 | `STORED AS` | Keys | Details |
 | ----------- | ---- | ------- |
-| `NC` | `read_dimensions`, `use_rust_reader`, `enable_statistics` | [NetCDF](/docs/2.1.0-rc3/formats/netcdf#options) |
+| `NC` | `read_dimensions`, `skip_unbroadcastable`, `skip_invalid_files`, `use_rust_reader`, `enable_statistics` | [NetCDF](/docs/2.1.0-rc3/formats/netcdf#options) |
 | `HDF5`, `H5` | `read_dimensions`, `use_rust_reader`, `enable_statistics`, `unify_phony_dimensions`, `convention` | [HDF5](/docs/2.1.0-rc3/formats/hdf5#options) |
 | `ZARR` | `read_dimensions`, `enable_statistics` | [Zarr](/docs/2.1.0-rc3/formats/zarr#options) |
 | `ATLAS` | `read_dimensions` | [Atlas](/docs/2.1.0-rc3/formats/atlas#options) |
@@ -185,15 +266,29 @@ These keys apply to a table of each file format:
 | `ERDDAP` | `request_timeout_secs` | [ERDDAP](/docs/2.1.0-rc3/data-sources/erddap#options) |
 | `PARQUET`, `GEOPARQUET`, `ARROW`, `TIFF`, `BBF` | None | |
 
+## `REFRESH`
+
+`REFRESH` lists the files of an external table again. If Beacon inferred the schema of the table, it
+infers the schema again. A new column in a new file then shows in the table. Beacon stores the new
+schema.
+
+```sql
+REFRESH cruises
+
+REFRESH TABLE cruises
+```
+
+The two statements do the same refresh. Only the admin can run `REFRESH`.
+
 ## `DROP TABLE`
 
 `DROP TABLE` removes a table from the catalog. Beacon does not delete the files. It deletes the file
 statistics of the table.
 
 ```sql
-DROP TABLE argo
+DROP TABLE cruises
 
-DROP TABLE IF EXISTS argo
+DROP TABLE IF EXISTS cruises
 ```
 
 ## Querying and inspecting

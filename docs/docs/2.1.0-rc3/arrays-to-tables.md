@@ -57,10 +57,10 @@ SELECT * FROM read_netcdf('sst/2024-01.nc') LIMIT 5;
 | 1704067200 | 51.0 | -4.0 | 11.8 | degree_Celsius | Demo SST |
 
 ```sql
-SELECT count(*) FROM read_netcdf('sst/2024-01.nc');
+SELECT count(sst) FROM read_netcdf('sst/2024-01.nc');
 ```
 
-| count(\*) |
+| count(sst) |
 |---|
 | 24 |
 

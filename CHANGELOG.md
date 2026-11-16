@@ -38,6 +38,12 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   writes each variable with deflate. `chunk_rows` sets the rows in one chunk of `obs`, with a
   default of 65536. In SQL, use the keys `compression.level`, `compression.shuffle` and
   `chunk_rows`. ([#576](https://github.com/maris-development/beacon/issues/576))
+- **External table options.** `'skip_invalid_files_on_scan' 'true'` lets a query skip a file that it
+  cannot open or read. `'skip_invalid_files_on_inference' 'true'` lets schema inference skip such a
+  file. Beacon writes a warning for each file that it skips. `type_widening` and
+  `type_widening_on_conflict` set the schema merge rule of one table. `parallel_schema_inference`
+  infers the file schemas on parallel tasks. A scan error names the table, the file type and the
+  file. See [CREATE EXTERNAL TABLE](docs/docs/2.1.0-rc3/sql/create-external-table.md).
 
 ### Changed
 
