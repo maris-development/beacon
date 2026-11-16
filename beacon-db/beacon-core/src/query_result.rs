@@ -117,6 +117,8 @@ pub struct ArrowOutputStream {
     /// of the stream — means the metrics are durable by the time a caller sees
     /// the stream finish, which is what makes them readable immediately after.
     recording: Option<BoxFuture<'static, ()>>,
+    /// Keeps the query active in the gate until the stream drops.
+    gate: Option<crate::query_gate::QueryGuard>,
 }
 
 impl ArrowOutputStream {
@@ -133,7 +135,13 @@ impl ArrowOutputStream {
             metrics,
             store,
             recording: None,
+            gate: None,
         }
+    }
+
+    /// Keeps `guard` until the stream drops.
+    pub(crate) fn hold_gate(&mut self, guard: crate::query_gate::QueryGuard) {
+        self.gate = Some(guard);
     }
 
     pub fn schema(&self) -> SchemaRef {

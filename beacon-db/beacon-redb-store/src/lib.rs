@@ -45,7 +45,8 @@
 //! Deleted or overwritten heap blobs leak their space until a compaction pass
 //! reclaims it. [`RedbStore::vacuum`] with [`VacuumMode::Rewrite`] rewrites every
 //! live object into a fresh file and atomically renames it back, reclaiming both
-//! the dead heap blobs and redb's free pages in one shot. redb's own pages are
+//! the dead heap blobs and redb's free pages in one shot. The store swaps the
+//! file under its clones, so each clone stays valid. redb's own pages are
 //! otherwise reclaimed incrementally by redb's freelist.
 
 mod container;
@@ -53,7 +54,7 @@ mod container;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -122,11 +123,28 @@ pub struct RedbStore {
 }
 
 struct Inner {
-    db: Arc<Database>,
-    container: Arc<Container>,
+    /// The open file. Each operation holds the read lock for its full duration,
+    /// and [`RedbStore::vacuum`] holds the write lock to swap the file. `None`
+    /// only after a vacuum that could not open the file again.
+    open: RwLock<Option<OpenFile>>,
     /// The container file's path — kept so [`RedbStore::vacuum`] can rewrite the
     /// store into a sibling temp file and atomically rename it back.
     path: PathBuf,
+}
+
+/// The open container file and the redb database that runs on it.
+struct OpenFile {
+    db: Arc<Database>,
+    container: Arc<Container>,
+}
+
+/// The file sizes that [`RedbStore::vacuum`] reports, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VacuumReport {
+    /// The size of the container file before the vacuum.
+    pub size_before: u64,
+    /// The size of the container file after the vacuum.
+    pub size_after: u64,
 }
 
 /// How [`RedbStore::vacuum`] reclaims space.
@@ -146,22 +164,10 @@ impl RedbStore {
     /// Takes an exclusive lock on the file for the store's lifetime.
     pub fn open(path: impl AsRef<FsPath>) -> OsResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let container = Container::open(&path).map_err(generic)?;
-        let db = redb::Builder::new()
-            .create_with_backend(RegionBackend::new(container.clone()))
-            .map_err(generic)?;
-        // Ensure all tables exist so reads on a fresh file don't fail.
-        let txn = db.begin_write().map_err(generic)?;
-        {
-            txn.open_table(DATA_TABLE).map_err(generic)?;
-            txn.open_table(META_TABLE).map_err(generic)?;
-            txn.open_table(STATE_TABLE).map_err(generic)?;
-        }
-        txn.commit().map_err(generic)?;
+        let open = OpenFile::open(&path)?;
         Ok(Self {
             inner: Arc::new(Inner {
-                db: Arc::new(db),
-                container,
+                open: RwLock::new(Some(open)),
                 path,
             }),
         })
@@ -187,98 +193,87 @@ impl RedbStore {
     ///    [`vacuum`] refuses to run while a tenant still holds the database.
     ///
     /// [`vacuum`]: Self::vacuum
-    pub fn database(&self) -> Arc<Database> {
-        self.inner.db.clone()
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a vacuum left the file closed and it does not open.
+    pub fn database(&self) -> OsResult<Arc<Database>> {
+        self.inner.with(|open| Ok(open.db.clone()))
     }
 
     /// Compact the store, reclaiming space held by deleted or overwritten
     /// objects and shrinking the file to (roughly) its live size.
     ///
-    /// Consumes the store and returns a freshly opened, compacted one:
+    /// The store swaps the file under its clones, so each clone stays valid:
     ///
     /// ```no_run
     /// # async fn f(store: beacon_redb_store::RedbStore) -> object_store::Result<()> {
     /// use beacon_redb_store::VacuumMode;
-    /// let store = store.vacuum(VacuumMode::Rewrite).await?;
+    /// let report = store.vacuum(VacuumMode::Rewrite).await?;
+    /// assert!(report.size_after <= report.size_before);
     /// # Ok(()) }
     /// ```
     ///
-    /// Taking `self` by value enforces the *exclusive access* the rewrite needs:
-    /// it errors if any other clone of the store is still alive. Object bytes
+    /// The rewrite has *exclusive access*: it waits for the operations in
+    /// progress, and each new operation waits for the rewrite. Object bytes
     /// handed out by an earlier `get` stay valid (they pin their own view of the
     /// old file), but on Windows an outstanding read can block the rename — run
     /// vacuum from a maintenance window with no reads in flight.
     ///
     /// Etags and modification times are preserved, so clients holding an etag
     /// keep working across a vacuum.
-    pub async fn vacuum(self, mode: VacuumMode) -> OsResult<Self> {
+    ///
+    /// # Returns
+    ///
+    /// The size of the file before and after the vacuum.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a tenant holds the [`database`](Self::database)
+    /// handle, or if the rewrite or the rename fails. The store then keeps the
+    /// original file.
+    pub async fn vacuum(&self, mode: VacuumMode) -> OsResult<VacuumReport> {
         let VacuumMode::Rewrite = mode;
-        let inner = Arc::into_inner(self.inner).ok_or_else(|| {
-            generic(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "cannot vacuum: the store still has outstanding clones",
-            ))
-        })?;
-        // A rewrite replaces the file, so it needs the only handle on the old
-        // one. A tenant holding `database()` would keep it alive past the drop
-        // below and block (or, on Windows, break) the rename.
-        if Arc::strong_count(&inner.db) > 1 {
-            return Err(generic(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "cannot vacuum: a tenant still holds the redb database handle",
-            )));
-        }
-        block(move || inner.rewrite()).await
+        let inner = self.inner.clone();
+        block(move || inner.vacuum()).await
     }
 
-    /// Write `payload`, routing large objects to the heap (durable before the
-    /// redb transaction records them) and small ones inline.
+    /// Write `chunks` as one object, routing large objects to the heap (durable
+    /// before the redb transaction records them) and small ones inline.
     async fn write(
         &self,
         location: &Path,
-        payload: PutPayload,
+        chunks: Vec<Bytes>,
         mode: WriteMode,
     ) -> OsResult<PutResult> {
-        let size = payload.content_length();
-        let stored = if size > HEAP_THRESHOLD {
-            let chunks: Vec<Bytes> = payload.iter().cloned().collect();
-            let container = self.inner.container.clone();
-            let extent = block(move || container.heap_write(&chunks).map_err(generic)).await?;
-            StoredPayload::Heap {
-                extent,
-                size: size as u64,
-            }
-        } else {
-            let mut buf = Vec::with_capacity(size);
-            for chunk in &payload {
-                buf.extend_from_slice(chunk);
-            }
-            StoredPayload::Inline(buf)
-        };
         let inner = self.inner.clone();
         let path = location.to_string();
-        block(move || inner.put(&path, stored, mode)).await
+        // One lock for the heap write and the commit, so no vacuum runs between them.
+        block(move || {
+            inner.with(|open| {
+                let size: usize = chunks.iter().map(Bytes::len).sum();
+                let stored = if size > HEAP_THRESHOLD {
+                    StoredPayload::Heap {
+                        extent: open.container.heap_write(&chunks).map_err(generic)?,
+                        size: size as u64,
+                    }
+                } else {
+                    StoredPayload::Inline(chunks.concat())
+                };
+                open.put(&path, stored, mode)
+            })
+        })
+        .await
     }
 
-    /// Write pre-buffered `bytes` (used by multipart `complete`).
-    async fn write_bytes(
+    /// The metadata of every object under `prefix`. Runs on the blocking pool,
+    /// because the read lock waits for a vacuum in progress.
+    fn list_metas(
         &self,
-        location: &Path,
-        bytes: Vec<u8>,
-        mode: WriteMode,
-    ) -> OsResult<PutResult> {
-        let stored = if bytes.len() > HEAP_THRESHOLD {
-            let chunks = vec![Bytes::from(bytes)];
-            let size = chunks[0].len() as u64;
-            let container = self.inner.container.clone();
-            let extent = block(move || container.heap_write(&chunks).map_err(generic)).await?;
-            StoredPayload::Heap { extent, size }
-        } else {
-            StoredPayload::Inline(bytes)
-        };
+        prefix: Option<Path>,
+    ) -> impl Future<Output = OsResult<Vec<ObjectMeta>>> + Send + 'static {
         let inner = self.inner.clone();
-        let path = location.to_string();
-        block(move || inner.put(&path, stored, mode)).await
+        block(move || inner.with(|open| open.list(prefix.as_ref())))
     }
 
     /// Fetch the full object bytes: zero-copy from the heap, or a copy from the
@@ -286,21 +281,103 @@ impl RedbStore {
     async fn fetch(&self, location: &Path) -> OsResult<(Bytes, StoredMeta)> {
         let inner = self.inner.clone();
         let path = location.to_string();
-        let (inline, stored) = block(move || inner.get(&path, true)).await?;
-        let bytes = match &stored.payload {
-            PayloadLoc::Inline => Bytes::from(inline.expect("inline payload present")),
-            PayloadLoc::Heap(extent) => self
-                .inner
-                .container
-                .read_extents(std::slice::from_ref(extent))
-                .pop()
-                .expect("one extent yields one slice"),
-        };
-        Ok((bytes, stored))
+        block(move || {
+            inner.with(|open| {
+                let (inline, stored) = open.get(&path, true)?;
+                let bytes = match &stored.payload {
+                    PayloadLoc::Inline => Bytes::from(inline.expect("inline payload present")),
+                    PayloadLoc::Heap(extent) => open
+                        .container
+                        .read_extents(std::slice::from_ref(extent))
+                        .pop()
+                        .expect("one extent yields one slice"),
+                };
+                Ok((bytes, stored))
+            })
+        })
+        .await
     }
 }
 
 impl Inner {
+    /// Run `operation` on the open file, under the read lock. If a vacuum left
+    /// the file closed, open it again first.
+    fn with<T>(&self, operation: impl FnOnce(&OpenFile) -> OsResult<T>) -> OsResult<T> {
+        {
+            let slot = self.open.read().map_err(|_| lock_poisoned())?;
+            if let Some(open) = slot.as_ref() {
+                return operation(open);
+            }
+        }
+        let mut slot = self.open.write().map_err(|_| lock_poisoned())?;
+        operation(self.reopen(&mut slot)?)
+    }
+
+    /// The open file of `slot`. Opens the file again if a vacuum left it closed.
+    fn reopen<'a>(&self, slot: &'a mut Option<OpenFile>) -> OsResult<&'a OpenFile> {
+        if slot.is_none() {
+            *slot = Some(OpenFile::open(&self.path)?);
+        }
+        slot.as_ref().ok_or_else(closed)
+    }
+
+    /// Write the live data into a sibling file under the write lock, then swap
+    /// the sibling in. The original file stays open until the sibling is complete.
+    fn vacuum(&self) -> OsResult<VacuumReport> {
+        let mut slot = self.open.write().map_err(|_| lock_poisoned())?;
+        let open = self.reopen(&mut slot)?;
+        // A tenant handle keeps the old file open and blocks the rename.
+        if Arc::strong_count(&open.db) > 1 {
+            return Err(generic(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "cannot vacuum: a tenant still holds the redb database handle",
+            )));
+        }
+        let size_before = file_size(&self.path)?;
+        let tmp = temp_sibling(&self.path);
+        if let Err(error) = open.write_compacted(&tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+
+        // The rename needs the original file closed, and its lock released.
+        *slot = None;
+        let renamed = std::fs::rename(&tmp, &self.path).map_err(generic);
+        if renamed.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        // On an error the slot stays empty, and the next operation opens the file.
+        self.reopen(&mut slot)?;
+        renamed?;
+        Ok(VacuumReport {
+            size_before,
+            size_after: file_size(&self.path)?,
+        })
+    }
+}
+
+impl OpenFile {
+    /// Open the container file at `path`, creating the file (and its tables) if
+    /// absent. Takes an exclusive lock on the file.
+    fn open(path: &FsPath) -> OsResult<Self> {
+        let container = Container::open(path).map_err(generic)?;
+        let db = redb::Builder::new()
+            .create_with_backend(RegionBackend::new(container.clone()))
+            .map_err(generic)?;
+        // Ensure all tables exist so reads on a fresh file don't fail.
+        let txn = db.begin_write().map_err(generic)?;
+        {
+            txn.open_table(DATA_TABLE).map_err(generic)?;
+            txn.open_table(META_TABLE).map_err(generic)?;
+            txn.open_table(STATE_TABLE).map_err(generic)?;
+        }
+        txn.commit().map_err(generic)?;
+        Ok(Self {
+            db: Arc::new(db),
+            container,
+        })
+    }
+
     /// Atomic put with the given [`WriteMode`], recording the (already-durable)
     /// payload locator. Runs entirely inside one redb write transaction so the
     /// CAS check and the write are indivisible.
@@ -522,32 +599,35 @@ impl Inner {
         Ok(out)
     }
 
-    /// Rewrite every live object into a fresh sibling file and atomically rename
-    /// it over the original. Dead heap blobs and redb free pages are left behind,
-    /// so the new file is (roughly) the live size.
+    /// Write every live object into a fresh file at `tmp`. Dead heap blobs and
+    /// redb free pages are left behind, so the new file is (roughly) the live
+    /// size.
     ///
-    /// Crash-safe: the original is untouched until the final `rename`, which is
-    /// the single commit point. A crash mid-vacuum leaves the original intact and
-    /// only orphans the temp file (cleaned up by the next vacuum).
-    fn rewrite(self) -> OsResult<RedbStore> {
-        let Inner {
-            db,
-            container,
-            path,
-        } = self;
+    /// Crash-safe: this file is untouched. The caller renames `tmp` over it,
+    /// which is the single commit point. A crash mid-vacuum leaves the original
+    /// intact and only orphans the temp file (cleaned up by the next vacuum).
+    ///
+    /// The file at `tmp` is closed on return.
+    fn write_compacted(&self, tmp: &FsPath) -> OsResult<()> {
+        let OpenFile { db, container } = self;
 
         // 1. Snapshot every live object. Heap payloads are read zero-copy from the
         //    old mmap; we hold those slices only until they're copied below.
-        let (prepared, max_seq, new_container, new_db) = {
+        let (prepared, max_seq, new_db) = {
             let rtxn = db.begin_read().map_err(generic)?;
             let metas = rtxn.open_table(META_TABLE).map_err(generic)?;
             let datas = rtxn.open_table(DATA_TABLE).map_err(generic)?;
+            let stored_seq = rtxn
+                .open_table(STATE_TABLE)
+                .map_err(generic)?
+                .get(SEQ_KEY)
+                .map_err(generic)?
+                .map_or(0, |guard| guard.value());
 
             // Open the compacted target as a sibling temp file. Clear any orphan
             // from a previously-aborted vacuum first.
-            let tmp = temp_sibling(&path);
-            let _ = std::fs::remove_file(&tmp);
-            let new_container = Container::open(&tmp).map_err(generic)?;
+            let _ = std::fs::remove_file(tmp);
+            let new_container = Container::open(tmp).map_err(generic)?;
             let new_db = redb::Builder::new()
                 .create_with_backend(RegionBackend::new(new_container.clone()))
                 .map_err(generic)?;
@@ -555,7 +635,8 @@ impl Inner {
             // Copy each object's bytes into the new file (heap blobs are fsync'd by
             // `heap_write`), capturing its new payload locator. Etags are preserved.
             let mut prepared: Vec<(String, StoredMeta, Option<Vec<u8>>)> = Vec::new();
-            let mut max_seq = 0u64;
+            // The counter also covers the etags of deleted objects.
+            let mut max_seq = stored_seq;
             for entry in metas.iter().map_err(generic)? {
                 let (key, value) = entry.map_err(generic)?;
                 let path = key.value().to_string();
@@ -592,7 +673,7 @@ impl Inner {
                 };
                 prepared.push((path, meta, inline));
             }
-            (prepared, max_seq, new_container, new_db)
+            (prepared, max_seq, new_db)
         };
 
         // 2. Record all metadata (and inline bodies) in one transaction, carrying
@@ -639,19 +720,7 @@ impl Inner {
                 }
             }
         }
-        wtxn.commit().map_err(generic)?;
-
-        // 3. Fully close both files before the rename: the new one so it can be
-        //    moved, the old one so it can be replaced (and its lock released).
-        let tmp = temp_sibling(&path);
-        drop(new_db);
-        drop(new_container);
-        drop(db);
-        drop(container);
-
-        // 4. Atomically swap the compacted file in, then reopen it.
-        std::fs::rename(&tmp, &path).map_err(generic)?;
-        RedbStore::open(&path)
+        wtxn.commit().map_err(generic)
     }
 }
 
@@ -668,7 +737,8 @@ impl ObjectStore for RedbStore {
             PutMode::Create => WriteMode::Create,
             PutMode::Update(v) => WriteMode::Update(v.e_tag),
         };
-        self.write(location, payload, mode).await
+        self.write(location, payload.iter().cloned().collect(), mode)
+            .await
     }
 
     async fn put_multipart_opts(
@@ -689,7 +759,7 @@ impl ObjectStore for RedbStore {
         if options.head {
             let inner = self.inner.clone();
             let path = location.to_string();
-            let (_none, stored) = block(move || inner.get(&path, false)).await?;
+            let (_none, stored) = block(move || inner.with(|open| open.get(&path, false))).await?;
             let meta = object_meta(location.clone(), &stored);
             options.check_preconditions(&meta)?;
             let size = stored.size;
@@ -749,7 +819,7 @@ impl ObjectStore for RedbStore {
                 async move {
                     let location = location?;
                     let path = location.to_string();
-                    block(move || inner.delete(&path)).await?;
+                    block(move || inner.with(|open| open.delete(&path))).await?;
                     Ok(location)
                 }
             })
@@ -757,10 +827,10 @@ impl ObjectStore for RedbStore {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, OsResult<ObjectMeta>> {
-        match self.inner.list(prefix) {
-            Ok(metas) => futures::stream::iter(metas.into_iter().map(Ok)).boxed(),
-            Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
-        }
+        futures::stream::once(self.list_metas(prefix.cloned()))
+            .map_ok(|metas| futures::stream::iter(metas.into_iter().map(Ok)))
+            .try_flatten()
+            .boxed()
     }
 
     fn list_with_offset(
@@ -776,7 +846,7 @@ impl ObjectStore for RedbStore {
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> OsResult<ListResult> {
         let prefix = prefix.cloned().unwrap_or_default();
-        let metas = self.inner.list(Some(&prefix))?;
+        let metas = self.list_metas(Some(prefix.clone())).await?;
 
         let mut objects = Vec::new();
         let mut common_prefixes = BTreeSet::new();
@@ -810,7 +880,7 @@ impl ObjectStore for RedbStore {
         let from = from.to_string();
         let to = to.to_string();
         let create = matches!(options.mode, object_store::CopyMode::Create);
-        block(move || inner.transfer(&from, &to, create, false)).await
+        block(move || inner.with(|open| open.transfer(&from, &to, create, false))).await
     }
 
     async fn rename_opts(&self, from: &Path, to: &Path, options: RenameOptions) -> OsResult<()> {
@@ -818,7 +888,7 @@ impl ObjectStore for RedbStore {
         let from = from.to_string();
         let to = to.to_string();
         let create = matches!(options.target_mode, RenameTargetMode::Create);
-        block(move || inner.transfer(&from, &to, create, true)).await
+        block(move || inner.with(|open| open.transfer(&from, &to, create, true))).await
     }
 }
 
@@ -828,7 +898,7 @@ impl RedbStore {
     fn is_heap(&self, location: &Path) -> OsResult<bool> {
         let inner = self.inner.clone();
         let path = location.to_string();
-        let (_none, meta) = inner.get(&path, false)?;
+        let (_none, meta) = inner.with(|open| open.get(&path, false))?;
         Ok(matches!(meta.payload, PayloadLoc::Heap(_)))
     }
 }
@@ -879,12 +949,10 @@ impl MultipartUpload for RedbMultipart {
     }
 
     async fn complete(&mut self) -> OsResult<PutResult> {
-        let mut buf = Vec::new();
-        for part in self.parts.values() {
-            buf.extend_from_slice(part);
-        }
+        // The parts stay, so a caller can try `complete` again after an error.
+        let chunks = self.parts.values().cloned().map(Bytes::from).collect();
         self.store
-            .write_bytes(&self.location, buf, WriteMode::Overwrite)
+            .write(&self.location, chunks, WriteMode::Overwrite)
             .await
     }
 
@@ -943,6 +1011,21 @@ fn temp_sibling(path: &FsPath) -> PathBuf {
         .and_then(|n| n.to_str())
         .unwrap_or("beacon.db");
     path.with_file_name(format!(".{name}.vacuum-tmp"))
+}
+
+/// The size of the file at `path`, in bytes.
+fn file_size(path: &FsPath) -> OsResult<u64> {
+    Ok(std::fs::metadata(path).map_err(generic)?.len())
+}
+
+fn closed() -> object_store::Error {
+    generic(io::Error::other(
+        "the store is closed: the file did not open again after a vacuum",
+    ))
+}
+
+fn lock_poisoned() -> object_store::Error {
+    generic(io::Error::other("the store lock is poisoned"))
 }
 
 fn not_found(path: &str) -> object_store::Error {

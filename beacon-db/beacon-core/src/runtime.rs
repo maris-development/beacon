@@ -44,6 +44,8 @@ pub struct Runtime {
     /// Where a completed query's metrics are written: the managed table that
     /// `beacon.system.query_metrics` exposes, which is how callers read them.
     pub(crate) query_metrics: Arc<QueryMetricsStore>,
+    /// Counts the active queries. The session config holds the same gate.
+    pub(crate) query_gate: Arc<crate::query_gate::QueryGate>,
     /// Authentication + authorization context (users, roles, grants). Shared, owned by the runtime.
     pub(crate) auth: Arc<beacon_auth::AuthContext>,
 
@@ -151,6 +153,7 @@ impl Runtime {
         identity: beacon_auth::AuthIdentity,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
+        let gate = self.query_gate.enter()?;
         let query_id = uuid::Uuid::new_v4();
         let query_json = serde_json::to_value(&query)?;
         let crate::query::Query {
@@ -188,7 +191,7 @@ impl Runtime {
         )
         .await?;
 
-        match output {
+        let mut result = match output {
             Some(output) => {
                 // An output format wraps the plan in a `COPY TO`, which only
                 // accepts a row-producing input. Reject side-effecting statements
@@ -220,7 +223,12 @@ impl Runtime {
                 )
                 .await
             }
+        }?;
+        // A streamed query stays active until the caller drops the stream.
+        if let QueryOutput::Stream(stream) = &mut result.query_output {
+            stream.hold_gate(gate);
         }
+        Ok(result)
     }
 
     /// Stream the plan's results, wrapping the stream so output rows/bytes are
@@ -613,6 +621,7 @@ impl Runtime {
         identity: beacon_auth::AuthIdentity,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<String> {
+        let _gate = self.query_gate.enter()?;
         let plan = self.lower_query(query.inner).await?;
         crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
         if self.read_only && !crate::statement_plan::plan_produces_result_set(&plan) {
@@ -694,6 +703,7 @@ impl Runtime {
             BeaconStatement::CompactTable(statement) => {
                 Ok(crate::statement_plan::compact_table_plan(statement))
             }
+            BeaconStatement::Vacuum => Ok(crate::statement_plan::vacuum_plan()),
             BeaconStatement::Attach(statement) => {
                 crate::statement_plan::attach_plan(statement)
             }

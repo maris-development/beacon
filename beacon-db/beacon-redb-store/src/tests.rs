@@ -298,13 +298,15 @@ async fn vacuum_reclaims_space_and_preserves_live_objects() {
     let keep_etag = store.head(&keep).await.unwrap().e_tag;
     let size_before = std::fs::metadata(&file).unwrap().len();
 
-    let store = store.vacuum(VacuumMode::Rewrite).await.unwrap();
+    let report = store.vacuum(VacuumMode::Rewrite).await.unwrap();
 
     let size_after = std::fs::metadata(&file).unwrap().len();
     assert!(
         size_after < size_before,
         "vacuum should shrink the file: {size_before} -> {size_after}"
     );
+    assert_eq!(report.size_before, size_before);
+    assert_eq!(report.size_after, size_after);
 
     // Live objects: byte-identical, etag preserved, still heap-stored.
     let got = store.get(&keep).await.unwrap().bytes().await.unwrap();
@@ -324,19 +326,114 @@ async fn vacuum_reclaims_space_and_preserves_live_objects() {
     assert_ne!(after.e_tag, keep_etag);
 }
 
-/// Vacuum consumes the store and needs exclusive ownership: an outstanding clone
-/// makes it fail rather than silently rewrite under a live handle.
+/// The etag of a deleted object is not given to a new object after a vacuum.
 #[tokio::test]
-async fn vacuum_requires_exclusive_access() {
+async fn vacuum_does_not_reuse_the_etag_of_a_deleted_object() {
+    let (_dir, store) = store();
+    store.put(&Path::from("a"), "x".into()).await.unwrap();
+    let gone = Path::from("gone");
+    let gone_etag = store.put(&gone, "x".into()).await.unwrap().e_tag.unwrap();
+    store.delete(&gone).await.unwrap();
+
+    store.vacuum(VacuumMode::Rewrite).await.unwrap();
+
+    let fresh = store.put(&Path::from("b"), "x".into()).await.unwrap();
+    let fresh_etag: u64 = fresh.e_tag.unwrap().parse().unwrap();
+    assert!(fresh_etag > gone_etag.parse().unwrap(), "{fresh_etag}");
+}
+
+/// A rewrite that fails leaves the original file open, also while a reader
+/// holds bytes of it.
+#[tokio::test]
+async fn failed_vacuum_keeps_the_store_open() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("beacon.db");
+    let store = RedbStore::open(&file).unwrap();
+    let payload = vec![5u8; super::HEAP_THRESHOLD * 4];
+    let path = Path::from("data/held.lance");
+    store.put(&path, payload.clone().into()).await.unwrap();
+    let held = store.get(&path).await.unwrap().bytes().await.unwrap();
+    // A directory at the temp path makes the rewrite fail.
+    std::fs::create_dir(dir.path().join(".beacon.db.vacuum-tmp")).unwrap();
+
+    store.vacuum(VacuumMode::Rewrite).await.unwrap_err();
+
+    assert_eq!(held.as_ref(), payload.as_slice());
+    let got = store.get(&path).await.unwrap().bytes().await.unwrap();
+    assert_eq!(got.as_ref(), payload.as_slice());
+    store.put(&Path::from("after"), "x".into()).await.unwrap();
+}
+
+/// A vacuum swaps the file under the store, so each clone sees the new file.
+#[tokio::test]
+async fn vacuum_works_with_live_clones() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("beacon.db");
+    let store = RedbStore::open(&file).unwrap();
+    let clone = store.clone();
+
+    let big = |b: u8| vec![b; super::HEAP_THRESHOLD * 4];
+    let keep = Path::from("data/keep.lance");
+    store.put(&keep, big(7).into()).await.unwrap();
+    for i in 0..3u8 {
+        let gone = Path::from(format!("data/gone-{i}.lance"));
+        store.put(&gone, big(i).into()).await.unwrap();
+        store.delete(&gone).await.unwrap();
+    }
+
+    let report = store.vacuum(VacuumMode::Rewrite).await.unwrap();
+
+    assert!(report.size_after < report.size_before, "{report:?}");
+    assert_eq!(report.size_after, std::fs::metadata(&file).unwrap().len());
+    let got = clone.get(&keep).await.unwrap().bytes().await.unwrap();
+    assert_eq!(got.as_ref(), big(7).as_slice());
+
+    // A write through the clone and a read through the original share one file.
+    let fresh = Path::from("data/fresh.lance");
+    clone.put(&fresh, big(9).into()).await.unwrap();
+    let got = store.get(&fresh).await.unwrap().bytes().await.unwrap();
+    assert_eq!(got.as_ref(), big(9).as_slice());
+}
+
+/// Bytes of an earlier read pin the old file. The rename can then fail on
+/// Windows. In both cases the bytes and the store stay valid.
+#[tokio::test]
+async fn vacuum_keeps_bytes_a_reader_holds() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("beacon.db");
+    let store = RedbStore::open(&file).unwrap();
+
+    let payload = vec![5u8; super::HEAP_THRESHOLD * 4];
+    let path = Path::from("data/held.lance");
+    store.put(&path, payload.clone().into()).await.unwrap();
+    let churn = Path::from("data/churn.lance");
+    store.put(&churn, payload.clone().into()).await.unwrap();
+    store.delete(&churn).await.unwrap();
+
+    let held = store.get(&path).await.unwrap().bytes().await.unwrap();
+    let size_before = std::fs::metadata(&file).unwrap().len();
+
+    let result = store.vacuum(VacuumMode::Rewrite).await;
+
+    assert_eq!(held.as_ref(), payload.as_slice());
+    let got = store.get(&path).await.unwrap().bytes().await.unwrap();
+    assert_eq!(got.as_ref(), payload.as_slice());
+    if result.is_err() {
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), size_before);
+        assert!(!dir.path().join(".beacon.db.vacuum-tmp").exists());
+    }
+}
+
+/// A store with nothing to reclaim is not an error.
+#[tokio::test]
+async fn vacuum_report_of_a_store_without_garbage() {
     let (_dir, store) = store();
     store.put(&Path::from("a"), "x".into()).await.unwrap();
 
-    let clone = store.clone();
-    let err = store.vacuum(VacuumMode::Rewrite).await.unwrap_err();
-    assert!(matches!(err, object_store::Error::Generic { .. }), "{err}");
+    let report = store.vacuum(VacuumMode::Rewrite).await.unwrap();
 
-    // The clone is still usable — vacuum didn't touch the file.
-    let got = clone.get(&Path::from("a")).await.unwrap().bytes().await.unwrap();
+    assert!(report.size_after <= report.size_before, "{report:?}");
+    let got = store.get(&Path::from("a")).await.unwrap().bytes().await.unwrap();
     assert_eq!(got.as_ref(), b"x");
 }
 
@@ -666,7 +763,7 @@ async fn vacuum_preserves_a_tenant_table() {
 
     // A tenant writes through the shared database handle.
     {
-        let db = store.database();
+        let db = store.database().unwrap();
         let write = db.begin_write().unwrap();
         {
             let mut table = write.open_table(TENANT_TABLE).unwrap();
@@ -682,9 +779,9 @@ async fn vacuum_preserves_a_tenant_table() {
         store.put(&churn, vec![i; super::HEAP_THRESHOLD * 2].into()).await.unwrap();
     }
 
-    let store = store.vacuum(VacuumMode::Rewrite).await.unwrap();
+    store.vacuum(VacuumMode::Rewrite).await.unwrap();
 
-    let db = store.database();
+    let db = store.database().unwrap();
     let read = db.begin_read().unwrap();
     let table = read.open_table(TENANT_TABLE).unwrap();
     assert_eq!(
@@ -706,13 +803,16 @@ async fn vacuum_refuses_while_a_tenant_holds_the_database() {
     let dir = TempDir::new().unwrap();
     let store = RedbStore::open(dir.path().join("beacon.db")).unwrap();
 
-    let tenant = store.database();
+    let tenant = store.database().unwrap();
     let error = store.vacuum(VacuumMode::Rewrite).await.unwrap_err();
     assert!(
         error.to_string().contains("holds the redb database handle"),
         "unexpected error: {error}"
     );
     drop(tenant);
+
+    // The refusal leaves the store open.
+    store.put(&Path::from("a"), "x".into()).await.unwrap();
 }
 
 /// Big-endian keys are what make a tenant's ordered iteration work, because redb
@@ -721,7 +821,7 @@ async fn vacuum_refuses_while_a_tenant_holds_the_database() {
 fn big_endian_keys_iterate_in_numeric_order() {
     let dir = TempDir::new().unwrap();
     let store = RedbStore::open(dir.path().join("beacon.db")).unwrap();
-    let db = store.database();
+    let db = store.database().unwrap();
 
     let write = db.begin_write().unwrap();
     {

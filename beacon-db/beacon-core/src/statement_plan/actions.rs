@@ -1111,6 +1111,45 @@ pub(crate) async fn compact_table(
     Ok(batch)
 }
 
+/// `VACUUM`: rewrite `beacon.db` to its live size. No other query runs during
+/// the rewrite. Returns the file size before and after as a single row.
+pub(crate) async fn vacuum(
+    session: &Arc<SessionContext>,
+) -> anyhow::Result<arrow::record_batch::RecordBatch> {
+    use anyhow::Context;
+    use arrow::array::{ArrayRef, UInt64Array};
+
+    let state = session.state();
+    let config = state.config();
+    let store = config
+        .get_extension::<beacon_redb_store::RedbStore>()
+        .context("VACUUM is not available: the database is in memory or read-only")?;
+    let gate = config
+        .get_extension::<crate::query_gate::QueryGate>()
+        .context("the query gate is not registered on the session")?;
+    let warehouse = lance_warehouse(session)?;
+    let exclusive = gate.begin_exclusive()?;
+    // The task owns the guard: a caller that leaves does not open the gate early.
+    let report = tokio::spawn(async move {
+        let _exclusive = exclusive;
+        // A cached read pins the old file, and that can block the file swap.
+        warehouse.forget("").await;
+        store.vacuum(beacon_redb_store::VacuumMode::Rewrite).await
+    })
+    .await
+    .context("the VACUUM task stopped")?
+    .context("VACUUM failed")?;
+
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        super::logical::vacuum_arrow_schema(),
+        vec![
+            Arc::new(UInt64Array::from(vec![report.size_before])) as ArrayRef,
+            Arc::new(UInt64Array::from(vec![report.size_after])),
+        ],
+    )?;
+    Ok(batch)
+}
+
 /// Convert a SQL column definition's type to an Arrow type, reusing
 /// DataFusion's full type support (no catalog access is needed).
 fn sql_column_type_to_arrow(

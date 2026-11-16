@@ -357,6 +357,10 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
+        if any.is::<logical::VacuumNode>() {
+            return Ok(Some(Arc::new(physical::VacuumExec::new(session))));
+        }
+
         if let Some(comment) = any.downcast_ref::<logical::CommentOnNode>() {
             return Ok(Some(Arc::new(physical::CommentOnExec::new(
                 comment.target.clone(),
