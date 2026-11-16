@@ -137,6 +137,11 @@ page. It links to the admin UI and the API docs. Open the
 query. Open `http://localhost:5001/swagger` for the API docs. You can query any file in `./datasets`
 at once.
 
+::: tip Add Beacon Studio
+[Beacon Studio](/docs/2.1.0-rc2/beacon-studio) shows your data on maps, in tables and in charts. Its
+Compose file runs Beacon and Studio together.
+:::
+
 ::: tip SELinux hosts
 On a host with SELinux, add `:z` to each volume, for example `./tables:/beacon/data/tables:z`. This
 also applies to the S3 setup below. See
@@ -266,7 +271,7 @@ OIDC, see the [chart README](https://github.com/maris-development/beacon/tree/ma
 | | |
 | - | - |
 | **Decide who reads what** | [Access Control](/docs/2.1.0-rc2/security/access-control) |
-| **Explore in the browser** | [Admin Web UI](/docs/2.1.0-rc2/connect/web-admin-ui) |
+| **Explore in the browser** | [Admin Web UI](/docs/2.1.0-rc2/connect/web-admin-ui) · [Beacon Studio](/docs/2.1.0-rc2/beacon-studio) |
 | **Point clients at it** | [Python](/docs/2.1.0-rc2/connect/python) · [TypeScript](/docs/2.1.0-rc2/connect/typescript) · [CLI](/docs/2.1.0-rc2/connect/cli) · [DataGrip](/docs/2.1.0-rc2/connect/datagrip) · [Python ADBC](/docs/2.1.0-rc2/connect/python-adbc) |
 | **Document the query API** | [REST API](/docs/2.1.0-rc2/api/) |
 
