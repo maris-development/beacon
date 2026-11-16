@@ -56,8 +56,8 @@ use beacon_nd_array::{
     NdArrayD,
 };
 use indexmap::IndexMap;
-use object_store::{path::Path, ObjectStore};
-use oxcdf::AsyncNetcdfFile;
+use object_store::{path::Path, ObjectMeta, ObjectStore};
+use oxcdf::{async_source::AsyncObjectStoreSource, AsyncNetcdfFile, OpenOptions};
 
 use crate::dimensions::PhonyDimensions;
 use crate::oxcdf_reader::compat;
@@ -78,6 +78,42 @@ use crate::oxcdf_reader::compat;
 pub async fn open_dataset(store: Arc<dyn ObjectStore>, path: Path) -> anyhow::Result<AnyDataset> {
     let name = path.to_string();
     let file = Arc::new(AsyncNetcdfFile::open_store(store, path).await?);
+    dataset_from_file(name, file).await
+}
+
+/// Open the NetCDF object that `object` describes and return its contents as an
+/// [`AnyDataset`].
+///
+/// This is [`open_dataset`] for an object that a listing already found. The
+/// size comes from `object`, so the open sends no `head` request.
+///
+/// # Errors
+///
+/// Returns an error when the object cannot be opened, or when a variable uses a
+/// type this reader does not support.
+pub async fn open_object(
+    store: Arc<dyn ObjectStore>,
+    object: &ObjectMeta,
+) -> anyhow::Result<AnyDataset> {
+    let name = object.location.to_string();
+    let file = Arc::new(open_file(store, object).await?);
+    dataset_from_file(name, file).await
+}
+
+/// Open the file that `object` describes, with the size from `object`.
+///
+/// # Errors
+///
+/// Returns an error when the file metadata cannot be read.
+pub async fn open_file(
+    store: Arc<dyn ObjectStore>,
+    object: &ObjectMeta,
+) -> oxcdf::Result<AsyncNetcdfFile> {
+    let source = AsyncObjectStoreSource::with_size(store, object.location.clone(), object.size);
+    AsyncNetcdfFile::open_with(Arc::new(source), OpenOptions::remote()).await
+}
+
+async fn dataset_from_file(name: String, file: Arc<AsyncNetcdfFile>) -> anyhow::Result<AnyDataset> {
     let phony = PhonyDimensions::of_file(&file);
     let arrays = read_arrays(&file)?;
     // A file that names no dimension is an instrument file, and `SELECT *`
@@ -188,6 +224,97 @@ mod tests {
     async fn open_dataset_reads_a_gridded_file() {
         let any = open(GRIDDED_FILE).await;
         assert!(any.get_array("analysed_sst").is_some());
+    }
+
+    /// A store that counts the `head` requests it gets.
+    #[derive(Debug)]
+    struct HeadCountingStore {
+        inner: Arc<dyn ObjectStore>,
+        heads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl std::fmt::Display for HeadCountingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HeadCountingStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for HeadCountingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            if options.head {
+                self.heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// A listed object carries its size, so the open sends no `head` request.
+    #[tokio::test]
+    async fn open_object_sends_no_head_request() {
+        use object_store::ObjectStoreExt;
+
+        let object = test_store().head(&Path::from(WOD_FILE)).await.unwrap();
+        let store = Arc::new(HeadCountingStore {
+            inner: test_store(),
+            heads: Default::default(),
+        });
+
+        let any = open_object(store.clone(), &object).await.unwrap();
+
+        assert!(!any.dataset().arrays.is_empty());
+        assert_eq!(store.heads.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

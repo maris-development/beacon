@@ -59,7 +59,7 @@ use beacon_nd_array::{
     NdArrayD,
 };
 use indexmap::IndexMap;
-use object_store::{path::Path, ObjectStore};
+use object_store::{path::Path, ObjectMeta, ObjectStore};
 use oxcdf::{netcdf::NcGroup, AsyncNetcdfFile, AsyncVariable};
 
 use crate::conventions;
@@ -95,7 +95,33 @@ pub async fn open_dataset(
 ) -> anyhow::Result<AnyDataset> {
     let name = path.to_string();
     let file = Arc::new(AsyncNetcdfFile::open_store(store, path).await?);
+    dataset_from_file(name, file, options).await
+}
 
+/// Open the HDF5 object that `object` describes and return its contents as an
+/// [`AnyDataset`].
+///
+/// This is [`open_dataset`] for an object that a listing already found. The
+/// size comes from `object`, so the open sends no `head` request.
+///
+/// # Errors
+///
+/// Returns an error when the object cannot be opened.
+pub async fn open_object(
+    store: Arc<dyn ObjectStore>,
+    object: &ObjectMeta,
+    options: ReadOptions,
+) -> anyhow::Result<AnyDataset> {
+    let name = object.location.to_string();
+    let file = Arc::new(beacon_arrow_netcdf::oxcdf_reader::open_file(store, object).await?);
+    dataset_from_file(name, file, options).await
+}
+
+async fn dataset_from_file(
+    name: String,
+    file: Arc<AsyncNetcdfFile>,
+    options: ReadOptions,
+) -> anyhow::Result<AnyDataset> {
     // The file names no dimension, so netCDF invented one per length per group.
     // Give every length one name instead, or a dataset of one group would not
     // broadcast against a dataset of another. See
