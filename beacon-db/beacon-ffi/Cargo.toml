@@ -1,0 +1,17 @@
+[package]
+name = "beacon-ffi"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "The plugin FFI of Beacon: one crate that re-exports each beacon-ffi-* part"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+# The parts are in the subfolders. This crate only re-exports them.
+[dependencies]
+beacon-ffi-abi = { path = "beacon-ffi-abi" }
+beacon-ffi-object-store = { path = "beacon-ffi-object-store" }
+beacon-ffi-scalar-functions = { path = "beacon-ffi-scalar-functions" }
+beacon-ffi-file-format = { path = "beacon-ffi-file-format" }
+beacon-ffi-host = { path = "beacon-ffi-host" }
+beacon-ffi-table-type = { path = "beacon-ffi-table-type" }

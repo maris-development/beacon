@@ -1,0 +1,28 @@
+[package]
+name = "beacon-ffi-file-format"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "File format plugins of Beacon: the traits and their FFI tables"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+[dependencies]
+beacon-ffi-abi = { path = "../beacon-ffi-abi" }
+beacon-ffi-object-store = { path = "../beacon-ffi-object-store" }
+datafusion = { workspace = true }
+datafusion-ffi = { workspace = true }
+datafusion-proto-common = { workspace = true }
+prost = { workspace = true }
+stabby = { workspace = true }
+object_store = { version = "0.13.1", default-features = false }
+async-ffi = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+object_store = { version = "0.13.1", default-features = false, features = ["fs"] }
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
+tempfile = { workspace = true }

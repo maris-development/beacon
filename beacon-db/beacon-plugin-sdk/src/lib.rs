@@ -3,49 +3,16 @@
 #[cfg(panic = "abort")]
 compile_error!("beacon plugins need panic = \"unwind\"");
 
-pub mod file_format;
-pub mod host;
-pub mod object_store;
-mod panic_safe;
-pub mod scalar_functions;
-pub mod table_type;
+// The code of each part is in a `beacon-ffi-*` crate. This crate is the one dependency
+// of a plugin, and it adds `export_plugin!`.
+pub use beacon_ffi::{ABI_SYMBOL, AbiFn, BEACON_PLUGIN_SDK_ABI, BeaconPluginAbi, sdk_abi_version};
+pub use beacon_ffi::{file_format, host, object_store, scalar_functions, table_type};
 
 pub use beacon_nd_encoding as nd;
 pub use datafusion;
 pub use datafusion_ffi;
 pub use datafusion_proto;
 pub use stabby;
-
-/// The ABI version of this SDK. Beacon refuses a plugin with a different value.
-///
-/// It is the one version of all FFI types of the SDK: each table reports it in its
-/// `version` field, and an import refuses a table with another value. Increase it on
-/// any change of a table layout, of an FFI enum value, or of the `beacon.nd` encoding.
-pub const BEACON_PLUGIN_SDK_ABI: u32 = 7;
-
-/// [`BEACON_PLUGIN_SDK_ABI`] as the tables carry it.
-pub(crate) const ABI_VERSION: u64 = BEACON_PLUGIN_SDK_ABI as u64;
-
-/// Returns [`BEACON_PLUGIN_SDK_ABI`]. The `version` field of each FFI table points here.
-pub extern "C" fn sdk_abi_version() -> u64 {
-    ABI_VERSION
-}
-
-/// The ABI versions of a plugin, as `beacon_plugin_abi` returns them.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BeaconPluginAbi {
-    /// The value of [`BEACON_PLUGIN_SDK_ABI`] in the plugin.
-    pub sdk_abi: u32,
-    /// The value of [`datafusion_ffi::version`] in the plugin.
-    pub ffi_major: u64,
-}
-
-/// The name of the ABI symbol, with a trailing NUL.
-pub const ABI_SYMBOL: &[u8] = b"beacon_plugin_abi\0";
-
-/// The type of the [`ABI_SYMBOL`] function.
-pub type AbiFn = extern "C" fn() -> BeaconPluginAbi;
 
 /// Generates the `extern "C"` symbols that Beacon loads from a plugin.
 ///
@@ -117,15 +84,103 @@ macro_rules! export_plugin {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use beacon_ffi_host::testing::{TestHost, foreign_table};
+    use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
+    use datafusion::catalog::{Session, TableProvider, TableProviderFactory};
+    use datafusion::datasource::MemTable;
+    use datafusion::error::Result;
+    use datafusion::execution::SendableRecordBatchStream;
+    use datafusion::logical_expr::{CreateExternalTable, ScalarUDF};
+    use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
     use datafusion_ffi::util::FFI_Result;
 
     use super::*;
-    use crate::file_format::FileFormatsFn;
-    use crate::file_format::factory_tests::make_formats;
-    use crate::scalar_functions::ScalarFunctionsFn;
-    use crate::scalar_functions::tests::make_functions;
-    use crate::table_type::TableTypesFn;
-    use crate::table_type::tests::make_tables;
+    use crate::file_format::{FileFormatsFn, FormatFactory, FormatReader, OutputKind, ScanRequest};
+    use crate::object_store::store::{ObjectMeta, ObjectStore};
+    use crate::scalar_functions::{ScalarFunctionsFn, function};
+    use crate::table_type::{TableType, TableTypesFn};
+
+    fn make_functions() -> Vec<ScalarUDF> {
+        let same = function("same")
+            .args([DataType::Int64])
+            .returns(DataType::Int64)
+            .invoke_arrays(|arrays| Ok(Arc::clone(&arrays[0])));
+        vec![same]
+    }
+
+    /// A reader of empty files.
+    #[derive(Debug)]
+    struct EmptyReader;
+
+    #[async_trait]
+    impl FormatReader for EmptyReader {
+        async fn infer_schema(&self, _: Arc<dyn ObjectStore>, _: &ObjectMeta) -> Result<SchemaRef> {
+            Ok(Arc::new(Schema::empty()))
+        }
+
+        async fn open(
+            &self,
+            _: Arc<dyn ObjectStore>,
+            _: &ObjectMeta,
+            request: ScanRequest,
+        ) -> Result<SendableRecordBatchStream> {
+            let stream = futures::stream::empty();
+            Ok(Box::pin(RecordBatchStreamAdapter::new(
+                request.schema,
+                stream,
+            )))
+        }
+    }
+
+    #[derive(Debug)]
+    struct EmptyFormat;
+
+    impl FormatFactory for EmptyFormat {
+        fn name(&self) -> &str {
+            "empty"
+        }
+
+        fn extensions(&self) -> Vec<String> {
+            vec!["emp".to_string()]
+        }
+
+        fn output_kind(&self) -> OutputKind {
+            OutputKind::Flat
+        }
+
+        fn create(&self, _: &HashMap<String, String>) -> Result<Arc<dyn FormatReader>> {
+            Ok(Arc::new(EmptyReader))
+        }
+    }
+
+    fn make_formats() -> Vec<Arc<dyn FormatFactory>> {
+        vec![Arc::new(EmptyFormat)]
+    }
+
+    #[derive(Debug)]
+    struct EmptyTables;
+
+    #[async_trait]
+    impl TableProviderFactory for EmptyTables {
+        async fn create(
+            &self,
+            _: &dyn Session,
+            _: &CreateExternalTable,
+        ) -> Result<Arc<dyn TableProvider>> {
+            Ok(Arc::new(MemTable::try_new(
+                Arc::new(Schema::empty()),
+                vec![vec![]],
+            )?))
+        }
+    }
+
+    fn make_tables() -> Vec<TableType> {
+        vec![TableType::new("empty_table", Arc::new(EmptyTables))]
+    }
 
     crate::export_plugin!(
         scalar = make_functions,
@@ -141,9 +196,9 @@ mod tests {
         let FFI_Result::Ok(formats) = formats() else {
             panic!("expected formats");
         };
-        assert_eq!(formats.len(), 2);
+        assert_eq!(formats.len(), 1);
         let tables: TableTypesFn = beacon_plugin_table_types;
-        let FFI_Result::Ok(tables) = tables(crate::table_type::tests::test_host()) else {
+        let FFI_Result::Ok(tables) = tables(foreign_table(TestHost::new())) else {
             panic!("expected table types");
         };
         assert_eq!(tables.len(), 1);

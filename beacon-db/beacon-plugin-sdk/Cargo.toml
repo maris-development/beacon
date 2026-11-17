@@ -12,27 +12,16 @@ categories = ["database", "development-tools"]
 
 # A native plugin depends only on this crate, so its DataFusion versions match Beacon.
 [dependencies]
+# The FFI tables and the traits: this crate re-exports them.
+beacon-ffi = { path = "../beacon-ffi" }
+beacon-nd-encoding = { path = "../beacon-nd-encoding" }
 datafusion = { workspace = true }
 datafusion-ffi = { workspace = true }
 datafusion-proto = { workspace = true }
-datafusion-proto-common = { workspace = true }
-prost = { workspace = true }
-beacon-nd-encoding = { path = "../beacon-nd-encoding" }
 stabby = { workspace = true }
-# Re-exported to plugins: keep the default and cloud features off.
-object_store = { version = "0.13.1", default-features = false }
-async-ffi = { workspace = true }
-async-trait = { workspace = true }
-bytes = { workspace = true }
-futures = { workspace = true }
-tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
-chrono = { version = "0.4.41", default-features = false }
-form_urlencoded = "1.2.2"
-tracing = { workspace = true }
-url = { workspace = true }
 
 [dev-dependencies]
-object_store = { version = "0.13.1", default-features = false, features = ["fs"] }
+beacon-ffi-host = { path = "../beacon-ffi/beacon-ffi-host", features = ["test-util"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
 tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
-chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
-tempfile = { workspace = true }

@@ -1,0 +1,29 @@
+[package]
+name = "beacon-ffi-object-store"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Carries an object_store::ObjectStore across the Beacon plugin boundary"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+[dependencies]
+beacon-ffi-abi = { path = "../beacon-ffi-abi" }
+datafusion-ffi = { workspace = true }
+stabby = { workspace = true }
+# Re-exported to plugins: keep the default and cloud features off.
+object_store = { version = "0.13.1", default-features = false }
+async-ffi = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
+chrono = { version = "0.4.41", default-features = false }
+form_urlencoded = "1.2.2"
+tracing = { workspace = true }
+
+[dev-dependencies]
+object_store = { version = "0.13.1", default-features = false, features = ["fs"] }
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
+tempfile = { workspace = true }
