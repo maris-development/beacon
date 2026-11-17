@@ -340,12 +340,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ObjectStore for FakeStore {
-        async fn put_opts(
-            &self,
-            _l: &Path,
-            _p: PutPayload,
-            _o: PutOptions,
-        ) -> OsResult<PutResult> {
+        async fn put_opts(&self, _l: &Path, _p: PutPayload, _o: PutOptions) -> OsResult<PutResult> {
             unimplemented!("the tests only list")
         }
         async fn put_multipart_opts(
@@ -382,8 +377,7 @@ mod tests {
                 let full = path.as_ref();
                 let rest = if base.is_empty() {
                     Some(full)
-                } else if full.starts_with(&base)
-                    && full.as_bytes().get(base.len()) == Some(&b'/')
+                } else if full.starts_with(&base) && full.as_bytes().get(base.len()) == Some(&b'/')
                 {
                     Some(&full[base.len() + 1..])
                 } else {
@@ -465,10 +459,18 @@ mod tests {
             concurrency: 1,
         };
         let mut walked = listing.list(None);
-        while walked.try_next().await.expect("the walk succeeds").is_some() {}
+        while walked
+            .try_next()
+            .await
+            .expect("the walk succeeds")
+            .is_some()
+        {}
 
         let sizes = store.page_sizes();
-        assert!(!sizes.is_empty(), "the store was asked for at least one page");
+        assert!(
+            !sizes.is_empty(),
+            "the store was asked for at least one page"
+        );
         assert!(
             sizes.iter().all(|s| *s == Some(3)),
             "every page asked for 3 keys, got {sizes:?}"
@@ -485,10 +487,18 @@ mod tests {
             concurrency: 4,
         };
         let mut walked = listing.list(None);
-        while walked.try_next().await.expect("the walk succeeds").is_some() {}
+        while walked
+            .try_next()
+            .await
+            .expect("the walk succeeds")
+            .is_some()
+        {}
 
         let sizes = store.page_sizes();
-        assert!(sizes.len() >= 4, "one page per leaf shard at least, got {sizes:?}");
+        assert!(
+            sizes.len() >= 4,
+            "one page per leaf shard at least, got {sizes:?}"
+        );
         assert!(sizes.iter().all(|s| *s == Some(3)), "got {sizes:?}");
     }
 
@@ -562,10 +572,8 @@ mod tests {
     #[tokio::test]
     async fn a_shard_does_not_reach_a_sibling_that_shares_its_name() {
         let got = listed(BigPageList::new(FakeStore::new(&shared_prefix_tree()))).await;
-        let mut expected: Vec<String> = shared_prefix_tree()
-            .iter()
-            .map(|p| p.to_string())
-            .collect();
+        let mut expected: Vec<String> =
+            shared_prefix_tree().iter().map(|p| p.to_string()).collect();
         expected.sort();
         assert_eq!(got, expected, "every object exactly once");
     }

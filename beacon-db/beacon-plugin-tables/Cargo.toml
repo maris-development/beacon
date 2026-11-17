@@ -11,6 +11,7 @@ repository = "https://github.com/maris-development/beacon"
 beacon-plugin-sdk = { path = "../beacon-plugin-sdk" }
 beacon-plugin-formats = { path = "../beacon-plugin-formats" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-object-store = { path = "../beacon-object-store" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 datafusion = { workspace = true }

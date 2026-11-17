@@ -358,6 +358,99 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "beacon-ffi"
+version = "2.1.0-rc.3"
+dependencies = [
+ "beacon-ffi-abi",
+ "beacon-ffi-file-format",
+ "beacon-ffi-host",
+ "beacon-ffi-object-store",
+ "beacon-ffi-scalar-functions",
+ "beacon-ffi-table-type",
+]
+
+[[package]]
+name = "beacon-ffi-abi"
+version = "2.1.0-rc.3"
+
+[[package]]
+name = "beacon-ffi-file-format"
+version = "2.1.0-rc.3"
+dependencies = [
+ "async-ffi",
+ "async-trait",
+ "beacon-ffi-abi",
+ "beacon-ffi-object-store",
+ "datafusion",
+ "datafusion-ffi",
+ "datafusion-proto-common",
+ "futures",
+ "object_store",
+ "prost",
+ "stabby",
+ "tokio",
+]
+
+[[package]]
+name = "beacon-ffi-host"
+version = "2.1.0-rc.3"
+dependencies = [
+ "beacon-ffi-abi",
+ "beacon-ffi-object-store",
+ "datafusion",
+ "datafusion-ffi",
+ "futures",
+ "object_store",
+ "stabby",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "beacon-ffi-object-store"
+version = "2.1.0-rc.3"
+dependencies = [
+ "async-ffi",
+ "async-trait",
+ "beacon-ffi-abi",
+ "bytes",
+ "chrono",
+ "datafusion-ffi",
+ "form_urlencoded",
+ "futures",
+ "object_store",
+ "stabby",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "beacon-ffi-scalar-functions"
+version = "2.1.0-rc.3"
+dependencies = [
+ "beacon-ffi-abi",
+ "datafusion",
+ "datafusion-ffi",
+ "datafusion-proto",
+ "stabby",
+]
+
+[[package]]
+name = "beacon-ffi-table-type"
+version = "2.1.0-rc.3"
+dependencies = [
+ "async-trait",
+ "beacon-ffi-abi",
+ "beacon-ffi-file-format",
+ "beacon-ffi-host",
+ "datafusion",
+ "datafusion-ffi",
+ "futures",
+ "stabby",
+ "tokio",
+]
+
+[[package]]
 name = "beacon-nd-encoding"
 version = "2.1.0-rc.3"
 dependencies = [
@@ -369,23 +462,12 @@ dependencies = [
 name = "beacon-plugin-sdk"
 version = "2.1.0-rc.3"
 dependencies = [
- "async-ffi",
- "async-trait",
+ "beacon-ffi",
  "beacon-nd-encoding",
- "bytes",
- "chrono",
  "datafusion",
  "datafusion-ffi",
  "datafusion-proto",
- "datafusion-proto-common",
- "form_urlencoded",
- "futures",
- "object_store",
- "prost",
  "stabby",
- "tokio",
- "tracing",
- "url",
 ]
 
 [[package]]

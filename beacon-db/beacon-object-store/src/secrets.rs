@@ -216,7 +216,9 @@ impl fmt::Debug for SecretStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut names: Vec<String> = self.secrets.read().keys().cloned().collect();
         names.sort_unstable();
-        f.debug_struct("SecretStore").field("names", &names).finish()
+        f.debug_struct("SecretStore")
+            .field("names", &names)
+            .finish()
     }
 }
 
@@ -272,9 +274,11 @@ mod tests {
         let store = SecretStore::new();
         store.add(secret("bucket", SecretType::S3, "s3://bucket"));
         // Same prefix string but different bucket must NOT match.
-        assert!(store
-            .resolve(&Url::parse("s3://bucketother/x").unwrap())
-            .is_none());
+        assert!(
+            store
+                .resolve(&Url::parse("s3://bucketother/x").unwrap())
+                .is_none()
+        );
         assert_eq!(
             store
                 .resolve(&Url::parse("s3://bucket/x").unwrap())
@@ -289,7 +293,11 @@ mod tests {
         let store = SecretStore::new();
         store.add(secret("s3", SecretType::S3, "s3://"));
         // A gs:// URL must not match an S3 secret.
-        assert!(store.resolve(&Url::parse("gs://bucket/x").unwrap()).is_none());
+        assert!(
+            store
+                .resolve(&Url::parse("gs://bucket/x").unwrap())
+                .is_none()
+        );
     }
 
     #[test]
@@ -325,9 +333,11 @@ mod tests {
                 .as_deref(),
             Some("p")
         );
-        assert!(store
-            .resolve(&Url::parse("s3://bucket/other/x").unwrap())
-            .is_none());
+        assert!(
+            store
+                .resolve(&Url::parse("s3://bucket/other/x").unwrap())
+                .is_none()
+        );
     }
 
     #[test]

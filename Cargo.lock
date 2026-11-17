@@ -1892,6 +1892,7 @@ dependencies = [
  "base64",
  "beacon-common",
  "beacon-nd-encoding",
+ "beacon-object-store",
  "blake3",
  "chrono",
  "datafusion 54.1.0",
@@ -2326,6 +2327,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-object-store"
+version = "2.1.0-rc.3"
+dependencies = [
+ "async-trait",
+ "datafusion 54.1.0",
+ "futures",
+ "object_store 0.13.2",
+ "parking_lot",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "beacon-plugin-formats"
 version = "2.1.0-rc.3"
 dependencies = [
@@ -2392,6 +2409,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "beacon-datafusion-ext",
+ "beacon-object-store",
  "beacon-plugin-formats",
  "beacon-plugin-sdk",
  "datafusion 54.1.0",
