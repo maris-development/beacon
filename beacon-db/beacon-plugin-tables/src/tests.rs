@@ -6,13 +6,10 @@ use beacon_plugin_sdk::datafusion_ffi::util::FFI_Result;
 use beacon_plugin_sdk::object_store::store::memory::InMemory;
 use beacon_plugin_sdk::object_store::store::path::Path;
 use beacon_plugin_sdk::object_store::store::{ObjectStoreExt, PutPayload};
-use beacon_plugin_sdk::table_type::{
-    FFI_PluginHost, TableType, export_table_types, resolve_location,
-};
+use beacon_plugin_sdk::table_type::{TableType, export_table_types, open_location};
 use datafusion::arrow::array::{Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider, TableProviderFactory};
-use datafusion::common::plan_err;
 use datafusion::datasource::{MemTable, TableType as DfTableType};
 use datafusion::error::Result;
 use datafusion::execution::object_store::DefaultObjectStoreRegistry;
@@ -104,12 +101,12 @@ fn exported(names: &'static [&'static str]) -> Vec<PluginTableType> {
 
 /// The `greedy` type, through the FFI export and import.
 fn foreign_types() -> Vec<PluginTableType> {
-    let host = FFI_PluginHost::new(
-        Arc::new(DefaultObjectStoreRegistry::new()),
-        tokio::runtime::Handle::current(),
-        None,
-        None,
-    );
+    let info = PluginHostInfo {
+        runtime: tokio::runtime::Handle::current(),
+        datasets_url: None,
+        datasets_base_url: None,
+    };
+    let host = info.ffi_host(Arc::new(DefaultObjectStoreRegistry::new()));
     let FFI_Result::Ok(ffi) = export_table_types(
         || vec![TableType::new("greedy", Arc::new(GreedyFactory))],
         host,
@@ -358,12 +355,13 @@ impl TableProviderFactory for ReaderFactory {
         state: &dyn Session,
         cmd: &CreateExternalTable,
     ) -> Result<Arc<dyn TableProvider>> {
-        let found = resolve_location(state, &cmd.location)?;
-        let Some(store_url) = found.store_url else {
-            return plan_err!("no store for {}", cmd.location);
-        };
-        let store = state.runtime_env().object_store(store_url)?;
-        let bytes = store.get(&Path::from(found.path)).await?.bytes().await?;
+        let open = open_location(state, &cmd.location)?;
+        let bytes = open
+            .store
+            .get(&Path::from(open.path))
+            .await?
+            .bytes()
+            .await?;
         let value: i64 = std::str::from_utf8(&bytes).unwrap().trim().parse().unwrap();
         let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, true)]));
         let batch = RecordBatch::try_new(

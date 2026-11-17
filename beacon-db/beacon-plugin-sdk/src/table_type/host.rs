@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::catalog::Session;
-use datafusion::common::DFSchema;
 use datafusion::common::config::TableOptions;
+use datafusion::common::{DFSchema, plan_err};
+use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
 use datafusion::execution::context::SessionConfig;
@@ -23,10 +24,12 @@ use datafusion::logical_expr::{
 };
 use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
 use datafusion_ffi::ffi_option::FFI_Option;
+use object_store::ObjectStore;
 use stabby::string::String as SString;
 use tokio::runtime::Handle;
 use url::Url;
 
+use super::location::{FFI_LocationResolver, LocationResolver, ResolvedLocation};
 use crate::object_store::FFI_ObjectStoreRegistry;
 use crate::{ABI_VERSION, sdk_abi_version};
 
@@ -37,6 +40,8 @@ pub struct FFI_PluginHost {
     pub version: unsafe extern "C" fn() -> u64,
     /// The object stores of Beacon, read-only.
     pub registry: FFI_ObjectStoreRegistry,
+    /// The rule of Beacon for the `LOCATION` text of a table.
+    pub resolver: FFI_LocationResolver,
     /// The URL of the datasets store, such as `datasets://`. Empty without a datasets store.
     pub datasets_url: FFI_Option<SString>,
     /// The location of the datasets store, such as `file:///beacon/data/datasets/`.
@@ -44,15 +49,17 @@ pub struct FFI_PluginHost {
 }
 
 impl FFI_PluginHost {
-    /// Exports `registry` and the datasets URLs. The store I/O runs inside `handle`.
+    /// Exports `registry`, `resolver` and the datasets URLs. The store I/O runs inside `handle`.
     pub fn new(
         registry: Arc<dyn ObjectStoreRegistry>,
         handle: Handle,
+        resolver: Arc<dyn LocationResolver>,
         datasets_url: Option<&ObjectStoreUrl>,
         datasets_base_url: Option<&Url>,
     ) -> Self {
         Self {
             version: sdk_abi_version,
+            resolver: FFI_LocationResolver::new(resolver, handle.clone()),
             registry: FFI_ObjectStoreRegistry::new(registry, handle),
             datasets_url: datasets_url.map(|url| SString::from(url.as_str())).into(),
             datasets_base_url: datasets_base_url
@@ -66,6 +73,7 @@ impl FFI_PluginHost {
 #[derive(Debug)]
 pub(crate) struct PluginHost {
     registry: Arc<dyn ObjectStoreRegistry>,
+    resolver: Arc<dyn LocationResolver>,
     pub(crate) datasets_url: Option<ObjectStoreUrl>,
     pub(crate) datasets_base_url: Option<Url>,
 }
@@ -84,6 +92,7 @@ impl TryFrom<FFI_PluginHost> for PluginHost {
         }
         let FFI_PluginHost {
             registry,
+            resolver,
             datasets_url,
             datasets_base_url,
             ..
@@ -102,6 +111,7 @@ impl TryFrom<FFI_PluginHost> for PluginHost {
             .transpose()?;
         Ok(Self {
             registry: Arc::<dyn ObjectStoreRegistry>::try_from(registry)?,
+            resolver: Arc::<dyn LocationResolver>::try_from(resolver)?,
             datasets_url,
             datasets_base_url,
         })
@@ -237,218 +247,116 @@ pub fn datasets_url(state: &dyn Session) -> Option<ObjectStoreUrl> {
 /// `s3://bucket/`. Use it for a reader that opens a path or URL by itself.
 ///
 /// The object store of this URL is not the datasets store. Read the datasets store through
-/// [`datasets_url`].
+/// [`open_location`].
 pub fn datasets_base_url(state: &dyn Session) -> Option<Url> {
     host_of(state)?.datasets_base_url.clone()
 }
 
-/// A `LOCATION` as an object store and a path in that store.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedLocation {
-    /// The store, for `runtime_env().object_store`. `None` for a path of the local machine.
-    pub store_url: Option<ObjectStoreUrl>,
-    /// The path in the store, with glob characters unchanged. No leading `/` in a store.
+/// Asks Beacon for the object store and the path of the `LOCATION` text of a table.
+///
+/// Beacon owns the rule. A relative location is a path in the datasets store. A path of
+/// the local machine has no store. A session that is not from Beacon gives no store.
+pub fn resolve_location(state: &dyn Session, location: &str) -> Result<ResolvedLocation> {
+    match host_of(state) {
+        Some(host) => host.resolver.resolve(location),
+        None => Ok(ResolvedLocation {
+            store_url: None,
+            path: location.to_string(),
+        }),
+    }
+}
+
+/// An open `LOCATION`: the object store and the path in it.
+#[derive(Debug, Clone)]
+pub struct OpenLocation {
+    /// The object store of Beacon that holds the location.
+    pub store: Arc<dyn ObjectStore>,
+    /// The URL of the store.
+    pub store_url: ObjectStoreUrl,
+    /// The path in the store, with glob characters unchanged.
     pub path: String,
 }
 
-/// True for `/x`, `\x`, `C:\x` and `C:/x`.
-fn is_absolute_path(location: &str) -> bool {
-    let bytes = location.as_bytes();
-    location.starts_with(['/', '\\'])
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'))
-}
-
-/// Splits `scheme://rest`. A text with no valid scheme gives `None`.
-fn split_scheme(location: &str) -> Option<(&str, &str)> {
-    let (scheme, rest) = location.split_once("://")?;
-    // One letter is a Windows drive.
-    let valid = scheme.len() > 1
-        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-        && scheme
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
-    valid.then_some((scheme, rest))
-}
-
-/// Resolves the `LOCATION` of a table against the object stores of Beacon.
+/// Opens the object store of the `LOCATION` text of a table.
 ///
-/// - A relative location is a path in the datasets store.
-/// - `datasets://a/b` and `datasets:///a/b` are the path `a/b` in the datasets store.
-/// - A location with another scheme gives the store `scheme://authority` and its path.
-///   The path keeps a query string and percent codes as text.
-/// - An absolute local path stays, with no store.
-/// - Without a datasets store, a relative location stays, with no store.
-pub fn resolve_location(state: &dyn Session, location: &str) -> Result<ResolvedLocation> {
-    let datasets = datasets_url(state);
-    if let Some((scheme, rest)) = split_scheme(location) {
-        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-        let datasets_authority = datasets
-            .as_ref()
-            .and_then(|url| split_scheme(url.as_str()))
-            .filter(|(found, _)| found.eq_ignore_ascii_case(scheme))
-            .map(|(_, rest)| rest.trim_end_matches('/'));
-        let in_datasets = match datasets_authority {
-            // The registry keys a store by scheme and authority, so the first segment is path.
-            Some("") => Some(rest.trim_start_matches('/')),
-            Some(found) if found.eq_ignore_ascii_case(authority) => Some(path),
-            _ => None,
-        };
-        if let Some(path) = in_datasets {
-            return Ok(ResolvedLocation {
-                store_url: datasets,
-                path: path.to_string(),
-            });
-        }
-        return Ok(ResolvedLocation {
-            store_url: Some(ObjectStoreUrl::parse(format!("{scheme}://{authority}"))?),
-            path: path.to_string(),
-        });
-    }
-    let store_url = match is_absolute_path(location) {
-        true => None,
-        false => datasets,
+/// Fails for a path of the local machine, which has no store.
+pub fn open_location(state: &dyn Session, location: &str) -> Result<OpenLocation> {
+    let found = resolve_location(state, location)?;
+    let Some(store_url) = found.store_url else {
+        return plan_err!("the location `{location}` is not in an object store");
     };
-    Ok(ResolvedLocation {
+    Ok(OpenLocation {
+        store: state.runtime_env().object_store(&store_url)?,
         store_url,
-        path: location.to_string(),
+        path: found.path,
     })
+}
+
+/// The `LOCATION` text of a table as a DataFusion `ListingTableUrl`.
+///
+/// Use it for a `ListingTable`, or with `list_all_files` for a location with a glob.
+pub fn listing_url(state: &dyn Session, location: &str) -> Result<ListingTableUrl> {
+    let found = resolve_location(state, location)?;
+    let Some(store_url) = found.store_url else {
+        return ListingTableUrl::parse(&found.path);
+    };
+    // DataFusion reads a glob only in a path with no scheme, so the glob goes in apart.
+    let (folder, glob) = match found.path.find(['?', '*', '[']) {
+        Some(at) => {
+            let split = found.path[..at].rfind('/').map_or(0, |slash| slash + 1);
+            (&found.path[..split], Some(&found.path[split..]))
+        }
+        None => (found.path.as_str(), None),
+    };
+    // The store URL ends with `/`.
+    let url = ListingTableUrl::parse(format!("{}{folder}", store_url.as_str()))?;
+    match glob {
+        Some(glob) => url.with_glob(glob),
+        None => Ok(url),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use datafusion::execution::object_store::DefaultObjectStoreRegistry;
     use datafusion::prelude::SessionContext;
+    use object_store::ObjectStoreExt;
+    use object_store::path::Path;
 
     use super::*;
-    use crate::table_type::tests::{test_handle, test_host};
+    use crate::table_type::tests::test_host;
 
     fn host() -> Arc<PluginHost> {
         Arc::new(PluginHost::try_from(test_host()).unwrap())
     }
 
-    /// A host of a Beacon without a datasets store.
-    fn bare_host() -> Arc<PluginHost> {
-        let registry = Arc::new(DefaultObjectStoreRegistry::new());
-        let ffi = FFI_PluginHost::new(registry, test_handle(), None, None);
-        Arc::new(PluginHost::try_from(ffi).unwrap())
-    }
-
-    fn resolved(host: &Arc<PluginHost>, location: &str) -> (Option<String>, String) {
+    /// Runs `check` with a session that has the host of the tests.
+    fn with_session<T>(check: impl FnOnce(&dyn Session) -> T) -> T {
+        let host = host();
         let state = SessionContext::new().state();
-        let session = HostSession::new(&state, host);
-        let found = resolve_location(&session, location).unwrap();
-        (
-            found.store_url.map(|url| url.as_str().to_string()),
-            found.path,
-        )
+        check(&HostSession::new(&state, &host))
     }
 
     #[test]
-    fn resolve_location_cases() {
-        let host = host();
-        let datasets = Some("datasets:///".to_string());
-        for (location, store, path) in [
-            (
-                "example-shards/part_*.lance",
-                datasets.clone(),
-                "example-shards/part_*.lance",
-            ),
-            (
-                "datasets://example-shards/part_*.lance",
-                datasets.clone(),
-                "example-shards/part_*.lance",
-            ),
-            ("datasets:///a/b", datasets.clone(), "a/b"),
-            (
-                "s3://bucket/a/b.parquet",
-                Some("s3://bucket/".to_string()),
-                "a/b.parquet",
-            ),
-            ("s3://bucket", Some("s3://bucket/".to_string()), ""),
-            ("/beacon/data/x.lance", None, "/beacon/data/x.lance"),
-            (r"C:\data\x.lance", None, r"C:\data\x.lance"),
-            ("C:/data/x.lance", None, "C:/data/x.lance"),
-            (
-                "file:///beacon/data/x",
-                Some("file:///".to_string()),
-                "beacon/data/x",
-            ),
-        ] {
-            assert_eq!(
-                resolved(&host, location),
-                (store, path.to_string()),
-                "{location}"
-            );
-        }
-    }
-
-    /// A host whose datasets store has the URL `url`.
-    fn host_at(url: &str) -> Arc<PluginHost> {
-        let registry = Arc::new(DefaultObjectStoreRegistry::new());
-        let url = ObjectStoreUrl::parse(url).unwrap();
-        let ffi = FFI_PluginHost::new(registry, test_handle(), Some(&url), None);
-        Arc::new(PluginHost::try_from(ffi).unwrap())
-    }
-
-    #[test]
-    fn a_datasets_store_with_an_authority_matches_only_that_authority() {
-        let host = host_at("s3://bucket");
-        let datasets = Some("s3://bucket/".to_string());
-        assert_eq!(
-            resolved(&host, "obs/a"),
-            (datasets.clone(), "obs/a".to_string())
+    fn resolve_location_asks_the_host() {
+        let found = with_session(|state| resolve_location(state, "a/x.txt")).unwrap();
+        assert_eq!(found.store_url.unwrap().as_str(), "datasets:///");
+        assert_eq!(found.path, "a/x.txt");
+        let error = with_session(|state| resolve_location(state, "bad/x")).unwrap_err();
+        assert!(
+            error.to_string().contains("the host refuses bad/x"),
+            "{error}"
         );
-        assert_eq!(
-            resolved(&host, "s3://bucket/obs/a"),
-            (datasets, "obs/a".to_string())
-        );
-        assert_eq!(
-            resolved(&host, "s3://other/obs/a"),
-            (Some("s3://other/".to_string()), "obs/a".to_string())
-        );
-    }
-
-    #[test]
-    fn the_scheme_matches_without_case() {
-        let host = host();
-        assert_eq!(
-            resolved(&host, "DATASETS://obs/a"),
-            (Some("datasets:///".to_string()), "obs/a".to_string())
-        );
-    }
-
-    #[test]
-    fn a_one_letter_scheme_is_a_local_path() {
-        let host = host();
-        assert_eq!(
-            resolved(&host, "C://data/x"),
-            (None, "C://data/x".to_string())
-        );
-    }
-
-    #[test]
-    fn relative_location_stays_without_a_default_store() {
-        let host = bare_host();
-        assert_eq!(resolved(&host, "a/b"), (None, "a/b".to_string()));
-        let state = SessionContext::new().state();
-        let session = HostSession::new(&state, &host);
-        assert_eq!(datasets_url(&session), None);
-        assert_eq!(datasets_base_url(&session), None);
     }
 
     #[test]
     fn the_urls_cross() {
-        let host = host();
-        let state = SessionContext::new().state();
-        let session = HostSession::new(&state, &host);
-        assert_eq!(datasets_url(&session).unwrap().as_str(), "datasets:///");
-        assert_eq!(
-            datasets_base_url(&session).unwrap().as_str(),
-            "file:///beacon/data/datasets/"
-        );
+        with_session(|state| {
+            assert_eq!(datasets_url(state).unwrap().as_str(), "datasets:///");
+            assert_eq!(
+                datasets_base_url(state).unwrap().as_str(),
+                "file:///beacon/data/datasets/"
+            );
+        });
     }
 
     #[test]
@@ -459,24 +367,57 @@ mod tests {
         let found = resolve_location(&state, "a/b").unwrap();
         assert_eq!(found.store_url, None);
         assert_eq!(found.path, "a/b");
+        assert!(open_location(&state, "a/b").is_err());
     }
 
     #[test]
-    fn a_resolved_location_reads_through_the_session() {
-        let host = host();
-        let state = SessionContext::new().state();
-        let session = HostSession::new(&state, &host);
-        let found = resolve_location(&session, "datasets://a/x.txt").unwrap();
-        let store = session
-            .runtime_env()
-            .object_store(found.store_url.unwrap())
-            .unwrap();
-        let path = object_store::path::Path::from(found.path);
+    fn open_location_reads_the_host_store() {
+        let open = with_session(|state| open_location(state, "a/x.txt")).unwrap();
+        assert_eq!(open.store_url.as_str(), "datasets:///");
         let bytes = futures::executor::block_on(async {
-            use object_store::ObjectStoreExt;
-            store.get(&path).await?.bytes().await
+            open.store.get(&Path::from(open.path)).await?.bytes().await
         })
         .unwrap();
         assert_eq!(bytes.as_ref(), b"hi");
+    }
+
+    #[test]
+    fn open_location_refuses_a_local_path() {
+        let error = with_session(|state| open_location(state, "/data/x")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the location `/data/x` is not in an object store"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn listing_url_keeps_the_store_and_the_glob() {
+        let url = with_session(|state| listing_url(state, "a/*.txt")).unwrap();
+        assert_eq!(url.object_store().as_str(), "datasets:///");
+        assert_eq!(url.prefix().as_ref(), "a");
+        let files: Vec<String> = with_session(|state| {
+            let store = state
+                .runtime_env()
+                .object_store(url.object_store())
+                .unwrap();
+            futures::executor::block_on(async {
+                use futures::TryStreamExt;
+                let listed = url.list_all_files(state, store.as_ref(), "").await?;
+                listed.try_collect::<Vec<_>>().await
+            })
+        })
+        .unwrap()
+        .into_iter()
+        .map(|meta| meta.location.to_string())
+        .collect();
+        assert_eq!(files, vec!["a/x.txt".to_string()]);
+    }
+
+    #[test]
+    fn listing_url_of_a_local_path_is_a_file_url() {
+        let url = with_session(|state| listing_url(state, "/data/x.txt")).unwrap();
+        assert_eq!(url.scheme(), "file");
     }
 }

@@ -65,10 +65,12 @@ pub(crate) fn test_host() -> FFI_PluginHost {
     let mut host = FFI_PluginHost::new(
         host_registry(),
         test_handle(),
+        Arc::new(crate::table_type::location::tests::TestResolver),
         Some(&ObjectStoreUrl::parse("datasets://").unwrap()),
         Some(&Url::parse(BASE_URL).unwrap()),
     );
     host.registry.library_marker_id = foreign_marker_id;
+    host.resolver.library_marker_id = foreign_marker_id;
     host
 }
 

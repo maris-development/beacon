@@ -4,6 +4,7 @@
 //! The factory crosses the boundary as a `datafusion-ffi` [`FFI_TableProviderFactory`].
 
 mod host;
+mod location;
 mod runtime;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -24,7 +25,12 @@ use crate::panic_safe::panic_message;
 use crate::{ABI_VERSION, sdk_abi_version};
 use host::PluginHost;
 pub use host::{
-    FFI_PluginHost, ResolvedLocation, datasets_base_url, datasets_url, resolve_location,
+    FFI_PluginHost, OpenLocation, datasets_base_url, datasets_url, listing_url, open_location,
+    resolve_location,
+};
+pub use location::{
+    FFI_LocationResolver, FFI_ResolvedLocation, ForeignLocationResolver, LocationResolver,
+    ResolvedLocation,
 };
 use runtime::{PluginContext, RuntimeFactory};
 

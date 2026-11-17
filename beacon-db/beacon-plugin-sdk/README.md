@@ -263,33 +263,29 @@ INSERT INTO readings VALUES (1.5);
 
 ### Object stores in table code
 
-The session and the task context of the table code hold the object stores of Beacon.
-Call `runtime_env().object_store(url)` in `create`, `scan`, `insert_into` and `execute`.
+Give Beacon the `LOCATION` text. Beacon gives back the object store and the path.
 
 ```rust,no_run
 use std::sync::Arc;
 
 use beacon_plugin_sdk::datafusion::catalog::{Session, TableProvider};
-use beacon_plugin_sdk::datafusion::common::plan_err;
 use beacon_plugin_sdk::datafusion::error::Result;
 use beacon_plugin_sdk::datafusion::logical_expr::CreateExternalTable;
 use beacon_plugin_sdk::object_store::store::ObjectStoreExt;
 use beacon_plugin_sdk::object_store::store::path::Path;
-use beacon_plugin_sdk::table_type::resolve_location;
+use beacon_plugin_sdk::table_type::open_location;
 
 async fn open(state: &dyn Session, cmd: &CreateExternalTable) -> Result<Arc<dyn TableProvider>> {
-    let found = resolve_location(state, &cmd.location)?;
-    let Some(store_url) = found.store_url else {
-        return plan_err!("give a location in an object store");
-    };
-    let store = state.runtime_env().object_store(store_url)?;
-    let _bytes = store.get(&Path::from(found.path)).await?.bytes().await?;
+    let open = open_location(state, &cmd.location)?;
+    let _bytes = open.store.get(&Path::from(open.path)).await?.bytes().await?;
     todo!("build the table from the bytes")
 }
 ```
 
-- `datasets://` is the URL of the datasets store. Beacon reads it with its own credentials, also when the store is an S3 bucket.
-- `resolve_location` resolves `LOCATION` against the object stores of Beacon:
+- `open_location(state, location)` gives the store and the path. It fails for a path of the local machine.
+- `listing_url(state, location)` gives a DataFusion `ListingTableUrl`. Use it for a `ListingTable`, or with `list_all_files` for a location with a glob.
+- `resolve_location(state, location)` gives the store URL and the path, and opens nothing.
+- Beacon owns the rule for `LOCATION`. The plugin sends the text and does not parse it:
 
   | `LOCATION` | Store | Path |
   | --- | --- | --- |
@@ -298,12 +294,16 @@ async fn open(state: &dyn Session, cmd: &CreateExternalTable) -> Result<Arc<dyn 
   | `s3://bucket/obs/a.parquet` | `s3://bucket/` | `obs/a.parquet` |
   | `/data/obs/a.parquet` | none | `/data/obs/a.parquet` |
 
+- `datasets://` is the URL of the datasets store. Beacon reads it with its own credentials, also when the store is an S3 bucket.
+- Each lookup reads the stores of Beacon at that moment. A store that Beacon adds or replaces later is visible to the plugin.
+- The session and the task context hold the same stores. `runtime_env().object_store(url)` works in `create`, `scan`, `insert_into` and `execute`, so DataFusion code such as a `ListingTable` finds them.
 - Do not parse `datasets://obs/a` as a URL. A URL parser reads `obs` as the host, and no store has that name.
-- `resolve_location` accepts each scheme and each absolute local path. The built-in table types refuse those when Beacon has a datasets store. Refuse in your plugin the locations that your users must not read.
+- The rule accepts each scheme and each absolute local path. The built-in table types refuse those when Beacon has a datasets store. Refuse in your plugin the locations that your users must not read.
 - When Beacon has no datasets store, a relative `LOCATION` stays unchanged and has no store.
+- A glob in `listing_url` follows the DataFusion rule: `*` stays in one folder.
 - `datasets_base_url(state)` gives the location of the datasets store, such as `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL by itself. The store of `s3://bucket/` is not the datasets store: it gets its credentials from the environment or from a secret.
 - `datasets_url(state)` gives the URL of the datasets store.
-- The stores are read-only as a set. `register_store` and `deregister_store` change only the plugin. A store that the plugin registers hides the Beacon store of the same URL.
+- The plugin cannot replace or remove a store of Beacon. `register_store` and `deregister_store` change only the plugin. A store that the plugin registers hides the Beacon store of the same URL.
 - `state.as_any()` gives no `SessionState`. Use the methods of `Session`.
 - An `INSERT ... SELECT` runs its `SELECT` in Beacon. Beacon cannot read a table on an object store as the source of such an insert into a plugin table.
 

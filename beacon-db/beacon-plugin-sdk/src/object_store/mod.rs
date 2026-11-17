@@ -7,7 +7,7 @@ pub use ::object_store as store;
 
 mod bytes;
 mod error;
-mod export;
+pub(crate) mod export;
 mod foreign;
 mod multipart;
 mod options;

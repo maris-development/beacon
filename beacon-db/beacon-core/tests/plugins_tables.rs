@@ -188,3 +188,18 @@ async fn a_store_table_survives_a_restart() {
     let rt = rt.restart().await;
     assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM s").await), 6);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_glob_location_reads_each_match_in_the_datasets_store() {
+    let rt = runtime_with_plugin("tables-store-glob").await;
+    let folder = rt.datasets_dir().join("shards");
+    write_file(&folder.join("part_1.txt"), "1\n2\n");
+    write_file(&folder.join("part_2.txt"), "10\n");
+    write_file(&folder.join("other.txt"), "100\n");
+    rt.sql("CREATE EXTERNAL TABLE s STORED AS exstore LOCATION 'shards/part_*.txt'")
+        .await;
+    assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM s").await), 13);
+    // A file that arrives later is in the next scan.
+    write_file(&folder.join("part_3.txt"), "1000\n");
+    assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM s").await), 1013);
+}

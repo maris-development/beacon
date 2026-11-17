@@ -152,23 +152,26 @@ A table type is a DataFusion `TableProviderFactory` with a name in a `TableType`
 
 ### Object stores in a table type
 
-The session of `create`, `scan` and `insert_into` holds the object stores of Beacon. The task
-context of `execute` holds them too. Call `runtime_env().object_store(url)` to get a store.
+Give Beacon the `LOCATION` text. Beacon gives back the object store and the path.
 
 ```rust
-use beacon_plugin_sdk::table_type::resolve_location;
+use beacon_plugin_sdk::table_type::open_location;
 
-let found = resolve_location(state, &cmd.location)?;
-let Some(store_url) = found.store_url else {
-    return plan_err!("give a location in an object store");
-};
-let store = state.runtime_env().object_store(store_url)?;
-let bytes = store.get(&Path::from(found.path)).await?.bytes().await?;
+let open = open_location(state, &cmd.location)?;
+let bytes = open.store.get(&Path::from(open.path)).await?.bytes().await?;
 ```
 
-`datasets://` is the URL of the datasets store. The plugin reads this store with the credentials
-of Beacon, also when the store is an S3 bucket. `resolve_location` resolves `LOCATION` against the
-object stores of Beacon:
+For a location with a glob, or for a DataFusion `ListingTable`, use `listing_url`:
+
+```rust
+use beacon_plugin_sdk::table_type::listing_url;
+
+let url = listing_url(state, &cmd.location)?;
+let store = state.runtime_env().object_store(url.object_store())?;
+let files = url.list_all_files(state, store.as_ref(), "").await?;
+```
+
+Beacon owns the rule for `LOCATION`. The plugin sends the text and does not parse it:
 
 | `LOCATION` | Store | Path |
 | --- | --- | --- |
@@ -177,10 +180,17 @@ object stores of Beacon:
 | `s3://bucket/obs/a.parquet` | `s3://bucket/` | `obs/a.parquet` |
 | `/data/obs/a.parquet` | none | `/data/obs/a.parquet` |
 
+- `datasets://` is the URL of the datasets store. The plugin reads this store with the
+  credentials of Beacon, also when the store is an S3 bucket.
+- Each lookup reads the stores of Beacon at that moment. A store that Beacon adds or replaces later
+  is visible to the plugin.
+- The session of `create`, `scan` and `insert_into` holds the same stores. The task context of
+  `execute` holds them too. `runtime_env().object_store(url)` thus works in DataFusion code.
 - Do not parse `datasets://obs/a` as a URL. A URL parser reads `obs` as the host.
-- `resolve_location` accepts each scheme and each absolute local path. The built-in table types
-  refuse those when Beacon has a datasets store. Refuse in your plugin the locations that your
-  users must not read.
+- The rule accepts each scheme and each absolute local path. The built-in table types refuse those
+  when Beacon has a datasets store. Refuse in your plugin the locations that your users must not
+  read.
+- A glob in `listing_url` follows the DataFusion rule: `*` stays in one folder.
 - `datasets_base_url(state)` gives the location of the datasets store, such as
   `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL
   by itself. The store of `s3://bucket/` is not the datasets store.

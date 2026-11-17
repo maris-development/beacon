@@ -1,5 +1,5 @@
 //! Table types: `exkv` keeps CSV files in a local folder, `expanic` panics in `create`,
-//! and `exstore` reads a text file from a Beacon object store.
+//! and `exstore` reads text files from a Beacon object store.
 
 use std::sync::Arc;
 
@@ -20,9 +20,9 @@ use beacon_plugin_sdk::datafusion::physical_plan::ExecutionPlan;
 use beacon_plugin_sdk::datafusion::arrow::array::{Int64Array, RecordBatch, StringArray};
 use beacon_plugin_sdk::datafusion::arrow::datatypes::{DataType, Field, Schema};
 use beacon_plugin_sdk::datafusion::datasource::MemTable;
-use beacon_plugin_sdk::object_store::store::ObjectStoreExt;
-use beacon_plugin_sdk::object_store::store::path::Path;
-use beacon_plugin_sdk::table_type::{TableType, datasets_base_url, resolve_location};
+use beacon_plugin_sdk::object_store::store::{ObjectMeta, ObjectStoreExt};
+use beacon_plugin_sdk::table_type::{TableType, datasets_base_url, listing_url};
+use futures::TryStreamExt;
 
 /// A CSV listing table that claims `Inexact` for every filter, so Beacon applies them again.
 #[derive(Debug)]
@@ -117,7 +117,7 @@ pub fn tables() -> Vec<TableType> {
     ]
 }
 
-/// A table over a text file in a Beacon object store: one integer for each line.
+/// A table over text files in a Beacon object store: one integer for each line.
 ///
 /// `create` and each `scan` read the file through the object stores of the session.
 #[derive(Debug)]
@@ -133,19 +133,24 @@ fn store_schema() -> SchemaRef {
     ]))
 }
 
-/// Reads the rows of `location` through the object stores of `state`.
+/// Reads the rows of each file that `location` matches, through the stores of `state`.
 async fn store_rows(state: &dyn Session, location: &str) -> Result<RecordBatch> {
-    let found = resolve_location(state, location)?;
-    let Some(store_url) = found.store_url else {
-        return plan_err!("exstore needs a location in an object store, not {location}");
-    };
-    let store = state.runtime_env().object_store(store_url)?;
-    let bytes = store.get(&Path::from(found.path)).await?.bytes().await?;
-    let text = String::from_utf8_lossy(&bytes);
-    let values: Vec<i64> = text
-        .lines()
-        .filter_map(|line| line.trim().parse().ok())
-        .collect();
+    let url = listing_url(state, location)?;
+    let store = state.runtime_env().object_store(url.object_store())?;
+    let files: Vec<ObjectMeta> = url
+        .list_all_files(state, store.as_ref(), "")
+        .await?
+        .try_collect()
+        .await?;
+    if files.is_empty() {
+        return plan_err!("exstore: file not found: {location}");
+    }
+    let mut values: Vec<i64> = Vec::new();
+    for file in files {
+        let bytes = store.get(&file.location).await?.bytes().await?;
+        let text = String::from_utf8_lossy(&bytes);
+        values.extend(text.lines().filter_map(|line| line.trim().parse::<i64>().ok()));
+    }
     let base = datasets_base_url(state)
         .map(|url| url.to_string())
         .unwrap_or_default();

@@ -13,6 +13,8 @@ use datafusion::error::Result;
 use datafusion::execution::SessionState;
 use datafusion::execution::object_store::{ObjectStoreRegistry, ObjectStoreUrl};
 use parking_lot::Mutex;
+
+use crate::location::DatasetsLocationResolver;
 use tokio::runtime::Handle;
 use url::Url;
 
@@ -47,6 +49,7 @@ impl PluginHostInfo {
         FFI_PluginHost::new(
             registry,
             self.runtime.clone(),
+            Arc::new(DatasetsLocationResolver::new(self.datasets_url.clone())),
             self.datasets_url.as_ref(),
             self.datasets_base_url.as_ref(),
         )

@@ -135,11 +135,17 @@ fn check_collision(
 /// read-only, and the datasets URLs.
 fn plugin_host(session: &SessionContext) -> FFI_PluginHost {
     let registry = Arc::clone(&session.runtime_env().object_store_registry);
-    match session.state().config().get_extension::<PluginHostInfo>() {
-        Some(info) => info.ffi_host(registry),
-        // A session without the extension has no datasets store to name.
-        None => FFI_PluginHost::new(registry, Handle::current(), None, None),
-    }
+    let info = session.state().config().get_extension::<PluginHostInfo>();
+    // A session without the extension has no datasets store to name.
+    let info = info.map_or_else(
+        || PluginHostInfo {
+            runtime: Handle::current(),
+            datasets_url: None,
+            datasets_base_url: None,
+        },
+        |info| info.as_ref().clone(),
+    );
+    info.ffi_host(registry)
 }
 
 /// Runs every check on the unpacked plugin in `dir`. Registers nothing.
