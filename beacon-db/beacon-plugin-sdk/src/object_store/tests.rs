@@ -25,7 +25,7 @@ use tokio::runtime::Handle;
 
 use super::*;
 
-extern "C" fn foreign_marker_id() -> usize {
+pub(crate) extern "C" fn foreign_marker_id() -> usize {
     get_library_marker_id() + 1
 }
 
