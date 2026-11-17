@@ -8,7 +8,9 @@ use beacon_plugin_sdk::file_format::{FFI_FileFormatFactory, FileFormatsFn, FILE_
 use beacon_plugin_sdk::scalar_functions::{
     import_scalar_function, ScalarFunctionsFn, SCALAR_FUNCTIONS_SYMBOL,
 };
-use beacon_plugin_sdk::table_type::{FFI_PluginTableType, TableTypesFn, TABLE_TYPES_SYMBOL};
+use beacon_plugin_sdk::table_type::{
+    FFI_PluginHost, FFI_PluginTableType, TableTypesFn, TABLE_TYPES_SYMBOL,
+};
 use beacon_plugin_sdk::{AbiFn, ABI_SYMBOL, BEACON_PLUGIN_SDK_ABI};
 use datafusion::logical_expr::ScalarUDF;
 use parking_lot::Mutex;
@@ -47,16 +49,21 @@ pub fn library_file_name(name: &str) -> String {
 
 /// Opens the library at `path`, checks its ABI and returns its functions.
 ///
+/// `host` makes the host value for the table types. It runs only when the library has some.
+///
 /// A library that opens stays loaded until the process stops, also when a check fails:
 /// the functions point into its code, and the library ran code at load.
-pub fn load_native(path: &Path) -> anyhow::Result<NativeExports> {
+pub fn load_native(
+    path: &Path,
+    host: impl FnOnce() -> FFI_PluginHost,
+) -> anyhow::Result<NativeExports> {
     if !path.is_file() {
         return Err(missing_library(path));
     }
     // SAFETY: a plugin library is trusted code that a super-user installed.
     let library = unsafe { libloading::Library::new(path) }
         .with_context(|| format!("cannot open native library {}", path.display()))?;
-    let result = exports(&library);
+    let result = exports(&library, host);
     LIBRARIES.lock().push(library);
     result
 }
@@ -96,7 +103,10 @@ fn require_exports(has_functions: bool, has_formats: bool, has_tables: bool) -> 
     Ok(())
 }
 
-fn exports(library: &libloading::Library) -> anyhow::Result<NativeExports> {
+fn exports(
+    library: &libloading::Library,
+    host: impl FnOnce() -> FFI_PluginHost,
+) -> anyhow::Result<NativeExports> {
     // SAFETY: the SDK exports these symbols with these types.
     let (abi, functions, formats, tables) = unsafe {
         let abi = *library
@@ -139,7 +149,7 @@ fn exports(library: &libloading::Library) -> anyhow::Result<NativeExports> {
         Some(FFI_Result::Ok(list)) => list.into_iter().collect(),
         Some(FFI_Result::Err(message)) => anyhow::bail!("plugin file formats failed: {message}"),
     };
-    let table_types = match tables.map(|make| make()) {
+    let table_types = match tables.map(|make| make(host())) {
         None => Vec::new(),
         Some(FFI_Result::Ok(list)) => list.into_iter().collect(),
         Some(FFI_Result::Err(message)) => anyhow::bail!("plugin table types failed: {message}"),
@@ -154,6 +164,10 @@ fn exports(library: &libloading::Library) -> anyhow::Result<NativeExports> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_host() -> FFI_PluginHost {
+        unreachable!("no library opens in these tests")
+    }
 
     #[test]
     fn exports_need_at_least_one_kind() {
@@ -174,7 +188,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(library_file_name("fake"));
         std::fs::write(&path, b"not a library").unwrap();
-        let err = load_native(&path).unwrap_err().to_string();
+        let err = load_native(&path, no_host).unwrap_err().to_string();
         assert!(err.contains("cannot open native library"), "{err}");
     }
 
@@ -183,7 +197,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let other = if cfg!(windows) { "libx.so" } else { "x.dll" };
         std::fs::write(dir.path().join(other), b"x").unwrap();
-        let err = load_native(&dir.path().join(library_file_name("x")))
+        let err = load_native(&dir.path().join(library_file_name("x")), no_host)
             .unwrap_err()
             .to_string();
         assert!(err.contains(&library_file_name("x")), "{err}");
@@ -194,7 +208,7 @@ mod tests {
     #[test]
     fn a_missing_library_in_an_empty_folder_is_named() {
         let dir = tempfile::tempdir().unwrap();
-        let err = load_native(&dir.path().join(library_file_name("x")))
+        let err = load_native(&dir.path().join(library_file_name("x")), no_host)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no library file"), "{err}");

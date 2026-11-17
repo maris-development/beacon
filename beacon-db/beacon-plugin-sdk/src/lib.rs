@@ -20,7 +20,7 @@ pub use stabby;
 /// It is the one version of all FFI types of the SDK: each table reports it in its
 /// `version` field, and an import refuses a table with another value. Increase it on
 /// any change of a table layout, of an FFI enum value, or of the `beacon.nd` encoding.
-pub const BEACON_PLUGIN_SDK_ABI: u32 = 6;
+pub const BEACON_PLUGIN_SDK_ABI: u32 = 7;
 
 /// [`BEACON_PLUGIN_SDK_ABI`] as the tables carry it.
 pub(crate) const ABI_VERSION: u64 = BEACON_PLUGIN_SDK_ABI as u64;
@@ -90,11 +90,12 @@ macro_rules! export_plugin {
     };
     (@symbol tables $tables:path) => {
         #[unsafe(no_mangle)]
-        pub extern "C" fn beacon_plugin_table_types()
-        -> $crate::datafusion_ffi::util::FFI_Result<
+        pub extern "C" fn beacon_plugin_table_types(
+            host: $crate::table_type::FFI_PluginHost,
+        ) -> $crate::datafusion_ffi::util::FFI_Result<
             $crate::stabby::vec::Vec<$crate::table_type::FFI_PluginTableType>,
         > {
-            $crate::table_type::export_table_types($tables)
+            $crate::table_type::export_table_types($tables, host)
         }
     };
     (@symbol $other:ident $value:path) => {
@@ -141,7 +142,7 @@ mod tests {
         };
         assert_eq!(formats.len(), 2);
         let tables: TableTypesFn = beacon_plugin_table_types;
-        let FFI_Result::Ok(tables) = tables() else {
+        let FFI_Result::Ok(tables) = tables(crate::table_type::tests::test_host()) else {
             panic!("expected table types");
         };
         assert_eq!(tables.len(), 1);

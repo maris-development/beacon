@@ -38,6 +38,7 @@ use beacon_plugin_formats::{
 use beacon_plugin_tables::{
     check_table_types, import_table_types, InstalledTableTypes, PluginTableType,
 };
+use beacon_plugin_sdk::table_type::FFI_PluginHost;
 use tokio::runtime::Handle;
 
 /// A plugin that passed every check and has registered nothing yet.
@@ -183,7 +184,10 @@ pub(crate) fn prepare(
     // Native functions first, so the plugin SQL can call them.
     if let Some(native) = &manifest.native {
         let path = dir.join("lib").join(library_file_name(&native.library));
-        let exports = load_native(&path)?;
+        let exports = load_native(&path, || {
+            let registry = Arc::clone(&session.runtime_env().object_store_registry);
+            FFI_PluginHost::new(registry, Handle::current(), None, None)
+        })?;
         formats = import_formats(exports.formats, Handle::current())?;
         check_formats(&state, &formats)
             .with_context(|| format!("a file format of plugin '{expected_name}'"))?;

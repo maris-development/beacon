@@ -29,6 +29,8 @@ use tokio::runtime::{Handle, Runtime};
 use crate::file_format::panic_safe_stream;
 use crate::panic_safe::panic_message;
 
+use super::host::{HostSession, PluginHost};
+
 /// The runtime and the codec session of one export of table types.
 ///
 /// The plugin has its own tokio copy, so the host runtime does not drive plugin I/O.
@@ -39,6 +41,7 @@ pub(crate) struct PluginContext {
     runtime: Option<Runtime>,
     handle: Handle,
     session: Arc<dyn TaskContextProvider + Send + Sync>,
+    host: Arc<PluginHost>,
 }
 
 impl fmt::Debug for PluginContext {
@@ -49,7 +52,7 @@ impl fmt::Debug for PluginContext {
 
 impl PluginContext {
     /// Starts a runtime and a session with the DataFusion default functions only.
-    pub(crate) fn new() -> Arc<Self> {
+    pub(crate) fn new(host: Arc<PluginHost>) -> Arc<Self> {
         #[cfg(not(miri))]
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         // Miri refuses threads that live to the end, and a current-thread runtime starts none.
@@ -64,15 +67,17 @@ impl PluginContext {
             handle: runtime.handle().clone(),
             runtime: Some(runtime),
             session: Arc::new(SessionContext::new()),
+            host,
         })
     }
 
     /// Uses the runtime of `handle`, which the plugin author owns and stops.
-    pub(crate) fn with_handle(handle: Handle) -> Arc<Self> {
+    pub(crate) fn with_handle(handle: Handle, host: Arc<PluginHost>) -> Arc<Self> {
         Arc::new(Self {
             runtime: None,
             handle,
             session: Arc::new(SessionContext::new()),
+            host,
         })
     }
 
@@ -170,8 +175,9 @@ impl TableProviderFactory for RuntimeFactory {
         cmd: &CreateExternalTable,
     ) -> Result<Arc<dyn TableProvider>> {
         let inner = Arc::clone(&self.inner);
+        let state = HostSession::new(state, &self.context.host);
         let provider =
-            in_runtime(&self.context, "table create", || inner.create(state, cmd)).await?;
+            in_runtime(&self.context, "table create", || inner.create(&state, cmd)).await?;
         Ok(Arc::new(RuntimeProvider {
             inner: provider,
             context: Arc::clone(&self.context),
@@ -216,8 +222,9 @@ impl TableProvider for RuntimeProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let state = HostSession::new(state, &self.context.host);
         let plan = in_runtime(&self.context, "table scan", || {
-            self.inner.scan(state, projection, filters, limit)
+            self.inner.scan(&state, projection, filters, limit)
         })
         .await?;
         Ok(PanicSafePlan::wrap(plan, &self.context))
@@ -229,8 +236,9 @@ impl TableProvider for RuntimeProvider {
         input: Arc<dyn ExecutionPlan>,
         insert_op: InsertOp,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let state = HostSession::new(state, &self.context.host);
         let plan = in_runtime(&self.context, "table insert", || {
-            self.inner.insert_into(state, input, insert_op)
+            self.inner.insert_into(&state, input, insert_op)
         })
         .await?;
         Ok(PanicSafePlan::wrap(plan, &self.context))
@@ -291,7 +299,10 @@ impl ExecutionPlan for PanicSafePlan {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let stream = guarded("plan execute", || self.inner.execute(partition, context))?;
+        let stream = guarded("plan execute", || {
+            let context = self.context.host.task_ctx(&context);
+            self.inner.execute(partition, context)
+        })?;
         Ok(Box::pin(KeepAlive {
             inner: panic_safe_stream(stream),
             _context: Arc::clone(&self.context),
@@ -334,14 +345,18 @@ impl datafusion::physical_plan::RecordBatchStream for KeepAlive {
 mod tests {
     use std::sync::Arc;
 
-    use super::PluginContext;
+    use super::{PluginContext, PluginHost};
+
+    fn test_host() -> Arc<PluginHost> {
+        Arc::new(PluginHost::try_from(crate::table_type::tests::test_host()).unwrap())
+    }
 
     #[test]
     // Under Miri the runtime has no worker thread to run a spawn.
     #[cfg_attr(miri, ignore)]
     fn each_context_has_its_own_runtime() {
-        let first = PluginContext::new();
-        let second = PluginContext::new();
+        let first = PluginContext::new(test_host());
+        let second = PluginContext::new(test_host());
         assert!(!Arc::ptr_eq(&first, &second));
         let handle = second.handle();
         drop(first);
@@ -353,7 +368,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn a_context_drops_inside_its_own_runtime() {
-        let context = PluginContext::new();
+        let context = PluginContext::new(test_host());
         let handle = context.handle();
         // The last owner drops on a worker thread of the runtime itself.
         futures::executor::block_on(handle.spawn(async move { drop(context) })).unwrap();

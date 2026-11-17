@@ -3,12 +3,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_plugin_sdk::datafusion_ffi::util::FFI_Result;
-use beacon_plugin_sdk::table_type::{TableType, export_table_types};
+use beacon_plugin_sdk::table_type::{FFI_PluginHost, TableType, export_table_types};
 use datafusion::arrow::array::{Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider, TableProviderFactory};
 use datafusion::datasource::{MemTable, TableType as DfTableType};
 use datafusion::error::Result;
+use datafusion::execution::object_store::DefaultObjectStoreRegistry;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{
     ColumnarValue, CreateExternalTable, DdlStatement, Expr, LogicalPlan, ScalarUDF,
@@ -96,9 +97,16 @@ fn exported(names: &'static [&'static str]) -> Vec<PluginTableType> {
 
 /// The `greedy` type, through the FFI export and import.
 fn foreign_types() -> Vec<PluginTableType> {
-    let FFI_Result::Ok(ffi) =
-        export_table_types(|| vec![TableType::new("greedy", Arc::new(GreedyFactory))])
-    else {
+    let host = FFI_PluginHost::new(
+        Arc::new(DefaultObjectStoreRegistry::new()),
+        tokio::runtime::Handle::current(),
+        None,
+        None,
+    );
+    let FFI_Result::Ok(ffi) = export_table_types(
+        || vec![TableType::new("greedy", Arc::new(GreedyFactory))],
+        host,
+    ) else {
         panic!("export failed");
     };
     import_table_types(ffi.into_iter().collect()).unwrap()

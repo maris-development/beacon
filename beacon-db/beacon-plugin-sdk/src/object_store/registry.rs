@@ -284,7 +284,10 @@ mod tests {
         let host = host().await;
         let want = host.get_store(&url("nope://x")).unwrap_err().to_string();
         let registry = foreign_registry(host);
-        let error = registry.get_store(&url("nope://x")).unwrap_err().to_string();
+        let error = registry
+            .get_store(&url("nope://x"))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains(&want), "{error} does not contain {want}");
     }
 
