@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-atlas"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-bbf"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-csv"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-geoparquet"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-hdf5"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-ipc"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-netcdf"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1602,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-odv"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1631,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-parquet"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-tiff"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-zarr"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1698,7 +1698,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-auth"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1773,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-core"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1864,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-dap"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "axum",
@@ -1882,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-datafusion-ext"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1892,6 +1892,7 @@ dependencies = [
  "base64",
  "beacon-common",
  "beacon-nd-encoding",
+ "beacon-object-store",
  "blake3",
  "chrono",
  "datafusion 54.1.0",
@@ -1919,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-db-py"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1938,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-delta"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1959,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-erddap"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -1985,7 +1986,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-external-table"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2004,8 +2005,107 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-ffi"
+version = "2.1.0-rc.3"
+dependencies = [
+ "beacon-ffi-abi",
+ "beacon-ffi-file-format",
+ "beacon-ffi-host",
+ "beacon-ffi-object-store",
+ "beacon-ffi-scalar-functions",
+ "beacon-ffi-table-type",
+]
+
+[[package]]
+name = "beacon-ffi-abi"
+version = "2.1.0-rc.3"
+
+[[package]]
+name = "beacon-ffi-file-format"
+version = "2.1.0-rc.3"
+dependencies = [
+ "async-ffi",
+ "async-trait",
+ "beacon-ffi-abi",
+ "beacon-ffi-object-store",
+ "chrono",
+ "datafusion 54.1.0",
+ "datafusion-ffi",
+ "datafusion-proto-common",
+ "futures",
+ "object_store 0.13.2",
+ "prost",
+ "stabby",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "beacon-ffi-host"
+version = "2.1.0-rc.3"
+dependencies = [
+ "beacon-ffi-abi",
+ "beacon-ffi-object-store",
+ "bytes",
+ "datafusion 54.1.0",
+ "datafusion-ffi",
+ "futures",
+ "object_store 0.13.2",
+ "stabby",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "beacon-ffi-object-store"
+version = "2.1.0-rc.3"
+dependencies = [
+ "async-ffi",
+ "async-trait",
+ "beacon-ffi-abi",
+ "bytes",
+ "chrono",
+ "datafusion-ffi",
+ "form_urlencoded",
+ "futures",
+ "object_store 0.13.2",
+ "stabby",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "beacon-ffi-scalar-functions"
+version = "2.1.0-rc.3"
+dependencies = [
+ "beacon-ffi-abi",
+ "datafusion 54.1.0",
+ "datafusion-ffi",
+ "datafusion-proto",
+ "stabby",
+ "tokio",
+]
+
+[[package]]
+name = "beacon-ffi-table-type"
+version = "2.1.0-rc.3"
+dependencies = [
+ "async-trait",
+ "beacon-ffi-abi",
+ "beacon-ffi-file-format",
+ "beacon-ffi-host",
+ "datafusion 54.1.0",
+ "datafusion-ffi",
+ "futures",
+ "object_store 0.13.2",
+ "stabby",
+ "tokio",
+]
+
+[[package]]
 name = "beacon-file-statistics"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2030,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-functions"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -2070,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-iceberg"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2093,7 +2193,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-icechunk"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2115,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-lance"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2142,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-mcp"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2159,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-array"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2188,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-arrow"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2209,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-encoding"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "datafusion-common 54.1.0",
@@ -2217,7 +2317,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-execution"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "beacon-nd-encoding",
@@ -2227,8 +2327,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-object-store"
+version = "2.1.0-rc.3"
+dependencies = [
+ "async-trait",
+ "datafusion 54.1.0",
+ "futures",
+ "object_store 0.13.2",
+ "parking_lot",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "beacon-plugin-formats"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "arrow 58.4.0",
  "async-trait",
@@ -2247,7 +2363,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-plugin-registry"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2272,34 +2388,28 @@ dependencies = [
 
 [[package]]
 name = "beacon-plugin-sdk"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
- "async-ffi",
  "async-trait",
+ "beacon-ffi",
+ "beacon-ffi-host",
  "beacon-nd-encoding",
- "bytes",
- "chrono",
  "datafusion 54.1.0",
  "datafusion-ffi",
  "datafusion-proto",
- "datafusion-proto-common",
- "form_urlencoded",
  "futures",
- "object_store 0.13.2",
- "prost",
  "stabby",
- "tempfile",
  "tokio",
- "tracing",
 ]
 
 [[package]]
 name = "beacon-plugin-tables"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
  "beacon-datafusion-ext",
+ "beacon-object-store",
  "beacon-plugin-formats",
  "beacon-plugin-sdk",
  "datafusion 54.1.0",
@@ -2309,11 +2419,12 @@ dependencies = [
  "tokio",
  "tracing",
  "typetag",
+ "url",
 ]
 
 [[package]]
 name = "beacon-redb-store"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "async-trait",
  "bincode",
@@ -2333,7 +2444,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-server"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",
@@ -2369,6 +2480,7 @@ dependencies = [
  "tracing-appender",
  "tracing-panic",
  "tracing-subscriber",
+ "url",
  "utoipa",
  "utoipa-axum",
  "utoipa-scalar",
@@ -2378,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-server-config"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "base64",
  "beacon-arrow-atlas",
@@ -2396,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-sql-databases"
-version = "2.1.0-rc.2"
+version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow 58.4.0",

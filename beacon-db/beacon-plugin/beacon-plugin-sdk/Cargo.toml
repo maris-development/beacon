@@ -1,0 +1,27 @@
+[package]
+name = "beacon-plugin-sdk"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "SDK for Beacon native function plugins"
+readme = "README.md"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+keywords = ["beacon", "datafusion", "plugin", "udf", "sql"]
+categories = ["database", "development-tools"]
+
+# A native plugin depends only on this crate, so its DataFusion versions match Beacon.
+[dependencies]
+# The FFI tables and the traits: this crate re-exports them.
+beacon-ffi = { path = "../../beacon-ffi" }
+beacon-nd-encoding = { path = "../../beacon-nd-encoding" }
+datafusion = { workspace = true }
+datafusion-ffi = { workspace = true }
+datafusion-proto = { workspace = true }
+stabby = { workspace = true }
+
+[dev-dependencies]
+beacon-ffi-host = { path = "../../beacon-ffi/beacon-ffi-host", features = ["test-util"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }

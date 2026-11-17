@@ -38,8 +38,23 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   writes each variable with deflate. `chunk_rows` sets the rows in one chunk of `obs`, with a
   default of 65536. In SQL, use the keys `compression.level`, `compression.shuffle` and
   `chunk_rows`. ([#576](https://github.com/maris-development/beacon/issues/576))
+- **External table options.** `'skip_invalid_files_on_scan' 'true'` lets a query skip a file that it
+  cannot open or read. `'skip_invalid_files_on_inference' 'true'` lets schema inference skip such a
+  file. Beacon writes a warning for each file that it skips. `type_widening` and
+  `type_widening_on_conflict` set the schema merge rule of one table. `parallel_schema_inference`
+  infers the file schemas on parallel tasks. A scan error names the table, the file type and the
+  file. See [CREATE EXTERNAL TABLE](docs/docs/2.1.0-rc3/sql/create-external-table.md).
 
 ### Changed
+
+- **Plugin tables read the Beacon object stores.** The table code of a plugin table type gets the
+  object stores of Beacon through `runtime_env().object_store(url)`. `datasets://` is the datasets
+  store, with the credentials of Beacon. Beacon resolves the `LOCATION` text for the plugin: the new
+  SDK type `Host` (from `Host::of(state)`) gives the store and the path with `open`, `listing_url`
+  and `resolve`, and a relative `LOCATION` is a path in the datasets store. A plugin cannot replace
+  a store of Beacon. The plugin SDK ABI is now 7. Rebuild each native plugin with the new
+  SDK, because Beacon refuses a plugin with SDK ABI 6.
+  ([#653](https://github.com/maris-development/beacon/issues/653))
 
 - **File statistics belong to an external table.** Set `'use_statistics_pruning' 'true'` in the
   `OPTIONS` of a table. Beacon then keeps one statistics table for it in `beacon.db`, and a query on
@@ -51,7 +66,7 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   `table_statistics('<table>')` shows the statistics to the super-user. `DROP TABLE` deletes them.
   `BEACON_FILE_STATS_MAX_REFRESHES`, 2 by default, limits the tables that refresh at the same time.
   The `enable_statistics` option of a NetCDF, HDF5 or Zarr table now has effect. See
-  [File statistics](docs/docs/2.1.0-rc2/internals/file-statistics.md).
+  [File statistics](docs/docs/2.1.0-rc3/internals/file-statistics.md).
 - **Plugin functions get literal arguments as scalars.** A native plugin function gets each literal
   argument as `ColumnarValue::Scalar`, not as an array with one copy per row. So a function can
   require a constant argument, or prepare a constant one time per batch. The plugin SDK ABI is now

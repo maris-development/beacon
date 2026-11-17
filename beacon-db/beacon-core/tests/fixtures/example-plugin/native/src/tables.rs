@@ -1,4 +1,5 @@
-//! Table types: `exkv` keeps CSV files in a local folder, and `expanic` panics in `create`.
+//! Table types: `exkv` keeps CSV files in a local folder, `expanic` panics in `create`,
+//! and `exstore` reads text files from a Beacon object store.
 
 use std::sync::Arc;
 
@@ -16,7 +17,13 @@ use beacon_plugin_sdk::datafusion::logical_expr::{
     CreateExternalTable, Expr, TableProviderFilterPushDown,
 };
 use beacon_plugin_sdk::datafusion::physical_plan::ExecutionPlan;
+use beacon_plugin_sdk::datafusion::arrow::array::{Int64Array, RecordBatch, StringArray};
+use beacon_plugin_sdk::datafusion::arrow::datatypes::{DataType, Field, Schema};
+use beacon_plugin_sdk::datafusion::datasource::MemTable;
+use beacon_plugin_sdk::object_store::store::{ObjectMeta, ObjectStoreExt};
+use beacon_plugin_sdk::host::Host;
 use beacon_plugin_sdk::table_type::TableType;
+use futures::TryStreamExt;
 
 /// A CSV listing table that claims `Inexact` for every filter, so Beacon applies them again.
 #[derive(Debug)]
@@ -107,5 +114,94 @@ pub fn tables() -> Vec<TableType> {
     vec![
         TableType::new("exkv", Arc::new(KvFactory)),
         TableType::new("expanic", Arc::new(PanicFactory)),
+        TableType::new("exstore", Arc::new(StoreFactory)),
     ]
+}
+
+/// A table over text files in a Beacon object store: one integer for each line.
+///
+/// `create` and each `scan` read the file through the object stores of the session.
+#[derive(Debug)]
+struct StoreTable {
+    location: String,
+    schema: SchemaRef,
+}
+
+fn store_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Int64, false),
+        Field::new("base", DataType::Utf8, false),
+    ]))
+}
+
+/// Reads the rows of each file that `location` matches, through the stores of `state`.
+async fn store_rows(state: &dyn Session, location: &str) -> Result<RecordBatch> {
+    let host = Host::of(state)?;
+    let url = host.listing_url(location)?;
+    let store = state.runtime_env().object_store(url.object_store())?;
+    let files: Vec<ObjectMeta> = url
+        .list_all_files(state, store.as_ref(), "")
+        .await?
+        .try_collect()
+        .await?;
+    if files.is_empty() {
+        return plan_err!("exstore: file not found: {location}");
+    }
+    let mut values: Vec<i64> = Vec::new();
+    for file in files {
+        let bytes = store.get(&file.location).await?.bytes().await?;
+        let text = String::from_utf8_lossy(&bytes);
+        values.extend(text.lines().filter_map(|line| line.trim().parse::<i64>().ok()));
+    }
+    let base = host
+        .datasets_base_url()
+        .map(|url| url.to_string())
+        .unwrap_or_default();
+    let bases = StringArray::from(vec![base; values.len()]);
+    Ok(RecordBatch::try_new(
+        store_schema(),
+        vec![Arc::new(Int64Array::from(values)), Arc::new(bases)],
+    )?)
+}
+
+#[async_trait]
+impl TableProvider for StoreTable {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+
+    fn table_type(&self) -> DfTableType {
+        DfTableType::Base
+    }
+
+    async fn scan(
+        &self,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let batch = store_rows(state, &self.location).await?;
+        let table = MemTable::try_new(Arc::clone(&self.schema), vec![vec![batch]])?;
+        table.scan(state, projection, &[], limit).await
+    }
+}
+
+#[derive(Debug)]
+struct StoreFactory;
+
+#[async_trait]
+impl TableProviderFactory for StoreFactory {
+    async fn create(
+        &self,
+        state: &dyn Session,
+        cmd: &CreateExternalTable,
+    ) -> Result<Arc<dyn TableProvider>> {
+        // The read fails the statement when the file is not in the store.
+        store_rows(state, &cmd.location).await?;
+        Ok(Arc::new(StoreTable {
+            location: cmd.location.clone(),
+            schema: store_schema(),
+        }))
+    }
 }

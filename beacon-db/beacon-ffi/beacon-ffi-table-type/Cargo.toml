@@ -1,0 +1,24 @@
+[package]
+name = "beacon-ffi-table-type"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Table type plugins of Beacon: the plugin runtime and the session of table code"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+[dependencies]
+beacon-ffi-abi = { path = "../beacon-ffi-abi" }
+beacon-ffi-file-format = { path = "../beacon-ffi-file-format" }
+beacon-ffi-host = { path = "../beacon-ffi-host" }
+datafusion = { workspace = true }
+datafusion-ffi = { workspace = true }
+stabby = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+beacon-ffi-host = { path = "../beacon-ffi-host", features = ["test-util"] }
+object_store = { version = "0.13.1", default-features = false }
+tokio = { version = "1.47.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }

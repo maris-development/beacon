@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 wrong-abi = []
 
 [dependencies]
-beacon-plugin-sdk = { path = "../../../../../beacon-plugin-sdk" }
+beacon-plugin-sdk = { path = "../../../../../beacon-plugin/beacon-plugin-sdk" }
 async-trait = "0.1"
 futures = "0.3"
 tokio = { version = "1.47.1", features = ["fs"] }
