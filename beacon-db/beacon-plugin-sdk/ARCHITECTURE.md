@@ -45,7 +45,9 @@ flowchart LR
 
 | Crate | Side | Task |
 | --- | --- | --- |
-| `beacon-plugin-sdk` | both | traits, FFI tables, the `export_plugin!` macro |
+| `beacon-plugin-sdk` | both | the one dependency of a plugin: re-exports `beacon-ffi`, adds `export_plugin!` |
+| `beacon-ffi` and `beacon-ffi-*` | both | the traits and the FFI tables, one crate for each part |
+| `beacon-object-store` | Beacon | the store registry, the secrets and the `LOCATION` rule |
 | `beacon-plugin-registry` | Beacon | opens the library, checks the ABI, reads the symbols |
 | `beacon-plugin-formats` | Beacon | makes a DataFusion file format from a plugin format |
 | `beacon-plugin-tables` | Beacon | makes a table from a plugin table type, and is the host of table code |
@@ -96,45 +98,67 @@ sequenceDiagram
 
 A library that opens stays loaded until the process stops. Plugin code can still run after `UNINSTALL`, because plans and streams hold pointers into the library.
 
-## Modules
+## Crates
+
+Each part of the SDK is its own crate in the folder `beacon-db/beacon-ffi/`. A crate holds
+the trait of its part and the FFI table of that trait.
+
+```text
+beacon-db/
+  beacon-ffi/                     beacon-ffi: re-exports each part
+    beacon-ffi-abi/               ABI version, panic helpers
+    beacon-ffi-object-store/      one object store across the boundary
+    beacon-ffi-scalar-functions/  scalar function plugins
+    beacon-ffi-file-format/       file format plugins
+    beacon-ffi-host/              the Beacon server for table code
+    beacon-ffi-table-type/        table type plugins
+  beacon-plugin-sdk/              the one dependency of a plugin
+  beacon-object-store/            the stores of the server (Beacon only)
+```
 
 ```mermaid
 flowchart TB
-    LIB["lib.rs<br/>ABI version, export_plugin!"]
+    SDK["beacon-plugin-sdk<br/>export_plugin!, re-exports"]
+    UMB["beacon-ffi<br/>re-exports each part"]
 
     subgraph PARTS["Parts that a plugin exports"]
-        SF["scalar_functions"]
-        FF["file_format"]
-        TT["table_type"]
+        SF["beacon-ffi-scalar-functions"]
+        FF["beacon-ffi-file-format"]
+        TT["beacon-ffi-table-type"]
     end
 
     subgraph SERVICES["Services from Beacon to the plugin"]
-        OS["object_store<br/>one store across the boundary"]
-        HOST["host<br/>the Beacon server for table code"]
+        OS["beacon-ffi-object-store<br/>one store across the boundary"]
+        HOST["beacon-ffi-host<br/>the Beacon server for table code"]
     end
 
-    PS["panic_safe<br/>panic text"]
+    ABI["beacon-ffi-abi<br/>ABI version, panic helpers"]
 
-    LIB --> SF
-    LIB --> FF
-    LIB --> TT
+    SDK --> UMB
+    UMB --> SF
+    UMB --> FF
+    UMB --> TT
     FF --> OS
     TT --> HOST
+    TT --> FF
     HOST --> OS
-    SF --> PS
-    FF --> PS
-    TT --> PS
-    HOST --> PS
+    SF --> ABI
+    OS --> ABI
 ```
 
-| Module | Direction | Content |
-| --- | --- | --- |
-| `scalar_functions` | plugin to Beacon | the function builder, planner hooks, scalar arguments |
-| `file_format` | plugin to Beacon | `FormatFactory` and `FormatReader`, with their FFI tables |
-| `table_type` | plugin to Beacon | `TableType`, the plugin runtime, the session wrapper |
-| `object_store` | Beacon to plugin | `FFI_ObjectStore`: one `ObjectStore` across the boundary |
-| `host` | Beacon to plugin | `HostApi`, `Host`, `FFI_Host`: the server for table code |
-| `panic_safe` | internal | reads the text of a panic |
+| Crate | SDK path | Direction | Content |
+| --- | --- | --- | --- |
+| `beacon-ffi-scalar-functions` | `scalar_functions` | plugin to Beacon | the function builder, planner hooks, scalar arguments |
+| `beacon-ffi-file-format` | `file_format` | plugin to Beacon | `FormatFactory` and `FormatReader`, with their FFI tables |
+| `beacon-ffi-table-type` | `table_type` | plugin to Beacon | `TableType`, the plugin runtime, the session wrapper |
+| `beacon-ffi-object-store` | `object_store` | Beacon to plugin | `FFI_ObjectStore`: one `ObjectStore` across the boundary |
+| `beacon-ffi-host` | `host` | Beacon to plugin | `HostApi`, `Host`, `FFI_Host`: the server for table code |
+| `beacon-ffi-abi` | crate root | both | `BEACON_PLUGIN_SDK_ABI`, the panic text, a drop that catches a panic |
+
+- **A plugin depends on `beacon-plugin-sdk` only.** The SDK paths, such as `beacon_plugin_sdk::host::Host`, are re-exports.
+- **The dependencies have one direction.** `beacon-ffi-abi` is the base. No `beacon-ffi-*` crate depends on `beacon-ffi` or on the SDK.
+- **`beacon-object-store` is not part of the SDK.** It builds the S3, GCS and Azure clients. Only Beacon uses it; `BeaconHost` gets its `LOCATION` rule from it.
+- **Test helpers of `beacon-ffi-host` are behind the `test-util` feature.** The table type crate and the SDK use them in tests.
 
 The SDK also re-exports `datafusion`, `datafusion_ffi`, `datafusion_proto`, `stabby` and the `object_store` crate. A plugin depends only on the SDK, so its versions match the versions in Beacon.
 
@@ -257,23 +281,23 @@ The host is the Beacon server as table code sees it. It has three layers, each i
 
 ```mermaid
 flowchart TB
-    subgraph L1["Interface: host/mod.rs (no FFI, no unsafe)"]
+    subgraph L1["Interface: beacon-ffi-host, lib.rs (no FFI, no unsafe)"]
         API["trait HostApi<br/>object_store, resolve,<br/>datasets_url, datasets_base_url"]
         H["struct Host<br/>of, open, listing_url, resolve"]
         H -->|"uses"| API
     end
 
-    subgraph L2["Transport: host/ffi.rs (all unsafe code of the host)"]
+    subgraph L2["Transport: beacon-ffi-host, ffi.rs (all unsafe code of the host)"]
         FH["FFI_Host<br/>one table"]
         FOR["ForeignHost<br/>implements HostApi"]
         FH -->|"TryFrom"| FOR
     end
 
-    subgraph L3["DataFusion adapter: host/stores.rs"]
+    subgraph L3["DataFusion adapter: beacon-ffi-host, stores.rs"]
         HS["HostStores<br/>implements ObjectStoreRegistry"]
     end
 
-    subgraph L4["Glue: table_type/session.rs"]
+    subgraph L4["Glue: beacon-ffi-table-type, session.rs"]
         HB["HostBinding"]
         SESS["HostSession<br/>the session that table code gets"]
         HB --> SESS
@@ -374,7 +398,7 @@ flowchart LR
 - An author can give a runtime with `TableType::with_runtime`. The SDK then starts none for that type.
 - An exported store or host enters the Beacon query runtime for each call. The loader passes that handle, not the handle of the thread that loads the plugin.
 
-## Rules that hold in all modules
+## Rules that hold in all crates
 
 | Rule | Reason |
 | --- | --- |
@@ -386,8 +410,9 @@ flowchart LR
 
 ## Where to put new code
 
-- **A new service from Beacon to table code:** add a method to `HostApi`, a function to `FFI_Host`, and the implementation to `BeaconHost`. Increase `BEACON_PLUGIN_SDK_ABI`.
-- **A new kind of plugin part:** add a module with its trait, its FFI table and its foreign wrapper. Add a key to `export_plugin!` and a symbol to `beacon-plugin-registry`.
-- **A change of a table layout:** increase `BEACON_PLUGIN_SDK_ABI`. Each native plugin then needs a rebuild.
+- **A new service from Beacon to table code:** add a method to `HostApi` and a function to `FFI_Host` in `beacon-ffi-host`, and the implementation to `BeaconHost`. Increase `BEACON_PLUGIN_SDK_ABI`.
+- **A new kind of plugin part:** add a `beacon-ffi-*` crate with its trait, its FFI table and its foreign wrapper. Re-export it in `beacon-ffi` and in the SDK. Add a key to `export_plugin!` and a symbol to `beacon-plugin-registry`.
+- **A change of a table layout:** increase `BEACON_PLUGIN_SDK_ABI` in `beacon-ffi-abi`. Each native plugin then needs a rebuild.
+- **A change of which store a URL means:** change `beacon-object-store`. No plugin needs a rebuild.
 
-The `host` module separates the interface from the transport. The older `file_format` and `object_store` modules keep both in one module.
+`beacon-ffi-host` separates the interface from the transport in two files. The older crates `beacon-ffi-file-format` and `beacon-ffi-object-store` keep both together.
