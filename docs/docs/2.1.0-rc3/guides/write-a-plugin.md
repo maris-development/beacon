@@ -167,17 +167,20 @@ let bytes = store.get(&Path::from(found.path)).await?.bytes().await?;
 ```
 
 `datasets://` is the URL of the datasets store. The plugin reads this store with the credentials
-of Beacon, also when the store is an S3 bucket. `resolve_location` resolves `LOCATION` in the same
-way as the built-in table types:
+of Beacon, also when the store is an S3 bucket. `resolve_location` resolves `LOCATION` against the
+object stores of Beacon:
 
 | `LOCATION` | Store | Path |
 | --- | --- | --- |
-| `obs/part_*.lance` | `datasets://` | `obs/part_*.lance` |
-| `datasets://obs/part_*.lance` | `datasets://` | `obs/part_*.lance` |
-| `s3://bucket/obs/a.parquet` | `s3://bucket` | `obs/a.parquet` |
+| `obs/part_*.lance` | `datasets:///` | `obs/part_*.lance` |
+| `datasets://obs/part_*.lance` | `datasets:///` | `obs/part_*.lance` |
+| `s3://bucket/obs/a.parquet` | `s3://bucket/` | `obs/a.parquet` |
 | `/data/obs/a.parquet` | none | `/data/obs/a.parquet` |
 
 - Do not parse `datasets://obs/a` as a URL. A URL parser reads `obs` as the host.
+- `resolve_location` accepts each scheme and each absolute local path. The built-in table types
+  refuse those when Beacon has a datasets store. Refuse in your plugin the locations that your
+  users must not read.
 - `datasets_base_url(state)` gives the location of the datasets store, such as
   `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL
   by itself. The store of `s3://bucket/` is not the datasets store.

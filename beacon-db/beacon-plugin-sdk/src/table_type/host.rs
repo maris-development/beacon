@@ -264,34 +264,44 @@ fn is_absolute_path(location: &str) -> bool {
 /// Splits `scheme://rest`. A text with no valid scheme gives `None`.
 fn split_scheme(location: &str) -> Option<(&str, &str)> {
     let (scheme, rest) = location.split_once("://")?;
-    let valid = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+    // One letter is a Windows drive.
+    let valid = scheme.len() > 1
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
         && scheme
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
     valid.then_some((scheme, rest))
 }
 
-/// Resolves the `LOCATION` of a table the same way as the built-in table types.
+/// Resolves the `LOCATION` of a table against the object stores of Beacon.
 ///
 /// - A relative location is a path in the datasets store.
 /// - `datasets://a/b` and `datasets:///a/b` are the path `a/b` in the datasets store.
 /// - A location with another scheme gives the store `scheme://authority` and its path.
+///   The path keeps a query string and percent codes as text.
 /// - An absolute local path stays, with no store.
 /// - Without a datasets store, a relative location stays, with no store.
 pub fn resolve_location(state: &dyn Session, location: &str) -> Result<ResolvedLocation> {
     let datasets = datasets_url(state);
     if let Some((scheme, rest)) = split_scheme(location) {
-        // The registry keys a store by scheme and authority, so the first segment is path.
-        if let Some(url) = datasets
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let datasets_authority = datasets
             .as_ref()
-            .filter(|url| split_scheme(url.as_str()).is_some_and(|(found, _)| found == scheme))
-        {
+            .and_then(|url| split_scheme(url.as_str()))
+            .filter(|(found, _)| found.eq_ignore_ascii_case(scheme))
+            .map(|(_, rest)| rest.trim_end_matches('/'));
+        let in_datasets = match datasets_authority {
+            // The registry keys a store by scheme and authority, so the first segment is path.
+            Some("") => Some(rest.trim_start_matches('/')),
+            Some(found) if found.eq_ignore_ascii_case(authority) => Some(path),
+            _ => None,
+        };
+        if let Some(path) = in_datasets {
             return Ok(ResolvedLocation {
-                store_url: Some(url.clone()),
-                path: rest.trim_start_matches('/').to_string(),
+                store_url: datasets,
+                path: path.to_string(),
             });
         }
-        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
         return Ok(ResolvedLocation {
             store_url: Some(ObjectStoreUrl::parse(format!("{scheme}://{authority}"))?),
             path: path.to_string(),
@@ -373,6 +383,50 @@ mod tests {
                 "{location}"
             );
         }
+    }
+
+    /// A host whose datasets store has the URL `url`.
+    fn host_at(url: &str) -> Arc<PluginHost> {
+        let registry = Arc::new(DefaultObjectStoreRegistry::new());
+        let url = ObjectStoreUrl::parse(url).unwrap();
+        let ffi = FFI_PluginHost::new(registry, test_handle(), Some(&url), None);
+        Arc::new(PluginHost::try_from(ffi).unwrap())
+    }
+
+    #[test]
+    fn a_datasets_store_with_an_authority_matches_only_that_authority() {
+        let host = host_at("s3://bucket");
+        let datasets = Some("s3://bucket/".to_string());
+        assert_eq!(
+            resolved(&host, "obs/a"),
+            (datasets.clone(), "obs/a".to_string())
+        );
+        assert_eq!(
+            resolved(&host, "s3://bucket/obs/a"),
+            (datasets, "obs/a".to_string())
+        );
+        assert_eq!(
+            resolved(&host, "s3://other/obs/a"),
+            (Some("s3://other/".to_string()), "obs/a".to_string())
+        );
+    }
+
+    #[test]
+    fn the_scheme_matches_without_case() {
+        let host = host();
+        assert_eq!(
+            resolved(&host, "DATASETS://obs/a"),
+            (Some("datasets:///".to_string()), "obs/a".to_string())
+        );
+    }
+
+    #[test]
+    fn a_one_letter_scheme_is_a_local_path() {
+        let host = host();
+        assert_eq!(
+            resolved(&host, "C://data/x"),
+            (None, "C://data/x".to_string())
+        );
     }
 
     #[test]

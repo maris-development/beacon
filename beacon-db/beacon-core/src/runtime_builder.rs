@@ -155,10 +155,6 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Register `store` under the default store's URL instead of building one from
-    /// the configured [`RootStore`]. Use with [`Self::with_default_store`], which
-    /// still supplies the URL and the root that native readers resolve paths
-    /// against.
     /// Sets the location of the datasets store that plugin tables get, such as
     /// `s3://bucket/`. Without it, the root of [`Self::with_default_store`] gives the URL.
     pub fn with_datasets_base_url(mut self, url: Url) -> Self {
@@ -166,6 +162,10 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Register `store` under the default store's URL instead of building one from
+    /// the configured [`RootStore`]. Use with [`Self::with_default_store`], which
+    /// still supplies the URL and the root that native readers resolve paths
+    /// against.
     pub fn with_default_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.default_store_instance = Some(store);
         self
@@ -986,7 +986,7 @@ fn build_session_config(
         .with_extension(new_file_format_registry_handle())
         // The file formats of each installed plugin, for an uninstall.
         .with_extension(Arc::new(beacon_plugin_formats::InstalledFormats::default()))
-        // The table types of each installed plugin, for `STORED AS` and an uninstall.
+        // What the table types of each plugin get: the query runtime and the datasets URLs.
         .with_extension(Arc::new(beacon_plugin_tables::PluginHostInfo {
             runtime: runtime_handle.clone(),
             datasets_url: builder.default_store.as_ref().map(|store| store.url.clone()),
@@ -995,6 +995,7 @@ fn build_session_config(
                 builder.datasets_base_url.as_ref(),
             ),
         }))
+        // The table types of each installed plugin, for `STORED AS` and an uninstall.
         .with_extension(Arc::new(
             beacon_plugin_tables::InstalledTableTypes::default(),
         ))

@@ -289,16 +289,17 @@ async fn open(state: &dyn Session, cmd: &CreateExternalTable) -> Result<Arc<dyn 
 ```
 
 - `datasets://` is the URL of the datasets store. Beacon reads it with its own credentials, also when the store is an S3 bucket.
-- `resolve_location` resolves `LOCATION` in the same way as the built-in table types:
+- `resolve_location` resolves `LOCATION` against the object stores of Beacon:
 
   | `LOCATION` | Store | Path |
   | --- | --- | --- |
-  | `obs/part_*.lance` | `datasets://` | `obs/part_*.lance` |
-  | `datasets://obs/part_*.lance` | `datasets://` | `obs/part_*.lance` |
-  | `s3://bucket/obs/a.parquet` | `s3://bucket` | `obs/a.parquet` |
+  | `obs/part_*.lance` | `datasets:///` | `obs/part_*.lance` |
+  | `datasets://obs/part_*.lance` | `datasets:///` | `obs/part_*.lance` |
+  | `s3://bucket/obs/a.parquet` | `s3://bucket/` | `obs/a.parquet` |
   | `/data/obs/a.parquet` | none | `/data/obs/a.parquet` |
 
 - Do not parse `datasets://obs/a` as a URL. A URL parser reads `obs` as the host, and no store has that name.
+- `resolve_location` accepts each scheme and each absolute local path. The built-in table types refuse those when Beacon has a datasets store. Refuse in your plugin the locations that your users must not read.
 - When Beacon has no datasets store, a relative `LOCATION` stays unchanged and has no store.
 - `datasets_base_url(state)` gives the location of the datasets store, such as `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL by itself. The store of `s3://bucket/` is not the datasets store: it gets its credentials from the environment or from a secret.
 - `datasets_url(state)` gives the URL of the datasets store.
