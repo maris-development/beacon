@@ -145,14 +145,12 @@ type Stores = Mutex<HashMap<String, Arc<dyn ObjectStore>>>;
 
 /// An `ObjectStoreRegistry` over an [`FFI_ObjectStoreRegistry`] from another library.
 ///
-/// `get_store` reads the exporter registry. `register_store` and `deregister_store` change
+/// `get_store` reads the exporter registry in each call. `register_store` and `deregister_store` change
 /// only this value, and a registered store hides the exporter store of the same URL.
 pub struct ForeignObjectStoreRegistry {
     table: FFI_ObjectStoreRegistry,
     /// The stores that this side registered.
     own: Stores,
-    /// The imported stores of the exporter.
-    imported: Stores,
 }
 
 impl fmt::Debug for ForeignObjectStoreRegistry {
@@ -182,7 +180,6 @@ impl TryFrom<FFI_ObjectStoreRegistry> for Arc<dyn ObjectStoreRegistry> {
         Ok(Arc::new(ForeignObjectStoreRegistry {
             table,
             own: Mutex::default(),
-            imported: Mutex::default(),
         }))
     }
 }
@@ -214,9 +211,6 @@ impl ObjectStoreRegistry for ForeignObjectStoreRegistry {
         if let Some(store) = lock(&self.own).get(&key) {
             return Ok(Arc::clone(store));
         }
-        if let Some(store) = lock(&self.imported).get(&key) {
-            return Ok(Arc::clone(store));
-        }
         // SAFETY: the live table has this version and matches its pointers.
         let found = unsafe { (self.table.get_store)(&self.table, SString::from(url.as_str())) };
         let table = match found {
@@ -225,9 +219,10 @@ impl ObjectStoreRegistry for ForeignObjectStoreRegistry {
                 return Err(DataFusionError::Execution(message.as_str().to_string()));
             }
         };
+        // No cache: the exporter can replace a store, and its registry is the one source.
         let store = Arc::<dyn ObjectStore>::try_from(table)
             .map_err(|error| DataFusionError::ObjectStore(Box::new(error)))?;
-        Ok(Arc::clone(lock(&self.imported).entry(key).or_insert(store)))
+        Ok(store)
     }
 }
 
@@ -319,11 +314,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn get_store_caches_the_import() {
-        let registry = foreign_registry(host().await);
+    async fn a_store_that_the_host_replaces_is_seen() {
+        let host = host().await;
+        let registry = foreign_registry(Arc::clone(&host));
         let first = registry.get_store(&url("datasets://")).unwrap();
-        let second = registry.get_store(&url("datasets:///a/x.txt")).unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.get(&Path::from("a/x.txt")).await.is_ok());
+        // The host puts an empty store at the same URL.
+        host.register_store(&url("datasets://"), Arc::new(InMemory::new()));
+        let second = registry.get_store(&url("datasets://")).unwrap();
+        assert!(second.get(&Path::from("a/x.txt")).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_store_that_the_host_adds_later_is_seen() {
+        let host = host().await;
+        let registry = foreign_registry(Arc::clone(&host));
+        assert!(registry.get_store(&url("late://")).is_err());
+        host.register_store(&url("late://"), Arc::new(InMemory::new()));
+        assert!(registry.get_store(&url("late://")).is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread")]
