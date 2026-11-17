@@ -3,9 +3,8 @@
 //!
 //! The factory crosses the boundary as a `datafusion-ffi` [`FFI_TableProviderFactory`].
 
-mod host;
-mod location;
 mod runtime;
+mod session;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -21,17 +20,10 @@ use stabby::string::String as SString;
 use stabby::vec::Vec as SVec;
 use tokio::runtime::Handle;
 
+use crate::host::HostApi;
+use crate::host::ffi::FFI_Host;
 use crate::panic_safe::panic_message;
 use crate::{ABI_VERSION, sdk_abi_version};
-use host::PluginHost;
-pub use host::{
-    FFI_PluginHost, OpenLocation, datasets_base_url, datasets_url, listing_url, open_location,
-    resolve_location,
-};
-pub use location::{
-    FFI_LocationResolver, FFI_ResolvedLocation, ForeignLocationResolver, LocationResolver,
-    ResolvedLocation,
-};
 use runtime::{PluginContext, RuntimeFactory};
 
 /// A table type that a plugin exports: the `STORED AS` name and its factory.
@@ -77,7 +69,7 @@ pub struct FFI_PluginTableType {
 pub const TABLE_TYPES_SYMBOL: &[u8] = b"beacon_plugin_table_types\0";
 
 /// The type of the [`TABLE_TYPES_SYMBOL`] function.
-pub type TableTypesFn = extern "C" fn(FFI_PluginHost) -> FFI_Result<SVec<FFI_PluginTableType>>;
+pub type TableTypesFn = extern "C" fn(FFI_Host) -> FFI_Result<SVec<FFI_PluginTableType>>;
 
 fn export_table_type(table_type: TableType, context: &Arc<PluginContext>) -> FFI_PluginTableType {
     let factory = Arc::new(RuntimeFactory::new(table_type.factory, Arc::clone(context)));
@@ -95,17 +87,18 @@ fn export_table_type(table_type: TableType, context: &Arc<PluginContext>) -> FFI
 
 /// Exports the table types that `make` returns. A panic becomes an error.
 ///
-/// The table code of each type gets the object stores of `host`.
+/// The table code of each type gets `host` through `Host::of`, and its object stores
+/// through the session.
 ///
 /// Each call starts its own plugin runtime, so each Beacon instance in a process has one.
 /// The runtime stops when the last factory, table, plan and stream of the call drops.
 /// A type with [`TableType::with_runtime`] uses that runtime instead.
 pub fn export_table_types(
     make: fn() -> Vec<TableType>,
-    host: FFI_PluginHost,
+    host: FFI_Host,
 ) -> FFI_Result<SVec<FFI_PluginTableType>> {
     let exported = catch_unwind(AssertUnwindSafe(|| {
-        let host = Arc::new(PluginHost::try_from(host)?);
+        let host = Arc::<dyn HostApi>::try_from(host)?;
         // The SDK starts a runtime only when a type has none.
         let mut shared: Option<Arc<PluginContext>> = None;
         let mut out = SVec::new();

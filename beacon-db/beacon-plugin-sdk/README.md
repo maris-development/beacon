@@ -263,7 +263,8 @@ INSERT INTO readings VALUES (1.5);
 
 ### Object stores in table code
 
-Give Beacon the `LOCATION` text. Beacon gives back the object store and the path.
+`Host` is the Beacon server that runs the table code. Get it from the session with `Host::of`.
+Give it the `LOCATION` text. It gives back the object store and the path.
 
 ```rust,no_run
 use std::sync::Arc;
@@ -271,20 +272,24 @@ use std::sync::Arc;
 use beacon_plugin_sdk::datafusion::catalog::{Session, TableProvider};
 use beacon_plugin_sdk::datafusion::error::Result;
 use beacon_plugin_sdk::datafusion::logical_expr::CreateExternalTable;
+use beacon_plugin_sdk::host::Host;
 use beacon_plugin_sdk::object_store::store::ObjectStoreExt;
 use beacon_plugin_sdk::object_store::store::path::Path;
-use beacon_plugin_sdk::table_type::open_location;
 
 async fn open(state: &dyn Session, cmd: &CreateExternalTable) -> Result<Arc<dyn TableProvider>> {
-    let open = open_location(state, &cmd.location)?;
+    let host = Host::of(state)?;
+    let open = host.open(&cmd.location)?;
     let _bytes = open.store.get(&Path::from(open.path)).await?.bytes().await?;
     todo!("build the table from the bytes")
 }
 ```
 
-- `open_location(state, location)` gives the store and the path. It fails for a path of the local machine.
-- `listing_url(state, location)` gives a DataFusion `ListingTableUrl`. Use it for a `ListingTable`, or with `list_all_files` for a location with a glob.
-- `resolve_location(state, location)` gives the store URL and the path, and opens nothing.
+- `Host::of(state)` works with the session of `create`, `scan` and `insert_into`. It fails for a session that is not from Beacon.
+- `host.open(location)` gives the store and the path. It fails for a path of the local machine.
+- `host.listing_url(location)` gives a DataFusion `ListingTableUrl`. Use it for a `ListingTable`, or with `list_all_files` for a location with a glob.
+- `host.resolve(location)` gives the store URL and the path, and opens nothing.
+- The SDK has three layers. `host::HostApi` is the interface that Beacon implements. `host::ffi` carries it across the plugin boundary. `host::Host` is what your code uses.
+- To test your table code without Beacon, implement `HostApi` in the test and build the host with `Host::new`.
 - Beacon owns the rule for `LOCATION`. The plugin sends the text and does not parse it:
 
   | `LOCATION` | Store | Path |
@@ -301,8 +306,8 @@ async fn open(state: &dyn Session, cmd: &CreateExternalTable) -> Result<Arc<dyn 
 - The rule accepts each scheme and each absolute local path. The built-in table types refuse those when Beacon has a datasets store. Refuse in your plugin the locations that your users must not read.
 - When Beacon has no datasets store, a relative `LOCATION` stays unchanged and has no store.
 - A glob in `listing_url` follows the DataFusion rule: `*` stays in one folder.
-- `datasets_base_url(state)` gives the location of the datasets store, such as `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL by itself. The store of `s3://bucket/` is not the datasets store: it gets its credentials from the environment or from a secret.
-- `datasets_url(state)` gives the URL of the datasets store.
+- `host.datasets_base_url()` gives the location of the datasets store, such as `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL by itself. The store of `s3://bucket/` is not the datasets store: it gets its credentials from the environment or from a secret.
+- `host.datasets_url()` gives the URL of the datasets store.
 - The plugin cannot replace or remove a store of Beacon. `register_store` and `deregister_store` change only the plugin. A store that the plugin registers hides the Beacon store of the same URL.
 - `state.as_any()` gives no `SessionState`. Use the methods of `Session`.
 - An `INSERT ... SELECT` runs its `SELECT` in Beacon. Beacon cannot read a table on an object store as the source of such an insert into a plugin table.

@@ -8,9 +8,8 @@ use beacon_plugin_sdk::file_format::{FFI_FileFormatFactory, FileFormatsFn, FILE_
 use beacon_plugin_sdk::scalar_functions::{
     import_scalar_function, ScalarFunctionsFn, SCALAR_FUNCTIONS_SYMBOL,
 };
-use beacon_plugin_sdk::table_type::{
-    FFI_PluginHost, FFI_PluginTableType, TableTypesFn, TABLE_TYPES_SYMBOL,
-};
+use beacon_plugin_sdk::host::ffi::FFI_Host;
+use beacon_plugin_sdk::table_type::{FFI_PluginTableType, TableTypesFn, TABLE_TYPES_SYMBOL};
 use beacon_plugin_sdk::{AbiFn, ABI_SYMBOL, BEACON_PLUGIN_SDK_ABI};
 use datafusion::logical_expr::ScalarUDF;
 use parking_lot::Mutex;
@@ -55,7 +54,7 @@ pub fn library_file_name(name: &str) -> String {
 /// the functions point into its code, and the library ran code at load.
 pub fn load_native(
     path: &Path,
-    host: impl FnOnce() -> FFI_PluginHost,
+    host: impl FnOnce() -> FFI_Host,
 ) -> anyhow::Result<NativeExports> {
     if !path.is_file() {
         return Err(missing_library(path));
@@ -105,7 +104,7 @@ fn require_exports(has_functions: bool, has_formats: bool, has_tables: bool) -> 
 
 fn exports(
     library: &libloading::Library,
-    host: impl FnOnce() -> FFI_PluginHost,
+    host: impl FnOnce() -> FFI_Host,
 ) -> anyhow::Result<NativeExports> {
     // SAFETY: the SDK exports these symbols with these types.
     let (abi, functions, formats, tables) = unsafe {
@@ -165,7 +164,7 @@ fn exports(
 mod tests {
     use super::*;
 
-    fn no_host() -> FFI_PluginHost {
+    fn no_host() -> FFI_Host {
         unreachable!("no library opens in these tests")
     }
 

@@ -11,7 +11,6 @@ pub(crate) mod export;
 mod foreign;
 mod multipart;
 mod options;
-mod registry;
 mod stream;
 
 pub use bytes::FFI_Bytes;
@@ -24,7 +23,6 @@ pub use options::{
     FFI_GetResultMeta, FFI_ListResult, FFI_ObjectMeta, FFI_PutMode, FFI_PutMultipartOptions,
     FFI_PutOptions, FFI_PutResult, FFI_Range, FFI_RenameOptions, FFI_TagSet,
 };
-pub use registry::{FFI_ObjectStoreRegistry, ForeignObjectStoreRegistry};
 pub use stream::{FFI_BytesStream, FFI_MetaStream, FFI_PathStream, FFI_Stream};
 
 #[cfg(test)]

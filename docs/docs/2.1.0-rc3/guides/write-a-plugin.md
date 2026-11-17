@@ -152,24 +152,27 @@ A table type is a DataFusion `TableProviderFactory` with a name in a `TableType`
 
 ### Object stores in a table type
 
-Give Beacon the `LOCATION` text. Beacon gives back the object store and the path.
+`Host` is the Beacon server that runs the table code. Get it from the session of `create`, `scan`
+or `insert_into`. Give it the `LOCATION` text. It gives back the object store and the path.
 
 ```rust
-use beacon_plugin_sdk::table_type::open_location;
+use beacon_plugin_sdk::host::Host;
 
-let open = open_location(state, &cmd.location)?;
+let host = Host::of(state)?;
+let open = host.open(&cmd.location)?;
 let bytes = open.store.get(&Path::from(open.path)).await?.bytes().await?;
 ```
 
 For a location with a glob, or for a DataFusion `ListingTable`, use `listing_url`:
 
 ```rust
-use beacon_plugin_sdk::table_type::listing_url;
-
-let url = listing_url(state, &cmd.location)?;
+let url = host.listing_url(&cmd.location)?;
 let store = state.runtime_env().object_store(url.object_store())?;
 let files = url.list_all_files(state, store.as_ref(), "").await?;
 ```
+
+To test your table code without Beacon, implement the `HostApi` trait in the test and build the
+host with `Host::new`.
 
 Beacon owns the rule for `LOCATION`. The plugin sends the text and does not parse it:
 
@@ -191,7 +194,7 @@ Beacon owns the rule for `LOCATION`. The plugin sends the text and does not pars
   when Beacon has a datasets store. Refuse in your plugin the locations that your users must not
   read.
 - A glob in `listing_url` follows the DataFusion rule: `*` stays in one folder.
-- `datasets_base_url(state)` gives the location of the datasets store, such as
+- `host.datasets_base_url()` gives the location of the datasets store, such as
   `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL
   by itself. The store of `s3://bucket/` is not the datasets store.
 - The plugin cannot replace or remove a store of Beacon. `register_store` changes only the plugin.

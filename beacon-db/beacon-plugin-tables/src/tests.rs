@@ -3,10 +3,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_plugin_sdk::datafusion_ffi::util::FFI_Result;
+use beacon_plugin_sdk::host::Host;
 use beacon_plugin_sdk::object_store::store::memory::InMemory;
 use beacon_plugin_sdk::object_store::store::path::Path;
 use beacon_plugin_sdk::object_store::store::{ObjectStoreExt, PutPayload};
-use beacon_plugin_sdk::table_type::{TableType, export_table_types, open_location};
+use beacon_plugin_sdk::table_type::{TableType, export_table_types};
 use datafusion::arrow::array::{Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider, TableProviderFactory};
@@ -355,7 +356,7 @@ impl TableProviderFactory for ReaderFactory {
         state: &dyn Session,
         cmd: &CreateExternalTable,
     ) -> Result<Arc<dyn TableProvider>> {
-        let open = open_location(state, &cmd.location)?;
+        let open = Host::of(state)?.open(&cmd.location)?;
         let bytes = open
             .store
             .get(&Path::from(open.path))

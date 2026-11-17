@@ -4,6 +4,7 @@
 compile_error!("beacon plugins need panic = \"unwind\"");
 
 pub mod file_format;
+pub mod host;
 pub mod object_store;
 mod panic_safe;
 pub mod scalar_functions;
@@ -91,7 +92,7 @@ macro_rules! export_plugin {
     (@symbol tables $tables:path) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn beacon_plugin_table_types(
-            host: $crate::table_type::FFI_PluginHost,
+            host: $crate::host::ffi::FFI_Host,
         ) -> $crate::datafusion_ffi::util::FFI_Result<
             $crate::stabby::vec::Vec<$crate::table_type::FFI_PluginTableType>,
         > {

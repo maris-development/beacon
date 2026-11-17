@@ -29,7 +29,8 @@ use tokio::runtime::{Handle, Runtime};
 use crate::file_format::panic_safe_stream;
 use crate::panic_safe::panic_message;
 
-use super::host::{HostSession, PluginHost};
+use super::session::{HostBinding, HostSession};
+use crate::host::HostApi;
 
 /// The runtime and the codec session of one export of table types.
 ///
@@ -41,7 +42,7 @@ pub(crate) struct PluginContext {
     runtime: Option<Runtime>,
     handle: Handle,
     session: Arc<dyn TaskContextProvider + Send + Sync>,
-    host: Arc<PluginHost>,
+    host: HostBinding,
 }
 
 impl fmt::Debug for PluginContext {
@@ -52,7 +53,7 @@ impl fmt::Debug for PluginContext {
 
 impl PluginContext {
     /// Starts a runtime and a session with the DataFusion default functions only.
-    pub(crate) fn new(host: Arc<PluginHost>) -> Arc<Self> {
+    pub(crate) fn new(host: Arc<dyn HostApi>) -> Arc<Self> {
         #[cfg(not(miri))]
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         // Miri refuses threads that live to the end, and a current-thread runtime starts none.
@@ -67,17 +68,17 @@ impl PluginContext {
             handle: runtime.handle().clone(),
             runtime: Some(runtime),
             session: Arc::new(SessionContext::new()),
-            host,
+            host: HostBinding::new(host),
         })
     }
 
     /// Uses the runtime of `handle`, which the plugin author owns and stops.
-    pub(crate) fn with_handle(handle: Handle, host: Arc<PluginHost>) -> Arc<Self> {
+    pub(crate) fn with_handle(handle: Handle, host: Arc<dyn HostApi>) -> Arc<Self> {
         Arc::new(Self {
             runtime: None,
             handle,
             session: Arc::new(SessionContext::new()),
-            host,
+            host: HostBinding::new(host),
         })
     }
 
@@ -345,10 +346,10 @@ impl datafusion::physical_plan::RecordBatchStream for KeepAlive {
 mod tests {
     use std::sync::Arc;
 
-    use super::{PluginContext, PluginHost};
+    use super::{HostApi, PluginContext};
 
-    fn test_host() -> Arc<PluginHost> {
-        Arc::new(PluginHost::try_from(crate::table_type::tests::test_host()).unwrap())
+    fn test_host() -> Arc<dyn HostApi> {
+        crate::host::tests::TestHost::new()
     }
 
     #[test]

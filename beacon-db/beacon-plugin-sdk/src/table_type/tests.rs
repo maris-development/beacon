@@ -7,20 +7,18 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::catalog::{Session, TableProvider, TableProviderFactory};
 use datafusion::datasource::MemTable;
 use datafusion::error::Result;
-use datafusion::execution::object_store::{
-    DefaultObjectStoreRegistry, ObjectStoreRegistry, ObjectStoreUrl,
-};
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_expr::{CreateExternalTable, DdlStatement, LogicalPlan};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 use datafusion::prelude::SessionContext;
 use datafusion_ffi::util::FFI_Result;
-use object_store::memory::InMemory;
+use object_store::ObjectStoreExt;
 use object_store::path::Path;
-use object_store::{ObjectStoreExt, PutPayload};
-use url::Url;
 
-use crate::object_store::tests::foreign_marker_id;
+use crate::host::Host;
+use crate::host::ffi::tests::foreign_table;
+use crate::host::tests::TestHost;
 
 use super::*;
 
@@ -33,45 +31,22 @@ enum Mode {
     ReadStore,
 }
 
-/// A runtime for the host stores of the tests. It lives to the end of the test binary.
-pub(crate) fn test_handle() -> tokio::runtime::Handle {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .thread_name("test-host")
-                .build()
-                .unwrap()
-        })
-        .handle()
-        .clone()
+/// The test host as a table that imports through the foreign path.
+pub(crate) fn test_host() -> FFI_Host {
+    foreign_table(TestHost::new())
 }
 
-const BASE_URL: &str = "file:///beacon/data/datasets/";
-
-/// A host registry with `a/x.txt` = `hi` in the store `datasets://`.
-fn host_registry() -> Arc<dyn ObjectStoreRegistry> {
-    let store = InMemory::new();
-    futures::executor::block_on(store.put(&Path::from("a/x.txt"), PutPayload::from_static(b"hi")))
-        .unwrap();
-    let registry = DefaultObjectStoreRegistry::new();
-    registry.register_store(&Url::parse("datasets://").unwrap(), Arc::new(store));
-    Arc::new(registry)
-}
-
-/// A host value whose registry crosses through the foreign path.
-pub(crate) fn test_host() -> FFI_PluginHost {
-    let mut host = FFI_PluginHost::new(
-        host_registry(),
-        test_handle(),
-        Arc::new(crate::table_type::location::tests::TestResolver),
-        Some(&ObjectStoreUrl::parse("datasets://").unwrap()),
-        Some(&Url::parse(BASE_URL).unwrap()),
-    );
-    host.registry.library_marker_id = foreign_marker_id;
-    host.resolver.library_marker_id = foreign_marker_id;
-    host
+/// Reads `a/x.txt` through the host of `state`.
+async fn read_hi_from_host(state: &dyn Session) -> Result<()> {
+    let open = Host::of(state)?.open("a/x.txt")?;
+    let bytes = open
+        .store
+        .get(&Path::from(open.path))
+        .await?
+        .bytes()
+        .await?;
+    assert_eq!(bytes.as_ref(), b"hi");
+    Ok(())
 }
 
 /// Reads `a/x.txt` of the datasets store through `env`.
@@ -105,6 +80,7 @@ impl TableProvider for StoreTable {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         read_hi(state.runtime_env()).await?;
         read_hi(&state.task_ctx().runtime_env()).await?;
+        read_hi_from_host(state).await?;
         let inner = self.0.scan(state, projection, filters, limit).await?;
         Ok(Arc::new(StoreExec(inner)))
     }
@@ -215,6 +191,7 @@ impl TableProviderFactory for TestFactory {
             Mode::ReadStore => {
                 read_hi(state.runtime_env()).await?;
                 read_hi(&state.task_ctx().runtime_env()).await?;
+                read_hi_from_host(state).await?;
                 return Ok(Arc::new(StoreTable(memory_table())));
             }
         }

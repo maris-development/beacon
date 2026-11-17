@@ -38,7 +38,7 @@ use beacon_plugin_formats::{
 use beacon_plugin_tables::{
     check_table_types, import_table_types, InstalledTableTypes, PluginHostInfo, PluginTableType,
 };
-use beacon_plugin_sdk::table_type::FFI_PluginHost;
+use beacon_plugin_sdk::host::ffi::FFI_Host;
 use tokio::runtime::Handle;
 
 /// A plugin that passed every check and has registered nothing yet.
@@ -131,9 +131,8 @@ fn check_collision(
     anyhow::bail!("function '{function}' of plugin '{plugin}' collides with {clash}")
 }
 
-/// The host value for the table types of one plugin: the object stores of `session`,
-/// read-only, and the datasets URLs.
-fn plugin_host(session: &SessionContext) -> FFI_PluginHost {
+/// Beacon as the host of the table types of one plugin, with the object stores of `session`.
+fn plugin_host(session: &SessionContext) -> FFI_Host {
     let registry = Arc::clone(&session.runtime_env().object_store_registry);
     let info = session.state().config().get_extension::<PluginHostInfo>();
     // A session without the extension has no datasets store to name.

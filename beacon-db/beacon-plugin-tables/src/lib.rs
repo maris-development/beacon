@@ -6,16 +6,16 @@
 
 mod definition;
 mod filters;
+mod host;
 mod install;
-mod location;
 mod table;
 
 pub use definition::PluginTableDefinition;
+pub use host::{BeaconHost, PluginHostInfo};
 pub use install::{
-    BUILT_IN_TABLE_TYPES, InstalledTableTypes, PluginHostInfo, PluginTableType,
-    check_table_types, import_table_types,
+    BUILT_IN_TABLE_TYPES, InstalledTableTypes, PluginTableType, check_table_types,
+    import_table_types,
 };
-pub use location::DatasetsLocationResolver;
 pub use table::{PluginTable, create_plugin_table};
 
 #[cfg(test)]

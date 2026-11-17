@@ -21,7 +21,8 @@ use beacon_plugin_sdk::datafusion::arrow::array::{Int64Array, RecordBatch, Strin
 use beacon_plugin_sdk::datafusion::arrow::datatypes::{DataType, Field, Schema};
 use beacon_plugin_sdk::datafusion::datasource::MemTable;
 use beacon_plugin_sdk::object_store::store::{ObjectMeta, ObjectStoreExt};
-use beacon_plugin_sdk::table_type::{TableType, datasets_base_url, listing_url};
+use beacon_plugin_sdk::host::Host;
+use beacon_plugin_sdk::table_type::TableType;
 use futures::TryStreamExt;
 
 /// A CSV listing table that claims `Inexact` for every filter, so Beacon applies them again.
@@ -135,7 +136,8 @@ fn store_schema() -> SchemaRef {
 
 /// Reads the rows of each file that `location` matches, through the stores of `state`.
 async fn store_rows(state: &dyn Session, location: &str) -> Result<RecordBatch> {
-    let url = listing_url(state, location)?;
+    let host = Host::of(state)?;
+    let url = host.listing_url(location)?;
     let store = state.runtime_env().object_store(url.object_store())?;
     let files: Vec<ObjectMeta> = url
         .list_all_files(state, store.as_ref(), "")
@@ -151,7 +153,8 @@ async fn store_rows(state: &dyn Session, location: &str) -> Result<RecordBatch> 
         let text = String::from_utf8_lossy(&bytes);
         values.extend(text.lines().filter_map(|line| line.trim().parse::<i64>().ok()));
     }
-    let base = datasets_base_url(state)
+    let base = host
+        .datasets_base_url()
         .map(|url| url.to_string())
         .unwrap_or_default();
     let bases = StringArray::from(vec![base; values.len()]);
