@@ -6,10 +6,12 @@
 
 mod definition;
 mod filters;
+mod host;
 mod install;
 mod table;
 
 pub use definition::PluginTableDefinition;
+pub use host::{BeaconHost, PluginHostInfo};
 pub use install::{
     BUILT_IN_TABLE_TYPES, InstalledTableTypes, PluginTableType, check_table_types,
     import_table_types,

@@ -2291,6 +2291,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -2309,6 +2310,7 @@ dependencies = [
  "tokio",
  "tracing",
  "typetag",
+ "url",
 ]
 
 [[package]]
@@ -2369,6 +2371,7 @@ dependencies = [
  "tracing-appender",
  "tracing-panic",
  "tracing-subscriber",
+ "url",
  "utoipa",
  "utoipa-axum",
  "utoipa-scalar",

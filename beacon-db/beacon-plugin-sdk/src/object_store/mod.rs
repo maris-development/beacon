@@ -7,7 +7,7 @@ pub use ::object_store as store;
 
 mod bytes;
 mod error;
-mod export;
+pub(crate) mod export;
 mod foreign;
 mod multipart;
 mod options;
@@ -26,4 +26,4 @@ pub use options::{
 pub use stream::{FFI_BytesStream, FFI_MetaStream, FFI_PathStream, FFI_Stream};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

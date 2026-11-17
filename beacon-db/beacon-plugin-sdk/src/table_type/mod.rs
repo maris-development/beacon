@@ -4,6 +4,7 @@
 //! The factory crosses the boundary as a `datafusion-ffi` [`FFI_TableProviderFactory`].
 
 mod runtime;
+mod session;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -19,6 +20,8 @@ use stabby::string::String as SString;
 use stabby::vec::Vec as SVec;
 use tokio::runtime::Handle;
 
+use crate::host::HostApi;
+use crate::host::ffi::FFI_Host;
 use crate::panic_safe::panic_message;
 use crate::{ABI_VERSION, sdk_abi_version};
 use runtime::{PluginContext, RuntimeFactory};
@@ -66,7 +69,7 @@ pub struct FFI_PluginTableType {
 pub const TABLE_TYPES_SYMBOL: &[u8] = b"beacon_plugin_table_types\0";
 
 /// The type of the [`TABLE_TYPES_SYMBOL`] function.
-pub type TableTypesFn = extern "C" fn() -> FFI_Result<SVec<FFI_PluginTableType>>;
+pub type TableTypesFn = extern "C" fn(FFI_Host) -> FFI_Result<SVec<FFI_PluginTableType>>;
 
 fn export_table_type(table_type: TableType, context: &Arc<PluginContext>) -> FFI_PluginTableType {
     let factory = Arc::new(RuntimeFactory::new(table_type.factory, Arc::clone(context)));
@@ -84,25 +87,35 @@ fn export_table_type(table_type: TableType, context: &Arc<PluginContext>) -> FFI
 
 /// Exports the table types that `make` returns. A panic becomes an error.
 ///
+/// The table code of each type gets `host` through `Host::of`, and its object stores
+/// through the session.
+///
 /// Each call starts its own plugin runtime, so each Beacon instance in a process has one.
 /// The runtime stops when the last factory, table, plan and stream of the call drops.
 /// A type with [`TableType::with_runtime`] uses that runtime instead.
-pub fn export_table_types(make: fn() -> Vec<TableType>) -> FFI_Result<SVec<FFI_PluginTableType>> {
+pub fn export_table_types(
+    make: fn() -> Vec<TableType>,
+    host: FFI_Host,
+) -> FFI_Result<SVec<FFI_PluginTableType>> {
     let exported = catch_unwind(AssertUnwindSafe(|| {
+        let host = Arc::<dyn HostApi>::try_from(host)?;
         // The SDK starts a runtime only when a type has none.
         let mut shared: Option<Arc<PluginContext>> = None;
         let mut out = SVec::new();
         for mut table_type in make() {
             let context = match table_type.runtime.take() {
-                Some(handle) => PluginContext::with_handle(handle),
-                None => Arc::clone(shared.get_or_insert_with(PluginContext::new)),
+                Some(handle) => PluginContext::with_handle(handle, Arc::clone(&host)),
+                None => {
+                    Arc::clone(shared.get_or_insert_with(|| PluginContext::new(Arc::clone(&host))))
+                }
             };
             out.push(export_table_type(table_type, &context));
         }
-        out
+        Ok::<_, DataFusionError>(out)
     }));
     match exported {
-        Ok(types) => FFI_Result::Ok(types),
+        Ok(Ok(types)) => FFI_Result::Ok(types),
+        Ok(Err(error)) => FFI_Result::Err(SString::from(error.to_string().as_str())),
         Err(payload) => FFI_Result::Err(SString::from(
             format!(
                 "plugin table types panicked: {}",

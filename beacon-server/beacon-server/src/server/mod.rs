@@ -297,6 +297,13 @@ async fn build_runtime(
             },
         });
 
+    // Plugin tables get the bucket URL; the https root is for netCDF-c only.
+    if let Some(bucket) = config.s3.bucket.as_deref().filter(|_| config.s3.datasets_on_s3) {
+        let url = url::Url::parse(&format!("s3://{bucket}/"))
+            .with_context(|| format!("invalid S3 bucket name '{bucket}'"))?;
+        builder = builder.with_datasets_base_url(url);
+    }
+
     // The single-file tables store: catalog, managed data, and the auth directory.
     builder = builder.with_db_path(config.data.db_file.clone());
 

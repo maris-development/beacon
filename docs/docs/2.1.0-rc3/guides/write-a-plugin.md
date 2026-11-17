@@ -146,9 +146,61 @@ gives to the reader.
 A table type is a DataFusion `TableProviderFactory` with a name in a `TableType`. Beacon calls
 `create` for each `CREATE EXTERNAL TABLE ... STORED AS <name>` and again at each start.
 
-- The table opens its own connections. It gets no Beacon object store.
+- The table code reads the object stores of Beacon. See [Object stores in a table type](#object-stores-in-a-table-type).
 - The SDK runs the table code in a tokio runtime of the plugin.
 - Do not keep the state of one server in a `static`. Several Beacon servers can share a process.
+
+### Object stores in a table type
+
+`Host` is the Beacon server that runs the table code. Get it from the session of `create`, `scan`
+or `insert_into`. Give it the `LOCATION` text. It gives back the object store and the path.
+
+```rust
+use beacon_plugin_sdk::host::Host;
+
+let host = Host::of(state)?;
+let open = host.open(&cmd.location)?;
+let bytes = open.store.get(&Path::from(open.path)).await?.bytes().await?;
+```
+
+For a location with a glob, or for a DataFusion `ListingTable`, use `listing_url`:
+
+```rust
+let url = host.listing_url(&cmd.location)?;
+let store = state.runtime_env().object_store(url.object_store())?;
+let files = url.list_all_files(state, store.as_ref(), "").await?;
+```
+
+To test your table code without Beacon, implement the `HostApi` trait in the test and build the
+host with `Host::new`.
+
+Beacon owns the rule for `LOCATION`. The plugin sends the text and does not parse it:
+
+| `LOCATION` | Store | Path |
+| --- | --- | --- |
+| `obs/part_*.lance` | `datasets:///` | `obs/part_*.lance` |
+| `datasets://obs/part_*.lance` | `datasets:///` | `obs/part_*.lance` |
+| `s3://bucket/obs/a.parquet` | `s3://bucket/` | `obs/a.parquet` |
+| `/data/obs/a.parquet` | none | `/data/obs/a.parquet` |
+
+- `datasets://` is the URL of the datasets store. The plugin reads this store with the
+  credentials of Beacon, also when the store is an S3 bucket.
+- Each lookup reads the stores of Beacon at that moment. A store that Beacon adds or replaces later
+  is visible to the plugin.
+- The session of `create`, `scan` and `insert_into` holds the same stores. The task context of
+  `execute` holds them too. `runtime_env().object_store(url)` thus works in DataFusion code.
+- Do not parse `datasets://obs/a` as a URL. A URL parser reads `obs` as the host.
+- The rule accepts each scheme and each absolute local path. The built-in table types refuse those
+  when Beacon has a datasets store. Refuse in your plugin the locations that your users must not
+  read.
+- A glob in `listing_url` follows the DataFusion rule: `*` stays in one folder.
+- `host.datasets_base_url()` gives the location of the datasets store, such as
+  `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL
+  by itself. The store of `s3://bucket/` is not the datasets store.
+- The plugin cannot replace or remove a store of Beacon. `register_store` changes only the plugin.
+- When Beacon has no datasets store, a relative `LOCATION` stays unchanged and has no store.
+- Beacon cannot read a table on an object store as the source of an `INSERT ... SELECT` into a
+  plugin table.
 
 ### Rules for native code
 

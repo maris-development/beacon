@@ -146,8 +146,8 @@ fn foreign(factory: Arc<dyn FormatFactory>) -> Arc<dyn FormatFactory> {
 }
 
 #[test]
-fn sdk_abi_is_six() {
-    assert_eq!(crate::BEACON_PLUGIN_SDK_ABI, 6);
+fn sdk_abi_is_seven() {
+    assert_eq!(crate::BEACON_PLUGIN_SDK_ABI, 7);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -258,7 +258,7 @@ async fn wrong_version_is_refused() {
     assert!(
         error
             .to_string()
-            .contains("file format FFI version 2 is not supported (want 6)"),
+            .contains("file format FFI version 2 is not supported (want 7)"),
         "{error}"
     );
 }

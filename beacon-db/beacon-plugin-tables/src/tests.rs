@@ -3,12 +3,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_plugin_sdk::datafusion_ffi::util::FFI_Result;
+use beacon_plugin_sdk::host::Host;
+use beacon_plugin_sdk::object_store::store::memory::InMemory;
+use beacon_plugin_sdk::object_store::store::path::Path;
+use beacon_plugin_sdk::object_store::store::{ObjectStoreExt, PutPayload};
 use beacon_plugin_sdk::table_type::{TableType, export_table_types};
 use datafusion::arrow::array::{Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider, TableProviderFactory};
 use datafusion::datasource::{MemTable, TableType as DfTableType};
 use datafusion::error::Result;
+use datafusion::execution::object_store::DefaultObjectStoreRegistry;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{
     ColumnarValue, CreateExternalTable, DdlStatement, Expr, LogicalPlan, ScalarUDF,
@@ -18,7 +24,7 @@ use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties, collect}
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::{
-    InstalledTableTypes, PluginTableDefinition, PluginTableType, check_table_types,
+    InstalledTableTypes, PluginHostInfo, PluginTableDefinition, PluginTableType, check_table_types,
     create_plugin_table, import_table_types,
 };
 
@@ -96,9 +102,16 @@ fn exported(names: &'static [&'static str]) -> Vec<PluginTableType> {
 
 /// The `greedy` type, through the FFI export and import.
 fn foreign_types() -> Vec<PluginTableType> {
-    let FFI_Result::Ok(ffi) =
-        export_table_types(|| vec![TableType::new("greedy", Arc::new(GreedyFactory))])
-    else {
+    let info = PluginHostInfo {
+        runtime: tokio::runtime::Handle::current(),
+        datasets_url: None,
+        datasets_base_url: None,
+    };
+    let host = info.ffi_host(Arc::new(DefaultObjectStoreRegistry::new()));
+    let FFI_Result::Ok(ffi) = export_table_types(
+        || vec![TableType::new("greedy", Arc::new(GreedyFactory))],
+        host,
+    ) else {
         panic!("export failed");
     };
     import_table_types(ffi.into_iter().collect()).unwrap()
@@ -330,4 +343,109 @@ async fn a_failed_pushdown_leaves_the_filters_to_beacon() {
         .await
         .unwrap();
     assert_eq!(rows.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+}
+
+/// A table type that reads the file of `LOCATION` through the session of `create`.
+#[derive(Debug)]
+struct ReaderFactory;
+
+#[async_trait]
+impl TableProviderFactory for ReaderFactory {
+    async fn create(
+        &self,
+        state: &dyn Session,
+        cmd: &CreateExternalTable,
+    ) -> Result<Arc<dyn TableProvider>> {
+        let open = Host::of(state)?.open(&cmd.location)?;
+        let bytes = open
+            .store
+            .get(&Path::from(open.path))
+            .await?
+            .bytes()
+            .await?;
+        let value: i64 = std::str::from_utf8(&bytes).unwrap().trim().parse().unwrap();
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![value]))],
+        )?;
+        Ok(Arc::new(MemTable::try_new(schema, vec![vec![batch]])?))
+    }
+}
+
+/// A session with `obs/a.txt` = `42` in the store `datasets://`, and the `reader` type.
+async fn reader_session() -> (Arc<SessionContext>, Arc<InstalledTableTypes>) {
+    let installed = Arc::new(InstalledTableTypes::default());
+    let ctx = session(installed.clone());
+    let datasets = ObjectStoreUrl::parse("datasets://").unwrap();
+    let store = InMemory::new();
+    store
+        .put(&Path::from("obs/a.txt"), PutPayload::from_static(b"42"))
+        .await
+        .unwrap();
+    ctx.register_object_store(datasets.as_ref(), Arc::new(store));
+    let info = PluginHostInfo {
+        runtime: tokio::runtime::Handle::current(),
+        datasets_url: Some(datasets),
+        datasets_base_url: None,
+    };
+    let host = info.ffi_host(Arc::clone(&ctx.runtime_env().object_store_registry));
+    let FFI_Result::Ok(ffi) = export_table_types(
+        || vec![TableType::new("reader", Arc::new(ReaderFactory))],
+        host,
+    ) else {
+        panic!("export failed");
+    };
+    installed.insert("p", import_table_types(ffi.into_iter().collect()).unwrap());
+    (ctx, installed)
+}
+
+async fn reader_value(location: &str) -> i64 {
+    let (ctx, installed) = reader_session().await;
+    let sql = format!("CREATE EXTERNAL TABLE t STORED AS reader LOCATION '{location}'");
+    let cmd = command(&ctx, &sql).await;
+    let table = create_plugin_table(&ctx.state(), &installed, &cmd)
+        .await
+        .unwrap()
+        .unwrap();
+    ctx.register_table("t", table).unwrap();
+    let batches = ctx
+        .sql("SELECT a FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_table_reads_a_relative_location() {
+    assert_eq!(reader_value("obs/a.txt").await, 42);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_table_reads_a_datasets_url() {
+    assert_eq!(reader_value("datasets://obs/a.txt").await, 42);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_table_keeps_the_location_text() {
+    let (ctx, installed) = reader_session().await;
+    let cmd = command(
+        &ctx,
+        "CREATE EXTERNAL TABLE t STORED AS reader LOCATION 'obs/a.txt'",
+    )
+    .await;
+    let table = create_plugin_table(&ctx.state(), &installed, &cmd)
+        .await
+        .unwrap()
+        .unwrap();
+    let table = table.downcast_ref::<crate::PluginTable>().unwrap();
+    assert_eq!(table.definition().location, "obs/a.txt");
 }

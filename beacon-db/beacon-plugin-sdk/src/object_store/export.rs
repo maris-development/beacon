@@ -209,7 +209,7 @@ unsafe extern "C" fn display_fn(store: &FFI_ObjectStore) -> SString {
 }
 
 /// Runs `drop_work` and swallows a panic in it.
-pub(super) fn drop_quietly(drop_work: impl FnOnce()) {
+pub(crate) fn drop_quietly(drop_work: impl FnOnce()) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(drop_work)) {
         // The payload drop can panic too.
         std::mem::forget(payload);

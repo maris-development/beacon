@@ -50,6 +50,7 @@ utoipa-scalar = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 tokio = { workspace = true}
 tokio-util = { workspace = true}
+url = { workspace = true }
 serde = { workspace = true}
 serde_json = { workspace = true}
 anyhow = { workspace = true}

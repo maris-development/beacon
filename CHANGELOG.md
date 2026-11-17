@@ -47,6 +47,15 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **Plugin tables read the Beacon object stores.** The table code of a plugin table type gets the
+  object stores of Beacon through `runtime_env().object_store(url)`. `datasets://` is the datasets
+  store, with the credentials of Beacon. Beacon resolves the `LOCATION` text for the plugin: the new
+  SDK type `Host` (from `Host::of(state)`) gives the store and the path with `open`, `listing_url`
+  and `resolve`, and a relative `LOCATION` is a path in the datasets store. A plugin cannot replace
+  a store of Beacon. The plugin SDK ABI is now 7. Rebuild each native plugin with the new
+  SDK, because Beacon refuses a plugin with SDK ABI 6.
+  ([#653](https://github.com/maris-development/beacon/issues/653))
+
 - **File statistics belong to an external table.** Set `'use_statistics_pruning' 'true'` in the
   `OPTIONS` of a table. Beacon then keeps one statistics table for it in `beacon.db`, and a query on
   the table prunes the files that cannot match. A refresh reads only the new and changed files.

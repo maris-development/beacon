@@ -261,9 +261,59 @@ INSERT INTO readings VALUES (1.5);
 - Beacon stores the table and calls `create` again at each start. When the plugin is missing, Beacon skips the table and keeps its definition.
 - Beacon stores `LOCATION` and `OPTIONS` as plain text in the table definition. Do not put secrets there that the storage must not see.
 
+### Object stores in table code
+
+`Host` is the Beacon server that runs the table code. Get it from the session with `Host::of`.
+Give it the `LOCATION` text. It gives back the object store and the path.
+
+```rust,no_run
+use std::sync::Arc;
+
+use beacon_plugin_sdk::datafusion::catalog::{Session, TableProvider};
+use beacon_plugin_sdk::datafusion::error::Result;
+use beacon_plugin_sdk::datafusion::logical_expr::CreateExternalTable;
+use beacon_plugin_sdk::host::Host;
+use beacon_plugin_sdk::object_store::store::ObjectStoreExt;
+use beacon_plugin_sdk::object_store::store::path::Path;
+
+async fn open(state: &dyn Session, cmd: &CreateExternalTable) -> Result<Arc<dyn TableProvider>> {
+    let host = Host::of(state)?;
+    let open = host.open(&cmd.location)?;
+    let _bytes = open.store.get(&Path::from(open.path)).await?.bytes().await?;
+    todo!("build the table from the bytes")
+}
+```
+
+- `Host::of(state)` works with the session of `create`, `scan` and `insert_into`. It fails for a session that is not from Beacon.
+- `host.open(location)` gives the store and the path. It fails for a path of the local machine.
+- `host.listing_url(location)` gives a DataFusion `ListingTableUrl`. Use it for a `ListingTable`, or with `list_all_files` for a location with a glob.
+- `host.resolve(location)` gives the store URL and the path, and opens nothing.
+- The SDK has three layers. `host::HostApi` is the interface that Beacon implements. `host::ffi` carries it across the plugin boundary. `host::Host` is what your code uses.
+- To test your table code without Beacon, implement `HostApi` in the test and build the host with `Host::new`.
+- Beacon owns the rule for `LOCATION`. The plugin sends the text and does not parse it:
+
+  | `LOCATION` | Store | Path |
+  | --- | --- | --- |
+  | `obs/part_*.lance` | `datasets:///` | `obs/part_*.lance` |
+  | `datasets://obs/part_*.lance` | `datasets:///` | `obs/part_*.lance` |
+  | `s3://bucket/obs/a.parquet` | `s3://bucket/` | `obs/a.parquet` |
+  | `/data/obs/a.parquet` | none | `/data/obs/a.parquet` |
+
+- `datasets://` is the URL of the datasets store. Beacon reads it with its own credentials, also when the store is an S3 bucket.
+- Each lookup reads the stores of Beacon at that moment. A store that Beacon adds or replaces later is visible to the plugin.
+- The session and the task context hold the same stores. `runtime_env().object_store(url)` works in `create`, `scan`, `insert_into` and `execute`, so DataFusion code such as a `ListingTable` finds them.
+- Do not parse `datasets://obs/a` as a URL. A URL parser reads `obs` as the host, and no store has that name.
+- The rule accepts each scheme and each absolute local path. The built-in table types refuse those when Beacon has a datasets store. Refuse in your plugin the locations that your users must not read.
+- When Beacon has no datasets store, a relative `LOCATION` stays unchanged and has no store.
+- A glob in `listing_url` follows the DataFusion rule: `*` stays in one folder.
+- `host.datasets_base_url()` gives the location of the datasets store, such as `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL by itself. The store of `s3://bucket/` is not the datasets store: it gets its credentials from the environment or from a secret.
+- `host.datasets_url()` gives the URL of the datasets store.
+- The plugin cannot replace or remove a store of Beacon. `register_store` and `deregister_store` change only the plugin. A store that the plugin registers hides the Beacon store of the same URL.
+- `state.as_any()` gives no `SessionState`. Use the methods of `Session`.
+- An `INSERT ... SELECT` runs its `SELECT` in Beacon. Beacon cannot read a table on an object store as the source of such an insert into a plugin table.
+
 ### Rules for table code
 
-- The table gets no Beacon object store. Open your own connections.
 - The SDK runs `create`, `scan`, `insert_into` and the output streams inside a tokio runtime of the plugin. Tokio I/O, `tokio::spawn` and `tokio::time` work there.
 - Each Beacon instance in a process gets its own runtime, also when the instances share the plugin library. Do not keep state of one instance in a `static`.
 - To control the runtime, such as its thread count, build it in the `tables` function and call `TableType::with_runtime(handle)`. The SDK then starts no runtime for that type. Keep the runtime in your factory, and stop it with `shutdown_background` in `Drop`: the last owner can drop inside a runtime.

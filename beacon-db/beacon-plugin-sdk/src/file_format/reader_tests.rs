@@ -360,7 +360,7 @@ async fn wrong_version_is_refused() {
     assert!(
         error
             .to_string()
-            .contains("file format FFI version 2 is not supported (want 6)"),
+            .contains("file format FFI version 2 is not supported (want 7)"),
         "{error}"
     );
 }
