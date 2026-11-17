@@ -49,6 +49,7 @@ use datafusion::{
 use object_store::ObjectStore;
 use tempfile::env::temp_dir;
 use tokio::runtime::Handle;
+use url::Url;
 
 use crate::{
     auth_store::TablesAuthStore,
@@ -82,6 +83,9 @@ pub struct RuntimeBuilder {
     /// the store itself (e.g. an application that also reads and writes files
     /// through it) and needs the runtime to query the very same instance.
     pub default_store_instance: Option<Arc<dyn ObjectStore>>,
+    /// The location of the datasets store that plugin tables get. `None` derives it
+    /// from the root of [`Self::default_store`].
+    pub datasets_base_url: Option<Url>,
 
     pub admin_username: Option<String>,
     pub admin_password: Option<String>,
@@ -155,6 +159,13 @@ impl RuntimeBuilder {
     /// the configured [`RootStore`]. Use with [`Self::with_default_store`], which
     /// still supplies the URL and the root that native readers resolve paths
     /// against.
+    /// Sets the location of the datasets store that plugin tables get, such as
+    /// `s3://bucket/`. Without it, the root of [`Self::with_default_store`] gives the URL.
+    pub fn with_datasets_base_url(mut self, url: Url) -> Self {
+        self.datasets_base_url = Some(url);
+        self
+    }
+
     pub fn with_default_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.default_store_instance = Some(store);
         self
@@ -903,6 +914,24 @@ fn build_session_state(
     Ok(state_builder.build())
 }
 
+/// The location of the datasets store for plugin tables: `explicit`, or the root of
+/// `default` as a URL that ends with `/`. `None` without a datasets store.
+pub(crate) fn datasets_base_url(default: Option<&DefaultStore>, explicit: Option<&Url>) -> Option<Url> {
+    if let Some(url) = explicit {
+        return Some(url.clone());
+    }
+    match &default?.root {
+        RootStore::FileSystem(dir) => {
+            // A relative root has no URL form.
+            let dir = std::path::absolute(dir).ok()?;
+            Url::from_directory_path(dir).ok()
+        }
+        RootStore::HttpsStore(base) => {
+            Url::parse(&format!("{}/", base.trim_end_matches('/'))).ok()
+        }
+    }
+}
+
 fn build_session_config(
     builder: &RuntimeBuilder,
     secrets_store: Arc<SecretStore>,
@@ -958,6 +987,14 @@ fn build_session_config(
         // The file formats of each installed plugin, for an uninstall.
         .with_extension(Arc::new(beacon_plugin_formats::InstalledFormats::default()))
         // The table types of each installed plugin, for `STORED AS` and an uninstall.
+        .with_extension(Arc::new(beacon_plugin_tables::PluginHostInfo {
+            runtime: runtime_handle.clone(),
+            datasets_url: builder.default_store.as_ref().map(|store| store.url.clone()),
+            datasets_base_url: datasets_base_url(
+                builder.default_store.as_ref(),
+                builder.datasets_base_url.as_ref(),
+            ),
+        }))
         .with_extension(Arc::new(
             beacon_plugin_tables::InstalledTableTypes::default(),
         ))
@@ -1084,4 +1121,71 @@ fn runtime_env_builder(
         .with_object_store_registry(Arc::new(object_store_registry));
 
     Ok(Arc::new(runtime_env_builder.build()?))
+}
+
+#[cfg(test)]
+mod datasets_base_url_tests {
+    use super::*;
+
+    fn default_store(root: RootStore) -> DefaultStore {
+        DefaultStore::new(ObjectStoreUrl::parse("datasets://").unwrap(), root)
+    }
+
+    #[test]
+    fn base_url_of_a_local_root_is_a_file_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = default_store(RootStore::FileSystem(dir.path().to_path_buf()));
+        let url = datasets_base_url(Some(&store), None).unwrap();
+        assert_eq!(url.scheme(), "file");
+        assert!(url.as_str().ends_with('/'), "{url}");
+        assert_eq!(url.to_file_path().unwrap(), dir.path());
+    }
+
+    #[test]
+    fn base_url_of_an_https_root_ends_with_a_slash() {
+        let store = default_store(RootStore::HttpsStore("https://h/b/p".to_string()));
+        let url = datasets_base_url(Some(&store), None).unwrap();
+        assert_eq!(url.as_str(), "https://h/b/p/");
+        let store = default_store(RootStore::HttpsStore("https://h/b/p/".to_string()));
+        let url = datasets_base_url(Some(&store), None).unwrap();
+        assert_eq!(url.as_str(), "https://h/b/p/");
+    }
+
+    #[test]
+    fn explicit_base_url_wins() {
+        let store = default_store(RootStore::HttpsStore("https://h/b".to_string()));
+        let explicit = Url::parse("s3://bucket/").unwrap();
+        let url = datasets_base_url(Some(&store), Some(&explicit)).unwrap();
+        assert_eq!(url.as_str(), "s3://bucket/");
+    }
+
+    #[test]
+    fn no_default_store_has_no_base_url() {
+        assert_eq!(datasets_base_url(None, None), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_session_carries_the_plugin_host_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let datasets = dir.path().join("datasets");
+        std::fs::create_dir_all(&datasets).unwrap();
+        let runtime = RuntimeBuilder::new()
+            .with_default_store(
+                ObjectStoreUrl::parse("datasets://").unwrap(),
+                RootStore::FileSystem(datasets),
+            )
+            .with_tmp_dir_path(dir.path().join("tmp"))
+            .build()
+            .await
+            .unwrap();
+        let info = runtime
+            .session_ctx
+            .state()
+            .config()
+            .get_extension::<beacon_plugin_tables::PluginHostInfo>()
+            .expect("the plugin host info");
+        assert_eq!(info.datasets_url.as_ref().unwrap().as_str(), "datasets:///");
+        let base = info.datasets_base_url.as_ref().unwrap();
+        assert_eq!(base.to_file_path().unwrap(), dir.path().join("datasets"));
+    }
 }

@@ -1,11 +1,14 @@
 //! Table type plugins through the real loader: the fixture library exports `exkv`
-//! (CSV files in a local folder) and `expanic` (panics in `create`).
+//! (CSV files in a local folder), `expanic` (panics in `create`) and `exstore` (a text
+//! file in a Beacon object store).
 
 mod common;
 
 use bytes::Bytes;
 use common::plugins::example_plugin;
-use common::{restartable_runtime, scalar_i64, total_rows, TestRuntime};
+use common::{
+    restartable_runtime, scalar_i64, scalar_string, total_rows, write_file, TestRuntime,
+};
 
 async fn install(rt: &TestRuntime) {
     rt.runtime
@@ -113,4 +116,75 @@ async fn an_uninstall_stops_the_table() {
     install(&rt).await;
     let rt = rt.restart().await;
     assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM t").await), 7);
+}
+
+/// Writes `obs/a.txt` with the values 1, 2 and 3 into the datasets store.
+fn write_values(rt: &TestRuntime) {
+    write_file(&rt.datasets_dir().join("obs").join("a.txt"), "1\n2\n3\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relative_location_reads_the_datasets_store() {
+    let rt = runtime_with_plugin("tables-store-relative").await;
+    write_values(&rt);
+    rt.sql("CREATE EXTERNAL TABLE s STORED AS exstore LOCATION 'obs/a.txt'")
+        .await;
+    assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM s").await), 6);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_datasets_url_reads_the_datasets_store() {
+    let rt = runtime_with_plugin("tables-store-url").await;
+    write_values(&rt);
+    rt.sql("CREATE EXTERNAL TABLE s STORED AS exstore LOCATION 'datasets://obs/a.txt'")
+        .await;
+    assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM s").await), 6);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_reads_the_datasets_store_again() {
+    let rt = runtime_with_plugin("tables-store-scan").await;
+    write_values(&rt);
+    rt.sql("CREATE EXTERNAL TABLE s STORED AS exstore LOCATION 'obs/a.txt'")
+        .await;
+    // `exstore` reads the file in each scan, through the session of the scan.
+    write_file(&rt.datasets_dir().join("obs").join("a.txt"), "10\n20\n");
+    assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM s").await), 30);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_file_in_the_datasets_store_is_a_sql_error() {
+    let rt = runtime_with_plugin("tables-store-missing").await;
+    let error = sql_error(
+        &rt,
+        "CREATE EXTERNAL TABLE s STORED AS exstore LOCATION 'obs/none.txt'",
+    )
+    .await;
+    assert!(error.contains("none.txt"), "{error}");
+    assert!(error.contains("not found"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_datasets_base_url_is_the_datasets_folder() {
+    let rt = runtime_with_plugin("tables-store-base").await;
+    write_values(&rt);
+    rt.sql("CREATE EXTERNAL TABLE s STORED AS exstore LOCATION 'obs/a.txt'")
+        .await;
+    let base = scalar_string(&rt.sql("SELECT DISTINCT base FROM s").await);
+    let path = url::Url::parse(&base).unwrap().to_file_path().unwrap();
+    assert_eq!(
+        path.canonicalize().unwrap(),
+        rt.datasets_dir().canonicalize().unwrap()
+    );
+    assert!(base.ends_with('/'), "{base}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_table_survives_a_restart() {
+    let rt = runtime_with_plugin("tables-store-restart").await;
+    write_values(&rt);
+    rt.sql("CREATE EXTERNAL TABLE s STORED AS exstore LOCATION 'obs/a.txt'")
+        .await;
+    let rt = rt.restart().await;
+    assert_eq!(scalar_i64(&rt.sql("SELECT sum(a) FROM s").await), 6);
 }

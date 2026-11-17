@@ -36,7 +36,7 @@ use beacon_plugin_formats::{
     InstalledFormats, PluginFileFormatFactory,
 };
 use beacon_plugin_tables::{
-    check_table_types, import_table_types, InstalledTableTypes, PluginTableType,
+    check_table_types, import_table_types, InstalledTableTypes, PluginHostInfo, PluginTableType,
 };
 use beacon_plugin_sdk::table_type::FFI_PluginHost;
 use tokio::runtime::Handle;
@@ -131,6 +131,17 @@ fn check_collision(
     anyhow::bail!("function '{function}' of plugin '{plugin}' collides with {clash}")
 }
 
+/// The host value for the table types of one plugin: the object stores of `session`,
+/// read-only, and the datasets URLs.
+fn plugin_host(session: &SessionContext) -> FFI_PluginHost {
+    let registry = Arc::clone(&session.runtime_env().object_store_registry);
+    match session.state().config().get_extension::<PluginHostInfo>() {
+        Some(info) => info.ffi_host(registry),
+        // A session without the extension has no datasets store to name.
+        None => FFI_PluginHost::new(registry, Handle::current(), None, None),
+    }
+}
+
 /// Runs every check on the unpacked plugin in `dir`. Registers nothing.
 pub(crate) fn prepare(
     dir: &Path,
@@ -184,10 +195,7 @@ pub(crate) fn prepare(
     // Native functions first, so the plugin SQL can call them.
     if let Some(native) = &manifest.native {
         let path = dir.join("lib").join(library_file_name(&native.library));
-        let exports = load_native(&path, || {
-            let registry = Arc::clone(&session.runtime_env().object_store_registry);
-            FFI_PluginHost::new(registry, Handle::current(), None, None)
-        })?;
+        let exports = load_native(&path, || plugin_host(session))?;
         formats = import_formats(exports.formats, Handle::current())?;
         check_formats(&state, &formats)
             .with_context(|| format!("a file format of plugin '{expected_name}'"))?;

@@ -385,6 +385,7 @@ dependencies = [
  "stabby",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

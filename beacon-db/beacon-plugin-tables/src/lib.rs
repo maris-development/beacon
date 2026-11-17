@@ -11,8 +11,8 @@ mod table;
 
 pub use definition::PluginTableDefinition;
 pub use install::{
-    BUILT_IN_TABLE_TYPES, InstalledTableTypes, PluginTableType, check_table_types,
-    import_table_types,
+    BUILT_IN_TABLE_TYPES, InstalledTableTypes, PluginHostInfo, PluginTableType,
+    check_table_types, import_table_types,
 };
 pub use table::{PluginTable, create_plugin_table};
 

@@ -6,12 +6,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use beacon_plugin_formats::PluginFileFormatFactory;
-use beacon_plugin_sdk::table_type::{FFI_PluginTableType, import_table_type};
+use beacon_plugin_sdk::table_type::{FFI_PluginHost, FFI_PluginTableType, import_table_type};
 use datafusion::catalog::TableProviderFactory;
 use datafusion::common::plan_err;
 use datafusion::error::Result;
 use datafusion::execution::SessionState;
+use datafusion::execution::object_store::{ObjectStoreRegistry, ObjectStoreUrl};
 use parking_lot::Mutex;
+use tokio::runtime::Handle;
+use url::Url;
 
 /// The `STORED AS` names that Beacon itself handles.
 pub const BUILT_IN_TABLE_TYPES: &[&str] = &[
@@ -25,6 +28,30 @@ pub const BUILT_IN_TABLE_TYPES: &[&str] = &[
     "mysql",
     "odbc",
 ];
+
+/// What Beacon gives to the table types of each plugin. Register one as a session config
+/// extension.
+#[derive(Debug, Clone)]
+pub struct PluginHostInfo {
+    /// The runtime that runs the store I/O of a plugin: the query runtime.
+    pub runtime: Handle,
+    /// The URL of the datasets store. `None` when Beacon has no datasets store.
+    pub datasets_url: Option<ObjectStoreUrl>,
+    /// The location of the datasets store, for a reader that opens a path or URL itself.
+    pub datasets_base_url: Option<Url>,
+}
+
+impl PluginHostInfo {
+    /// The host value for one plugin, with `registry` as read-only FFI data.
+    pub fn ffi_host(&self, registry: Arc<dyn ObjectStoreRegistry>) -> FFI_PluginHost {
+        FFI_PluginHost::new(
+            registry,
+            self.runtime.clone(),
+            self.datasets_url.as_ref(),
+            self.datasets_base_url.as_ref(),
+        )
+    }
+}
 
 /// A table type of a plugin: the `STORED AS` name and the imported factory.
 #[derive(Debug, Clone)]
