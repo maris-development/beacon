@@ -112,7 +112,11 @@ beacon-db/
     beacon-ffi-file-format/       file format plugins
     beacon-ffi-host/              the Beacon server for table code
     beacon-ffi-table-type/        table type plugins
-  beacon-plugin-sdk/              the one dependency of a plugin
+  beacon-plugin/
+    beacon-plugin-sdk/            the one dependency of a plugin
+    beacon-plugin-registry/       opens a plugin library (Beacon only)
+    beacon-plugin-formats/        plugin file formats in Beacon (Beacon only)
+    beacon-plugin-tables/         plugin table types in Beacon (Beacon only)
   beacon-object-store/            the stores of the server (Beacon only)
 ```
 

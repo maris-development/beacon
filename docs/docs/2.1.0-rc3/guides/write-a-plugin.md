@@ -17,7 +17,7 @@ To start fast, use the
 [beacon-plugin-template](https://github.com/maris-development/beacon-plugin-template) repository.
 It has an example of each plugin part and a release workflow. See [Plugins](/docs/2.1.0-rc3/server/plugins).
 
-The [SDK README](https://github.com/maris-development/beacon/blob/main/beacon-db/beacon-plugin-sdk/README.md)
+The [SDK README](https://github.com/maris-development/beacon/blob/main/beacon-db/beacon-plugin/beacon-plugin-sdk/README.md)
 holds the full Rust examples and the rules for each plugin part.
 The names `my-org` and `my-plugin` in this guide are example names.
 

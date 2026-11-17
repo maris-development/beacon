@@ -6,13 +6,13 @@ on:
   push:
     branches: [main]
     paths:
-      - "beacon-db/beacon-plugin-sdk/**"
+      - "beacon-db/beacon-plugin/beacon-plugin-sdk/**"
       - "beacon-db/beacon-ffi/**"
       - "Cargo.lock"
       - ".github/workflows/sdk-asan.yml"
   pull_request:
     paths:
-      - "beacon-db/beacon-plugin-sdk/**"
+      - "beacon-db/beacon-plugin/beacon-plugin-sdk/**"
       - "beacon-db/beacon-ffi/**"
       - "Cargo.lock"
       - ".github/workflows/sdk-asan.yml"
