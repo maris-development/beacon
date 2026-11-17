@@ -285,9 +285,9 @@ pub(crate) mod tests {
         static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
         RUNTIME
             .get_or_init(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .thread_name("test-host")
+                // The exports only enter this runtime. A current-thread runtime starts no
+                // thread, and Miri refuses a thread that lives to the end.
+                tokio::runtime::Builder::new_current_thread()
                     .build()
                     .unwrap()
             })
