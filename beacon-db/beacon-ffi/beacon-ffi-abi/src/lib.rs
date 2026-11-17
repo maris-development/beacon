@@ -50,8 +50,10 @@ pub fn panic_message(payload: &(dyn Any + Send)) -> String {
 /// Runs `drop_work` and swallows a panic in it.
 pub fn drop_quietly(drop_work: impl FnOnce()) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(drop_work)) {
-        // The payload drop can panic too.
-        std::mem::forget(payload);
+        // The payload drop can panic too. Only a payload of that second panic leaks.
+        if let Err(second) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+            std::mem::forget(second);
+        }
     }
 }
 
@@ -86,5 +88,22 @@ mod tests {
     #[test]
     fn drop_quietly_swallows_a_panic() {
         drop_quietly(|| drop(PanicsOnDrop));
+    }
+
+    /// Counts its drops, as a panic payload.
+    struct CountedPayload(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for CountedPayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn drop_quietly_frees_the_panic_payload() {
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let payload = CountedPayload(std::sync::Arc::clone(&drops));
+        drop_quietly(move || std::panic::panic_any(payload));
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
