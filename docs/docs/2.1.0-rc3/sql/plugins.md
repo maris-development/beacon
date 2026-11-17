@@ -189,6 +189,9 @@ INSERT INTO readings VALUES (1.5);
   skips the table and keeps its definition.
 - Beacon stores `LOCATION` and `OPTIONS` as plain text in the table definition. Do not put a secret
   there.
+- A plugin can read the datasets store. Such a plugin accepts a relative `LOCATION`, such as
+  `'obs/part_*.lance'`, and `'datasets://obs/part_*.lance'`. The documentation of the plugin tells
+  you which locations it accepts.
 
 ## Rules and limits
 

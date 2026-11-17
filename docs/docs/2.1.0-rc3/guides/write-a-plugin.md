@@ -146,9 +146,45 @@ gives to the reader.
 A table type is a DataFusion `TableProviderFactory` with a name in a `TableType`. Beacon calls
 `create` for each `CREATE EXTERNAL TABLE ... STORED AS <name>` and again at each start.
 
-- The table opens its own connections. It gets no Beacon object store.
+- The table code reads the object stores of Beacon. See [Object stores in a table type](#object-stores-in-a-table-type).
 - The SDK runs the table code in a tokio runtime of the plugin.
 - Do not keep the state of one server in a `static`. Several Beacon servers can share a process.
+
+### Object stores in a table type
+
+The session of `create`, `scan` and `insert_into` holds the object stores of Beacon. The task
+context of `execute` holds them too. Call `runtime_env().object_store(url)` to get a store.
+
+```rust
+use beacon_plugin_sdk::table_type::resolve_location;
+
+let found = resolve_location(state, &cmd.location)?;
+let Some(store_url) = found.store_url else {
+    return plan_err!("give a location in an object store");
+};
+let store = state.runtime_env().object_store(store_url)?;
+let bytes = store.get(&Path::from(found.path)).await?.bytes().await?;
+```
+
+`datasets://` is the URL of the datasets store. The plugin reads this store with the credentials
+of Beacon, also when the store is an S3 bucket. `resolve_location` resolves `LOCATION` in the same
+way as the built-in table types:
+
+| `LOCATION` | Store | Path |
+| --- | --- | --- |
+| `obs/part_*.lance` | `datasets://` | `obs/part_*.lance` |
+| `datasets://obs/part_*.lance` | `datasets://` | `obs/part_*.lance` |
+| `s3://bucket/obs/a.parquet` | `s3://bucket` | `obs/a.parquet` |
+| `/data/obs/a.parquet` | none | `/data/obs/a.parquet` |
+
+- Do not parse `datasets://obs/a` as a URL. A URL parser reads `obs` as the host.
+- `datasets_base_url(state)` gives the location of the datasets store, such as
+  `file:///beacon/data/datasets/` or `s3://bucket/`. Use it for a reader that opens a path or URL
+  by itself. The store of `s3://bucket/` is not the datasets store.
+- The plugin cannot replace or remove a store of Beacon. `register_store` changes only the plugin.
+- When Beacon has no datasets store, a relative `LOCATION` stays unchanged and has no store.
+- Beacon cannot read a table on an object store as the source of an `INSERT ... SELECT` into a
+  plugin table.
 
 ### Rules for native code
 
