@@ -284,10 +284,6 @@ An external table with the option `use_statistics_pruning` keeps the value range
 each file. A query on the table then prunes the files that cannot match. See
 [File statistics](/docs/2.1.0-rc3/internals/file-statistics).
 
-The pure-Rust readers are the default for netCDF and HDF5 (see [File formats](#file-formats)).
-Beacon records a real range for those formats. A server that reads netCDF or HDF5 through the
-netCDF-C library records no range.
-
 Each table sets its own refresh interval with `statistics_refresh_interval`. These variables apply
 to all tables:
 
@@ -319,24 +315,19 @@ change them.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_NETCDF_ENABLE_STATISTICS` | `true` | Compute and cache per-file statistics used for query pruning. |
-| `BEACON_NETCDF_USE_RUST_READER` | `true` | Read NetCDF with the pure-Rust reader instead of the netCDF-C library. It reads in parallel. It opens a file in an object store. It reports the statistics of each file. |
 
 ### HDF5
 
-A NetCDF-4 file is an HDF5 file, and the netCDF-C library opens a plain HDF5 file too. Beacon reads
-`.h5` and `.hdf5` through the pure-Rust reader by default. HDF5 carries its own reader flag, so you
-can move one format at a time.
+A NetCDF-4 file is an HDF5 file. Beacon reads `.h5` and `.hdf5` through a pure-Rust reader.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_HDF5_USE_RUST_READER` | `true` | Read HDF5 with the pure-Rust reader instead of the netCDF-C library. It also reports a nested group and a compound dataset. The netCDF-C library reports neither. |
-| `BEACON_HDF5_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. Needs the pure-Rust reader. |
+| `BEACON_HDF5_ENABLE_STATISTICS` | `true` | Compute per-file statistics used for query pruning. |
 | `BEACON_HDF5_CONVENTION` | `none` | The vendor layout every HDF5 table reads on top of the container. `none` reads the container alone and inspects no file. `optodas` reads an ASN OptoDAS acquisition file: it names the axes of the payload, adds the `time` and `distance` columns the file describes, and decodes the payload to the unit the file records. A table sets its own with `OPTIONS ('convention' 'optodas')`. |
 | `BEACON_HDF5_UNIFY_PHONY_DIMENSIONS` | `true` | Name every axis a plain HDF5 file leaves unnamed by its length, over the whole file, so two groups broadcast together. Set it to `false` to keep one dimension per length per group. A file that names its dimensions, such as any netCDF-4 file, is unaffected. |
 
-The pure-Rust reader also reads two layouts the netCDF data model cannot express: a nested group,
-and a compound dataset. See
-[Performance Tuning](/docs/2.1.0-rc3/server/performance-tuning#hdf5-pure-rust-reader).
+The reader also reads two layouts the netCDF data model cannot express: a nested group,
+and a compound dataset. See [HDF5](/docs/2.1.0-rc3/formats/hdf5).
 
 ### Zarr
 

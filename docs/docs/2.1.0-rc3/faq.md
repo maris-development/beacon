@@ -128,11 +128,9 @@ Beacon reads `AWS_REGION`. It does **not** use `AWS_DEFAULT_REGION`.
 
 ### My NetCDF files on S3 fail to read, but Parquet works
 
-Check the reader. The pure-Rust reader is the default, and it reads a private bucket with the
-server credentials. The netCDF-C library opens a file by URL, so it reads an anonymous bucket only.
-Do you set `BEACON_NETCDF_USE_RUST_READER=false`, or `use_rust_reader` on the table? Then remove
-that setting. The same rule applies to HDF5 and `BEACON_HDF5_USE_RUST_READER`. See
-[NetCDF](/docs/2.1.0-rc3/formats/netcdf).
+Check the credentials and the region of the server. Beacon reads NetCDF and HDF5 through the
+object store, with the same credentials as Parquet. If Parquet works on the same bucket, look at
+the error message for the file that fails. See [NetCDF](/docs/2.1.0-rc3/formats/netcdf).
 
 ### `CREATE PERSISTENT SECRET` fails
 

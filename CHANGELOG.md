@@ -85,6 +85,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   `BEACON_FILE_STATS_TARGET_GROUP_FILES`, `BEACON_FILE_STATS_MIN_GROUP_FILES`,
   `BEACON_FILE_STATS_PREFIX_DEPTH`, `BEACON_FILE_STATS_SCAN_PREFIX`,
   `BEACON_FILE_STATS_DISCOVERY_CHUNK` and `BEACON_FILE_STATS_SCHEMA_CACHE` have no effect.
+- **The netCDF-C reader.** Beacon reads NetCDF and HDF5 only with the pure-Rust reader.
+  `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` have no effect. The table
+  option `use_rust_reader` has no effect, and Beacon logs a warning for `'false'`. Writes still use
+  the netCDF-C library. ([#658](https://github.com/maris-development/beacon/issues/658))
 - **BBF.** `STORED AS BBF`, `read_bbf`, `read_bbf_schema`, the JSON `bbf` source and `fromBbf` in
   the TypeScript client are gone. A stored BBF table is skipped at startup, with an error in the
   log. Convert BBF data to a different format with an earlier release before the upgrade.

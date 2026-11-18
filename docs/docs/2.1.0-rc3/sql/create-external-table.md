@@ -252,8 +252,8 @@ more cores. Set it for a table with many files. The merged schema does not chang
 
 | `STORED AS` | Keys | Details |
 | ----------- | ---- | ------- |
-| `NC` | `read_dimensions`, `skip_unbroadcastable`, `skip_invalid_files`, `use_rust_reader`, `enable_statistics` | [NetCDF](/docs/2.1.0-rc3/formats/netcdf#options) |
-| `HDF5`, `H5` | `read_dimensions`, `use_rust_reader`, `enable_statistics`, `unify_phony_dimensions`, `convention` | [HDF5](/docs/2.1.0-rc3/formats/hdf5#options) |
+| `NC` | `read_dimensions`, `skip_unbroadcastable`, `skip_invalid_files`, `enable_statistics` | [NetCDF](/docs/2.1.0-rc3/formats/netcdf#options) |
+| `HDF5`, `H5` | `read_dimensions`, `enable_statistics`, `unify_phony_dimensions`, `convention` | [HDF5](/docs/2.1.0-rc3/formats/hdf5#options) |
 | `ZARR` | `read_dimensions`, `enable_statistics` | [Zarr](/docs/2.1.0-rc3/formats/zarr#options) |
 | `ATLAS` | `read_dimensions` | [Atlas](/docs/2.1.0-rc3/formats/atlas#options) |
 | `CSV` | `delimiter`, `infer_records` | [CSV](/docs/2.1.0-rc3/formats/csv#options) |

@@ -57,9 +57,8 @@ Object storage has a high latency. Fetch as few bytes as possible:
 - **Select only the columns that you need.** Projection pushdown turns a narrow `SELECT` into fewer
   bytes.
 - **Filter early.** A predicate prunes row groups and chunks before any transfer.
-- **Keep the pure-Rust reader for NetCDF and HDF5.** It is the default, and it reads byte ranges
-  from a private bucket. The netCDF-C library reads an anonymous bucket only. See
-  [NetCDF](/docs/2.1.0-rc3/formats/netcdf).
+- **NetCDF and HDF5 read byte ranges.** Beacon reads them from a private bucket with no local
+  copy. See [NetCDF](/docs/2.1.0-rc3/formats/netcdf).
 
 ## Register a prefix as a table
 

@@ -13,14 +13,6 @@ a query against these ranges. It then prunes the files that cannot hold a row th
 An external table turns this feature on for itself. Beacon keeps one statistics table for each such
 external table, in `beacon.db`.
 
-:::warning The reader decides the range
-A netCDF or HDF5 file supplies a range only through the pure-Rust reader. Both readers are the
-default, so a standard server records a range. A server that sets
-`BEACON_NETCDF_USE_RUST_READER=false` or `BEACON_HDF5_USE_RUST_READER=false` reads each such file
-and records no range. The [Check the result](#check-the-result) section shows how to find this
-condition.
-:::
-
 ## Turn it on for a table
 
 Set the option `use_statistics_pruning` on the table:
@@ -262,8 +254,8 @@ time, and has other columns.
 | Format | Ranges | Cost |
 | --- | --- | --- |
 | Parquet, GeoParquet | Yes | None. Beacon reads the file footer. |
-| netCDF | Yes, through the Rust reader (the default) | Beacon opens the file and reads the coordinate variables. |
-| HDF5 | Yes, through the Rust reader (the default) | Beacon opens the file and reads the one-dimensional datasets. |
+| netCDF | Yes | Beacon opens the file and reads the coordinate variables. |
+| HDF5 | Yes | Beacon opens the file and reads the one-dimensional datasets. |
 | Zarr | Yes | Beacon reads the store metadata, and the coordinate arrays it does not describe. |
 | CSV, Arrow IPC | No | |
 | ODV, TIFF | No | |
@@ -294,17 +286,6 @@ store can hold a value outside them, and Beacon returns that value. A range from
 would drop a file that holds a matching row.
 
 Set `BEACON_ZARR_ENABLE_STATISTICS=false` to stop this work.
-:::
-
-:::warning netCDF and HDF5 need the Rust reader
-The netCDF-C library holds one lock for each call in the process. Beacon computes the ranges through
-one thread. Your core count does not change this. The work also blocks queries.
-
-Beacon therefore computes netCDF ranges with its own Rust reader. That reader reads through the
-object store and uses each core. It is the default.
-
-With `BEACON_NETCDF_USE_RUST_READER=false`, netCDF files record `NULL` bounds. Beacon prunes no
-file. The rule applies to `.h5` and `.hdf5` files, through `BEACON_HDF5_USE_RUST_READER`.
 :::
 
 ## Changed and deleted files
