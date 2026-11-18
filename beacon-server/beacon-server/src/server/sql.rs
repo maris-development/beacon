@@ -52,7 +52,7 @@ async fn collect(
 ) -> anyhow::Result<Vec<RecordBatch>> {
     let result = server
         .runtime()
-        .run_query(Query::sql(sql.into()), identity)
+        .run_query_with(Query::sql(sql.into()), server.validator(identity))
         .await?;
     Ok(result.into_record_stream()?.try_collect().await?)
 }

@@ -90,7 +90,10 @@ impl BeaconFlightSqlService {
         let stream = self
             .runtime
             .runtime()
-            .run_query(beacon_core::query::Query::sql(sql.clone()), auth.identity.clone())
+            .run_query_with(
+                beacon_core::query::Query::sql(sql.clone()),
+                self.runtime.validator(auth.identity.clone()),
+            )
             .await
             .map_err(|error| self.internal_status(error))?
             .into_record_stream()
@@ -118,7 +121,10 @@ impl BeaconFlightSqlService {
         let stream = self
             .runtime
             .runtime()
-            .run_query(beacon_core::query::Query::sql(sql), auth.identity.clone())
+            .run_query_with(
+                beacon_core::query::Query::sql(sql),
+                self.runtime.validator(auth.identity.clone()),
+            )
             .await
             .map_err(|error| self.internal_status(error))?
             .into_record_stream()
@@ -136,7 +142,10 @@ impl BeaconFlightSqlService {
         let stream = self
             .runtime
             .runtime()
-            .run_query(beacon_core::query::Query::sql(sql), auth.identity.clone())
+            .run_query_with(
+                beacon_core::query::Query::sql(sql),
+                self.runtime.validator(auth.identity.clone()),
+            )
             .await
             .map_err(|error| self.internal_status(error))?
             .into_record_stream()
@@ -397,7 +406,10 @@ impl FlightSqlService for BeaconFlightSqlService {
         let stream = self
             .runtime
             .runtime()
-            .run_query(beacon_core::query::Query::sql(sql), auth.identity.clone())
+            .run_query_with(
+                beacon_core::query::Query::sql(sql),
+                self.runtime.validator(auth.identity.clone()),
+            )
             .await
             .map_err(|error| self.internal_status(error))?
             .into_record_stream()
@@ -432,7 +444,10 @@ impl FlightSqlService for BeaconFlightSqlService {
             let stream = self
                 .runtime
                 .runtime()
-            .run_query(beacon_core::query::Query::sql(query.query.clone()), auth.identity.clone())
+            .run_query_with(
+                beacon_core::query::Query::sql(query.query.clone()),
+                self.runtime.validator(auth.identity.clone()),
+            )
             .await
             .map_err(|error| self.internal_status(error))?
             .into_record_stream()

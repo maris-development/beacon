@@ -97,7 +97,10 @@ pub(crate) async fn list_catalog_tables(
     server: &Arc<Server>,
     identity: AuthIdentity,
 ) -> anyhow::Result<Vec<QualifiedTable>> {
-    let batches = server.runtime().visible_tables(&identity).await?;
+    let batches = server
+        .runtime()
+        .visible_tables_with(server.validator(identity).as_ref())
+        .await?;
 
     Ok(rows_from_batches(&batches)?
         .iter()
@@ -147,7 +150,10 @@ pub(crate) async fn table_arrow_schema(
     table: impl Into<datafusion::sql::TableReference>,
     identity: AuthIdentity,
 ) -> anyhow::Result<arrow::datatypes::SchemaRef> {
-    server.runtime().table_arrow_schema(table, &identity).await
+    server
+        .runtime()
+        .table_arrow_schema_with(table, server.validator(identity).as_ref())
+        .await
 }
 
 /// Discover datasets via the `list_datasets` table function.
@@ -198,8 +204,9 @@ pub(crate) async fn list_datasets(
     if !filtered {
         return Ok(datasets.collect());
     }
+    let validator = server.validator(identity);
     Ok(datasets
-        .filter(|dataset| runtime.can_read_path(&identity, &dataset.file_path))
+        .filter(|dataset| validator.can_read_path(&dataset.file_path))
         .skip(offset.unwrap_or(0))
         .take(limit.unwrap_or(usize::MAX))
         .collect())
@@ -279,12 +286,12 @@ pub(crate) async fn dataset_schema(
 
     let result = server
         .runtime()
-        .run_query(
+        .run_query_with(
             beacon_core::query::Query::sql(format!(
                 "SELECT * FROM {read_fn}({}) LIMIT 0",
                 quote_literal(file)
             )),
-            identity,
+            server.validator(identity),
         )
         .await
         .map_err(DatasetSchemaError::Read)?;

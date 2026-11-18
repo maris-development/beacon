@@ -1,6 +1,8 @@
 //! File downloads of a DAP2 subset (`.csv`, `.nc`) for clients that cannot read Sequences,
 //! such as xarray and netCDF tools.
 
+use std::sync::Arc;
+
 use axum::body::Body;
 use axum::http::{header, HeaderValue};
 use axum::response::Response;
@@ -8,7 +10,7 @@ use beacon_core::query::output::{Output, OutputFormat};
 use beacon_core::query::Query;
 use beacon_core::query_result::QueryOutput;
 use beacon_core::runtime::Runtime;
-use beacon_core::AuthIdentity;
+use beacon_core::plan_validator::PlanValidator;
 use futures::StreamExt;
 
 use crate::compile;
@@ -20,19 +22,19 @@ use crate::names::encode;
 /// The subset of `table` for the raw constraint `query`, as a file in `format`.
 pub(crate) async fn file_response(
     runtime: &Runtime,
-    identity: AuthIdentity,
+    validator: Arc<dyn PlanValidator>,
     table: &str,
     query: &str,
     format: OutputFormat,
 ) -> Result<Response, DapError> {
-    let (reference, schema) = load_schema(runtime, &identity, table).await?;
+    let (reference, schema) = load_schema(runtime, validator.as_ref(), table).await?;
     let constraint = constraint::parse(query)?;
     let compiled = compile::compile(&reference, &schema, &constraint)?;
     let mut query = Query::sql_with_params(compiled.sql, compiled.params);
     query.output = Some(Output { format });
 
     let result = runtime
-        .run_query(query, identity)
+        .run_query_with(query, validator)
         .await
         .map_err(|error| DapError::Query(error.to_string()))?;
     let QueryOutput::File(file) = result.query_output else {

@@ -71,11 +71,15 @@ pub(crate) async fn query(
 
     // The caller's identity is resolved by the `resolve_identity` middleware and stored in the
     // request extensions: a super-user (e.g. the admin) may run DDL/DML, while anonymous/role
-    // users are gated by `validate_query_plan` (and read-authz when enforcement is enabled).
-    let query_result = state.runtime().run_query(query, identity).await.map_err(|err| {
-        tracing::error!("Error running beacon query: {}", err);
-        (StatusCode::BAD_REQUEST, Json(err.to_string()))
-    })?;
+    // users are gated by the validator of the caller (and read-authz when enforcement is enabled).
+    let query_result = state
+        .runtime()
+        .run_query_with(query, state.validator(identity))
+        .await
+        .map_err(|err| {
+            tracing::error!("Error running beacon query: {}", err);
+            (StatusCode::BAD_REQUEST, Json(err.to_string()))
+        })?;
 
     match query_result.query_output {
         beacon_core::query_result::QueryOutput::File(query_output_file) => {
@@ -352,7 +356,11 @@ pub(crate) async fn explain_query(
 
     // EXPLAIN does not execute, so it is not gated by `sql.enable`: it exposes
     // no more than `/api/parse-query` already does about a rejected query.
-    match state.runtime().explain_query(query, identity).await {
+    match state
+        .runtime()
+        .explain_query_with(query, state.validator(identity))
+        .await
+    {
         Ok(explanation) => Ok((
             [(header::CONTENT_TYPE, "application/json")],
             Body::from(explanation),
@@ -410,7 +418,11 @@ pub(crate) async fn explain_analyze_query(
         ));
     }
 
-    match state.runtime().explain_analyze_query(query, identity).await {
+    match state
+        .runtime()
+        .explain_analyze_query_with(query, state.validator(identity))
+        .await
+    {
         Ok(explanation) => Ok((
             [(header::CONTENT_TYPE, "application/json")],
             Body::from(explanation),

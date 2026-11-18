@@ -31,34 +31,65 @@ fn credential_from_header(value: &str) -> Result<Credential, StatusCode> {
     }
 }
 
-/// Resolves the caller's [`AuthIdentity`](beacon_core::AuthIdentity) for client routes and stores it in request extensions.
+/// The identity of the caller of a request.
 ///
 /// Credentials present → authenticate (401 on invalid). No credentials → the anonymous user, or a
 /// 401 when anonymous access is disabled: without enforcement a role-less caller reads everything.
+async fn caller_identity(
+    server: &Server,
+    headers: &HeaderMap,
+) -> Result<beacon_core::AuthIdentity, StatusCode> {
+    match headers.get("Authorization") {
+        Some(value) => {
+            let auth_str = value.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
+            let credential = credential_from_header(auth_str)?;
+            server
+                .runtime()
+                .authenticate(&credential)
+                .await
+                .map_err(|_| StatusCode::UNAUTHORIZED)
+        }
+        None => server
+            .runtime()
+            .authenticate_anonymous()
+            .await
+            .map_err(|_| StatusCode::UNAUTHORIZED),
+    }
+}
+
+/// Resolves the caller's [`AuthIdentity`](beacon_core::AuthIdentity) for client routes and stores it in request extensions.
+///
+/// It also stores the validator of the caller, as `Arc<dyn PlanValidator>`. A transport that
+/// knows no identity, such as DAP, reads only the validator.
 pub(super) async fn resolve_identity(
-    State(runtime): State<Arc<Server>>,
+    State(server): State<Arc<Server>>,
     headers: HeaderMap,
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let identity = match headers.get("Authorization") {
-        Some(value) => {
-            let auth_str = value.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
-            let credential = credential_from_header(auth_str)?;
-            runtime
-                .runtime()
-                .authenticate(&credential)
-                .await
-                .map_err(|_| StatusCode::UNAUTHORIZED)?
-        }
-        None => runtime
-            .runtime()
-            .authenticate_anonymous()
-            .await
-            .map_err(|_| StatusCode::UNAUTHORIZED)?,
-    };
+    let identity = caller_identity(&server, &headers).await?;
 
+    request
+        .extensions_mut()
+        .insert(server.validator(identity.clone()));
     request.extensions_mut().insert(identity);
+    Ok(next.run(request).await)
+}
+
+/// Stores the validator of the caller for a read-only transport, such as MCP.
+///
+/// The validator never has super-user rights, so it refuses DDL and DML for each caller. The
+/// roles of the caller stay, so the read grants still apply.
+pub(super) async fn resolve_read_only_caller(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let mut identity = caller_identity(&server, &headers).await?;
+    identity.is_super_user = false;
+
+    request.extensions_mut().insert(server.validator(identity));
     Ok(next.run(request).await)
 }
 

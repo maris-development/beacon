@@ -110,7 +110,9 @@ impl Runtime {
     }
 
     /// The validator that applies the roles of `identity`.
-    fn role_validator(&self, identity: beacon_auth::AuthIdentity) -> Arc<dyn PlanValidator> {
+    ///
+    /// A transport builds one validator for each request and gives it to the `*_with` methods.
+    pub fn role_validator(&self, identity: beacon_auth::AuthIdentity) -> Arc<dyn PlanValidator> {
         Arc::new(crate::statement_plan::RoleValidator::new(
             self.auth.clone(),
             identity,

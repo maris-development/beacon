@@ -199,6 +199,16 @@ impl Server {
         &self.runtime
     }
 
+    /// The access check of `identity`: the one place where the server builds a validator.
+    ///
+    /// Each transport gives this validator to the engine with a query.
+    pub fn validator(
+        &self,
+        identity: beacon_core::AuthIdentity,
+    ) -> Arc<dyn beacon_core::plan_validator::PlanValidator> {
+        self.runtime.role_validator(identity)
+    }
+
     /// The application configuration.
     pub fn config(&self) -> &Arc<Config> {
         &self.config

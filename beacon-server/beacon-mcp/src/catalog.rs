@@ -11,24 +11,24 @@ use arrow::array::AsArray;
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use beacon_core::comments::COMMENT_METADATA_KEY;
 use beacon_core::runtime::Runtime;
-use beacon_core::{AuthIdentity, TableReference};
+use beacon_core::plan_validator::PlanValidator;
+use beacon_core::TableReference;
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
 use crate::result::run_sql_to_json;
 
-/// The tables in beacon's own schema that `identity` is entitled to see, sorted.
+/// The tables in beacon's own schema that `validator` permits, sorted.
 ///
-/// The enumeration cannot be run as `identity` — `information_schema` is
-/// super-user-only — so it goes through `Runtime::visible_tables`, which reads
-/// the catalog as the engine and returns only the tables that identity's roles
-/// grant `Select` on.
+/// The enumeration cannot be run as a query of the caller — `information_schema` is
+/// super-user-only — so it goes through `Runtime::visible_tables_with`, which reads
+/// the catalog as the engine and returns only the tables that `validator` permits.
 async fn list_table_names(
     runtime: &Arc<Runtime>,
-    identity: &AuthIdentity,
+    validator: &dyn PlanValidator,
 ) -> anyhow::Result<Vec<String>> {
     let (default_catalog, default_schema) = runtime.default_catalog_and_schema();
-    let batches = runtime.visible_tables(identity).await?;
+    let batches = runtime.visible_tables_with(validator).await?;
 
     let mut names = Vec::new();
     for batch in &batches {
@@ -54,14 +54,14 @@ async fn list_table_names(
 }
 
 /// A table's Arrow schema with its comments, or `None` when the table is
-/// unknown (or `identity` may not read it).
+/// unknown (or `validator` refuses it).
 async fn table_schema(
     runtime: &Arc<Runtime>,
     table: &str,
-    identity: &AuthIdentity,
+    validator: &dyn PlanValidator,
 ) -> Option<SchemaRef> {
     runtime
-        .table_arrow_schema(TableReference::bare(table.to_string()), identity)
+        .table_arrow_schema_with(TableReference::bare(table.to_string()), validator)
         .await
         .ok()
 }
@@ -81,17 +81,17 @@ pub async fn dispatch(
     runtime: &Arc<Runtime>,
     name: &str,
     args: Map<String, Value>,
-    identity: AuthIdentity,
+    validator: Arc<dyn PlanValidator>,
 ) -> anyhow::Result<String> {
     match name {
-        "list_tables" => list_tables_json(runtime, &identity).await,
-        "describe_table" => describe_table_json(runtime, &args, &identity).await,
+        "list_tables" => list_tables_json(runtime, validator.as_ref()).await,
+        "describe_table" => describe_table_json(runtime, &args, validator.as_ref()).await,
         "run_sql" => {
             let sql = args
                 .get("sql")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("missing required 'sql' argument"))?;
-            run_sql_to_json(runtime, sql.to_string(), identity).await
+            run_sql_to_json(runtime, sql.to_string(), validator).await
         }
         "export_query" => export_query_recipe(&args),
         other => anyhow::bail!("unknown tool '{other}'"),
@@ -235,11 +235,11 @@ fn export_query_recipe(args: &Map<String, Value>) -> anyhow::Result<String> {
 
 async fn list_tables_json(
     runtime: &Arc<Runtime>,
-    identity: &AuthIdentity,
+    validator: &dyn PlanValidator,
 ) -> anyhow::Result<String> {
     let mut out = Vec::new();
-    for table in list_table_names(runtime, identity).await? {
-        let description = table_schema(runtime, &table, identity)
+    for table in list_table_names(runtime, validator).await? {
+        let description = table_schema(runtime, &table, validator)
             .await
             .and_then(|schema| table_description(&schema));
         out.push(json!({ "name": table, "description": description }));
@@ -250,13 +250,13 @@ async fn list_tables_json(
 async fn describe_table_json(
     runtime: &Arc<Runtime>,
     args: &Map<String, Value>,
-    identity: &AuthIdentity,
+    validator: &dyn PlanValidator,
 ) -> anyhow::Result<String> {
     let table = args
         .get("table_name")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing required 'table_name' argument"))?;
-    let schema = table_schema(runtime, table, identity)
+    let schema = table_schema(runtime, table, validator)
         .await
         .ok_or_else(|| anyhow::anyhow!("table '{table}' not found"))?;
     let columns: Vec<Value> = schema
