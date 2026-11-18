@@ -17,29 +17,6 @@ pub enum RootStore {
     HttpsStore(String), // Object Store full path, e.g. https://s3.amazonaws.com/bucket-name/path/to/root
 }
 
-impl RootStore {
-    /// Translate an object path (relative to the store this root describes) into the
-    /// path / URL a native reader (netCDF-c) opens directly.
-    ///
-    /// - [`RootStore::FileSystem`] → the object path joined onto the local root.
-    ///   (For a dynamic local store the root is the filesystem root `/`, so this
-    ///   restores the absolute path; `PathBuf::join` leaves an already-absolute
-    ///   Windows drive path unchanged.)
-    /// - [`RootStore::HttpsStore`] → the object path appended to the base URL, with
-    ///   the `#mode=bytes` suffix netCDF-c needs to range-read over HTTP.
-    pub fn to_native_path(&self, object_path: &object_store::path::Path) -> String {
-        match self {
-            RootStore::FileSystem(root) => root
-                .join(object_path.to_string())
-                .to_string_lossy()
-                .into_owned(),
-            RootStore::HttpsStore(base) => {
-                format!("{}/{}#mode=bytes", base.trim_end_matches('/'), object_path)
-            }
-        }
-    }
-}
-
 /// A configured default store: the DataFusion object-store URL a bare (schemeless)
 /// path resolves against, paired with the physical [`RootStore`] the same store
 /// maps to for readers (netCDF-c) that open by path/URL instead of going through
@@ -260,7 +237,6 @@ impl ObjectListing {
 #[cfg(test)]
 mod tests {
     use datafusion::execution::context::SessionContext;
-    use object_store::path::Path as ObjectPath;
 
     use super::*;
 
@@ -410,22 +386,6 @@ mod tests {
         assert_eq!(
             factory.native_read_root(&listing_url("datasets:///a.nc")).unwrap(),
             RootStore::FileSystem(PathBuf::from("/data/root"))
-        );
-    }
-
-    #[test]
-    fn root_store_translates_object_paths_to_native_paths() {
-        // FileSystem: join onto the root.
-        assert_eq!(
-            RootStore::FileSystem(PathBuf::from("/data/root"))
-                .to_native_path(&ObjectPath::from("argo/a.nc")),
-            PathBuf::from("/data/root").join("argo/a.nc").to_string_lossy()
-        );
-        // HttpsStore: append + byte-range suffix, trimming a trailing slash.
-        assert_eq!(
-            RootStore::HttpsStore("https://example.org/bucket/".to_string())
-                .to_native_path(&ObjectPath::from("argo/a.nc")),
-            "https://example.org/bucket/argo/a.nc#mode=bytes"
         );
     }
 

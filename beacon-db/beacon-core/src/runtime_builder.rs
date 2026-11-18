@@ -852,9 +852,8 @@ fn register_file_formats(
     .with_ext("h5");
     state.register_file_format(Arc::new(hdf5_h5), true)?;
 
-    // Fill the handle registered on the session config. Without this the
-    // external-table builder cannot reach `create_with_native_root`, and a netCDF
-    // external table is built with a resolver that fails on every object.
+    // Fill the handle registered on the session config. The external-table
+    // builder and the file analyzer find the Beacon format factories through it.
     let handle = state
         .config()
         .get_extension::<OnceLock<FileFormatRegistry>>()

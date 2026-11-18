@@ -228,11 +228,11 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
         &self,
         state: &dyn Session,
         format_options: &std::collections::HashMap<String, String>,
-        url: &datafusion::datasource::listing::ListingTableUrl,
-        listing: &beacon_datafusion_ext::listing_factory::ListingFactory,
+        _url: &datafusion::datasource::listing::ListingTableUrl,
+        _listing: &beacon_datafusion_ext::listing_factory::ListingFactory,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         let wanted = self.statistics_wanted(format_options)?;
-        let format = self.create_with_native_root(state, format_options, url, listing)?;
+        let format = self.create(state, format_options)?;
         let zarr = format
             .downcast_ref::<ZarrFormat>()
             .ok_or_else(|| {
