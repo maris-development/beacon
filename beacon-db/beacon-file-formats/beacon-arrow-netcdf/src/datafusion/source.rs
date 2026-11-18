@@ -28,7 +28,7 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt};
 use object_store::ObjectMeta;
 
-use super::reader::{FileAccess, NetcdfInput};
+use super::reader::NetcdfInput;
 
 /// Which files a scan reads past instead of failing the query.
 ///
@@ -47,7 +47,6 @@ struct SkipFiles {
 /// pipeline via a [`FileOpener`].
 #[derive(Debug, Clone)]
 pub struct NetCDFSource {
-    access: FileAccess,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     read_dimensions: Option<Vec<String>>,
@@ -65,13 +64,8 @@ pub struct NetCDFSource {
 }
 
 impl NetCDFSource {
-    pub fn new(
-        access: FileAccess,
-        read_dimensions: Option<Vec<String>>,
-        table_schema: TableSchema,
-    ) -> Self {
+    pub fn new(read_dimensions: Option<Vec<String>>, table_schema: TableSchema) -> Self {
         Self {
-            access,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             read_dimensions,
@@ -120,7 +114,6 @@ impl FileSource for NetCDFSource {
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(NetCDFOpener::new(
-            self.access.clone(),
             projected_schema,
             self.read_dimensions.clone(),
             self.skip,
@@ -146,11 +139,7 @@ impl FileSource for NetCDFSource {
     }
 
     fn supports_repartitioning(&self) -> bool {
-        tracing::trace!(
-            "NetCDFSource supports_repartitioning: access={:?}",
-            self.access
-        );
-        matches!(self.access, FileAccess::Oxcdf)
+        true
     }
 
     /// Put the scan's files in one queue, and point every partition at it.
@@ -172,11 +161,8 @@ impl FileSource for NetCDFSource {
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
-        tracing::trace!(
-            "NetCDFSource repartitioned: access={:?}, target_partitions={target_partitions}",
-            self.access,
-        );
-        if !self.supports_repartitioning() || output_ordering.is_some() || target_partitions <= 1 {
+        tracing::trace!("NetCDFSource repartitioned: target_partitions={target_partitions}");
+        if output_ordering.is_some() || target_partitions <= 1 {
             return Ok(None);
         }
 
@@ -262,10 +248,7 @@ struct NetCDFOpener {
     /// This partition's counters, registered once. See [`ReadMetrics::new`].
     read_metrics: ReadMetrics,
     partition: usize,
-    /// How this opener reaches its files, and which reader opens them.
-    access: FileAccess,
-    /// The store the scan lists from. The `oxcdf` reader reads through it; the
-    /// netcdf-c reader ignores it and opens a resolved native path instead.
+    /// The store the scan lists from. The reader reads through it.
     object_store: Arc<dyn object_store::ObjectStore>,
     /// The scan's file queue, when it is planned morsel-driven. `Some` means the
     /// entry `FileStream` hands this opener is the scan, not a file.
@@ -280,7 +263,6 @@ struct NetCDFOpener {
 impl NetCDFOpener {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        access: FileAccess,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         skip: SkipFiles,
@@ -294,7 +276,6 @@ impl NetCDFOpener {
     ) -> Self {
         let read_metrics = ReadMetrics::new(&metrics, partition);
         let files = Arc::new(NetCDFFiles {
-            access: access.clone(),
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
             read_dimensions: read_dimensions.clone(),
@@ -315,7 +296,6 @@ impl NetCDFOpener {
             predicate,
             read_metrics,
             partition,
-            access,
             object_store,
             partition_fields,
         }
@@ -418,7 +398,6 @@ impl NetCDFOpener {
 /// This is everything a [`MorselSource`] needs of the format. The queue holds
 /// the files; this says what opening one means.
 struct NetCDFFiles {
-    access: FileAccess,
     object_store: Arc<dyn object_store::ObjectStore>,
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
@@ -432,18 +411,14 @@ struct NetCDFFiles {
 
 impl std::fmt::Debug for NetCDFFiles {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NetCDFFiles")
-            .field("access", &self.access)
-            .finish_non_exhaustive()
+        f.debug_struct("NetCDFFiles").finish_non_exhaustive()
     }
 }
 
 #[async_trait::async_trait]
 impl OpenFile for NetCDFFiles {
     async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<FileRead>> {
-        let input = self
-            .access
-            .input_for(&self.object_store, &file.object_meta)?;
+        let input = NetcdfInput::new(&self.object_store, &file.object_meta);
         let Some(dataset) = NetCDFOpener::open_dataset(
             input,
             file.object_meta.clone(),
@@ -488,15 +463,12 @@ impl FileOpener for NetCDFOpener {
         }
 
         tracing::trace!(
-            "NetCDFOpener open: access={:?}, file={:?}, partition={}",
-            self.access,
+            "NetCDFOpener open: file={:?}, partition={}",
             file.object_meta.location,
             self.partition
         );
         let metrics = self.read_metrics.clone();
-        let input = self
-            .access
-            .input_for(&self.object_store, &file.object_meta)?;
+        let input = NetcdfInput::new(&self.object_store, &file.object_meta);
         let partitions =
             FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone());
 

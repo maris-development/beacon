@@ -820,8 +820,7 @@ fn register_file_formats(
             NetcdfOptions::default(),
             builder.netcdf.clone(),
         )),
-        // HDF5 (its own crate — a NetCDF-4 file is HDF5). It reads through the netCDF reader
-        // when `builder.hdf5.use_rust_reader` is off, and it writes through it either way. In
+        // HDF5 (its own crate — a NetCDF-4 file is HDF5). It writes through the netCDF format. In
         // the `formats` vec so beacon's format registry keys it by `.h5`/`.hdf5` and dataset
         // discovery picks those files up. Registered under `hdf5` in DataFusion's native registry
         // by the loop below.

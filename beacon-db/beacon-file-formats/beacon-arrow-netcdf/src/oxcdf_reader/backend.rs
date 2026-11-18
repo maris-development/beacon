@@ -1,11 +1,7 @@
 //! Lazy array backends that read variable data through [`oxcdf`].
 //!
-//! The netcdf-c path stacks [`VariableDecoder`](crate::decoders::VariableDecoder)
-//! values on top of one typed read. It must: `netcdf::Variable::get` returns
-//! only the type the file stores, so a CF transform needs a wrapper for each
-//! source type. [`oxcdf`] converts on read, so every transform here is one
-//! backend over an `f64` read or a raw byte read. That removes the decoder
-//! layer from this path.
+//! [`oxcdf`] converts on read, so every transform here is one backend over an
+//! `f64` read or a raw byte read.
 
 use std::sync::Arc;
 
@@ -210,9 +206,7 @@ where
 /// Reads a packed numeric variable and applies CF `scale_factor` /
 /// `add_offset`.
 ///
-/// The values come back as `f64` and decode as `raw * scale + offset`, which
-/// matches [`ScaleOffsetVariableDecoder`](crate::decoders::scale_offset::ScaleOffsetVariableDecoder)
-/// on the netcdf-c path.
+/// The values come back as `f64` and decode as `raw * scale + offset`.
 #[derive(Debug)]
 pub struct ScaleOffsetBackend {
     variable: VariableRef,
@@ -301,8 +295,8 @@ impl TimestampBackend {
             // A variable that declares no fill still gets one. See
             // `cf_time::NO_TIME`.
             fill_value: raw_fill_value
-                .map(|f| crate::decoders::cf_time::cf_offset_to_timestamp(f, epoch, unit))
-                .or(Some(crate::decoders::cf_time::NO_TIME)),
+                .map(|f| crate::cf_time::cf_offset_to_timestamp(f, epoch, unit))
+                .or(Some(crate::cf_time::NO_TIME)),
         }
     }
 }
@@ -336,7 +330,7 @@ impl ArrayBackend<TimestampNanosecond> for TimestampBackend {
         let variable = self.variable.bind()?;
         let extents = self.variable.extents(&subset)?;
         let array = variable.get::<f64, _>(extents).await?;
-        Ok(crate::decoders::cf_time::convert_to_timestamp_nanoseconds(
+        Ok(crate::cf_time::convert_to_timestamp_nanoseconds(
             array.view(),
             self.epoch,
             self.unit,
@@ -436,5 +430,38 @@ impl ArrayBackend<String> for StringBackend {
         };
 
         shaped(name, &subset, values)
+    }
+}
+
+/// Backend for scalar attribute values surfaced as rank-0 arrays.
+#[derive(Debug)]
+pub struct AttributeBackend<T: NdArrayType> {
+    value: T,
+}
+
+impl<T: NdArrayType> AttributeBackend<T> {
+    /// Create an attribute backend from a single scalar value.
+    pub fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: NdArrayType + Clone> ArrayBackend<T> for AttributeBackend<T> {
+    fn len(&self) -> usize {
+        1
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        vec![]
+    }
+    fn dimensions(&self) -> Vec<String> {
+        vec![]
+    }
+    fn fill_value(&self) -> Option<T> {
+        None
+    }
+    async fn read_subset(&self, _subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<T>> {
+        Ok(ndarray::arr0(self.value.clone()).into_dyn())
     }
 }

@@ -3,13 +3,11 @@ use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_datafusion_ext::fast_object::FastObjectTable;
-use beacon_datafusion_ext::listing_factory::{ListingFactory, RootStore};
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{catalog::TableFunctionImpl, common::plan_err, prelude::SessionContext};
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
-use crate::datafusion::object_meta_resolver::create_object_resolver;
-use crate::datafusion::{FileAccess, NetcdfFormat};
 
 /// Format identity the NetCDF factory is registered under (its `get_ext`).
 const NETCDF_FORMAT: &str = "nc";
@@ -86,19 +84,12 @@ impl BeaconTableFunctionImpl for ReadNetCDFFunc {
     }
 }
 
-impl ReadNetCDFFunc {
-    /// [`TableFunctionImpl::call`], with `extra_options` added to the table
-    /// options the format is built from.
-    ///
-    /// `read_hdf5` calls this on its netcdf-c fallback, to pin the reader. The
-    /// netCDF format has a backend of its own, and it may be the Rust one, so a
-    /// caller that has already resolved a reader has to name it rather than
-    /// inherit whatever netCDF is set to.
-    pub fn call_with_options(
+impl TableFunctionImpl for ReadNetCDFFunc {
+    fn call_with_args(
         &self,
-        args: &[datafusion::prelude::Expr],
-        extra_options: HashMap<String, String>,
+        args: datafusion::catalog::TableFunctionArgs,
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let args = args.exprs();
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
@@ -147,9 +138,9 @@ impl ReadNetCDFFunc {
         tracing::debug!("read_netcdf listing urls: {:?}", listing_urls);
 
         // Build the file format from the factory registered on the session, so
-        // the table function shares the runtime's configured format and reader.
+        // the table function shares the configured format of the runtime.
         // Per-call settings (read dimensions) are passed as table options.
-        let mut format_options: HashMap<String, String> = extra_options;
+        let mut format_options: HashMap<String, String> = HashMap::new();
         if !dimensions.is_empty() {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));
         }
@@ -169,66 +160,13 @@ impl ReadNetCDFFunc {
                 )
             })?;
         let file_format = factory.create(&state, &format_options)?;
-        let netcdf_file_format = file_format
-            .downcast_ref::<NetcdfFormat>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "read_netcdf: the file format registered under 'nc' is not a NetcdfFormat"
-                        .to_string(),
-                )
-            })?
-            .clone();
-
-        // netcdf-c opens a path itself, so the format needs a resolver built from
-        // the one root store every path shares. The `oxcdf` reader reads through
-        // the object store, so it needs none, and it takes s3, gs and az too.
-        let netcdf_file_format = match netcdf_file_format.access {
-            FileAccess::Oxcdf => netcdf_file_format,
-            FileAccess::NetcdfC { .. } => {
-                let mut root_store: Option<RootStore> = None;
-                for url in &listing_urls {
-                    // Reject a remote object store (s3/gs/az) here with a clear
-                    // error rather than failing later inside the reader.
-                    let native_read_store = listing_factory.native_read_root(url)?;
-                    match &root_store {
-                        Some(store) if store != &native_read_store => {
-                            return plan_err!(
-                                "read_netcdf: all glob paths must resolve to the same root store (local or http/https)"
-                            );
-                        }
-                        Some(_) => {}
-                        None => root_store = Some(native_read_store),
-                    }
-                }
-                let Some(root_store) = root_store else {
-                    return plan_err!("read_netcdf: no root store could be determined from the provided glob paths. NetCDF files only work for local or http/https paths.");
-                };
-                netcdf_file_format
-                    .with_access(FileAccess::netcdf_c(create_object_resolver(&root_store)))
-            }
-        };
 
         let fast_object_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async {
-                FastObjectTable::try_new(
-                    &session_ctx.state(),
-                    Arc::new(netcdf_file_format),
-                    listing_urls,
-                )
-                .await
+                FastObjectTable::try_new(&session_ctx.state(), file_format, listing_urls).await
             })
         })?;
 
         Ok(Arc::new(fast_object_table))
-    }
-}
-
-impl TableFunctionImpl for ReadNetCDFFunc {
-    fn call_with_args(
-        &self,
-        args: datafusion::catalog::TableFunctionArgs,
-    ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let args = args.exprs();
-        self.call_with_options(args, HashMap::new())
     }
 }

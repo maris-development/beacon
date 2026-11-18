@@ -515,16 +515,6 @@ struct RawConfig {
     #[envconfig(from = "BEACON_NETCDF_ENABLE_STATISTICS", default = "true")]
     netcdf_enable_statistics: bool,
 
-    /// Read netCDF with the pure-Rust `oxcdf` reader instead of netcdf-c.
-    ///
-    /// On by default. It reads in parallel. It opens a netCDF file in an object
-    /// store (s3, gs or az), which netcdf-c cannot. It reports the statistics of
-    /// each file.
-    ///
-    /// Set it to false to read with netcdf-c. Writes always use netcdf-c.
-    #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER", default = "true")]
-    netcdf_use_rust_reader: bool,
-
     #[envconfig(from = "BEACON_HDF5_ENABLE_STATISTICS", default = "true")]
     hdf5_enable_statistics: bool,
 
@@ -706,7 +696,6 @@ impl From<RawConfig> for Config {
             },
             netcdf: NetcdfConfig {
                 enable_statistics: raw.netcdf_enable_statistics,
-                use_rust_reader: raw.netcdf_use_rust_reader,
             },
             hdf5: Hdf5Config {
                 unify_phony_dimensions: raw.hdf5_unify_phony_dimensions,
@@ -1498,17 +1487,13 @@ mod tests {
 
     // ── Reader flags ───────────────────────────────────────────────────
 
-    /// A server that sets no flag reads netCDF in Rust.
+    /// A removed reader flag in the environment does not stop the server.
     #[test]
-    fn netcdf_defaults_to_the_rust_reader() {
-        assert!(config(&[]).netcdf.use_rust_reader);
-    }
-
-    /// The flag selects netcdf-c for netCDF.
-    #[test]
-    fn the_flag_moves_netcdf() {
-        let netcdf_c = config(&[("BEACON_NETCDF_USE_RUST_READER", "false")]);
-        assert!(!netcdf_c.netcdf.use_rust_reader);
+    fn a_removed_reader_flag_is_ignored() {
+        config(&[
+            ("BEACON_NETCDF_USE_RUST_READER", "false"),
+            ("BEACON_HDF5_USE_RUST_READER", "false"),
+        ]);
     }
 
     /// No file is read for a convention it may not follow, unless a server asks.
