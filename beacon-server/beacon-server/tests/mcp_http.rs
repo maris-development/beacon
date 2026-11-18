@@ -293,6 +293,41 @@ async fn granted_reader_lists_only_readable_tables_with_their_comments() {
     assert!(secret.get("columns").is_none(), "secret must not be described: {secret}");
 }
 
+/// MCP is read-only for each caller. The validator of an MCP request has no super-user rights.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_admin_cannot_write_or_manage_users_through_mcp() {
+    let (router, harness, admin) = router_with(config(false)).await;
+    commented_table(&router, &admin, "obs").await;
+
+    let mut replies = Vec::new();
+    for sql in [
+        "CREATE TABLE mcp_made (a BIGINT)",
+        "INSERT INTO obs VALUES (1, 2.0)",
+        "CREATE ROLE mcp_role",
+        "CREATE USER mcp_user WITH PASSWORD 'pw'",
+    ] {
+        replies.push(call_tool(&router, Some(&admin), "run_sql", json!({ "sql": sql })).await);
+    }
+    let read = call_tool(
+        &router,
+        Some(&admin),
+        "run_sql",
+        json!({ "sql": "SELECT count(*) AS n FROM obs" }),
+    )
+    .await;
+    let listed = call_tool(&router, Some(&admin), "list_tables", json!({})).await;
+
+    for reply in &replies {
+        assert!(reply.is_string(), "a write must give an error text: {reply}");
+    }
+    assert!(!read.is_string(), "a read still works: {read}");
+    assert!(read.to_string().contains("\"n\":0"), "no row was inserted: {read}");
+    assert!(listed.to_string().contains("\"obs\""), "{listed}");
+    assert!(!listed.to_string().contains("mcp_made"), "no table was created: {listed}");
+    assert!(harness.server.auth().list_roles().is_empty());
+    assert!(!harness.server.auth().user_exists("mcp_user").await);
+}
+
 /// `GET /api/table-extensions` stays for older clients: every table reads as a
 /// table without extensions.
 #[tokio::test(flavor = "multi_thread")]

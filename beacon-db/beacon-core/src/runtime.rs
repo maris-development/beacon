@@ -1084,6 +1084,176 @@ mod client_query_tests {
             .is_err());
     }
 
+    /// `EXPLAIN` and `EXPLAIN ANALYZE` plan a statement, so they ask the validator too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explain_asks_the_validator() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        run_sql(runtime, "CREATE TABLE explained (a BIGINT)").await;
+        let query = || crate::query::Query::sql("SELECT * FROM explained".to_string());
+        let refuse = || std::sync::Arc::new(RefuseAll);
+
+        let explained = runtime
+            .explain_query(query(), crate::plan_validator::allow_all())
+            .await;
+        let analyzed = runtime
+            .explain_analyze_query(query(), crate::plan_validator::allow_all())
+            .await;
+        let explain_refused = runtime.explain_query(query(), refuse()).await;
+        let analyze_refused = runtime.explain_analyze_query(query(), refuse()).await;
+
+        assert!(explained.is_ok(), "{explained:?}");
+        assert!(analyzed.is_ok(), "{analyzed:?}");
+        for refused in [explain_refused, analyze_refused] {
+            let error = refused.expect_err("the validator refuses the plan");
+            assert!(error.to_string().contains("refused by the test validator"));
+        }
+    }
+
+    /// `EXPLAIN` runs nothing, so it explains only a plain read, also with full access.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explain_refuses_a_write_for_each_validator() {
+        let rt: TestRt = test_runtime().await;
+
+        let explained = rt
+            .runtime
+            .explain_query(
+                crate::query::Query::sql("CREATE TABLE never_made (a BIGINT)".to_string()),
+                crate::plan_validator::allow_all(),
+            )
+            .await;
+
+        assert!(explained.is_err());
+    }
+
+    /// A validator sees the plan after the engine binds the parameters.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_validator_gets_the_tables_of_the_plan() {
+        /// Records the table names of each plan that it permits.
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+
+        #[async_trait::async_trait]
+        impl crate::plan_validator::PlanValidator for Recorder {
+            fn caller(&self) -> &str {
+                "recorder"
+            }
+
+            fn limits(&self) -> crate::plan_validator::QueryLimits {
+                crate::plan_validator::QueryLimits::default()
+            }
+
+            async fn validate(
+                &self,
+                facts: &crate::plan_validator::PlanFacts<'_>,
+            ) -> anyhow::Result<()> {
+                let mut seen = self.0.lock().expect("the lock is not poisoned");
+                for read in facts.reads() {
+                    if let crate::plan_validator::PlanRead::Table(table) = read {
+                        seen.push(table.name().to_string());
+                    }
+                }
+                Ok(())
+            }
+
+            fn check_table(
+                &self,
+                _table: &crate::plan_validator::TableFacts,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn can_read_path(&self, _path: &str) -> bool {
+                true
+            }
+        }
+
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        run_sql(runtime, "CREATE TABLE left_t (a BIGINT)").await;
+        run_sql(runtime, "CREATE TABLE right_t (a BIGINT)").await;
+        run_sql(runtime, "CREATE VIEW both_v AS SELECT * FROM left_t JOIN right_t USING (a)").await;
+        let recorder = std::sync::Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+
+        runtime
+            .run_query(
+                crate::query::Query::sql("SELECT * FROM both_v".to_string()),
+                recorder.clone(),
+            )
+            .await
+            .expect("the recorder permits the query");
+
+        let mut seen = recorder.0.lock().expect("the lock is not poisoned").clone();
+        seen.sort();
+        seen.dedup();
+        assert!(
+            seen.iter().any(|name| name.contains("both_v"))
+                || (seen.iter().any(|name| name.contains("left_t"))
+                    && seen.iter().any(|name| name.contains("right_t"))),
+            "the validator must see the view or its tables: {seen:?}"
+        );
+    }
+
+    /// A host application adds a table to `beacon.system`, and a name is used once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_host_table_joins_the_system_schema() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        let schema = std::sync::Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
+        let table = || {
+            // Each scan gets its own handle to the schema.
+            let row_schema = schema.clone();
+            let snapshot: crate::Snapshot = std::sync::Arc::new(move || {
+                let row_schema = row_schema.clone();
+                Box::pin(async move {
+                    let values = std::sync::Arc::new(Int64Array::from(vec![1, 2, 3]));
+                    Ok(arrow::record_batch::RecordBatch::try_new(row_schema, vec![values])?)
+                })
+            });
+            std::sync::Arc::new(crate::SystemTable::new(schema.clone(), snapshot))
+        };
+
+        let added = runtime.register_system_table("host_rows", table());
+        let again = runtime.register_system_table("host_rows", table());
+        let reserved = runtime.register_system_table("query_metrics", table());
+        let rows: usize = runtime
+            .run_query(
+                crate::query::Query::sql("SELECT n FROM beacon.system.host_rows".to_string()),
+                crate::plan_validator::allow_all(),
+            )
+            .await
+            .expect("the host table reads")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the stream drains")
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum();
+
+        assert!(added.is_ok());
+        assert!(again.is_err(), "a name is used once");
+        assert!(reserved.is_err(), "`query_metrics` is a name of the engine");
+        assert_eq!(rows, 3);
+    }
+
+    /// The empty result of a host statement has no columns and no rows.
+    #[tokio::test]
+    async fn an_empty_result_has_no_columns_and_no_rows() {
+        let stream = crate::query_result::QueryResult::empty()
+            .into_record_stream()
+            .expect("an empty result is a stream");
+
+        let columns = stream.schema().fields().len();
+        let batches = stream.try_collect::<Vec<_>>().await.expect("the stream ends");
+
+        assert_eq!(columns, 0);
+        assert!(batches.is_empty());
+    }
+
     /// `AllowAll` needs no identity: it runs DDL, DML and a read.
     #[tokio::test(flavor = "multi_thread")]
     async fn allow_all_runs_privileged_statements() {

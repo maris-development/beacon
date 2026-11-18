@@ -915,6 +915,54 @@ async fn unauthenticated_execute_is_rejected_when_anonymous_is_off() {
     server.handle.abort();
 }
 
+/// Flight SQL gives the engine the validator of the caller: a read needs a grant, and a user
+/// statement needs the super-user.
+#[tokio::test(flavor = "multi_thread")]
+async fn flight_reads_and_user_statements_follow_the_roles() {
+    let server = spawn_server_with(common::config(true), false).await;
+    let mut admin = client(server.addr).await;
+    admin
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+    // The super-user manages users and roles through Flight SQL.
+    for sql in [
+        "CREATE TABLE flight_open (a BIGINT)",
+        "CREATE TABLE flight_secret (a BIGINT)",
+        "CREATE ROLE reader",
+        "GRANT SELECT ON TABLE flight_open TO ROLE reader",
+        "CREATE USER alice WITH PASSWORD 'pw'",
+        "GRANT ROLE reader TO USER alice",
+    ] {
+        admin
+            .execute(sql.to_string(), None)
+            .await
+            .unwrap_or_else(|error| panic!("`{sql}` should run: {error}"));
+    }
+    let mut alice = client(server.addr).await;
+    alice.handshake("alice", "pw").await.unwrap();
+
+    let granted = alice
+        .execute("SELECT * FROM flight_open".to_string(), None)
+        .await;
+    let refused = alice
+        .execute("SELECT * FROM flight_secret".to_string(), None)
+        .await;
+    let escalation = alice
+        .execute("GRANT SELECT ON TABLE flight_secret TO ROLE reader".to_string(), None)
+        .await;
+    let still_refused = alice
+        .execute("SELECT * FROM flight_secret".to_string(), None)
+        .await;
+
+    assert!(granted.is_ok(), "a granted table reads: {granted:?}");
+    assert!(refused.is_err(), "a table without a grant is refused");
+    assert!(escalation.is_err(), "only the super-user changes the rules");
+    assert!(still_refused.is_err(), "the refused grant has no effect");
+
+    server.handle.abort();
+}
+
 /// Anonymous Flight access needs the anonymous user. With it off in the auth model, a caller
 /// without credentials is refused, not given a role-less context that reads everything.
 #[tokio::test(flavor = "multi_thread")]
