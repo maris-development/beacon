@@ -9,7 +9,7 @@
 //! readable.
 //!
 //! Both are super-user-only, gated unconditionally in
-//! [`authorize_logical_plan`](crate::statement_plan::authorize_logical_plan) —
+//! [`RoleValidator`](crate::statement_plan::RoleValidator) —
 //! the same treatment the `__beacon_*` tables get, and for the same reason: grant
 //! enforcement is off by default, so a gate that depended on it would expose the
 //! directory on a default runtime. No password material is exposed here at all:

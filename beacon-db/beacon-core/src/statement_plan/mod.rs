@@ -21,6 +21,7 @@ mod logical;
 mod lower;
 pub(crate) mod materialized_view;
 mod physical;
+mod plan_facts;
 mod query_planner;
 mod stream_coalescer;
 
@@ -42,7 +43,8 @@ use crate::parser::statement::{
     SummarizeStatement, InstallStatement, UninstallStatement,
 };
 
-pub(crate) use authz::{authorize_logical_plan, table_targets};
+pub(crate) use authz::RoleValidator;
+pub use plan_facts::{FileLocation, PlanFacts, PlanRead, TableFacts};
 pub(crate) use stream_coalescer::CoalesceSqlStream;
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;

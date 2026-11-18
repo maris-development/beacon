@@ -5,6 +5,7 @@ pub mod comments;
 pub mod metrics;
 mod name_rule;
 pub mod parser;
+pub mod plan_validator;
 pub mod plugins;
 pub mod query;
 pub mod query_cpu;

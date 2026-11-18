@@ -10,6 +10,7 @@ use futures::TryStreamExt;
 
 use crate::{
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
+    plan_validator::{PlanFacts, PlanValidator, QueryLimits, TableFacts},
     query_cpu::QueryCpuMeter,
     query_executor::QueryExecutor,
     query_metrics_store::QueryMetricsStore,
@@ -105,50 +106,83 @@ impl Runtime {
     /// For a transport that lists files on a caller's behalf and shows only what the caller
     /// could go on to read.
     pub fn can_read_path(&self, identity: &beacon_auth::AuthIdentity, path: &str) -> bool {
-        !self.checks_reads_of(identity)
-            || self.auth.is_allowed(
-                &identity.roles,
-                beacon_auth::Privilege::Select,
-                &beacon_auth::ConcreteTarget::Path(path.to_string()),
-            )
+        self.role_validator(identity.clone()).can_read_path(path)
     }
 
-    /// Execute a client query (JSON or SQL) and return a metrics-tracked result.
-    ///
-    /// The single entry point for query execution: the JSON form is compiled by
-    /// beacon's query compiler, the SQL form goes through beacon's SQL parser, and
-    /// both are lowered to a `LogicalPlan` and validated against the caller's
-    /// privileges (`is_super_user`). The plan then runs through the unified
-    /// `create_physical_plan -> execute_stream` pipeline. Without an `output`
-    /// format the result is streamed (metrics recorded as the client drains);
-    /// with one, the result is written to a temporary file in that format and
-    /// returned as a file download.
+    /// The validator that applies the roles of `identity`.
+    fn role_validator(&self, identity: beacon_auth::AuthIdentity) -> Arc<dyn PlanValidator> {
+        Arc::new(crate::statement_plan::RoleValidator::new(
+            self.auth.clone(),
+            identity,
+            self.auth_enforce,
+        ))
+    }
+
+    /// [`Self::run_query_with`], with the roles of `identity` as the validator.
     ///
     /// The CPU budget of the query comes from the `query_cpu_limit_ms` setting
-    /// of the caller's roles; see [`crate::query_cpu::budget_for`]. It covers
-    /// planning and execution. A query that goes over it fails with a "CPU
-    /// budget" error.
+    /// of the caller's roles; see [`crate::query_cpu::budget_for`].
     #[tracing::instrument(skip(self, query, identity))]
     pub async fn run_query(
         &self,
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<QueryResult> {
-        let meter = QueryCpuMeter::new(crate::query_cpu::budget_for(&self.auth, &identity));
+        self.run_query_with(query, self.role_validator(identity))
+            .await
+    }
+
+    /// Execute a client query (JSON or SQL) and return a metrics-tracked result.
+    ///
+    /// The single entry point for query execution: the JSON form is compiled by
+    /// beacon's query compiler, the SQL form goes through beacon's SQL parser, and
+    /// both are lowered to a `LogicalPlan`. `validator` then permits or refuses
+    /// the plan. The plan then runs through the unified
+    /// `create_physical_plan -> execute_stream` pipeline. Without an `output`
+    /// format the result is streamed (metrics recorded as the client drains);
+    /// with one, the result is written to a temporary file in that format and
+    /// returned as a file download.
+    ///
+    /// The limits of the query come from [`PlanValidator::limits`]. The CPU
+    /// budget covers planning and execution. A query that goes over it fails
+    /// with a "CPU budget" error.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The JSON or SQL query, with its output format and parameters
+    /// * `validator` - The access check of the caller
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query does not plan, when `validator` refuses
+    /// the plan, when a read-only database gets a write, or when execution fails.
+    #[tracing::instrument(skip(self, query, validator))]
+    pub async fn run_query_with(
+        &self,
+        query: crate::query::Query,
+        validator: Arc<dyn PlanValidator>,
+    ) -> anyhow::Result<QueryResult> {
+        let limits = validator.limits();
+        let meter = QueryCpuMeter::new(limits.cpu_budget);
         // Planning reads metadata too, so the whole query moves to the executor.
         let runtime = self.clone();
         let metered = meter.meter_future({
             let meter = meter.clone();
-            async move { runtime.run_query_on_executor(query, identity, meter).await }
+            async move {
+                runtime
+                    .run_query_on_executor(query, validator.as_ref(), limits, meter)
+                    .await
+            }
         });
         self.executor.run(metered).await
     }
 
-    /// [`Self::run_query`], on the query executor.
+    /// [`Self::run_query_with`], on the query executor.
     async fn run_query_on_executor(
         &self,
         query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
+        validator: &dyn PlanValidator,
+        limits: QueryLimits,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
         let query_id = uuid::Uuid::new_v4();
@@ -169,7 +203,9 @@ impl Runtime {
                 .with_param_values(params)
                 .map_err(|e| anyhow::anyhow!("failed to bind query parameters: {e}"))?;
         }
-        crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
+        validator
+            .validate(&PlanFacts::new(&plan, &self.session_ctx))
+            .await?;
         // A read-only database refuses anything that would mutate it. `plan_produces_result_set`
         // is the read/write discriminator: reads (SELECT, VALUES, `SHOW …`) produce rows; every
         // write (DDL/DML/COPY/SET and beacon's side-effecting extension statements, e.g. `ATTACH`,
@@ -179,15 +215,8 @@ impl Runtime {
                 "this database was opened read-only; writes are not permitted on this connection"
             );
         }
-        crate::statement_plan::authorize_logical_plan(
-            &plan,
-            &self.session_ctx,
-            &self.auth,
-            &identity,
-            self.auth_enforce,
-        )
-        .await?;
 
+        let metrics = MetricsTracker::new(query_json, query_id, validator.caller());
         match output {
             Some(output) => {
                 // An output format wraps the plan in a `COPY TO`, which only
@@ -200,41 +229,26 @@ impl Runtime {
                          (e.g. SELECT); this statement produces no result set to export"
                     );
                 }
-                self.run_query_to_file(
-                    plan,
-                    output,
-                    query_id,
-                    query_json,
-                    &identity,
-                    cpu_meter,
-                )
-                .await
+                self.run_query_to_file(plan, output, metrics, limits.output_row_limit, cpu_meter)
+                    .await
             }
             None => {
-                self.run_query_to_stream(
-                    plan,
-                    query_id,
-                    query_json,
-                    &identity,
-                    cpu_meter,
-                )
-                .await
+                self.run_query_to_stream(plan, metrics, limits.output_row_limit, cpu_meter)
+                    .await
             }
         }
     }
 
     /// Stream the plan's results, wrapping the stream so output rows/bytes are
-    /// recorded under `query_id` as the client drains it.
+    /// recorded in `metrics` as the client drains it.
     async fn run_query_to_stream(
         &self,
         plan: datafusion::logical_expr::LogicalPlan,
-        query_id: uuid::Uuid,
-        query_json: serde_json::Value,
-        identity: &beacon_auth::AuthIdentity,
+        metrics: Arc<MetricsTracker>,
+        output_row_limit: Option<u64>,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
-        let output_row_limit = crate::query_row_limit::row_limit_for(&self.auth, identity);
-        let metrics = MetricsTracker::new(query_json, query_id, &identity.username);
+        let query_id = metrics.query_id;
         metrics.set_cpu_meter(cpu_meter.clone());
         metrics.set_logical_plan(&plan);
         // Record the optimized logical plan alongside the parsed one. `optimize`
@@ -268,17 +282,16 @@ impl Runtime {
 
     /// Write the plan's results to a temporary file in the requested `output`
     /// format (via a `COPY TO`) and return a file download. The file write is
-    /// driven to completion here and its metrics recorded under `query_id`.
+    /// driven to completion here and its metrics recorded in `metrics`.
     async fn run_query_to_file(
         &self,
         plan: datafusion::logical_expr::LogicalPlan,
         output: crate::query::output::Output,
-        query_id: uuid::Uuid,
-        query_json: serde_json::Value,
-        identity: &beacon_auth::AuthIdentity,
+        metrics: Arc<MetricsTracker>,
+        output_row_limit: Option<u64>,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
-        let output_row_limit = crate::query_row_limit::row_limit_for(&self.auth, identity);
+        let query_id = metrics.query_id;
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         //
@@ -297,7 +310,6 @@ impl Runtime {
             )
             .await?;
 
-        let metrics = MetricsTracker::new(query_json, query_id, &identity.username);
         metrics.set_cpu_meter(cpu_meter.clone());
         metrics.set_logical_plan(&copy_plan);
         if let Ok(optimized) = self.session_ctx.state().optimize(&copy_plan) {
@@ -346,9 +358,8 @@ impl Runtime {
     /// metadata; see [`TableComments::apply`](crate::comments::TableComments::apply).
     /// To get them, Beacon reads the small `comments.json` sidecar of the table.
     ///
-    /// Authorization matches the read path in
-    /// [`authorize_logical_plan`](crate::statement_plan::authorize_logical_plan):
-    /// the internal `__beacon_*` tables and the metadata schemas
+    /// Authorization matches the read path: with the roles of `identity`, the
+    /// internal `__beacon_*` tables and the metadata schemas
     /// (`beacon.system`, `information_schema`) are super-user only regardless of
     /// enforcement, and otherwise a non-super-user needs `Select` on the table. A
     /// schema is metadata about data the caller may not read, so it is gated the
@@ -358,38 +369,30 @@ impl Runtime {
         table: impl Into<datafusion::sql::TableReference>,
         identity: &beacon_auth::AuthIdentity,
     ) -> anyhow::Result<arrow::datatypes::SchemaRef> {
-        use beacon_auth::Privilege;
-        use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
+        self.table_arrow_schema_with(table, self.role_validator(identity.clone()).as_ref())
+            .await
+    }
 
+    /// A registered table's Arrow schema, when `validator` permits the read.
+    ///
+    /// See [`Self::table_arrow_schema`] for the source of the schema.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table reference
+    /// * `validator` - The access check of the caller
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when [`PlanValidator::check_table`] refuses the table or
+    /// when the table does not resolve.
+    pub async fn table_arrow_schema_with(
+        &self,
+        table: impl Into<datafusion::sql::TableReference>,
+        validator: &dyn PlanValidator,
+    ) -> anyhow::Result<arrow::datatypes::SchemaRef> {
         let table: datafusion::sql::TableReference = table.into();
-
-        if !identity.is_super_user {
-            if table.table().starts_with(INTERNAL_TABLE_PREFIX) {
-                anyhow::bail!(
-                    "permission denied: the internal '{INTERNAL_TABLE_PREFIX}*' tables are \
-                     restricted to the super-user"
-                );
-            }
-            if let Some(schema) = table
-                .schema()
-                .filter(|s| crate::system_schema::is_metadata_schema(s))
-            {
-                anyhow::bail!(
-                    "permission denied: the '{schema}' schema is restricted to the super-user"
-                );
-            }
-        }
-
-        if self.auth_enforce
-            && !identity.is_super_user
-            && !self.auth.is_allowed_any(
-                &identity.roles,
-                Privilege::Select,
-                &crate::statement_plan::table_targets(&table, &self.session_ctx),
-            )
-        {
-            anyhow::bail!("permission denied: SELECT on table {}", table.table());
-        }
+        validator.check_table(&TableFacts::new(table.clone(), &self.session_ctx))?;
 
         let provider = self
             .session_ctx
@@ -427,6 +430,20 @@ impl Runtime {
         &self,
         identity: &beacon_auth::AuthIdentity,
     ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
+        self.visible_tables_with(self.role_validator(identity.clone()).as_ref())
+            .await
+    }
+
+    /// The `information_schema.tables` rows that `validator` permits, as Arrow
+    /// batches. See [`Self::visible_tables`] for the columns and the order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog read fails.
+    pub async fn visible_tables_with(
+        &self,
+        validator: &dyn PlanValidator,
+    ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
         // Read directly through the session rather than `run_query`: this is the
         // engine reading its own catalog on a caller's behalf, so it is neither
         // subject to the caller's authorization (the filter below is) nor worth
@@ -442,11 +459,6 @@ impl Runtime {
             .collect()
             .await?;
 
-        // A super-user keeps every row, so there is nothing to filter or rebuild.
-        if identity.is_super_user {
-            return Ok(batches);
-        }
-
         let mut visible = Vec::with_capacity(batches.len());
         for batch in &batches {
             let column = |name: &str| {
@@ -460,7 +472,12 @@ impl Runtime {
             };
             let mask: arrow::array::BooleanArray = (0..batch.num_rows())
                 .map(|row| {
-                    Some(self.can_list_table(identity, Some(schemas.value(row)), names.value(row)))
+                    let reference = datafusion::sql::TableReference::partial(
+                        schemas.value(row),
+                        names.value(row),
+                    );
+                    let table = TableFacts::new(reference, &self.session_ctx);
+                    Some(validator.check_table(&table).is_ok())
                 })
                 .collect();
             visible.push(arrow::compute::filter_record_batch(batch, &mask)?);
@@ -479,30 +496,13 @@ impl Runtime {
         schema: Option<&str>,
         table: &str,
     ) -> bool {
-        use beacon_auth::Privilege;
-        use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
-
-        if identity.is_super_user {
-            return true;
-        }
-        if table.starts_with(INTERNAL_TABLE_PREFIX) {
-            return false;
-        }
-        if schema.is_some_and(crate::system_schema::is_metadata_schema) {
-            return false;
-        }
-        // With enforcement off every table is readable, so listing them all is
-        // what the listing promises: what you see is what you can read.
         let reference = match schema {
             Some(schema) => datafusion::sql::TableReference::partial(schema, table),
             None => datafusion::sql::TableReference::bare(table),
         };
-        !self.auth_enforce
-            || self.auth.is_allowed_any(
-                &identity.roles,
-                Privilege::Select,
-                &crate::statement_plan::table_targets(&reference, &self.session_ctx),
-            )
+        self.role_validator(identity.clone())
+            .check_table(&TableFacts::new(reference, &self.session_ctx))
+            .is_ok()
     }
 
     /// DataFusion's function catalog — the `SHOW FUNCTIONS` result, as Arrow
@@ -548,29 +548,42 @@ impl Runtime {
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<String> {
-        let runtime = self.clone();
-        self.executor
-            .run(async move { runtime.explain_query_on_executor(query, identity).await })
+        self.explain_query_with(query, self.role_validator(identity))
             .await
     }
 
-    /// [`Self::explain_query`], on the query executor.
+    /// [`Self::explain_query`], with `validator` as the access check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query does not plan, when the statement is not
+    /// a plain read, or when `validator` refuses the plan.
+    pub async fn explain_query_with(
+        &self,
+        query: crate::query::Query,
+        validator: Arc<dyn PlanValidator>,
+    ) -> anyhow::Result<String> {
+        let runtime = self.clone();
+        self.executor
+            .run(async move {
+                runtime
+                    .explain_query_on_executor(query, validator.as_ref())
+                    .await
+            })
+            .await
+    }
+
+    /// [`Self::explain_query_with`], on the query executor.
     async fn explain_query_on_executor(
         &self,
         query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
+        validator: &dyn PlanValidator,
     ) -> anyhow::Result<String> {
         // `output` (file format) is meaningless here: only the query body is planned.
         let plan = self.lower_query(query.inner).await?;
-        crate::statement_plan::validate_query_plan(&plan, false)?;
-        crate::statement_plan::authorize_logical_plan(
-            &plan,
-            &self.session_ctx,
-            &self.auth,
-            &identity,
-            self.auth_enforce,
-        )
-        .await?;
+        let facts = PlanFacts::new(&plan, &self.session_ctx);
+        facts.verify_unprivileged()?;
+        validator.validate(&facts).await?;
         // Bound to a local: the `Display` wrapper borrows `plan`, so formatting
         // it inline would drop `plan` while the temporary still holds the borrow.
         let pg_json = plan.display_pg_json().to_string();
@@ -592,42 +605,51 @@ impl Runtime {
         query: crate::query::Query,
         identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<String> {
-        // The plan runs in full, so the CPU budget of `run_query` applies.
-        let meter = QueryCpuMeter::new(crate::query_cpu::budget_for(&self.auth, &identity));
+        self.explain_analyze_query_with(query, self.role_validator(identity))
+            .await
+    }
+
+    /// [`Self::explain_analyze_query`], with `validator` as the access check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query does not plan, when `validator` refuses
+    /// the plan, when a read-only database gets a write, or when execution fails.
+    pub async fn explain_analyze_query_with(
+        &self,
+        query: crate::query::Query,
+        validator: Arc<dyn PlanValidator>,
+    ) -> anyhow::Result<String> {
+        // The plan runs in full, so the CPU budget of `run_query_with` applies.
+        let meter = QueryCpuMeter::new(validator.limits().cpu_budget);
         let runtime = self.clone();
         let metered = meter.meter_future({
             let meter = meter.clone();
             async move {
                 runtime
-                    .explain_analyze_query_on_executor(query, identity, meter)
+                    .explain_analyze_query_on_executor(query, validator.as_ref(), meter)
                     .await
             }
         });
         self.executor.run(metered).await
     }
 
-    /// [`Self::explain_analyze_query`], on the query executor.
+    /// [`Self::explain_analyze_query_with`], on the query executor.
     async fn explain_analyze_query_on_executor(
         &self,
         query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
+        validator: &dyn PlanValidator,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<String> {
         let plan = self.lower_query(query.inner).await?;
-        crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
+        validator
+            .validate(&PlanFacts::new(&plan, &self.session_ctx))
+            .await?;
         if self.read_only && !crate::statement_plan::plan_produces_result_set(&plan) {
             anyhow::bail!(
                 "this database was opened read-only; writes are not permitted on this connection"
             );
         }
-        crate::statement_plan::authorize_logical_plan(
-            &plan,
-            &self.session_ctx,
-            &self.auth,
-            &identity,
-            self.auth_enforce,
-        )
-        .await?;
 
         // Keep the `Arc` so per-node metrics can be read once the stream drains.
         // `execute_statement_plan` discards the plan, so create/execute are inlined.
@@ -1105,6 +1127,162 @@ mod client_query_tests {
             err.to_string().contains("super-user"),
             "unexpected error: {err}"
         );
+    }
+
+    /// A validator that refuses each statement and permits one output row.
+    struct RefuseAll;
+
+    #[async_trait::async_trait]
+    impl crate::plan_validator::PlanValidator for RefuseAll {
+        fn caller(&self) -> &str {
+            "refused"
+        }
+
+        fn limits(&self) -> crate::plan_validator::QueryLimits {
+            crate::plan_validator::QueryLimits::default()
+        }
+
+        async fn validate(
+            &self,
+            _facts: &crate::plan_validator::PlanFacts<'_>,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("refused by the test validator")
+        }
+
+        fn check_table(&self, _table: &crate::plan_validator::TableFacts) -> anyhow::Result<()> {
+            anyhow::bail!("refused by the test validator")
+        }
+
+        fn can_read_path(&self, _path: &str) -> bool {
+            false
+        }
+    }
+
+    /// The engine runs a plan only after the validator permits it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_validator_refusal_stops_the_query() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+
+        let error = runtime
+            .run_query_with(
+                crate::query::Query::sql("CREATE TABLE refused (a BIGINT)".to_string()),
+                std::sync::Arc::new(RefuseAll),
+            )
+            .await
+            .err()
+            .expect("the validator refuses the statement");
+
+        assert!(error.to_string().contains("refused by the test validator"));
+        let tables = runtime
+            .visible_tables_with(&crate::plan_validator::AllowAll)
+            .await
+            .expect("the catalog should list");
+        let rows: usize = tables.iter().map(|batch| batch.num_rows()).sum();
+        let refused = runtime.visible_tables_with(&RefuseAll).await.unwrap();
+        assert!(rows > 0);
+        assert_eq!(refused.iter().map(|batch| batch.num_rows()).sum::<usize>(), 0);
+        assert!(runtime
+            .table_arrow_schema_with("refused", &crate::plan_validator::AllowAll)
+            .await
+            .is_err());
+    }
+
+    /// `AllowAll` needs no identity: it runs DDL, DML and a read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn allow_all_runs_privileged_statements() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        let run = |sql: &str| {
+            runtime.run_query_with(
+                crate::query::Query::sql(sql.to_string()),
+                std::sync::Arc::new(crate::plan_validator::AllowAll),
+            )
+        };
+
+        for sql in [
+            "CREATE TABLE open_t (a BIGINT)",
+            "INSERT INTO open_t VALUES (1), (2)",
+        ] {
+            run(sql)
+                .await
+                .expect("AllowAll permits the statement")
+                .into_record_stream()
+                .expect("streamed result")
+                .try_collect::<Vec<_>>()
+                .await
+                .expect("the statement should drain");
+        }
+        let rows: usize = run("SELECT * FROM open_t")
+            .await
+            .expect("AllowAll permits the read")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the read should drain")
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum();
+
+        assert_eq!(rows, 2);
+        assert!(runtime
+            .table_arrow_schema_with("open_t", &crate::plan_validator::AllowAll)
+            .await
+            .is_ok());
+    }
+
+    /// A validator that permits each statement with a limit of one output row.
+    struct OneRow;
+
+    #[async_trait::async_trait]
+    impl crate::plan_validator::PlanValidator for OneRow {
+        fn caller(&self) -> &str {
+            "one-row"
+        }
+
+        fn limits(&self) -> crate::plan_validator::QueryLimits {
+            crate::plan_validator::QueryLimits {
+                output_row_limit: Some(1),
+                ..Default::default()
+            }
+        }
+
+        async fn validate(
+            &self,
+            _facts: &crate::plan_validator::PlanFacts<'_>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn check_table(&self, _table: &crate::plan_validator::TableFacts) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn can_read_path(&self, _path: &str) -> bool {
+            true
+        }
+    }
+
+    /// The limits of the validator apply to the query.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_row_limit_of_the_validator_applies() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+
+        let result = runtime
+            .run_query_with(
+                crate::query::Query::sql("SELECT * FROM (VALUES (1), (2), (3))".to_string()),
+                std::sync::Arc::new(OneRow),
+            )
+            .await
+            .expect("the validator permits the read")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await;
+
+        assert!(result.is_err(), "three rows pass a limit of one row");
     }
 
     /// A non-super-user cannot escalate its own privileges: all auth-management
