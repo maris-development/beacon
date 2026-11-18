@@ -39,7 +39,7 @@ impl FlightSqlMetadata {
     /// Builds the `GetCatalogs` response batch from DataFusion catalogs visible to Beacon.
     pub(super) async fn build_catalogs_batch(
         &self,
-        identity: beacon_core::AuthIdentity,
+        identity: beacon_auth::AuthIdentity,
     ) -> Result<RecordBatch, tonic::Status> {
         let mut builder = GetCatalogsBuilder::new();
 
@@ -61,7 +61,7 @@ impl FlightSqlMetadata {
     pub(super) async fn build_schemas_batch(
         &self,
         query: CommandGetDbSchemas,
-        identity: beacon_core::AuthIdentity,
+        identity: beacon_auth::AuthIdentity,
     ) -> Result<RecordBatch, tonic::Status> {
         let mut builder = GetDbSchemasBuilder::from(query);
 
@@ -84,7 +84,7 @@ impl FlightSqlMetadata {
     pub(super) async fn build_tables_batch(
         &self,
         query: CommandGetTables,
-        identity: beacon_core::AuthIdentity,
+        identity: beacon_auth::AuthIdentity,
     ) -> Result<RecordBatch, tonic::Status> {
         let mut builder = GetTablesBuilder::from(query);
 

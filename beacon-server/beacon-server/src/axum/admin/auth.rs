@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use ::axum::{extract::State, http::StatusCode, Extension, Json};
 use crate::api::{AuthRoleView, AuthRuleView, AuthUserView};
-use beacon_core::AuthIdentity;
+use beacon_auth::AuthIdentity;
 use crate::server::{
     sql::{query_rows, str_field},
     Server,

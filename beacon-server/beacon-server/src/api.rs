@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use beacon_core::beacon_auth::{PrivilegeRule, PrivilegeTarget, Role, UserRecord};
+use beacon_auth::{PrivilegeRule, PrivilegeTarget, Role, UserRecord};
 use beacon_core::crawler::{CrawlReport, CrawlerDefinition, TableNaming};
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use serde_json::{Map, Value};

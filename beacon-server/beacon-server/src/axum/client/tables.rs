@@ -7,7 +7,7 @@ use ::axum::{
     http::StatusCode,
     Extension, Json,
 };
-use beacon_core::AuthIdentity;
+use beacon_auth::AuthIdentity;
 use crate::server::{catalog, Server};
 use utoipa::{IntoParams, ToSchema};
 

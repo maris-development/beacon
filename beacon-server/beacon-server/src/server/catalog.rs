@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use crate::api::DatasetInfo;
-use beacon_core::AuthIdentity;
+use beacon_auth::AuthIdentity;
 use serde_json::Value;
 
 use super::sql::{query_rows, quote_literal, rows_from_batches, str_field};
@@ -99,7 +99,7 @@ pub(crate) async fn list_catalog_tables(
 ) -> anyhow::Result<Vec<QualifiedTable>> {
     let batches = server
         .runtime()
-        .visible_tables_with(server.validator(identity).as_ref())
+        .visible_tables(server.validator(identity).as_ref())
         .await?;
 
     Ok(rows_from_batches(&batches)?
@@ -152,7 +152,7 @@ pub(crate) async fn table_arrow_schema(
 ) -> anyhow::Result<arrow::datatypes::SchemaRef> {
     server
         .runtime()
-        .table_arrow_schema_with(table, server.validator(identity).as_ref())
+        .table_arrow_schema(table, server.validator(identity).as_ref())
         .await
 }
 
@@ -171,8 +171,7 @@ pub(crate) async fn list_datasets(
     limit: Option<usize>,
     identity: AuthIdentity,
 ) -> anyhow::Result<Vec<DatasetInfo>> {
-    let runtime = server.runtime();
-    let filtered = runtime.checks_reads_of(&identity);
+    let filtered = server.checks_reads_of(&identity);
     let (listing_offset, listing_limit) = if filtered { (None, None) } else { (offset, limit) };
     let sql = format!(
         "SELECT * FROM list_datasets({}, {}, {})",
@@ -285,13 +284,12 @@ pub(crate) async fn dataset_schema(
     }
 
     let result = server
-        .runtime()
-        .run_query_with(
+        .run_query(
             beacon_core::query::Query::sql(format!(
                 "SELECT * FROM {read_fn}({}) LIMIT 0",
                 quote_literal(file)
             )),
-            server.validator(identity),
+            identity,
         )
         .await
         .map_err(DatasetSchemaError::Read)?;

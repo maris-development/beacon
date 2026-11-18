@@ -13,7 +13,6 @@ use std::time::Duration;
 use arrow::array::{AsArray, Float64Array, Int64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use beacon_common::FileStatsConfig;
-use beacon_core::AuthIdentity;
 use beacon_file_statistics::RefreshSummary;
 use common::{
     column_strings, restartable_runtime, runtime, runtime_with, total_rows, write_file, TestRuntime,
@@ -96,9 +95,13 @@ async fn metric(rt: &TestRuntime, sql: &str, name: &str) -> usize {
         .sum()
 }
 
-/// The error of `sql`, run as `identity`.
-async fn error_as(rt: &TestRuntime, sql: &str, identity: AuthIdentity) -> String {
-    match rt.try_sql_as(sql, identity).await {
+/// The error of `sql`, run with `validator`.
+async fn error_as(
+    rt: &TestRuntime,
+    sql: &str,
+    validator: std::sync::Arc<dyn beacon_core::plan_validator::PlanValidator>,
+) -> String {
+    match rt.try_sql_as(sql, validator).await {
         Ok(_) => panic!("{sql} should fail"),
         Err(error) => format!("{error:#}"),
     }
@@ -170,9 +173,9 @@ async fn analyze_files_covers_each_table_with_statistics() {
     let tables: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
     assert_eq!(tables, vec!["argo", "obs"]);
 
-    let plain = error_as(&rt, "ANALYZE FILES plain", rt.admin().await).await;
+    let plain = error_as(&rt, "ANALYZE FILES plain", rt.admin()).await;
     assert!(plain.contains("use_statistics_pruning"), "{plain}");
-    let unknown = error_as(&rt, "ANALYZE FILES nope", rt.admin().await).await;
+    let unknown = error_as(&rt, "ANALYZE FILES nope", rt.admin()).await;
     assert!(unknown.contains("nope"), "{unknown}");
 }
 
@@ -203,12 +206,12 @@ async fn table_statistics_shows_one_row_for_each_file_to_the_super_user() {
         .collect();
     assert_eq!(minimums, vec![0.0, 90.0, 20.0]);
 
-    let reader = AuthIdentity {
-        username: "reader".to_string(),
-        roles: Vec::new(),
-        is_super_user: false,
-    };
-    let refused = error_as(&rt, "SELECT * FROM table_statistics('obs')", reader).await;
+    let refused = error_as(
+        &rt,
+        "SELECT * FROM table_statistics('obs')",
+        common::unprivileged(),
+    )
+    .await;
     assert!(refused.contains("super-user"), "{refused}");
 }
 
@@ -239,7 +242,7 @@ async fn drop_table_deletes_the_statistics() {
     let error = error_as(
         &rt,
         "SELECT * FROM table_statistics('obs')",
-        rt.admin().await,
+        rt.admin(),
     )
     .await;
     assert!(error.contains("no statistics"), "{error}");
@@ -297,7 +300,7 @@ async fn or_replace_keeps_or_deletes_the_statistics_with_the_option() {
     let error = error_as(
         &rt,
         "SELECT * FROM table_statistics('obs')",
-        rt.admin().await,
+        rt.admin(),
     )
     .await;
     assert!(error.contains("no statistics"), "{error}");
@@ -318,7 +321,7 @@ async fn too_many_range_columns_need_statistics_columns() {
         &rt,
         "CREATE EXTERNAL TABLE wide STORED AS CSV LOCATION 'wide/' \
          OPTIONS ('use_statistics_pruning' 'true')",
-        rt.admin().await,
+        rt.admin(),
     )
     .await;
     assert!(error.contains("statistics_columns"), "{error}");
@@ -341,6 +344,6 @@ async fn analyze_files_names_the_setting_when_statistics_are_off() {
     })
     .await;
 
-    let error = error_as(&rt, "ANALYZE FILES", rt.admin().await).await;
+    let error = error_as(&rt, "ANALYZE FILES", rt.admin()).await;
     assert!(error.contains("BEACON_FILE_STATS_ENABLE"), "{error}");
 }

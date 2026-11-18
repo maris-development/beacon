@@ -38,7 +38,7 @@ pub struct PlanFacts<'a> {
 
 impl<'a> PlanFacts<'a> {
     /// Collects the facts of `plan`, resolved against `session_ctx`.
-    pub(crate) fn new(plan: &'a LogicalPlan, session_ctx: &'a SessionContext) -> Self {
+    pub fn new(plan: &'a LogicalPlan, session_ctx: &'a SessionContext) -> Self {
         Self { plan, session_ctx }
     }
 
@@ -202,7 +202,7 @@ pub struct TableFacts {
 
 impl TableFacts {
     /// Resolves the spellings of `reference` against the default catalog and schema.
-    pub(crate) fn new(reference: TableReference, session_ctx: &SessionContext) -> Self {
+    pub fn new(reference: TableReference, session_ctx: &SessionContext) -> Self {
         let names = table_names(&reference, session_ctx);
         Self { reference, names }
     }

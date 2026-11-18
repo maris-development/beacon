@@ -25,7 +25,7 @@ async fn seeded(tag: &str) -> TestRuntime {
 async fn run_json(rt: &TestRuntime, body: serde_json::Value) -> Vec<RecordBatch> {
     let query: Query = serde_json::from_value(body).expect("query body should deserialize");
     rt.runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("JSON query should run")
         .into_record_stream()
@@ -311,7 +311,7 @@ async fn aggregate_functions_are_not_available_in_json_select() {
     }))
     .expect("body should deserialize");
 
-    let err = match rt.runtime.run_query(query, rt.admin().await).await {
+    let err = match rt.runtime.run_query(query, rt.admin()).await {
         Err(e) => e,
         Ok(_) => panic!("an aggregate in a JSON select should not resolve"),
     };
@@ -378,7 +378,7 @@ async fn unknown_column_is_a_clear_error() {
     }))
     .expect("body should deserialize");
 
-    let err = match rt.runtime.run_query(query, rt.admin().await).await {
+    let err = match rt.runtime.run_query(query, rt.admin()).await {
         Err(e) => e,
         Ok(_) => panic!("projecting an unknown column should fail"),
     };

@@ -9,13 +9,12 @@ mod common;
 
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::SchemaRef;
-use beacon_core::{AuthIdentity, Credential};
 use common::{restartable_runtime, TestRuntime};
 use datafusion::sql::TableReference;
 
 async fn schema(rt: &TestRuntime, table: &str) -> SchemaRef {
     rt.runtime
-        .table_arrow_schema(TableReference::bare(table), &AuthIdentity::system())
+        .table_arrow_schema(TableReference::bare(table), &beacon_core::plan_validator::AllowAll)
         .await
         .expect("table schema")
 }
@@ -35,7 +34,7 @@ fn column_comment<'a>(schema: &'a SchemaRef, column: &str) -> Option<&'a str> {
 
 async fn run(rt: &TestRuntime, statements: &[&str]) {
     for sql in statements {
-        rt.sql_as(sql, AuthIdentity::system()).await;
+        rt.sql_as(sql, beacon_core::plan_validator::allow_all()).await;
     }
 }
 
@@ -128,7 +127,7 @@ async fn names_keep_their_case() {
     let wrong_case = rt
         .try_sql_as(
             "COMMENT ON COLUMN MyObs.depth IS 'x'",
-            AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await;
 
@@ -145,12 +144,12 @@ async fn an_unknown_column_is_rejected_but_null_removes_a_stale_key() {
     run(&rt, &["CREATE TABLE obs (depth DOUBLE)"]).await;
 
     let unknown = rt
-        .try_sql_as("COMMENT ON COLUMN obs.ghost IS 'x'", AuthIdentity::system())
+        .try_sql_as("COMMENT ON COLUMN obs.ghost IS 'x'", beacon_core::plan_validator::allow_all())
         .await;
     let remove = rt
         .try_sql_as(
             "COMMENT ON COLUMN obs.ghost IS NULL",
-            AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await;
 
@@ -164,12 +163,12 @@ async fn an_unknown_table_errors_unless_if_exists() {
     let rt = restartable_runtime("tc-unknown-table", |b| b).await;
 
     let missing = rt
-        .try_sql_as("COMMENT ON TABLE nope IS 'x'", AuthIdentity::system())
+        .try_sql_as("COMMENT ON TABLE nope IS 'x'", beacon_core::plan_validator::allow_all())
         .await;
     let if_exists = rt
         .try_sql_as(
             "COMMENT IF EXISTS ON TABLE nope IS 'x'",
-            AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await;
 
@@ -192,14 +191,14 @@ async fn only_tables_of_the_default_schema_take_comments() {
     let metadata_table = rt
         .try_sql_as(
             "COMMENT ON TABLE information_schema.tables IS 'x'",
-            AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await;
     let catalog_view = rt
         .runtime
         .table_arrow_schema(
             TableReference::partial("information_schema", "tables"),
-            &AuthIdentity::system(),
+            &beacon_core::plan_validator::AllowAll,
         )
         .await
         .expect("information_schema.tables schema");
@@ -224,7 +223,7 @@ async fn other_object_types_are_unsupported() {
     let rt = restartable_runtime("tc-object", |b| b).await;
 
     let database = rt
-        .try_sql_as("COMMENT ON DATABASE beacon IS 'x'", AuthIdentity::system())
+        .try_sql_as("COMMENT ON DATABASE beacon IS 'x'", beacon_core::plan_validator::allow_all())
         .await;
 
     let message = database.expect_err("COMMENT ON DATABASE").to_string();
@@ -237,21 +236,11 @@ async fn other_object_types_are_unsupported() {
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_super_user_may_comment() {
     let rt = restartable_runtime("tc-authz", |b| b).await;
-    run(
-        &rt,
-        &[
-            "CREATE TABLE obs (depth DOUBLE)",
-            "CREATE USER alice WITH PASSWORD 'pw'",
-        ],
-    )
-    .await;
-    let alice = rt
-        .runtime
-        .authenticate(&Credential::basic("alice", "pw"))
-        .await
-        .expect("alice authenticates");
+    run(&rt, &["CREATE TABLE obs (depth DOUBLE)"]).await;
 
-    let denied = rt.try_sql_as("COMMENT ON TABLE obs IS 'x'", alice).await;
+    let denied = rt
+        .try_sql_as("COMMENT ON TABLE obs IS 'x'", common::unprivileged())
+        .await;
 
     assert!(denied.is_err(), "a regular user must not set comments");
     assert_eq!(table_comment(&schema(&rt, "obs").await), None);
@@ -331,15 +320,9 @@ async fn system_comments_lists_every_comment_for_the_super_user_only() {
             "CREATE TABLE plain (a BIGINT)",
             "COMMENT ON TABLE obs IS 'profiles'",
             "COMMENT ON COLUMN obs.depth IS 'meters'",
-            "CREATE USER alice WITH PASSWORD 'pw'",
         ],
     )
     .await;
-    let alice = rt
-        .runtime
-        .authenticate(&Credential::basic("alice", "pw"))
-        .await
-        .expect("alice authenticates");
 
     let batches = rt
         .sql(
@@ -348,7 +331,7 @@ async fn system_comments_lists_every_comment_for_the_super_user_only() {
         )
         .await;
     let denied = rt
-        .try_sql_as("SELECT * FROM beacon.system.comments", alice)
+        .try_sql_as("SELECT * FROM beacon.system.comments", common::unprivileged())
         .await;
 
     let mut rows = Vec::new();
@@ -390,7 +373,7 @@ async fn the_extension_statements_are_gone() {
         "SHOW EXTENSIONS FOR obs",
     ] {
         assert!(
-            rt.try_sql_as(sql, AuthIdentity::system()).await.is_err(),
+            rt.try_sql_as(sql, beacon_core::plan_validator::allow_all()).await.is_err(),
             "{sql} must no longer run"
         );
     }

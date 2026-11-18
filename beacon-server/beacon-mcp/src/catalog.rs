@@ -28,7 +28,7 @@ async fn list_table_names(
     validator: &dyn PlanValidator,
 ) -> anyhow::Result<Vec<String>> {
     let (default_catalog, default_schema) = runtime.default_catalog_and_schema();
-    let batches = runtime.visible_tables_with(validator).await?;
+    let batches = runtime.visible_tables(validator).await?;
 
     let mut names = Vec::new();
     for batch in &batches {
@@ -61,7 +61,7 @@ async fn table_schema(
     validator: &dyn PlanValidator,
 ) -> Option<SchemaRef> {
     runtime
-        .table_arrow_schema_with(TableReference::bare(table.to_string()), validator)
+        .table_arrow_schema(TableReference::bare(table.to_string()), validator)
         .await
         .ok()
 }

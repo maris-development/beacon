@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ::axum::{extract::State, http::StatusCode, Extension, Json};
 use crate::api::CreateExternalTableRequest;
-use beacon_core::AuthIdentity;
+use beacon_auth::AuthIdentity;
 use crate::server::{
     sql::{execute, quote_ident, quote_literal},
     Server,

@@ -18,7 +18,7 @@ pub async fn run_sql_to_json(
     sql: String,
     validator: Arc<dyn PlanValidator>,
 ) -> anyhow::Result<String> {
-    let result = runtime.run_query_with(Query::sql(sql), validator).await?;
+    let result = runtime.run_query(Query::sql(sql), validator).await?;
     let mut stream = result.into_record_stream()?;
 
     let mut batches: Vec<RecordBatch> = Vec::new();

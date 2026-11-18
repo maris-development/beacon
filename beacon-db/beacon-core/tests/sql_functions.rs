@@ -9,7 +9,6 @@ mod common;
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
-use beacon_core::AuthIdentity;
 use common::{column_strings, restartable_runtime, runtime, scalar_i64, total_rows, TestRuntime};
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -24,14 +23,6 @@ const WOD_FLAG_SQL: &str = "CREATE FUNCTION wod_flag_sql(flag BIGINT) RETURNS VA
 /// Every WOD flag, values outside the mapping, and NULL.
 const FLAGS: &str = "(SELECT * FROM (VALUES (-1), (0), (1), (2), (3), (4), (5), (6), (7), \
      (8), (9), (10), (11), (NULL)) AS t(flag))";
-
-fn non_super_user() -> AuthIdentity {
-    AuthIdentity {
-        username: "reader".to_string(),
-        roles: vec![],
-        is_super_user: false,
-    }
-}
 
 async fn error_of(rt: &TestRuntime, sql: &str) -> String {
     rt.try_sql(sql)
@@ -293,7 +284,7 @@ async fn only_the_super_user_creates_or_drops_a_function() {
 
     for sql in [WOD_FLAG_SQL, "DROP FUNCTION IF EXISTS wod_flag_sql"] {
         let error = rt
-            .try_sql_as(sql, non_super_user())
+            .try_sql_as(sql, common::unprivileged())
             .await
             .err()
             .unwrap_or_else(|| panic!("`{sql}` should be refused"));
@@ -304,13 +295,13 @@ async fn only_the_super_user_creates_or_drops_a_function() {
     let rows = rt
         .sql_as(
             &format!("SELECT wod_flag_sql(flag) FROM {FLAGS}"),
-            non_super_user(),
+            common::unprivileged(),
         )
         .await;
     assert_eq!(total_rows(&rows), 14);
 
     let error = rt
-        .try_sql_as("DROP FUNCTION wod_flag_sql", non_super_user())
+        .try_sql_as("DROP FUNCTION wod_flag_sql", common::unprivileged())
         .await
         .err()
         .expect("a non-super DROP FUNCTION should be refused");

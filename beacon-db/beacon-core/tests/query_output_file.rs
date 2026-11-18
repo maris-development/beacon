@@ -24,7 +24,7 @@ async fn query_with_csv_output_produces_a_nonempty_file() {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("query with an output format should run");
 
@@ -62,7 +62,7 @@ async fn query_with_netcdf_output_writes_under_configured_tmp() {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("netcdf query with an output format should run");
 

@@ -84,7 +84,7 @@ You can force a source build on a platform that *does* have a wheel. Use
 
 ## Next steps
 
-- [Getting started](/docs/2.0.2/beacondb/python/getting-started): connect, first query, auth modes.
+- [Getting started](/docs/2.0.2/beacondb/python/getting-started): connect, first query, read-only.
 - [Querying](/docs/2.0.2/beacondb/python/querying): lazy relations, readers, file sinks, streams.
 - [Bring data in](/docs/2.0.2/beacondb/python/data-in): `register()` and `append()`.
 - [Remote catalogs](/docs/2.0.2/beacondb/python/remote-catalogs): `ATTACH` a remote Beacon.

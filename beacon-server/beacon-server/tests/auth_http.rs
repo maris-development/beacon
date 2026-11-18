@@ -11,7 +11,7 @@ use ::axum::{
     http::{header, Request, StatusCode},
     Router,
 };
-use beacon_core::runtime::Runtime;
+use beacon_server::Server;
 use common::{basic, config, unique};
 use futures::TryStreamExt;
 use tower::ServiceExt;
@@ -30,11 +30,11 @@ async fn app(
 }
 
 /// Runs setup SQL as a super-user directly against the runtime (test fixture).
-async fn seed(runtime: &Runtime, sql: &str) {
+async fn seed(runtime: &Server, sql: &str) {
     runtime
         .run_query(
             beacon_core::query::Query::sql(sql.to_string()),
-            beacon_core::AuthIdentity::system(),
+            beacon_auth::AuthIdentity::system(),
         )
         .await
         .unwrap_or_else(|e| panic!("seed failed: {sql}: {e}"))
@@ -73,9 +73,9 @@ async fn status(router: &Router, req: Request<Body>) -> StatusCode {
 async fn admin_route_requires_a_super_user() {
     let (harness, config) = app(config(false)).await;
     // A non-super-user to exercise the 403 path.
-    seed(harness.server.runtime(), "CREATE ROLE reader").await;
-    seed(harness.server.runtime(), "CREATE USER alice WITH PASSWORD 'pw'").await;
-    seed(harness.server.runtime(), "GRANT ROLE reader TO USER alice").await;
+    seed(&harness.server, "CREATE ROLE reader").await;
+    seed(&harness.server, "CREATE USER alice WITH PASSWORD 'pw'").await;
+    seed(&harness.server, "GRANT ROLE reader TO USER alice").await;
 
     let router = setup_router(harness.server.clone(), config.clone()).unwrap();
 
@@ -152,7 +152,7 @@ async fn client_query_anonymous_reads_but_cannot_write() {
 #[tokio::test(flavor = "multi_thread")]
 async fn enforced_http_query_respects_table_grants() {
     let (harness, config) = app(config(true)).await;
-    let rt = harness.server.runtime();
+    let rt = &harness.server;
 
     let t1 = unique("t1");
     let t2 = unique("t2");

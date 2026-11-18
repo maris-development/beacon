@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use beacon_core::query::Query;
-use beacon_core::AuthIdentity;
+use beacon_auth::AuthIdentity;
 use futures::TryStreamExt;
 use serde_json::Value;
 
@@ -51,8 +51,7 @@ async fn collect(
     identity: AuthIdentity,
 ) -> anyhow::Result<Vec<RecordBatch>> {
     let result = server
-        .runtime()
-        .run_query_with(Query::sql(sql.into()), server.validator(identity))
+        .run_query(Query::sql(sql.into()), identity)
         .await?;
     Ok(result.into_record_stream()?.try_collect().await?)
 }

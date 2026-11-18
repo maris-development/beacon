@@ -1,38 +1,19 @@
 //! Opening a beacon database **in-process**, the way an embedded database is opened.
 //!
-//! [`Runtime`] is deliberately narrow — authenticate a caller, then run a query — because it
+//! [`Runtime`] is deliberately narrow — run a query that a validator permits — because it
 //! is designed to sit behind a server that already knows who the caller is. An embedder has no
 //! server: it is a Python notebook, a test, or an application that owns the file outright and
 //! needs one call that turns a path into something it can query. That call is [`Database::open`].
 //!
-//! # The two auth modes
+//! # Access
 //!
-//! The only decision an embedder has to make is whether beacon's RBAC applies, and the default
-//! is that it does not:
-//!
-//! - [`AuthMode::Disabled`] (default) — every query runs as [`AuthIdentity::local`], a
-//!   super-user, with grant enforcement off. Opening the file requires no credentials and
-//!   permits everything. **This is the embedded-database contract: possession of the file is
-//!   full control.**
-//! - [`AuthMode::Enabled`] — grant enforcement on, sessions resolve to the anonymous
-//!   principal until a [`Credential`] is supplied, and DDL/DML requires the single configured
-//!   super-user.
-//!
-//! Both switches have to move together, which is why this is one enum rather than two flags:
-//! [`validate_query_plan`](crate::statement_plan) derives `allow_ddl`/`allow_dml` from
-//! `is_super_user` *alone*, so enforcement-off with a non-super identity would be a broken
-//! half-mode where reads work and `CREATE TABLE` does not.
-//!
-//! The mode is a property of *how the database was opened*, never of the file: auth tables are
-//! created and bootstrapped in both modes, so users, roles and grants written by one mode are
-//! still there in the other. A `beacon.db` governed by a server can therefore be opened locally
-//! with auth disabled and read in full — RBAC is a boundary for *served* access, not against
-//! local possession of the bytes.
+//! The database has no users and no roles. **Possession of the file is full control**: each
+//! statement runs with [`AllowAll`](crate::plan_validator::AllowAll). Users, roles and grants
+//! belong to the Beacon server, which gives the engine a validator for each request.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use beacon_auth::{AuthIdentity, Credential, ANONYMOUS_USERNAME};
 use beacon_common::FileStatsConfig;
 use beacon_datafusion_ext::listing_factory::DefaultStore;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, TypeConflict};
@@ -111,96 +92,12 @@ impl From<PathBuf> for DbPath {
     }
 }
 
-/// The single super-user credential, supplied by the embedder when auth is enabled.
-#[derive(Clone)]
-pub struct AdminCredentials {
-    pub username: String,
-    pub password: String,
-}
-
-impl AdminCredentials {
-    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
-        Self {
-            username: username.into(),
-            password: password.into(),
-        }
-    }
-}
-
-// Hand-written so a stray `{:?}` on `OpenOptions` (a panic message, a tracing span, a Python
-// repr) can never print the super-user's password.
-impl std::fmt::Debug for AdminCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AdminCredentials")
-            .field("username", &self.username)
-            .field("password", &"<redacted>")
-            .finish()
-    }
-}
-
-/// How an auth-enabled database resolves principals.
-#[derive(Debug, Clone, Default)]
-pub struct AuthSettings {
-    /// The one super-user. `None` means no principal can perform DDL/DML — useful for a
-    /// strictly read-only embedding, useless otherwise.
-    pub admin: Option<AdminCredentials>,
-    /// The principal unauthenticated sessions resolve to. `None` disables anonymous access,
-    /// making credentials mandatory.
-    pub anonymous_username: Option<String>,
-}
-
-/// Whether beacon's RBAC model applies to this database.
-#[derive(Debug, Clone, Default)]
-pub enum AuthMode {
-    /// No authentication, no authorization: every session is [`AuthIdentity::local`].
-    #[default]
-    Disabled,
-    /// Full RBAC. See the module docs.
-    Enabled(AuthSettings),
-}
-
-impl AuthMode {
-    /// RBAC on, with the default anonymous principal and no super-user.
-    pub fn enabled() -> Self {
-        Self::Enabled(AuthSettings {
-            admin: None,
-            anonymous_username: Some(ANONYMOUS_USERNAME.to_string()),
-        })
-    }
-
-    /// RBAC on, with the default anonymous principal and the given super-user.
-    pub fn enabled_with_admin(username: impl Into<String>, password: impl Into<String>) -> Self {
-        Self::Enabled(AuthSettings {
-            admin: Some(AdminCredentials::new(username, password)),
-            anonymous_username: Some(ANONYMOUS_USERNAME.to_string()),
-        })
-    }
-
-    /// Requires credentials on every session by disabling the anonymous principal.
-    /// No-op when auth is disabled — there are no principals to require.
-    pub fn without_anonymous(self) -> Self {
-        match self {
-            Self::Disabled => Self::Disabled,
-            Self::Enabled(settings) => Self::Enabled(AuthSettings {
-                anonymous_username: None,
-                ..settings
-            }),
-        }
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        matches!(self, Self::Enabled(_))
-    }
-}
-
 /// Everything an embedder can configure at open time.
 ///
-/// Defaults are chosen for an interactive, single-user embedding: auth off, crawlers available,
+/// Defaults are chosen for an interactive, single-user embedding: crawlers available,
 /// dataset paths resolved dynamically by their own scheme (or against the cwd).
 #[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
-    /// Whether RBAC applies. Defaults to [`AuthMode::Disabled`].
-    pub auth: AuthMode,
     /// The Tokio runtime the engine schedules on. Defaults to the ambient runtime, which means
     /// [`Database::open`] must then be called from inside one.
     pub runtime_handle: Option<Handle>,
@@ -244,11 +141,6 @@ pub struct OpenOptions {
 impl OpenOptions {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn with_auth(mut self, auth: AuthMode) -> Self {
-        self.auth = auth;
-        self
     }
 
     pub fn with_runtime_handle(mut self, handle: Handle) -> Self {
@@ -338,32 +230,20 @@ impl OpenOptions {
     }
 }
 
-/// An open beacon database: a [`Runtime`] plus the identity policy it was opened under.
+/// An open beacon database. Each statement runs with full access.
 ///
 /// Cheap to clone-share via [`Database::runtime`]; the container file is held by an exclusive
 /// lock for the lifetime of this value, so one process opens one `beacon.db` once.
 pub struct Database {
     runtime: Arc<Runtime>,
-    auth_enabled: bool,
-    /// The identity a session gets without presenting credentials. `None` only when auth is
-    /// enabled *and* anonymous access is disabled, i.e. credentials are mandatory.
-    default_identity: Option<AuthIdentity>,
 }
 
-// `Runtime` is not `Debug` (it owns a session context), so this reports the parts an embedder
-// actually wants in a panic message or a Python `repr`: which mode the database is in and who
-// a credential-less session is.
+// `Runtime` is not `Debug` (it owns a session context), so this reports what an embedder wants
+// in a panic message or a Python `repr`.
 impl std::fmt::Debug for Database {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Database")
-            .field("auth_enabled", &self.auth_enabled)
-            .field(
-                "default_identity",
-                &self
-                    .default_identity
-                    .as_ref()
-                    .map(|identity| identity.username.as_str()),
-            )
+            .field("read_only", &self.runtime.read_only)
             .finish_non_exhaustive()
     }
 }
@@ -376,10 +256,8 @@ impl Database {
     /// file's exclusive lock.
     pub async fn open(path: impl Into<DbPath>, options: OpenOptions) -> anyhow::Result<Self> {
         let path = path.into();
-        let auth_enabled = options.auth.is_enabled();
 
         let mut builder = RuntimeBuilder::new()
-            .with_auth_enforcement(auth_enabled)
             .with_read_only(options.read_only)
             .with_crawler(options.crawlers.clone())
             .with_file_stats(options.file_stats.clone());
@@ -416,15 +294,6 @@ impl Database {
         if let Some(key) = options.secrets_key.or_else(secrets_key_from_env) {
             builder = builder.with_secrets_encryption(key);
         }
-        if let AuthMode::Enabled(settings) = &options.auth {
-            if let Some(admin) = &settings.admin {
-                builder =
-                    builder.with_admin_credentials(admin.username.clone(), admin.password.clone());
-            }
-            if let Some(anonymous) = &settings.anonymous_username {
-                builder = builder.with_anonymous_user(anonymous.clone());
-            }
-        }
 
         let runtime = Arc::new(builder.build().await.map_err(|source| {
             match path.as_path() {
@@ -439,23 +308,7 @@ impl Database {
             }
         })?);
 
-        // Resolve the credential-less identity once, at open time, so a misconfiguration fails
-        // here rather than on the first query.
-        let default_identity = if auth_enabled {
-            if runtime.anonymous_enabled() {
-                Some(runtime.authenticate_anonymous().await?)
-            } else {
-                None
-            }
-        } else {
-            Some(AuthIdentity::local())
-        };
-
-        Ok(Self {
-            runtime,
-            auth_enabled,
-            default_identity,
-        })
+        Ok(Self { runtime })
     }
 
     /// The underlying runtime, for callers that need the full query surface.
@@ -511,67 +364,24 @@ impl Database {
         beacon_datafusion_ext::remote::RemoteCredential::from_secret(&secret)
     }
 
-    /// Whether this database was opened with RBAC applied.
-    pub fn auth_enabled(&self) -> bool {
-        self.auth_enabled
-    }
-
     /// Whether this database was opened read-only (all writes refused).
     pub fn is_read_only(&self) -> bool {
         self.runtime.read_only
     }
 
-    /// The identity a session gets without credentials: [`AuthIdentity::local`] when auth is
-    /// disabled, the anonymous principal when it is enabled, and `None` when auth is enabled
-    /// with anonymous access turned off.
-    pub fn default_identity(&self) -> Option<&AuthIdentity> {
-        self.default_identity.as_ref()
+    /// Runs a query with full access.
+    pub async fn run_query(&self, query: Query) -> anyhow::Result<QueryResult> {
+        self.runtime
+            .run_query(query, crate::plan_validator::allow_all())
+            .await
     }
 
-    /// [`Self::default_identity`], erroring when credentials are mandatory.
-    pub fn require_default_identity(&self) -> anyhow::Result<AuthIdentity> {
-        self.default_identity.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "this database requires credentials: it was opened with auth enabled and \
-                 anonymous access disabled"
-            )
-        })
+    /// Runs SQL, streaming the result (no output format applied).
+    pub async fn sql(&self, sql: impl Into<String>) -> anyhow::Result<QueryResult> {
+        self.run_query(Query::sql(sql.into())).await
     }
 
-    /// Resolves a credential to an identity.
-    ///
-    /// Errors when auth is disabled — there is nothing to authenticate against, and silently
-    /// accepting credentials would imply a restriction that does not exist.
-    pub async fn authenticate(&self, credential: &Credential) -> anyhow::Result<AuthIdentity> {
-        if !self.auth_enabled {
-            anyhow::bail!(
-                "this database was opened with auth disabled, so credentials cannot be used: \
-                 every session already has full access. Reopen with auth enabled to \
-                 authenticate users."
-            );
-        }
-        self.runtime.authenticate(credential).await
-    }
-
-    /// Runs a query as `identity`.
-    pub async fn run_query(
-        &self,
-        query: Query,
-        identity: AuthIdentity,
-    ) -> anyhow::Result<QueryResult> {
-        self.runtime.run_query(query, identity).await
-    }
-
-    /// Runs SQL as `identity`, streaming the result (no output format applied).
-    pub async fn sql(
-        &self,
-        sql: impl Into<String>,
-        identity: AuthIdentity,
-    ) -> anyhow::Result<QueryResult> {
-        self.run_query(Query::sql(sql.into()), identity).await
-    }
-
-    /// Runs SQL whose `$1..$n` placeholders are bound to `params`, as `identity`.
+    /// Runs SQL whose `$1..$n` placeholders are bound to `params`.
     ///
     /// The values are bound to the lowered plan rather than substituted into the SQL text, so
     /// there is no interpolation and no injection surface.
@@ -579,9 +389,8 @@ impl Database {
         &self,
         sql: impl Into<String>,
         params: Vec<ScalarValue>,
-        identity: AuthIdentity,
     ) -> anyhow::Result<QueryResult> {
-        self.run_query(Query::sql_with_params(sql.into(), params), identity)
+        self.run_query(Query::sql_with_params(sql.into(), params))
             .await
     }
 
@@ -608,20 +417,18 @@ impl Database {
         })
     }
 
-    /// Creates a **persisted** managed table named `name` from `batches`, as `identity`.
+    /// Creates a **persisted** managed table named `name` from `batches`.
     ///
     /// Unlike [`Self::register_batches`] (a session-only [`MemTable`]), this writes the data into
     /// `beacon.db` through the default managed-table engine — so it survives a reopen and travels
     /// with the file. Implemented by reusing beacon's `CREATE TABLE … AS SELECT` path: the batches
-    /// are staged as a temporary table and copied into a managed one. Being real DDL, it requires
-    /// the identity's DDL privileges (a super-user), and it fails if `name` already exists — drop
-    /// it first to replace, rather than silently overwriting persisted data.
+    /// are staged as a temporary table and copied into a managed one. It fails if `name` already
+    /// exists — drop it first to replace, rather than silently overwriting persisted data.
     pub async fn persist_batches(
         &self,
         name: &str,
         schema: arrow::datatypes::SchemaRef,
         batches: Vec<arrow::record_batch::RecordBatch>,
-        identity: AuthIdentity,
     ) -> anyhow::Result<()> {
         use futures::TryStreamExt;
 
@@ -638,7 +445,7 @@ impl Database {
             quote_ident(STAGING)
         );
         let outcome = async {
-            let stream = self.sql(ctas, identity).await?.into_record_stream()?;
+            let stream = self.sql(ctas).await?.into_record_stream()?;
             // Draining the statement's stream is what runs the write to completion.
             stream.try_collect::<Vec<_>>().await?;
             Ok::<(), anyhow::Error>(())
@@ -652,15 +459,14 @@ impl Database {
 
     /// Append `batches` to an existing managed table `name` (`INSERT INTO name SELECT * FROM …`).
     ///
-    /// The insert runs through the normal query path, so it is subject to the same authorization
-    /// (write privileges) and read-only checks as any other write, and fails clearly if `name` does
-    /// not exist or its schema is incompatible.
+    /// The insert runs through the normal query path, so it is subject to the same read-only
+    /// check as any other write, and fails clearly if `name` does not exist or its schema is
+    /// incompatible.
     pub async fn append_batches(
         &self,
         name: &str,
         schema: arrow::datatypes::SchemaRef,
         batches: Vec<arrow::record_batch::RecordBatch>,
-        identity: AuthIdentity,
     ) -> anyhow::Result<()> {
         use futures::TryStreamExt;
 
@@ -673,7 +479,7 @@ impl Database {
             quote_ident(STAGING)
         );
         let outcome = async {
-            let stream = self.sql(insert, identity).await?.into_record_stream()?;
+            let stream = self.sql(insert).await?.into_record_stream()?;
             stream.try_collect::<Vec<_>>().await?;
             Ok::<(), anyhow::Error>(())
         }
@@ -870,19 +676,5 @@ mod tests {
             DbPath::parse("beacon.db"),
             DbPath::File(PathBuf::from("beacon.db"))
         );
-    }
-
-    #[test]
-    fn admin_credentials_never_debug_print_the_password() {
-        let creds = AdminCredentials::new("admin", "hunter2");
-        let rendered = format!("{creds:?}");
-        assert!(!rendered.contains("hunter2"), "password leaked: {rendered}");
-        assert!(rendered.contains("admin"));
-    }
-
-    #[test]
-    fn auth_defaults_to_disabled() {
-        assert!(!OpenOptions::default().auth.is_enabled());
-        assert!(AuthMode::enabled().is_enabled());
     }
 }

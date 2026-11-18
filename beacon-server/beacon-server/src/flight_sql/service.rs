@@ -89,10 +89,9 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightInfo, Status> {
         let stream = self
             .runtime
-            .runtime()
-            .run_query_with(
+            .run_query(
                 beacon_core::query::Query::sql(sql.clone()),
-                self.runtime.validator(auth.identity.clone()),
+                auth.identity.clone(),
             )
             .await
             .map_err(|error| self.internal_status(error))?
@@ -120,10 +119,9 @@ impl BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
-            .runtime()
-            .run_query_with(
+            .run_query(
                 beacon_core::query::Query::sql(sql),
-                self.runtime.validator(auth.identity.clone()),
+                auth.identity.clone(),
             )
             .await
             .map_err(|error| self.internal_status(error))?
@@ -141,10 +139,9 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightDataStream, Status> {
         let stream = self
             .runtime
-            .runtime()
-            .run_query_with(
+            .run_query(
                 beacon_core::query::Query::sql(sql),
-                self.runtime.validator(auth.identity.clone()),
+                auth.identity.clone(),
             )
             .await
             .map_err(|error| self.internal_status(error))?
@@ -405,10 +402,9 @@ impl FlightSqlService for BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
-            .runtime()
-            .run_query_with(
+            .run_query(
                 beacon_core::query::Query::sql(sql),
-                self.runtime.validator(auth.identity.clone()),
+                auth.identity.clone(),
             )
             .await
             .map_err(|error| self.internal_status(error))?
@@ -443,10 +439,9 @@ impl FlightSqlService for BeaconFlightSqlService {
         } else {
             let stream = self
                 .runtime
-                .runtime()
-            .run_query_with(
+            .run_query(
                 beacon_core::query::Query::sql(query.query.clone()),
-                self.runtime.validator(auth.identity.clone()),
+                auth.identity.clone(),
             )
             .await
             .map_err(|error| self.internal_status(error))?

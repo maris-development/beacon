@@ -2,16 +2,15 @@
 //! `SELECT * FROM t LIMIT 0`.
 //!
 //! Two things matter and are pinned here. It must return the same schema a scan
-//! would, so Flight SQL keeps reporting real Arrow types; and it must apply the
-//! *same* read authorization, because a schema is metadata about data the caller
-//! may not be allowed to see. The gate is hand-written rather than routed through
-//! `authorize_logical_plan` (there is no plan to authorize), so it is asserted
-//! against the SQL path rather than assumed to agree with it.
+//! would, so Flight SQL keeps reporting real Arrow types; and it must ask the
+//! validator of the caller, because a schema is metadata about data the caller
+//! may not be allowed to see. There is no plan to validate, so the check is
+//! `PlanValidator::check_table`, and it is asserted against the SQL path.
 
 mod common;
 
-use beacon_core::{AuthIdentity, Credential};
-use common::{restartable_runtime, ADMIN_PASSWORD, ADMIN_USERNAME};
+use beacon_core::plan_validator::AllowAll;
+use common::{restartable_runtime, Unprivileged};
 use datafusion::sql::TableReference;
 
 /// The provider's schema matches what a scan of the same table reports.
@@ -20,23 +19,23 @@ async fn returns_the_same_schema_a_scan_would() {
     let rt = restartable_runtime("tas-schema", |b| b).await;
     rt.sql_as(
         "CREATE TABLE obs (a BIGINT, b DOUBLE, c VARCHAR)",
-        AuthIdentity::system(),
+        beacon_core::plan_validator::allow_all(),
     )
     .await;
     // A row, so the comparison scan actually emits a batch to read the schema
     // from — `LIMIT 0` produces none, which is part of why it is a poor way to
     // ask a table what its columns are.
-    rt.sql_as("INSERT INTO obs VALUES (1, 2.0, 'x')", AuthIdentity::system())
+    rt.sql_as("INSERT INTO obs VALUES (1, 2.0, 'x')", beacon_core::plan_validator::allow_all())
         .await;
 
     let from_provider = rt
         .runtime
-        .table_arrow_schema(TableReference::bare("obs"), &AuthIdentity::system())
+        .table_arrow_schema(TableReference::bare("obs"), &beacon_core::plan_validator::AllowAll)
         .await
         .expect("schema from the provider");
 
     let from_scan = rt
-        .try_sql_as("SELECT * FROM obs", AuthIdentity::system())
+        .try_sql_as("SELECT * FROM obs", beacon_core::plan_validator::allow_all())
         .await
         .expect("scan");
 
@@ -64,101 +63,45 @@ async fn returns_the_same_schema_a_scan_would() {
     );
 }
 
-/// A table the caller has no grant on must not leak its schema — the same denial
-/// the equivalent `SELECT` gets. This is the whole risk of not going through
-/// `authorize_logical_plan`, so both paths are asserted together.
+/// A table that the validator refuses must not leak its schema — the same refusal the
+/// equivalent `SELECT` gets.
 #[tokio::test(flavor = "multi_thread")]
-async fn denies_a_table_the_caller_may_not_read() {
-    let rt = restartable_runtime("tas-authz", |b| b.with_auth_enforcement(true)).await;
+async fn a_refused_table_gives_no_schema() {
+    let rt = restartable_runtime("tas-refused", |b| b).await;
+    rt.sql("CREATE TABLE obs (a BIGINT)").await;
+    let metadata = || TableReference::partial("information_schema", "tables");
 
-    rt.sql_as("CREATE TABLE granted (a BIGINT)", AuthIdentity::system())
-        .await;
-    rt.sql_as("CREATE TABLE secret (a BIGINT)", AuthIdentity::system())
-        .await;
-    rt.sql_as("CREATE ROLE reader", AuthIdentity::system()).await;
-    rt.sql_as(
-        "CREATE USER alice WITH PASSWORD 'pw'",
-        AuthIdentity::system(),
-    )
-    .await;
-    rt.sql_as("GRANT ROLE reader TO USER alice", AuthIdentity::system())
-        .await;
-    rt.sql_as(
-        "GRANT SELECT ON TABLE granted TO ROLE reader",
-        AuthIdentity::system(),
-    )
-    .await;
-
-    let alice = rt
-        .runtime
-        .authenticate(&Credential::basic("alice", "pw"))
-        .await
-        .expect("alice authenticates");
-    assert!(!alice.is_super_user);
-
-    // Granted: both paths succeed.
+    // Permitted: both paths succeed.
     rt.runtime
-        .table_arrow_schema(TableReference::bare("granted"), &alice)
+        .table_arrow_schema(TableReference::bare("obs"), &Unprivileged)
         .await
-        .expect("a granted table's schema is readable");
-    rt.try_sql_as("SELECT * FROM granted LIMIT 0", alice.clone())
+        .expect("the schema of a permitted table is readable");
+    rt.try_sql_as("SELECT * FROM obs LIMIT 0", common::unprivileged())
         .await
-        .expect("a granted table scans");
+        .expect("a permitted table scans");
 
-    // Ungranted: both paths deny.
-    let schema_denied = rt
+    // Refused: both paths refuse.
+    let schema_refused = rt
         .runtime
-        .table_arrow_schema(TableReference::bare("secret"), &alice)
+        .table_arrow_schema(metadata(), &Unprivileged)
         .await;
     assert!(
-        schema_denied.is_err(),
-        "an ungranted table must not leak its schema, got: {schema_denied:?}"
+        schema_refused.is_err(),
+        "a refused table must not leak its schema, got: {schema_refused:?}"
     );
-    let scan_denied = rt.try_sql_as("SELECT * FROM secret LIMIT 0", alice).await;
-    assert!(
-        scan_denied.is_err(),
-        "sanity: the equivalent scan is denied too"
-    );
-}
-
-/// The internal `__beacon_*` tables hold password hashes and are super-user-only
-/// *unconditionally* — enforcement OFF must not open them, matching the gate in
-/// `authorize_logical_plan`. Fails closed.
-#[tokio::test(flavor = "multi_thread")]
-async fn internal_tables_stay_super_user_only_with_enforcement_off() {
-    let rt = restartable_runtime("tas-internal", |b| b.with_auth_enforcement(false)).await;
-
-    rt.sql_as(
-        "CREATE USER bob WITH PASSWORD 'pw'",
-        AuthIdentity::system(),
-    )
-    .await;
-    let bob = rt
-        .runtime
-        .authenticate(&Credential::basic("bob", "pw"))
-        .await
-        .expect("bob authenticates");
-    assert!(!bob.is_super_user);
-
-    let denied = rt
-        .runtime
-        .table_arrow_schema(TableReference::bare("__beacon_users"), &bob)
+    let scan_refused = rt
+        .try_sql_as(
+            "SELECT * FROM information_schema.tables LIMIT 0",
+            common::unprivileged(),
+        )
         .await;
-    assert!(
-        denied.is_err(),
-        "the internal auth table must be denied even with enforcement off, got: {denied:?}"
-    );
+    assert!(scan_refused.is_err(), "the equivalent scan is refused too");
 
-    // The super-user still reaches it, so the gate is on identity, not existence.
-    let admin = rt
-        .runtime
-        .authenticate(&Credential::basic(ADMIN_USERNAME, ADMIN_PASSWORD))
-        .await
-        .expect("admin authenticates");
+    // The refusal comes from the validator, not from the table.
     rt.runtime
-        .table_arrow_schema(TableReference::bare("__beacon_users"), &admin)
+        .table_arrow_schema(metadata(), &AllowAll)
         .await
-        .expect("the super-user may read the internal table's schema");
+        .expect("full access reads the schema");
 }
 
 /// An unknown table is an error, not an empty schema — callers map that to 404.
@@ -167,7 +110,7 @@ async fn unknown_table_errors() {
     let rt = restartable_runtime("tas-missing", |b| b).await;
     let missing = rt
         .runtime
-        .table_arrow_schema(TableReference::bare("nope"), &AuthIdentity::system())
+        .table_arrow_schema(TableReference::bare("nope"), &beacon_core::plan_validator::AllowAll)
         .await;
     assert!(missing.is_err(), "an unknown table must error");
 }

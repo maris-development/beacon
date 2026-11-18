@@ -5,7 +5,7 @@ Registered as the ``beacondb`` dialect, so::
     from sqlalchemy import create_engine
     engine = create_engine("beacondb:///beacon.db")          # a file
     engine = create_engine("beacondb://")                     # in-memory
-    engine = create_engine("beacondb:///beacon.db?auth=true&username=u&password=p")
+    engine = create_engine("beacondb:///beacon.db?read_only=true")
 
     import pandas as pd
     pd.read_sql("SELECT * FROM obs", engine)
@@ -14,6 +14,8 @@ The dialect is deliberately thin: beacon speaks DataFusion SQL (ANSI/Postgres-fl
 SQLAlchemy's generic SQL compiler is used as-is. Schema reflection is answered from beacon's
 ``information_schema``. The engine is autocommit (no multi-statement transactions), which the
 DB-API's no-op ``commit``/``rollback`` model transparently.
+
+The embedded database has no users, so the URL takes no user name, password or token.
 """
 
 from __future__ import annotations
@@ -22,6 +24,24 @@ from typing import Any
 
 from sqlalchemy import types as sqltypes
 from sqlalchemy.engine import default
+from sqlalchemy.exc import ArgumentError
+
+# URL query keys for users and credentials. The embedded database has no users.
+_USER_QUERY_KEYS = (
+    "auth",
+    "anonymous",
+    "username",
+    "password",
+    "token",
+    "admin_username",
+    "admin_password",
+)
+
+_NO_USERS_MESSAGE = (
+    "The embedded beacondb database has no users. "
+    "Remove the user name, password and token from the URL. "
+    "The Beacon server owns users and roles."
+)
 
 # DataFusion's information_schema reports Arrow type names (e.g. "Int64", "Utf8",
 # "Timestamp(Microsecond, None)"). Match on a lowercased prefix so parameterized types resolve.
@@ -101,28 +121,16 @@ class BeacondbDialect(default.DefaultDialect):
         kwargs: dict[str, Any] = {"database": url.database or ":memory:"}
 
         query = dict(url.query)
-        for key in ("auth", "anonymous", "crawlers", "read_only"):
+        if url.username or url.password or any(key in query for key in _USER_QUERY_KEYS):
+            raise ArgumentError(_NO_USERS_MESSAGE)
+        for key in ("crawlers", "read_only"):
             if key in query:
                 kwargs[key] = _as_bool(query.pop(key))
         for key in ("batch_size", "memory_limit", "cpu_limit"):
             if key in query:
                 kwargs[key] = int(query.pop(key))
-        for key in (
-            "username",
-            "password",
-            "token",
-            "admin_username",
-            "admin_password",
-            "datasets",
-        ):
-            if key in query:
-                kwargs[key] = query.pop(key)
-
-        # Credentials may also ride on the URL's userinfo (beacondb://user:pass@/db).
-        if url.username and "username" not in kwargs:
-            kwargs["username"] = url.username
-        if url.password and "password" not in kwargs:
-            kwargs["password"] = url.password
+        if "datasets" in query:
+            kwargs["datasets"] = query.pop("datasets")
 
         return ([], kwargs)
 

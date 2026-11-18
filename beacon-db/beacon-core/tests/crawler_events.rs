@@ -28,7 +28,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
 
 async fn try_count(rt: &TestRuntime, table: &str) -> Option<i64> {
-    let identity = rt.admin().await;
+    let identity = rt.admin();
     let batches = rt
         .try_sql_as(&format!("SELECT count(*) FROM {table}"), identity)
         .await

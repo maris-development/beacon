@@ -7,7 +7,6 @@
 
 mod common;
 
-use beacon_core::AuthIdentity;
 use common::write_file;
 
 /// `CREATE EXTERNAL TABLE` over a CSV, then reopen the same `beacon.db`: the
@@ -90,5 +89,5 @@ async fn dropped_external_table_does_not_come_back() {
         0,
         "a dropped external table must not reappear after a restart"
     );
-    let _ = AuthIdentity::system(); // keep the import meaningful if assertions change
+    let _ = beacon_core::plan_validator::allow_all(); // keep the import meaningful if assertions change
 }

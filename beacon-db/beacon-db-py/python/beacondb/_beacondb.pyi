@@ -176,15 +176,8 @@ class Connection:
     def list_tables(self) -> list[str]: ...
     def refresh(self, name: str) -> Connection: ...
 
-    # identity / session
+    # session
     def cursor(self) -> Connection: ...
-    def connect_as(
-        self, username: str | None = None, password: str | None = None, token: str | None = None
-    ) -> Connection: ...
-    def as_anonymous(self) -> Connection: ...
-    def whoami(self) -> dict[str, Any]: ...
-    @property
-    def auth_enabled(self) -> bool: ...
 
     # transactions (autocommit — these are no-ops, for DB-API/SQLAlchemy compatibility)
     def commit(self) -> None: ...
@@ -203,13 +196,6 @@ def connect(
     database: str = ":memory:",
     *,
     read_only: bool = False,
-    auth: bool = False,
-    username: str | None = None,
-    password: str | None = None,
-    token: str | None = None,
-    admin_username: str | None = None,
-    admin_password: str | None = None,
-    anonymous: bool = True,
     datasets: str | None = None,
     batch_size: int | None = None,
     memory_limit: int | None = None,

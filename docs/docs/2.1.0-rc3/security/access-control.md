@@ -34,10 +34,20 @@ model of Beacon.
 | **User** | A local user name and password, or an OIDC token | Read-only. Its roles set the limits |
 | **Anonymous** | No credentials, when anonymous access is on | Read-only. The roles of the `anonymous` user set the limits |
 
-Beacon stores the local users in a SQLite directory database. The file is
-`users/directory.db`, under the data directory. Beacon hashes each password with
+The Beacon server stores the local users, the roles and the rules in one JSON file. The file is
+`beacon-auth.json`, in the directory of `beacon.db`. Beacon hashes each password with
 Argon2. The super-user is **not** in this store. It is a fixed credential from the
 environment. You therefore cannot change or copy it through SQL.
+
+Include `beacon-auth.json` in your backup of the data directory. On Linux and macOS, only the
+owner of the file can read it.
+
+An earlier version kept this state in internal tables of `beacon.db`. On the first start without
+`beacon-auth.json`, the server copies that state to the file. The internal tables stay in
+`beacon.db`.
+
+Users and roles belong to the server. The embedded database, such as the `beacondb` Python
+package, has no users. A process that opens a `beacon.db` file has full access to it.
 
 ## Enforcement
 
@@ -312,7 +322,7 @@ type of the credential:
 
 | Request header | Routed to | Used for |
 | --- | --- | --- |
-| `Authorization: Basic …` | The local provider, with the SQLite user store | The super-user and the users from SQL |
+| `Authorization: Basic …` | The local provider, with the user store of the server | The super-user and the users from SQL |
 | `Authorization: Bearer …` | The OIDC provider | A token from an external identity provider |
 
 Local admin users and external users therefore work together. The user management

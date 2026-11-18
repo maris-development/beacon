@@ -17,9 +17,6 @@ use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
 use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
 use beacon_arrow_zarr::ZarrConfig;
-use beacon_auth::{
-    AuthContext, BasicAuthProvider, InMemoryUserStore, RoleProvider, RoleStore, UserDirectory,
-};
 use beacon_datafusion_ext::{
     consts::{DEFAULT_DB_STORE_URL_OBJECT_URL, TMP_STORE_URL_OBJECT_URL},
     format_ext::{new_file_format_registry_handle, FileFormatFactoryExt, FileFormatRegistry},
@@ -52,7 +49,6 @@ use tokio::runtime::Handle;
 use url::Url;
 
 use crate::{
-    auth_store::TablesAuthStore,
     query_executor::QueryExecutor,
     runtime::Runtime,
     settings::{SqlSettings, SqlStreamCoalesceSettings},
@@ -87,9 +83,6 @@ pub struct RuntimeBuilder {
     /// from the root of [`Self::default_store`].
     pub datasets_base_url: Option<Url>,
 
-    pub admin_username: Option<String>,
-    pub admin_password: Option<String>,
-
     pub vm_memory_limit: Option<usize>,
     pub vm_cpu_limit: Option<usize>,
 
@@ -107,13 +100,8 @@ pub struct RuntimeBuilder {
     pub hdf5: Hdf5Config,
     pub zarr: ZarrConfig,
 
-    pub auth_provider: Option<Arc<dyn beacon_auth::AuthProvider>>,
     pub secrets_encryption_key: Option<[u8; 32]>,
 
-    /// Username resolving unauthenticated access. `None` disables anonymous access.
-    pub anonymous_username: Option<String>,
-    /// Whether table-level grants are enforced for non-super-users.
-    pub auth_enforce: bool,
     /// Whether the runtime refuses all writes (a read-only open).
     pub read_only: bool,
 
@@ -168,12 +156,6 @@ impl RuntimeBuilder {
     /// against.
     pub fn with_default_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.default_store_instance = Some(store);
-        self
-    }
-
-    pub fn with_admin_credentials(mut self, username: String, password: String) -> Self {
-        self.admin_username = Some(username);
-        self.admin_password = Some(password);
         self
     }
 
@@ -251,11 +233,6 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn with_auth_provider(mut self, provider: Arc<dyn beacon_auth::AuthProvider>) -> Self {
-        self.auth_provider = Some(provider);
-        self
-    }
-
     pub fn with_secrets_encryption(mut self, key: [u8; 32]) -> Self {
         self.secrets_encryption_key = Some(key);
         self
@@ -306,22 +283,8 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Enables anonymous access, resolving unauthenticated callers to `username`.
-    /// The user is created (password-less, roleless) at build time if absent.
-    pub fn with_anonymous_user(mut self, username: impl Into<String>) -> Self {
-        self.anonymous_username = Some(username.into());
-        self
-    }
-
-    /// Enables table-level grant enforcement for non-super-users. Off by default:
-    /// without it, any authenticated identity may read any table.
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
-        self
-    }
-
-    pub fn with_auth_enforcement(mut self, enforce: bool) -> Self {
-        self.auth_enforce = enforce;
         self
     }
 
@@ -333,23 +296,12 @@ impl RuntimeBuilder {
             })?,
         };
 
-        // The planner's late-filled weak handle to the session. Created here so both the auth store
-        // and the query planner share the same cell; it is filled once the session exists.
+        // The planner's late-filled weak handle to the session. It is filled once the session
+        // exists.
         let session_cell = new_session_cell();
-
-        // Built before the session so it can be published as a session extension: the `AuthExec`
-        // node recovers it from there to apply auth DDL. Unhydrated — the db-backed store
-        // reaches its tables through `session_cell`, which does not yet point anywhere.
-        let AuthSetup {
-            context: auth_context,
-            store: auth_store,
-        } = init_auth_context(&self, session_cell.clone()).await?;
-        let auth_context = Arc::new(auth_context);
-
         let plugins = Arc::new(PluginRegistry::default());
         let session_ctx = init_session_ctx(
             &self,
-            auth_context.clone(),
             session_cell.clone(),
             plugins.clone(),
             &runtime_handle,
@@ -385,8 +337,8 @@ impl RuntimeBuilder {
         );
 
         // Install the persistent schema provider and load the tables already in the
-        // tables store into the catalog. This must run before `ensure_tables` below:
-        // on a restart the auth `__beacon_*` tables already exist in the store, and
+        // tables store into the catalog. This must run before `ensure_table` below:
+        // on a restart the internal `__beacon_*` tables already exist in the store, and
         // only a hydrated catalog lets their `CREATE TABLE IF NOT EXISTS` see them —
         // otherwise the managed-table create path re-creates them and Lance rejects
         // the duplicate dataset.
@@ -398,14 +350,6 @@ impl RuntimeBuilder {
         )
         .await?;
 
-        // The session and its tables now exist and the session cell is filled, so the auth store can
-        // reach its tables. Ensure they exist, hydrate the in-memory user/role copies from whatever
-        // is already there (spawning from an already-populated store across a restart), then
-        // bootstrap. All idempotent, so this is safe on every start.
-        auth_store.ensure_tables().await?;
-        auth_context.hydrate().await?;
-        bootstrap_auth(&self, &auth_context).await?;
-
         // Query metrics land in an internal managed table, so they survive a restart
         // and are queryable like anything else. Created here — after the schema
         // provider is installed, so the managed engine can build it — and exposed as
@@ -416,13 +360,9 @@ impl RuntimeBuilder {
         ));
         query_metrics.ensure_table().await?;
 
-        // `beacon.system` — the auth directory and query metrics as SQL tables.
-        register_system_schema(
-            &session_ctx,
-            session_cell.clone(),
-            auth_context.clone(),
-            plugins.clone(),
-        )?;
+        // `beacon.system` — the runtime state and the query metrics as SQL tables.
+        let system_schema =
+            register_system_schema(&session_ctx, session_cell.clone(), plugins.clone())?;
 
         init_crawler_manager(&self, &session_ctx, session_cell.clone(), file_formats).await?;
 
@@ -446,8 +386,7 @@ impl RuntimeBuilder {
             executor: QueryExecutor::new(runtime_handle),
             session_ctx,
             query_metrics,
-            auth: auth_context,
-            auth_enforce: self.auth_enforce,
+            system_schema,
             read_only: self.read_only,
             file_stats,
             plugins,
@@ -499,77 +438,13 @@ async fn init_crawler_manager(
     Ok(())
 }
 
-/// The auth context plus the tables-backed store that has to be brought online once the session
-/// (and its tables) exist. Kept separate so `build` can drive the ordering: build unhydrated →
-/// create session → ensure tables → hydrate → bootstrap.
-struct AuthSetup {
-    context: AuthContext,
-    store: Arc<TablesAuthStore>,
-}
-
-/// Builds the auth context around the tables-backed store, **unhydrated**.
-///
-/// The store persists users, roles and grants in the internal managed tables and reaches them
-/// through `session_cell` — which is filled only after the session exists — so the in-memory copies
-/// stay empty until `build` hydrates them. Roles are always tables-backed; the user store is
-/// tables-backed only for the default Basic provider (a custom provider, e.g. OIDC, owns its own
-/// user directory, which beacon does not persist).
-///
-/// The config-defined super-user is set here (it is never stored in the tables — the only way to be
-/// a super-user is the `BEACON_ADMIN_*` credential), and anonymous access is recorded so
-/// `anonymous_enabled` reflects config immediately; the anonymous *user* is seeded in
-/// [`bootstrap_auth`], after the tables are reachable.
-async fn init_auth_context(
-    builder: &RuntimeBuilder,
-    session_cell: SessionCell,
-) -> anyhow::Result<AuthSetup> {
-    let store = Arc::new(TablesAuthStore::new(session_cell));
-    let role_provider = RoleProvider::with_store(store.clone() as Arc<dyn RoleStore>);
-
-    let provider: Arc<dyn beacon_auth::AuthProvider> = match &builder.auth_provider {
-        Some(auth_provider) => auth_provider.clone(),
-        None => {
-            let user_store = Arc::new(InMemoryUserStore::with_store(
-                store.clone() as Arc<dyn UserDirectory>
-            ));
-            Arc::new(BasicAuthProvider::with_user_store(user_store))
-        }
-    };
-
-    let mut context = AuthContext::with_role_provider(provider, role_provider);
-
-    if let (Some(username), Some(password)) = (&builder.admin_username, &builder.admin_password) {
-        context.set_super_user(username, password);
-    }
-
-    if let Some(anonymous) = &builder.anonymous_username {
-        context.set_anonymous_user(anonymous);
-    }
-
-    Ok(AuthSetup { context, store })
-}
-
-/// Idempotent bootstrap, run on every start once the tables are hydrated: seed the anonymous
-/// principal (password-less, roleless) when anonymous access is enabled. Admins can later grant it
-/// read-only roles via `GRANT ROLE <role> TO USER <anonymous>`. Re-running against a populated store
-/// is a no-op (the user already exists in the hydrated copy).
-async fn bootstrap_auth(builder: &RuntimeBuilder, auth: &Arc<AuthContext>) -> anyhow::Result<()> {
-    if let Some(anonymous) = &builder.anonymous_username {
-        if !auth.user_exists(anonymous).await {
-            auth.create_user(anonymous, "").await?;
-        }
-    }
-    Ok(())
-}
-
 /// Builds the session state, including the runtime environment, and returns a new session context. The
-/// session cell is filled with a weak reference to the session context so that the auth store and
-/// query planner can reach it once it exists.
+/// session cell is filled with a weak reference to the session context so that the query planner
+/// can reach it once it exists.
 ///
 /// Functions and File Formats ARE NOT REGISTERED HERE. This is done in `register_functions` after the session context is built.
 async fn init_session_ctx(
     builder: &RuntimeBuilder,
-    auth_context: Arc<AuthContext>,
     session_cell: SessionCell,
     plugins: Arc<PluginRegistry>,
     runtime_handle: &Handle,
@@ -591,7 +466,6 @@ async fn init_session_ctx(
     let config = build_session_config(
         builder,
         secrets_store.clone(),
-        auth_context,
         db_store.clone(),
         session_cell.clone(),
         runtime_handle,
@@ -760,22 +634,24 @@ async fn load_persisted_secrets_into_store(session_ctx: &Arc<SessionContext>) {
     }
 }
 
-/// Registers the read-only `beacon.system` schema (users, roles, query metrics)
+/// Registers the read-only `beacon.system` schema (comments, plugins, query metrics)
 /// so runtime introspection is reachable through SQL. Takes the session cell
 /// rather than the session: `query_metrics` resolves to its managed table on
 /// each access, and a strong handle here would leak the session.
+///
+/// Returns the provider, so the runtime can add the tables of the host application.
 fn register_system_schema(
     session_ctx: &Arc<SessionContext>,
     session_cell: SessionCell,
-    auth: Arc<AuthContext>,
     plugins: Arc<PluginRegistry>,
-) -> anyhow::Result<()> {
-    let provider = Arc::new(SystemSchemaProvider::new(session_cell, auth, plugins));
+) -> anyhow::Result<Arc<SystemSchemaProvider>> {
+    let provider = Arc::new(SystemSchemaProvider::new(session_cell, plugins));
 
     session_ctx
         .catalog("beacon")
         .ok_or_else(|| anyhow::anyhow!("Failed to get catalog 'beacon'"))?
-        .register_schema(SYSTEM_SCHEMA_NAME, provider)?;
+        // `Arc::clone` shares the provider; the catalog and the runtime hold the same one.
+        .register_schema(SYSTEM_SCHEMA_NAME, Arc::clone(&provider) as _)?;
 
     // A function, not a table, because it takes the table to report on. The
     // authorization walk finds it by its provider, because a function has no schema.
@@ -784,7 +660,7 @@ fn register_system_schema(
         Arc::new(crate::system_schema::TableStatisticsFunc),
     );
 
-    Ok(())
+    Ok(provider)
 }
 
 fn register_file_formats(
@@ -935,7 +811,6 @@ pub(crate) fn datasets_base_url(default: Option<&DefaultStore>, explicit: Option
 fn build_session_config(
     builder: &RuntimeBuilder,
     secrets_store: Arc<SecretStore>,
-    auth_context: Arc<AuthContext>,
     db_store: Arc<dyn ObjectStore>,
     session_cell: SessionCell,
     runtime_handle: &Handle,
@@ -954,8 +829,6 @@ fn build_session_config(
         .with_information_schema(true)
         .with_collect_statistics(true)
         .with_spill_compression(datafusion::config::SpillCompression::Lz4Frame)
-        // Recovered by the `AuthExec` node to apply auth DDL (CREATE USER/ROLE, GRANT, ...).
-        .with_extension(auth_context)
         // Routes managed Lance tables through beacon's tables store. Per-runtime (no
         // process globals), so managed-table CRUD stays isolated.
         .with_extension(Arc::clone(&warehouse))

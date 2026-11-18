@@ -13,10 +13,11 @@ use crate::server::Server;
 use beacon_core::{
     query::Query,
     query_result::QueryOutputFile,
-    AuthIdentity,
 };
 use futures::{StreamExt, TryStreamExt};
 use std::sync::Arc;
+
+use beacon_auth::AuthIdentity;
 
 /// Executes a query against the runtime and streams the result to the client.
 ///
@@ -73,8 +74,7 @@ pub(crate) async fn query(
     // request extensions: a super-user (e.g. the admin) may run DDL/DML, while anonymous/role
     // users are gated by the validator of the caller (and read-authz when enforcement is enabled).
     let query_result = state
-        .runtime()
-        .run_query_with(query, state.validator(identity))
+        .run_query(query, identity)
         .await
         .map_err(|err| {
             tracing::error!("Error running beacon query: {}", err);
@@ -358,7 +358,7 @@ pub(crate) async fn explain_query(
     // no more than `/api/parse-query` already does about a rejected query.
     match state
         .runtime()
-        .explain_query_with(query, state.validator(identity))
+        .explain_query(query, state.validator(identity))
         .await
     {
         Ok(explanation) => Ok((
@@ -420,7 +420,7 @@ pub(crate) async fn explain_analyze_query(
 
     match state
         .runtime()
-        .explain_analyze_query_with(query, state.validator(identity))
+        .explain_analyze_query(query, state.validator(identity))
         .await
     {
         Ok(explanation) => Ok((

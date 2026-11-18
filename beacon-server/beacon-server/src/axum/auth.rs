@@ -1,7 +1,7 @@
 //! Axum-specific authentication middleware backed by the runtime's auth context.
 //!
 //! Credential validation is delegated to the runtime; these helpers only parse the wire formats
-//! (HTTP Basic, Bearer) into a [`Credential`] and resolve the caller's [`AuthIdentity`](beacon_core::AuthIdentity).
+//! (HTTP Basic, Bearer) into a [`Credential`] and resolve the caller's [`AuthIdentity`](beacon_auth::AuthIdentity).
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use ::axum::{
     response::Response,
 };
 use crate::server::Server;
-use beacon_core::Credential;
+use beacon_auth::Credential;
 
 use crate::auth::{parse_basic_auth_credentials, parse_bearer_token};
 
@@ -38,26 +38,24 @@ fn credential_from_header(value: &str) -> Result<Credential, StatusCode> {
 async fn caller_identity(
     server: &Server,
     headers: &HeaderMap,
-) -> Result<beacon_core::AuthIdentity, StatusCode> {
+) -> Result<beacon_auth::AuthIdentity, StatusCode> {
     match headers.get("Authorization") {
         Some(value) => {
             let auth_str = value.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
             let credential = credential_from_header(auth_str)?;
             server
-                .runtime()
                 .authenticate(&credential)
                 .await
                 .map_err(|_| StatusCode::UNAUTHORIZED)
         }
         None => server
-            .runtime()
             .authenticate_anonymous()
             .await
             .map_err(|_| StatusCode::UNAUTHORIZED),
     }
 }
 
-/// Resolves the caller's [`AuthIdentity`](beacon_core::AuthIdentity) for client routes and stores it in request extensions.
+/// Resolves the caller's [`AuthIdentity`](beacon_auth::AuthIdentity) for client routes and stores it in request extensions.
 ///
 /// It also stores the validator of the caller, as `Arc<dyn PlanValidator>`. A transport that
 /// knows no identity, such as DAP, reads only the validator.
@@ -110,7 +108,6 @@ pub(super) async fn basic_auth(
     let credential = credential_from_header(auth_str)?;
 
     let identity = runtime
-        .runtime()
         .authenticate(&credential)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;

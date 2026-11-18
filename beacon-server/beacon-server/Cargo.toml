@@ -66,6 +66,7 @@ prost = {workspace = true}
 object_store = { workspace = true }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
 sysinfo = { workspace = true }
 
 # Local dependencies
@@ -74,6 +75,7 @@ beacon-server-config = { path = "../beacon-server-config" }
 # turns PROJ on, and `--no-default-features` here reaches all the way down.
 beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
+beacon-auth = { path = "../beacon-auth" }
 beacon-mcp = { path = "../beacon-mcp" }
 beacon-dap = { path = "../beacon-dap" }
 

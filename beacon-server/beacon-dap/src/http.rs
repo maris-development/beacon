@@ -115,7 +115,7 @@ pub(crate) async fn load_schema(
     let mut failure = None;
     for reference in references {
         match runtime
-            .table_arrow_schema_with(reference.clone(), validator)
+            .table_arrow_schema(reference.clone(), validator)
             .await
         {
             Ok(schema) => return Ok((reference, ServedSchema::from_arrow(&schema))),

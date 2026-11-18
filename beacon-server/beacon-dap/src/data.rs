@@ -36,7 +36,7 @@ pub(crate) async fn dods_response(
     let dap_types: Vec<DapType> = compiled.columns.iter().map(|c| c.dap_type).collect();
 
     let result = runtime
-        .run_query_with(
+        .run_query(
             Query::sql_with_params(compiled.sql.clone(), compiled.params.clone()),
             validator,
         )

@@ -3,16 +3,16 @@
 //!
 //! Authentication itself is not expressible as SQL: verifying a credential is
 //! what *produces* the identity a query runs as, so it necessarily precedes any
-//! query (see [`Runtime::authenticate`](crate::runtime::Runtime::authenticate)).
-//! Everything around it is SQL — `CREATE USER`, `CREATE ROLE`, `GRANT`/`DENY`
-//! already are, and these two tables complete the set by making the directory
-//! readable.
+//! query. Everything around it is SQL — `CREATE USER`, `CREATE ROLE`,
+//! `GRANT`/`DENY` already are, and these tables complete the set by making the
+//! directory readable.
 //!
-//! Both are super-user-only, gated unconditionally in
-//! [`RoleValidator`](crate::statement_plan::RoleValidator) —
+//! The server owns the tables and adds them to the `system` schema of the engine.
+//! All are super-user-only, gated unconditionally in
+//! [`RoleValidator`](super::RoleValidator) —
 //! the same treatment the `__beacon_*` tables get, and for the same reason: grant
 //! enforcement is off by default, so a gate that depended on it would expose the
-//! directory on a default runtime. No password material is exposed here at all:
+//! directory on a default server. No password material is exposed here at all:
 //! the hash never leaves the auth subsystem.
 
 use std::sync::Arc;
@@ -22,9 +22,26 @@ use arrow::{
     datatypes::{DataType, Field, Schema, SchemaRef},
     record_batch::RecordBatch,
 };
+use beacon_auth::{AuthContext, PrivilegeRule, PrivilegeTarget, Role};
+use beacon_core::runtime::Runtime;
+use beacon_core::{Snapshot, SystemTable};
 use datafusion::common::Result as DFResult;
 
-use super::table::{Snapshot, SystemTable};
+/// Adds `beacon.system.users`, `beacon.system.roles` and `beacon.system.role_settings` to the
+/// engine, with `auth` as their source.
+///
+/// # Errors
+///
+/// Returns an error when the `system` schema already holds one of the tables.
+pub(super) fn register(runtime: &Runtime, auth: &Arc<AuthContext>) -> anyhow::Result<()> {
+    // `Arc::clone` copies the pointer, not the auth state.
+    runtime.register_system_table("users", Arc::new(users_table(Arc::clone(auth))))?;
+    runtime.register_system_table("roles", Arc::new(roles_table(Arc::clone(auth))))?;
+    runtime.register_system_table(
+        "role_settings",
+        Arc::new(role_settings_table(Arc::clone(auth))),
+    )
+}
 
 fn users_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -54,7 +71,7 @@ fn role_settings_schema() -> SchemaRef {
 }
 
 /// `beacon.system.users` — usernames and their roles. Never the password hash.
-pub(super) fn users_table(auth: Arc<beacon_auth::AuthContext>) -> SystemTable {
+fn users_table(auth: Arc<AuthContext>) -> SystemTable {
     let snapshot: Snapshot = Arc::new(move || {
         let auth = auth.clone();
         Box::pin(async move {
@@ -81,7 +98,7 @@ pub(super) fn users_table(auth: Arc<beacon_auth::AuthContext>) -> SystemTable {
 }
 
 /// `beacon.system.roles` — roles with their grant and deny rules.
-pub(super) fn roles_table(auth: Arc<beacon_auth::AuthContext>) -> SystemTable {
+fn roles_table(auth: Arc<AuthContext>) -> SystemTable {
     let snapshot: Snapshot = Arc::new(move || {
         let auth = auth.clone();
         Box::pin(async move {
@@ -108,7 +125,7 @@ pub(super) fn roles_table(auth: Arc<beacon_auth::AuthContext>) -> SystemTable {
 
 /// `beacon.system.role_settings` — one row for each key-value setting of a role, set with
 /// `ALTER ROLE <role> SET <key> = <value>`.
-pub(super) fn role_settings_table(auth: Arc<beacon_auth::AuthContext>) -> SystemTable {
+fn role_settings_table(auth: Arc<AuthContext>) -> SystemTable {
     let snapshot: Snapshot = Arc::new(move || {
         let auth = auth.clone();
         Box::pin(async move {
@@ -136,7 +153,7 @@ pub(super) fn role_settings_table(auth: Arc<beacon_auth::AuthContext>) -> System
 }
 
 /// Render the settings of a role as a JSON object, e.g. `{"wms.max_tiles":"500"}`.
-fn settings_json(role: &beacon_auth::Role) -> String {
+fn settings_json(role: &Role) -> String {
     serde_json::to_string(&role.settings).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -146,15 +163,15 @@ fn settings_json(role: &beacon_auth::Role) -> String {
 /// The shape mirrors the `AuthRuleView` API contract so a consumer can
 /// deserialize a row straight into it. Sorted because the underlying set has no
 /// stable order and a scan must be deterministic.
-fn rules_json(rules: &std::collections::HashSet<beacon_auth::PrivilegeRule>) -> String {
+fn rules_json(rules: &std::collections::HashSet<PrivilegeRule>) -> String {
     let mut rendered: Vec<serde_json::Value> = rules
         .iter()
         .map(|rule| {
             // `None` and `All` both mean "every target for this privilege".
             let (target_type, target_value) = match &rule.target {
-                None | Some(beacon_auth::PrivilegeTarget::All) => ("all", None),
-                Some(beacon_auth::PrivilegeTarget::Table(t)) => ("table", Some(t.clone())),
-                Some(beacon_auth::PrivilegeTarget::Path(p)) => ("path", Some(p.clone())),
+                None | Some(PrivilegeTarget::All) => ("all", None),
+                Some(PrivilegeTarget::Table(t)) => ("table", Some(t.clone())),
+                Some(PrivilegeTarget::Path(p)) => ("path", Some(p.clone())),
             };
             serde_json::json!({
                 "privilege": rule.privilege.to_string(),

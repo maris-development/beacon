@@ -557,10 +557,9 @@ async fn query_metrics_json_keeps_its_documented_shape() {
 async fn table_config_answers_with_a_deprecation_notice() {
     let (router, harness) = app().await;
     harness.server
-        .runtime()
         .run_query(
             beacon_core::query::Query::sql("CREATE TABLE cfg (a BIGINT)".to_string()),
-            beacon_core::AuthIdentity::system(),
+            beacon_auth::AuthIdentity::system(),
         )
         .await
         .expect("create table");

@@ -7,6 +7,8 @@
 //! [`AllowAll`] is the validator of an embedded database: the process that opens the database has
 //! full access.
 
+use std::sync::Arc;
+
 use crate::query_cpu::CpuBudget;
 pub use crate::statement_plan::{FileLocation, PlanFacts, PlanRead, TableFacts};
 
@@ -96,6 +98,47 @@ impl PlanValidator for AllowAll {
     fn can_read_path(&self, _path: &str) -> bool {
         true
     }
+}
+
+/// [`AllowAll`] as the shared trait object that the query methods take.
+///
+/// `Arc` is a reference-counted pointer. `AllowAll` has no data, so this call does not allocate.
+pub fn allow_all() -> Arc<dyn PlanValidator> {
+    Arc::new(AllowAll)
+}
+
+/// A test validator that permits only a statement that a caller without privileges can run.
+#[cfg(test)]
+struct Unprivileged;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl PlanValidator for Unprivileged {
+    fn caller(&self) -> &str {
+        ""
+    }
+
+    fn limits(&self) -> QueryLimits {
+        QueryLimits::default()
+    }
+
+    async fn validate(&self, facts: &PlanFacts<'_>) -> anyhow::Result<()> {
+        facts.verify_unprivileged()
+    }
+
+    fn check_table(&self, _table: &TableFacts) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn can_read_path(&self, _path: &str) -> bool {
+        true
+    }
+}
+
+/// [`Unprivileged`] as the shared trait object that the query methods take.
+#[cfg(test)]
+pub(crate) fn unprivileged() -> Arc<dyn PlanValidator> {
+    Arc::new(Unprivileged)
 }
 
 #[cfg(test)]

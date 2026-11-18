@@ -15,11 +15,11 @@ use beacon_auth::{AuthContext, AuthIdentity, ConcreteTarget, Privilege, Privileg
 use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
 use object_store::path::Path as ObjectPath;
 
-use super::plan_facts::{PlanFacts, PlanRead, TableFacts};
-use crate::plan_validator::{PlanValidator, QueryLimits};
+use beacon_core::plan_validator::{PlanFacts, PlanRead, PlanValidator, QueryLimits, TableFacts};
+use beacon_core::query_cpu::CpuBudget;
 
 /// The validator of one caller under the role model of [`beacon_auth`].
-pub(crate) struct RoleValidator {
+pub struct RoleValidator {
     auth: Arc<AuthContext>,
     identity: AuthIdentity,
     /// Whether table and path grants apply to a caller that is not a super-user.
@@ -34,7 +34,7 @@ impl RoleValidator {
     /// * `auth` - The roles and the rules
     /// * `identity` - The caller
     /// * `enforce` - Whether table and path grants apply to a caller that is not a super-user
-    pub(crate) fn new(auth: Arc<AuthContext>, identity: AuthIdentity, enforce: bool) -> Self {
+    pub fn new(auth: Arc<AuthContext>, identity: AuthIdentity, enforce: bool) -> Self {
         Self {
             auth,
             identity,
@@ -56,8 +56,8 @@ impl PlanValidator for RoleValidator {
 
     fn limits(&self) -> QueryLimits {
         QueryLimits {
-            cpu_budget: crate::query_cpu::budget_for(&self.auth, &self.identity),
-            output_row_limit: crate::query_row_limit::row_limit_for(&self.auth, &self.identity),
+            cpu_budget: budget_for(&self.auth, &self.identity),
+            output_row_limit: row_limit_for(&self.auth, &self.identity),
         }
     }
 
@@ -105,6 +105,39 @@ impl PlanValidator for RoleValidator {
     }
 }
 
+/// The [`CpuBudget`] of a query that `identity` runs.
+///
+/// 1. A super-user has no limit.
+/// 2. Else the `query_cpu_limit_ms` setting of the identity's roles applies, set
+///    with `ALTER ROLE <role> SET query_cpu_limit_ms = <n>`. The most generous
+///    role wins, and `0` means no limit.
+/// 3. Else there is no limit.
+///
+/// The roles are read live, so an `ALTER ROLE` applies from the next query.
+fn budget_for(auth: &AuthContext, identity: &AuthIdentity) -> CpuBudget {
+    if identity.is_super_user {
+        return CpuBudget::Unlimited;
+    }
+    auth.query_cpu_limit_ms(&identity.roles)
+        .map(CpuBudget::from_millis)
+        .unwrap_or_default()
+}
+
+/// The most rows a query that `identity` runs may output. `None` means no limit.
+///
+/// 1. A super-user has no limit.
+/// 2. Else the `query_output_row_limit` setting of the identity's roles applies,
+///    set with `ALTER ROLE <role> SET query_output_row_limit = <n>`. The most
+///    generous role wins, and `0` means no limit.
+/// 3. Else there is no limit.
+fn row_limit_for(auth: &AuthContext, identity: &AuthIdentity) -> Option<u64> {
+    if identity.is_super_user {
+        return None;
+    }
+    auth.query_output_row_limit(&identity.roles)
+        .filter(|&limit| limit > 0)
+}
+
 /// Authorizes the reads of a plan for `identity`. Returns `Ok(())` when allowed.
 ///
 /// The grant checks do not apply when `enforce` is false or the caller is a super-user. Only
@@ -115,11 +148,10 @@ async fn authorize_reads(
     identity: &AuthIdentity,
     enforce: bool,
 ) -> anyhow::Result<()> {
-    // Unconditional gate on beacon's internal auth tables, checked BEFORE the enforcement/super-user
-    // early return below. Those tables hold Argon2 password hashes, and grant enforcement defaults
-    // OFF — so a gate that relied on `enforce` would let any user `SELECT * FROM __beacon_users` on a
-    // default runtime. Only the super-user may touch them, always. `tests/auth_persistence.rs` pins
-    // that this fails closed with enforcement off.
+    // Unconditional gate on the internal tables, checked BEFORE the enforcement/super-user early
+    // return below. A database of an earlier version holds Argon2 hashes in `__beacon_users`, and
+    // grant enforcement defaults OFF. Only the super-user may touch them, always.
+    // `tests/auth_persistence.rs` pins that this fails closed with enforcement off.
     if !identity.is_super_user && facts.touches_internal_tables() {
         anyhow::bail!(
             "permission denied: the internal '{}*' tables are restricted to the super-user",
@@ -462,5 +494,52 @@ mod tests {
         assert!(open.can_read_path("argo/a.nc"));
         assert!(enforced.check_table(&table).is_err());
         assert!(!enforced.can_read_path("argo/a.nc"));
+    }
+
+    #[tokio::test]
+    async fn the_limits_come_from_the_role_settings() {
+        use beacon_auth::{QUERY_CPU_LIMIT_MS, QUERY_OUTPUT_ROW_LIMIT};
+        use std::time::Duration;
+
+        let auth = Arc::new(AuthContext::new(Arc::new(BasicAuthProvider::new())));
+        for role in ["analyst", "free", "plain"] {
+            auth.create_role(role).await.unwrap();
+        }
+        for (role, cpu, rows) in [("analyst", "60000", "100"), ("free", "0", "0")] {
+            auth.set_role_setting(role, QUERY_CPU_LIMIT_MS, cpu)
+                .await
+                .unwrap();
+            auth.set_role_setting(role, QUERY_OUTPUT_ROW_LIMIT, rows)
+                .await
+                .unwrap();
+        }
+        let limits =
+            |roles: &[&str]| RoleValidator::new(auth.clone(), identity(roles), false).limits();
+        let limited = |secs, rows| QueryLimits {
+            cpu_budget: CpuBudget::Limited(Duration::from_secs(secs)),
+            output_row_limit: Some(rows),
+        };
+        let mut super_user = identity(&["analyst"]);
+        super_user.is_super_user = true;
+
+        assert_eq!(limits(&["analyst"]), limited(60, 100));
+        // The most generous role wins, and `0` means no limit.
+        assert_eq!(limits(&["analyst", "free"]), QueryLimits::default());
+        assert_eq!(limits(&["plain"]), QueryLimits::default());
+        assert_eq!(limits(&[]), QueryLimits::default());
+        assert_eq!(
+            RoleValidator::new(auth.clone(), super_user, false).limits(),
+            QueryLimits::default()
+        );
+
+        // The roles are read live, so a change applies to the next query.
+        auth.set_role_setting("analyst", QUERY_CPU_LIMIT_MS, "1000")
+            .await
+            .unwrap();
+        assert_eq!(limits(&["analyst"]), limited(1, 100));
+        auth.reset_role_setting("analyst", QUERY_CPU_LIMIT_MS)
+            .await
+            .unwrap();
+        assert_eq!(limits(&["analyst"]).cpu_budget, CpuBudget::Unlimited);
     }
 }

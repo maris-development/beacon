@@ -11,7 +11,8 @@ use ::axum::{
     Extension, Json,
 };
 use beacon_core::comments::TableComments;
-use beacon_core::{AuthIdentity, TableReference};
+use beacon_auth::AuthIdentity;
+use beacon_core::TableReference;
 use serde_json::Value;
 
 use crate::server::{

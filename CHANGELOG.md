@@ -47,6 +47,12 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **The server owns users and roles.** The engine has no users, no roles and no identity. The server
+  checks each request, and it gives the engine the access rules of the caller. The server keeps
+  users, roles and rules in `beacon-auth.json`, next to `beacon.db`. On the first start, it copies
+  them from the internal tables of `beacon.db`. Include the file in your backup. `CREATE USER`,
+  `CREATE ROLE`, `GRANT`, `DENY`, `REVOKE` and `ALTER ROLE` work as before on the server.
+  ([#669](https://github.com/maris-development/beacon/issues/669))
 - **Plugin tables read the Beacon object stores.** The table code of a plugin table type gets the
   object stores of Beacon through `runtime_env().object_store(url)`. `datasets://` is the datasets
   store, with the credentials of Beacon. Beacon resolves the `LOCATION` text for the plugin: the new
@@ -76,6 +82,12 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Removed
 
+- **Users in the embedded database.** `beacondb.connect()` has no `auth`, `username`, `password`,
+  `token`, `admin_username`, `admin_password` and `anonymous` arguments. `Connection.connect_as()`,
+  `as_anonymous()`, `whoami()` and `auth_enabled` are gone. The SQLAlchemy URL refuses a user name
+  and a password. A process that opens a `beacon.db` file has full access to it. The user
+  statements, such as `CREATE USER` and `GRANT`, fail in the embedded database. Use the Beacon
+  server for users and roles. ([#669](https://github.com/maris-development/beacon/issues/669))
 - **The datasets-wide file statistics.** `beacon.system.file_stats`, `beacon.system.file_stats_segments`
   and `file_statistics(path)` are gone. A query on them now fails with "not found". Use
   `table_statistics('<table>')`. The `read_*()` functions

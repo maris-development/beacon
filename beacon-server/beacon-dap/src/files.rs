@@ -34,7 +34,7 @@ pub(crate) async fn file_response(
     query.output = Some(Output { format });
 
     let result = runtime
-        .run_query_with(query, validator)
+        .run_query(query, validator)
         .await
         .map_err(|error| DapError::Query(error.to_string()))?;
     let QueryOutput::File(file) = result.query_output else {
