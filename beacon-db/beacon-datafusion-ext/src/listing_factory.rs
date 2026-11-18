@@ -19,7 +19,7 @@ pub enum RootStore {
 
 /// A configured default store: the DataFusion object-store URL a bare (schemeless)
 /// path resolves against, paired with the physical [`RootStore`] the same store
-/// maps to for readers (netCDF-c) that open by path/URL instead of going through
+/// maps to for readers (Icechunk) that open by path/URL instead of going through
 /// the object store.
 ///
 /// The two are always defined together — that is the whole point of this type:

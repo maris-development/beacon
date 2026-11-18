@@ -330,7 +330,7 @@ pub fn resolve_location(session: &dyn Session, location: &str) -> anyhow::Result
     // onto it, with credentials from the environment. A location resolved
     // against a *configured* datasets store carries Beacon's own scheme
     // (`datasets://`) instead, so the physical root that store maps to is what
-    // decides the backend — the same root netCDF-c reads through.
+    // decides the backend.
     let backend = match url.scheme() {
         "file" | "s3" | "s3a" | "gs" | "gcs" | "az" | "abfs" | "abfss" | "azure" => {
             RepositoryBackend::from_listing_url(&url)?
