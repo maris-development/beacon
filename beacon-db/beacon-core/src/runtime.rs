@@ -94,6 +94,19 @@ impl Runtime {
         self.system_schema.add_table(name, table)
     }
 
+    /// Whether the catalog holds `table`. The reserved `__beacon_*` tables count too, although
+    /// no catalog list shows them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog or the schema of `table` does not exist.
+    pub fn table_exists(
+        &self,
+        table: impl Into<datafusion::sql::TableReference>,
+    ) -> anyhow::Result<bool> {
+        Ok(self.session_ctx.table_exist(table.into())?)
+    }
+
     /// The facts of `table` that a [`PlanValidator`] checks, with each spelling of its name.
     pub fn table_facts(&self, table: impl Into<datafusion::sql::TableReference>) -> TableFacts {
         TableFacts::new(table.into(), &self.session_ctx)

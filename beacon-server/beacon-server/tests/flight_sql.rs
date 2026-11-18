@@ -963,6 +963,43 @@ async fn flight_reads_and_user_statements_follow_the_roles() {
     server.handle.abort();
 }
 
+/// A client that executes a user statement and then gets its ticket applies the statement once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_statement_runs_once_when_the_client_gets_the_ticket() {
+    let server = spawn_server(false).await;
+    let mut admin = client(server.addr).await;
+    admin
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+
+    let info = admin
+        .execute("CREATE USER once WITH PASSWORD 'pw'".to_string(), None)
+        .await
+        .expect("the statement runs");
+    let ticket = info.endpoint[0].ticket.clone().unwrap();
+    let batches = admin
+        .do_get(ticket)
+        .await
+        .expect("the ticket gives the empty result, not a second run")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the stream ends");
+    let mut prepared = admin
+        .prepare("CREATE ROLE once_role".to_string(), None)
+        .await
+        .expect("the prepare step does not run the statement");
+    let updated = prepared.execute_update().await;
+
+    assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+    assert!(server.harness.server.auth().user_exists("once").await);
+    assert!(updated.is_ok(), "the role is created once: {updated:?}");
+    let roles = server.harness.server.auth().list_roles();
+    assert_eq!(roles.len(), 1, "{roles:?}");
+
+    server.handle.abort();
+}
+
 /// Anonymous Flight access needs the anonymous user. With it off in the auth model, a caller
 /// without credentials is refused, not given a role-less context that reads everything.
 #[tokio::test(flavor = "multi_thread")]

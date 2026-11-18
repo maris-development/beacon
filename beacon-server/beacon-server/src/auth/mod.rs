@@ -43,7 +43,7 @@ pub fn auth_store_path(config: &Config) -> PathBuf {
 /// Builds the auth context of the server.
 ///
 /// 1. Open the auth store. On the first start, import the users and roles that an earlier
-///    version kept in `beacon.db`.
+///    version kept in `beacon.db`. Then drop those tables from `beacon.db`.
 /// 2. Set the super-user of the configuration. Only this credential gives super-user rights.
 /// 3. Load the users and roles into memory, where each login and each access check reads them.
 /// 4. Create the anonymous user when anonymous access is on.
@@ -66,6 +66,10 @@ pub(crate) async fn open(config: &Config, runtime: &Runtime) -> anyhow::Result<A
             .await
             .context("failed to import the auth state from beacon.db")?;
     }
+    // The store holds the state now, so `beacon.db` must hold no copy with password hashes.
+    legacy::drop_tables(runtime)
+        .await
+        .context("failed to drop the internal auth tables from beacon.db")?;
 
     // `Arc::clone` shares the one store between the user copy and the role copy.
     let users = InMemoryUserStore::with_store(Arc::clone(&store) as Arc<dyn UserDirectory>);

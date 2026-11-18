@@ -147,6 +147,14 @@ impl BeaconFlightSqlService {
             .map_err(|error| self.internal_status(error))?
             .into_record_stream()
             .map_err(|error| self.internal_status(error))?;
+        Ok(self.encode_flight_stream(stream))
+    }
+
+    /// Converts an Arrow result stream into Flight data frames.
+    fn encode_flight_stream(
+        &self,
+        stream: beacon_core::query_result::ArrowOutputStream,
+    ) -> FlightDataStream {
         let schema = stream.schema();
 
         let redactor = self.redactor.clone();
@@ -155,7 +163,7 @@ impl BeaconFlightSqlService {
             .build(stream.map_err(|error| FlightError::ExternalError(error.into())))
             .map_err(move |error| Status::internal(redactor.redact(&error.to_string())));
 
-        Ok(Box::pin(flight_stream))
+        Box::pin(flight_stream)
     }
 
     /// A gRPC internal status for a query error, without the server data paths.
@@ -305,7 +313,15 @@ impl FlightSqlService for BeaconFlightSqlService {
     ) -> Result<Response<<Self::FlightService as FlightService>::DoGetStream>, Status> {
         let auth = self.authenticator.authorize_request(&request).await?;
         let sql = self.statements.take(&ticket.statement_handle).await?;
-        let stream = self.execute_sql_as_flight_stream(sql, auth).await?;
+        // `get_flight_info` applied a user statement. A second run fails or repeats the change.
+        let stream = if is_user_statement(&sql) {
+            let empty = beacon_core::query_result::QueryResult::empty()
+                .into_record_stream()
+                .map_err(|error| self.internal_status(error))?;
+            self.encode_flight_stream(empty)
+        } else {
+            self.execute_sql_as_flight_stream(sql, auth).await?
+        };
         Ok(Response::new(stream))
     }
 
@@ -434,7 +450,7 @@ impl FlightSqlService for BeaconFlightSqlService {
         // DDL statements have no result schema and must not be executed here — executing to
         // infer the schema would cause a double-execution when do_put_prepared_statement_update
         // runs the statement for real (e.g. CREATE EXTERNAL TABLE would be created twice).
-        let dataset_schema = if is_ddl(&query.query) {
+        let dataset_schema = if is_ddl(&query.query) || is_user_statement(&query.query) {
             empty_schema.clone()
         } else {
             let stream = self
@@ -477,6 +493,13 @@ fn is_ddl(sql: &str) -> bool {
         || upper.starts_with("DROP ")
         || upper.starts_with("ALTER ")
         || upper.starts_with("TRUNCATE ")
+}
+
+/// Whether `sql` is a statement that manages users or roles, such as `GRANT`.
+///
+/// The parser of the server decides, so a keyword in a string or a comment does not count.
+fn is_user_statement(sql: &str) -> bool {
+    matches!(crate::auth::AuthStatement::parse(sql), Ok(Some(_)))
 }
 
 /// Builds the Flight SQL tonic service for embedding in a caller-managed server

@@ -39,12 +39,13 @@ The Beacon server stores the local users, the roles and the rules in one JSON fi
 Argon2. The super-user is **not** in this store. It is a fixed credential from the
 environment. You therefore cannot change or copy it through SQL.
 
-Include `beacon-auth.json` in your backup of the data directory. On Linux and macOS, only the
-owner of the file can read it.
+Include `beacon-auth.json` in your backup of the data directory. Only the owner of the file can
+read it.
 
 An earlier version kept this state in internal tables of `beacon.db`. On the first start without
-`beacon-auth.json`, the server copies that state to the file. The internal tables stay in
-`beacon.db`.
+`beacon-auth.json`, the server copies that state to the file. The server then drops the internal
+tables. Make a backup of `beacon.db` before the upgrade, because an earlier version cannot read
+the file.
 
 Users and roles belong to the server. The embedded database, such as the `beacondb` Python
 package, has no users. A process that opens a `beacon.db` file has full access to it.

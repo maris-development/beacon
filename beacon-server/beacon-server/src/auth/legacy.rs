@@ -9,8 +9,8 @@
 //! - `__beacon_role_settings(role, key, value)`
 //!
 //! The server now keeps that state in its own file. On the first start with no such file,
-//! [`import`] copies the content of the tables to it. The tables stay in `beacon.db`, so an
-//! operator can go back to an earlier version.
+//! [`import`] copies the content of the tables to it. [`drop_tables`] then removes the tables,
+//! so `beacon.db` holds no password hash and no second import can bring back a removed user.
 
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
@@ -22,7 +22,7 @@ use beacon_auth::{
     decode_target, normalize_setting, rule_kind, FileAuthStore, Privilege, PrivilegeRule, Role,
     StoredUser,
 };
-use beacon_core::plan_validator::{allow_all, AllowAll};
+use beacon_core::plan_validator::allow_all;
 use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
 use futures::TryStreamExt;
@@ -65,13 +65,42 @@ pub(super) async fn import(runtime: &Runtime, store: &FileAuthStore) -> anyhow::
     Ok(true)
 }
 
+/// Removes the internal auth tables from `beacon.db`.
+///
+/// Call this only when the auth store holds their content.
+///
+/// # Errors
+///
+/// Returns an error when the catalog cannot be read or when a table cannot be dropped.
+pub(super) async fn drop_tables(runtime: &Runtime) -> anyhow::Result<()> {
+    for table in [
+        USERS_TABLE,
+        USER_ROLES_TABLE,
+        ROLES_TABLE,
+        ROLE_RULES_TABLE,
+        ROLE_SETTINGS_TABLE,
+    ] {
+        if !runtime.table_exists(table)? {
+            continue;
+        }
+        runtime
+            .run_query(Query::sql(format!("DROP TABLE {table}")), allow_all())
+            .await?
+            .into_record_stream()?
+            .try_collect::<Vec<RecordBatch>>()
+            .await?;
+        tracing::info!(%table, "dropped an internal auth table from beacon.db");
+    }
+    Ok(())
+}
+
 /// The rows of `table` as strings, one inner vector for each row. A null gives an empty string.
 ///
 /// A table that does not exist gives no rows: a database of an earlier version can lack a
-/// table, and a new database has none of them.
+/// table, and a new database has none of them. A table that exists and does not read is an
+/// error, so a failed read never looks like an empty table.
 async fn rows(runtime: &Runtime, table: &str, columns: &str) -> anyhow::Result<Vec<Vec<String>>> {
-    if let Err(error) = runtime.table_arrow_schema(table, &AllowAll).await {
-        tracing::debug!(%table, %error, "no internal auth table to import");
+    if !runtime.table_exists(table)? {
         return Ok(Vec::new());
     }
     let batches: Vec<RecordBatch> = runtime

@@ -53,7 +53,6 @@ base64 = { workspace = true }
 
 tracing = { workspace=true}
 # Local dependencies
-
 beacon-common = { path = "../beacon-common" }
 beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-hdf5 = { path = "../beacon-file-formats/beacon-arrow-hdf5" }

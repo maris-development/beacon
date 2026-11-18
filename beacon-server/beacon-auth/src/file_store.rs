@@ -240,11 +240,43 @@ impl FileAuthStore {
         handle.write_all(&bytes).await?;
         handle.sync_all().await?;
         drop(handle);
+        // A rename keeps the access rights of the temporary file.
+        #[cfg(windows)]
+        restrict_to_owner(&temporary).await?;
 
         tokio::fs::rename(&temporary, &self.path)
             .await
             .with_context(|| format!("cannot replace auth store {}", self.path.display()))
     }
+}
+
+/// Limits `path` to its owner on Windows.
+///
+/// A new file on Windows inherits the access rights of its directory, and `OpenOptions` has
+/// no mode for them. `icacls` removes the inherited rights and gives full control to the
+/// owner of the file only.
+#[cfg(windows)]
+async fn restrict_to_owner(path: &Path) -> anyhow::Result<()> {
+    // The full path of the tool, so a program named `icacls` in the search path never runs.
+    let system_root = std::env::var_os("SystemRoot").context("SystemRoot is not set")?;
+    let icacls = PathBuf::from(system_root)
+        .join("System32")
+        .join("icacls.exe");
+    let output = tokio::process::Command::new(icacls)
+        .arg(path)
+        // `*S-1-3-4` is the identity "owner rights": the owner of the file, without its name.
+        .args(["/inheritance:r", "/grant:r", "*S-1-3-4:F"])
+        .output()
+        .await
+        .context("cannot run icacls for the auth store")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cannot limit the auth store {} to its owner: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
+    }
+    Ok(())
 }
 
 /// The user `username` of `file`, or an error when the store has no such user.
@@ -260,8 +292,15 @@ impl UserDirectory for FileAuthStore {
         // The working copy makes its own hash. Both hashes verify the same password.
         let password_hash = hash_password(password)?;
         self.update(|file| {
-            let user = file.users.entry(username.to_string()).or_default();
-            user.password_hash = password_hash;
+            // A second create must not replace the password of the user.
+            if file.users.contains_key(username) {
+                anyhow::bail!("user '{username}' already exists");
+            }
+            let user = FileUser {
+                password_hash,
+                roles: BTreeSet::new(),
+            };
+            file.users.insert(username.to_string(), user);
             Ok(())
         })
         .await
@@ -472,6 +511,67 @@ mod tests {
         assert!(verify_password(&users[0].password_hash, "secret"));
         assert!(reopened.user_exists("alice").await);
         assert!(!reopened.user_exists("bob").await);
+    }
+
+    #[tokio::test]
+    async fn a_second_create_keeps_the_user_and_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileAuthStore::open(dir.path().join("auth.json"))
+            .await
+            .unwrap();
+        store.create_user("alice", "secret").await.unwrap();
+        store.grant_role("alice", "reader").await.unwrap();
+
+        let error = store.create_user("alice", "other").await.unwrap_err();
+
+        assert!(error.to_string().contains("already exists"), "{error}");
+        let users = store.load_users().await.unwrap();
+        assert!(verify_password(&users[0].password_hash, "secret"));
+        assert_eq!(users[0].roles, vec!["reader".to_string()]);
+    }
+
+    /// The store file holds password hashes, so only its owner has access to it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_store_file_has_no_inherited_rights_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = FileAuthStore::open(&path).await.unwrap();
+
+        store.create_user("alice", "secret").await.unwrap();
+        store.grant_role("alice", "reader").await.unwrap();
+
+        let listing = std::process::Command::new("icacls")
+            .arg(&path)
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&listing.stdout).to_string();
+        assert!(!listing.contains("(I)"), "no right is inherited: {listing}");
+        assert_eq!(
+            listing.lines().filter(|line| line.contains(":(")).count(),
+            1,
+            "one identity has rights: {listing}"
+        );
+        assert!(
+            FileAuthStore::open(&path).await.is_ok(),
+            "the owner reads it"
+        );
+    }
+
+    /// On Unix, the mode of the store file gives access to its owner only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_store_file_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = FileAuthStore::open(&path).await.unwrap();
+
+        store.create_user("alice", "secret").await.unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[tokio::test]

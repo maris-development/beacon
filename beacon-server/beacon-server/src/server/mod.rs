@@ -115,7 +115,7 @@ impl Server {
 
     /// Whether the reads of `identity` are checked against its roles.
     pub fn checks_reads_of(&self, identity: &AuthIdentity) -> bool {
-        self.config.auth.enforce && !identity.is_super_user
+        crate::auth::RoleValidator::checks_reads_of(self.config.auth.enforce, identity)
     }
 
     /// Runs `query` for `identity`: the one path of each transport to the engine.

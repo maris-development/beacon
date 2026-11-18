@@ -178,6 +178,41 @@ async fn the_first_start_imports_the_legacy_auth_tables() {
     );
 }
 
+/// The import drops the auth tables. `beacon.db` then holds no password hash, and a lost auth
+/// store cannot bring back a user that the admin dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_import_drops_the_legacy_tables_and_runs_once() {
+    // Arrange
+    let ts = enforced_server().await;
+    create_legacy_auth_tables(&ts).await;
+    insert_legacy_user(&ts, "legacy_bob").await;
+    let ts = restart_without_auth_store(ts).await;
+    ts.login("legacy_bob", "pw").await;
+
+    // Act
+    let tables_left: Vec<&str> = [
+        "__beacon_users",
+        "__beacon_user_roles",
+        "__beacon_roles",
+        "__beacon_role_rules",
+        "__beacon_role_settings",
+    ]
+    .into_iter()
+    .filter(|table| ts.server.runtime().table_exists(*table).unwrap())
+    .collect();
+    ts.sql_as("DROP USER legacy_bob", AuthIdentity::system())
+        .await;
+    let ts = restart_without_auth_store(ts).await;
+    let login = ts
+        .server
+        .authenticate(&beacon_auth::Credential::basic("legacy_bob", "pw"))
+        .await;
+
+    // Assert
+    assert!(tables_left.is_empty(), "tables left: {tables_left:?}");
+    assert!(login.is_err(), "a dropped user must not come back");
+}
+
 /// An earlier version stored a quoted table name with its quotes, so the rule never matched.
 /// The import strips them. A revoke then also holds after a restart.
 #[tokio::test(flavor = "multi_thread")]

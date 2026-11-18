@@ -42,9 +42,19 @@ impl RoleValidator {
         }
     }
 
+    /// Whether the reads of `identity` are checked against its roles.
+    ///
+    /// # Arguments
+    ///
+    /// * `enforce` - Whether table and path grants apply to a caller that is not a super-user
+    /// * `identity` - The caller
+    pub fn checks_reads_of(enforce: bool, identity: &AuthIdentity) -> bool {
+        enforce && !identity.is_super_user
+    }
+
     /// Whether the reads of the caller are checked against its roles.
     fn checks_reads(&self) -> bool {
-        self.enforce && !self.identity.is_super_user
+        Self::checks_reads_of(self.enforce, &self.identity)
     }
 }
 

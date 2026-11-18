@@ -50,7 +50,8 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 - **The server owns users and roles.** The engine has no users, no roles and no identity. The server
   checks each request, and it gives the engine the access rules of the caller. The server keeps
   users, roles and rules in `beacon-auth.json`, next to `beacon.db`. On the first start, it copies
-  them from the internal tables of `beacon.db`. Include the file in your backup. `CREATE USER`,
+  them from the internal tables of `beacon.db` and drops those tables. Make a backup of `beacon.db`
+  before the upgrade. Include the file in your backup. `CREATE USER`,
   `CREATE ROLE`, `GRANT`, `DENY`, `REVOKE` and `ALTER ROLE` work as before on the server.
   ([#669](https://github.com/maris-development/beacon/issues/669))
 - **Plugin tables read the Beacon object stores.** The table code of a plugin table type gets the
