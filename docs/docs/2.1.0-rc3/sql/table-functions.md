@@ -198,19 +198,6 @@ read_odv_ascii(glob_paths)
 SELECT * FROM read_odv_ascii('odv/**/*.txt')
 ```
 
-## `read_bbf`
-
-```text
-read_bbf(glob_paths)
-```
-
-Beacon reads Beacon Binary Format files. A BBF query must name its columns. `SELECT *` and
-`SELECT count(*)` fail at plan time. See [BBF](/docs/2.1.0-rc3/formats/bbf) for the reason.
-
-```sql
-SELECT time, depth, temperature FROM read_bbf('bbf/**/*.bbf')
-```
-
 ## `read_tiff`
 
 ```text

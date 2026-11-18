@@ -145,7 +145,7 @@ Content-Type: application/json
 }
 ```
 
-The other format keys are `csv`, `arrow`, `odv`, `tiff` and `bbf`.
+The other format keys are `csv`, `arrow`, `odv` and `tiff`.
 
 ## Filters
 

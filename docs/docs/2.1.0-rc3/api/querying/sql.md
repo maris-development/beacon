@@ -97,7 +97,7 @@ Content-Type: application/json
 }
 ```
 
-The other table functions are `read_arrow`, `read_csv`, `read_odv_ascii`, `read_bbf` and
+The other table functions are `read_arrow`, `read_csv`, `read_odv_ascii` and
 `read_tiff`. See [Read Files](/docs/2.1.0-rc3/sql/table-functions) for the full
 signatures.
 

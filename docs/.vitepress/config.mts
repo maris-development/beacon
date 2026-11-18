@@ -242,7 +242,6 @@ export default defineConfig({
                 { text: 'Zarr', link: '/docs/2.1.0-rc3/formats/zarr' },
                 { text: 'Atlas', link: '/docs/2.1.0-rc3/formats/atlas' },
                 { text: 'GeoTIFF / COG', link: '/docs/2.1.0-rc3/formats/geotiff' },
-                { text: 'BBF', link: '/docs/2.1.0-rc3/formats/bbf' },
                 { text: 'Delta Lake', link: '/docs/2.1.0-rc3/formats/delta-lake' },
                 { text: 'Apache Iceberg', link: '/docs/2.1.0-rc3/formats/iceberg' },
                 { text: 'Icechunk', link: '/docs/2.1.0-rc3/formats/icechunk' },

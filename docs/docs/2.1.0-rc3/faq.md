@@ -25,7 +25,7 @@ Beacon copies nothing.
 
 ### Which formats are supported?
 
-Parquet, GeoParquet, CSV, TSV, Arrow IPC, NetCDF, HDF5, Zarr, Icechunk, Atlas, GeoTIFF, COG, BBF,
+Parquet, GeoParquet, CSV, TSV, Arrow IPC, NetCDF, HDF5, Zarr, Icechunk, Atlas, GeoTIFF, COG,
 Delta Lake, Apache Iceberg and ODV ASCII. Each format has its own chapter in
 [File Formats](/docs/2.1.0-rc3/formats/).
 

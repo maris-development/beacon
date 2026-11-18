@@ -35,7 +35,6 @@ S3-compatible bucket, chosen at startup. See
 | [Zarr](/docs/2.1.0-rc3/formats/zarr) | `read_zarr` | `ZARR` | `zarr.json` marker |
 | [Atlas](/docs/2.1.0-rc3/formats/atlas) | `read_atlas` | `ATLAS` | `data.atlas` file |
 | [GeoTIFF / COG](/docs/2.1.0-rc3/formats/geotiff) | `read_tiff` | `TIFF` | `.tif`, `.tiff` |
-| [BBF](/docs/2.1.0-rc3/formats/bbf) | `read_bbf` | `BBF` | `.bbf` |
 | [Delta Lake](/docs/2.1.0-rc3/formats/delta-lake) | `read_delta` | `DELTA` | `_delta_log/` directory |
 | [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg) | `read_iceberg` | `ICEBERG` | `metadata/` directory |
 | [Icechunk](/docs/2.1.0-rc3/formats/icechunk) | `read_icechunk` | `ICECHUNK` | repository directory |
@@ -60,7 +59,6 @@ The table above says how to read each format. This one says what you get.
 | Zarr | Full | Projection + dimension selection, chunk pruning | No | `read_zarr_schema` | Yes |
 | Atlas | Full | Predicate + projection, **dataset-level pruning** | Yes | `read_atlas_schema` | Yes |
 | GeoTIFF / COG | Full | Projection, range requests | No | `read_tiff_schema` | Yes |
-| BBF | Full | Predicate + projection, **column list required** | No | `read_bbf_schema` | Yes |
 | Delta Lake | Full | Predicate + projection, file skipping | No, but see below | `read_delta_schema` | No |
 | Apache Iceberg | Full | Predicate + projection, file skipping | No | `read_iceberg_schema` | No |
 | Icechunk | Full, see [Icechunk](/docs/2.1.0-rc3/formats/icechunk) | Projection + dimension selection, chunk pruning | No | `read_icechunk_schema` | Yes |
