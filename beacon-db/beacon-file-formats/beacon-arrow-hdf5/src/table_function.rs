@@ -1,9 +1,6 @@
 //! [`ReadHdf5Func`]: the `read_hdf5` table function.
 //!
-//! Which reader runs is the format's decision, not this function's, so the
-//! function asks the registered HDF5 factory. With netcdf-c — the default — it
-//! hands the whole call to [`ReadNetCDFFunc`], which is what it has always
-//! done. With the Rust reader it builds the format itself, because that reader
+//! The function builds its format from the registered HDF5 factory. The reader
 //! needs no native root and therefore accepts an s3, gs or az path.
 
 use std::any::Any;
@@ -11,7 +8,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
-use beacon_arrow_netcdf::datafusion::ReadNetCDFFunc;
 use beacon_common::table_function::BeaconTableFunctionImpl;
 use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
@@ -25,10 +21,6 @@ use datafusion::{
 
 /// The `read_hdf5` table function.
 pub struct ReadHdf5Func {
-    /// The netCDF reader, for the netcdf-c fallback. A NetCDF-4 file *is* HDF5,
-    /// and netcdf-c's HDF5 dispatch opens plain HDF5 too, so there is nothing to
-    /// re-implement there.
-    inner: ReadNetCDFFunc,
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
 }
@@ -36,12 +28,6 @@ pub struct ReadHdf5Func {
 impl ReadHdf5Func {
     pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Weak<SessionContext>) -> Self {
         Self {
-            // The inner reader carries the `read_hdf5` name so its own error messages read right.
-            inner: ReadNetCDFFunc::with_name(
-                "read_hdf5",
-                runtime_handle.clone(),
-                session_ctx.clone(),
-            ),
             runtime_handle,
             session_ctx,
         }
@@ -104,23 +90,9 @@ impl TableFunctionImpl for ReadHdf5Func {
         let hdf5_factory = factory
             .as_ref()
             .and_then(|f| f.downcast_ref::<crate::Hdf5FormatFactory>());
-
-        // Not registered, or registered on netcdf-c: this is the delegating
-        // path this function has always taken. `read_netcdf` is told which
-        // reader to use, because the netCDF format picks its own reader and it
-        // may be the Rust one.
-        let netcdf_c = || {
-            self.inner.call_with_options(
-                args,
-                HashMap::from([("use_rust_reader".to_string(), "false".to_string())]),
-            )
-        };
         let Some(hdf5_factory) = hdf5_factory else {
-            return netcdf_c();
+            return plan_err!("read_hdf5: the HDF5 format is not registered on the session");
         };
-        if !hdf5_factory.uses_rust_reader(&HashMap::new())? {
-            return netcdf_c();
-        }
 
         let listing_factory = state
             .config()

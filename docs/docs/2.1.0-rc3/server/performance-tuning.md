@@ -90,102 +90,24 @@ File statistics record the lowest and the highest value of each column in each f
 - A table refreshes its statistics every 15 minutes. `statistics_refresh_interval` changes this.
 - Run `ANALYZE FILES` to start a refresh now. It runs in the background.
 - `BEACON_FILE_STATS_MAX_REFRESHES` limits the tables that refresh at the same time.
-- A netCDF or HDF5 file supplies a range only through the pure-Rust reader.
-
-The [File statistics](/docs/2.1.0-rc3/internals/file-statistics) chapter tells how to check the result.
-
-## NetCDF Tuning
-
-Two points control the NetCDF performance:
-
-- The number of times that Beacon opens the file and infers the schema.
-- The cache of the open readers.
-
-::: tip
-For a very large `.nc` file, split it into smaller files. You can also convert it to a chunked
-format such as Zarr. Your access pattern decides the gain. A scan returns batches of
-`BEACON_BATCH_SIZE` rows. The default is `64000`.
-:::
-
-### Statistics of each file
 
 `BEACON_NETCDF_ENABLE_STATISTICS` controls the statistics of each file. Beacon uses them to prune a
 query on a table with `use_statistics_pruning`. The default is `true`. Keep it on. Switch it off only
 to debug the pruning.
 
-Statistics also need the pure-Rust reader below. That reader is the default. The netCDF-C library
-holds one lock for each call in the process. Beacon computes the statistics through one thread, and
-the work blocks queries. Your core count does not change this.
+## NetCDF and HDF5 reader
 
-With `BEACON_NETCDF_USE_RUST_READER=false`, Beacon reports no statistics for netCDF. It prunes no
-file. This variable does not change that result. See
-[File statistics](/docs/2.1.0-rc3/internals/file-statistics).
-
-### Pure-Rust reader (parallel reads and object storage)
-
-#### `BEACON_NETCDF_USE_RUST_READER`
-
-Beacon reads NetCDF with the pure-Rust reader by default. It holds no lock, so Beacon reads many
+Beacon reads NetCDF and HDF5 with a pure-Rust reader. It holds no lock, so Beacon reads many
 files at the same time. It also reads byte ranges through the object store, so a file in S3, GCS or
-Azure needs no local copy.
+Azure needs no local copy. The reader has no setting. Writes use the netCDF-C library.
 
-Set `BEACON_NETCDF_USE_RUST_READER=false` to read with the netCDF-C library instead. That library is
-not thread safe. Its Rust bindings hold one lock for each call. The lock covers the input, the
-decompression and the type conversion. A query that reads many files therefore reads one file at a
-time. The library also opens only a local path or an `http`/`https` URL.
-
-Recommendations:
-
-- Keep the default `true` for a query that scans many NetCDF files.
-- Keep the default `true` for NetCDF files in an object store. The netCDF-C library cannot open
-  those.
-- Set it to `false` only if you must match the behaviour of the netCDF-C library exactly.
-
-Both readers give the same schema and the same values. Writes always use the netCDF-C library.
-
-You can also set the reader for one table:
-
-```sql
-CREATE EXTERNAL TABLE my_table STORED AS NC
-LOCATION 's3://bucket/data/'
-OPTIONS ('use_rust_reader' 'false');
-```
-
-## HDF5 pure-Rust reader
-
-### `BEACON_HDF5_USE_RUST_READER`
-
-A NetCDF-4 file is an HDF5 file, and the netCDF-C library opens a plain HDF5 file too. Beacon reads
-`.h5` and `.hdf5` through the pure-Rust reader by default. Set `BEACON_HDF5_USE_RUST_READER=false`
-to read through the netCDF-C library instead. That library carries the same three costs as netCDF:
-one lock for each call, a local path only, and no statistics. The flag is separate from
-`BEACON_NETCDF_USE_RUST_READER`, so you move one format at a time.
-
-The pure-Rust reader adds two things the netCDF reader cannot give you, because the netCDF data
-model does not hold them:
+The reader also reads two layouts of a plain HDF5 file:
 
 - **A nested group.** Beacon walks every group. A dataset outside the root group takes its path as
   its column name, such as `observations/qc/flag`.
 - **A compound dataset.** Each member becomes its own column, named `dataset/member`. Beacon skips a
   member that holds a pointer into a heap, such as a variable-length string, and it logs a message
-  that names the dataset and every member type. The netCDF-C library reports neither the dataset nor
-  an error.
-
-A NetCDF-4 file gives the same schema and the same values on either reader. Writes always use the
-netCDF-C library.
-
-Set the reader for one table:
-
-```sql
-CREATE EXTERNAL TABLE my_table STORED AS HDF5
-LOCATION 's3://bucket/data/'
-OPTIONS ('use_rust_reader' 'false');
-```
-
-Measure before you move a local archive to the netCDF-C library. On a warm local file that library
-is competitive, because it reads the file directly and Beacon reads byte ranges through the object
-store. The pure-Rust reader wins where the lock and the local copy cost the most: many files in one
-query, and files in S3, GCS or Azure.
+  that names the dataset and every member type.
 
 ## Zarr predicate pushdown
 

@@ -1,11 +1,8 @@
-//! The two HDF5 backends, side by side.
+//! Scans of HDF5 tables, end to end.
 //!
-//! An HDF5 table reads through netcdf-c or through the pure-Rust reader, and
-//! the flag that picks between them is the whole point of this crate's second
-//! reader. These tests hold the two to the same answer on a NetCDF-4 file —
-//! which is an HDF5 file — and then exercise what only the Rust one can do:
-//! a plain HDF5 file with a nested group, a compound dataset, and an object
-//! read with no local copy.
+//! These tests read a NetCDF-4 file, which is an HDF5 file, and a plain HDF5
+//! file with a nested group, a compound dataset, and an object read with no
+//! local copy.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,7 +16,7 @@ use beacon_datafusion_ext::fast_object::FastObjectTable;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::common::stats::Precision;
-use datafusion::datasource::file_format::FileFormat;
+use datafusion::datasource::file_format::FileFormatFactory;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
@@ -45,25 +42,6 @@ const OPTODAS_FILE: &str = "optodas.h5";
 /// group, a description of each channel in a second group, and metadata that
 /// outnumbers both. See `test_files/generate.py`.
 const INSTRUMENT_FILE: &str = "instrument.h5";
-
-/// Which reader a table reads through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Backend {
-    NetcdfC,
-    Rust,
-}
-
-impl Backend {
-    fn options(self) -> HashMap<String, String> {
-        HashMap::from([(
-            "use_rust_reader".to_string(),
-            match self {
-                Backend::NetcdfC => "false".to_string(),
-                Backend::Rust => "true".to_string(),
-            },
-        )])
-    }
-}
 
 /// The absolute path of a bundled NetCDF-4 file.
 ///
@@ -111,8 +89,8 @@ fn hdf5_file(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The factory a runtime registers, on the runtime's default reader.
-fn factory(default_reader: Backend) -> Hdf5FormatFactory {
+/// The factory a runtime registers.
+fn factory() -> Hdf5FormatFactory {
     let listing = Arc::new(ListingFactory::dynamic());
     let inner = NetCDFFormatFactory::new(
         listing,
@@ -120,13 +98,7 @@ fn factory(default_reader: Backend) -> Hdf5FormatFactory {
         NetcdfOptions::default(),
         NetcdfConfig::default(),
     );
-    Hdf5FormatFactory::new(
-        inner,
-        Hdf5Config {
-            use_rust_reader: default_reader == Backend::Rust,
-            ..Hdf5Config::default()
-        },
-    )
+    Hdf5FormatFactory::new(inner, Hdf5Config::default())
 }
 
 /// A single-partition session, so a scan yields rows in a stable order.
@@ -146,21 +118,16 @@ fn session() -> SessionContext {
     SessionContext::new_with_state(state)
 }
 
-/// Register `path` as a table read on `backend`.
-///
-/// This goes through `create_with_native_root`, the path a `CREATE EXTERNAL
-/// TABLE` takes, so netcdf-c gets the resolver it cannot work without and the
-/// Rust reader is left to read through the object store.
-async fn register(ctx: &SessionContext, table: &str, backend: Backend, path: &std::path::Path) {
-    let listing = Arc::new(ListingFactory::dynamic());
+/// Register `path` as a table.
+async fn register(ctx: &SessionContext, table: &str, path: &std::path::Path) {
     let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
-    let format = factory(Backend::NetcdfC)
-        .create_with_native_root(&ctx.state(), &backend.options(), &url, &listing)
-        .unwrap_or_else(|e| panic!("build the {backend:?} format for {}: {e}", path.display()));
+    let format = factory()
+        .create(&ctx.state(), &HashMap::new())
+        .unwrap_or_else(|e| panic!("build the format for {}: {e}", path.display()));
 
     let table_provider = FastObjectTable::try_new(&ctx.state(), format, vec![url])
         .await
-        .unwrap_or_else(|e| panic!("register {} on {backend:?}: {e}", path.display()));
+        .unwrap_or_else(|e| panic!("register {}: {e}", path.display()));
     ctx.register_table(table, Arc::new(table_provider)).unwrap();
 }
 
@@ -194,50 +161,7 @@ async fn collect(ctx: &SessionContext, sql: &str) -> RecordBatch {
     concat_batches(&schema, &batches).unwrap()
 }
 
-// ─── A NetCDF-4 file reads the same on both backends ────────────────────────
-
-#[tokio::test]
-async fn both_backends_infer_the_same_schema() {
-    for file in [GRIDDED_FILE, WOD_FILE] {
-        let ctx = session();
-        register(&ctx, "netcdf_c", Backend::NetcdfC, &netcdf_file(file)).await;
-        register(&ctx, "rust", Backend::Rust, &netcdf_file(file)).await;
-
-        // Compare the Arrow schemas: a `DFSchema` also carries the table name,
-        // which differs here by construction.
-        let c = ctx
-            .table("netcdf_c")
-            .await
-            .unwrap()
-            .schema()
-            .as_arrow()
-            .clone();
-        let rust = ctx.table("rust").await.unwrap().schema().as_arrow().clone();
-        assert_eq!(rust, c, "schemas differ for {file}");
-    }
-}
-
-/// A full scan of a gridded file: chunked storage, `scale_factor` packing and a
-/// CF time axis all decode the same way on either backend.
-#[tokio::test]
-async fn both_backends_return_the_same_rows_for_a_gridded_file() {
-    let ctx = session();
-    register(
-        &ctx,
-        "netcdf_c",
-        Backend::NetcdfC,
-        &netcdf_file(GRIDDED_FILE),
-    )
-    .await;
-    register(&ctx, "rust", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
-
-    let rust = collect(&ctx, "SELECT analysed_sst, lat, lon, time FROM rust").await;
-    assert!(rust.num_rows() > 0, "the scan must return rows");
-    assert_eq!(
-        rust,
-        collect(&ctx, "SELECT analysed_sst, lat, lon, time FROM netcdf_c").await
-    );
-}
+// ─── A NetCDF-4 file ────────────────────────────────────────────────────────
 
 // ── Splitting one file across partitions ────────────────────────────────────
 
@@ -255,46 +179,6 @@ fn scan_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> 
         node = Arc::clone(child);
     }
     node.output_partitioning().partition_count()
-}
-
-/// A table is served by the reader it asked for, and only `oxcdf` can split.
-///
-/// The reader decides, not the format. `Hdf5Source` is the `oxcdf` source and
-/// permits the split; a table on netcdf-c is served by `NetCDFSource`, which
-/// declines because every netcdf-c call queues on one process-global mutex, so
-/// shares of a file would run one at a time and pay for an extra open each.
-///
-/// That routing lives in `Hdf5FormatFactory`, three files from the source that
-/// allows the split. This holds it in place, by reading the scan's file type off
-/// the plan rather than by counting partitions: the bundled fixtures are under
-/// [`MIN_SHARE_SIZE`], so neither reader shares them and a partition count would
-/// say nothing about which source is underneath.
-#[tokio::test]
-async fn each_reader_serves_its_own_source() {
-    for (backend, file_type) in [
-        (Backend::NetcdfC, "file_type=netcdf"),
-        (Backend::Rust, "file_type=hdf5"),
-    ] {
-        let ctx = splitting_session(4);
-        register(&ctx, "t", backend, &netcdf_file(GRIDDED_FILE)).await;
-
-        let plan = ctx
-            .sql("SELECT analysed_sst FROM t")
-            .await
-            .unwrap()
-            .create_physical_plan()
-            .await
-            .unwrap();
-        let rendered = datafusion::physical_plan::displayable(plan.as_ref())
-            .indent(false)
-            .to_string();
-
-        assert!(
-            rendered.contains(file_type),
-            "{backend:?} should scan through {file_type}:
-{rendered}"
-        );
-    }
 }
 
 /// A small scan runs on every partition, and returns the same rows it returns
@@ -317,10 +201,10 @@ async fn a_small_scan_runs_on_every_partition_and_returns_the_same_rows() {
     const PARTITIONS: usize = 4;
 
     let whole = session();
-    register(&whole, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+    register(&whole, "t", &netcdf_file(GRIDDED_FILE)).await;
 
     let asked = splitting_session(PARTITIONS);
-    register(&asked, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+    register(&asked, "t", &netcdf_file(GRIDDED_FILE)).await;
 
     let plan = asked
         .sql("SELECT analysed_sst FROM t")
@@ -417,10 +301,10 @@ async fn a_large_file_splits_and_returns_the_same_rows() {
     let (_dir, file) = write_large_netcdf();
 
     let whole = session();
-    register(&whole, "t", Backend::Rust, &file).await;
+    register(&whole, "t", &file).await;
 
     let split = splitting_session(4);
-    register(&split, "t", Backend::Rust, &file).await;
+    register(&split, "t", &file).await;
 
     let plan = split
         .sql(r#"SELECT "V0" FROM t"#)
@@ -441,41 +325,6 @@ async fn a_large_file_splits_and_returns_the_same_rows() {
     assert_eq!(split_summary, whole_summary);
 }
 
-/// A ragged file, where the row count comes from the instance/observation
-/// layout rather than from a grid.
-#[tokio::test]
-async fn both_backends_return_the_same_rows_for_a_ragged_file() {
-    let ctx = session();
-    register(&ctx, "netcdf_c", Backend::NetcdfC, &netcdf_file(WOD_FILE)).await;
-    register(&ctx, "rust", Backend::Rust, &netcdf_file(WOD_FILE)).await;
-
-    let rust = collect(&ctx, "SELECT * FROM rust").await;
-    assert!(rust.num_rows() > 0, "the scan must return rows");
-    assert_eq!(rust, collect(&ctx, "SELECT * FROM netcdf_c").await);
-}
-
-/// A pushed-down predicate must not change the answer either.
-#[tokio::test]
-async fn both_backends_agree_under_a_predicate() {
-    let ctx = session();
-    register(
-        &ctx,
-        "netcdf_c",
-        Backend::NetcdfC,
-        &netcdf_file(GRIDDED_FILE),
-    )
-    .await;
-    register(&ctx, "rust", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
-
-    let sql = "SELECT lat, lon, analysed_sst FROM {table} WHERE lat > 45 AND lon < 30";
-    let rust = collect(&ctx, &sql.replace("{table}", "rust")).await;
-    assert!(rust.num_rows() > 0, "the predicate must match rows");
-    assert_eq!(
-        rust,
-        collect(&ctx, &sql.replace("{table}", "netcdf_c")).await
-    );
-}
-
 // ─── What only the Rust reader can do ───────────────────────────────────────
 
 /// A plain HDF5 file whose datasets live two group levels deep. netcdf-c
@@ -483,7 +332,7 @@ async fn both_backends_agree_under_a_predicate() {
 #[tokio::test]
 async fn a_nested_group_reads_end_to_end() {
     let ctx = session();
-    register(&ctx, "nested", Backend::Rust, &hdf5_file(NESTED_FILE)).await;
+    register(&ctx, "nested", &hdf5_file(NESTED_FILE)).await;
 
     let batch = collect(
         &ctx,
@@ -515,9 +364,8 @@ async fn a_partitioned_table_gives_every_row_the_value_of_its_path() {
 
     let ctx = session();
     let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
-    let listing = Arc::new(ListingFactory::dynamic());
-    let format = factory(Backend::Rust)
-        .create_with_native_root(&ctx.state(), &Backend::Rust.options(), &url, &listing)
+    let format = factory()
+        .create(&ctx.state(), &HashMap::new())
         .expect("the HDF5 format builds");
 
     let options = ListingOptions::new(format)
@@ -566,7 +414,7 @@ async fn a_partitioned_table_gives_every_row_the_value_of_its_path() {
 #[tokio::test]
 async fn a_root_dataset_aligns_with_a_nested_one() {
     let ctx = session();
-    register(&ctx, "nested", Backend::Rust, &hdf5_file(NESTED_FILE)).await;
+    register(&ctx, "nested", &hdf5_file(NESTED_FILE)).await;
 
     let batch = collect(
         &ctx,
@@ -614,7 +462,6 @@ async fn an_instrument_file_defaults_to_the_grid_of_its_payload() {
     register(
         &ctx,
         "instrument",
-        Backend::Rust,
         &hdf5_file(INSTRUMENT_FILE),
     )
     .await;
@@ -635,7 +482,6 @@ async fn a_channel_description_lines_up_with_the_payload() {
     register(
         &ctx,
         "instrument",
-        Backend::Rust,
         &hdf5_file(INSTRUMENT_FILE),
     )
     .await;
@@ -691,7 +537,6 @@ async fn the_metadata_grid_needs_an_explicit_dimension_list() {
     register(
         &ctx,
         "instrument",
-        Backend::Rust,
         &hdf5_file(INSTRUMENT_FILE),
     )
     .await;
@@ -718,18 +563,12 @@ async fn the_metadata_grid_needs_an_explicit_dimension_list() {
 
     // The same file on the metadata grid.
     let ctx = session();
-    let listing = Arc::new(ListingFactory::dynamic());
     let path = hdf5_file(INSTRUMENT_FILE);
     let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
-    let format = factory(Backend::Rust)
-        .create_with_native_root(
+    let format = factory()
+        .create(
             &ctx.state(),
-            &HashMap::from([
-                ("use_rust_reader".to_string(), "true".to_string()),
-                ("read_dimensions".to_string(), "phony_len_3".to_string()),
-            ]),
-            &url,
-            &listing,
+            &HashMap::from([("read_dimensions".to_string(), "phony_len_3".to_string())]),
         )
         .unwrap();
     let table = FastObjectTable::try_new(&ctx.state(), format, vec![url])
@@ -751,16 +590,14 @@ async fn the_skip_option_reads_past_a_file_the_dimension_list_does_not_fit() {
         std::fs::copy(hdf5_file(file), dir.path().join(file)).unwrap();
     }
     let ctx = session();
-    let listing = Arc::new(ListingFactory::dynamic());
     let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
     let table = async |skip: &str| {
         let options = HashMap::from([
-            ("use_rust_reader".to_string(), "true".to_string()),
             ("read_dimensions".to_string(), "phony_len_3".to_string()),
             ("skip_unbroadcastable".to_string(), skip.to_string()),
         ]);
-        let format = factory(Backend::Rust)
-            .create_with_native_root(&ctx.state(), &options, &url, &listing)
+        let format = factory()
+            .create(&ctx.state(), &options)
             .unwrap();
         FastObjectTable::try_new(&ctx.state(), format, vec![url.clone()]).await
     };
@@ -777,55 +614,15 @@ async fn the_skip_option_reads_past_a_file_the_dimension_list_does_not_fit() {
     assert_eq!(batch.num_rows(), 3, "the nested file alone");
 }
 
-/// Both backends invent the same dimension names for a plain HDF5 file.
-///
-/// netcdf-c reads the root group alone, so the payload is all the two share.
-/// The names have to agree there, or a table would change its dimensions when
-/// the reader changes.
-#[tokio::test]
-async fn both_backends_name_the_axes_of_a_plain_file_the_same() {
-    let ctx = session();
-    register(
-        &ctx,
-        "netcdf_c",
-        Backend::NetcdfC,
-        &hdf5_file(INSTRUMENT_FILE),
-    )
-    .await;
-    register(&ctx, "rust", Backend::Rust, &hdf5_file(INSTRUMENT_FILE)).await;
-
-    let netcdf_c = collect(&ctx, r#"SELECT "data" FROM netcdf_c ORDER BY "data""#).await;
-    let rust = collect(&ctx, r#"SELECT "data" FROM rust ORDER BY "data""#).await;
-    assert_eq!(netcdf_c.num_rows(), 24);
-    assert_eq!(
-        netcdf_c, rust,
-        "the payload reads the same on both backends"
-    );
-
-    // The dimension names themselves, which no query shows.
-    let arrays = beacon_arrow_netcdf::reader::read_arrays(hdf5_file(INSTRUMENT_FILE))
-        .expect("netcdf-c opens a plain HDF5 file");
-    assert_eq!(
-        arrays["data"].dimensions(),
-        vec!["phony_len_6".to_string(), "phony_len_4".to_string()],
-    );
-}
-
 // ─── The OptoDAS convention ─────────────────────────────────────────────────
 
 /// Register `path` as a table that reads with the OptoDAS convention.
 async fn register_optodas(ctx: &SessionContext, table: &str, path: &std::path::Path) {
-    let listing = Arc::new(ListingFactory::dynamic());
     let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
-    let format = factory(Backend::Rust)
-        .create_with_native_root(
+    let format = factory()
+        .create(
             &ctx.state(),
-            &HashMap::from([
-                ("use_rust_reader".to_string(), "true".to_string()),
-                ("convention".to_string(), "optodas".to_string()),
-            ]),
-            &url,
-            &listing,
+            &HashMap::from([("convention".to_string(), "optodas".to_string())]),
         )
         .unwrap();
     let table_provider = FastObjectTable::try_new(&ctx.state(), format, vec![url])
@@ -841,7 +638,7 @@ async fn register_optodas(ctx: &SessionContext, table: &str, path: &std::path::P
 #[tokio::test]
 async fn the_convention_is_off_unless_a_table_asks_for_it() {
     let ctx = session();
-    register(&ctx, "plain", Backend::Rust, &hdf5_file(OPTODAS_FILE)).await;
+    register(&ctx, "plain", &hdf5_file(OPTODAS_FILE)).await;
     register_optodas(&ctx, "das", &hdf5_file(OPTODAS_FILE)).await;
 
     let plain: Vec<String> = ctx
@@ -1007,7 +804,7 @@ async fn a_netcdf_file_keeps_the_dimension_names_it_carries() {
 #[tokio::test]
 async fn a_compound_dataset_reads_end_to_end() {
     let ctx = session();
-    register(&ctx, "compound", Backend::Rust, &hdf5_file(COMPOUND_FILE)).await;
+    register(&ctx, "compound", &hdf5_file(COMPOUND_FILE)).await;
 
     let batch = collect(
         &ctx,
@@ -1058,7 +855,7 @@ async fn concurrent_scans_of_one_file_all_agree() {
     const SCANS: usize = 8;
 
     let ctx = Arc::new(session());
-    register(&ctx, "rust", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+    register(&ctx, "rust", &netcdf_file(GRIDDED_FILE)).await;
 
     let expected = collect(&ctx, "SELECT lat, lon FROM rust").await;
 
@@ -1069,67 +866,6 @@ async fn concurrent_scans_of_one_file_all_agree() {
     }
     while let Some(batch) = set.join_next().await {
         assert_eq!(batch.unwrap(), expected);
-    }
-}
-
-/// What two concurrent scans of one file actually cost, on each backend.
-///
-/// Run it with:
-///
-/// ```text
-/// cargo test --release -p beacon-arrow-hdf5 --test backend_parity \
-///     concurrent_scan_cost -- --ignored --nocapture
-/// ```
-///
-/// Ignored because it is a measurement, not an assertion: wall-clock ratios
-/// depend on the machine and on what else it is doing, so asserting on them
-/// makes a flaky test. It prints the serial and the concurrent time for both
-/// backends, and the speed-up each one gets from running the scans together.
-/// netcdf-c cannot overlap them — every call queues on one process-global
-/// mutex — so its speed-up stays near 1.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "measurement, not an assertion"]
-async fn concurrent_scan_cost() {
-    use std::time::Instant;
-
-    const SCANS: usize = 8;
-    const QUERY: &str = "SELECT analysed_sst FROM t";
-
-    for backend in [Backend::NetcdfC, Backend::Rust] {
-        // A fresh session for each backend, so no reader cache carries over.
-        let ctx = Arc::new(session());
-        register(&ctx, "t", backend, &netcdf_file(GRIDDED_FILE)).await;
-
-        // Warm the page cache and the reader cache, so this measures the read
-        // rather than the first open.
-        let rows = collect(&ctx, QUERY).await.num_rows();
-
-        let start = Instant::now();
-        for _ in 0..SCANS {
-            collect(&ctx, QUERY).await;
-        }
-        let serial = start.elapsed().as_secs_f64();
-
-        let start = Instant::now();
-        let mut set = tokio::task::JoinSet::new();
-        for _ in 0..SCANS {
-            let ctx = ctx.clone();
-            set.spawn(async move { collect(&ctx, QUERY).await });
-        }
-        while set.join_next().await.is_some() {}
-        let concurrent = start.elapsed().as_secs_f64();
-
-        println!(
-            "\n{backend:?}  ({SCANS} scans of {GRIDDED_FILE}, {rows} rows each)\n  \
-             serial     : {:.0} ms total ({:.0} ms/scan)\n  \
-             concurrent : {:.0} ms total ({:.0} ms/scan)\n  \
-             speed-up   : {:.2}x",
-            serial * 1e3,
-            serial * 1e3 / SCANS as f64,
-            concurrent * 1e3,
-            concurrent * 1e3 / SCANS as f64,
-            serial / concurrent,
-        );
     }
 }
 
@@ -1151,17 +887,11 @@ fn local_object(path: &std::path::Path) -> (Arc<dyn ObjectStore>, ObjectMeta) {
     (store, object)
 }
 
-/// The format a table would get for `path` on `backend`, ready to infer.
-fn format_on(
-    ctx: &SessionContext,
-    backend: Backend,
-    path: &std::path::Path,
-) -> Arc<dyn datafusion::datasource::file_format::FileFormat> {
-    let listing = Arc::new(ListingFactory::dynamic());
-    let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
-    factory(Backend::NetcdfC)
-        .create_with_native_root(&ctx.state(), &backend.options(), &url, &listing)
-        .unwrap_or_else(|e| panic!("build the {backend:?} format: {e}"))
+/// The format a table would get, ready to infer.
+fn format_on(ctx: &SessionContext) -> Arc<dyn datafusion::datasource::file_format::FileFormat> {
+    factory()
+        .create(&ctx.state(), &HashMap::new())
+        .unwrap_or_else(|e| panic!("build the format: {e}"))
 }
 
 /// The analysis form of a format: the one that measures files.
@@ -1170,14 +900,13 @@ fn format_on(
 /// never pays to compute them. Only the file analyzer asks for this one.
 fn analysis_format_on(
     ctx: &SessionContext,
-    backend: Backend,
     path: &std::path::Path,
 ) -> Arc<dyn datafusion::datasource::file_format::FileFormat> {
     let listing = Arc::new(ListingFactory::dynamic());
     let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
-    factory(Backend::NetcdfC)
-        .create_for_analysis(&ctx.state(), &backend.options(), &url, &listing)
-        .unwrap_or_else(|e| panic!("build the {backend:?} analysis format: {e}"))
+    factory()
+        .create_for_analysis(&ctx.state(), &HashMap::new(), &url, &listing)
+        .unwrap_or_else(|e| panic!("build the analysis format: {e}"))
 }
 
 /// How many columns came back with a real minimum.
@@ -1189,18 +918,15 @@ fn columns_with_a_range(statistics: &datafusion::common::Statistics) -> usize {
         .count()
 }
 
-/// Statistics are a capability of the reader, not of the format — the same rule
-/// netCDF follows. Every netcdf-c call serialises on a process-global mutex and
-/// the read is synchronous, so computing statistics under it is serial and parks
-/// a tokio worker. The Rust reader has neither problem.
+/// The analysis format computes real ranges.
 #[tokio::test]
-async fn statistics_come_from_the_rust_reader_only() {
+async fn the_analysis_format_computes_statistics() {
     let ctx = session();
     let state = ctx.state();
     let path = netcdf_file(WOD_FILE);
     let (store, object) = local_object(&path);
 
-    let rust = analysis_format_on(&ctx, Backend::Rust, &path);
+    let rust = analysis_format_on(&ctx, &path);
     let schema = rust
         .infer_schema(&state, &store, std::slice::from_ref(&object))
         .await
@@ -1213,24 +939,6 @@ async fn statistics_come_from_the_rust_reader_only() {
         columns_with_a_range(&with_rust_reader) > 0,
         "the Rust reader must produce real ranges for the coordinate variables"
     );
-
-    // netcdf-c reports unknown rather than erroring, so a deployment on it keeps
-    // working and simply prunes nothing.
-    let netcdf_c = analysis_format_on(&ctx, Backend::NetcdfC, &path);
-    let without_rust_reader = netcdf_c
-        .infer_stats(&state, &store, schema.clone(), &object)
-        .await
-        .expect("netcdf-c reports unknown, it does not fail");
-    assert_eq!(
-        columns_with_a_range(&without_rust_reader),
-        0,
-        "netcdf-c must report unknown rather than compute"
-    );
-    assert_eq!(
-        without_rust_reader.column_statistics.len(),
-        schema.fields().len(),
-        "unknown statistics still cover every column, as DataFusion requires"
-    );
 }
 
 /// A plain HDF5 file gets ranges too, including a dataset inside a group.
@@ -1241,7 +949,7 @@ async fn statistics_cover_a_plain_hdf5_file() {
     let path = hdf5_file(NESTED_FILE);
     let (store, object) = local_object(&path);
 
-    let format = analysis_format_on(&ctx, Backend::Rust, &path);
+    let format = analysis_format_on(&ctx, &path);
     let schema = format
         .infer_schema(&state, &store, std::slice::from_ref(&object))
         .await
@@ -1276,15 +984,15 @@ async fn statistics_cover_a_plain_hdf5_file() {
     );
 }
 
-/// The switch is still honoured on top of the reader gate.
+/// The table option turns statistics off for the analysis format too.
 #[tokio::test]
-async fn disabling_statistics_wins_over_the_reader() {
+async fn disabling_statistics_turns_them_off() {
     let ctx = session();
     let state = ctx.state();
     let path = netcdf_file(WOD_FILE);
     let (store, object) = local_object(&path);
 
-    let on = format_on(&ctx, Backend::Rust, &path);
+    let on = format_on(&ctx);
     let schema = on
         .infer_schema(&state, &store, std::slice::from_ref(&object))
         .await
@@ -1292,13 +1000,10 @@ async fn disabling_statistics_wins_over_the_reader() {
 
     let listing = Arc::new(ListingFactory::dynamic());
     let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
-    let off = factory(Backend::NetcdfC)
-        .create_with_native_root(
+    let off = factory()
+        .create_for_analysis(
             &ctx.state(),
-            &HashMap::from([
-                ("use_rust_reader".to_string(), "true".to_string()),
-                ("enable_statistics".to_string(), "false".to_string()),
-            ]),
+            &HashMap::from([("enable_statistics".to_string(), "false".to_string())]),
             &url,
             &listing,
         )
@@ -1329,7 +1034,7 @@ async fn a_predicate_reaches_the_scan_and_skips_its_chunks() {
     use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanVisitor};
 
     let ctx = session();
-    register(&ctx, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+    register(&ctx, "t", &netcdf_file(GRIDDED_FILE)).await;
 
     struct ScanRows(Option<usize>);
     impl ExecutionPlanVisitor for ScanRows {
@@ -1390,7 +1095,7 @@ async fn a_pruned_scan_counts_what_the_coordinate_says_it_should() {
     use arrow::array::{Float32Array, Int64Array};
 
     let ctx = session();
-    register(&ctx, "t", Backend::Rust, &netcdf_file(GRIDDED_FILE)).await;
+    register(&ctx, "t", &netcdf_file(GRIDDED_FILE)).await;
 
     let lats: Vec<f32> = {
         let batch = collect(&ctx, "SELECT lat FROM t").await;

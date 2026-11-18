@@ -515,32 +515,6 @@ struct RawConfig {
     #[envconfig(from = "BEACON_NETCDF_ENABLE_STATISTICS", default = "true")]
     netcdf_enable_statistics: bool,
 
-    /// Read netCDF with the pure-Rust `oxcdf` reader instead of netcdf-c.
-    ///
-    /// On by default. It reads in parallel. It opens a netCDF file in an object
-    /// store (s3, gs or az), which netcdf-c cannot. It reports the statistics of
-    /// each file.
-    ///
-    /// Set it to false to read with netcdf-c. Writes always use netcdf-c.
-    #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER", default = "true")]
-    netcdf_use_rust_reader: bool,
-
-    /// Read HDF5 with the pure-Rust reader instead of netcdf-c.
-    ///
-    /// On by default. It reads in parallel. It opens an HDF5 file in an object
-    /// store (s3, gs or az). It reports the statistics of each file. It also
-    /// reports two layouts that netcdf-c cannot: a nested group and a compound
-    /// dataset.
-    ///
-    /// Set it to false to read with netcdf-c. A NetCDF-4 file is an HDF5 file,
-    /// so the netcdf-c HDF5 dispatch opens a plain HDF5 file too. Writes always
-    /// use netcdf-c.
-    ///
-    /// This flag is separate from `BEACON_NETCDF_USE_RUST_READER`. A server can
-    /// change one format at a time.
-    #[envconfig(from = "BEACON_HDF5_USE_RUST_READER", default = "true")]
-    hdf5_use_rust_reader: bool,
-
     #[envconfig(from = "BEACON_HDF5_ENABLE_STATISTICS", default = "true")]
     hdf5_enable_statistics: bool,
 
@@ -722,10 +696,8 @@ impl From<RawConfig> for Config {
             },
             netcdf: NetcdfConfig {
                 enable_statistics: raw.netcdf_enable_statistics,
-                use_rust_reader: raw.netcdf_use_rust_reader,
             },
             hdf5: Hdf5Config {
-                use_rust_reader: raw.hdf5_use_rust_reader,
                 unify_phony_dimensions: raw.hdf5_unify_phony_dimensions,
                 // An unknown name reads as no convention. A server that cannot
                 // start over a typo is worse than one that reads the container.
@@ -1515,24 +1487,13 @@ mod tests {
 
     // ── Reader flags ───────────────────────────────────────────────────
 
-    /// A server that sets neither flag reads both formats in Rust.
+    /// A removed reader flag in the environment does not stop the server.
     #[test]
-    fn both_formats_default_to_the_rust_reader() {
-        let config = config(&[]);
-        assert!(config.netcdf.use_rust_reader);
-        assert!(config.hdf5.use_rust_reader);
-    }
-
-    /// Each flag moves one format, so a server can fall back for one alone.
-    #[test]
-    fn each_flag_moves_one_format() {
-        let netcdf_c = config(&[("BEACON_NETCDF_USE_RUST_READER", "false")]);
-        assert!(!netcdf_c.netcdf.use_rust_reader);
-        assert!(netcdf_c.hdf5.use_rust_reader);
-
-        let hdf5_c = config(&[("BEACON_HDF5_USE_RUST_READER", "false")]);
-        assert!(hdf5_c.netcdf.use_rust_reader);
-        assert!(!hdf5_c.hdf5.use_rust_reader);
+    fn a_removed_reader_flag_is_ignored() {
+        config(&[
+            ("BEACON_NETCDF_USE_RUST_READER", "false"),
+            ("BEACON_HDF5_USE_RUST_READER", "false"),
+        ]);
     }
 
     /// No file is read for a convention it may not follow, unless a server asks.

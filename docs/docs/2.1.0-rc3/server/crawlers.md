@@ -192,7 +192,7 @@ endpoints:
 ## Supported formats and limitations
 
 The crawler finds **one file per dataset** formats. The file extension must equal the format
-identifier exactly. The identifiers are `parquet`, `geoparquet`, `csv`, `nc` for NetCDF, `bbf`,
+identifier exactly. The identifiers are `parquet`, `geoparquet`, `csv`, `nc` for NetCDF,
 `arrow`, `tiff` and `atlas`. The crawler does **not** read an alias extension. A file must use the canonical
 extension. The crawler therefore skips `.tsv` (CSV), `.feather` (Arrow) and `.tif` (TIFF). The
 readers open those files directly. Register such a file with a table function or with

@@ -21,8 +21,8 @@ engines cannot open those formats.
 
 ## What it does
 
-- **Reads files in place.** NetCDF, Zarr, Parquet, GeoParquet, CSV, Arrow, GeoTIFF, Atlas, Delta,
-  ODV and BBF, on local disk or on S3, GCS and Azure. There is no conversion and no load step.
+- **Reads files in place.** NetCDF, Zarr, Parquet, GeoParquet, CSV, Arrow, GeoTIFF, Atlas, Delta
+  and ODV, on local disk or on S3, GCS and Azure. There is no conversion and no load step.
 - **Answers SQL.** A full analytical dialect on DataFusion, with joins, aggregates, window
   functions, views and materialized views.
 - **Owns data when you want it to.** Managed tables give you `INSERT`, `UPDATE` and `DELETE`. One

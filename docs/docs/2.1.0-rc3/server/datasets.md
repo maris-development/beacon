@@ -23,7 +23,6 @@ The default local path in the Docker container is `/beacon/data/datasets/`.
 | [Zarr](/docs/2.1.0-rc3/formats/zarr) | `zarr.json` marker | `ZARR` | `read_zarr` | no |
 | [Atlas](/docs/2.1.0-rc3/formats/atlas) | `data.atlas` file | `ATLAS` | `read_atlas` | yes |
 | [GeoTIFF / COG](/docs/2.1.0-rc3/formats/geotiff) | `.tif`, `.tiff` | `TIFF` | `read_tiff` | no |
-| [BBF](/docs/2.1.0-rc3/formats/bbf) | `.bbf` | `BBF` | `read_bbf` | no |
 | [Delta Lake](/docs/2.1.0-rc3/formats/delta-lake) | `_delta_log/` directory | `DELTA` | `read_delta` | no |
 | [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg) | `metadata/` directory | `ICEBERG` | `read_iceberg` | no |
 | [ODV ASCII](/docs/2.1.0-rc3/formats/odv) | `.txt` | not supported | `read_odv_ascii` | yes |

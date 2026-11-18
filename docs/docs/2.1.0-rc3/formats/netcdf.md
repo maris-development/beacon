@@ -81,9 +81,7 @@ LIMIT 1
 Limitations:
 
 - Beacon does not support user-defined types.
-- Object storage authenticates on the default `BEACON_NETCDF_USE_RUST_READER=true`. On the netCDF-C
-  library a bucket supports anonymous access only, because that library opens a file by URL and
-  never sees the credential chain.
+- Beacon reads a file in object storage with the credentials of the server.
 
 :::tip
 For a large NetCDF collection, convert the files into one
@@ -200,15 +198,14 @@ full read model.
 | `read_dimensions` | List of dimension names | The default grid of each file | The dimensions the table reads. Beacon returns a variable only if the list holds every dimension of that variable. |
 | `skip_unbroadcastable` | Boolean | `false` | Skip a file that does not fit `read_dimensions`. Beacon writes a warning and reads the next file. Without it the query fails. |
 | `skip_invalid_files` | Boolean | `false` | Skip a file that the reader cannot open. Beacon writes a warning and reads the next file. Without it the query fails, and the error names the file. |
-| `use_rust_reader` | Boolean | `true` (`BEACON_NETCDF_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library needs anonymous access to a bucket. |
 | `enable_statistics` | Boolean | `true` (`BEACON_NETCDF_ENABLE_STATISTICS`) | Compute the column ranges of each file for the [file statistics](/docs/2.1.0-rc3/internals/file-statistics) of this table. With `false`, the table records no range and prunes no file. |
 
 ```sql
--- One grid, and the netCDF-C reader for this table alone
+-- One grid
 CREATE EXTERNAL TABLE argo
 STORED AS NC
 LOCATION 'argo/**/*.nc'
-OPTIONS ('read_dimensions' 'time,latitude,longitude', 'use_rust_reader' 'false')
+OPTIONS ('read_dimensions' 'time,latitude,longitude')
 ```
 
 See [`OPTIONS`](/docs/2.1.0-rc3/sql/create-external-table#options) for the rules that hold for every key. See

@@ -57,7 +57,7 @@ export interface ComparisonFilter {
  * A data source: either a registered table name (a bare string) or a single-key
  * object keyed by file format, e.g. `{ netcdf: { paths: ["a.nc"] } }` or
  * `{ csv: { paths: [...], delimiter: ";" } }`. Supported formats: `csv`,
- * `parquet`, `arrow`, `netcdf`, `odv`, `tiff`, `zarr`, `bbf`.
+ * `parquet`, `arrow`, `netcdf`, `odv`, `tiff`, `zarr`.
  */
 export type From = string | Record<string, unknown>;
 
