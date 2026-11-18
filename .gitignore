@@ -39,8 +39,6 @@ CLAUDE.md
 AGENTS.md
 .claude/
 beacon-arrow-tiff/test-files/TEMP_AVG_20201201.tif
-beacon-binary-format-toolbox/test-files/000043_CFPOINT_100098_V0.nc
-beacon-binary-format-toolbox/test-files/000635_CFPOINT_BA080006_V0.nc
 plans/
 # --- beacon-db-py: maturin/PyO3 build artifacts ---
 # The compiled extension module `maturin develop` drops into the package dir. It is a

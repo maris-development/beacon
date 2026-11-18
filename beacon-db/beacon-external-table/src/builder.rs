@@ -217,7 +217,7 @@ impl ExternalTableBuilder {
             .parse_listing_table_url(session, &definition.location)?
             .with_table_ref(TableReference::from(definition.name.as_str()));
 
-        let format = self.file_format(state, &file_type, &url, &listing_factory, declared)?;
+        let format = self.file_format(state, &file_type, declared)?;
 
         let options = ListingOptions::new(format)
             // The format finds its own files.
@@ -246,20 +246,16 @@ impl ExternalTableBuilder {
         })
     }
 
-    /// Creates the file format after the URL: a format that reads files by path
-    /// (netCDF) needs the root store that the location resolves against.
+    /// Creates the file format from the factory of `file_type`.
     fn file_format(
         &self,
         state: &SessionState,
         file_type: &str,
-        url: &datafusion::datasource::listing::ListingTableUrl,
-        listing_factory: &ListingFactory,
         schema_declared: bool,
     ) -> Result<Arc<dyn FileFormat>> {
         let format_options = self.definition.format_options();
         if let Some(factory) = try_file_format_factory_ext(state, file_type) {
-            let format =
-                factory.create_with_native_root(state, &format_options, url, listing_factory)?;
+            let format = factory.create(state, &format_options)?;
             return Ok(if schema_declared {
                 factory.with_declared_columns(format)
             } else {

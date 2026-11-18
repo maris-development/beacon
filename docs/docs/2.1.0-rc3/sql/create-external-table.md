@@ -50,7 +50,6 @@ CREATE EXTERNAL TABLE cruises STORED AS NC LOCATION 'cruises/**/*.nc'
 | `CSV` | `.csv`, `.tsv` | [CSV](/docs/2.1.0-rc3/formats/csv) |
 | `ARROW` | Arrow IPC (`.arrow`, `.feather`) | [Arrow IPC](/docs/2.1.0-rc3/formats/arrow) |
 | `TIFF` | GeoTIFF / Cloud-Optimized GeoTIFF | [GeoTIFF](/docs/2.1.0-rc3/formats/geotiff) |
-| `BBF` | Beacon Binary Format | [BBF](/docs/2.1.0-rc3/formats/bbf) |
 | `DELTA` | Delta Lake table directory (`_delta_log/`) | [Delta Lake](/docs/2.1.0-rc3/formats/delta-lake) |
 | `ICEBERG` | Apache Iceberg table directory (`metadata/`) | [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg) |
 | `ICECHUNK` | Icechunk repository directory | [Icechunk](/docs/2.1.0-rc3/formats/icechunk) |
@@ -253,8 +252,8 @@ more cores. Set it for a table with many files. The merged schema does not chang
 
 | `STORED AS` | Keys | Details |
 | ----------- | ---- | ------- |
-| `NC` | `read_dimensions`, `skip_unbroadcastable`, `skip_invalid_files`, `use_rust_reader`, `enable_statistics` | [NetCDF](/docs/2.1.0-rc3/formats/netcdf#options) |
-| `HDF5`, `H5` | `read_dimensions`, `use_rust_reader`, `enable_statistics`, `unify_phony_dimensions`, `convention` | [HDF5](/docs/2.1.0-rc3/formats/hdf5#options) |
+| `NC` | `read_dimensions`, `skip_unbroadcastable`, `skip_invalid_files`, `enable_statistics` | [NetCDF](/docs/2.1.0-rc3/formats/netcdf#options) |
+| `HDF5`, `H5` | `read_dimensions`, `enable_statistics`, `unify_phony_dimensions`, `convention` | [HDF5](/docs/2.1.0-rc3/formats/hdf5#options) |
 | `ZARR` | `read_dimensions`, `enable_statistics` | [Zarr](/docs/2.1.0-rc3/formats/zarr#options) |
 | `ATLAS` | `read_dimensions` | [Atlas](/docs/2.1.0-rc3/formats/atlas#options) |
 | `CSV` | `delimiter`, `infer_records` | [CSV](/docs/2.1.0-rc3/formats/csv#options) |
@@ -264,7 +263,7 @@ more cores. Set it for a table with many files. The merged schema does not chang
 | `POSTGRES`, `MYSQL` | `host`, `port`, `user`, `password`, `database`, `sslmode` | [SQL Databases](/docs/2.1.0-rc3/data-sources/sql-databases#options) |
 | `REMOTE` | `tls` | [Remote Tables](/docs/2.1.0-rc3/data-sources/remote-tables#options) |
 | `ERDDAP` | `request_timeout_secs` | [ERDDAP](/docs/2.1.0-rc3/data-sources/erddap#options) |
-| `PARQUET`, `GEOPARQUET`, `ARROW`, `TIFF`, `BBF` | None | |
+| `PARQUET`, `GEOPARQUET`, `ARROW`, `TIFF` | None | |
 
 ## `REFRESH`
 

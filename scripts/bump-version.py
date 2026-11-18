@@ -12,9 +12,6 @@ Four ecosystems, three spellings of the same version:
   Cargo.toml [workspace.package]   SemVer     2.0.0-rc.2   (inherited by all 26 release crates)
   */pyproject.toml                 PEP 440    2.0.0rc2     (canonical Python form)
   beacon-ts/package.json           SemVer     2.0.0-rc.2   (+ its lockfiles, via `npm version`)
-
-`beacon-binary-format` (a git submodule) and `beacon-binary-format-toolbox` are deliberately
-untouched: they version the binary format, not the beacon release.
 """
 
 import re

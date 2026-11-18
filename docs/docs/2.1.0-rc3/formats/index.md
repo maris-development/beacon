@@ -35,7 +35,6 @@ S3-compatible bucket, chosen at startup. See
 | [Zarr](/docs/2.1.0-rc3/formats/zarr) | `read_zarr` | `ZARR` | `zarr.json` marker |
 | [Atlas](/docs/2.1.0-rc3/formats/atlas) | `read_atlas` | `ATLAS` | `data.atlas` file |
 | [GeoTIFF / COG](/docs/2.1.0-rc3/formats/geotiff) | `read_tiff` | `TIFF` | `.tif`, `.tiff` |
-| [BBF](/docs/2.1.0-rc3/formats/bbf) | `read_bbf` | `BBF` | `.bbf` |
 | [Delta Lake](/docs/2.1.0-rc3/formats/delta-lake) | `read_delta` | `DELTA` | `_delta_log/` directory |
 | [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg) | `read_iceberg` | `ICEBERG` | `metadata/` directory |
 | [Icechunk](/docs/2.1.0-rc3/formats/icechunk) | `read_icechunk` | `ICECHUNK` | repository directory |
@@ -55,12 +54,11 @@ The table above says how to read each format. This one says what you get.
 | GeoParquet | Full | Projection; no `st_*` pushdown yet | Yes | `read_geoparquet_schema` | No |
 | CSV / TSV | Full | Projection only | Yes | `read_csv_schema` | No |
 | Arrow IPC | Full | Projection only | Yes | `read_arrow_schema` | No |
-| NetCDF | **Anonymous only**, or full with the Rust reader | Projection + dimension selection | Yes | `read_netcdf_schema` | Yes |
-| HDF5 | **Anonymous only**, or full with the Rust reader | Projection + dimension selection | Yes | `read_hdf5_schema` | Yes |
+| NetCDF | Full | Projection + dimension selection | Yes | `read_netcdf_schema` | Yes |
+| HDF5 | Full | Projection + dimension selection | Yes | `read_hdf5_schema` | Yes |
 | Zarr | Full | Projection + dimension selection, chunk pruning | No | `read_zarr_schema` | Yes |
 | Atlas | Full | Predicate + projection, **dataset-level pruning** | Yes | `read_atlas_schema` | Yes |
 | GeoTIFF / COG | Full | Projection, range requests | No | `read_tiff_schema` | Yes |
-| BBF | Full | Predicate + projection, **column list required** | No | `read_bbf_schema` | Yes |
 | Delta Lake | Full | Predicate + projection, file skipping | No, but see below | `read_delta_schema` | No |
 | Apache Iceberg | Full | Predicate + projection, file skipping | No | `read_iceberg_schema` | No |
 | Icechunk | Full, see [Icechunk](/docs/2.1.0-rc3/formats/icechunk) | Projection + dimension selection, chunk pruning | No | `read_icechunk_schema` | Yes |
@@ -69,11 +67,8 @@ The table above says how to read each format. This one says what you get.
 Reading the columns:
 
 - **On an S3 datasets store** — how the reader behaves when the server's datasets store is a
-  bucket rather than a local directory. NetCDF and HDF5 read through a pure-Rust reader by default.
-  That reader goes through the object store and authenticates normally. A server that sets
-  `BEACON_NETCDF_USE_RUST_READER=false` or `BEACON_HDF5_USE_RUST_READER=false` reads through
-  netCDF-c instead. It **then needs the bucket to allow anonymous reads**: netCDF-c opens a file by
-  URL and never sees the credential chain. Every other reader authenticates normally already. This is a property of the server's store, not of the
+  bucket rather than a local directory. Every reader goes through the object store and
+  authenticates normally. This is a property of the server's store, not of the
   query — paths in SQL are relative either way.
 - **Pushdown** — how much of a query reaches storage instead of running after the read. *Predicate*
   means a `WHERE` clause prunes data. *Projection* means a narrow `SELECT` reads fewer columns.

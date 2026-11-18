@@ -1,5 +1,5 @@
 ---
-description: Query HDF5 files with read_hdf5. Beacon reads HDF5 with a pure-Rust reader that adds nested groups, compound datasets and object storage. The netCDF-c library is the fallback.
+description: Query HDF5 files with read_hdf5. Beacon reads HDF5 with a pure-Rust reader that reads nested groups, compound datasets and object storage.
 ---
 
 # HDF5
@@ -10,43 +10,30 @@ SELECT * FROM read_hdf5('experiments/**/*.h5') LIMIT 10;
 
 Beacon recognizes `.h5` and `.hdf5`. It finds them in the dataset store automatically.
 
-## Two readers
+## The reader
 
-A netCDF-4 file **is** an HDF5 file, and the netCDF-c library also opens plain HDF5. Beacon reads
-HDF5 through the pure-Rust reader by default. Beacon reads it through that library when you set the
-Rust reader to false. HDF5 behaves exactly like
+A netCDF-4 file **is** an HDF5 file. HDF5 behaves exactly like
 [NetCDF](/docs/2.1.0-rc3/formats/netcdf): the same data model, the same
 [array to table mapping](/docs/2.1.0-rc3/arrays-to-tables), the same
 [CF decoding](/docs/2.1.0-rc3/cf-decoding) and the same attribute columns.
 
-The **pure-Rust HDF5 reader** is the default. It reads the same files and gives the same answer for
-a netCDF-4 file, and it adds five things over netCDF-c:
+Beacon reads HDF5 with a pure-Rust reader:
 
-| | netCDF-c | Pure-Rust reader (default) |
-| --- | --- | --- |
-| Nested groups | Root group only | Every group |
-| Compound datasets | Not read | One column for each member |
-| Object storage | Anonymous access only | Full credential chain, no local copy |
-| [File statistics](/docs/2.1.0-rc3/internals/file-statistics) | None | Per-file column ranges |
-| Concurrent scans | One file at a time | In parallel |
-| Writes | netCDF-c | netCDF-c |
-
-The flag is on by default, and it is separate from `BEACON_NETCDF_USE_RUST_READER`, so you move one
-format at a time. Set it for one table instead of the whole server:
-
-```sql
-CREATE EXTERNAL TABLE experiments
-STORED AS HDF5
-LOCATION 'experiments/'
-OPTIONS ('use_rust_reader' 'false');
-```
+| | Behavior |
+| --- | --- |
+| Nested groups | Every group |
+| Compound datasets | One column for each member |
+| Object storage | Full credential chain, no local copy |
+| [File statistics](/docs/2.1.0-rc3/internals/file-statistics) | Per-file column ranges |
+| Concurrent scans | In parallel |
+| Writes | The netCDF-C library |
 
 ## How a dataset becomes a column
 
 An HDF5 dataset reads as a variable. An HDF5 attribute reads as a `<dataset>.<attribute>` column,
 and a file attribute as `.<attribute>`.
 
-The pure-Rust reader adds two more shapes. Both use `/`, so quote the column name in SQL.
+The reader adds two more shapes. Both use `/`, so quote the column name in SQL.
 
 ### A dataset inside a group
 
@@ -170,13 +157,9 @@ LOCATION 'experiments/';
 | --- | --- | --- | --- |
 | `read_dimensions` | List of dimension names | The default grid of each file | The dimensions the table reads. Beacon returns a dataset only if the list holds every dimension of that dataset. |
 | `skip_unbroadcastable` | Boolean | `false` | Skip a file that does not fit `read_dimensions`. Beacon writes a warning and reads the next file. Without it the query fails. |
-| `use_rust_reader` | Boolean | `true` (`BEACON_HDF5_USE_RUST_READER`) | Read with the pure-Rust reader. Set it to `false` to read with the netCDF-C library. That library reads no nested group and no compound dataset, and it needs anonymous access to a bucket. |
 | `enable_statistics` | Boolean | `true` (`BEACON_HDF5_ENABLE_STATISTICS`) | Compute the column ranges of each file for the [file statistics](/docs/2.1.0-rc3/internals/file-statistics) of this table. With `false`, the table records no range and prunes no file. |
 | `unify_phony_dimensions` | Boolean | `true` (`BEACON_HDF5_UNIFY_PHONY_DIMENSIONS`) | Give every unnamed axis one name per length, over the whole file, so two groups broadcast together. Set it to `false` to keep one dimension per length per group. |
 | `convention` | `none` | `none` (`BEACON_HDF5_CONVENTION`) | The vendor layout the table reads on top of the container. |
-
-The pure-Rust reader applies `unify_phony_dimensions` and `convention`. A table with
-`use_rust_reader` set to `false` ignores both.
 
 ```sql
 CREATE EXTERNAL TABLE das
@@ -189,12 +172,8 @@ See [`OPTIONS`](/docs/2.1.0-rc3/sql/create-external-table#options) for the rules
 
 ## On object storage
 
-On the netCDF-c reader, **HDF5 supports anonymous access only**, for the same reason as NetCDF:
-that library opens a file by URL and does not go through the credential chain. For a public bucket,
-set `AWS_SKIP_SIGNATURE=true`.
-
-The default pure-Rust reader has no such limit. It reads byte ranges through the object store, so a
-private S3, GCS or Azure bucket works and no local copy is made. A bucket needs no option at all:
+The reader reads byte ranges through the object store, so a private S3, GCS or Azure bucket works
+and Beacon makes no local copy. A bucket needs no option at all:
 
 ```sql
 CREATE EXTERNAL TABLE experiments
@@ -207,14 +186,11 @@ See [Object Storage](/docs/2.1.0-rc3/data-sources/object-storage).
 ## As a query output
 
 `COPY TO ... STORED AS HDF5` uses the netCDF-4 writer. The result is a netCDF-4 file with an HDF5
-extension. Every HDF5 reader opens it. A write always uses netCDF-c, whatever the read flag says.
+extension. Every HDF5 reader opens it. A write always uses the netCDF-C library.
 
 ::: warning What does not map
-The pure-Rust reader covers nested groups and compound datasets. It does not read a variable-length
+The reader covers nested groups and compound datasets. It does not read a variable-length
 or opaque type, a reference, or a region reference.
-
-On the netCDF-c reader the netCDF data model bounds what Beacon sees. A compound datatype, a
-variable-length or opaque type, a reference, and a group outside the root are not read.
 
 One more limit is worth knowing. Beacon drops an attribute narrower than 8 bytes on a file written
 with the earliest HDF5 library version — h5py's default — because the reader takes the object
@@ -224,8 +200,8 @@ header padding as part of the value. The datasets are unaffected. This is
 
 ## See also
 
-- [NetCDF](/docs/2.1.0-rc3/formats/netcdf): the same readers, with the full detail
+- [NetCDF](/docs/2.1.0-rc3/formats/netcdf): the same data model, with the full detail
 - [Arrays to tables](/docs/2.1.0-rc3/arrays-to-tables): the row count and the grid rule
 - [CF decoding](/docs/2.1.0-rc3/cf-decoding): units, packing and fill values
-- [Performance tuning](/docs/2.1.0-rc3/server/performance-tuning#hdf5-pure-rust-reader): when to
-  change the reader
+- [Performance tuning](/docs/2.1.0-rc3/server/performance-tuning#netcdf-and-hdf5-reader): how the
+  reader behaves

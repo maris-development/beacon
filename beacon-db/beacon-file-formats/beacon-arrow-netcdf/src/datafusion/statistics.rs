@@ -25,9 +25,8 @@ use crate::datafusion::reader::NetcdfInput;
 /// Open the NetCDF object `input` names and return DataFusion [`Statistics`]
 /// for the columns in `table_schema`.
 ///
-/// `input` already says which reader opens the file and where its bytes are.
-/// The caller builds it, so statistics and scans go through one mechanism and
-/// can never disagree about a file (see [`NetcdfInput`]).
+/// `input` says where the bytes of the file are. The caller builds it, so
+/// statistics and scans go through one mechanism (see [`NetcdfInput`]).
 pub async fn generate_statistics(
     input: NetcdfInput,
     table_schema: &arrow::datatypes::Schema,

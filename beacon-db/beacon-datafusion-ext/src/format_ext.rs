@@ -55,30 +55,6 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
         vec![self.get_ext()]
     }
 
-    /// Create a [`FileFormat`] for files located at `url`.
-    ///
-    /// A format read *natively* — opened by local path or http(s) URL by an
-    /// external reader (netCDF-c), never streamed through the object store — needs
-    /// to know which [`RootStore`](crate::listing_factory::RootStore) its objects
-    /// live under so it can turn each
-    /// listed object into a path that reader can open. `listing` resolves that
-    /// from `url` via [`ListingFactory::native_read_root`].
-    ///
-    /// The default ignores both and delegates to [`FileFormatFactory::create`], so
-    /// object-store formats (Parquet, CSV, …) are unaffected and no location is
-    /// rejected on their behalf. Only an overriding format calls
-    /// `native_read_root`, so the "only local files and http/https" error is raised
-    /// exactly for the formats that have that limitation.
-    fn create_with_native_root(
-        &self,
-        state: &dyn Session,
-        format_options: &HashMap<String, String>,
-        _url: &ListingTableUrl,
-        _listing: &ListingFactory,
-    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        self.create(state, format_options)
-    }
-
     /// Create a [`FileFormat`] that computes file statistics.
     ///
     /// A format answers `infer_stats` by reading the file. For parquet that is a
@@ -100,10 +76,10 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
         &self,
         state: &dyn Session,
         format_options: &HashMap<String, String>,
-        url: &ListingTableUrl,
-        listing: &ListingFactory,
+        _url: &ListingTableUrl,
+        _listing: &ListingFactory,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        self.create_with_native_root(state, format_options, url, listing)
+        self.create(state, format_options)
     }
 
     /// `format` for an external table whose columns the user declared.
@@ -354,7 +330,7 @@ pub fn try_file_format_factory_ext(
 /// extensions they answer to. Registered (via a late-filled `OnceLock`) as a
 /// session-config extension so plan-time code — the external-table builder, table
 /// functions — can recover format capabilities (like
-/// [`FileFormatFactoryExt::create_with_native_root`]) that DataFusion's plain
+/// [`FileFormatFactoryExt::create_for_analysis`]) that DataFusion's plain
 /// `FileFormatFactory` registry erases once the concrete `Ext` type is gone.
 #[derive(Default)]
 pub struct FileFormatRegistry {

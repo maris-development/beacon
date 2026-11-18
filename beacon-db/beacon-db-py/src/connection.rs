@@ -616,8 +616,6 @@ const TABLE_FUNCTIONS: &[(&str, &[&str])] = &[
     ("list_datasets", &[]),
     ("read_arrow", &["glob_paths"]),
     ("read_arrow_schema", &["glob_paths"]),
-    ("read_bbf", &["glob_paths"]),
-    ("read_bbf_schema", &["glob_paths"]),
     ("read_csv", &["glob_paths", "delimiter", "infer_records"]),
     (
         "read_csv_schema",

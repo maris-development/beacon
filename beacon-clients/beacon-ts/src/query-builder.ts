@@ -237,10 +237,6 @@ export class QueryBuilder<T = Row> {
     this._from = { tiff: { paths: toArray(paths) } };
     return this;
   }
-  fromBbf(paths: string | string[]): this {
-    this._from = { bbf: { paths: toArray(paths) } };
-    return this;
-  }
 
   // -- projection --
   /** Adds projected items (column names, `column()`, `func()`, `literal()`). */

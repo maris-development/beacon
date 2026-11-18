@@ -211,8 +211,7 @@ export default defineConfig({
               items: [
                 { text: 'Query engine', link: '/docs/2.1.0-rc3/server/performance-tuning#beacon-query-engine-settings' },
                 { text: 'File statistics', link: '/docs/2.1.0-rc3/internals/file-statistics' },
-                { text: 'NetCDF', link: '/docs/2.1.0-rc3/server/performance-tuning#netcdf-tuning' },
-                { text: 'HDF5', link: '/docs/2.1.0-rc3/server/performance-tuning#hdf5-pure-rust-reader' },
+                { text: 'NetCDF and HDF5', link: '/docs/2.1.0-rc3/server/performance-tuning#netcdf-and-hdf5-reader' },
                 { text: 'Zarr', link: '/docs/2.1.0-rc3/server/performance-tuning#zarr-predicate-pushdown' },
                 { text: 'Atlas', link: '/docs/2.1.0-rc3/server/performance-tuning#atlas-tuning' },
               ]
@@ -242,7 +241,6 @@ export default defineConfig({
                 { text: 'Zarr', link: '/docs/2.1.0-rc3/formats/zarr' },
                 { text: 'Atlas', link: '/docs/2.1.0-rc3/formats/atlas' },
                 { text: 'GeoTIFF / COG', link: '/docs/2.1.0-rc3/formats/geotiff' },
-                { text: 'BBF', link: '/docs/2.1.0-rc3/formats/bbf' },
                 { text: 'Delta Lake', link: '/docs/2.1.0-rc3/formats/delta-lake' },
                 { text: 'Apache Iceberg', link: '/docs/2.1.0-rc3/formats/iceberg' },
                 { text: 'Icechunk', link: '/docs/2.1.0-rc3/formats/icechunk' },

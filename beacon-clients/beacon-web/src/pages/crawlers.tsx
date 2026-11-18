@@ -38,7 +38,6 @@ const FORMATS = [
   { value: "arrow", label: "Arrow" },
   { value: "odv", label: "ODV" },
   { value: "tiff", label: "GeoTIFF" },
-  { value: "bbf", label: "BBF" },
 ];
 
 function crawlerName(c: unknown): string {
