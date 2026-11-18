@@ -115,9 +115,6 @@ impl FromFormat {
         &self,
         session_context: &SessionContext,
     ) -> datafusion::error::Result<Arc<dyn TableSource>> {
-        // URLs first: a natively-read format needs the root store its location
-        // resolves against, so the format cannot be built until the paths are
-        // resolved. See `file_format`.
         let urls = self.listing_table_urls(session_context)?;
         let file_format = self.file_format(session_context).await?;
 

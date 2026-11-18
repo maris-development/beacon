@@ -1170,8 +1170,7 @@ mod format_tests {
         path: &std::path::Path,
     ) -> datafusion::error::Result<Arc<FastObjectTable>> {
         let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
-        let format = NetcdfFormat::new(Arc::new(ListingFactory::dynamic()), options)
-            ;
+        let format = NetcdfFormat::new(Arc::new(ListingFactory::dynamic()), options);
         FastObjectTable::try_new(&ctx.state(), Arc::new(format), vec![url])
             .await
             .map(Arc::new)

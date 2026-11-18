@@ -1,6 +1,6 @@
 # Beacon
 
-> Beacon is a high-performance, open-source (AGPL-3.0) data lakehouse query engine for scientific and climate data. Point it at existing files — NetCDF, Zarr, Parquet, GeoTIFF/COG, CSV, ODV ASCII, Arrow IPC, Atlas and BBF — on local storage or S3, and query them in place over SQL or a JSON API, with no data migration. Built in Rust on Apache Arrow and DataFusion.
+> Beacon is a high-performance, open-source (AGPL-3.0) data lakehouse query engine for scientific and climate data. Point it at existing files — NetCDF, Zarr, Parquet, GeoTIFF/COG, CSV, ODV ASCII, Arrow IPC and Atlas — on local storage or S3, and query them in place over SQL or a JSON API, with no data migration. Built in Rust on Apache Arrow and DataFusion.
 
 ## Documentation
 - [Introduction](https://maris-development.github.io/beacon/docs/1.8.0/introduction.html): What Beacon is and how a query flows through it.

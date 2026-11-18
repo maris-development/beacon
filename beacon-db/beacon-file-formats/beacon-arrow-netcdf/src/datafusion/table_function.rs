@@ -8,7 +8,6 @@ use datafusion::{catalog::TableFunctionImpl, common::plan_err, prelude::SessionC
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
-
 /// Format identity the NetCDF factory is registered under (its `get_ext`).
 const NETCDF_FORMAT: &str = "nc";
 

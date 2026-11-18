@@ -790,9 +790,7 @@ fn register_file_formats(
     builder: &RuntimeBuilder,
     session_ctx: &Arc<SessionContext>,
 ) -> anyhow::Result<Vec<Arc<dyn FileFormatFactoryExt>>> {
-    // The NetCDF factory resolves object paths to native reader paths through the
-    // `ListingFactory`, so it must already be registered (it is, as a session config
-    // extension built in `build_session_config`). Read it before taking the write lock.
+    // The format factories need the `ListingFactory`. Read it before taking the write lock.
     let listing_factory = session_ctx
         .state()
         .config()

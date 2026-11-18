@@ -103,7 +103,7 @@ async fn scan_reads_every_file_regardless_of_target_partitions() {
 
         if scanned != expected || counted != expected {
             failures.push(format!(
-                "target_partitions={tp}: scanned {scanned} ({} files), count(*) {counted},                  expected {expected}",
+                "target_partitions={tp}: scanned {scanned} ({} files), count(*) {counted}, expected {expected}",
                 scanned / per_file
             ));
         }
