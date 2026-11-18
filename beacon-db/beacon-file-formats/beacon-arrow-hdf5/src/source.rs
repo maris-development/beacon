@@ -135,15 +135,6 @@ impl FileSource for Hdf5Source {
 
     /// Whether a scan may split one file across partitions. It may.
     ///
-    /// This source is the `oxcdf` reader's, and only ever that one. A table on
-    /// netcdf-c never reaches here: `Hdf5FormatFactory` hands the whole call to
-    /// the netCDF factory when `use_rust_reader` is off, so it is served by
-    /// `NetCDFSource`, which declines the split because every netcdf-c call
-    /// queues on one process-global mutex. `Hdf5Format` has private fields and
-    /// one construction site, behind that same check, so the invariant is
-    /// structural rather than a convention. `only_the_rust_reader_splits_one_file`
-    /// in `tests/backend_parity.rs` holds it to that.
-    ///
     /// `oxcdf` range-reads through the object store and holds no lock, so the
     /// partitions of one file run at the same time. Nothing is divided by byte
     /// range: they take chunks from one shared queue, so no two of them read the

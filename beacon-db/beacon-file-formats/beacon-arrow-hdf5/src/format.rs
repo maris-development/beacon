@@ -1,10 +1,7 @@
 //! The HDF5 `FileFormat` and its factory.
 //!
-//! [`Hdf5FormatFactory`] owns the HDF5 identity and picks the reader. With
-//! `use_rust_reader` on — the default — it builds an [`Hdf5Format`], and keeps
-//! the netCDF format for writes. With it off it delegates every call to the
-//! netCDF factory, which is what this crate did before the Rust reader
-//! existed.
+//! [`Hdf5FormatFactory`] owns the HDF5 identity. It builds an [`Hdf5Format`],
+//! and keeps the netCDF format for writes.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,7 +44,6 @@ fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> 
 /// The per-table settings a `CREATE EXTERNAL TABLE ... OPTIONS (...)` clause
 /// can override, resolved against the runtime config.
 struct EffectiveOptions {
-    use_rust_reader: bool,
     enable_statistics: bool,
     read_dimensions: Option<Vec<String>>,
     /// Skip a file that does not fit `read_dimensions`, instead of failing.
@@ -59,12 +55,11 @@ struct EffectiveOptions {
 ///
 /// This factory supplies the HDF5 identity: the `STORED AS` name / `get_ext` it
 /// registers under and the `.h5`/`.hdf5` files it recognizes during discovery.
-/// It also picks the reader, from [`Hdf5Config::use_rust_reader`].
 #[derive(Debug, Clone)]
 pub struct Hdf5FormatFactory {
-    /// The netCDF factory: the fallback read path, and every write path.
+    /// The netCDF factory: every write path.
     inner: NetCDFFormatFactory,
-    /// The runtime settings, including which reader reads.
+    /// The runtime settings.
     config: Hdf5Config,
     /// The `get_ext` this instance registers under. DataFusion's native format
     /// registry keys a factory only by its single `get_ext`, so `h5` and `hdf5`
@@ -74,8 +69,7 @@ pub struct Hdf5FormatFactory {
 }
 
 impl Hdf5FormatFactory {
-    /// Wrap a netCDF factory, registering under the canonical `hdf5` name and
-    /// reading through the default reader.
+    /// Wrap a netCDF factory, registering under the canonical `hdf5` name.
     pub fn wrapping(inner: NetCDFFormatFactory) -> Self {
         Self::new(inner, Hdf5Config::default())
     }
@@ -100,39 +94,20 @@ impl Hdf5FormatFactory {
         &self.config
     }
 
-    /// The netCDF factory, pinned to netcdf-c.
-    ///
-    /// The fallback path delegates to the netCDF format, and that format picks
-    /// its own reader — the Rust one by default. A table that asked HDF5 for
-    /// netcdf-c has to get netcdf-c, so the reader is set here rather than
-    /// inherited from the netCDF setting. Neither format then depends on how the
-    /// other is configured.
-    fn netcdf_c(&self) -> NetCDFFormatFactory {
-        let mut factory = self.inner.clone();
-        factory.config.use_rust_reader = false;
-        factory
-    }
-
-    /// Whether a table built with `format_options` reads through the Rust
-    /// reader. The per-table `use_rust_reader` option wins over the runtime
-    /// default.
-    pub fn uses_rust_reader(
-        &self,
-        format_options: &HashMap<String, String>,
-    ) -> datafusion::error::Result<bool> {
-        match format_option(format_options, "use_rust_reader") {
-            Some(value) => parse_bool_option("use_rust_reader", value),
-            None => Ok(self.config.use_rust_reader),
-        }
-    }
-
     /// Resolve the per-table options against the runtime config.
     fn effective_options(
         &self,
         format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<EffectiveOptions> {
+        // A stored table can hold this option. It selects nothing.
+        if let Some(value) = format_option(format_options, "use_rust_reader") {
+            if !parse_bool_option("use_rust_reader", value)? {
+                tracing::warn!(
+                    "the HDF5 option 'use_rust_reader' has no effect; netcdf-c reads are removed"
+                );
+            }
+        }
         let mut options = EffectiveOptions {
-            use_rust_reader: self.uses_rust_reader(format_options)?,
             enable_statistics: self.config.enable_statistics,
             read_dimensions: None,
             skip_unbroadcastable: false,
@@ -203,21 +178,12 @@ impl FileFormatFactory for Hdf5FormatFactory {
         let mut options = self.effective_options(format_options)?;
         // A query never computes statistics. See `create_for_analysis`.
         options.enable_statistics = false;
-        // netcdf-c: hand the whole call to the netCDF factory, exactly as this
-        // crate did before a second reader existed.
-        if !options.use_rust_reader {
-            return self.netcdf_c().create(state, format_options);
-        }
         let writer = self.inner.create(state, format_options)?;
         Ok(Arc::new(self.build_format(options, writer)))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        if !self.config.use_rust_reader {
-            return self.netcdf_c().default();
-        }
         let options = EffectiveOptions {
-            use_rust_reader: true,
             // A query never computes statistics. See `create_for_analysis`.
             enable_statistics: false,
             read_dimensions: None,
@@ -233,45 +199,19 @@ impl FileFormatFactory for Hdf5FormatFactory {
 }
 
 impl FileFormatFactoryExt for Hdf5FormatFactory {
-    /// The Rust reader reads through the scan's object store, so it is complete
-    /// as it stands and no native root is needed — which is what lets an HDF5
-    /// table live in s3, gs or az. netcdf-c needs a resolver built from the root
-    /// store `url` resolves against, so that path stays with the netCDF factory.
-    fn create_with_native_root(
-        &self,
-        state: &dyn Session,
-        format_options: &HashMap<String, String>,
-        url: &ListingTableUrl,
-        listing: &ListingFactory,
-    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        if self.uses_rust_reader(format_options)? {
-            return self.create(state, format_options);
-        }
-        self.netcdf_c()
-            .create_with_native_root(state, format_options, url, listing)
-    }
-
     /// The same format, with statistics switched on.
     ///
     /// `infer_stats` opens the file and reads every coordinate array, so only
     /// the file analyzer asks for this. See
     /// [`FileFormatFactoryExt::create_for_analysis`].
-    ///
-    /// netcdf-c keeps its own answer: the netCDF factory decides what statistics
-    /// mean for the reader it owns.
     fn create_for_analysis(
         &self,
         state: &dyn Session,
         format_options: &HashMap<String, String>,
-        url: &ListingTableUrl,
-        listing: &ListingFactory,
+        _url: &ListingTableUrl,
+        _listing: &ListingFactory,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         let options = self.effective_options(format_options)?;
-        if !options.use_rust_reader {
-            return self
-                .netcdf_c()
-                .create_for_analysis(state, format_options, url, listing);
-        }
         let writer = self.inner.create(state, format_options)?;
         Ok(Arc::new(self.build_format(options, writer)))
     }
@@ -301,12 +241,7 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
         self.get_ext()
     }
 
-    /// HDF5 opts into the schema cache on its reader alone.
-    ///
-    /// The reader is in the fingerprint through the format's own type: this
-    /// factory hands back an [`Hdf5Format`] on the Rust reader and a
-    /// [`NetcdfFormat`] on netcdf-c, and the two walk different metadata. A
-    /// `NetcdfFormat` is fingerprinted by the netCDF factory, which owns it.
+    /// HDF5 opts into the schema cache.
     ///
     /// TODO(#367): cache a dimension-projected read as well. `read_dimensions`
     /// decides which arrays appear, so the same file has one schema per
@@ -315,10 +250,7 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
     /// names dimensions derives its schema, exactly as it did before the cache
     /// existed. The default read is cached.
     fn schema_options_fingerprint(&self, format: &dyn FileFormat) -> Option<u64> {
-        let Some(hdf5) = format.downcast_ref::<Hdf5Format>() else {
-            // netcdf-c reads this one. Ask the factory that built it.
-            return self.inner.schema_options_fingerprint(format);
-        };
+        let hdf5 = format.downcast_ref::<Hdf5Format>()?;
         if hdf5.read_dimensions().is_some() {
             return None;
         }
@@ -559,7 +491,7 @@ impl FileFormat for Hdf5Format {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetcdfConfig, ReaderBackend};
+    use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetcdfConfig};
     use datafusion::execution::session_state::SessionStateBuilder;
     use datafusion::prelude::SessionContext;
     use object_store::{path::Path, ObjectMeta};
@@ -635,98 +567,25 @@ mod tests {
 
     // ── The backend ────────────────────────────────────────────────────
 
-    /// The Rust reader by default: the factory builds its own format, and keeps
-    /// the netCDF one for writes.
+    /// The factory builds its own format, and keeps the netCDF one for writes.
     #[test]
-    fn the_default_reader_is_the_rust_one() {
+    fn the_factory_builds_an_hdf5_format() {
         let ctx = session();
         let f = factory("hdf5", Hdf5Config::default());
 
-        assert!(f.config().use_rust_reader);
         let format = f.create(&ctx.state(), &HashMap::new()).unwrap();
         assert!(format.downcast_ref::<Hdf5Format>().is_some());
         assert!(f.default().downcast_ref::<Hdf5Format>().is_some());
     }
 
-    /// The fallback hands the whole call to the netCDF format, which is what a
-    /// server saw before the Rust reader existed.
+    /// A stored table can still hold the option of the removed reader.
     #[test]
-    fn the_runtime_flag_selects_netcdf_c() {
+    fn the_removed_reader_option_does_not_change_the_format() {
         let ctx = session();
-        let f = factory(
-            "hdf5",
-            Hdf5Config {
-                use_rust_reader: false,
-                ..Hdf5Config::default()
-            },
-        );
-
-        let format = f.create(&ctx.state(), &HashMap::new()).unwrap();
-        assert!(format.downcast_ref::<NetcdfFormat>().is_some());
-        assert!(f
-            .default()
-            .downcast_ref::<NetcdfFormat>()
-            .is_some());
-    }
-
-    /// A per-table option wins over the runtime default, both ways.
-    #[test]
-    fn a_table_option_overrides_the_runtime_flag() {
-        let ctx = session();
-        let options =
-            |value: &str| HashMap::from([("use_rust_reader".to_string(), value.to_string())]);
-
-        let rust = factory("hdf5", Hdf5Config::default());
-        let format = rust.create(&ctx.state(), &options("false")).unwrap();
-        assert!(format.downcast_ref::<NetcdfFormat>().is_some());
-
-        let netcdf_c = factory(
-            "hdf5",
-            Hdf5Config {
-                use_rust_reader: false,
-                ..Hdf5Config::default()
-            },
-        );
-        let format = netcdf_c.create(&ctx.state(), &options("true")).unwrap();
-        assert!(format.downcast_ref::<Hdf5Format>().is_some());
-    }
-
-    /// The fallback reads through netcdf-c even when netCDF itself is set to the
-    /// Rust reader. Each format carries its own backend, so neither may inherit
-    /// the other's — the netCDF factory here is on its default, which is Rust.
-    #[test]
-    fn the_fallback_pins_netcdf_c_whatever_netcdf_is_set_to() {
-        let ctx = session();
-        let backend_of = |format: Arc<dyn FileFormat>| {
-            format
-                .downcast_ref::<NetcdfFormat>()
-                .expect("the fallback builds a NetcdfFormat")
-                .reader_backend()
-        };
-
-        // From the runtime setting.
-        let f = factory(
-            "hdf5",
-            Hdf5Config {
-                use_rust_reader: false,
-                ..Hdf5Config::default()
-            },
-        );
-        assert_eq!(
-            backend_of(f.create(&ctx.state(), &HashMap::new()).unwrap()),
-            ReaderBackend::NetcdfC
-        );
-        assert_eq!(backend_of(f.default()), ReaderBackend::NetcdfC);
-
-        // And from one table's option, on a runtime that reads HDF5 in Rust.
         let f = factory("hdf5", Hdf5Config::default());
-        let format = f
-            .create(
-                &ctx.state(),
-                &HashMap::from([("use_rust_reader".to_string(), "false".to_string())]),
-            )
-            .unwrap();
-        assert_eq!(backend_of(format), ReaderBackend::NetcdfC);
+        let options = HashMap::from([("use_rust_reader".to_string(), "false".to_string())]);
+        let format = f.create(&ctx.state(), &options).unwrap();
+        assert!(format.downcast_ref::<Hdf5Format>().is_some());
     }
 
     #[test]
