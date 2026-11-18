@@ -7,7 +7,6 @@ use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
 use crate::plugins::{PluginRegistry, PluginStatus};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
 use beacon_arrow_atlas::{AtlasFormatFactory, AtlasOptions};
-use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
 use beacon_arrow_hdf5::Hdf5Config;
@@ -360,14 +359,14 @@ impl RuntimeBuilder {
         // Formats and functions FIRST — before any persisted table is rebuilt.
         //
         // Startup recovery reconstructs each table from its stored definition, and an
-        // external table's definition names its format (`STORED AS BBF`), which is
+        // external table's definition names its format (`STORED AS ZARR`), which is
         // resolved through `SessionState::get_file_format_factory`. Register these
         // after recovery and only DataFusion's built-ins (CSV/Parquet/Arrow/JSON) are
-        // present, so every table in a *beacon* format — BBF, Atlas, Zarr, GeoTIFF,
+        // present, so every table in a *beacon* format — Atlas, Zarr, GeoTIFF,
         // GeoParquet, NetCDF, HDF5 — fails to rebuild with "Could not find FileFormat"
         // and is skipped, i.e. silently vanishes from the catalog on restart.
         // Table functions come along for the same reason: a persisted view's SQL can
-        // call `read_bbf(...)`, which must resolve while the view is being rebuilt.
+        // call `read_zarr(...)`, which must resolve while the view is being rebuilt.
         //
         // Neither depends on the catalog: both read only the session config
         // (`ListingFactory`, the `FileFormatRegistry` handle) set up with the session.
@@ -814,7 +813,6 @@ fn register_file_formats(
             ZarrFormatFactory::new(builder.zarr.clone()).with_output_dir(native_output_dir.clone()),
         ),
         Arc::new(AtlasFormatFactory::new(AtlasOptions::default())),
-        Arc::new(BBFFormatFactory),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
             listing_factory.clone(),

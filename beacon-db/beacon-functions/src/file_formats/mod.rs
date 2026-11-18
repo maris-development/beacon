@@ -64,10 +64,6 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
         )),
-        Arc::new(beacon_arrow_bbf::datafusion::ReadBBFFunc::new(
-            runtime_handle.clone(),
-            Arc::downgrade(&session_ctx),
-        )),
         Arc::new(beacon_arrow_odv::datafusion::ReadOdvAsciiFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),

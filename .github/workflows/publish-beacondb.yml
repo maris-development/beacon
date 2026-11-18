@@ -56,10 +56,8 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive # beacon-binary-format is a submodule, and ships in the sdist
 
       - name: Build sdist
         run: |
@@ -107,10 +105,8 @@ jobs:
             }
     runs-on: ${{ matrix.platform.runner }}
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive # beacon-binary-format is a submodule
 
       # The build needs protoc and cmake. It compiles netCDF, HDF5 and PROJ from source, so this
       # step installs none of the three. The build of PROJ also runs the `sqlite3` program, which

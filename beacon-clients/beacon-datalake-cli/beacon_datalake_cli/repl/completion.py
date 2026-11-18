@@ -35,7 +35,6 @@ SQL_KEYWORDS = sorted(
 TABLE_FUNCTIONS = sorted(
     [
         "read_arrow",
-        "read_bbf",
         "read_csv",
         "read_delta",
         "read_geoparquet",

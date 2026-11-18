@@ -101,8 +101,6 @@ pub enum FromFormat {
     Tiff { paths: Vec<String> },
     #[serde(rename = "zarr")]
     Zarr { paths: Vec<String> },
-    #[serde(rename = "bbf")]
-    Bbf { paths: Vec<String> },
 }
 
 impl FromFormat {
@@ -157,7 +155,6 @@ impl FromFormat {
             FromFormat::NetCDF { .. } => file_format_from_session(session_context, "nc", urls),
             FromFormat::Tiff { .. } => file_format_from_session(session_context, "tiff", urls),
             FromFormat::Zarr { .. } => file_format_from_session(session_context, "zarr", urls),
-            FromFormat::Bbf { .. } => file_format_from_session(session_context, "bbf", urls),
         }
     }
 
@@ -175,7 +172,6 @@ impl FromFormat {
             | FromFormat::Tiff { paths }
             | FromFormat::Odv { paths }
             | FromFormat::Zarr { paths, .. } => paths,
-            FromFormat::Bbf { paths } => paths,
         };
 
         let state = session_context.state();
@@ -282,12 +278,6 @@ fn file_format_from_session(
 //                 FromFormat::Zarr { paths: vec![] },
 //                 Arc::new(beacon_arrow_zarr::datafusion::ZarrFormatFactory),
 //             ),
-//             (
-//                 FromFormat::Bbf { paths: vec![] },
-//                 Arc::new(beacon_arrow_bbf::datafusion::BBFFormatFactory::new(
-//                     Default::default(),
-//                 )),
-//             ),
 //         ]
 //     }
 
@@ -338,7 +328,6 @@ fn file_format_from_session(
 //             FromFormat::NetCDF { paths: vec![] },
 //             FromFormat::Tiff { paths: vec![] },
 //             FromFormat::Zarr { paths: vec![] },
-//             FromFormat::Bbf { paths: vec![] },
 //         ] {
 //             assert!(
 //                 variant.file_format(&ctx).await.is_err(),
