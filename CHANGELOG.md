@@ -108,6 +108,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   `BEACON_FILE_STATS_TARGET_GROUP_FILES`, `BEACON_FILE_STATS_MIN_GROUP_FILES`,
   `BEACON_FILE_STATS_PREFIX_DEPTH`, `BEACON_FILE_STATS_SCAN_PREFIX`,
   `BEACON_FILE_STATS_DISCOVERY_CHUNK` and `BEACON_FILE_STATS_SCHEMA_CACHE` have no effect.
+- **The file statistics cache.** `view_dataset_statistics(path)`,
+  `view_external_table_statistics(table_name)` and `view_statistics_cache()` are gone. No table
+  filled their cache. `BEACON_STATS_CACHE_CAPACITY` has no effect. Use
+  `table_statistics('<table>')`.
 - **The netCDF-C reader.** Beacon reads NetCDF and HDF5 only with the pure-Rust reader.
   `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` have no effect. The table
   option `use_rust_reader` has no effect, and Beacon logs a warning for `'false'`.

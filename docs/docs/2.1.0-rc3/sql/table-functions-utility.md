@@ -82,55 +82,6 @@ SELECT file_name FROM list_datasets() WHERE file_format = 'nc'
 SELECT file_name FROM list_datasets('argo/**/*.parquet') ORDER BY file_name LIMIT 50
 ```
 
-## `view_dataset_statistics`
-
-```text
-view_dataset_statistics(path)
-```
-
-Returns the minimum and maximum of each column of one file. Beacon reads the statistics from the
-cache. If the cache holds nothing, Beacon computes them on demand.
-
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `column_name` | `TEXT` | The column name |
-| `data_type` | `TEXT` | The data type of the column |
-| `min_value` | `TEXT` | The minimum value. `NULL` if Beacon does not know it. |
-| `max_value` | `TEXT` | The maximum value. `NULL` if Beacon does not know it. |
-| `is_exact` | `BOOLEAN` | `true` if the statistics are exact |
-
-```sql
-SELECT * FROM view_dataset_statistics('argo/2024/R6900001.nc')
-```
-
-## `view_external_table_statistics`
-
-```text
-view_external_table_statistics(table_name)
-```
-
-Returns the statistics of every file under an external table. Use it to see which files have cached
-statistics. It also gives their value ranges.
-
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `path` | `TEXT` | The file path |
-| `file_size` | `UINT64` | The file size in bytes |
-| `cached` | `BOOLEAN` | `true` if the cache holds statistics for this file |
-| `column_name` | `TEXT` | The column name. `NULL` if the cache holds nothing. |
-| `data_type` | `TEXT` | The data type of the column |
-| `min_value` | `TEXT` | The minimum value |
-| `max_value` | `TEXT` | The maximum value |
-| `is_exact` | `BOOLEAN` | `true` if the statistics are exact |
-
-```sql
-SELECT * FROM view_external_table_statistics('ocean_profiles')
-
--- Find files with no cached statistics
-SELECT path FROM view_external_table_statistics('ocean_profiles')
-WHERE cached = false
-```
-
 ## `table_statistics`
 
 ```text
@@ -156,31 +107,4 @@ SELECT _path, "TEMP"['min'], "TEMP"['max'] FROM table_statistics('ocean_profiles
 
 -- Find files with no range for TEMP
 SELECT _path FROM table_statistics('ocean_profiles') WHERE "TEMP"['min'] IS NULL
-```
-
-## `view_statistics_cache`
-
-```text
-view_statistics_cache()
-```
-
-Streams every entry of the global file statistics cache. Beacon checks each row against the object
-store. The `is_valid` flag shows two things: the file still exists, and its size matches.
-
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `path` | `TEXT` | The file path |
-| `file_size` | `UINT64` | The file size in bytes |
-| `is_valid` | `BOOLEAN` | `true` if the cache entry is still valid |
-| `column_name` | `TEXT` | The column name |
-| `data_type` | `TEXT` | The data type of the column |
-| `min_value` | `TEXT` | The minimum value |
-| `max_value` | `TEXT` | The maximum value |
-| `is_exact` | `BOOLEAN` | `true` if the statistics are exact |
-
-```sql
-SELECT * FROM view_statistics_cache()
-
--- Find stale cache entries
-SELECT path FROM view_statistics_cache() WHERE is_valid = false
 ```

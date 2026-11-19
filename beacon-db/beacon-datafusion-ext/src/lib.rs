@@ -18,7 +18,6 @@ pub mod listing_url_resolver;
 pub mod nd;
 pub mod remote;
 pub mod scan_adapt;
-pub mod stats_cache;
 pub mod table_ext;
 pub mod type_widening;
 pub mod unique_values;
