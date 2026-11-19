@@ -57,7 +57,6 @@ async fn if_not_exists_skips_an_existing_table_with_an_old_name() {
     let db = Database::open(root.path().join("beacon.db"), options)
         .await
         .expect("open database");
-    let me = db.require_default_identity().unwrap();
 
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
     let batch =
@@ -69,13 +68,13 @@ async fn if_not_exists_skips_an_existing_table_with_an_old_name() {
         r#"CREATE TABLE IF NOT EXISTS "odd name" (id BIGINT)"#,
         r#"CREATE EXTERNAL TABLE IF NOT EXISTS "odd name" STORED AS CSV LOCATION 'obs/'"#,
     ] {
-        db.sql(statement, me.clone())
+        db.sql(statement)
             .await
             .unwrap_or_else(|error| panic!("should do nothing: {statement}: {error}"));
     }
 
     let rows: Vec<RecordBatch> = db
-        .sql(r#"SELECT id FROM "odd name""#, me)
+        .sql(r#"SELECT id FROM "odd name""#)
         .await
         .unwrap()
         .into_record_stream()

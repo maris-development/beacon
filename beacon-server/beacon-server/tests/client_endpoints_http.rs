@@ -18,7 +18,7 @@ use ::axum::{
     http::{header, Request, StatusCode},
     Router,
 };
-use beacon_core::runtime::Runtime;
+use beacon_server::Server;
 use common::{basic, config, ADMIN_PASSWORD, ADMIN_USERNAME};
 use futures::TryStreamExt;
 use serde_json::{json, Value};
@@ -38,11 +38,11 @@ async fn app(
 }
 
 /// Runs setup SQL directly against the runtime as the system identity.
-async fn seed(runtime: &Runtime, sql: &str) {
+async fn seed(runtime: &Server, sql: &str) {
     runtime
         .run_query(
             beacon_core::query::Query::sql(sql.to_string()),
-            beacon_core::AuthIdentity::system(),
+            beacon_auth::AuthIdentity::system(),
         )
         .await
         .unwrap_or_else(|e| panic!("seed failed: {sql}: {e}"))
@@ -140,11 +140,11 @@ async fn query_sql_select_streams_arrow_with_a_query_id() {
 async fn an_empty_result_still_carries_its_schema() {
     let (router, harness, _cfg) = app(config(false)).await;
     seed(
-        harness.server.runtime(),
+        &harness.server,
         "CREATE TABLE e (a BIGINT, s VARCHAR)",
     )
     .await;
-    seed(harness.server.runtime(), "INSERT INTO e VALUES (1, 'x')").await;
+    seed(&harness.server, "INSERT INTO e VALUES (1, 'x')").await;
 
     // Each of these returns zero rows, by a different route through the planner.
     for sql in [
@@ -207,8 +207,8 @@ async fn an_empty_result_still_carries_its_schema() {
 #[tokio::test(flavor = "multi_thread")]
 async fn query_json_body_runs() {
     let (router, harness, _cfg) = app(config(false)).await;
-    seed(harness.server.runtime(), "CREATE TABLE jq (a BIGINT)").await;
-    seed(harness.server.runtime(), "INSERT INTO jq VALUES (1), (2), (3)").await;
+    seed(&harness.server, "CREATE TABLE jq (a BIGINT)").await;
+    seed(&harness.server, "INSERT INTO jq VALUES (1), (2), (3)").await;
 
     let res = send(
         &router,
@@ -226,8 +226,8 @@ async fn query_json_body_runs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn query_with_csv_output_is_a_file_download() {
     let (router, harness, _cfg) = app(config(false)).await;
-    seed(harness.server.runtime(), "CREATE TABLE t (a BIGINT)").await;
-    seed(harness.server.runtime(), "INSERT INTO t VALUES (10), (20)").await;
+    seed(&harness.server, "CREATE TABLE t (a BIGINT)").await;
+    seed(&harness.server, "INSERT INTO t VALUES (10), (20)").await;
 
     let res = send(
         &router,
@@ -380,8 +380,8 @@ fn assert_pg_json_plan(body: &[u8]) {
 #[tokio::test(flavor = "multi_thread")]
 async fn explain_query_returns_a_pg_json_plan_without_executing() {
     let (router, harness, _cfg) = app(config(false)).await;
-    seed(harness.server.runtime(), "CREATE TABLE ex (a BIGINT)").await;
-    seed(harness.server.runtime(), "INSERT INTO ex VALUES (1), (2)").await;
+    seed(&harness.server, "CREATE TABLE ex (a BIGINT)").await;
+    seed(&harness.server, "INSERT INTO ex VALUES (1), (2)").await;
 
     let res = send(
         &router,
@@ -407,8 +407,8 @@ async fn explain_query_returns_a_pg_json_plan_without_executing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn explain_analyze_query_returns_a_plan_with_execution_metrics() {
     let (router, harness, _cfg) = app(config(false)).await;
-    seed(harness.server.runtime(), "CREATE TABLE an (a BIGINT)").await;
-    seed(harness.server.runtime(), "INSERT INTO an VALUES (1), (2), (3)").await;
+    seed(&harness.server, "CREATE TABLE an (a BIGINT)").await;
+    seed(&harness.server, "INSERT INTO an VALUES (1), (2), (3)").await;
 
     let res = send(
         &router,
@@ -498,8 +498,8 @@ async fn query_metrics_are_retrievable_by_query_id() {
 #[tokio::test(flavor = "multi_thread")]
 async fn query_metrics_go_only_to_the_owner_and_the_super_user() {
     let (router, harness, _cfg) = app(config(false)).await;
-    seed(harness.server.runtime(), "CREATE USER alice WITH PASSWORD 'pw'").await;
-    seed(harness.server.runtime(), "CREATE USER bob WITH PASSWORD 'pw'").await;
+    seed(&harness.server, "CREATE USER alice WITH PASSWORD 'pw'").await;
+    seed(&harness.server, "CREATE USER bob WITH PASSWORD 'pw'").await;
     let alice = basic("alice", "pw");
     let bob = basic("bob", "pw");
     let admin = basic(ADMIN_USERNAME, ADMIN_PASSWORD);
@@ -532,7 +532,7 @@ async fn query_metrics_go_only_to_the_owner_and_the_super_user() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_discovery_endpoints_reflect_a_created_table() {
     let (router, harness, _cfg) = app(config(false)).await;
-    seed(harness.server.runtime(), "CREATE TABLE obs (id BIGINT, name VARCHAR)").await;
+    seed(&harness.server, "CREATE TABLE obs (id BIGINT, name VARCHAR)").await;
 
     // /api/tables lists it.
     let tables = json(&send(&router, get("/api/tables", None)).await.body);
@@ -572,9 +572,9 @@ async fn table_discovery_endpoints_reflect_a_created_table() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_carries_the_comments() {
     let (router, harness, _cfg) = app(config(false)).await;
-    seed(harness.server.runtime(), "CREATE TABLE obs (id BIGINT, name VARCHAR)").await;
-    seed(harness.server.runtime(), "COMMENT ON TABLE obs IS 'observations'").await;
-    seed(harness.server.runtime(), "COMMENT ON COLUMN obs.name IS 'platform name'").await;
+    seed(&harness.server, "CREATE TABLE obs (id BIGINT, name VARCHAR)").await;
+    seed(&harness.server, "COMMENT ON TABLE obs IS 'observations'").await;
+    seed(&harness.server, "COMMENT ON COLUMN obs.name IS 'platform name'").await;
 
     let schema = json(&send(&router, get("/api/table-schema?table_name=obs", None)).await.body);
 
@@ -594,7 +594,7 @@ async fn table_schema_carries_the_comments() {
 #[tokio::test(flavor = "multi_thread")]
 async fn catalogs_endpoint_covers_every_schema_for_the_super_user_only() {
     let (router, harness, _cfg) = app(config(false)).await;
-    seed(harness.server.runtime(), "CREATE TABLE obs (id BIGINT, name VARCHAR)").await;
+    seed(&harness.server, "CREATE TABLE obs (id BIGINT, name VARCHAR)").await;
     let admin = basic(ADMIN_USERNAME, ADMIN_PASSWORD);
 
     let body = json(&send(&router, get("/api/catalogs", Some(&admin))).await.body);

@@ -1,13 +1,14 @@
 //! The `.dods` response: the DDS, `Data:\n`, then the XDR rows and the end marker.
 
 use std::future::ready;
+use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use axum::body::Body;
 use axum::response::Response;
 use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
-use beacon_core::AuthIdentity;
+use beacon_core::plan_validator::PlanValidator;
 use bytes::{Bytes, BytesMut};
 use futures::stream::Fuse;
 use futures::{stream, Stream, StreamExt};
@@ -24,11 +25,11 @@ use crate::xdr::{encode_rows, END_OF_SEQUENCE};
 /// The `.dods` response of `table` for the raw constraint `query`.
 pub(crate) async fn dods_response(
     runtime: &Runtime,
-    identity: AuthIdentity,
+    validator: Arc<dyn PlanValidator>,
     table: &str,
     query: &str,
 ) -> Result<Response, DapError> {
-    let (reference, schema) = load_schema(runtime, &identity, table).await?;
+    let (reference, schema) = load_schema(runtime, validator.as_ref(), table).await?;
     let constraint = constraint::parse(query)?;
     let compiled = compile::compile(&reference, &schema, &constraint)?;
     let columns: Vec<&ServedColumn> = compiled.columns.iter().collect();
@@ -37,7 +38,7 @@ pub(crate) async fn dods_response(
     let result = runtime
         .run_query(
             Query::sql_with_params(compiled.sql.clone(), compiled.params.clone()),
-            identity,
+            validator,
         )
         .await
         .map_err(|error| DapError::Query(error.to_string()))?;

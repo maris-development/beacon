@@ -14,9 +14,9 @@ use datafusion::{
 /// Produces the table's rows. Called once per scan, so a table always reflects the
 /// runtime's state at query time rather than at registration time.
 ///
-/// Async because some sources are (the auth directory reads through a provider
-/// that may be backed by storage); synchronous sources just return a ready future.
-pub(crate) type Snapshot = Arc<
+/// Async because some sources are (a table of the host application can read
+/// storage); synchronous sources just return a ready future.
+pub type Snapshot = Arc<
     dyn Fn() -> futures::future::BoxFuture<'static, DFResult<RecordBatch>> + Send + Sync,
 >;
 
@@ -28,13 +28,19 @@ pub(crate) type Snapshot = Arc<
 /// bounded number of retained query metrics) and keeps the tables free of any
 /// persistence concern — a persistent backing can replace the snapshot closure
 /// later without changing the SQL surface.
-pub(crate) struct SystemTable {
+pub struct SystemTable {
     schema: SchemaRef,
     snapshot: Snapshot,
 }
 
 impl SystemTable {
-    pub(crate) fn new(schema: SchemaRef, snapshot: Snapshot) -> Self {
+    /// Builds a table from its schema and the closure that gives its rows.
+    ///
+    /// # Arguments
+    ///
+    /// * `schema` - The fixed schema of the table
+    /// * `snapshot` - Gives the rows for one scan, as one batch with `schema`
+    pub fn new(schema: SchemaRef, snapshot: Snapshot) -> Self {
         Self { schema, snapshot }
     }
 }

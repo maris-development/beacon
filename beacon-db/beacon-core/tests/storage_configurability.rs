@@ -12,7 +12,6 @@ mod common;
 use beacon_core::query::Query;
 use beacon_core::query_result::QueryOutput;
 use beacon_core::runtime_builder::RuntimeBuilder;
-use beacon_core::AuthIdentity;
 use beacon_datafusion_ext::listing_factory::RootStore;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use futures::TryStreamExt;
@@ -86,7 +85,7 @@ async fn query_output_is_written_under_the_configured_tmp_dir() {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("a query with an output format should run");
 
@@ -106,7 +105,7 @@ async fn run(
     rt: &beacon_core::runtime::Runtime,
     sql: &str,
 ) -> Vec<arrow::record_batch::RecordBatch> {
-    rt.run_query(Query::sql(sql.to_string()), AuthIdentity::system())
+    rt.run_query(Query::sql(sql.to_string()), beacon_core::plan_validator::allow_all())
         .await
         .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))
         .into_record_stream()

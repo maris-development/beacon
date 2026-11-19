@@ -12,8 +12,6 @@
 //! [`LogicalPlan::Extension`]: datafusion::logical_expr::LogicalPlan::Extension
 
 mod actions;
-mod auth;
-mod authz;
 pub(crate) mod crawler;
 mod definition;
 pub(crate) mod functions;
@@ -21,6 +19,7 @@ mod logical;
 mod lower;
 pub(crate) mod materialized_view;
 mod physical;
+mod plan_facts;
 mod query_planner;
 mod stream_coalescer;
 
@@ -35,14 +34,14 @@ use datafusion::{
 };
 
 use crate::parser::statement::{
-    AttachStatement, AuthStatement, CompactTableStatement, CreateCrawlerStatement, CreateIndexStatement,
+    AttachStatement, CompactTableStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropIndexStatement, DropSecretStatement, RefreshStatement,
     AnalyzeFilesStatement, RunCrawlerStatement, ShowIndexesStatement,
     SummarizeStatement, InstallStatement, UninstallStatement,
 };
 
-pub(crate) use authz::{authorize_logical_plan, table_targets};
+pub use plan_facts::{FileLocation, PlanFacts, PlanRead, TableFacts};
 pub(crate) use stream_coalescer::CoalesceSqlStream;
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;
@@ -164,18 +163,6 @@ fn object_name_value(name: &datafusion::sql::sqlparser::ast::ObjectName) -> Stri
         })
         .collect::<Vec<_>>()
         .join(".")
-}
-
-/// Build the logical plan for an auth-management statement (CREATE/DROP USER/ROLE, GRANT/DENY/
-/// REVOKE). Lowered to an [`Extension`] node so it inherits the super-user gate in
-/// [`validate_query_plan`] (all beacon extension nodes are super-user-only).
-pub(crate) fn auth_plan(statement: AuthStatement) -> LogicalPlan {
-    let key = statement.to_string();
-    LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::AuthNode {
-            statement: logical::Keyed::new(key, statement),
-        }),
-    })
 }
 
 /// Build the logical plan for `CREATE MATERIALIZED VIEW <name> AS <query>`.
@@ -673,7 +660,6 @@ mod tests {
             BeaconStatement::Refresh(statement) => refresh_plan(statement),
             BeaconStatement::ShowCrawlers => show_crawlers_plan(),
             BeaconStatement::ShowIndexes(statement) => show_indexes_plan(statement),
-            BeaconStatement::Auth(statement) => auth_plan(statement),
             other => panic!("unexpected statement for `{sql}`: {other:?}"),
         }
     }
@@ -709,7 +695,6 @@ mod tests {
     #[test]
     fn extension_nodes_are_exportable_only_when_they_expose_columns() {
         assert!(!plan_produces_result_set(&beacon_plan("REFRESH t")));
-        assert!(!plan_produces_result_set(&beacon_plan("CREATE ROLE reader")));
 
         assert!(plan_produces_result_set(&beacon_plan("SHOW CRAWLERS")));
         assert!(plan_produces_result_set(&beacon_plan("SHOW INDEXES ON t")));
@@ -765,10 +750,10 @@ mod tests {
 
     /// `verify_plan` cannot see through an `Extension` node, so every beacon
     /// extension node needs the separate super-user check — without it, statements
-    /// such as `REFRESH` or auth DDL would pass validation for any user.
+    /// such as `REFRESH` would pass validation for any user.
     #[test]
     fn extension_nodes_are_super_user_only() {
-        for sql in ["REFRESH t", "CREATE ROLE reader", "SHOW CRAWLERS"] {
+        for sql in ["REFRESH t", "SHOW CRAWLERS"] {
             let plan = beacon_plan(sql);
             // The first gate lets these through: they are not DDL/DML/statements
             // as far as DataFusion is concerned...

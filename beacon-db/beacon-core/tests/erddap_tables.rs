@@ -146,7 +146,7 @@ async fn erddap_attributes_become_metadata_and_comments() {
 
     let schema = rt
         .runtime
-        .table_arrow_schema("bottles", &rt.admin().await)
+        .table_arrow_schema("bottles", rt.admin().as_ref())
         .await
         .unwrap();
     assert_eq!(
@@ -170,7 +170,7 @@ async fn erddap_attributes_become_metadata_and_comments() {
     let rt = rt.restart().await;
     let schema = rt
         .runtime
-        .table_arrow_schema("bottles", &rt.admin().await)
+        .table_arrow_schema("bottles", rt.admin().as_ref())
         .await
         .unwrap();
     let temperature = schema.field_with_name("temperature0").unwrap().metadata();

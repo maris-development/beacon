@@ -83,7 +83,7 @@ async fn delta_external_table_read_insert_time_travel_drop() {
 
     // DROP TABLE deregisters it (the underlying Delta files remain on disk).
     rt.sql(&format!("DROP TABLE {table}")).await;
-    let identity = rt.admin().await;
+    let identity = rt.admin();
     let err = rt
         .try_sql_as(&format!("SELECT count(*) FROM {table}"), identity)
         .await;

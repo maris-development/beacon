@@ -11,7 +11,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 
 /// Run SQL as a super-user (DDL/DML allowed) and collect the result batches.
 async fn run(rt: &TestRuntime, sql: &str) -> Vec<RecordBatch> {
-    rt.sql_as(sql, beacon_core::AuthIdentity::system()).await
+    rt.sql_as(sql, beacon_core::plan_validator::allow_all()).await
 }
 
 fn scalar_count(batches: &[RecordBatch]) -> i64 {
@@ -66,7 +66,7 @@ async fn lance_create_insert_update_delete() {
     let _ = rt
         .try_sql_as(
             &format!("DROP TABLE IF EXISTS {table}"),
-            beacon_core::AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await;
 
@@ -150,7 +150,7 @@ async fn lance_compact_table_merges_fragments_and_reclaims_versions() {
     let _ = rt
         .try_sql_as(
             &format!("DROP TABLE IF EXISTS {table}"),
-            beacon_core::AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await;
 
@@ -227,7 +227,7 @@ async fn lance_compact_table_merges_fragments_and_reclaims_versions() {
     let error = rt
         .try_sql_as(
             &format!("COMPACT TABLE {table} WITH ('target_rows' '10')"),
-            beacon_core::AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await
         .expect_err("an unknown option should be rejected");

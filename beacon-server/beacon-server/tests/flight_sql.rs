@@ -58,11 +58,11 @@ async fn spawn_server_with(
 }
 
 async fn run_sql_rows(
-    runtime: &beacon_core::runtime::Runtime,
+    runtime: &beacon_server::Server,
     sql: &str,
 ) -> Vec<arrow::array::RecordBatch> {
     runtime
-        .run_query(beacon_core::query::Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .run_query(beacon_core::query::Query::sql(sql.to_string()), beacon_auth::AuthIdentity::system())
         .await
         .expect("query should run")
         .into_record_stream()
@@ -90,7 +90,7 @@ async fn federated_remote_table_pushes_down_and_streams() {
     // Anonymous access on the remote: remote tables connect without credentials.
     let server = spawn_server(true).await;
     let port = server.addr.port();
-    let runtime = server.harness.server.runtime();
+    let runtime = &server.harness.server;
 
     // Unique names so the shared process-wide test state can't collide.
     let suffix = uuid::Uuid::new_v4().simple();
@@ -177,7 +177,7 @@ async fn run_local(
     db: &beacon_core::embedded::Database,
     sql: &str,
 ) -> Vec<arrow::array::RecordBatch> {
-    db.sql(sql.to_string(), beacon_core::AuthIdentity::local())
+    db.sql(sql.to_string())
         .await
         .expect("local query should run")
         .into_record_stream()
@@ -198,7 +198,7 @@ async fn attached_remote_catalog_resolves_and_queries_tables() {
     // Anonymous access on the remote: attach connects without credentials.
     let server = spawn_server(true).await;
     let port = server.addr.port();
-    let runtime = server.harness.server.runtime();
+    let runtime = &server.harness.server;
 
     let suffix = uuid::Uuid::new_v4().simple();
     let obs = format!("obs_{suffix}");
@@ -272,7 +272,6 @@ async fn attached_remote_catalog_resolves_and_queries_tables() {
         local
             .sql(
                 format!("SELECT * FROM remote.public.{obs}"),
-                beacon_core::AuthIdentity::local(),
             )
             .await
             .is_err(),
@@ -293,7 +292,7 @@ async fn sql_attach_and_detach_a_remote_catalog() {
 
     let server = spawn_server(true).await;
     let port = server.addr.port();
-    let runtime = server.harness.server.runtime();
+    let runtime = &server.harness.server;
 
     let suffix = uuid::Uuid::new_v4().simple();
     let obs = format!("obs_{suffix}");
@@ -331,7 +330,7 @@ async fn sql_attach_and_detach_a_remote_catalog() {
     assert!(local.attached_catalogs().is_empty());
     assert!(
         local
-            .sql("DETACH nope", beacon_core::AuthIdentity::local())
+            .sql("DETACH nope")
             .await
             .is_err(),
         "detaching an unattached catalog must error"
@@ -351,7 +350,7 @@ async fn attach_authenticates_with_username_and_password() {
     // Anonymous access disabled: the remote demands credentials.
     let server = spawn_server(false).await;
     let port = server.addr.port();
-    let runtime = server.harness.server.runtime();
+    let runtime = &server.harness.server;
 
     let suffix = uuid::Uuid::new_v4().simple();
     let obs = format!("obs_{suffix}");
@@ -414,7 +413,7 @@ async fn attach_uses_a_stored_beacon_secret() {
 
     let server = spawn_server(false).await;
     let port = server.addr.port();
-    let runtime = server.harness.server.runtime();
+    let runtime = &server.harness.server;
 
     let suffix = uuid::Uuid::new_v4().simple();
     let obs = format!("obs_{suffix}");
@@ -483,7 +482,7 @@ impl AttachedLake {
 
         let server = spawn_server(true).await;
         let port = server.addr.port();
-        let runtime = server.harness.server.runtime();
+        let runtime = &server.harness.server;
 
         let obs = format!("obs_{}", uuid::Uuid::new_v4().simple());
         run_sql_rows(runtime, &format!("CREATE TABLE {obs} (depth BIGINT, val DOUBLE)")).await;
@@ -511,7 +510,7 @@ impl AttachedLake {
     /// Run `sql` locally; fail with the query error when it does not run.
     async fn rows(&self, sql: &str) -> Vec<arrow::array::RecordBatch> {
         self.local
-            .sql(sql.to_string(), beacon_core::AuthIdentity::local())
+            .sql(sql.to_string())
             .await
             .unwrap_or_else(|error| panic!("`{sql}` should run: {error:#}"))
             .into_record_stream()
@@ -546,7 +545,7 @@ impl AttachedLake {
         );
         let result = self
             .local
-            .run_query(query, beacon_core::AuthIdentity::local())
+            .run_query(query)
             .await
             .unwrap_or_else(|error| panic!("`{sql}` with CSV output should run: {error:#}"));
         match result.query_output {
@@ -558,7 +557,7 @@ impl AttachedLake {
     }
 
     async fn drop(self) {
-        run_sql_rows(self.server.harness.server.runtime(), &format!("DROP TABLE {}", self.obs))
+        run_sql_rows(&self.server.harness.server, &format!("DROP TABLE {}", self.obs))
             .await;
         self.server.handle.abort();
     }
@@ -916,6 +915,91 @@ async fn unauthenticated_execute_is_rejected_when_anonymous_is_off() {
     server.handle.abort();
 }
 
+/// Flight SQL gives the engine the validator of the caller: a read needs a grant, and a user
+/// statement needs the super-user.
+#[tokio::test(flavor = "multi_thread")]
+async fn flight_reads_and_user_statements_follow_the_roles() {
+    let server = spawn_server_with(common::config(true), false).await;
+    let mut admin = client(server.addr).await;
+    admin
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+    // The super-user manages users and roles through Flight SQL.
+    for sql in [
+        "CREATE TABLE flight_open (a BIGINT)",
+        "CREATE TABLE flight_secret (a BIGINT)",
+        "CREATE ROLE reader",
+        "GRANT SELECT ON TABLE flight_open TO ROLE reader",
+        "CREATE USER alice WITH PASSWORD 'pw'",
+        "GRANT ROLE reader TO USER alice",
+    ] {
+        admin
+            .execute(sql.to_string(), None)
+            .await
+            .unwrap_or_else(|error| panic!("`{sql}` should run: {error}"));
+    }
+    let mut alice = client(server.addr).await;
+    alice.handshake("alice", "pw").await.unwrap();
+
+    let granted = alice
+        .execute("SELECT * FROM flight_open".to_string(), None)
+        .await;
+    let refused = alice
+        .execute("SELECT * FROM flight_secret".to_string(), None)
+        .await;
+    let escalation = alice
+        .execute("GRANT SELECT ON TABLE flight_secret TO ROLE reader".to_string(), None)
+        .await;
+    let still_refused = alice
+        .execute("SELECT * FROM flight_secret".to_string(), None)
+        .await;
+
+    assert!(granted.is_ok(), "a granted table reads: {granted:?}");
+    assert!(refused.is_err(), "a table without a grant is refused");
+    assert!(escalation.is_err(), "only the super-user changes the rules");
+    assert!(still_refused.is_err(), "the refused grant has no effect");
+
+    server.handle.abort();
+}
+
+/// A client that executes a user statement and then gets its ticket applies the statement once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_statement_runs_once_when_the_client_gets_the_ticket() {
+    let server = spawn_server(false).await;
+    let mut admin = client(server.addr).await;
+    admin
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+
+    let info = admin
+        .execute("CREATE USER once WITH PASSWORD 'pw'".to_string(), None)
+        .await
+        .expect("the statement runs");
+    let ticket = info.endpoint[0].ticket.clone().unwrap();
+    let batches = admin
+        .do_get(ticket)
+        .await
+        .expect("the ticket gives the empty result, not a second run")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the stream ends");
+    let mut prepared = admin
+        .prepare("CREATE ROLE once_role".to_string(), None)
+        .await
+        .expect("the prepare step does not run the statement");
+    let updated = prepared.execute_update().await;
+
+    assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+    assert!(server.harness.server.auth().user_exists("once").await);
+    assert!(updated.is_ok(), "the role is created once: {updated:?}");
+    let roles = server.harness.server.auth().list_roles();
+    assert_eq!(roles.len(), 1, "{roles:?}");
+
+    server.handle.abort();
+}
+
 /// Anonymous Flight access needs the anonymous user. With it off in the auth model, a caller
 /// without credentials is refused, not given a role-less context that reads everything.
 #[tokio::test(flavor = "multi_thread")]
@@ -936,7 +1020,7 @@ async fn anonymous_flight_access_needs_the_anonymous_user() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_over_a_managed_table_returns_the_rows() {
     let server = spawn_server(false).await;
-    let runtime = server.harness.server.runtime();
+    let runtime = &server.harness.server;
 
     // Seed a managed table directly against the shared runtime.
     let table = format!("fsql_{}", uuid::Uuid::new_v4().simple());
@@ -982,7 +1066,7 @@ async fn execute_over_a_managed_table_returns_the_rows() {
 #[tokio::test(flavor = "multi_thread")]
 async fn get_tables_metadata_includes_a_created_table() {
     let server = spawn_server(false).await;
-    let runtime = server.harness.server.runtime();
+    let runtime = &server.harness.server;
 
     let table = format!("meta_{}", uuid::Uuid::new_v4().simple());
     run_sql_rows(runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
@@ -1026,7 +1110,7 @@ async fn get_tables_metadata_includes_a_created_table() {
 #[tokio::test(flavor = "multi_thread")]
 async fn prepared_update_inserts_rows() {
     let server = spawn_server(false).await;
-    let runtime = server.harness.server.runtime();
+    let runtime = &server.harness.server;
 
     let table = format!("upd_{}", uuid::Uuid::new_v4().simple());
     run_sql_rows(runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;

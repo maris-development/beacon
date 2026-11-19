@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use arrow::array::{Array, Float64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use beacon_core::plugins::archive::sha256_hex;
-use beacon_core::AuthIdentity;
 use common::plugins::{
     example_plugin_dir, plugin_archive, put_plugin_folder, read_record, sql_manifest,
 };
@@ -313,7 +312,7 @@ async fn non_super_user_is_refused() {
         install_sql("demo", dir.path()),
         "UNINSTALL demo".to_string(),
     ] {
-        let error = match rt.try_sql_as(&sql, AuthIdentity::empty()).await {
+        let error = match rt.try_sql_as(&sql, common::unprivileged()).await {
             Ok(_) => panic!("expected `{sql}` to be refused"),
             Err(error) => format!("{error:#}"),
         };

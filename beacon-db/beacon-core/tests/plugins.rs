@@ -429,7 +429,7 @@ async fn system_plugins_is_refused_for_a_non_super_user() {
     let error = rt
         .try_sql_as(
             "SELECT * FROM beacon.system.plugins",
-            beacon_core::AuthIdentity::empty(),
+            common::unprivileged(),
         )
         .await
         .err()

@@ -78,43 +78,17 @@ If you must stay on Alpine, `apk add --no-cache build-base linux-headers hdf5-de
 sqlite` first, then `pip install beacondb`. musllinux wheels are expected to return; this is a
 temporary gap.
 
-## Auth is off by default
+## No users
 
-Opening a database locally needs no credentials and permits everything — the usual contract
-for a file-backed embedded database: **possession of the file is full control.**
-
-```python
-con = beacondb.connect("beacon.db")
-con.whoami()
-# {'username': 'local', 'roles': [], 'is_super_user': True, 'auth': False}
-```
-
-Pass `auth=True` to switch on beacon's RBAC. A session is then the anonymous, read-only
-principal until credentials are supplied:
-
-```python
-anon = beacondb.connect("beacon.db", auth=True,
-                        admin_username="admin", admin_password=...)
-anon.whoami()["username"]              # 'anonymous'
-anon.execute("CREATE TABLE t (a INT)") # NotPermittedError
-
-analyst = anon.connect_as(username="analyst", password=...)
-analyst.sql("SELECT * FROM t").df()    # allowed if granted
-```
-
-Supplying credentials with `auth=False` is an error, not a no-op — a connection that looks
-restricted but is not would be worse than a clear refusal.
-
-RBAC written into a database is **not** enforced when it is opened with `auth=False`. It is
-a boundary for *served* access (the `beacon-server` HTTP / Flight SQL transports), not
-against local possession of the file.
+The embedded database has no users. The process that opens the file has full access.
+The Beacon server owns users and roles.
 
 ## One file, one handle
 
 The container file is held under an exclusive lock, so one process opens one `beacon.db`.
 A second `connect()` to the same path in the same process returns the same underlying
 database (sharing its lock); from another process it raises `OperationalError`. Use
-`cursor()` for an independent result slot, and `connect_as()` for a different identity.
+`cursor()` for an independent result slot.
 
 `connect(read_only=True)` opens a **read-only** handle: every write — DDL/DML and beacon's
 side-effecting statements (`ATTACH`, `CREATE SECRET`, `INSERT`, …) — is refused, while `SELECT`
@@ -245,9 +219,8 @@ and travels with the file:
 con.register("kept", pd.DataFrame({"x": [1, 2, 3]}), persist=True)
 ```
 
-`persist=True` is real DDL: it needs write privileges (a super-user — the default with auth
-off) and refuses to overwrite an existing table (drop it first to replace). `register()` needs
-`pyarrow` installed either way.
+`persist=True` is real DDL: a read-only connection refuses it, and it refuses to overwrite an
+existing table (drop it first to replace). `register()` needs `pyarrow` installed either way.
 
 To add rows to an **existing** managed table, `con.append(name, frame)` (an `INSERT INTO`):
 
@@ -442,8 +415,9 @@ SQLAlchemy ecosystem — `pandas.read_sql`, reflection, notebooks, BI tools — 
 ```python
 from sqlalchemy import create_engine, text
 engine = create_engine("beacondb:///beacon.db")     # or "beacondb://" for in-memory
-# auth and options ride on the URL query:
-#   beacondb:///beacon.db?auth=true&username=u&password=p&datasets=/data
+# options ride on the URL query:
+#   beacondb:///beacon.db?read_only=true&datasets=/data
+# a user name or password in the URL raises an error: the embedded database has no users
 
 import pandas as pd
 pd.read_sql("SELECT platform, avg(temperature) AS t FROM obs GROUP BY platform", engine)

@@ -16,7 +16,7 @@ use datafusion::parquet::arrow::ArrowWriter;
 /// Try `SELECT count(*) FROM <table>`; returns `None` while the table does not
 /// exist yet (so we can poll for the scheduled crawl to register it).
 async fn try_count(rt: &TestRuntime, table: &str) -> Option<i64> {
-    let identity = rt.admin().await;
+    let identity = rt.admin();
     let batches = rt
         .try_sql_as(&format!("SELECT count(*) FROM {table}"), identity)
         .await

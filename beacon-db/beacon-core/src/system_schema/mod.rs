@@ -1,8 +1,8 @@
 //! `beacon.system`: runtime introspection exposed as ordinary SQL tables.
 //!
 //! What the runtime knows about itself that is not user data lives here — the
-//! auth directory and the recorded query metrics — so it is reachable through
-//! the one query endpoint rather than through a typed method on
+//! comments, the plugins and the recorded query metrics — so it is reachable
+//! through the one query endpoint rather than through a typed method on
 //! [`Runtime`](crate::runtime::Runtime) and a bespoke HTTP route per item.
 //!
 //! `query_metrics` is not a table of its own: it is the internal managed table
@@ -17,22 +17,24 @@
 //! Making one persistent later is a change of snapshot source, not of the SQL
 //! surface consumers see.
 //!
-//! Reads of this schema — like reads of `information_schema` — are
-//! **super-user-only, unconditionally** (see [`is_metadata_schema`] and
-//! `statement_plan::authz`). It describes the instance rather than holding user
-//! data: `users`/`roles`/`role_settings` are the auth directory, `query_metrics` carries the
-//! text and plans of queries other users ran, and `information_schema` names
-//! every table in every catalog. Regular callers enumerate the catalog through
-//! [`Runtime::visible_tables`](crate::runtime::Runtime::visible_tables), which
-//! returns only what their roles grant.
+//! A host application can add tables of its own with
+//! [`Runtime::register_system_table`](crate::runtime::Runtime::register_system_table).
+//! The server adds its users and roles this way.
+//!
+//! This schema and `information_schema` describe the instance rather than hold
+//! user data (see [`is_metadata_schema`]): `query_metrics` carries the text and
+//! plans of queries other users ran, and `information_schema` names every table
+//! in every catalog. A [`PlanValidator`](crate::plan_validator::PlanValidator)
+//! can refuse them through
+//! [`PlanFacts::metadata_surface`](crate::plan_validator::PlanFacts::metadata_surface).
 
-mod auth;
 mod comments;
 mod plugins;
 mod table;
 mod table_sizes;
 mod table_statistics;
 
+pub use table::{Snapshot, SystemTable};
 pub use table_statistics::TABLE_STATISTICS_FUNCTION;
 pub(crate) use table_statistics::{TableStatisticsFunc, TableStatisticsTable};
 
@@ -42,6 +44,7 @@ use datafusion::{
     catalog::{SchemaProvider, TableProvider},
     error::DataFusionError,
 };
+use parking_lot::RwLock;
 
 use crate::query_metrics_store::QUERY_METRICS_TABLE;
 use crate::statement_plan::{upgrade_session, SessionCell};
@@ -55,11 +58,6 @@ pub const INFORMATION_SCHEMA_NAME: &str = "information_schema";
 /// Whether `schema` is one of beacon's metadata schemas — this one or
 /// `information_schema`.
 ///
-/// Both are super-user-only, and unconditionally so: like the internal
-/// `__beacon_*` tables, a gate that depended on grant enforcement (which is off
-/// by default) would leave the auth directory and every table name in the
-/// instance readable on a default runtime.
-///
 /// Matched on the schema name alone, as beacon's other schema gates are, so an
 /// attached catalog's `information_schema` (or a schema it happens to call
 /// `system`) is covered too — erring toward hiding metadata rather than
@@ -72,38 +70,22 @@ pub fn is_metadata_schema(schema: &str) -> bool {
 /// The name `query_metrics` carries in this schema.
 const QUERY_METRICS: &str = "query_metrics";
 
-/// A fixed, read-only set of runtime-introspection tables.
+/// A read-only set of runtime-introspection tables.
 #[derive(Debug)]
 pub struct SystemSchemaProvider {
-    /// The snapshot tables built over live runtime state.
-    tables: HashMap<String, Arc<dyn TableProvider>>,
+    /// The snapshot tables built over live runtime state. The lock lets the host add tables
+    /// after the session exists.
+    tables: RwLock<HashMap<String, Arc<dyn TableProvider>>>,
     /// Late-filled weak handle to the session, used to resolve `query_metrics`
     /// to the managed table that backs it.
     session: SessionCell,
 }
 
 impl SystemSchemaProvider {
-    /// Builds the schema over the runtime's live state: the auth context that
-    /// owns users and roles, and the session through which `query_metrics`
-    /// resolves to its managed table and `table_sizes` reads the catalog.
-    pub fn new(
-        session: SessionCell,
-        auth: Arc<beacon_auth::AuthContext>,
-        plugins: Arc<crate::plugins::PluginRegistry>,
-    ) -> Self {
+    /// Builds the schema over the runtime's live state: the session through which
+    /// `query_metrics` resolves to its managed table and `table_sizes` reads the catalog.
+    pub fn new(session: SessionCell, plugins: Arc<crate::plugins::PluginRegistry>) -> Self {
         let mut tables: HashMap<String, Arc<dyn TableProvider>> = HashMap::new();
-        tables.insert(
-            "users".to_string(),
-            Arc::new(auth::users_table(auth.clone())),
-        );
-        tables.insert(
-            "roles".to_string(),
-            Arc::new(auth::roles_table(auth.clone())),
-        );
-        tables.insert(
-            "role_settings".to_string(),
-            Arc::new(auth::role_settings_table(auth)),
-        );
         tables.insert(
             "comments".to_string(),
             Arc::new(comments::comments_table(session.clone())),
@@ -116,7 +98,28 @@ impl SystemSchemaProvider {
             "plugins".to_string(),
             Arc::new(plugins::plugins_table(plugins)),
         );
-        Self { tables, session }
+        Self {
+            tables: RwLock::new(tables),
+            session,
+        }
+    }
+
+    /// Adds the table `name` of the host application.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the schema already holds a table with this name.
+    pub(crate) fn add_table(
+        &self,
+        name: &str,
+        table: Arc<dyn TableProvider>,
+    ) -> anyhow::Result<()> {
+        let mut tables = self.tables.write();
+        if name == QUERY_METRICS || tables.contains_key(name) {
+            anyhow::bail!("`{SYSTEM_SCHEMA_NAME}.{name}` already exists");
+        }
+        tables.insert(name.to_string(), table);
+        Ok(())
     }
 
     /// The managed table behind `query_metrics`, or `None` when it was never
@@ -133,24 +136,24 @@ impl SystemSchemaProvider {
 #[async_trait::async_trait]
 impl SchemaProvider for SystemSchemaProvider {
     fn table_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.tables.keys().cloned().collect();
+        let mut names: Vec<String> = self.tables.read().keys().cloned().collect();
         names.push(QUERY_METRICS.to_string());
         names.sort();
         names
     }
 
     fn table_exist(&self, name: &str) -> bool {
-        self.tables.contains_key(name) || name == QUERY_METRICS
+        self.tables.read().contains_key(name) || name == QUERY_METRICS
     }
 
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
         if name == QUERY_METRICS {
             return Ok(self.query_metrics_table().await);
         }
-        Ok(self.tables.get(name).cloned())
+        Ok(self.tables.read().get(name).cloned())
     }
 
-    /// The table set is fixed at construction; there is nothing to register.
+    /// SQL cannot register a table here; only the host application can add one.
     fn register_table(
         &self,
         name: String,

@@ -23,7 +23,7 @@ async fn output_bytes(tag: &str, output: serde_json::Value) -> Vec<u8> {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("query with an output format should run");
 
@@ -76,7 +76,7 @@ async fn nd_netcdf_output_writes_the_dimension_columns_as_dimensions() {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("an ND NetCDF query should run");
     let QueryOutput::File(file) = result.query_output else {
@@ -103,7 +103,7 @@ async fn netcdf_output(
     query.output = Some(serde_json::from_value(output).expect("valid output spec"));
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("the NetCDF query should run");
     let QueryOutput::File(file) = result.query_output else {
@@ -469,7 +469,7 @@ async fn geoparquet_output_uses_the_named_coordinate_columns() {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("the named coordinate columns should build the geometry");
     assert!(matches!(result.query_output, QueryOutput::File(_)));
@@ -502,7 +502,7 @@ async fn geoparquet_output_does_not_panic_and_is_a_real_parquet_file() {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("a GeoParquet COPY must not panic or error");
 
@@ -542,7 +542,7 @@ async fn zarr_output_is_a_zipped_flat_store_that_reads_back() {
     query.output = Some(serde_json::from_value(json!({ "format": "zarr" })).unwrap());
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("a zarr output query should run");
     let QueryOutput::File(file) = result.query_output else {

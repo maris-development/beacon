@@ -12,7 +12,7 @@ use std::{
 
 use arrow_flight::{BasicAuth, HandshakeRequest};
 use crate::server::Server;
-use beacon_core::{AuthIdentity, Credential};
+use beacon_auth::{AuthIdentity, Credential};
 use prost::Message;
 use tonic::{Request, Status};
 use uuid::Uuid;
@@ -102,7 +102,6 @@ impl Authenticator {
     /// in the auth model: without enforcement a role-less caller reads everything.
     async fn anonymous_context(&self) -> Result<AuthContext, Status> {
         self.runtime
-            .runtime()
             .authenticate_anonymous()
             .await
             .map(AuthContext::from_identity)
@@ -167,7 +166,6 @@ impl Authenticator {
     async fn authenticate(&self, username: &str, password: &str) -> Result<AuthContext, Status> {
         let identity = self
             .runtime
-            .runtime()
             .authenticate(&Credential::basic(username, password))
             .await
             .map_err(|_| Status::unauthenticated("invalid credentials"))?;

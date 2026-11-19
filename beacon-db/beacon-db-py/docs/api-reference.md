@@ -11,7 +11,7 @@ Three objects carry almost the whole surface:
 
 | Object | You get it from | What it is |
 | --- | --- | --- |
-| [`Connection`](#connection) | `beacondb.connect()` | An open database. Runs SQL, reads files, holds identity. |
+| [`Connection`](#connection) | `beacondb.connect()` | An open database. Runs SQL and reads files. |
 | [`Relation`](#relation) | `con.sql()`, `con.table()`, `con.read_*()` | A **lazy** query. It runs only at a terminal method. |
 | [`Result`](#result) | `con.json_query()` | An already-executed result set. |
 
@@ -32,9 +32,7 @@ The query runs at the first terminal call: `fetchall`, `df`, `arrow`, `record_ba
 
 ```python
 beacondb.connect(
-    database=":memory:", *, read_only=False, auth=False,
-    username=None, password=None, token=None,
-    admin_username=None, admin_password=None, anonymous=True,
+    database=":memory:", *, read_only=False,
     datasets=None, batch_size=None, memory_limit=None, cpu_limit=None,
     crawlers=False, secrets_key=None,
 ) -> Connection
@@ -44,16 +42,15 @@ beacondb.connect(
 | --- | --- | --- |
 | `database` | `":memory:"` | The path to a `beacon.db` file. Use `":memory:"` for a throwaway database in the process. Beacon creates a missing file. |
 | `read_only` | `False` | Refuse every write. This covers DDL, DML and statements with a side effect, such as `ATTACH`, `CREATE SECRET` and `INSERT`. `SELECT` and `SHOW` still work. |
-| `auth` | `False` | Switch the RBAC of Beacon on. With auth off, the file gives full control. See [Getting started](/docs/2.0.2/beacondb/python/getting-started#authentication). |
-| `username`, `password`, `token` | `None` | The credentials of your identity. They need `auth=True`. With auth off they give an error. Beacon does not ignore them. |
-| `admin_username`, `admin_password` | `None` | Create the super-user on a database without an auth store. |
-| `anonymous` | `True` | `True` lets the anonymous, read-only principal connect. |
 | `datasets` | `None` | The root directory for a relative dataset path. |
 | `batch_size` | `None` | The number of rows in each Arrow batch. A higher value gives more throughput. A lower value gives less latency. |
 | `memory_limit` | `None` | The soft memory budget of a query, in bytes. |
 | `cpu_limit` | `None` | The maximum number of worker threads. The default is the core count of the machine. |
 | `crawlers` | `False` | Switch the background dataset crawlers on. |
 | `secrets_key` | `None` | A base64 key of 32 bytes. It encrypts the persistent secrets. `$BEACON_SECRETS_KEY` also works. A persistent secret needs it, because Beacon never stores a plaintext credential. See [Secrets](/docs/2.0.2/beacondb/python/secrets). |
+
+The embedded database has no users, so `connect()` takes no credentials. The connection has full
+access. The Beacon server owns users and roles.
 
 ## `Connection`
 
@@ -99,7 +96,7 @@ method. A new function appears without a client update. Each reader returns a la
 
 | Method | Description |
 | --- | --- |
-| `register(name, obj, *, persist=False)` | Give a pandas, polars or pyarrow object a table name. Any Arrow object works. By default the table lives in the session only. Beacon holds it in memory and writes nothing to the file. `persist=True` writes it into `beacon.db` as a managed table. That is real DDL. It needs write privileges and does not overwrite. It needs `pyarrow`. |
+| `register(name, obj, *, persist=False)` | Give a pandas, polars or pyarrow object a table name. Any Arrow object works. By default the table lives in the session only. Beacon holds it in memory and writes nothing to the file. `persist=True` writes it into `beacon.db` as a managed table. That is real DDL. A read-only connection refuses it. It does not overwrite. It needs `pyarrow`. |
 | `append(name, obj)` | Run `INSERT INTO` on an existing managed table. It gives an error if the table does not exist. |
 | `unregister(name)` | Drop a table of the session. |
 
@@ -110,15 +107,6 @@ method. A new function appears without a client update. Each reader returns a la
 | `attach(name, url, *, token=None, username=None, password=None, secret=None, tls=False)` | Mirror the catalog of a remote Beacon Data Lake under `name`. You can then query every remote table as `name.schema.table`. You can also join it against local data. Beacon contacts the remote server at once. A bad endpoint therefore fails here, not at the first query. `secret=` names a `TYPE BEACON` secret instead of inline credentials. |
 | `detach(name)` | Remove the attached catalog. Returns `True` if it existed. |
 | `attached()` | The names of the attached catalogs. |
-
-### Identity
-
-| Method | Description |
-| --- | --- |
-| `connect_as(username=None, password=None, token=None)` | A new connection to the same database, with a different identity. |
-| `as_anonymous()` | A new connection as the anonymous, read-only principal. |
-| `whoami()` | A dict that describes the current principal: `username`, `roles`, `is_super_user` and `auth`. |
-| `auth_enabled` | `True` if RBAC is on for this connection. |
 
 ### Engine extras
 
@@ -215,20 +203,20 @@ Error
     ├── IntegrityError      a constraint was violated
     ├── InternalError       the engine reached an inconsistent state
     ├── ProgrammingError    bad SQL, wrong parameter count, missing table
-    │   └── NotPermittedError    authorization refusal
+    │   └── NotPermittedError    a read-only connection or a remote server refuses it
     └── NotSupportedError   a real feature that Beacon does not implement
 ```
 
 ::: warning `NotPermittedError` is not `PermissionError`
 `NotPermittedError` is a subclass of `ProgrammingError`. It is not a subclass of the built-in
-`PermissionError` of CPython. The built-in class therefore does not catch an authorization refusal.
+`PermissionError` of CPython. The built-in class therefore does not catch a `NotPermittedError`.
 :::
 
 The package also exports `Warning`, as PEP 249 requires.
 
 ## See also
 
-- [Getting started](/docs/2.0.2/beacondb/python/getting-started): connect, auth modes, read-only.
+- [Getting started](/docs/2.0.2/beacondb/python/getting-started): connect, first query, read-only.
 - [Querying](/docs/2.0.2/beacondb/python/querying): relations, readers, sinks and streams, with examples.
 - [Bring data in](/docs/2.0.2/beacondb/python/data-in): `register()` and `append()`.
 - [Remote catalogs](/docs/2.0.2/beacondb/python/remote-catalogs): `ATTACH` and pushdown.

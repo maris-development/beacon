@@ -66,6 +66,7 @@ prost = {workspace = true}
 object_store = { workspace = true }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
 sysinfo = { workspace = true }
 
 # Local dependencies
@@ -74,11 +75,12 @@ beacon-server-config = { path = "../beacon-server-config" }
 # turns PROJ on, and `--no-default-features` here reaches all the way down.
 beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
+beacon-auth = { path = "../beacon-auth" }
 beacon-mcp = { path = "../beacon-mcp" }
 beacon-dap = { path = "../beacon-dap" }
 
 [dev-dependencies]
-# Tests build runtimes directly via `RuntimeBuilder`, so no test-only feature is
+# Tests open a `Server` and read engine types directly, so no test-only feature is
 # needed.
 beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 # The test harness roots each lake in a temp dir; the library itself never does.

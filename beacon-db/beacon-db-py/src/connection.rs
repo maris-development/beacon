@@ -1,9 +1,8 @@
 //! `connect()` and the `Connection` object.
 //!
-//! A connection is an open [`Database`] plus one [`AuthIdentity`] and one result slot. The
-//! database is shared (`Arc`) and the identity is not, which is what lets several connections
-//! with different identities exist over a single container file — the file allows exactly one
-//! handle per process, so per-connection identity is the only way to have more than one.
+//! A connection is an open [`Database`] plus one result slot. The database is shared (`Arc`).
+//! The container file allows one handle per process, so all connections to it share that handle.
+//! Each connection has full access to the database.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -11,15 +10,12 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 
 use arrow::array::AsArray;
 
-use beacon_core::embedded::{AuthMode, Database, DbPath, OpenOptions};
+use beacon_core::embedded::{Database, DbPath, OpenOptions};
 use beacon_core::query::{InnerQuery, Query};
-use beacon_core::{AuthIdentity, Credential};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::errors::{
-    interface_error, map_engine_error, programming_error, NotPermittedError, OperationalError,
-};
+use crate::errors::{interface_error, map_engine_error, programming_error, NotPermittedError};
 use crate::exec::{run_query_collected, run_sql};
 use crate::relation::{quote_ident, Relation};
 use crate::result::ResultSet;
@@ -62,37 +58,12 @@ fn database_key(path: &Path) -> PyResult<PathBuf> {
 }
 
 /// Opens `path`, or returns the already-open database for it.
-fn open_or_attach(
-    py: Python<'_>,
-    path: &Path,
-    options: OpenOptions,
-    auth_requested: bool,
-) -> PyResult<Arc<Database>> {
+fn open_or_attach(py: Python<'_>, path: &Path, options: OpenOptions) -> PyResult<Arc<Database>> {
     let key = database_key(path)?;
 
     {
         let registry = OPEN_DATABASES.lock().expect("database registry poisoned");
         if let Some(existing) = registry.get(&key).and_then(Weak::upgrade) {
-            // The mode belongs to the open handle, not to the file, so a second connection
-            // cannot quietly get different rules than it asked for.
-            if existing.auth_enabled() != auth_requested {
-                return Err(programming_error(format!(
-                    "`{}` is already open in this process with auth {}; a connection cannot \
-                     change the mode of an open database. Close the existing connection first, \
-                     or open with auth={}.",
-                    key.display(),
-                    if existing.auth_enabled() {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    },
-                    if existing.auth_enabled() {
-                        "True"
-                    } else {
-                        "False"
-                    },
-                )));
-            }
             return Ok(existing);
         }
     }
@@ -113,11 +84,10 @@ fn open_or_attach(
     Ok(database)
 }
 
-/// An open connection: a database, an identity, and the last statement's result.
+/// An open connection: a database and the last statement's result.
 #[pyclass(module = "beacondb", name = "Connection")]
 pub struct Connection {
     database: Option<Arc<Database>>,
-    identity: AuthIdentity,
     last_result: Option<ResultSet>,
 }
 
@@ -130,23 +100,16 @@ impl Connection {
 
     /// Runs a statement and collects its result, with the GIL released for the duration.
     fn run(&self, py: Python<'_>, sql: String) -> PyResult<ResultSet> {
-        run_sql(py, self.database()?, &self.identity, sql)
+        run_sql(py, self.database()?, sql)
     }
 
-    /// Refuse a mutating convenience method (`attach`/`detach`) that bypasses the engine's query
-    /// path: on a read-only connection, or when auth is enabled and this session is not a
-    /// super-user — matching the gates the SQL path already applies to `ATTACH`/`CREATE SECRET` and
-    /// other writes. With auth off and read-write, every session may write.
+    /// Refuses `attach`/`detach` on a read-only connection.
+    ///
+    /// These methods do not use the engine query path, so they apply the read-only check here.
     fn require_writer(&self) -> PyResult<()> {
-        let database = self.database()?;
-        if database.is_read_only() {
+        if self.database()?.is_read_only() {
             return Err(NotPermittedError::new_err(
                 "this database was opened read-only; writes are not permitted on this connection",
-            ));
-        }
-        if database.auth_enabled() && !self.identity.is_super_user {
-            return Err(NotPermittedError::new_err(
-                "this operation requires super-user privileges",
             ));
         }
         Ok(())
@@ -177,7 +140,7 @@ impl Connection {
             let conn = slf.borrow();
             let database = conn.database()?.clone();
             let (sql, params) = crate::params::prepare(query, parameters.as_ref())?;
-            crate::exec::run_sql_with_params(py, &database, &conn.identity, sql, params)?
+            crate::exec::run_sql_with_params(py, &database, sql, params)?
         };
         slf.borrow_mut().last_result = Some(result);
         Ok(slf)
@@ -206,7 +169,7 @@ impl Connection {
                 let conn = slf.borrow();
                 let database = conn.database()?.clone();
                 let (sql, params) = crate::params::prepare(query, Some(&row))?;
-                crate::exec::run_sql_with_params(py, &database, &conn.identity, sql, params)?
+                crate::exec::run_sql_with_params(py, &database, sql, params)?
             };
             last = Some(result);
         }
@@ -218,11 +181,7 @@ impl Connection {
     /// (`fetchall`, `arrow`, `df`, …) is called, so the relation can be filtered/projected/
     /// ordered further before execution.
     fn sql(&self, query: &str) -> PyResult<Relation> {
-        Ok(Relation::from_query(
-            self.database()?.clone(),
-            self.identity.clone(),
-            query,
-        ))
+        Ok(Relation::from_query(self.database()?.clone(), query))
     }
 
     /// Alias for [`Connection::sql`], for familiarity with other embedded engines.
@@ -238,10 +197,9 @@ impl Connection {
     /// see it), and re-registering the name replaces it.
     ///
     /// With `persist=True` the data is written into `beacon.db` as a managed table instead, so it
-    /// survives a reopen and travels with the file. That is real DDL: it needs the connection's
-    /// identity to have write privileges (a super-user — the default with auth off), and it
-    /// fails if `name` already exists (drop it first rather than silently overwriting on-disk
-    /// data). Needs `pyarrow` installed either way.
+    /// survives a reopen and travels with the file. That is real DDL, so a read-only connection
+    /// refuses it. It fails if `name` already exists (drop it first rather than silently
+    /// overwriting on-disk data). Needs `pyarrow` installed either way.
     #[pyo3(signature = (name, obj, *, persist=false))]
     fn register<'py>(
         slf: Bound<'py, Self>,
@@ -256,9 +214,8 @@ impl Connection {
         let database = conn.database()?.clone();
         let name = name.to_string();
         if persist {
-            let identity = conn.identity.clone();
             block_on(py, async move {
-                database.persist_batches(&name, schema, batches, identity).await
+                database.persist_batches(&name, schema, batches).await
             })?
             .map_err(map_engine_error)?;
         } else {
@@ -272,10 +229,9 @@ impl Connection {
     }
 
     /// Appends a pandas / pyarrow / polars frame (or any Arrow object) to an **existing** managed
-    /// table `name`, and returns the connection so the call chains. This is `INSERT INTO name …`, so
-    /// it needs write privileges (a super-user — the default with auth off), fails if `name` does
-    /// not exist or its columns are incompatible, and is refused on a read-only connection. Needs
-    /// `pyarrow` installed.
+    /// table `name`, and returns the connection so the call chains. This is `INSERT INTO name …`.
+    /// It fails if `name` does not exist or its columns are incompatible, and is refused on a
+    /// read-only connection. Needs `pyarrow` installed.
     fn append<'py>(
         slf: Bound<'py, Self>,
         name: &str,
@@ -286,10 +242,9 @@ impl Connection {
 
         let conn = slf.borrow();
         let database = conn.database()?.clone();
-        let identity = conn.identity.clone();
         let name = name.to_string();
         block_on(py, async move {
-            database.append_batches(&name, schema, batches, identity).await
+            database.append_batches(&name, schema, batches).await
         })?
         .map_err(map_engine_error)?;
         drop(conn);
@@ -321,15 +276,14 @@ impl Connection {
             .import("json")?
             .call_method1("dumps", (spec,))?
             .extract::<String>()?;
-        let inner: InnerQuery = serde_json::from_str(&json).map_err(|e| {
-            programming_error(format!("not a valid beacon JSON query: {e}"))
-        })?;
+        let inner: InnerQuery = serde_json::from_str(&json)
+            .map_err(|e| programming_error(format!("not a valid beacon JSON query: {e}")))?;
         let query = Query {
             inner,
             output: None,
             params: Vec::new(),
         };
-        run_query_collected(py, self.database()?, &self.identity, query)
+        run_query_collected(py, self.database()?, query)
     }
 
     /// The registered scalar, aggregate, and window functions, as a lazy [`Relation`]
@@ -340,7 +294,6 @@ impl Connection {
     fn functions(&self) -> PyResult<Relation> {
         Ok(Relation::from_query(
             self.database()?.clone(),
-            self.identity.clone(),
             "SELECT DISTINCT routine_name AS function_name, function_type, \
                     data_type AS return_type, description, syntax_example \
              FROM information_schema.routines",
@@ -360,11 +313,7 @@ impl Connection {
             ),
             None => "SELECT * FROM beacon.system.query_metrics".to_string(),
         };
-        Ok(Relation::from_query(
-            self.database()?.clone(),
-            self.identity.clone(),
-            &sql,
-        ))
+        Ok(Relation::from_query(self.database()?.clone(), &sql))
     }
 
     /// The names of the user tables and views in the default schema.
@@ -443,11 +392,7 @@ impl Connection {
 
     /// A lazy [`Relation`] over a catalog table or view.
     fn table(&self, name: &str) -> PyResult<Relation> {
-        Ok(Relation::over(
-            self.database()?.clone(),
-            self.identity.clone(),
-            quote_ident(name),
-        ))
+        Ok(Relation::over(self.database()?.clone(), quote_ident(name)))
     }
 
     /// Alias of [`Self::table`], for familiarity with other embedded engines.
@@ -532,13 +477,9 @@ impl Connection {
                     .map(|column| quote_ident(column))
                     .collect::<Vec<_>>()
                     .join(", ");
-                Relation::from_query(
-                    database,
-                    self.identity.clone(),
-                    &format!("SELECT {projected} FROM {call}"),
-                )
+                Relation::from_query(database, &format!("SELECT {projected} FROM {call}"))
             }
-            _ => Relation::over(database, self.identity.clone(), call),
+            _ => Relation::over(database, call),
         };
         Ok(relation)
     }
@@ -608,70 +549,8 @@ impl Connection {
     fn cursor(&self) -> PyResult<Self> {
         Ok(Self {
             database: Some(self.database()?.clone()),
-            identity: self.identity.clone(),
             last_result: None,
         })
-    }
-
-    /// A connection to the same database under a different identity.
-    ///
-    /// Only meaningful with auth enabled: with auth disabled there is no identity to switch to,
-    /// every session is already the local super-user.
-    #[pyo3(signature = (username=None, password=None, token=None))]
-    fn connect_as(
-        &self,
-        py: Python<'_>,
-        username: Option<&str>,
-        password: Option<&str>,
-        token: Option<&str>,
-    ) -> PyResult<Self> {
-        let database = self.database()?.clone();
-        let credential = build_credential(username, password, token)?.ok_or_else(|| {
-            programming_error("connect_as() needs either username and password, or token")
-        })?;
-        let identity = authenticate(py, &database, &credential)?;
-        Ok(Self {
-            database: Some(database),
-            identity,
-            last_result: None,
-        })
-    }
-
-    /// A connection to the same database as the anonymous principal.
-    fn as_anonymous(&self) -> PyResult<Self> {
-        let database = self.database()?.clone();
-        if !database.auth_enabled() {
-            return Err(programming_error(
-                "this database was opened with auth disabled, so there is no anonymous \
-                 principal: every session is the local super-user",
-            ));
-        }
-        let identity = database
-            .require_default_identity()
-            .map_err(map_engine_error)?;
-        Ok(Self {
-            database: Some(database),
-            identity,
-            last_result: None,
-        })
-    }
-
-    /// The resolved identity and the mode it was resolved under.
-    ///
-    /// Worth calling in a notebook before wondering why a statement was refused: it answers
-    /// "who am I and what may I do?" in one line.
-    fn whoami<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let dict = PyDict::new(py);
-        dict.set_item("username", &self.identity.username)?;
-        dict.set_item("roles", self.identity.roles.clone())?;
-        dict.set_item("is_super_user", self.identity.is_super_user)?;
-        dict.set_item("auth", self.database()?.auth_enabled())?;
-        Ok(dict)
-    }
-
-    #[getter]
-    fn auth_enabled(&self) -> PyResult<bool> {
-        Ok(self.database()?.auth_enabled())
     }
 
     /// Closes this connection. The database (and the container file's lock) is released once
@@ -711,9 +590,12 @@ impl Connection {
         match &self.database {
             None => "<beacondb.Connection closed>".to_string(),
             Some(database) => format!(
-                "<beacondb.Connection user={} auth={}>",
-                self.identity.username,
-                if database.auth_enabled() { "on" } else { "off" }
+                "<beacondb.Connection read_only={}>",
+                if database.is_read_only() {
+                    "True"
+                } else {
+                    "False"
+                }
             ),
         }
     }
@@ -735,7 +617,10 @@ const TABLE_FUNCTIONS: &[(&str, &[&str])] = &[
     ("read_arrow", &["glob_paths"]),
     ("read_arrow_schema", &["glob_paths"]),
     ("read_csv", &["glob_paths", "delimiter", "infer_records"]),
-    ("read_csv_schema", &["glob_paths", "delimiter", "infer_records"]),
+    (
+        "read_csv_schema",
+        &["glob_paths", "delimiter", "infer_records"],
+    ),
     ("read_delta", &["location"]),
     ("read_delta_schema", &["location"]),
     ("read_geoparquet", &["glob_paths"]),
@@ -798,9 +683,9 @@ fn extract_columns(value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     if let Ok(single) = value.extract::<String>() {
         return Ok(vec![single]);
     }
-    value.extract::<Vec<String>>().map_err(|_| {
-        programming_error("`columns` must be a column name or a list of column names")
-    })
+    value
+        .extract::<Vec<String>>()
+        .map_err(|_| programming_error("`columns` must be a column name or a list of column names"))
 }
 
 /// Collects the first column of a single-column `Utf8` result into a `Vec<String>`.
@@ -814,66 +699,20 @@ fn string_column(result: &ResultSet) -> Vec<String> {
     values
 }
 
-fn build_credential(
-    username: Option<&str>,
-    password: Option<&str>,
-    token: Option<&str>,
-) -> PyResult<Option<Credential>> {
-    if token.is_some() && (username.is_some() || password.is_some()) {
-        return Err(programming_error(
-            "pass either username/password or token, not both",
-        ));
-    }
-    match (username, password, token) {
-        (None, None, None) => Ok(None),
-        (_, _, Some(token)) => Ok(Some(Credential::bearer(token))),
-        (Some(username), Some(password), None) => Ok(Some(Credential::basic(username, password))),
-        (Some(_), None, None) => Err(programming_error("username given without a password")),
-        (None, Some(_), None) => Err(programming_error("password given without a username")),
-    }
-}
-
-/// Resolves a credential, classifying failures by *what was attempted* rather than by
-/// matching on the engine's message.
-///
-/// Everything reaching here is an authentication attempt, so a rejected credential is an
-/// `OperationalError` — the same class psycopg raises for a bad password, and the one DB-API
-/// consumers already treat as "could not establish this session". Only the mode check is the
-/// caller's mistake.
-fn authenticate(
-    py: Python<'_>,
-    database: &Arc<Database>,
-    credential: &Credential,
-) -> PyResult<AuthIdentity> {
-    if !database.auth_enabled() {
-        return Err(programming_error(
-            "this database was opened with auth disabled, so credentials cannot be used: every \
-             session already has full access. Reopen with auth=True to authenticate users.",
-        ));
-    }
-    let database = database.clone();
-    let credential = credential.clone();
-    block_on(py, async move { database.authenticate(&credential).await })?
-        .map_err(|err| OperationalError::new_err(format!("{err:#}")))
-}
-
 /// Opens a beacon database.
 ///
-/// `database` is `":memory:"` or the path of a container file. With `auth=False` (the default)
-/// the session is a local super-user and no credentials are accepted; with `auth=True` it is
-/// the anonymous principal unless credentials are supplied.
+/// `database` is `":memory:"` or the path of a container file. The embedded database has no
+/// users, so the connection has full access. `read_only=True` refuses every write.
+///
+/// # Errors
+///
+/// Raises `ProgrammingError` for a bad argument, and `OperationalError` or `DatabaseError` when
+/// the engine cannot open the database (for example, another process holds the file lock).
 #[pyfunction]
 #[pyo3(signature = (
     database = ":memory:",
     *,
     read_only = false,
-    auth = false,
-    username = None,
-    password = None,
-    token = None,
-    admin_username = None,
-    admin_password = None,
-    anonymous = true,
     datasets = None,
     batch_size = None,
     memory_limit = None,
@@ -886,13 +725,6 @@ pub fn connect(
     py: Python<'_>,
     database: &str,
     read_only: bool,
-    auth: bool,
-    username: Option<&str>,
-    password: Option<&str>,
-    token: Option<&str>,
-    admin_username: Option<&str>,
-    admin_password: Option<&str>,
-    anonymous: bool,
     datasets: Option<&str>,
     batch_size: Option<usize>,
     memory_limit: Option<usize>,
@@ -900,39 +732,7 @@ pub fn connect(
     crawlers: bool,
     secrets_key: Option<&str>,
 ) -> PyResult<Connection> {
-    let credential = build_credential(username, password, token)?;
-    if !auth && credential.is_some() {
-        return Err(programming_error(
-            "credentials were supplied but auth is disabled, so they would have no effect. \
-             Open with auth=True to authenticate, or drop the credentials — with auth=False \
-             every session already has full access.",
-        ));
-    }
-    if !auth && (admin_username.is_some() || admin_password.is_some()) {
-        return Err(programming_error(
-            "admin_username/admin_password only apply when auth=True",
-        ));
-    }
-
-    let auth_mode = if auth {
-        let mut mode = match (admin_username, admin_password) {
-            (Some(user), Some(pass)) => AuthMode::enabled_with_admin(user, pass),
-            (None, None) => AuthMode::enabled(),
-            _ => {
-                return Err(programming_error(
-                    "admin_username and admin_password must be given together",
-                ))
-            }
-        };
-        if !anonymous {
-            mode = mode.without_anonymous();
-        }
-        mode
-    } else {
-        AuthMode::Disabled
-    };
-
-    let mut options = OpenOptions::new().with_auth(auth_mode).with_read_only(read_only);
+    let mut options = OpenOptions::new().with_read_only(read_only);
     options.crawlers.enable = crawlers;
     if let Some(size) = batch_size {
         options = options.with_batch_size(size);
@@ -962,19 +762,11 @@ pub fn connect(
             .map_err(map_engine_error)?;
             Arc::new(opened)
         }
-        DbPath::File(path) => open_or_attach(py, &path, options, auth)?,
-    };
-
-    let identity = match credential {
-        Some(credential) => authenticate(py, &database, &credential)?,
-        None => database
-            .require_default_identity()
-            .map_err(map_engine_error)?,
+        DbPath::File(path) => open_or_attach(py, &path, options)?,
     };
 
     Ok(Connection {
         database: Some(database),
-        identity,
         last_result: None,
     })
 }

@@ -23,12 +23,11 @@ use beacon_core::query::Query;
 use beacon_core::query_result::QueryOutput;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
-use beacon_core::AuthIdentity;
 use futures::TryStreamExt;
 use tempfile::TempDir;
 
 /// A bare runtime in dynamic storage mode: no default store, in-memory tables,
-/// a default tmp dir. Auth is off, so queries run as the system identity.
+/// a default tmp dir. Queries run with full access.
 /// A bare runtime — no configured stores — with a tmp directory of its own.
 ///
 /// The tmp directory matters: building a runtime sweeps leftover `beacon_out_*`
@@ -46,7 +45,7 @@ async fn dynamic_runtime() -> Runtime {
 
 async fn try_sql(rt: &Runtime, sql: &str) -> anyhow::Result<Vec<RecordBatch>> {
     let batches = rt
-        .run_query(Query::sql(sql.to_string()), AuthIdentity::system())
+        .run_query(Query::sql(sql.to_string()), beacon_core::plan_validator::allow_all())
         .await?
         .into_record_stream()?
         .try_collect::<Vec<_>>()
@@ -444,7 +443,7 @@ async fn query_output_file_works_without_a_default_store() {
         Some(serde_json::from_value(serde_json::json!({ "format": "csv" })).expect("valid output"));
 
     let result = rt
-        .run_query(query, AuthIdentity::system())
+        .run_query(query, beacon_core::plan_validator::allow_all())
         .await
         .expect("query with output should run in dynamic mode");
     match result.query_output {

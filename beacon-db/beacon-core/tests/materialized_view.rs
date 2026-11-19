@@ -5,12 +5,11 @@
 
 mod common;
 
-use beacon_core::AuthIdentity;
 use common::{total_rows, TestRuntime};
 use datafusion::arrow::record_batch::RecordBatch;
 
 async fn run(rt: &TestRuntime, sql: &str) -> Vec<RecordBatch> {
-    rt.sql_as(sql, AuthIdentity::system()).await
+    rt.sql_as(sql, beacon_core::plan_validator::allow_all()).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -36,7 +35,7 @@ async fn materialized_view_create_query_refresh_drop_and_restart() {
     // are refreshable).
     run(&rt, "CREATE VIEW rv AS SELECT 1 AS a").await;
     let err = rt
-        .try_sql_as("REFRESH rv", AuthIdentity::system())
+        .try_sql_as("REFRESH rv", beacon_core::plan_validator::allow_all())
         .await
         .expect_err("refresh of a regular view should fail");
     assert!(
@@ -56,7 +55,7 @@ async fn materialized_view_create_query_refresh_drop_and_restart() {
     // no longer queryable.
     run(&rt, "DROP TABLE mv").await;
     assert!(
-        rt.try_sql_as("SELECT * FROM mv", AuthIdentity::system())
+        rt.try_sql_as("SELECT * FROM mv", beacon_core::plan_validator::allow_all())
             .await
             .is_err(),
         "materialized view should not be queryable after drop"
@@ -65,7 +64,7 @@ async fn materialized_view_create_query_refresh_drop_and_restart() {
     // The drop is persisted, so it stays gone after a restart.
     let rt = rt.restart().await;
     assert!(
-        rt.try_sql_as("SELECT * FROM mv", AuthIdentity::system())
+        rt.try_sql_as("SELECT * FROM mv", beacon_core::plan_validator::allow_all())
             .await
             .is_err(),
         "dropped materialized view should stay gone after restart"

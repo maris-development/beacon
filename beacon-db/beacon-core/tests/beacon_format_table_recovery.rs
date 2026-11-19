@@ -34,7 +34,7 @@ async fn write_hdf5_fixture(rt: &common::TestRuntime, rel: &str) {
     query.output = Some(serde_json::from_value(json!({ "format": "hdf5" })).expect("valid output"));
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("hdf5 output query should run");
 

@@ -18,7 +18,6 @@ use arrow::ffi::{to_ffi, FFI_ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use beacon_core::embedded::Database;
 use beacon_core::query_result::ArrowOutputStream;
-use beacon_core::AuthIdentity;
 use futures::StreamExt;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::prelude::*;
@@ -36,7 +35,6 @@ use crate::runtime::block_on;
 pub fn record_batch_reader<'py>(
     py: Python<'py>,
     database: &Arc<Database>,
-    identity: &AuthIdentity,
     sql: String,
     batch_size: Option<usize>,
 ) -> PyResult<Bound<'py, PyAny>> {
@@ -45,10 +43,10 @@ pub fn record_batch_reader<'py>(
     }
 
     let database = database.clone();
-    let identity = identity.clone();
-    let stream = block_on(py, async move {
-        database.sql(sql, identity).await?.into_record_stream()
-    })?
+    let stream = block_on(
+        py,
+        async move { database.sql(sql).await?.into_record_stream() },
+    )?
     .map_err(map_engine_error)?;
     let schema = stream.schema();
 
@@ -192,17 +190,19 @@ impl BatchCapsule {
         // them, and each capsule owns its FFI struct (freeing it if nobody consumes it).
         let schema_capsule = PyCapsule::new_with_value(py, ffi_schema, c"arrow_schema")?;
         let array_capsule = PyCapsule::new_with_value(py, ffi_array, c"arrow_array")?;
-        PyTuple::new(
-            py,
-            [schema_capsule.into_any(), array_capsule.into_any()],
-        )
+        PyTuple::new(py, [schema_capsule.into_any(), array_capsule.into_any()])
     }
 }
 
 /// Turns an Arrow schema into a `pyarrow.Schema` over the C schema interface.
 fn schema_to_pyarrow<'py>(py: Python<'py>, schema: &SchemaRef) -> PyResult<Bound<'py, PyAny>> {
     let pyarrow = import_or_hint(py, "pyarrow", "beacondb[arrow]")?;
-    let holder = Bound::new(py, SchemaCapsule { schema: schema.clone() })?;
+    let holder = Bound::new(
+        py,
+        SchemaCapsule {
+            schema: schema.clone(),
+        },
+    )?;
     pyarrow.call_method1("schema", (holder,))
 }
 

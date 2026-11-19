@@ -1,8 +1,8 @@
 //! A limit on the rows one query outputs.
 //!
-//! The limit comes from the `query_output_row_limit` setting of the caller's
-//! roles; see [`row_limit_for`]. [`limit_output`] puts a [`RowLimitExec`] where
-//! the rows of the query leave the plan:
+//! The limit comes from the validator of the caller; see
+//! [`QueryLimits`](crate::plan_validator::QueryLimits). [`limit_output`] puts a
+//! [`RowLimitExec`] where the rows of the query leave the plan:
 //!
 //! - For a streamed result, on top of the plan.
 //! - For a file output (`COPY TO`), below the `DataSinkExec`, so the sink never
@@ -20,7 +20,6 @@ use std::task::{Context, Poll};
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use beacon_auth::{AuthContext, AuthIdentity};
 use datafusion::common::Statistics;
 use datafusion::datasource::sink::DataSinkExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
@@ -29,21 +28,6 @@ use datafusion::physical_plan::execution_plan::CardinalityEffect;
 use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
-
-/// The most rows a query that `identity` runs may output. `None` means no limit.
-///
-/// 1. A super-user has no limit.
-/// 2. Else the `query_output_row_limit` setting of the identity's roles applies,
-///    set with `ALTER ROLE <role> SET query_output_row_limit = <n>`. The most
-///    generous role wins, and `0` means no limit.
-/// 3. Else there is no limit.
-pub fn row_limit_for(auth: &AuthContext, identity: &AuthIdentity) -> Option<u64> {
-    if identity.is_super_user {
-        return None;
-    }
-    auth.query_output_row_limit(&identity.roles)
-        .filter(|&limit| limit > 0)
-}
 
 /// Puts a [`RowLimitExec`] where the rows of `plan` leave it.
 ///

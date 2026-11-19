@@ -31,7 +31,6 @@ use std::time::Duration;
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use beacon_auth::{AuthContext, AuthIdentity};
 use datafusion::common::Statistics;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
@@ -70,24 +69,6 @@ impl CpuBudget {
             Self::Limited(limit) => Some(*limit),
         }
     }
-}
-
-/// The [`CpuBudget`] of a query that `identity` runs.
-///
-/// 1. A super-user has no limit.
-/// 2. Else the `query_cpu_limit_ms` setting of the identity's roles applies, set
-///    with `ALTER ROLE <role> SET query_cpu_limit_ms = <n>`. The most generous
-///    role wins, and `0` means no limit.
-/// 3. Else there is no limit.
-///
-/// The roles are read live, so an `ALTER ROLE` applies from the next query.
-pub fn budget_for(auth: &AuthContext, identity: &AuthIdentity) -> CpuBudget {
-    if identity.is_super_user {
-        return CpuBudget::Unlimited;
-    }
-    auth.query_cpu_limit_ms(&identity.roles)
-        .map(CpuBudget::from_millis)
-        .unwrap_or_default()
 }
 
 /// The CPU time one query has used, and the budget it runs under.
@@ -511,46 +492,6 @@ mod tests {
             CpuBudget::from_millis(1500),
             CpuBudget::Limited(Duration::from_millis(1500))
         );
-    }
-
-    fn identity_with(roles: &[&str]) -> AuthIdentity {
-        let mut identity = AuthIdentity::empty();
-        identity.roles = roles.iter().map(|role| role.to_string()).collect();
-        identity
-    }
-
-    #[tokio::test]
-    async fn the_budget_comes_from_the_role_setting() {
-        use beacon_auth::{BasicAuthProvider, QUERY_CPU_LIMIT_MS};
-
-        let auth = AuthContext::new(Arc::new(BasicAuthProvider::new()));
-        for role in ["analyst", "free", "plain"] {
-            auth.create_role(role).await.unwrap();
-        }
-        let setting = QUERY_CPU_LIMIT_MS;
-        auth.set_role_setting("analyst", setting, "60000")
-            .await
-            .unwrap();
-        auth.set_role_setting("free", setting, "0").await.unwrap();
-        let budget = |roles: &[&str]| budget_for(&auth, &identity_with(roles));
-        let limited = |secs| CpuBudget::Limited(Duration::from_secs(secs));
-
-        assert_eq!(
-            budget_for(&auth, &AuthIdentity::system()),
-            CpuBudget::Unlimited
-        );
-        assert_eq!(budget(&["analyst"]), limited(60));
-        assert_eq!(budget(&["analyst", "free"]), CpuBudget::Unlimited);
-        assert_eq!(budget(&["plain"]), CpuBudget::Unlimited);
-        assert_eq!(budget(&[]), CpuBudget::Unlimited);
-
-        // The roles are read live, so a change applies to the next query.
-        auth.set_role_setting("analyst", setting, "1000")
-            .await
-            .unwrap();
-        assert_eq!(budget(&["analyst"]), limited(1));
-        auth.reset_role_setting("analyst", setting).await.unwrap();
-        assert_eq!(budget(&["analyst"]), CpuBudget::Unlimited);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use beacon_core::runtime::Runtime;
-use beacon_core::AuthIdentity;
+use beacon_core::plan_validator::PlanValidator;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
@@ -48,8 +48,13 @@ impl ServerHandler for BeaconMcpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let args = request.arguments.unwrap_or_default();
-        let identity = identity_from_context(&context);
-        match crate::catalog::dispatch(&self.runtime, request.name.as_ref(), args, identity).await {
+        let Some(validator) = validator_from_context(&context) else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "the request has no caller: the server did not resolve one",
+            )]));
+        };
+        match crate::catalog::dispatch(&self.runtime, request.name.as_ref(), args, validator).await
+        {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             // Surface tool failures as an error result (not a protocol error) so
             // the model can read and react to the message.
@@ -58,21 +63,18 @@ impl ServerHandler for BeaconMcpServer {
     }
 }
 
-/// Recover the caller's [`AuthIdentity`], resolved by the `resolve_identity`
-/// middleware and carried in the HTTP request parts that the streamable-HTTP
-/// transport injects into the MCP request context. Falls back to a role-less
-/// identity (no access) when absent.
+/// Recover the caller's validator, stored by the middleware of the server and
+/// carried in the HTTP request parts that the streamable-HTTP transport injects
+/// into the MCP request context. `None` when the middleware stored no validator.
 ///
-/// The MCP surface is strictly read-only: the returned identity always has
-/// `is_super_user` cleared, so the query planner rejects any DDL/DML regardless
-/// of the caller's privileges. The caller's `roles` are preserved so per-user
-/// read grants (RBAC) still apply.
-fn identity_from_context(context: &RequestContext<RoleServer>) -> AuthIdentity {
-    let mut identity = context
+/// The MCP surface is strictly read-only. The server guarantees this: it stores
+/// a validator with no super-user rights, which refuses any DDL/DML regardless
+/// of the caller's privileges. The per-user read grants (RBAC) still apply.
+fn validator_from_context(
+    context: &RequestContext<RoleServer>,
+) -> Option<Arc<dyn PlanValidator>> {
+    context
         .extensions
         .get::<http::request::Parts>()
-        .and_then(|parts| parts.extensions.get::<AuthIdentity>().cloned())
-        .unwrap_or_else(AuthIdentity::empty);
-    identity.is_super_user = false;
-    identity
+        .and_then(|parts| parts.extensions.get::<Arc<dyn PlanValidator>>().cloned())
 }
