@@ -4,7 +4,7 @@ use arrow::{
     array::{ArrayRef, RecordBatch},
     datatypes::SchemaRef,
 };
-use netcdf::FileMut;
+use oxcdf::{AttributeValue, FileMut};
 
 use crate::datafusion::options::Compression;
 
@@ -23,6 +23,8 @@ pub struct EncoderOptions {
 /// Trait implemented by concrete NetCDF encoders.
 pub trait Encoder {
     /// Create an encoder instance for an open mutable NetCDF file and schema.
+    ///
+    /// An error removes the file.
     fn create(
         nc_file: FileMut,
         schema: SchemaRef,
@@ -45,12 +47,24 @@ pub trait Encoder {
         &mut self,
         _variable: Option<&str>,
         _name: &str,
-        _value: netcdf::AttributeValue,
+        _value: AttributeValue,
     ) -> Result<(), EncoderError> {
         Err(format!("{} does not support attributes", Self::encoder_name()).into())
     }
+    /// Give back the NetCDF file, to close or discard it.
+    fn into_file(self) -> FileMut
+    where
+        Self: Sized;
     /// Return a static encoder identifier.
     fn encoder_name() -> &'static str;
+}
+
+/// Remove a NetCDF file from `oxcdf::create` before its close.
+///
+/// A drop of a `FileMut` moves the partial file to its path, so an error path calls this.
+pub(crate) fn discard(file: FileMut) {
+    // `into_bytes` on a file on disk removes the temporary file and returns an error.
+    let _ = file.into_bytes();
 }
 
 /// Unified error type returned by encoders.

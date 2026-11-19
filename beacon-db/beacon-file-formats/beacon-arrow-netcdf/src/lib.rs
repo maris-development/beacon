@@ -9,7 +9,8 @@
 //!
 //! [`oxcdf_reader`] reads through [`oxcdf`], a pure-Rust reader. It holds no
 //! global lock and reads through `object_store`, so scans run in parallel and
-//! S3, GCS and Azure need no local copy. [`writer`] writes through netcdf-c.
+//! S3, GCS and Azure need no local copy. [`writer`] writes through [`oxcdf`].
+//! The N-dimensional sink writes through netcdf-c.
 //!
 //! # Key modules
 //! - [`oxcdf_reader`]: high-level NetCDF -> Arrow reader API.

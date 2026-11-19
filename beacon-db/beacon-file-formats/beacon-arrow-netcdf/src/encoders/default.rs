@@ -6,12 +6,23 @@ use arrow::{
     array::{self, Array, ArrayRef},
     datatypes::{DataType, Field, SchemaRef},
 };
-use ndarray::ArrayView;
-use netcdf::FileMut;
+use oxcdf::{AttributeValue, DType, FileMut};
 
-use crate::{NcChar, NcString};
+use super::{discard, Encoder, EncoderError, EncoderOptions};
 
-use super::{Encoder, EncoderError, EncoderOptions};
+/// The text of `s` before its first NUL byte. A NetCDF string holds no NUL.
+pub(crate) fn nul_free(s: &str) -> &str {
+    match s.find('\0') {
+        Some(nul) => {
+            tracing::warn!(
+                nul_position = nul,
+                "NetCDF string contains an interior NUL byte; truncating at the first NUL"
+            );
+            &s[..nul]
+        }
+        None => s,
+    }
+}
 
 /// Default encoder mapping common Arrow scalar arrays into NetCDF variables.
 pub struct DefaultEncoder {
@@ -42,26 +53,41 @@ macro_rules! downcast_and_put_values {
 }
 
 impl DefaultEncoder {
+    /// Define the record dimension and one variable for each field of `schema`.
+    fn define_file(
+        file: &mut FileMut,
+        schema: &SchemaRef,
+        options: &EncoderOptions,
+    ) -> anyhow::Result<()> {
+        //Add unlimited dimension to append data as it comes
+        file.add_unlimited_dimension(Self::OBS_DIM_NAME)?;
+
+        for field in schema.fields() {
+            Self::define_variable(file, field)?;
+            Self::set_storage(file, field, options)?;
+        }
+        Ok(())
+    }
+
     fn define_variable(file: &mut FileMut, field: &Field) -> anyhow::Result<()> {
         match field.data_type() {
             DataType::FixedSizeBinary(size) => {
                 let strlen_dim_name = format!("STRING{}", size);
                 //Create STRING dimension if it doesnt exist
-                if file.dimension(&strlen_dim_name).is_none() {
+                if file.dimension_len(&strlen_dim_name).is_none() {
                     file.add_dimension(&strlen_dim_name, *size as usize)?;
                 }
 
-                let mut variable = file.add_variable::<NcChar>(
+                let mut variable = file.add_variable_with_type(
                     field.name(),
                     &[Self::OBS_DIM_NAME, &strlen_dim_name],
+                    &DType::Char,
                 )?;
 
-                variable.set_fill_value(NcChar(b'\0'))?;
+                variable.set_fill_value(0u8)?;
             }
             DataType::Utf8 => {
-                let mut variable =
-                    file.add_variable::<NcString>(field.name(), &[Self::OBS_DIM_NAME])?;
-                variable.set_fill_value(NcString::new(""))?;
+                file.add_string_variable(field.name(), &[Self::OBS_DIM_NAME])?;
             }
             DataType::Int8 => {
                 let mut variable = file.add_variable::<i8>(field.name(), &[Self::OBS_DIM_NAME])?;
@@ -186,22 +212,14 @@ impl DefaultEncoder {
                     })?;
                 extents.push(0..*size as usize);
 
-                let byte_slice = array.value_data();
-
-                // Shape is (rows, fixed-size width); previously this was a hardcoded
-                // (1_000_000, 5), which panicked for any other array dimensions.
-                let view = ArrayView::from_shape((array.len(), *size as usize), byte_slice)
+                // The bytes are row-major in (rows, fixed-size width) order.
+                variable
+                    .put_values::<u8, _>(array.value_data(), extents)
                     .map_err(|e| {
                         anyhow::anyhow!(
-                            "failed to view FixedSizeBinary column {var_name} as ({}, {}): {e}",
-                            array.len(),
-                            size
+                            "failed to write FixedSizeBinary column {var_name} to NetCDF: {e}"
                         )
                     })?;
-
-                variable.put(view, extents).map_err(|e| {
-                    anyhow::anyhow!("failed to write FixedSizeBinary column {var_name} to NetCDF: {e}")
-                })?;
             }
             DataType::Utf8 => {
                 let string_array = array
@@ -209,12 +227,12 @@ impl DefaultEncoder {
                     .downcast_ref::<array::StringArray>()
                     .expect("Failed to downcast to StringArray");
 
-                let cstrings = string_array
+                let strings = string_array
                     .iter()
-                    .map(|x| NcString::new(x.unwrap_or("")))
+                    .map(|x| nul_free(x.unwrap_or("")))
                     .collect::<Vec<_>>();
 
-                variable.put_values::<NcString, _>(&cstrings, extents)?;
+                variable.put_strings(&strings, extents)?;
             }
             DataType::Int8 => {
                 downcast_and_put_values!(array, variable, extents, arrow::array::Int8Array, i8);
@@ -305,12 +323,9 @@ impl Encoder for DefaultEncoder {
     where
         Self: Sized,
     {
-        //Add unlimited dimension to append data as it comes
-        nc_file.add_unlimited_dimension(Self::OBS_DIM_NAME)?;
-
-        for field in schema.fields() {
-            Self::define_variable(&mut nc_file, field)?;
-            Self::set_storage(&mut nc_file, field, options)?;
+        if let Err(e) = Self::define_file(&mut nc_file, &schema, options) {
+            discard(nc_file);
+            return Err(e.into());
         }
 
         let offsets = schema
@@ -342,8 +357,15 @@ impl Encoder for DefaultEncoder {
         &mut self,
         variable: Option<&str>,
         name: &str,
-        value: netcdf::AttributeValue,
+        value: AttributeValue,
     ) -> Result<(), EncoderError> {
+        let value = match value {
+            AttributeValue::Str(text) => AttributeValue::Str(nul_free(&text).to_string()),
+            AttributeValue::Strs(texts) => AttributeValue::Strs(
+                texts.iter().map(|text| nul_free(text).to_string()).collect(),
+            ),
+            value => value,
+        };
         match variable {
             Some(variable) => {
                 let mut nc_variable = self
@@ -357,6 +379,10 @@ impl Encoder for DefaultEncoder {
             }
         }
         Ok(())
+    }
+
+    fn into_file(self) -> FileMut {
+        self.nc_file
     }
 
     fn encoder_name() -> &'static str {

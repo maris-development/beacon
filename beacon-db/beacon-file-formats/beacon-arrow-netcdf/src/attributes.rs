@@ -11,7 +11,7 @@ use arrow::{
     datatypes::{DataType, Field, Schema},
 };
 use datafusion::common::ScalarValue;
-use netcdf::AttributeValue;
+use oxcdf::AttributeValue;
 
 /// How the flat NetCDF writer combines the values of one attribute column.
 #[derive(
@@ -408,7 +408,6 @@ mod tests {
         TimestampNanosecondArray,
     };
     use arrow::datatypes::{Field, Float64Type, Schema, TimeUnit};
-    use netcdf::AttributeValue;
     use std::sync::Arc;
 
     fn schema(fields: &[(&str, DataType)]) -> Schema {
