@@ -61,8 +61,7 @@ impl Output {
             .file_type(session)
             .map_err(|e| DataFusionError::External(e.into()))?;
 
-        // Reserve a unique name under `tmp_dir`, the root of the tmp store.
-        // The COPY target `<tmp_store_url><object_name>` resolves to `temp.path()` in it.
+        // The tmp store is rooted at `tmp_dir`, so the COPY target resolves to `temp.path()`.
         let temp = TempObject::create_in(tmp_dir, kind.suggested_extension())
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let location = format!("{}{}", tmp_store_url.as_str(), temp.object_path());

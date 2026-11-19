@@ -20,7 +20,7 @@
 //! | `None` / empty               | [`NetCDFSink`]  | flat, unlimited `obs`   |
 //! | `Some(["lat", "lon", …])`  | [`NetCDFNdSink`]| gridded, named dims     |
 
-use std::{fmt::Formatter, sync::Arc};
+use std::{fmt::Formatter, path::PathBuf, sync::Arc};
 
 use crate::{
     datafusion::options::NetcdfWriterOptions,
@@ -37,7 +37,7 @@ use beacon_datafusion_ext::unique_values::{
 use datafusion::{
     datasource::{physical_plan::FileSinkConfig, sink::DataSink},
     error::DataFusionError,
-    execution::{SendableRecordBatchStream, TaskContext},
+    execution::{disk_manager::RefCountedTempFile, SendableRecordBatchStream, TaskContext},
     physical_plan::{DisplayAs, DisplayFormatType},
 };
 use futures::StreamExt;
@@ -48,19 +48,71 @@ use oxcdf::{Element, FileMut, VariableMut};
 
 // ─── Output through the object store ───────────────────────────────────────
 
-/// The name of the NetCDF file in its scratch folder.
-const SCRATCH_FILE: &str = "output.nc";
-
-/// Create a scratch folder in the OS temp folder for the file before its upload.
+/// The local path of the NetCDF file before its upload.
 ///
-/// A drop of the folder removes it and each file in it.
-fn scratch_folder() -> datafusion::error::Result<tempfile::TempDir> {
-    tempfile::Builder::new()
-        .prefix("beacon-netcdf-")
-        .tempdir()
-        .map_err(|e| {
-            DataFusionError::Execution(format!("Failed to create a NetCDF scratch folder: {}", e))
-        })
+/// The path is in the temp folder of the DataFusion disk manager. When the disk manager
+/// cannot give a file, the path is in a new folder in the OS temp folder.
+///
+/// oxcdf writes `<path>.tmp` and removes it at the close or the discard. A drop of the
+/// scratch file removes `<path>.tmp` if a stopped upload leaves it.
+struct ScratchFile {
+    path: PathBuf,
+    /// Keeps the managed file and its folder until the drop.
+    _managed: Option<RefCountedTempFile>,
+    /// The fallback folder in the OS temp folder. A drop removes it with its files.
+    _folder: Option<tempfile::TempDir>,
+}
+
+impl ScratchFile {
+    /// Reserve a scratch path in the temp folder of `context`.
+    fn new(context: &TaskContext) -> datafusion::error::Result<Self> {
+        match context
+            .runtime_env()
+            .disk_manager
+            .create_tmp_file("NetCDF output")
+        {
+            Ok(managed) => Ok(Self {
+                path: with_suffix(managed.path(), ".nc"),
+                _managed: Some(managed),
+                _folder: None,
+            }),
+            Err(e) => {
+                tracing::debug!("NetCDF scratch file goes to the OS temp folder: {}", e);
+                let folder = tempfile::Builder::new()
+                    .prefix("beacon-netcdf-")
+                    .tempdir()
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Failed to create a NetCDF scratch folder: {}",
+                            e
+                        ))
+                    })?;
+                Ok(Self {
+                    path: folder.path().join("output.nc"),
+                    _managed: None,
+                    _folder: Some(folder),
+                })
+            }
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        // Only an upload that stops at an await leaves this file.
+        let _ = std::fs::remove_file(with_suffix(&self.path, ".tmp"));
+    }
+}
+
+/// `path` with `suffix` added to its file name.
+fn with_suffix(path: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 /// Write `nc_file` and upload it to `location` in `store`.
@@ -87,7 +139,7 @@ async fn upload(
 /// [`ArrowRecordBatchWriter<DefaultEncoder>`] which serializes columns into
 /// NetCDF variables along a single unlimited `obs` dimension.
 ///
-/// The sink writes the file in a scratch folder in the OS temp folder. Then it
+/// The sink writes the file in the temp folder of the task's disk manager. Then it
 /// uploads the file to the path from [`FileSinkConfig::table_paths`] in the
 /// object store of [`FileSinkConfig::object_store_url`].
 #[derive(Debug, Clone)]
@@ -139,10 +191,10 @@ impl DataSink for NetCDFSink {
             location
         );
 
-        let scratch = scratch_folder()?;
+        let scratch = ScratchFile::new(context)?;
         let mut rows_written: u64 = 0;
         let mut nc_writer = ArrowRecordBatchWriter::<DefaultEncoder>::with_options(
-            scratch.path().join(SCRATCH_FILE),
+            scratch.path(),
             arrow_schema,
             self.options.clone(),
         )
@@ -189,7 +241,7 @@ impl DataSink for NetCDFSink {
 ///   [`UniqueValuesExec`](beacon_datafusion_ext::unique_values::UniqueValuesExec)
 ///   node in the physical plan.
 ///
-/// The sink writes the file in a scratch folder in the OS temp folder. Then it
+/// The sink writes the file in the temp folder of the task's disk manager. Then it
 /// uploads the file to the path from [`FileSinkConfig::table_paths`] in the
 /// object store of [`FileSinkConfig::object_store_url`].
 #[derive(Debug, Clone)]
@@ -278,8 +330,8 @@ impl DataSink for NetCDFNdSink {
                 },
             )?;
 
-        let scratch = scratch_folder()?;
-        let mut nc_file = oxcdf::create(scratch.path().join(SCRATCH_FILE)).map_err(|e| {
+        let scratch = ScratchFile::new(context)?;
+        let mut nc_file = oxcdf::create(scratch.path()).map_err(|e| {
             DataFusionError::Execution(format!("Failed to create NetCDF file: {}", e))
         })?;
         // A drop of the file puts it at its path, so an error discards it.
@@ -1759,17 +1811,112 @@ mod tests {
         config
     }
 
-    /// A task context with `store` under `store_url`.
+    /// A task context with `store` under `store_url` and its temp files in `scratch`.
     fn context_with_store(
         store_url: &str,
         store: Arc<dyn object_store::ObjectStore>,
+        scratch: &std::path::Path,
     ) -> Arc<TaskContext> {
-        let context = TaskContext::default();
+        let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+            .with_temp_file_path(scratch)
+            .build_arc()
+            .unwrap();
         let url = ObjectStoreUrl::parse(store_url).unwrap();
-        context
-            .runtime_env()
-            .register_object_store(url.as_ref(), store);
-        Arc::new(context)
+        runtime.register_object_store(url.as_ref(), store);
+        Arc::new(TaskContext::default().with_runtime(runtime))
+    }
+
+    /// The regular files in the tree of `dir`.
+    fn files_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = vec![];
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(files_in(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
+    }
+
+    /// The disk manager folder is in `scratch`, and no file of the sink stays in it.
+    fn assert_no_scratch_file(scratch: &std::path::Path) {
+        let folders = std::fs::read_dir(scratch).unwrap().count();
+        assert_eq!(folders, 1, "the disk manager makes one folder");
+        assert_eq!(files_in(scratch), Vec::<std::path::PathBuf>::new());
+    }
+
+    /// A store that refuses each multipart upload, the path of a file on disk.
+    #[derive(Debug)]
+    struct FailingUploadStore(Arc<object_store::memory::InMemory>);
+
+    impl std::fmt::Display for FailingUploadStore {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FailingUploadStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for FailingUploadStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.0.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            _location: &ObjectPath,
+            _opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            Err(object_store::Error::Generic {
+                store: "FailingUploadStore",
+                source: "the upload fails".into(),
+            })
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.0.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<ObjectPath>> {
+            self.0.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.0.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.0.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.0.copy_opts(from, to, options).await
+        }
     }
 
     /// A stream of `batches`.
@@ -1861,18 +2008,41 @@ mod tests {
         collection
     }
 
+    fn grid_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("lat", DataType::Int32, false),
+            Field::new("lon", DataType::Int32, false),
+            Field::new("temperature", DataType::Float64, true),
+        ]))
+    }
+
+    /// Rows on the grid of `grid_collection`. The cell lat = 20, lon = 300 gets no row.
+    fn grid_batch(schema: &SchemaRef) -> RecordBatch {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![10, 10, 10, 20, 20])),
+                Arc::new(Int32Array::from(vec![100, 200, 300, 100, 200])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+            ],
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn the_flat_sink_writes_through_the_object_store() {
+        let scratch = tempfile::tempdir().unwrap();
         let store: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
         let schema = pressure_schema();
         let config = store_sink_config(schema.clone(), "memory://out/", "a/b.nc");
         let sink = NetCDFSink::new(config, Default::default());
+        let context = context_with_store("memory://out/", store.clone(), scratch.path());
 
         let rows = sink
             .write_all(
                 batch_stream(schema.clone(), vec![pressure_batch(&schema)]),
-                &context_with_store("memory://out/", store.clone()),
+                &context,
             )
             .await
             .unwrap();
@@ -1888,34 +2058,23 @@ mod tests {
         let pressure: Vec<i64> = file.variable("pressure").unwrap().get_values(..).unwrap();
         assert_eq!(pressure, vec![1013, 1010, 1005]);
         assert_no_local_copy();
+        assert_no_scratch_file(scratch.path());
     }
 
     #[tokio::test]
     async fn the_nd_sink_writes_through_the_object_store() {
+        let scratch = tempfile::tempdir().unwrap();
         let store: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("lat", DataType::Int32, false),
-            Field::new("lon", DataType::Int32, false),
-            Field::new("temperature", DataType::Float64, true),
-        ]));
+        let schema = grid_schema();
         let config = store_sink_config(schema.clone(), "memory://out/", "a/b.nc");
         let sink = NetCDFNdSink::new(config, 2, grid_collection()).unwrap();
-        // The cell lat = 20, lon = 300 gets no row.
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![10, 10, 10, 20, 20])),
-                Arc::new(Int32Array::from(vec![100, 200, 300, 100, 200])),
-                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
-            ],
-        )
-        .unwrap();
+        let context = context_with_store("memory://out/", store.clone(), scratch.path());
 
         let rows = sink
             .write_all(
-                batch_stream(schema, vec![batch]),
-                &context_with_store("memory://out/", store.clone()),
+                batch_stream(schema.clone(), vec![grid_batch(&schema)]),
+                &context,
             )
             .await
             .unwrap();
@@ -1936,10 +2095,12 @@ mod tests {
         assert_eq!(data[[1, 1]], 5.0);
         assert_eq!(data[[1, 2]], f64::MIN);
         assert_no_local_copy();
+        assert_no_scratch_file(scratch.path());
     }
 
     #[tokio::test]
     async fn a_failed_flat_write_puts_nothing_in_the_store() {
+        let scratch = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap());
@@ -1963,18 +2124,17 @@ mod tests {
         };
         let config = store_sink_config(schema.clone(), "local://out/", "a/b.nc");
         let sink = NetCDFSink::new(config, options);
+        let context = context_with_store("local://out/", store.clone(), scratch.path());
 
         let err = sink
-            .write_all(
-                batch_stream(schema, vec![batch]),
-                &context_with_store("local://out/", store.clone()),
-            )
+            .write_all(batch_stream(schema, vec![batch]), &context)
             .await
             .unwrap_err();
 
         assert!(err.to_string().contains("comment"), "{err}");
         assert!(!has_object(store.as_ref(), "a/b.nc").await);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_no_scratch_file(scratch.path());
     }
 
     #[tokio::test]
@@ -1982,6 +2142,7 @@ mod tests {
         use arrow::array::DurationSecondArray;
         use beacon_datafusion_ext::unique_values::UniqueValuesHandle;
 
+        let scratch = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap());
@@ -2015,11 +2176,9 @@ mod tests {
             ],
         )
         .unwrap();
+        let context = context_with_store("local://out/", store.clone(), scratch.path());
         let err = sink
-            .write_all(
-                batch_stream(schema, vec![batch]),
-                &context_with_store("local://out/", store.clone()),
-            )
+            .write_all(batch_stream(schema, vec![batch]), &context)
             .await
             .unwrap_err();
 
@@ -2029,5 +2188,80 @@ mod tests {
         );
         assert!(!has_object(store.as_ref(), "grid.nc").await);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_no_scratch_file(scratch.path());
+    }
+
+    #[tokio::test]
+    async fn a_failed_flat_upload_puts_nothing_in_the_store() {
+        let scratch = tempfile::tempdir().unwrap();
+        let inner = Arc::new(object_store::memory::InMemory::new());
+        let store = Arc::new(FailingUploadStore(inner.clone()));
+        let schema = pressure_schema();
+        let config = store_sink_config(schema.clone(), "memory://out/", "a/b.nc");
+        let sink = NetCDFSink::new(config, Default::default());
+        let context = context_with_store("memory://out/", store, scratch.path());
+
+        let err = sink
+            .write_all(
+                batch_stream(schema.clone(), vec![pressure_batch(&schema)]),
+                &context,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("the upload fails"), "{err}");
+        assert!(!has_object(inner.as_ref(), "a/b.nc").await);
+        assert_no_scratch_file(scratch.path());
+    }
+
+    #[tokio::test]
+    async fn a_failed_nd_upload_puts_nothing_in_the_store() {
+        let scratch = tempfile::tempdir().unwrap();
+        let inner = Arc::new(object_store::memory::InMemory::new());
+        let store = Arc::new(FailingUploadStore(inner.clone()));
+        let schema = grid_schema();
+        let config = store_sink_config(schema.clone(), "memory://out/", "a/b.nc");
+        let sink = NetCDFNdSink::new(config, 2, grid_collection()).unwrap();
+        let context = context_with_store("memory://out/", store, scratch.path());
+
+        let err = sink
+            .write_all(
+                batch_stream(schema.clone(), vec![grid_batch(&schema)]),
+                &context,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("the upload fails"), "{err}");
+        assert!(!has_object(inner.as_ref(), "a/b.nc").await);
+        assert_no_scratch_file(scratch.path());
+    }
+
+    #[tokio::test]
+    async fn a_disabled_disk_manager_puts_the_scratch_file_in_the_os_temp_folder() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+            .with_disk_manager_builder(
+                datafusion::execution::disk_manager::DiskManagerBuilder::default()
+                    .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),
+            )
+            .build_arc()
+            .unwrap();
+        let url = ObjectStoreUrl::parse("memory://out/").unwrap();
+        runtime.register_object_store(url.as_ref(), store.clone());
+        let context = Arc::new(TaskContext::default().with_runtime(runtime));
+        let schema = pressure_schema();
+        let config = store_sink_config(schema.clone(), "memory://out/", "a/b.nc");
+        let sink = NetCDFSink::new(config, Default::default());
+
+        sink.write_all(
+            batch_stream(schema.clone(), vec![pressure_batch(&schema)]),
+            &context,
+        )
+        .await
+        .unwrap();
+
+        let file = open_object(store.as_ref(), "a/b.nc").await;
+        assert!(file.variable("pressure").is_some());
     }
 }

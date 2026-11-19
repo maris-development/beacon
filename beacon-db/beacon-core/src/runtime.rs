@@ -275,8 +275,7 @@ impl Runtime {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         //
-        // `self.tmp_dir` MUST be the root of the tmp store, where each writer puts `tmp://<name>`.
-        // Otherwise the returned `QueryOutputFile` cannot see the written bytes.
+        // `self.tmp_dir` MUST be the tmp store root, or `QueryOutputFile` cannot see the bytes.
         let (copy_plan, output_file) = output
             .parse(
                 &self.session_ctx,
