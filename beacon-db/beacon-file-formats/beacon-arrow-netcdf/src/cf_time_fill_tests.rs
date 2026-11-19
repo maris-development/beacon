@@ -28,20 +28,17 @@ const MAX_NS_ERROR: i64 = 1_000;
 /// Cell order: day 0, fill, day 1, fill.
 fn write_fixture(directory: &std::path::Path) -> std::path::PathBuf {
     let path = directory.join(FILE);
-    {
-        let mut nc = netcdf::create(&path).expect("create the fixture");
-        nc.add_dimension("obs", 4).unwrap();
-        let mut variable = nc.add_variable::<i16>("time", &["obs"]).unwrap();
-        // netCDF-4 refuses a `_FillValue` after the first write, so set the
-        // attributes first.
-        variable.put_attribute("_FillValue", FILL).unwrap();
-        variable
-            .put_attribute("units", "days since 1970-01-01")
-            .unwrap();
-        variable
-            .put_values(&[0i16, FILL, 1, FILL], netcdf::Extents::All)
-            .unwrap();
-    }
+    let mut nc = oxcdf::create(&path).expect("create the fixture");
+    nc.add_dimension("obs", 4).unwrap();
+    let mut variable = nc.add_variable::<i16>("time", &["obs"]).unwrap();
+    // netCDF-4 refuses a `_FillValue` after the first write, so set the
+    // attributes first.
+    variable.set_fill_value(FILL).unwrap();
+    variable
+        .put_attribute("units", "days since 1970-01-01")
+        .unwrap();
+    variable.put_values(&[0i16, FILL, 1, FILL], ..).unwrap();
+    nc.close().expect("close the fixture");
     path
 }
 

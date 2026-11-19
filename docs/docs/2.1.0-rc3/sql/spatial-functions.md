@@ -337,8 +337,7 @@ FROM read_parquet(['obs/*.parquet'])
 The function takes an EPSG code, not a PROJ string.
 
 `ST_Transform` links [PROJ](https://proj.org), a C++ library, and a standard Beacon build ships it.
-A build from source therefore needs PROJ 9.6.2 or later, beside the netCDF and HDF5 it already
-needs:
+A build from source therefore needs PROJ 9.6.2 or later:
 
 ```bash
 sudo apt-get install -y libproj-dev pkg-config   # Debian and Ubuntu

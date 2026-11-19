@@ -12,7 +12,7 @@
 //!
 //! # Writes
 //!
-//! Writes use netcdf-c, through [`beacon_arrow_netcdf`]. The Rust reader reads.
+//! Writes use the pure-Rust NetCDF writer of [`beacon_arrow_netcdf`].
 //!
 //! # The public surface
 //!

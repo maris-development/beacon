@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -82,7 +81,6 @@ fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> 
 #[derive(Debug, Clone)]
 pub struct NetCDFFormatFactory {
     pub listing_factory: Arc<ListingFactory>,
-    pub output_dir: PathBuf,
     pub options: NetcdfOptions,
     pub config: NetcdfConfig,
 }
@@ -90,13 +88,11 @@ pub struct NetCDFFormatFactory {
 impl NetCDFFormatFactory {
     pub fn new(
         listing_factory: Arc<ListingFactory>,
-        output_dir: PathBuf,
         options: NetcdfOptions,
         config: NetcdfConfig,
     ) -> Self {
         Self {
             listing_factory,
-            output_dir,
             options,
             config,
         }
@@ -121,7 +117,6 @@ impl NetCDFFormatFactory {
     fn build_format(&self, options: NetcdfOptions, enable_statistics: bool) -> NetcdfFormat {
         NetcdfFormat::new(self.listing_factory.clone(), options)
             .with_enable_statistics(enable_statistics)
-            .with_output_dir(self.output_dir.clone())
     }
 }
 
@@ -283,8 +278,6 @@ pub struct NetcdfFormat {
     pub options: NetcdfOptions,
     /// Whether to generate per-file statistics during planning.
     enable_statistics: bool,
-    /// Local directory the netcdf-c writer emits output files into.
-    output_dir: PathBuf,
 }
 
 impl NetcdfFormat {
@@ -293,20 +286,12 @@ impl NetcdfFormat {
             listing_factory,
             options,
             enable_statistics: false,
-            output_dir: std::env::temp_dir(),
         }
     }
 
     /// Set whether per-file statistics are generated during planning.
     pub fn with_enable_statistics(mut self, enable_statistics: bool) -> Self {
         self.enable_statistics = enable_statistics;
-        self
-    }
-
-    /// Set the local directory the writer emits output files into (defaults to the
-    /// OS temp dir).
-    pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
-        self.output_dir = output_dir;
         self
     }
 }
@@ -471,10 +456,7 @@ impl FileFormat for NetcdfFormat {
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        // NetCDF needs a real local path (the netcdf-c writer cannot stream to an
-        // object store). Write into the configured output directory (the tmp store
-        // root), threaded in by the runtime, rather than the OS temp dir.
-        let output_dir = self.output_dir.clone();
+        // The sinks write a local scratch file and upload it to the store of `conf`.
         match &self.options.write_dimensions {
             Some(dim_columns) if !dim_columns.is_empty() => {
                 let flat_keys = self.options.writer.set_keys();
@@ -509,7 +491,6 @@ impl FileFormat for NetcdfFormat {
                     conf,
                     unique_columns.len(),
                     collection_handle,
-                    output_dir.clone(),
                 )?);
 
                 Ok(Arc::new(DataSinkExec::new(
@@ -519,11 +500,7 @@ impl FileFormat for NetcdfFormat {
                 )))
             }
             _ => {
-                let netcdf_sink = Arc::new(NetCDFSink::new(
-                    conf,
-                    output_dir,
-                    self.options.writer.clone(),
-                ));
+                let netcdf_sink = Arc::new(NetCDFSink::new(conf, self.options.writer.clone()));
                 Ok(Arc::new(DataSinkExec::new(
                     input,
                     netcdf_sink,
@@ -571,7 +548,6 @@ mod format_tests {
     fn factory() -> NetCDFFormatFactory {
         NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
-            std::env::temp_dir(),
             NetcdfOptions::default(),
             NetcdfConfig::default(),
         )
@@ -967,7 +943,6 @@ mod format_tests {
 
         let factory = NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
-            std::env::temp_dir(),
             NetcdfOptions {
                 write_dimensions: Some(vec!["lat".to_string()]),
                 writer: crate::datafusion::options::NetcdfWriterOptions {
@@ -1738,6 +1713,44 @@ mod format_tests {
         );
     }
 
+    /// The writer gives a string variable no `_FillValue`, so a null string reads back as "".
+    #[tokio::test]
+    async fn a_null_string_reads_back_as_an_empty_string() {
+        use arrow::array::{AsArray, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let path = dir.path().join("names.nc");
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, true)]));
+        let names = StringArray::from(vec![Some("a"), None]);
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(names)]).unwrap();
+        let mut writer =
+            ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema).expect("a netCDF writer");
+        writer.write_record_batch(batch).expect("write the batch");
+        writer.finish().expect("finish the file");
+
+        let ctx = session();
+        register_path(&ctx, "names", &path).await;
+        let batches = ctx
+            .sql(r#"SELECT "name" FROM names"#)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let mut read = Vec::new();
+        for batch in &batches {
+            let column = arrow::compute::cast(batch.column(0), &DataType::Utf8).unwrap();
+            read.extend(column.as_string::<i32>().iter().map(|v| v.map(str::to_string)));
+        }
+        assert_eq!(read, [Some("a".to_string()), Some(String::new())]);
+    }
+
     /// The partition count of the scan at the bottom of `plan`.
     ///
     /// The root can carry more partitions than the scan does: DataFusion adds a
@@ -2195,7 +2208,6 @@ mod extension_tests {
     fn factory() -> NetCDFFormatFactory {
         NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
-            std::env::temp_dir(),
             NetcdfOptions::default(),
             NetcdfConfig::default(),
         )

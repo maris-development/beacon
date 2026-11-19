@@ -43,13 +43,10 @@ async fn query_with_csv_output_produces_a_nonempty_file() {
     }
 }
 
-/// NetCDF output goes through a custom `DataSink` that opens a real local file
-/// natively (netcdf-c cannot stream through an object store). This asserts the
-/// native writer lands on the `TempObject`'s path — under the configured tmp store
-/// root, not the OS temp dir — and is non-empty. It is the regression net for the
-/// three-way `tmp_dir` coupling the redesign made explicit: the COPY target
-/// `tmp://<name>` and the sink's `output_dir.join(<name>)` must resolve to the same
-/// file `QueryOutputFile` reads back.
+/// The NetCDF sink writes a local scratch file and uploads it through the tmp object
+/// store. This asserts the upload lands on the `TempObject`'s path, under the configured
+/// tmp store root and not the OS temp dir, and is non-empty. The COPY target
+/// `tmp://<name>` must resolve to the same file that `QueryOutputFile` reads back.
 #[tokio::test(flavor = "multi_thread")]
 async fn query_with_netcdf_output_writes_under_configured_tmp() {
     let rt = runtime("query-output-file-netcdf").await;
@@ -72,7 +69,7 @@ async fn query_with_netcdf_output_writes_under_configured_tmp() {
                 file.path().exists(),
                 "the netcdf output file should exist on disk while the result is held"
             );
-            // The native sink must land the file under the configured tmp store
+            // The sink must land the file under the configured tmp store
             // root (canonicalized: tempfile roots resolve through symlinks on macOS).
             let got = std::fs::canonicalize(file.path().parent().expect("output has a parent"))
                 .expect("canonicalize output parent");

@@ -524,8 +524,8 @@ impl FileFormat for ZarrFormat {
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        // zarrs writes a store through the local filesystem, as netcdf-c does,
-        // so the output goes to the configured tmp store root.
+        // zarrs writes a store through the local filesystem, as the NetCDF
+        // writer does, so the output goes to the configured tmp store root.
         let output_dir = self.output_dir.clone().ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(
                 "this Zarr format is read-only: it has no output directory".to_string(),

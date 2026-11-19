@@ -92,12 +92,8 @@ fn hdf5_file(name: &str) -> PathBuf {
 /// The factory a runtime registers.
 fn factory() -> Hdf5FormatFactory {
     let listing = Arc::new(ListingFactory::dynamic());
-    let inner = NetCDFFormatFactory::new(
-        listing,
-        std::env::temp_dir(),
-        NetcdfOptions::default(),
-        NetcdfConfig::default(),
-    );
+    let inner =
+        NetCDFFormatFactory::new(listing, NetcdfOptions::default(), NetcdfConfig::default());
     Hdf5FormatFactory::new(inner, Hdf5Config::default())
 }
 

@@ -62,9 +62,9 @@ toolchain and takes a long time.
 ::: warning No Alpine / musl wheel
 There is at this moment **no musllinux wheel**. On Alpine, or on any musl image such as
 `python:3.12-alpine`, pip uses the source distribution. It then builds the whole engine from source.
-Beacon provides Rust and `protoc` automatically. You still need a C toolchain and the system HDF5 and
-netCDF packages (`apk add build-base linux-headers hdf5-dev netcdf-dev`). The compile takes a long
-time.
+Beacon provides Rust and `protoc` automatically. You still need a C toolchain and the tools for a
+source build of PROJ (`apk add --no-cache build-base linux-headers cmake sqlite`). The compile takes a
+long time.
 
 Use a glibc image instead. `python:3.12-slim` (Debian) is the smallest option. It gets the prebuilt
 wheel. You change nothing else:

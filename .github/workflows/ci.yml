@@ -63,16 +63,15 @@ jobs:
             cmake \
             curl \
             libclang-dev \
-            libhdf5-dev \
-            libnetcdf-dev \
             libproj-dev \
             libsqlite3-dev \
-            netcdf-bin \
+            libssl-dev \
             pkg-config \
             protobuf-compiler \
             software-properties-common \
             sqlite3 \
-            wget
+            wget \
+            zlib1g-dev
 
       - name: Install Rust (${{ matrix.toolchain }})
         uses: dtolnay/rust-toolchain@stable

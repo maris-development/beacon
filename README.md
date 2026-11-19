@@ -141,8 +141,8 @@ Documentation home: <https://maris-development.github.io/beacon/>
 
 ## Contributing
 
-Beacon is a Rust workspace. A build needs Rust 1.94 or later, the netCDF and HDF5 libraries,
-PROJ 9.6.2 or later, and `pkg-config`. Build and test it:
+Beacon is a Rust workspace. A build needs Rust 1.94 or later, PROJ 9.6.2 or later, and
+`pkg-config`. Build and test it:
 
 ```bash
 git clone --recurse-submodules https://github.com/maris-development/beacon.git
