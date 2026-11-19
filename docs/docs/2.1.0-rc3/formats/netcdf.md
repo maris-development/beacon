@@ -94,6 +94,10 @@ arrays that you select. This is much faster than a scan of the original NetCDF f
 
 Beacon writes NetCDF with a pure-Rust writer.
 
+- Beacon writes a null value of a string column as an empty string.
+- An attribute above 64 KiB fails the write.
+- A failed write leaves no file at the output path.
+
 ### NetCDF output options
 
 The plain name `"format": "netcdf"` uses the default options. To set an option, give the `netcdf`
@@ -130,8 +134,7 @@ OPTIONS ('compression.level' '4', 'compression.shuffle' 'true', 'chunk_rows' '65
 
 - Level 1 is fast. Level 9 gives the smallest file and is slow. Level 4 is a good default.
 - Each variable on `obs` is in chunks of `chunk_rows` rows. A file with fewer rows gets one chunk.
-- Beacon does not compress a string variable. netCDF-C does not accept a filter on a
-  variable-length string.
+- Beacon does not compress a string variable.
 - xarray, netCDF4-python, Panoply and ncview read a deflate file. They need no plugin.
 
 ### Attributes in a NetCDF output

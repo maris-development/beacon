@@ -8,10 +8,9 @@ use std::path::{Path, PathBuf};
 
 /// Owns one query-output file on disk and deletes it on drop.
 ///
-/// Unlike `tempfile::NamedTempFile`, the file may be (re)created at this path by a
-/// path-based writer (NetCDF / ODV) rather than by us — those writers open the path
-/// themselves rather than writing through a file handle we hold — so cleanup is
-/// keyed on the path, not on an open handle. `object_name` is the single source of
+/// Unlike `tempfile::NamedTempFile`, a path-based writer (NetCDF / ODV) can (re)create
+/// the file at this path. Those writers open the path themselves, so cleanup is keyed
+/// on the path, not on an open handle. `object_name` is the single source of
 /// truth: the COPY target is `tmp://<object_name>` and the native sink reconstructs
 /// `tmp_dir/<object_name>` via the same `output_dir.join(prefix)`, so the write
 /// location and the readable path cannot diverge.

@@ -73,8 +73,8 @@ FROM python:3.12-slim      # not python:3.12-alpine
 RUN pip install beacondb
 ```
 
-If you must stay on Alpine, `apk add --no-cache build-base linux-headers hdf5-dev netcdf-dev cmake
-sqlite` first, then `pip install beacondb`. musllinux wheels are expected to return; this is a
+If you must stay on Alpine, `apk add --no-cache build-base linux-headers cmake sqlite` first, then
+`pip install beacondb`. musllinux wheels are expected to return; this is a
 temporary gap.
 
 ## No users

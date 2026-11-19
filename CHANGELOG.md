@@ -81,10 +81,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   body that accepts only `ColumnarValue::Array` must also accept a scalar. `invoke_arrays` still
   gives arrays. ([#612](https://github.com/maris-development/beacon/issues/612))
 - **The NetCDF writer is pure Rust.** Beacon writes NetCDF and HDF5 output with oxcdf, not with the
-  netCDF-C library. A null value of a string column is written as an empty string and reads back as
-  an empty string, because a string variable has no `_FillValue`. An attribute above 64 KiB fails
-  the write. A text attribute is cut at the first NUL byte. A failed write leaves no file at the
-  output path. ([#658](https://github.com/maris-development/beacon/issues/658))
+  netCDF-C library. Beacon writes a null value of a string column as an empty string. A string
+  variable has no `_FillValue`, so the value reads back as an empty string. An attribute above
+  64 KiB fails the write. Beacon cuts a string value and a text attribute at the first NUL byte. A
+  failed write leaves no file at the output path. ([#658](https://github.com/maris-development/beacon/issues/658))
 
 ### Removed
 

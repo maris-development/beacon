@@ -138,6 +138,6 @@ You can also add `rust cargo protobuf-dev`. This is optional. It helps if you bu
 system toolchain avoids a download of about 200 MB of rustup on every build. It also avoids the order
 problem above.
 
-The build needs a long compile. It makes a full DataFusion, Lance and netCDF engine from scratch.
+The build needs a long compile. It compiles the full engine, with DataFusion and Lance, from source.
 CI builds no musllinux wheel at this moment. The workflow still holds its `apk` branch. A change to
 the matrix therefore restores those wheels.

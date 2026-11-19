@@ -25,8 +25,8 @@ path = "src/main.rs"
 [features]
 jemalloc = ["dep:tikv-jemallocator"]
 # The server ships `ST_Transform`, so a standard build links PROJ. The machine needs PROJ 9.6.2 or
-# later and pkg-config, as it already needs netCDF and HDF5. `cargo build --no-default-features`
-# drops the function and the PROJ dependency with it.
+# later and pkg-config. `cargo build --no-default-features` drops the function and the PROJ
+# dependency with it.
 default = ["spatial-proj"]
 spatial-proj = ["beacon-core/spatial-proj"]
 # The same function, with PROJ built from source. Use it where the distribution carries a PROJ
