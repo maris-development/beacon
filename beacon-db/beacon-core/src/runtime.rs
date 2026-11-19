@@ -8,8 +8,8 @@ use beacon_datafusion_ext::consts::TMP_STORE_URL_OBJECT_URL;
 use datafusion::prelude::SessionContext;
 use futures::TryStreamExt;
 
+use beacon_sql_parser::{beacon_parser::BeaconParser, statement::BeaconStatement};
 use crate::{
-    parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
     plan_validator::{PlanFacts, PlanValidator, QueryLimits, TableFacts},
     query_cpu::QueryCpuMeter,
     query_executor::QueryExecutor,
@@ -581,7 +581,12 @@ impl Runtime {
         match inner {
             crate::query::InnerQuery::Sql(sql) => self.lower_sql(&sql).await,
             crate::query::InnerQuery::Json(body) => {
-                crate::query::compile_json_query(body, self.session_ctx.as_ref()).await
+                let settings = crate::settings::SqlSettings::from_session(&self.session_ctx);
+                let options = crate::query::JsonQueryOptions {
+                    default_table: settings.default_table,
+                    enable_pushdown_projection: settings.enable_pushdown_projection,
+                };
+                crate::query::compile_json_query(body, self.session_ctx.as_ref(), &options).await
             }
         }
     }
@@ -646,7 +651,7 @@ impl Runtime {
                 crate::statement_plan::summarize_plan(&self.session_ctx, statement).await
             }
             BeaconStatement::DFStatement(statement) => {
-                crate::parser::expression_depth::check_expression_depth(&statement)?;
+                beacon_sql_parser::expression_depth::check_expression_depth(&statement)?;
                 crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
             }
         }

@@ -1,8 +1,7 @@
 //! Compiler that turns a JSON [`QueryBody`] into a DataFusion `LogicalPlan`.
 //!
-//! SQL-form client queries (`InnerQuery::Sql`) are not handled here — they go
-//! straight to DataFusion's SQL parser in `Runtime::plan_client_query`; only the
-//! JSON form is "compiled".
+//! SQL-form client queries are not handled here — they go straight to the SQL
+//! path of the runtime in `beacon-core`; only the JSON form is "compiled".
 
 use datafusion::{
     arrow::datatypes::{Field, Schema},
@@ -15,20 +14,36 @@ use datafusion::{
     prelude::{Expr, SessionContext},
 };
 
-use crate::query::{QueryBody, Select};
+use crate::{QueryBody, Select};
+
+/// The settings of the runtime that change how a JSON query compiles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonQueryOptions {
+    /// The table a query without a `from` reads.
+    pub default_table: String,
+    /// Whether the compiler pushes the selected columns into the scan.
+    pub enable_pushdown_projection: bool,
+}
+
+impl Default for JsonQueryOptions {
+    fn default() -> Self {
+        Self {
+            default_table: "default".to_string(),
+            enable_pushdown_projection: true,
+        }
+    }
+}
 
 /// Compile a JSON query body into a DataFusion `LogicalPlan`.
 pub async fn compile_json_query(
     query_body: QueryBody,
     session: &SessionContext,
+    options: &JsonQueryOptions,
 ) -> anyhow::Result<LogicalPlan> {
-    // The runtime settings are published as a SessionConfig extension; fall back to
-    // defaults if absent (e.g. a bare session in a unit test).
-    let settings = crate::settings::SqlSettings::from_session(session);
-    let enable_pushdown_projection = settings.enable_pushdown_projection;
+    let enable_pushdown_projection = options.enable_pushdown_projection;
     let from = query_body
         .from
-        .unwrap_or_else(|| crate::query::from::From::Table(settings.default_table.clone()));
+        .unwrap_or_else(|| crate::from::From::Table(options.default_table.clone()));
 
     let filters: Vec<_> = query_body
         .filter
@@ -221,7 +236,7 @@ mod tests {
 
     async fn plan(session: &SessionContext, body: serde_json::Value) -> LogicalPlan {
         let body: QueryBody = serde_json::from_value(body).expect("body should deserialize");
-        compile_json_query(body, session)
+        compile_json_query(body, session, &JsonQueryOptions::default())
             .await
             .expect("query should compile")
     }
