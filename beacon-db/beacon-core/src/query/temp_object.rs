@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 /// Owns one query-output file on disk and deletes it on drop.
 ///
 /// Unlike `tempfile::NamedTempFile`, the file may be (re)created at this path by a
-/// native writer (netcdf-c / ODV) rather than by us — those writers open the path
+/// path-based writer (NetCDF / ODV) rather than by us — those writers open the path
 /// themselves rather than writing through a file handle we hold — so cleanup is
 /// keyed on the path, not on an open handle. `object_name` is the single source of
 /// truth: the COPY target is `tmp://<object_name>` and the native sink reconstructs
@@ -101,7 +101,7 @@ mod tests {
 
     /// A `TempObject` reserves a name but creates no file; writing to its path and
     /// dropping it removes the file — the RAII cleanup the native-writer path relies
-    /// on (netcdf-c opens the path itself, so `NamedTempFile` was the wrong tool).
+    /// on. The NetCDF writer opens the path itself, so a file handle cannot own it.
     #[test]
     fn temp_object_deletes_its_path_on_drop() {
         let dir = tempfile::tempdir().expect("temp dir");

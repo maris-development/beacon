@@ -942,7 +942,7 @@ mod client_query_tests {
     }
 
     /// NetCDF output goes through a custom `DataSink` that writes a real local
-    /// file (the netcdf-c writer cannot stream to an object store). This asserts
+    /// file (the NetCDF writer cannot stream to an object store). This asserts
     /// the file lands under the configured tmp store root — not the OS temp dir —
     /// and is non-empty.
     #[tokio::test(flavor = "multi_thread")]

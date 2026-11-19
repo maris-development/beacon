@@ -262,8 +262,8 @@ impl FileFormatFactoryExt for Hdf5FormatFactory {
 ///
 /// Reads go through [`crate::reader`]: no process-global lock, and byte ranges
 /// straight out of the scan's object store. Writes go to `writer`, which is a
-/// [`NetcdfFormat`] — this crate writes with netcdf-c whatever the read flag
-/// says, because the Rust reader does not write.
+/// [`NetcdfFormat`]. The HDF5 reader does not write, so this crate writes
+/// with the NetCDF writer.
 #[derive(Debug, Clone)]
 pub struct Hdf5Format {
     /// The extension this format answers to (`hdf5` or `h5`).
@@ -278,7 +278,7 @@ pub struct Hdf5Format {
     read: ReadOptions,
     /// Whether to generate per-file statistics during planning.
     enable_statistics: bool,
-    /// The format every write goes to. Always netcdf-c.
+    /// The format every write goes to. Always the NetCDF format.
     writer: Arc<dyn FileFormat>,
 }
 
@@ -308,12 +308,11 @@ impl Hdf5Format {
         self.read.convention
     }
 
-    /// Whether this format writes through netcdf-c.
+    /// Whether this format writes through the NetCDF writer.
     ///
-    /// Always true. The Rust reader reads; it has no writer, so a write goes to
-    /// the netCDF format whatever the read flag says. This is here so the
-    /// invariant is checkable rather than only stated.
-    pub fn writes_with_netcdf_c(&self) -> bool {
+    /// Always true. The HDF5 reader has no writer, so a write goes to the
+    /// NetCDF format. A test can check this invariant.
+    pub fn writes_with_netcdf_writer(&self) -> bool {
         self.writer
             .downcast_ref::<NetcdfFormat>()
             .is_some()
@@ -467,7 +466,7 @@ impl FileFormat for Hdf5Format {
         Ok(Arc::new(broadcast))
     }
 
-    /// Writes always use netcdf-c, whatever the read flag says.
+    /// Writes always use the NetCDF writer.
     async fn create_writer_physical_plan(
         &self,
         input: Arc<dyn ExecutionPlan>,
@@ -605,15 +604,15 @@ mod tests {
 
     // ── Writes ─────────────────────────────────────────────────────────
 
-    /// The Rust reader does not write. A format built on it still writes, and
-    /// it writes through netcdf-c.
+    /// The HDF5 reader does not write. The format still writes, through the
+    /// NetCDF writer.
     #[test]
-    fn a_write_stays_on_netcdf_c_on_the_rust_reader() {
+    fn a_write_goes_to_the_netcdf_writer() {
         let ctx = session();
         let f = factory("hdf5", Hdf5Config::default());
         let format = f.create(&ctx.state(), &HashMap::new()).unwrap();
         let hdf5 = format.downcast_ref::<Hdf5Format>().unwrap();
-        assert!(hdf5.writes_with_netcdf_c());
+        assert!(hdf5.writes_with_netcdf_writer());
     }
 
     // ── Per-table options ──────────────────────────────────────────────

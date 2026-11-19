@@ -380,7 +380,7 @@ impl AttributeCombiner {
     }
 }
 
-/// Keep `column` as a variable. A global gets a name that libnetcdf accepts.
+/// Keep `column` as a variable. A global gets a valid NetCDF name.
 fn keep_as_variable(
     plan: &mut AttributePlan,
     columns: &HashSet<String>,

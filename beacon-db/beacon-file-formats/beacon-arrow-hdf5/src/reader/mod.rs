@@ -39,7 +39,7 @@
 //!
 //! # Limits
 //!
-//! This reader reads. It does not write. Every write path stays on netcdf-c.
+//! This reader reads. It does not write. Every write goes to the NetCDF writer.
 //!
 //! # Layout
 //!

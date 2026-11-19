@@ -44,7 +44,7 @@ async fn query_with_csv_output_produces_a_nonempty_file() {
 }
 
 /// NetCDF output goes through a custom `DataSink` that opens a real local file
-/// natively (netcdf-c cannot stream through an object store). This asserts the
+/// natively (the NetCDF writer cannot stream through an object store). This asserts the
 /// native writer lands on the `TempObject`'s path — under the configured tmp store
 /// root, not the OS temp dir — and is non-empty. It is the regression net for the
 /// three-way `tmp_dir` coupling the redesign made explicit: the COPY target
