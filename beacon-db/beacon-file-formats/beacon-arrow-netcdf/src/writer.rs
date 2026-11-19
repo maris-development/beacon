@@ -82,12 +82,18 @@ impl<E: Encoder> Writer<E> {
     }
 
     /// Write the file and put it at its path. An error leaves no file at the path.
-    pub fn close(mut self) -> anyhow::Result<()> {
-        let encoder = self
-            .encoder
+    pub fn close(self) -> anyhow::Result<()> {
+        self.into_file()?.close().map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Give back the open NetCDF file, to close or upload it.
+    ///
+    /// A drop of the file puts it at its path.
+    pub fn into_file(mut self) -> anyhow::Result<oxcdf::FileMut> {
+        self.encoder
             .take()
-            .ok_or_else(|| anyhow::anyhow!("the NetCDF writer is closed"))?;
-        encoder.into_file().close().map_err(|e| anyhow::anyhow!(e))
+            .map(E::into_file)
+            .ok_or_else(|| anyhow::anyhow!("the NetCDF writer is closed"))
     }
 }
 
@@ -226,6 +232,18 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
 
     /// Finalize buffered data and write the NetCDF file.
     pub fn finish(&mut self) -> anyhow::Result<()> {
+        self.finish_writer()?.close()
+    }
+
+    /// Finalize buffered data and give back the open NetCDF file, to close or upload it.
+    ///
+    /// A drop of the file puts it at its path.
+    pub fn finish_file(&mut self) -> anyhow::Result<oxcdf::FileMut> {
+        self.finish_writer()?.into_file()
+    }
+
+    /// Write the buffered data into a new NetCDF writer for the path.
+    fn finish_writer(&mut self) -> anyhow::Result<Writer<E>> {
         self.writer.finish().map_err(|e| anyhow::anyhow!(e))?;
         let plan = match self.combiner.take() {
             Some(combiner) => combiner.resolve()?,
@@ -267,7 +285,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
 
         // A batch with no column has no row count, so the file keeps its attributes only.
         if kept_columns.is_empty() {
-            return nc_writer.close();
+            return Ok(nc_writer);
         }
 
         let batches = reader
@@ -285,7 +303,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             nc_writer.write_record_batch(updated_batch)?;
         }
 
-        nc_writer.close()
+        Ok(nc_writer)
     }
 
     fn map_record_batch(

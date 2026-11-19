@@ -20,7 +20,7 @@
 //! | `None` / empty               | [`NetCDFSink`]  | flat, unlimited `obs`   |
 //! | `Some(["lat", "lon", …])`  | [`NetCDFNdSink`]| gridded, named dims     |
 
-use std::{fmt::Formatter, path::PathBuf, sync::Arc};
+use std::{fmt::Formatter, sync::Arc};
 
 use crate::{
     datafusion::options::NetcdfWriterOptions,
@@ -42,8 +42,42 @@ use datafusion::{
 };
 use futures::StreamExt;
 use ndarray::ArrayBase;
+use object_store::{path::Path as ObjectPath, ObjectStore};
 use ordered_float::OrderedFloat;
 use oxcdf::{Element, FileMut, VariableMut};
+
+// ─── Output through the object store ───────────────────────────────────────
+
+/// The name of the NetCDF file in its scratch folder.
+const SCRATCH_FILE: &str = "output.nc";
+
+/// Create a scratch folder in the OS temp folder for the file before its upload.
+///
+/// A drop of the folder removes it and each file in it.
+fn scratch_folder() -> datafusion::error::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("beacon-netcdf-")
+        .tempdir()
+        .map_err(|e| {
+            DataFusionError::Execution(format!("Failed to create a NetCDF scratch folder: {}", e))
+        })
+}
+
+/// Write `nc_file` and upload it to `location` in `store`.
+///
+/// An error leaves the earlier object at `location`, or no object.
+async fn upload(
+    nc_file: FileMut,
+    store: &dyn ObjectStore,
+    location: &ObjectPath,
+) -> datafusion::error::Result<()> {
+    nc_file.close_to_store(store, location).await.map_err(|e| {
+        DataFusionError::Execution(format!(
+            "Failed to finish writing NetCDF to '{}': {}",
+            location, e
+        ))
+    })
+}
 
 // ─── Flat sink ─────────────────────────────────────────────────────────────
 
@@ -53,28 +87,21 @@ use oxcdf::{Element, FileMut, VariableMut};
 /// [`ArrowRecordBatchWriter<DefaultEncoder>`] which serializes columns into
 /// NetCDF variables along a single unlimited `obs` dimension.
 ///
-/// The output file is written to `output_dir` (the configured tmp store root)
-/// joined with the path from [`FileSinkConfig::table_paths`].
+/// The sink writes the file in a scratch folder in the OS temp folder. Then it
+/// uploads the file to the path from [`FileSinkConfig::table_paths`] in the
+/// object store of [`FileSinkConfig::object_store_url`].
 #[derive(Debug, Clone)]
 pub struct NetCDFSink {
     sink_config: FileSinkConfig,
-    /// Directory the NetCDF file is written to — the configured tmp store root.
-    output_dir: PathBuf,
     /// Options of the flat output.
     options: NetcdfWriterOptions,
 }
 
 impl NetCDFSink {
-    /// Create a new flat sink bound to the given [`FileSinkConfig`], writing into
-    /// `output_dir`.
-    pub fn new(
-        sink_config: FileSinkConfig,
-        output_dir: PathBuf,
-        options: NetcdfWriterOptions,
-    ) -> Self {
+    /// Create a new flat sink bound to the given [`FileSinkConfig`].
+    pub fn new(sink_config: FileSinkConfig, options: NetcdfWriterOptions) -> Self {
         Self {
             sink_config,
-            output_dir,
             options,
         }
     }
@@ -99,16 +126,23 @@ impl DataSink for NetCDFSink {
     async fn write_all(
         &self,
         data: SendableRecordBatchStream,
-        _context: &Arc<TaskContext>,
+        context: &Arc<TaskContext>,
     ) -> datafusion::error::Result<u64> {
         let arrow_schema = self.sink_config.output_schema().clone();
-        let file_path = self.sink_config.table_paths[0].prefix();
-        let full_path = self.output_dir.join(file_path.as_ref());
-        tracing::info!("Writing NetCDF to path: {:?}", full_path);
+        let store = context
+            .runtime_env()
+            .object_store(&self.sink_config.object_store_url)?;
+        let location = self.sink_config.table_paths[0].prefix();
+        tracing::info!(
+            "Writing NetCDF to {}{}",
+            self.sink_config.object_store_url,
+            location
+        );
 
+        let scratch = scratch_folder()?;
         let mut rows_written: u64 = 0;
         let mut nc_writer = ArrowRecordBatchWriter::<DefaultEncoder>::with_options(
-            full_path,
+            scratch.path().join(SCRATCH_FILE),
             arrow_schema,
             self.options.clone(),
         )
@@ -129,9 +163,10 @@ impl DataSink for NetCDFSink {
             })?;
         }
 
-        nc_writer.finish().map_err(|e| {
+        let nc_file = nc_writer.finish_file().map_err(|e| {
             DataFusionError::Execution(format!("Failed to finish writing NetCDF: {}", e))
         })?;
+        upload(nc_file, store.as_ref(), location).await?;
 
         Ok(rows_written)
     }
@@ -153,13 +188,15 @@ impl DataSink for NetCDFSink {
 /// * Dimension values must have been collected by an upstream
 ///   [`UniqueValuesExec`](beacon_datafusion_ext::unique_values::UniqueValuesExec)
 ///   node in the physical plan.
+///
+/// The sink writes the file in a scratch folder in the OS temp folder. Then it
+/// uploads the file to the path from [`FileSinkConfig::table_paths`] in the
+/// object store of [`FileSinkConfig::object_store_url`].
 #[derive(Debug, Clone)]
 pub struct NetCDFNdSink {
     sink_config: FileSinkConfig,
     ndims: usize,
     unique_values: UniqueValuesHandleCollection,
-    /// Directory the NetCDF file is written to — the configured tmp store root.
-    output_dir: PathBuf,
 }
 
 impl NetCDFNdSink {
@@ -171,7 +208,6 @@ impl NetCDFNdSink {
         sink_config: FileSinkConfig,
         ndims: usize,
         unique_values: UniqueValuesHandleCollection,
-        output_dir: PathBuf,
     ) -> Result<Self, DataFusionError> {
         tracing::info!("Creating NetCDFNdSink with {} dimensions", ndims);
         for field in sink_config.output_schema().fields() {
@@ -188,7 +224,6 @@ impl NetCDFNdSink {
             sink_config,
             ndims,
             unique_values,
-            output_dir,
         })
     }
 }
@@ -212,12 +247,17 @@ impl DataSink for NetCDFNdSink {
     async fn write_all(
         &self,
         data: SendableRecordBatchStream,
-        _context: &Arc<TaskContext>,
+        context: &Arc<TaskContext>,
     ) -> datafusion::error::Result<u64> {
-        let output_path = self
-            .output_dir
-            .join(self.sink_config.table_paths[0].prefix().as_ref());
-        tracing::info!("Writing ND NetCDF to path: {:?}", output_path);
+        let store = context
+            .runtime_env()
+            .object_store(&self.sink_config.object_store_url)?;
+        let location = self.sink_config.table_paths[0].prefix();
+        tracing::info!(
+            "Writing ND NetCDF to {}{}",
+            self.sink_config.object_store_url,
+            location
+        );
 
         let mut rows_written: u64 = 0;
         let mut pinned_stream = std::pin::pin!(data);
@@ -238,7 +278,8 @@ impl DataSink for NetCDFNdSink {
                 },
             )?;
 
-        let mut nc_file = oxcdf::create(output_path).map_err(|e| {
+        let scratch = scratch_folder()?;
+        let mut nc_file = oxcdf::create(scratch.path().join(SCRATCH_FILE)).map_err(|e| {
             DataFusionError::Execution(format!("Failed to create NetCDF file: {}", e))
         })?;
         // A drop of the file puts it at its path, so an error discards it.
@@ -247,9 +288,7 @@ impl DataSink for NetCDFNdSink {
             return Err(e);
         }
 
-        nc_file.close().map_err(|e| {
-            DataFusionError::Execution(format!("Failed to finish writing NetCDF: {}", e))
-        })?;
+        upload(nc_file, store.as_ref(), location).await?;
 
         Ok(rows_written)
     }
@@ -1439,7 +1478,7 @@ mod tests {
         let sink_config = test_sink_config(schema);
 
         let collection = UniqueValuesHandleCollection::new();
-        let err = NetCDFNdSink::new(sink_config, 1, collection, std::env::temp_dir()).unwrap_err();
+        let err = NetCDFNdSink::new(sink_config, 1, collection).unwrap_err();
         assert!(err.to_string().contains("only supports primitive"));
         assert!(err.to_string().contains("name"));
     }
@@ -1458,7 +1497,7 @@ mod tests {
     fn test_display_as_flat() {
         let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Int32, false)]));
         let sink_config = test_sink_config(schema);
-        let sink = NetCDFSink::new(sink_config, std::env::temp_dir(), Default::default());
+        let sink = NetCDFSink::new(sink_config, Default::default());
         let display = format!("{}", DisplayAsWrapper(&sink));
         assert!(display.contains("NetCDFSink"));
     }
@@ -1468,7 +1507,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Int32, false)]));
         let sink_config = test_sink_config(schema);
         let collection = UniqueValuesHandleCollection::new();
-        let sink = NetCDFNdSink::new(sink_config, 0, collection, std::env::temp_dir()).unwrap();
+        let sink = NetCDFNdSink::new(sink_config, 0, collection).unwrap();
         let display = format!("{}", DisplayAsWrapper(&sink));
         assert!(display.contains("NetCDFNdSink"));
     }
@@ -1704,14 +1743,248 @@ mod tests {
         }
     }
 
+    // ── writes through the object store ────────────────────────────────
+
+    /// A sink config that writes to `location` in the store of `store_url`.
+    fn store_sink_config(schema: SchemaRef, store_url: &str, location: &str) -> FileSinkConfig {
+        let mut config = test_sink_config(schema);
+        config.object_store_url = ObjectStoreUrl::parse(store_url).unwrap();
+        config.table_paths =
+            vec![
+                datafusion::datasource::listing::ListingTableUrl::parse(format!(
+                    "{store_url}{location}"
+                ))
+                .unwrap(),
+            ];
+        config
+    }
+
+    /// A task context with `store` under `store_url`.
+    fn context_with_store(
+        store_url: &str,
+        store: Arc<dyn object_store::ObjectStore>,
+    ) -> Arc<TaskContext> {
+        let context = TaskContext::default();
+        let url = ObjectStoreUrl::parse(store_url).unwrap();
+        context
+            .runtime_env()
+            .register_object_store(url.as_ref(), store);
+        Arc::new(context)
+    }
+
+    /// A stream of `batches`.
+    fn batch_stream(schema: SchemaRef, batches: Vec<RecordBatch>) -> SendableRecordBatchStream {
+        Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema,
+                futures::stream::iter(batches.into_iter().map(Ok)),
+            ),
+        )
+    }
+
+    /// Open the NetCDF object at `location` in `store`.
+    async fn open_object(
+        store: &dyn object_store::ObjectStore,
+        location: &str,
+    ) -> oxcdf::NetcdfFile {
+        use object_store::ObjectStoreExt;
+        let bytes = store
+            .get(&object_store::path::Path::from(location))
+            .await
+            .expect("the object is in the store")
+            .bytes()
+            .await
+            .unwrap();
+        oxcdf::NetcdfFile::from_source(Arc::new(oxcdf::MemorySource::new(bytes.to_vec())))
+            .expect("the object is a NetCDF file")
+    }
+
+    /// Whether `store` holds an object at `location`.
+    async fn has_object(store: &dyn object_store::ObjectStore, location: &str) -> bool {
+        use object_store::ObjectStoreExt;
+        match store.head(&object_store::path::Path::from(location)).await {
+            Ok(_) => true,
+            Err(object_store::Error::NotFound { .. }) => false,
+            Err(e) => panic!("head failed: {e}"),
+        }
+    }
+
+    /// No local file named after the location `a/b.nc` exists.
+    fn assert_no_local_copy() {
+        for root in [std::path::PathBuf::from("."), std::env::temp_dir()] {
+            assert!(!root.join("a").join("b.nc").exists(), "{}", root.display());
+            assert!(!root.join("b.nc").exists(), "{}", root.display());
+        }
+    }
+
+    fn pressure_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("temperature", DataType::Float64, true),
+            Field::new("pressure", DataType::Int64, true),
+        ]))
+    }
+
+    fn pressure_batch(schema: &SchemaRef) -> RecordBatch {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![15.0, 20.5, 30.1])),
+                Arc::new(Int64Array::from(vec![1013, 1010, 1005])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The handles of the grid lat = [10, 20], lon = [100, 200, 300].
+    fn grid_collection() -> UniqueValuesHandleCollection {
+        use beacon_datafusion_ext::unique_values::UniqueValuesHandle;
+        let lat: FieldRef = Arc::new(Field::new("lat", DataType::Int32, false));
+        let lon: FieldRef = Arc::new(Field::new("lon", DataType::Int32, false));
+        let handle = UniqueValuesHandle::try_new(&[lat.clone(), lon.clone()]).unwrap();
+        {
+            let mut values = handle.unique_column_values.lock();
+            values.insert(
+                lat,
+                Box::new(UniqueColumnValues::<i32> {
+                    values: vec![10, 20],
+                }),
+            );
+            values.insert(
+                lon,
+                Box::new(UniqueColumnValues::<i32> {
+                    values: vec![100, 200, 300],
+                }),
+            );
+        }
+        let collection = UniqueValuesHandleCollection::new();
+        collection.register_handle(Arc::new(handle));
+        collection
+    }
+
     #[tokio::test]
-    async fn a_failed_nd_write_leaves_no_file() {
+    async fn the_flat_sink_writes_through_the_object_store() {
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let schema = pressure_schema();
+        let config = store_sink_config(schema.clone(), "memory://out/", "a/b.nc");
+        let sink = NetCDFSink::new(config, Default::default());
+
+        let rows = sink
+            .write_all(
+                batch_stream(schema.clone(), vec![pressure_batch(&schema)]),
+                &context_with_store("memory://out/", store.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rows, 3);
+        let file = open_object(store.as_ref(), "a/b.nc").await;
+        let temperature: Vec<f64> = file
+            .variable("temperature")
+            .unwrap()
+            .get_values(..)
+            .unwrap();
+        assert_eq!(temperature, vec![15.0, 20.5, 30.1]);
+        let pressure: Vec<i64> = file.variable("pressure").unwrap().get_values(..).unwrap();
+        assert_eq!(pressure, vec![1013, 1010, 1005]);
+        assert_no_local_copy();
+    }
+
+    #[tokio::test]
+    async fn the_nd_sink_writes_through_the_object_store() {
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("lat", DataType::Int32, false),
+            Field::new("lon", DataType::Int32, false),
+            Field::new("temperature", DataType::Float64, true),
+        ]));
+        let config = store_sink_config(schema.clone(), "memory://out/", "a/b.nc");
+        let sink = NetCDFNdSink::new(config, 2, grid_collection()).unwrap();
+        // The cell lat = 20, lon = 300 gets no row.
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![10, 10, 10, 20, 20])),
+                Arc::new(Int32Array::from(vec![100, 200, 300, 100, 200])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+            ],
+        )
+        .unwrap();
+
+        let rows = sink
+            .write_all(
+                batch_stream(schema, vec![batch]),
+                &context_with_store("memory://out/", store.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rows, 5);
+        let file = open_object(store.as_ref(), "a/b.nc").await;
+        let lat: Vec<i32> = file.variable("lat").unwrap().get_values(..).unwrap();
+        assert_eq!(lat, vec![10, 20]);
+        let lon: Vec<i32> = file.variable("lon").unwrap().get_values(..).unwrap();
+        assert_eq!(lon, vec![100, 200, 300]);
+        let data = file
+            .variable("temperature")
+            .unwrap()
+            .get::<f64, _>(..)
+            .unwrap();
+        assert_eq!(data.shape(), &[2, 3]);
+        assert_eq!(data[[0, 0]], 1.0);
+        assert_eq!(data[[1, 1]], 5.0);
+        assert_eq!(data[[1, 2]], f64::MIN);
+        assert_no_local_copy();
+    }
+
+    #[tokio::test]
+    async fn a_failed_flat_write_puts_nothing_in_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Float64, true),
+            Field::new("temp.comment", DataType::Utf8, true),
+        ]));
+        // An attribute above 64 KiB fails at the end of the write.
+        let comment = "x".repeat(70_000);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(arrow::array::StringArray::from(vec![comment.as_str()])),
+            ],
+        )
+        .unwrap();
+        let options = NetcdfWriterOptions {
+            combine_attrs: Some(crate::attributes::CombineAttrs::Identical),
+            ..Default::default()
+        };
+        let config = store_sink_config(schema.clone(), "local://out/", "a/b.nc");
+        let sink = NetCDFSink::new(config, options);
+
+        let err = sink
+            .write_all(
+                batch_stream(schema, vec![batch]),
+                &context_with_store("local://out/", store.clone()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("comment"), "{err}");
+        assert!(!has_object(store.as_ref(), "a/b.nc").await);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_nd_write_puts_nothing_in_the_store() {
         use arrow::array::DurationSecondArray;
         use beacon_datafusion_ext::unique_values::UniqueValuesHandle;
-        use datafusion::datasource::listing::ListingTableUrl;
-        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 
         let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap());
         let lat: FieldRef = Arc::new(Field::new("lat", DataType::Int32, false));
         // The test needs a column type that `write_ndarray_slab` rejects.
         // The sink defines a Duration column but cannot write its slab.
@@ -1721,8 +1994,7 @@ mod tests {
             true,
         );
         let schema = Arc::new(Schema::new(vec![lat.as_ref().clone(), wait]));
-        let mut config = test_sink_config(schema.clone());
-        config.table_paths = vec![ListingTableUrl::parse("file:///grid.nc").unwrap()];
+        let config = store_sink_config(schema.clone(), "local://out/", "grid.nc");
 
         let handle = UniqueValuesHandle::try_new(&[lat.clone()]).unwrap();
         handle.unique_column_values.lock().insert(
@@ -1733,7 +2005,7 @@ mod tests {
         );
         let collection = UniqueValuesHandleCollection::new();
         collection.register_handle(Arc::new(handle));
-        let sink = NetCDFNdSink::new(config, 1, collection, dir.path().to_path_buf()).unwrap();
+        let sink = NetCDFNdSink::new(config, 1, collection).unwrap();
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -1743,12 +2015,11 @@ mod tests {
             ],
         )
         .unwrap();
-        let stream = Box::pin(RecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::iter(vec![Ok(batch)]),
-        ));
         let err = sink
-            .write_all(stream, &Arc::new(TaskContext::default()))
+            .write_all(
+                batch_stream(schema, vec![batch]),
+                &context_with_store("local://out/", store.clone()),
+            )
             .await
             .unwrap_err();
 
@@ -1756,6 +2027,7 @@ mod tests {
             err.to_string().contains("slab writing not implemented"),
             "{err}"
         );
+        assert!(!has_object(store.as_ref(), "grid.nc").await);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

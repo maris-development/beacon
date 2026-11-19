@@ -130,7 +130,10 @@ async fn write_nd(folder: &Path) -> anyhow::Result<()> {
         original_url: String::new(),
         object_store_url: ObjectStoreUrl::local_filesystem(),
         file_group: FileGroup::default(),
-        table_paths: vec![ListingTableUrl::parse("file:///nd.nc")?],
+        // The sink uploads the file through the local file system store.
+        table_paths: vec![ListingTableUrl::parse(
+            std::path::absolute(folder.join("nd.nc"))?.to_string_lossy(),
+        )?],
         output_schema: schema.clone(),
         table_partition_cols: vec![],
         insert_op: InsertOp::Append,
@@ -138,7 +141,7 @@ async fn write_nd(folder: &Path) -> anyhow::Result<()> {
         file_extension: "nc".to_string(),
         file_output_mode: FileOutputMode::SingleFile,
     };
-    let sink = NetCDFNdSink::new(config, 2, collection, folder.to_path_buf())?;
+    let sink = NetCDFNdSink::new(config, 2, collection)?;
 
     // The cell lat = 20, lon = 300 gets no row.
     let batch = RecordBatch::try_new(

@@ -275,12 +275,8 @@ impl Runtime {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         //
-        // `self.tmp_dir` is load-bearing coupling: it is both the tmp object store's
-        // root (where object-store writers land `tmp://<name>`) and the NetCDF/ODV
-        // factory's `output_dir` (registered from `storage.tmp_dir` in
-        // `register_file_formats`, where the native sinks reconstruct
-        // `output_dir.join(<name>)`). They MUST be the same directory or the written
-        // bytes are invisible to the returned `QueryOutputFile`.
+        // `self.tmp_dir` MUST be the root of the tmp store, where each writer puts `tmp://<name>`.
+        // Otherwise the returned `QueryOutputFile` cannot see the written bytes.
         let (copy_plan, output_file) = output
             .parse(
                 &self.session_ctx,
@@ -941,9 +937,8 @@ mod client_query_tests {
         }
     }
 
-    /// NetCDF output goes through a custom `DataSink` that writes a real local
-    /// file (the NetCDF writer cannot stream to an object store). This asserts
-    /// the file lands under the configured tmp store root — not the OS temp dir —
+    /// The NetCDF sink uploads its file through the tmp object store. This asserts
+    /// the file lands under the configured tmp store root, not the OS temp dir,
     /// and is non-empty.
     #[tokio::test(flavor = "multi_thread")]
     async fn query_with_netcdf_output_writes_under_configured_tmp() {

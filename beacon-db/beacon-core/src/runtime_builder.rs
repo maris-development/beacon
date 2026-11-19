@@ -672,7 +672,7 @@ fn register_file_formats(
         .config()
         .get_extension::<ListingFactory>()
         .ok_or_else(|| anyhow::anyhow!("ListingFactory must be registered before file formats"))?;
-    // NetCDF and Zarr write through local files, so they share the tmp store root.
+    // Zarr writes through local files in the tmp store root.
     let native_output_dir = builder.tmp_dir_path.clone().unwrap_or_else(temp_dir);
 
     let state_ref = session_ctx.state_ref();
@@ -690,7 +690,6 @@ fn register_file_formats(
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
             listing_factory.clone(),
-            native_output_dir.clone(),
             NetcdfOptions::default(),
             builder.netcdf.clone(),
         )),
@@ -701,7 +700,6 @@ fn register_file_formats(
         Arc::new(beacon_arrow_hdf5::Hdf5FormatFactory::new(
             NetCDFFormatFactory::new(
                 listing_factory.clone(),
-                native_output_dir.clone(),
                 NetcdfOptions::default(),
                 builder.netcdf.clone(),
             ),
@@ -717,7 +715,6 @@ fn register_file_formats(
     let hdf5_h5 = beacon_arrow_hdf5::Hdf5FormatFactory::new(
         NetCDFFormatFactory::new(
             listing_factory.clone(),
-            native_output_dir.clone(),
             NetcdfOptions::default(),
             builder.netcdf.clone(),
         ),

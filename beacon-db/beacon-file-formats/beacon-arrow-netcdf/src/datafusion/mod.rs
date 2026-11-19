@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -82,7 +81,6 @@ fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> 
 #[derive(Debug, Clone)]
 pub struct NetCDFFormatFactory {
     pub listing_factory: Arc<ListingFactory>,
-    pub output_dir: PathBuf,
     pub options: NetcdfOptions,
     pub config: NetcdfConfig,
 }
@@ -90,13 +88,11 @@ pub struct NetCDFFormatFactory {
 impl NetCDFFormatFactory {
     pub fn new(
         listing_factory: Arc<ListingFactory>,
-        output_dir: PathBuf,
         options: NetcdfOptions,
         config: NetcdfConfig,
     ) -> Self {
         Self {
             listing_factory,
-            output_dir,
             options,
             config,
         }
@@ -121,7 +117,6 @@ impl NetCDFFormatFactory {
     fn build_format(&self, options: NetcdfOptions, enable_statistics: bool) -> NetcdfFormat {
         NetcdfFormat::new(self.listing_factory.clone(), options)
             .with_enable_statistics(enable_statistics)
-            .with_output_dir(self.output_dir.clone())
     }
 }
 
@@ -283,8 +278,6 @@ pub struct NetcdfFormat {
     pub options: NetcdfOptions,
     /// Whether to generate per-file statistics during planning.
     enable_statistics: bool,
-    /// Local directory the NetCDF writer emits output files into.
-    output_dir: PathBuf,
 }
 
 impl NetcdfFormat {
@@ -293,20 +286,12 @@ impl NetcdfFormat {
             listing_factory,
             options,
             enable_statistics: false,
-            output_dir: std::env::temp_dir(),
         }
     }
 
     /// Set whether per-file statistics are generated during planning.
     pub fn with_enable_statistics(mut self, enable_statistics: bool) -> Self {
         self.enable_statistics = enable_statistics;
-        self
-    }
-
-    /// Set the local directory the writer emits output files into (defaults to the
-    /// OS temp dir).
-    pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
-        self.output_dir = output_dir;
         self
     }
 }
@@ -471,10 +456,7 @@ impl FileFormat for NetcdfFormat {
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        // The NetCDF sinks write a real local file, not an object store stream.
-        // Write into the configured output directory (the tmp store root),
-        // threaded in by the runtime, rather than the OS temp dir.
-        let output_dir = self.output_dir.clone();
+        // The sinks write a local scratch file and upload it to the store of `conf`.
         match &self.options.write_dimensions {
             Some(dim_columns) if !dim_columns.is_empty() => {
                 let flat_keys = self.options.writer.set_keys();
@@ -509,7 +491,6 @@ impl FileFormat for NetcdfFormat {
                     conf,
                     unique_columns.len(),
                     collection_handle,
-                    output_dir.clone(),
                 )?);
 
                 Ok(Arc::new(DataSinkExec::new(
@@ -519,11 +500,7 @@ impl FileFormat for NetcdfFormat {
                 )))
             }
             _ => {
-                let netcdf_sink = Arc::new(NetCDFSink::new(
-                    conf,
-                    output_dir,
-                    self.options.writer.clone(),
-                ));
+                let netcdf_sink = Arc::new(NetCDFSink::new(conf, self.options.writer.clone()));
                 Ok(Arc::new(DataSinkExec::new(
                     input,
                     netcdf_sink,
@@ -571,7 +548,6 @@ mod format_tests {
     fn factory() -> NetCDFFormatFactory {
         NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
-            std::env::temp_dir(),
             NetcdfOptions::default(),
             NetcdfConfig::default(),
         )
@@ -967,7 +943,6 @@ mod format_tests {
 
         let factory = NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
-            std::env::temp_dir(),
             NetcdfOptions {
                 write_dimensions: Some(vec!["lat".to_string()]),
                 writer: crate::datafusion::options::NetcdfWriterOptions {
@@ -2233,7 +2208,6 @@ mod extension_tests {
     fn factory() -> NetCDFFormatFactory {
         NetCDFFormatFactory::new(
             Arc::new(ListingFactory::dynamic()),
-            std::env::temp_dir(),
             NetcdfOptions::default(),
             NetcdfConfig::default(),
         )

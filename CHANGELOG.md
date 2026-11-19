@@ -85,6 +85,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   variable has no `_FillValue`, so the value reads back as an empty string. An attribute above
   64 KiB fails the write. Beacon cuts a string value and a text attribute at the first NUL byte. A
   failed write leaves no file at the output path. ([#658](https://github.com/maris-development/beacon/issues/658))
+- **NetCDF output goes through the object store.** The NetCDF and HDF5 writers write through the
+  object store of the target, so a NetCDF `COPY` to a remote store uploads the file. Beacon writes
+  the file to a local temporary file first, then uploads it. A failed write puts no new object at
+  the target. ([#658](https://github.com/maris-development/beacon/issues/658))
 
 ### Removed
 

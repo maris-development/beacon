@@ -40,8 +40,7 @@ impl Output {
     /// # Arguments
     /// * `datasets_root` - Local root of the datasets store (used by the NetCDF writer's
     ///   sibling reader path; ignored by other formats).
-    /// * `tmp_dir` - Directory the temporary output file is created in (the tmp store root),
-    ///   also where the NetCDF writer emits its file.
+    /// * `tmp_dir` - Directory the temporary output file is created in (the tmp store root).
     /// * `tmp_store_url` - The URL the tmp store is registered under; the COPY target is
     ///   `<tmp_store_url><object_name>`. Read from the session's `ObjectStoreUrls`
     ///   extension by the caller so it matches the URL the store was registered at.
@@ -62,12 +61,8 @@ impl Output {
             .file_type(session)
             .map_err(|e| DataFusionError::External(e.into()))?;
 
-        // Reserve a unique name under `tmp_dir` (the tmp store's root). The COPY
-        // target is `<tmp_store_url><object_name>`; object-store writers resolve that
-        // under the tmp store, and the native NetCDF/ODV sinks reconstruct
-        // `output_dir.join(<object_name>)` — with `output_dir == tmp_dir` (see the
-        // call site in `runtime.rs`), both land at `temp.path()`. One name, no
-        // path↔URL pair to keep in sync.
+        // Reserve a unique name under `tmp_dir`, the root of the tmp store.
+        // The COPY target `<tmp_store_url><object_name>` resolves to `temp.path()` in it.
         let temp = TempObject::create_in(tmp_dir, kind.suggested_extension())
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let location = format!("{}{}", tmp_store_url.as_str(), temp.object_path());

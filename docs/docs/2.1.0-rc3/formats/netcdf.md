@@ -92,7 +92,8 @@ arrays that you select. This is much faster than a scan of the original NetCDF f
 
 ## Write a NetCDF output
 
-Beacon writes NetCDF with a pure-Rust writer.
+Beacon writes NetCDF with a pure-Rust writer. Beacon writes the file to a local temporary file and
+then uploads it to the target store.
 
 - Beacon writes a null value of a string column as an empty string.
 - An attribute above 64 KiB fails the write.

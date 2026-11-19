@@ -8,28 +8,26 @@ use std::path::{Path, PathBuf};
 
 /// Owns one query-output file on disk and deletes it on drop.
 ///
-/// Unlike `tempfile::NamedTempFile`, a path-based writer (NetCDF / ODV) can (re)create
-/// the file at this path. Those writers open the path themselves, so cleanup is keyed
-/// on the path, not on an open handle. `object_name` is the single source of
-/// truth: the COPY target is `tmp://<object_name>` and the native sink reconstructs
-/// `tmp_dir/<object_name>` via the same `output_dir.join(prefix)`, so the write
+/// Unlike `tempfile::NamedTempFile`, the writer creates the file at this path.
+/// The writer does not share an open handle, so the cleanup uses the path.
+/// `object_name` is the single source of truth. The COPY target is
+/// `tmp://<object_name>`, and each writer writes through the tmp object store.
+/// That store is a local file system store rooted at `tmp_dir`, so the write
 /// location and the readable path cannot diverge.
 #[derive(Debug)]
 pub struct TempObject {
     /// `<tmp_dir>/<object_name>` — where the bytes end up, for read-back / size.
     path: PathBuf,
-    /// The bare `<object_name>` — the `tmp://` object path the COPY target and the
-    /// native sink agree on.
+    /// The bare `<object_name>`, the `tmp://` object path of the COPY target.
     object_name: String,
 }
 
 impl TempObject {
     /// Reserve a unique output name under `tmp_dir` (the tmp store's root).
     ///
-    /// `tmp_dir` MUST be the directory the tmp object store
-    /// (the tmp URL in [`crate::settings::ObjectStoreUrls`]) is rooted at *and* the NetCDF
-    /// factory's `output_dir`, so a COPY to `tmp://<object_name>` lands at
-    /// [`Self::path`] regardless of which writer produces it.
+    /// `tmp_dir` MUST be the directory that the tmp object store (the tmp URL in
+    /// [`crate::settings::ObjectStoreUrls`]) is rooted at. Then a COPY to
+    /// `tmp://<object_name>` lands at [`Self::path`], whichever writer produces it.
     ///
     /// The name is reserved (a unique `beacon_out_<uuid><extension>`), not created:
     /// the COPY writer — object-store or native — creates the file. `extension`
@@ -43,8 +41,7 @@ impl TempObject {
         Ok(Self { path, object_name })
     }
 
-    /// The bare object name — the `tmp://` object path shared by the COPY target and
-    /// the native sink.
+    /// The bare object name, the `tmp://` object path of the COPY target.
     pub fn object_path(&self) -> &str {
         &self.object_name
     }
@@ -100,7 +97,7 @@ mod tests {
 
     /// A `TempObject` reserves a name but creates no file; writing to its path and
     /// dropping it removes the file — the RAII cleanup the native-writer path relies
-    /// on. The NetCDF writer opens the path itself, so a file handle cannot own it.
+    /// on. The writer creates the file itself, so a file handle cannot own it.
     #[test]
     fn temp_object_deletes_its_path_on_drop() {
         let dir = tempfile::tempdir().expect("temp dir");

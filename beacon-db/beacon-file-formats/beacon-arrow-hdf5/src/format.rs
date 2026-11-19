@@ -499,12 +499,8 @@ mod tests {
     /// tests — they exercise the HDF5 identity and the reader choice.
     fn factory(ext: &str, config: Hdf5Config) -> Hdf5FormatFactory {
         let listing = Arc::new(ListingFactory::new(None));
-        let inner = NetCDFFormatFactory::new(
-            listing,
-            std::env::temp_dir(),
-            NetcdfOptions::default(),
-            NetcdfConfig::default(),
-        );
+        let inner =
+            NetCDFFormatFactory::new(listing, NetcdfOptions::default(), NetcdfConfig::default());
         Hdf5FormatFactory::new(inner, config).with_ext(ext)
     }
 
