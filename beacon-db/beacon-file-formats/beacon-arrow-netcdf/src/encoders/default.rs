@@ -372,10 +372,16 @@ impl Encoder for DefaultEncoder {
                     .nc_file
                     .variable_mut(variable)
                     .ok_or_else(|| format!("NetCDF variable not found: {variable}"))?;
-                nc_variable.put_attribute(name, value)?;
+                nc_variable.put_attribute(name, value).map_err(|e| {
+                    format!(
+                        "failed to write the attribute '{name}' of the variable '{variable}': {e}"
+                    )
+                })?;
             }
             None => {
-                self.nc_file.add_attribute(name, value)?;
+                self.nc_file
+                    .add_attribute(name, value)
+                    .map_err(|e| format!("failed to write the global attribute '{name}': {e}"))?;
             }
         }
         Ok(())

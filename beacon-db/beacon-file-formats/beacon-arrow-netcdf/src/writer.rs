@@ -1,7 +1,7 @@
 //! High-level writers for serializing Arrow record batches into NetCDF.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::Arc,
@@ -270,12 +270,18 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             return nc_writer.close();
         }
 
-        for batch in reader {
-            let batch = batch.map_err(|e| anyhow::anyhow!(e))?;
-            let batch = batch
-                .project(&kept_columns)
-                .map_err(|e| anyhow::anyhow!(e))?;
-            let updated_batch = Self::map_record_batch(batch, updated_schema.clone())?;
+        let batches = reader
+            .map(|batch| -> anyhow::Result<RecordBatch> { Ok(batch?.project(&kept_columns)?) });
+        // A compressed chunk goes to the file only when one write covers the whole chunk.
+        let whole_chunks = encoder_options
+            .chunk_rows
+            .filter(|_| encoder_options.compression.is_some());
+        let batches: Box<dyn Iterator<Item = anyhow::Result<RecordBatch>>> = match whole_chunks {
+            Some(rows) => Box::new(WholeChunks::new(batches, rows)),
+            None => Box::new(batches),
+        };
+        for batch in batches {
+            let updated_batch = Self::map_record_batch(batch?, updated_schema.clone())?;
             nc_writer.write_record_batch(updated_batch)?;
         }
 
@@ -304,6 +310,73 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         }
 
         Ok(RecordBatch::try_new(schema, arrays)?)
+    }
+}
+
+/// Regroups batches into batches of `rows` rows. The last batch can hold fewer rows.
+///
+/// It keeps only the rows that do not yet fill a batch.
+struct WholeChunks<I> {
+    batches: I,
+    rows: usize,
+    /// Rows that do not yet fill a batch, in input order.
+    pending: VecDeque<RecordBatch>,
+    pending_rows: usize,
+}
+
+impl<I> WholeChunks<I> {
+    fn new(batches: I, rows: usize) -> Self {
+        Self {
+            batches,
+            rows: rows.max(1),
+            pending: VecDeque::new(),
+            pending_rows: 0,
+        }
+    }
+
+    /// Remove the first `rows` pending rows and return them as one batch.
+    fn take(&mut self, rows: usize) -> anyhow::Result<RecordBatch> {
+        let mut parts = Vec::new();
+        let mut missing = rows;
+        while missing > 0 {
+            let Some(batch) = self.pending.pop_front() else {
+                break;
+            };
+            if batch.num_rows() > missing {
+                parts.push(batch.slice(0, missing));
+                self.pending
+                    .push_front(batch.slice(missing, batch.num_rows() - missing));
+                missing = 0;
+            } else {
+                missing -= batch.num_rows();
+                parts.push(batch);
+            }
+        }
+        self.pending_rows -= rows - missing;
+        match parts.len() {
+            1 => Ok(parts.remove(0)),
+            _ => Ok(arrow::compute::concat_batches(&parts[0].schema(), &parts)?),
+        }
+    }
+}
+
+impl<I: Iterator<Item = anyhow::Result<RecordBatch>>> Iterator for WholeChunks<I> {
+    type Item = anyhow::Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.pending_rows < self.rows {
+            match self.batches.next() {
+                Some(Ok(batch)) if batch.num_rows() == 0 => {}
+                Some(Ok(batch)) => {
+                    self.pending_rows += batch.num_rows();
+                    self.pending.push_back(batch);
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None if self.pending_rows == 0 => return None,
+                None => return Some(self.take(self.pending_rows)),
+            }
+        }
+        Some(self.take(self.rows))
     }
 }
 
@@ -689,6 +762,99 @@ mod tests {
     }
 
     #[test]
+    fn a_compressed_write_of_part_chunks_reads_back_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("parts.nc");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            true,
+        )]));
+        let batch = |start: usize| {
+            let values: Vec<f64> = (start..start + 3).map(|v| v as f64).collect();
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Float64Array::from(values))])
+                .unwrap()
+        };
+        let options = NetcdfWriterOptions {
+            chunk_rows: std::num::NonZeroUsize::new(4),
+            ..compressed(4)
+        };
+        write_with(
+            &path,
+            schema.clone(),
+            vec![batch(0), batch(3), batch(6)],
+            options,
+        )
+        .unwrap();
+
+        let file = open(&path);
+        assert_eq!(chunk_shape(&file, "value"), Some(vec![4]));
+        let expected: Vec<f64> = (0..9).map(|v| v as f64).collect();
+        assert_eq!(values(&file, "value"), expected);
+    }
+
+    fn int_batches(sizes: &[usize]) -> Vec<anyhow::Result<RecordBatch>> {
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, false)]));
+        let mut next = 0;
+        sizes
+            .iter()
+            .map(|&size| {
+                let values: Vec<i32> = (next..next + size as i32).collect();
+                next += size as i32;
+                Ok(RecordBatch::try_new(
+                    schema.clone(),
+                    vec![Arc::new(arrow::array::Int32Array::from(values))],
+                )?)
+            })
+            .collect()
+    }
+
+    /// The batch sizes and the values that `WholeChunks` gives for `sizes` and `rows`.
+    fn regroup(sizes: &[usize], rows: usize) -> (Vec<usize>, Vec<i32>) {
+        let batches: Vec<RecordBatch> = WholeChunks::new(int_batches(sizes).into_iter(), rows)
+            .collect::<anyhow::Result<_>>()
+            .unwrap();
+        let values = batches
+            .iter()
+            .flat_map(|batch| {
+                let column = batch.column(0).as_any();
+                let column = column.downcast_ref::<arrow::array::Int32Array>().unwrap();
+                column.values().to_vec()
+            })
+            .collect();
+        (batches.iter().map(RecordBatch::num_rows).collect(), values)
+    }
+
+    #[test]
+    fn whole_chunks_joins_small_batches() {
+        assert_eq!(regroup(&[3, 3, 3], 4), (vec![4, 4, 1], (0..9).collect()));
+    }
+
+    #[test]
+    fn whole_chunks_splits_a_large_batch() {
+        assert_eq!(regroup(&[8], 4), (vec![4, 4], (0..8).collect()));
+    }
+
+    #[test]
+    fn whole_chunks_keeps_a_short_last_batch() {
+        assert_eq!(regroup(&[2], 4), (vec![2], vec![0, 1]));
+    }
+
+    #[test]
+    fn whole_chunks_gives_no_batch_for_no_input() {
+        assert_eq!(regroup(&[], 4), (vec![], vec![]));
+        assert_eq!(regroup(&[0, 0], 4), (vec![], vec![]));
+    }
+
+    #[test]
+    fn whole_chunks_passes_an_error_on() {
+        let mut input = int_batches(&[3]);
+        input.push(Err(anyhow::anyhow!("a broken batch")));
+        let mut chunks = WholeChunks::new(input.into_iter(), 4);
+        assert!(chunks.next().unwrap().is_err());
+    }
+
+    #[test]
     fn the_default_chunk_is_not_larger_than_the_rows() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("small.nc");
@@ -836,7 +1002,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(write_with(&path, schema, vec![batch], options).is_err());
+        let error = write_with(&path, schema, vec![batch], options).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("comment"), "{text}");
+        assert!(text.contains("temp"), "{text}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 

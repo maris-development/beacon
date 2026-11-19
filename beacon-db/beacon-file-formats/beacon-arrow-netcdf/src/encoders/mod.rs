@@ -24,7 +24,7 @@ pub struct EncoderOptions {
 pub trait Encoder {
     /// Create an encoder instance for an open mutable NetCDF file and schema.
     ///
-    /// An error removes the file.
+    /// After an error, an implementor must leave no file: it discards `nc_file` with `into_bytes`.
     fn create(
         nc_file: FileMut,
         schema: SchemaRef,

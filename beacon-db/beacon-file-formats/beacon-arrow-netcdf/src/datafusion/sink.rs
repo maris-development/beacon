@@ -1713,6 +1713,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let lat: FieldRef = Arc::new(Field::new("lat", DataType::Int32, false));
+        // The test needs a column type that `write_ndarray_slab` rejects.
         // The sink defines a Duration column but cannot write its slab.
         let wait = Field::new(
             "wait",
