@@ -26,7 +26,7 @@ Beacon reads HDF5 with a pure-Rust reader:
 | Object storage | Full credential chain, no local copy |
 | [File statistics](/docs/2.1.0-rc3/internals/file-statistics) | Per-file column ranges |
 | Concurrent scans | In parallel |
-| Writes | The netCDF-C library |
+| Writes | A pure-Rust NetCDF writer |
 
 ## How a dataset becomes a column
 
@@ -186,7 +186,7 @@ See [Object Storage](/docs/2.1.0-rc3/data-sources/object-storage).
 ## As a query output
 
 `COPY TO ... STORED AS HDF5` uses the netCDF-4 writer. The result is a netCDF-4 file with an HDF5
-extension. Every HDF5 reader opens it. A write always uses the netCDF-C library.
+extension. Every HDF5 reader opens it. Beacon writes NetCDF with a pure-Rust writer.
 
 ::: warning What does not map
 The reader covers nested groups and compound datasets. It does not read a variable-length

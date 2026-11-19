@@ -92,6 +92,8 @@ arrays that you select. This is much faster than a scan of the original NetCDF f
 
 ## Write a NetCDF output
 
+Beacon writes NetCDF with a pure-Rust writer.
+
 ### NetCDF output options
 
 The plain name `"format": "netcdf"` uses the default options. To set an option, give the `netcdf`

@@ -52,15 +52,14 @@ declared build dependency (`protoc-wheel-0`) that pip installs for you. Both go 
 isolated build environment, so nothing lands on your system. Opt out of the Rust bootstrap with
 `MATURIN_NO_INSTALL_RUST=1`.
 
-What you *do* need is a C/C++ toolchain and system HDF5/netCDF, because a source build uses the
-crate's default features and links them dynamically. Those defaults also link **PROJ 9.6.2 or
-later** for `ST_Transform`; without one the build compiles PROJ itself, which needs `cmake` and
-the `sqlite3` program. For the static, self-contained variant instead, pass the features through
-maturin's PEP 517 hook:
+What you *do* need is a C/C++ toolchain, because a source build uses the crate's default
+features. Those defaults link **PROJ 9.6.2 or later** for `ST_Transform`; without one the build
+compiles PROJ itself, which needs `cmake` and the `sqlite3` program. For the static,
+self-contained variant instead, pass the feature through maturin's PEP 517 hook:
 
 ```bash
-# needs cmake + sqlite3, not hdf5-dev/netcdf-dev/proj
-MATURIN_PEP517_ARGS="--features static-netcdf,spatial-proj-bundled" pip install beacondb
+# needs cmake + sqlite3, not proj
+MATURIN_PEP517_ARGS="--features spatial-proj-bundled" pip install beacondb
 pip install beacondb --no-binary beacondb   # force source on a wheel platform
 ```
 
@@ -363,16 +362,18 @@ Beyond that, beacon inherits DataFusion's *friendly SQL* extensions: `SELECT * E
 links — not just a Rust compiler:
 
 - **protoc** (Lance generates protobuf at build time)
-- **HDF5 + netCDF** headers/libraries (the netCDF reader/writer)
 - **PROJ 9.6.2+** and pkg-config (the `ST_Transform` spatial function links it). Without one, the
   build compiles PROJ from source, which needs `cmake` and the `sqlite3` program
 - a Rust toolchain — **1.94 or later**, enforced by `rust-version` in the workspace `Cargo.toml`
 
+Beacon reads and writes NetCDF and HDF5 with a pure-Rust library, so the build needs no netCDF or
+HDF5 library.
+
 ```bash
 # macOS
-brew install protobuf hdf5 netcdf proj pkg-config
+brew install protobuf proj pkg-config
 # Debian/Ubuntu
-sudo apt-get install -y protobuf-compiler libhdf5-dev libnetcdf-dev libproj-dev pkg-config
+sudo apt-get install -y protobuf-compiler libproj-dev pkg-config
 
 pip install maturin
 maturin develop            # build + install into the current venv (debug)
@@ -383,14 +384,13 @@ The wheel is **abi3** (`cp310-abi3`), so one wheel per platform covers CPython 3
 `py.typed` and `_beacondb.pyi` type stubs — including the catalog-driven `read_*` readers — so
 editors get completion.
 
-**Portable wheels (`static-netcdf`, `spatial-proj-bundled`).** Distributable wheels link netCDF,
-HDF5 and PROJ *statically*, compiling them from source, so the wheel carries them and needs no
-system libraries — the only way to ship a portable **Windows** wheel (there's no `apt`/`brew` for
-HDF5 there):
+**Portable wheels (`spatial-proj-bundled`).** Distributable wheels link PROJ *statically*,
+compiling it from source, so the wheel carries it and needs no system library. This is the only
+way to ship a portable **Windows** wheel:
 
 ```bash
 # needs protoc, cmake and sqlite3
-maturin build --release --features static-netcdf,spatial-proj-bundled
+maturin build --release --features spatial-proj-bundled
 ```
 
 A static PROJ embeds its CRS database (`proj.db`) inside the library, so `ST_Transform` works out

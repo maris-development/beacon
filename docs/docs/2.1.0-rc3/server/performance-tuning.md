@@ -99,7 +99,7 @@ to debug the pruning.
 
 Beacon reads NetCDF and HDF5 with a pure-Rust reader. It holds no lock, so Beacon reads many
 files at the same time. It also reads byte ranges through the object store, so a file in S3, GCS or
-Azure needs no local copy. The reader has no setting. Writes use the netCDF-C library.
+Azure needs no local copy. The reader has no setting. Beacon writes NetCDF with a pure-Rust writer.
 
 The reader also reads two layouts of a plain HDF5 file:
 

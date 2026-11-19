@@ -80,6 +80,11 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   4. Rebuild each native plugin with the new SDK, because Beacon refuses a plugin with SDK ABI 3. A
   body that accepts only `ColumnarValue::Array` must also accept a scalar. `invoke_arrays` still
   gives arrays. ([#612](https://github.com/maris-development/beacon/issues/612))
+- **The NetCDF writer is pure Rust.** Beacon writes NetCDF and HDF5 output with oxcdf, not with the
+  netCDF-C library. A null value of a string column is written as an empty string and reads back as
+  an empty string, because a string variable has no `_FillValue`. An attribute above 64 KiB fails
+  the write. A text attribute is cut at the first NUL byte. A failed write leaves no file at the
+  output path. ([#658](https://github.com/maris-development/beacon/issues/658))
 
 ### Removed
 
@@ -100,8 +105,12 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   `BEACON_FILE_STATS_DISCOVERY_CHUNK` and `BEACON_FILE_STATS_SCHEMA_CACHE` have no effect.
 - **The netCDF-C reader.** Beacon reads NetCDF and HDF5 only with the pure-Rust reader.
   `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` have no effect. The table
-  option `use_rust_reader` has no effect, and Beacon logs a warning for `'false'`. Writes still use
-  the netCDF-C library. ([#658](https://github.com/maris-development/beacon/issues/658))
+  option `use_rust_reader` has no effect, and Beacon logs a warning for `'false'`.
+  ([#658](https://github.com/maris-development/beacon/issues/658))
+- **The `static-netcdf` feature and the netCDF-C build requirement.** A build of Beacon or of
+  `beacondb` needs no netCDF-C or HDF5 library. The `beacondb` wheels hold no netCDF-C or HDF5
+  library. `beacon-arrow-netcdf` no longer exports `NcChar`, `NcString`, `netcdf` and `netcdf_sys`.
+  ([#658](https://github.com/maris-development/beacon/issues/658))
 - **BBF.** `STORED AS BBF`, `read_bbf`, `read_bbf_schema`, the JSON `bbf` source and `fromBbf` in
   the TypeScript client are gone. A stored BBF table is skipped at startup, with an error in the
   log. Convert BBF data to a different format with an earlier release before the upgrade.

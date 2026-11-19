@@ -17,11 +17,6 @@ name = "_beacondb"
 crate-type = ["cdylib"]
 
 [features]
-# This feature compiles netCDF and HDF5 from source and links them statically. The wheel then
-# holds them, and needs no system library. The wheel jobs use it. `maturin develop` does not,
-# because a local build is faster without it. The build needs cmake.
-static-netcdf = ["beacon-core/static-netcdf"]
-
 # This feature compiles OpenSSL from source, so the wheel needs no system libssl. Only the
 # MySQL and PostgreSQL drivers need OpenSSL, and only on Linux. The feature is inert elsewhere,
 # so the wheel jobs pass it on every platform. The build needs cmake, make and perl.
