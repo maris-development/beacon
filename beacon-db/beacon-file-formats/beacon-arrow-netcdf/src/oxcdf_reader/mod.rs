@@ -6,8 +6,8 @@
 //!
 //! # Limits
 //!
-//! [`oxcdf`] reads files. It does not write them. The
-//! [`writer`](crate::writer) and the DataFusion sinks always use netcdf-c.
+//! This module reads files. It does not write them. The
+//! [`writer`](crate::writer) and the DataFusion sinks write through [`oxcdf`].
 //!
 //! # Layout
 //!

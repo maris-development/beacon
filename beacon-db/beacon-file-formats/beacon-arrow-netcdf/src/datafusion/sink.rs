@@ -23,7 +23,8 @@
 use std::{fmt::Formatter, path::PathBuf, sync::Arc};
 
 use crate::{
-    datafusion::options::NetcdfWriterOptions, encoders::default::DefaultEncoder,
+    datafusion::options::NetcdfWriterOptions,
+    encoders::{default::DefaultEncoder, discard},
     writer::ArrowRecordBatchWriter,
 };
 use arrow::{
@@ -41,8 +42,8 @@ use datafusion::{
 };
 use futures::StreamExt;
 use ndarray::ArrayBase;
-use netcdf::{Extents, FileMut, NcTypeDescriptor, VariableMut};
 use ordered_float::OrderedFloat;
+use oxcdf::{Element, FileMut, VariableMut};
 
 // ─── Flat sink ─────────────────────────────────────────────────────────────
 
@@ -219,10 +220,6 @@ impl DataSink for NetCDFNdSink {
         tracing::info!("Writing ND NetCDF to path: {:?}", output_path);
 
         let mut rows_written: u64 = 0;
-        let mut nc_file = netcdf::create(output_path).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to create NetCDF file: {}", e))
-        })?;
-
         let mut pinned_stream = std::pin::pin!(data);
         let mut batches = vec![];
         while let Some(batch) = pinned_stream.next().await {
@@ -241,6 +238,31 @@ impl DataSink for NetCDFNdSink {
                 },
             )?;
 
+        let mut nc_file = oxcdf::create(output_path).map_err(|e| {
+            DataFusionError::Execution(format!("Failed to create NetCDF file: {}", e))
+        })?;
+        // A drop of the file puts it at its path, so an error discards it.
+        if let Err(e) = self.write_grid(&mut nc_file, &concatted_batch) {
+            discard(nc_file);
+            return Err(e);
+        }
+
+        nc_file.close().map_err(|e| {
+            DataFusionError::Execution(format!("Failed to finish writing NetCDF: {}", e))
+        })?;
+
+        Ok(rows_written)
+    }
+}
+
+impl NetCDFNdSink {
+    /// Define the dimensions and variables of `nc_file` and write the rows of
+    /// `concatted_batch` into them.
+    fn write_grid(
+        &self,
+        nc_file: &mut FileMut,
+        concatted_batch: &RecordBatch,
+    ) -> datafusion::error::Result<()> {
         let unique_values_collection: Arc<ColumnValueMap> = self
             .unique_values
             .unique_values()?
@@ -283,10 +305,10 @@ impl DataSink for NetCDFNdSink {
                 .collect::<Vec<_>>(),
         ));
 
-        create_dimension_variables(&mut nc_file, &unique_values_collection)?;
+        create_dimension_variables(nc_file, &unique_values_collection)?;
 
         for field in &value_fields {
-            create_variable(&mut nc_file, field, &dim_names)?;
+            create_variable(nc_file, field, &dim_names)?;
         }
 
         let dimension_columns = RecordBatch::try_new(
@@ -320,17 +342,15 @@ impl DataSink for NetCDFNdSink {
 
             write_ndarray_slab(
                 &mut variable,
+                field.name(),
+                dim_names.len(),
                 unique_values_collection.clone(),
                 dimension_columns.clone(),
                 value_array.clone(),
             )?;
         }
 
-        nc_file.close().map_err(|e| {
-            DataFusionError::Execution(format!("Failed to finish writing NetCDF: {}", e))
-        })?;
-
-        Ok(rows_written)
+        Ok(())
     }
 }
 
@@ -442,22 +462,22 @@ fn create_dimension_for_field(
             let values = typed_values::<bool>(&dim_name, erased_values)?;
             let encoded: Vec<u8> = values.into_iter().map(|v| if v { 1 } else { 0 }).collect();
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<u8>(&mut variable, &encoded)?;
+            write_numeric_dimension_values::<u8>(&mut variable, &dim_name, &encoded)?;
         }
         DataType::Int8 => {
             let values = typed_values::<i8>(&dim_name, erased_values)?;
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<i8>(&mut variable, &values)?;
+            write_numeric_dimension_values::<i8>(&mut variable, &dim_name, &values)?;
         }
         DataType::Int16 => {
             let values = typed_values::<i16>(&dim_name, erased_values)?;
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<i16>(&mut variable, &values)?;
+            write_numeric_dimension_values::<i16>(&mut variable, &dim_name, &values)?;
         }
         DataType::Int32 | DataType::Date32 | DataType::Time32(_) => {
             let values = typed_values::<i32>(&dim_name, erased_values)?;
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<i32>(&mut variable, &values)?;
+            write_numeric_dimension_values::<i32>(&mut variable, &dim_name, &values)?;
         }
         DataType::Int64
         | DataType::Timestamp(_, _)
@@ -467,39 +487,39 @@ fn create_dimension_for_field(
         | DataType::Interval(_) => {
             let values = typed_values::<i64>(&dim_name, erased_values)?;
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<i64>(&mut variable, &values)?;
+            write_numeric_dimension_values::<i64>(&mut variable, &dim_name, &values)?;
         }
         DataType::UInt8 => {
             let values = typed_values::<u8>(&dim_name, erased_values)?;
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<u8>(&mut variable, &values)?;
+            write_numeric_dimension_values::<u8>(&mut variable, &dim_name, &values)?;
         }
         DataType::UInt16 => {
             let values = typed_values::<u16>(&dim_name, erased_values)?;
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<u16>(&mut variable, &values)?;
+            write_numeric_dimension_values::<u16>(&mut variable, &dim_name, &values)?;
         }
         DataType::UInt32 => {
             let values = typed_values::<u32>(&dim_name, erased_values)?;
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<u32>(&mut variable, &values)?;
+            write_numeric_dimension_values::<u32>(&mut variable, &dim_name, &values)?;
         }
         DataType::UInt64 => {
             let values = typed_values::<u64>(&dim_name, erased_values)?;
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<u64>(&mut variable, &values)?;
+            write_numeric_dimension_values::<u64>(&mut variable, &dim_name, &values)?;
         }
         DataType::Float32 => {
             let ordered = typed_values::<OrderedFloat<f32>>(&dim_name, erased_values)?;
             let floats: Vec<f32> = ordered.into_iter().map(|v| v.into_inner()).collect();
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<f32>(&mut variable, &floats)?;
+            write_numeric_dimension_values::<f32>(&mut variable, &dim_name, &floats)?;
         }
         DataType::Float64 => {
             let ordered = typed_values::<OrderedFloat<f64>>(&dim_name, erased_values)?;
             let floats: Vec<f64> = ordered.into_iter().map(|v| v.into_inner()).collect();
             let mut variable = create_variable(file, field, &dims)?;
-            write_numeric_dimension_values::<f64>(&mut variable, &floats)?;
+            write_numeric_dimension_values::<f64>(&mut variable, &dim_name, &floats)?;
         }
         other => {
             return Err(DataFusionError::Execution(format!(
@@ -513,13 +533,14 @@ fn create_dimension_for_field(
     Ok(())
 }
 
-/// Write a 1-D slice of coordinate values into `variable`.
+/// Write a 1-D slice of coordinate values into `variable`, the variable `name`.
 fn write_numeric_dimension_values<T>(
     variable: &mut VariableMut,
+    name: &str,
     values: &[T],
 ) -> datafusion::error::Result<()>
 where
-    T: NcTypeDescriptor + Copy,
+    T: Element,
 {
     if values.is_empty() {
         return Ok(());
@@ -528,7 +549,7 @@ where
     let extents = vec![0..values.len()];
     variable
         .put_values::<T, _>(values, extents)
-        .map_err(|e| df_err(&variable.name(), "write numeric coordinate", e))?;
+        .map_err(|e| df_err(name, "write numeric coordinate", e))?;
 
     Ok(())
 }
@@ -538,13 +559,11 @@ where
 /// If the dimension already exists with the same length, this is a no-op.
 /// A length mismatch returns an error.
 fn ensure_dimension(file: &mut FileMut, name: &str, len: usize) -> datafusion::error::Result<()> {
-    if let Some(dimension) = file.dimension(name) {
-        if dimension.len() != len {
+    if let Some(existing_len) = file.dimension_len(name) {
+        if existing_len != len as u64 {
             return Err(DataFusionError::Execution(format!(
                 "Dimension '{}' already exists with length {}, cannot redefine with length {}",
-                name,
-                dimension.len(),
-                len
+                name, existing_len, len
             )));
         }
     } else {
@@ -585,7 +604,7 @@ fn df_err(field: &str, action: &str, err: impl std::fmt::Display) -> DataFusionE
 // ─── N-dimensional slab helpers ────────────────────────────────────────────
 
 /// Create an N-dimensional array filled with `fill_value` whose shape is `dims`.
-fn typed_ndarray_slab<T: NcTypeDescriptor + Clone>(
+fn typed_ndarray_slab<T: Element>(
     dims: &[usize],
     fill_value: T,
 ) -> ArrayBase<ndarray::OwnedRepr<T>, ndarray::Dim<ndarray::IxDynImpl>> {
@@ -614,8 +633,12 @@ fn relative_slab_positions(
 /// Write an N-dimensional slab into `variable` by mapping each row of
 /// `value_column` to its position in the dimension grid described by
 /// `unique_values` and `dimension_columns`.
+///
+/// `variable` is the variable `name` on `variable_ndims` dimensions.
 fn write_ndarray_slab(
     variable: &mut VariableMut,
+    name: &str,
+    variable_ndims: usize,
     unique_values: Arc<ColumnValueMap>,
     dimension_columns: RecordBatch,
     value_column: arrow::array::ArrayRef,
@@ -632,13 +655,12 @@ fn write_ndarray_slab(
     let extents = infer_extents(&positions)?;
     let slab_positions = relative_slab_positions(&extents, &positions);
     let dims = infer_slab_dims(&extents);
-    let nc_extents: Extents = extents.into();
 
-    if dims.len() != variable.dimensions().len() {
+    if dims.len() != variable_ndims {
         return Err(DataFusionError::Execution(format!(
             "Inferred slab dimensions length {} does not match variable dimensions length {}",
             dims.len(),
-            variable.dimensions().len()
+            variable_ndims
         )));
     }
 
@@ -649,13 +671,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab Int8 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "Int8", &slab, &extents)?;
         }
         DataType::Int16 => {
             let slab = fill_primitive_slab::<arrow::datatypes::Int16Type>(
@@ -663,13 +679,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab Int16 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "Int16", &slab, &extents)?;
         }
         DataType::Int32 | DataType::Date32 | DataType::Time32(_) => {
             let slab = fill_primitive_slab::<arrow::datatypes::Int32Type>(
@@ -677,13 +687,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab Int32 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "Int32", &slab, &extents)?;
         }
         DataType::Int64 | DataType::Date64 | DataType::Time64(_) => {
             let slab = fill_primitive_slab::<arrow::datatypes::Int64Type>(
@@ -691,13 +695,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab Int64 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "Int64", &slab, &extents)?;
         }
         DataType::Timestamp(unit, _) => {
             let slab = match unit {
@@ -722,13 +720,7 @@ fn write_ndarray_slab(
                     &dims, &slab_positions, &value_column
                 )?,
             };
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab Timestamp data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "Timestamp", &slab, &extents)?;
         }
         DataType::UInt8 => {
             let slab = fill_primitive_slab::<arrow::datatypes::UInt8Type>(
@@ -736,13 +728,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab UInt8 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "UInt8", &slab, &extents)?;
         }
         DataType::UInt16 => {
             let slab = fill_primitive_slab::<arrow::datatypes::UInt16Type>(
@@ -750,13 +736,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab UInt16 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "UInt16", &slab, &extents)?;
         }
         DataType::UInt32 => {
             let slab = fill_primitive_slab::<arrow::datatypes::UInt32Type>(
@@ -764,13 +744,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab UInt32 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "UInt32", &slab, &extents)?;
         }
         DataType::UInt64 => {
             let slab = fill_primitive_slab::<arrow::datatypes::UInt64Type>(
@@ -778,13 +752,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab UInt64 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "UInt64", &slab, &extents)?;
         }
         DataType::Float32 => {
             let slab = fill_primitive_slab::<arrow::datatypes::Float32Type>(
@@ -792,13 +760,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab Float32 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "Float32", &slab, &extents)?;
         }
         DataType::Float64 => {
             let slab = fill_primitive_slab::<arrow::datatypes::Float64Type>(
@@ -806,13 +768,7 @@ fn write_ndarray_slab(
                 &slab_positions,
                 &value_column,
             )?;
-            variable.put(slab.view(), nc_extents).map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "Failed to write slab Float64 data to variable '{}': {}",
-                    variable.name(),
-                    e
-                ))
-            })?;
+            put_slab(variable, name, "Float64", &slab, &extents)?;
         }
         other => {
             return Err(DataFusionError::Execution(format!(
@@ -823,6 +779,31 @@ fn write_ndarray_slab(
     }
 
     Ok(())
+}
+
+/// Write `slab` to the cells of `extents` in `variable`, the variable `name`.
+///
+/// `type_name` names the Arrow type in an error.
+fn put_slab<T: Element>(
+    variable: &mut VariableMut,
+    name: &str,
+    type_name: &str,
+    slab: &ndarray::ArrayD<T>,
+    extents: &[std::ops::Range<usize>],
+) -> datafusion::error::Result<()> {
+    let write_error = |e: &dyn std::fmt::Display| {
+        DataFusionError::Execution(format!(
+            "Failed to write slab {} data to variable '{}': {}",
+            type_name, name, e
+        ))
+    };
+    // A slab from `typed_ndarray_slab` is in standard layout.
+    let values = slab
+        .as_slice()
+        .ok_or_else(|| write_error(&"the slab is not contiguous"))?;
+    variable
+        .put_values(values, extents)
+        .map_err(|e| write_error(&e))
 }
 
 /// Compute the bounding-box extents for each axis from the given slab positions.
@@ -883,7 +864,7 @@ fn fill_primitive_slab<T>(
 >
 where
     T: ArrowPrimitiveType,
-    T::Native: NcTypeDescriptor + Clone + Default,
+    T::Native: Element + Default,
     T::Native: num_traits::Bounded,
 {
     use num_traits::Bounded;
@@ -1429,7 +1410,7 @@ mod tests {
         // by calling write_ndarray_slab with mismatched sizes.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().with_extension("nc");
-        let mut nc = netcdf::create(&path).unwrap();
+        let mut nc = oxcdf::create(&path).unwrap();
 
         nc.add_dimension("x", 2).unwrap();
         nc.add_variable::<i32>("var", &["x"]).unwrap();
@@ -1443,8 +1424,10 @@ mod tests {
         let (unique_map, _) = two_i32_dims(vec![1, 2], vec![]);
 
         let mut variable = nc.variable_mut("var").unwrap();
-        let err = write_ndarray_slab(&mut variable, unique_map, dim_batch, value_col).unwrap_err();
+        let err = write_ndarray_slab(&mut variable, "var", 1, unique_map, dim_batch, value_col)
+            .unwrap_err();
         assert!(err.to_string().contains("Row count mismatch"));
+        discard(nc);
     }
 
     // ── NetCDFNdSink::new rejects non-primitive schemas ────────────────
@@ -1519,8 +1502,8 @@ mod tests {
         writer.write_record_batch(batch.clone()).unwrap();
         writer.finish().unwrap();
 
-        // Read the file back with netcdf and verify contents
-        let nc_file = netcdf::open(&nc_path).unwrap();
+        // Read the file back with oxcdf and verify contents
+        let nc_file = oxcdf::open(&nc_path).unwrap();
 
         let temp_var = nc_file
             .variable("temperature")
@@ -1579,7 +1562,7 @@ mod tests {
         // Write to a temp NetCDF
         let tmp_dir = tempfile::tempdir().unwrap();
         let nc_path = tmp_dir.path().join("test_nd.nc");
-        let mut nc_file = netcdf::create(&nc_path).unwrap();
+        let mut nc_file = oxcdf::create(&nc_path).unwrap();
 
         // Define dimensions and variables
         nc_file.add_dimension("lat", 2).unwrap();
@@ -1602,13 +1585,19 @@ mod tests {
             .unwrap();
 
         let mut temp_var = nc_file.variable_mut("temperature").unwrap();
-        write_ndarray_slab(&mut temp_var, uv_map, dim_batch, value_col).unwrap();
+        write_ndarray_slab(
+            &mut temp_var,
+            "temperature",
+            2,
+            uv_map,
+            dim_batch,
+            value_col,
+        )
+        .unwrap();
         nc_file.close().unwrap();
 
         // Read back and verify
-        let nc_read = netcdf::open(&nc_path).unwrap();
-        let temp_read = nc_read.variable("temperature").unwrap();
-        let data = temp_read.get::<f64, _>(..).unwrap();
+        let data = read_temperature(&nc_path);
 
         // Shape should be [2, 3]
         assert_eq!(data.shape(), &[2, 3]);
@@ -1622,5 +1611,150 @@ mod tests {
         // Unfilled cells get fill value (f64::MIN)
         assert_eq!(data[[0, 2]], f64::MIN); // lat=10, lon=300 not written
         assert_eq!(data[[1, 0]], f64::MIN); // lat=20, lon=100 not written
+    }
+
+    /// Write "temperature" on the grid lat = [10, 20], lon = [100, 200, 300].
+    ///
+    /// Each row puts one value at the cell of its `lats` and `lons` values.
+    fn write_temperature_grid(
+        path: &std::path::Path,
+        lats: Vec<i32>,
+        lons: Vec<i32>,
+        values: Vec<f64>,
+    ) {
+        let (uv_map, fields) = two_i32_dims(vec![10, 20], vec![100, 200, 300]);
+        let dim_schema = Arc::new(Schema::new(
+            fields
+                .iter()
+                .map(|f| f.as_ref().clone())
+                .collect::<Vec<_>>(),
+        ));
+        let dim_batch = RecordBatch::try_new(
+            dim_schema,
+            vec![
+                Arc::new(Int32Array::from(lats)),
+                Arc::new(Int32Array::from(lons)),
+            ],
+        )
+        .unwrap();
+        let value_col: arrow::array::ArrayRef = Arc::new(Float64Array::from(values));
+
+        let mut nc_file = oxcdf::create(path).unwrap();
+        nc_file.add_dimension("lat", 2).unwrap();
+        nc_file.add_dimension("lon", 3).unwrap();
+        let field: FieldRef = Arc::new(Field::new("temperature", DataType::Float64, true));
+        create_variable(&mut nc_file, &field, &["lat", "lon"]).unwrap();
+        let mut temp_var = nc_file.variable_mut("temperature").unwrap();
+        write_ndarray_slab(
+            &mut temp_var,
+            "temperature",
+            2,
+            uv_map,
+            dim_batch,
+            value_col,
+        )
+        .unwrap();
+        nc_file.close().unwrap();
+    }
+
+    /// The "temperature" grid of the file at `path`.
+    fn read_temperature(path: &std::path::Path) -> ndarray::ArrayD<f64> {
+        let nc_read = oxcdf::open(path).unwrap();
+        let temp_read = nc_read.variable("temperature").unwrap();
+        temp_read.get::<f64, _>(..).unwrap()
+    }
+
+    #[test]
+    fn a_missing_cell_holds_the_fill_value() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let nc_path = tmp_dir.path().join("missing_cell.nc");
+        // The cell lat=20, lon=300 gets no row.
+        write_temperature_grid(
+            &nc_path,
+            vec![10, 10, 10, 20, 20],
+            vec![100, 200, 300, 100, 200],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        );
+
+        let data = read_temperature(&nc_path);
+        assert_eq!(data.shape(), &[2, 3]);
+        assert_eq!(data[[0, 0]], 1.0);
+        assert_eq!(data[[1, 1]], 5.0);
+        // create_variable sets no fill value for Float64, so the cell holds the slab fill.
+        assert_eq!(data[[1, 2]], f64::MIN);
+    }
+
+    #[test]
+    fn a_cell_outside_the_written_rows_holds_the_netcdf_default_fill() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let nc_path = tmp_dir.path().join("missing_row.nc");
+        // No row has lat=20, so the slab covers lat=10 only.
+        write_temperature_grid(
+            &nc_path,
+            vec![10, 10, 10],
+            vec![100, 200, 300],
+            vec![1.0, 2.0, 3.0],
+        );
+
+        let data = read_temperature(&nc_path);
+        assert_eq!(data.shape(), &[2, 3]);
+        assert_eq!(data[[0, 2]], 3.0);
+        for lon in 0..3 {
+            assert_eq!(data[[1, lon]], 9.969_209_968_386_869e36);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_nd_write_leaves_no_file() {
+        use arrow::array::DurationSecondArray;
+        use beacon_datafusion_ext::unique_values::UniqueValuesHandle;
+        use datafusion::datasource::listing::ListingTableUrl;
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+
+        let dir = tempfile::tempdir().unwrap();
+        let lat: FieldRef = Arc::new(Field::new("lat", DataType::Int32, false));
+        // The sink defines a Duration column but cannot write its slab.
+        let wait = Field::new(
+            "wait",
+            DataType::Duration(arrow::datatypes::TimeUnit::Second),
+            true,
+        );
+        let schema = Arc::new(Schema::new(vec![lat.as_ref().clone(), wait]));
+        let mut config = test_sink_config(schema.clone());
+        config.table_paths = vec![ListingTableUrl::parse("file:///grid.nc").unwrap()];
+
+        let handle = UniqueValuesHandle::try_new(&[lat.clone()]).unwrap();
+        handle.unique_column_values.lock().insert(
+            lat,
+            Box::new(UniqueColumnValues::<i32> {
+                values: vec![10, 20],
+            }),
+        );
+        let collection = UniqueValuesHandleCollection::new();
+        collection.register_handle(Arc::new(handle));
+        let sink = NetCDFNdSink::new(config, 1, collection, dir.path().to_path_buf()).unwrap();
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![10, 20])),
+                Arc::new(DurationSecondArray::from(vec![1, 2])),
+            ],
+        )
+        .unwrap();
+        let stream = Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        let err = sink
+            .write_all(stream, &Arc::new(TaskContext::default()))
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("slab writing not implemented"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

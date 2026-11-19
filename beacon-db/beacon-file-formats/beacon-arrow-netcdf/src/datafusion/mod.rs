@@ -283,7 +283,7 @@ pub struct NetcdfFormat {
     pub options: NetcdfOptions,
     /// Whether to generate per-file statistics during planning.
     enable_statistics: bool,
-    /// Local directory the netcdf-c writer emits output files into.
+    /// Local directory the NetCDF writer emits output files into.
     output_dir: PathBuf,
 }
 
@@ -471,9 +471,9 @@ impl FileFormat for NetcdfFormat {
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        // NetCDF needs a real local path (the netcdf-c writer cannot stream to an
-        // object store). Write into the configured output directory (the tmp store
-        // root), threaded in by the runtime, rather than the OS temp dir.
+        // The NetCDF sinks write a real local file, not an object store stream.
+        // Write into the configured output directory (the tmp store root),
+        // threaded in by the runtime, rather than the OS temp dir.
         let output_dir = self.output_dir.clone();
         match &self.options.write_dimensions {
             Some(dim_columns) if !dim_columns.is_empty() => {
