@@ -10,6 +10,10 @@ RUN apt-get install -y software-properties-common
 RUN apt-get install -y capnproto
 RUN apt-get install -y libclang-dev
 RUN apt-get install -y libsqlite3-dev
+# `openssl-sys` (MySQL and PostgreSQL drivers) links the system libssl.
+RUN apt-get install -y libssl-dev
+# `libz-sys` (flate2, zarrs) links the system zlib.
+RUN apt-get install -y zlib1g-dev
 RUN apt-get install -y cmake
 RUN apt-get install -y sqlite3
 # protoc: required at build time by the `lance` crate (beacon-lance managed tables)

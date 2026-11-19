@@ -65,11 +65,13 @@ jobs:
             libclang-dev \
             libproj-dev \
             libsqlite3-dev \
+            libssl-dev \
             pkg-config \
             protobuf-compiler \
             software-properties-common \
             sqlite3 \
-            wget
+            wget \
+            zlib1g-dev
 
       - name: Install Rust (${{ matrix.toolchain }})
         uses: dtolnay/rust-toolchain@stable
