@@ -181,7 +181,7 @@ impl DefaultEncoder {
             }
             variable.set_chunking(&chunk)?;
         }
-        // netCDF-C 4.9 rejects a filter on a variable-length type, such as a string.
+        // A string variable gets no compression, as in the files from netCDF-C.
         let variable_length = field.data_type() == &DataType::Utf8;
         if let Some(compression) = options.compression.filter(|_| !variable_length) {
             variable.set_compression(compression.level.get().into(), compression.shuffle)?;

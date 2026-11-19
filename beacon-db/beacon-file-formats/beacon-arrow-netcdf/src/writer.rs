@@ -813,4 +813,72 @@ mod tests {
         drop(writer);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
+
+    #[test]
+    fn an_attribute_above_64_kib_fails_and_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.nc");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Float64, true),
+            Field::new("temp.comment", DataType::Utf8, true),
+        ]));
+        let comment = "x".repeat(70_000);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(StringArray::from(vec![comment.as_str()])),
+            ],
+        )
+        .unwrap();
+        let options = NetcdfWriterOptions {
+            combine_attrs: Some(CombineAttrs::Identical),
+            ..Default::default()
+        };
+
+        assert!(write_with(&path, schema, vec![batch], options).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// Write a file with one Float64 variable and the global attribute `title`.
+    fn write_title(path: &Path, title: AttributeValue) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            true,
+        )]));
+        let mut writer = Writer::<DefaultEncoder>::new(path, schema).unwrap();
+        let target = AttributeTarget::Global {
+            name: "title".to_string(),
+        };
+        writer.put_attributes(&[(target, title)]).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn a_text_attribute_is_cut_at_an_interior_nul() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("title.nc");
+        write_title(&path, AttributeValue::Str("ab\0cd".to_string()));
+
+        assert_eq!(
+            str_attribute(&open(&path), None, "title").as_deref(),
+            Some("ab")
+        );
+    }
+
+    #[test]
+    fn each_text_of_a_list_attribute_is_cut_at_an_interior_nul() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("titles.nc");
+        let titles = vec!["x\0y".to_string(), "z".to_string()];
+        write_title(&path, AttributeValue::Strs(titles));
+
+        let file = open(&path);
+        let value = &file.attribute("title").unwrap().value;
+        assert_eq!(
+            value,
+            &AttributeValue::Strs(vec!["x".to_string(), "z".to_string()])
+        );
+    }
 }

@@ -1738,6 +1738,44 @@ mod format_tests {
         );
     }
 
+    /// The writer gives a string variable no `_FillValue`, so a null string reads back as "".
+    #[tokio::test]
+    async fn a_null_string_reads_back_as_an_empty_string() {
+        use arrow::array::{AsArray, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let path = dir.path().join("names.nc");
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, true)]));
+        let names = StringArray::from(vec![Some("a"), None]);
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(names)]).unwrap();
+        let mut writer =
+            ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema).expect("a netCDF writer");
+        writer.write_record_batch(batch).expect("write the batch");
+        writer.finish().expect("finish the file");
+
+        let ctx = session();
+        register_path(&ctx, "names", &path).await;
+        let batches = ctx
+            .sql(r#"SELECT "name" FROM names"#)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let mut read = Vec::new();
+        for batch in &batches {
+            let column = arrow::compute::cast(batch.column(0), &DataType::Utf8).unwrap();
+            read.extend(column.as_string::<i32>().iter().map(|v| v.map(str::to_string)));
+        }
+        assert_eq!(read, [Some("a".to_string()), Some(String::new())]);
+    }
+
     /// The partition count of the scan at the bottom of `plan`.
     ///
     /// The root can carry more partitions than the scan does: DataFusion adds a
