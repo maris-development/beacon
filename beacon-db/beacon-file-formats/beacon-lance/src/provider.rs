@@ -11,18 +11,18 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
-use datafusion::datasource::sink::DataSinkExec;
 use datafusion::datasource::TableType;
+use datafusion::datasource::sink::DataSinkExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+use lance::datafusion::LanceTableProvider;
+use lance::dataset::Dataset;
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::scanner::MaterializationStyle;
-use lance::dataset::Dataset;
-use lance::datafusion::LanceTableProvider;
 use lance::session::Session as LanceSession;
 
 use crate::definition::LanceTableDefinition;
@@ -34,6 +34,10 @@ use crate::warehouse::LanceWarehouse;
 #[derive(Debug, Clone)]
 pub struct LanceTable {
     definition: LanceTableDefinition,
+    /// The URI that Lance opens. For a managed table it equals `definition.location`.
+    uri: String,
+    /// The pinned dataset version, or `None` for the latest version.
+    version: Option<u64>,
     schema: SchemaRef,
     /// The runtime-scoped warehouse, used to serialize writes (via the sink).
     warehouse: Arc<LanceWarehouse>,
@@ -46,9 +50,44 @@ impl LanceTable {
         warehouse: Arc<LanceWarehouse>,
     ) -> Self {
         Self {
+            uri: definition.location.clone(),
+            version: None,
             definition,
             schema,
             warehouse,
+        }
+    }
+
+    /// Set the URI that Lance opens.
+    pub fn with_uri(mut self, uri: String) -> Self {
+        self.uri = uri;
+        self
+    }
+
+    /// Pin the table to a dataset version. A pinned table is read-only.
+    pub fn with_version(mut self, version: Option<u64>) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// The URI that Lance opens.
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    /// `true` when the dataset lives outside Beacon.
+    pub fn is_external(&self) -> bool {
+        self.definition.external
+    }
+
+    /// Return an error when the table is pinned to a version.
+    pub fn ensure_writable(&self) -> anyhow::Result<()> {
+        match self.version {
+            Some(version) => Err(anyhow::anyhow!(
+                "Lance table '{}' is pinned to version {version} and is read-only",
+                self.definition.name
+            )),
+            None => Ok(()),
         }
     }
 
@@ -59,7 +98,9 @@ impl LanceTable {
     ) -> anyhow::Result<Self> {
         let provider = open_read_provider(&definition.location, warehouse.session())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to open Lance table '{}': {e}", definition.name))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to open Lance table '{}': {e}", definition.name)
+            })?;
         Ok(Self::new(definition, provider.schema(), warehouse))
     }
 
@@ -81,8 +122,20 @@ pub(crate) async fn open_dataset(
     uri: &str,
     session: Arc<LanceSession>,
 ) -> DataFusionResult<Arc<Dataset>> {
-    let dataset = DatasetBuilder::from_uri(uri)
-        .with_session(session)
+    open_dataset_at(uri, None, session).await
+}
+
+/// Open `version` of the dataset at `uri`, or the latest version for `None`.
+async fn open_dataset_at(
+    uri: &str,
+    version: Option<u64>,
+    session: Arc<LanceSession>,
+) -> DataFusionResult<Arc<Dataset>> {
+    let mut builder = DatasetBuilder::from_uri(uri).with_session(session);
+    if let Some(version) = version {
+        builder = builder.with_version(version);
+    }
+    let dataset = builder
         .load()
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -123,10 +176,7 @@ async fn scan_fragment_group(
             scan.empty_project().map_err(DataFusionError::from)?;
         }
         Some(p) => {
-            let columns: Vec<String> = p
-                .iter()
-                .map(|i| schema.field(*i).name().clone())
-                .collect();
+            let columns: Vec<String> = p.iter().map(|i| schema.field(*i).name().clone()).collect();
             scan.project(&columns).map_err(DataFusionError::from)?;
         }
         None => {}
@@ -218,8 +268,8 @@ impl TableProvider for LanceTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        // Reopen to the latest version so scans observe prior inserts/replaces.
-        let dataset = open_dataset(&self.definition.location, self.warehouse.session()).await?;
+        // Reopen so scans observe prior writes; a pinned table opens its pinned version.
+        let dataset = open_dataset_at(&self.uri, self.version, self.warehouse.session()).await?;
 
         let target = state.config_options().execution.target_partitions;
         let n_frags = dataset.fragments().len();
@@ -239,7 +289,8 @@ impl TableProvider for LanceTable {
         while start < n_frags {
             let end = (start + per).min(n_frags);
             plans.push(
-                scan_fragment_group(&dataset, &self.schema, start..end, projection, filters).await?,
+                scan_fragment_group(&dataset, &self.schema, start..end, projection, filters)
+                    .await?,
             );
             start = end;
         }
@@ -277,12 +328,14 @@ impl TableProvider for LanceTable {
         input: Arc<dyn ExecutionPlan>,
         insert_op: InsertOp,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        self.ensure_writable()
+            .map_err(|e| DataFusionError::Plan(e.to_string()))?;
         let kind = match insert_op {
             InsertOp::Append => WriteKind::Append,
             InsertOp::Overwrite | InsertOp::Replace => WriteKind::Overwrite,
         };
         let sink = Arc::new(LanceDataSink::new(
-            self.definition.location.clone(),
+            self.uri.clone(),
             self.schema.clone(),
             kind,
             self.warehouse.clone(),

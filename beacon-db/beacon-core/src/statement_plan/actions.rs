@@ -51,7 +51,7 @@ pub(crate) async fn drop_table(
     let lance_location = provider.as_ref().and_then(|provider| {
         provider
             .downcast_ref::<beacon_lance::LanceTable>()
-            .map(|table| table.definition().location.clone())
+            .map(|table| table.uri().to_string())
     });
 
     session.deregister_table(name.clone())?;
@@ -679,7 +679,7 @@ pub(crate) async fn create_table(
         beacon_lance::create_lance_table(warehouse.clone(), &namespace, &table_name, &arrow_schema)
             .await?
             .with_sql_definition(definition);
-    let location = table.definition().location.clone();
+    let location = table.uri().to_string();
     let provider: Arc<dyn datafusion::catalog::TableProvider> = Arc::new(table);
 
     // Registration persists the table's `table.json` pointer via the PersistentSchemaProvider.
@@ -762,7 +762,8 @@ pub(crate) async fn replace_table_contents(
     // surviving/updated rows. The provider reopens the latest dataset version on
     // each scan, so no rebuild is needed.
     if let Some(lance) = provider.downcast_ref::<beacon_lance::LanceTable>() {
-        let location = lance.definition().location.clone();
+        lance.ensure_writable()?;
+        let location = lance.uri().to_string();
         let warehouse = lance_warehouse(session)?;
         match mutation {
             Some(Mutation::Delete { predicate }) => {
@@ -804,15 +805,17 @@ pub(crate) async fn alter_table(
     let table_ref = crate::table_name::object_name_table_reference(&spec.name);
 
     let provider = session.table_provider(table_ref.clone()).await?;
-    let definition = provider
+    let lance = provider
         .downcast_ref::<beacon_lance::LanceTable>()
-        .map(|table| table.definition().clone())
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "ALTER TABLE is only supported on managed (Lance) tables, but '{}' is not one",
                 table_ref.table()
             )
         })?;
+    lance.ensure_writable()?;
+    let definition = lance.definition().clone();
+    let uri = lance.uri().to_string();
 
     let mut changes = Vec::new();
     for operation in &spec.operations {
@@ -866,7 +869,7 @@ pub(crate) async fn alter_table(
     }
 
     let warehouse = lance_warehouse(session)?;
-    beacon_lance::alter_table(&warehouse, &definition.location, &changes).await?;
+    beacon_lance::alter_table(&warehouse, &uri, &changes).await?;
 
     let fresh = definition.build_provider(session.clone()).await?;
     session.register_table(table_ref.clone(), fresh)?;
@@ -903,20 +906,20 @@ fn lance_warehouse(
         .ok_or_else(|| anyhow::anyhow!("Lance warehouse is unavailable"))
 }
 
-/// Resolve a managed table to the on-disk location of its Lance dataset, erroring
-/// if the table is not Lance-backed. `feature` names the caller in that error
-/// (indexes and compaction are both Lance-only).
-async fn lance_table_location(
+/// Resolve a table to its Lance provider, erroring if the table is not
+/// Lance-backed. `feature` names the caller in that error (indexes and
+/// compaction are both Lance-only).
+async fn lance_table(
     session: &Arc<SessionContext>,
     table: &str,
     feature: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<beacon_lance::LanceTable> {
     let provider = session
         .table_provider(crate::table_name::table_reference(table))
         .await?;
     provider
         .downcast_ref::<beacon_lance::LanceTable>()
-        .map(|t| t.definition().location.clone())
+        .cloned()
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "{feature} is only supported on Lance-backed tables, but '{table}' is not one"
@@ -934,7 +937,8 @@ pub(crate) async fn create_index(
     name: Option<String>,
     using: Option<String>,
 ) -> anyhow::Result<()> {
-    let location = lance_table_location(session, table, "Index management").await?;
+    let lance = lance_table(session, table, "Index management").await?;
+    lance.ensure_writable()?;
     let kind = match using {
         Some(using) => using
             .parse::<beacon_lance::ScalarIndexKind>()
@@ -943,7 +947,7 @@ pub(crate) async fn create_index(
     };
     let index_name = name.unwrap_or_else(|| format!("{table}_{column}_idx"));
     let warehouse = lance_warehouse(session)?;
-    beacon_lance::create_index(&warehouse, &location, column, &index_name, kind).await
+    beacon_lance::create_index(&warehouse, lance.uri(), column, &index_name, kind).await
 }
 
 /// `DROP INDEX <name> ON <table>`: drop a Lance table's index by name.
@@ -952,9 +956,10 @@ pub(crate) async fn drop_index(
     table: &str,
     name: &str,
 ) -> anyhow::Result<()> {
-    let location = lance_table_location(session, table, "Index management").await?;
+    let lance = lance_table(session, table, "Index management").await?;
+    lance.ensure_writable()?;
     let warehouse = lance_warehouse(session)?;
-    beacon_lance::drop_index(&warehouse, &location, name).await
+    beacon_lance::drop_index(&warehouse, lance.uri(), name).await
 }
 
 /// `SHOW INDEXES ON <table>`: list a Lance table's indexes as rows of
@@ -963,9 +968,9 @@ pub(crate) async fn list_indexes(
     session: &Arc<SessionContext>,
     table: &str,
 ) -> anyhow::Result<arrow::record_batch::RecordBatch> {
-    let location = lance_table_location(session, table, "Index management").await?;
+    let lance = lance_table(session, table, "Index management").await?;
     let warehouse = lance_warehouse(session)?;
-    let indices = beacon_lance::list_indices(&warehouse, &location).await?;
+    let indices = beacon_lance::list_indices(&warehouse, lance.uri()).await?;
 
     let names = indices.iter().map(|i| i.name.clone()).collect::<Vec<_>>();
     let columns = indices
@@ -1089,11 +1094,12 @@ pub(crate) async fn compact_table(
 ) -> anyhow::Result<arrow::record_batch::RecordBatch> {
     use arrow::array::{ArrayRef, UInt64Array};
 
-    let location = lance_table_location(session, table, "Compaction").await?;
+    let lance = lance_table(session, table, "Compaction").await?;
+    lance.ensure_writable()?;
     let options = beacon_lance::CompactOptions::from_pairs(options)
         .map_err(|e| anyhow::anyhow!("Invalid COMPACT TABLE option: {e}"))?;
     let warehouse = lance_warehouse(session)?;
-    let report = beacon_lance::compact_table(&warehouse, &location, &options).await?;
+    let report = beacon_lance::compact_table(&warehouse, lance.uri(), &options).await?;
 
     let batch = arrow::record_batch::RecordBatch::try_new(
         super::logical::compact_table_arrow_schema(),

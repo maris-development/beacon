@@ -57,7 +57,7 @@ async fn lance_tables(ctx: &SessionContext) -> anyhow::Result<Vec<(String, Strin
         let location = provider.table(&name).await?.and_then(|table| {
             table
                 .downcast_ref::<LanceTable>()
-                .map(|lance| lance.definition().location.clone())
+                .map(|lance| lance.uri().to_string())
         });
         if let Some(location) = location {
             tables.push((name, location));
