@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "beacon-it",
+      "credentials": [
+        {
+          "accessKey": "beacon-it-key",
+          "secretKey": "beacon-it-secret"
+        }
+      ],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}

@@ -9,3 +9,8 @@ adbc-driver-manager==1.3.0
 #
 # test_dap2.py reads the DAP2 endpoint with pydap. It is skipped when pydap is absent.
 pydap==3.5.11
+#
+# test_lance_s3.py makes the bucket with boto3 and reads the datasets with pylance. It is
+# skipped when either is absent. pylance matches the Lance version of the server (11.0.0).
+boto3==1.44.7
+pylance==11.0.0
