@@ -361,28 +361,39 @@ pub(crate) fn extract_dataset_layout(
         );
     }
 
-    // Prefer an array that spans *every* dataset dimension: its native dimension
+    // The grid spans only the dimensions the arrays use. An axis that no array
+    // has would repeat every value once per chunk along it.
+    let used: Vec<(&String, usize)> = dataset
+        .dimensions
+        .iter()
+        .filter(|(dim, _)| {
+            dataset
+                .arrays
+                .values()
+                .any(|array| array.dimensions().contains(dim))
+        })
+        .map(|(dim, &len)| (dim, len))
+        .collect();
+
+    // Prefer an array that spans every used dimension: its native dimension
     // order, shape, and chunk layout drive efficient chunked reads, and the other
     // (lower-rank) variables broadcast onto it.
-    let dim_count = dataset.dimensions.len();
     if let Some((_, full)) = dataset
         .arrays
         .iter()
-        .filter(|(_, array)| array.dimensions().len() == dim_count)
+        .filter(|(_, array)| array.dimensions().len() == used.len())
         .max_by_key(|(_, array)| array.shape().iter().product::<usize>())
     {
         return Ok((full.dimensions(), full.shape(), full.chunk_shape()));
     }
 
-    // No single array spans the full dimension set — e.g. a query over only the
-    // coordinate variables of a reduced dimension set (`read_netcdf(.., ['lat',
-    // 'lon'])`, where the data variable carried an extra dimension and was
-    // dropped). Build the grid from the dataset's dimensions so every remaining
-    // variable broadcasts onto the full grid instead of one being picked as an
-    // (incomplete) anchor. The chunk shape equals the full shape; the caller's
-    // `c_order_chunk_shape` then batches it.
-    let dims: Vec<String> = dataset.dimensions.keys().cloned().collect();
-    let shape: Vec<usize> = dataset.dimensions.values().copied().collect();
+    // No single array spans the used dimensions — e.g. a query over only the
+    // coordinate variables `lat` and `lon`. Build the grid from those
+    // dimensions so every variable broadcasts onto it instead of one being
+    // picked as an (incomplete) anchor. The chunk shape equals the full shape;
+    // the caller's `c_order_chunk_shape` then batches it.
+    let dims: Vec<String> = used.iter().map(|(dim, _)| (*dim).clone()).collect();
+    let shape: Vec<usize> = used.iter().map(|(_, len)| *len).collect();
     Ok((dims, shape.clone(), shape))
 }
 
