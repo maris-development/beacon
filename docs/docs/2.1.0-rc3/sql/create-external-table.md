@@ -64,9 +64,9 @@ CREATE EXTERNAL TABLE cruises STORED AS NC LOCATION 'cruises/**/*.nc'
 supports time travel and `INSERT INTO`. `ICEBERG` points to an [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg) table
 directory that already exists. It supports time travel. It reads each new snapshot. It is
 read-only.
-`LANCE` points at a Lance dataset directory. It supports reads and writes. With a column list it
-creates a new empty dataset. A Lance table takes columns before `STORED AS`:
-`CREATE EXTERNAL TABLE t (id BIGINT) STORED AS LANCE LOCATION 't.lance'`.
+`LANCE` points at a Lance dataset directory. It supports reads and writes. A column list before
+`STORED AS` creates a new empty dataset. A table with `OPTIONS ('version')` is read-only. See
+[Lance](/docs/2.1.0-rc3/data-sources/external-tables#lance).
 `REMOTE` federates a table on another Beacon server. See
 [Remote Tables](/docs/2.1.0-rc3/data-sources/remote-tables). `POSTGRES` and `MYSQL`
 federate a table in an external SQL database. See

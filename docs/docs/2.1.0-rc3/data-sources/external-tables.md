@@ -13,8 +13,9 @@ survives a restart.
 
 :::tip External vs managed tables
 An **external table** points at existing files. Beacon reads them in place. Some formats also accept
-writes, for example [Delta Lake](#delta-lake) and [Lance](#lance). Do you need a table that Beacon **owns** and can change with `INSERT`, `UPDATE` and `DELETE`?
-Then use a [managed table](/docs/2.1.0-rc3/sql/managed-tables).
+writes, for example [Delta Lake](#delta-lake) and [Lance](#lance). Do you need a table that Beacon
+**owns** and can change with `INSERT`, `UPDATE` and `DELETE`? Then use a
+[managed table](/docs/2.1.0-rc3/sql/managed-tables).
 :::
 
 :::tip Register many datasets at once
@@ -210,7 +211,7 @@ OPTIONS ('branch' 'main')
 `OPTIONS` selects the version. Use `branch`, `tag` or `snapshot`. Set one of the three. A tag and a
 snapshot do not move. The table reads the same rows after a later commit.
 
-The table is read only. See [Icechunk](/docs/2.1.0-rc3/formats/icechunk) for the full reference.
+The table is read-only. See [Icechunk](/docs/2.1.0-rc3/formats/icechunk) for the full reference.
 
 ### Lance
 
@@ -224,7 +225,7 @@ LOCATION '<location>'
 [OPTIONS ('version' '<n>')]
 ```
 
-A Lance external table is not read only. It supports the same statements as a
+A Lance external table is not read-only. It supports the same statements as a
 [managed table](/docs/2.1.0-rc3/sql/managed-tables): `SELECT`, `INSERT`, `DELETE`, `UPDATE`,
 `ALTER TABLE`, `CREATE INDEX`, `DROP INDEX`, `SHOW INDEXES` and `COMPACT TABLE`.
 [`INSERT INTO ... BY NAME`](/docs/2.1.0-rc3/sql/managed-tables#insert-into-by-name) also works on it.
@@ -268,8 +269,8 @@ LOCATION 's3://bucket/argo.lance'
 
 #### Pin a version
 
-`OPTIONS ('version' '<n>')` pins the table to version `n` of the dataset. A pinned table is **read
-only**. Each write to it gives an error.
+`OPTIONS ('version' '<n>')` pins the table to version `n` of the dataset. A pinned table is
+**read-only**. Each write to it gives an error.
 
 ```sql
 CREATE EXTERNAL TABLE argo_v1
@@ -285,7 +286,7 @@ OPTIONS ('version' '1')
 `DROP TABLE` removes only the registration. Beacon does **not** delete the dataset files. A new
 `CREATE EXTERNAL TABLE` on the same location reads the old rows again.
 
-::: warning Some statements change the dataset for all users
+:::warning Some statements change the dataset for all users
 `DROP INDEX` and `COMPACT TABLE` change the dataset itself. `COMPACT TABLE` also deletes old
 versions. Other tools that read the dataset see these changes. A table that another tool pins to an
 old version can lose that version.

@@ -86,11 +86,11 @@ STORED AS LANCE LOCATION 's3://bucket/argo.lance';
 INSERT INTO argo_lance BY NAME SELECT * FROM argo_netcdf;
 ```
 
-`BY NAME` has all its functions on a Lance table: a managed Lance table or a
-[Lance external table](/docs/2.1.0-rc3/data-sources/external-tables#lance). On other table types it
-only matches by name. A column list together with `BY NAME` is an error. The statement returns the
-number of inserted rows, the same as `INSERT INTO`. Beacon streams the rows. It does not keep the
-whole query result in memory.
+Only a Lance table adds new columns: a managed Lance table or a
+[Lance external table](/docs/2.1.0-rc3/data-sources/external-tables#lance). On other table types,
+`BY NAME` only matches by name. A column list together with `BY NAME` is an error. The statement
+returns the number of inserted rows, the same as `INSERT INTO`. Beacon streams the rows. It does not
+keep the whole query result in memory.
 
 ### Match the columns
 
@@ -98,7 +98,8 @@ whole query result in memory.
   different columns.
 - Two query columns with the same name are an error.
 - A table column that the query does not have gets `NULL`.
-- A table column that is not nullable must be in the query. If not, the statement fails before a write.
+- A table column that is not nullable must be in the query. If not, the statement fails before a
+  write.
 
 ### Add new columns
 
@@ -126,7 +127,8 @@ The new columns and the new rows are two Lance versions. If the write of the row
 columns stay in the table. They hold only `NULL`. Remove them with `ALTER TABLE ... DROP COLUMN` if
 necessary.
 
-`EXPLAIN INSERT INTO ... BY NAME` shows how Beacon maps the columns. It does not add columns to the table.
+`EXPLAIN INSERT INTO ... BY NAME` shows how Beacon maps the columns. It does not add columns to the
+table.
 
 ### NetCDF sources
 
@@ -135,10 +137,11 @@ A NetCDF external table merges the schemas of its files. A variable that a file 
 limits:
 
 - A query fails when its columns have disjoint dimensions. `SELECT *` can fail for this reason.
-  Select the columns that share dimensions. See [NetCDF](/docs/2.1.0-rc3/formats/netcdf#read-the-files).
+  Select the columns that share dimensions. Or set `read_dimensions` on the NetCDF table. See
+  [NetCDF options](/docs/2.1.0-rc3/formats/netcdf#options).
 - [Attribute columns](/docs/2.1.0-rc3/formats/netcdf#variable-attributes) (`var.attr`) also become
-  Lance columns. Many different attributes make a very
-  wide table, and Lance is slow with many columns. Select only the columns that you need.
+  Lance columns. Many different attributes make a very wide table. Lance is slow with many columns.
+  Select only the columns that you need.
 
 ### Errors
 
@@ -149,7 +152,7 @@ limits:
 | New columns on a table that is not Lance | `Table '<t>' does not have the columns <list>; only Lance tables add columns` |
 | Two query columns with the same name | `The source has the column '<c>' more than one time` |
 
-Only the super-user can run `INSERT INTO ... BY NAME`, the same as `INSERT INTO`. The
+Only the admin can run `INSERT INTO ... BY NAME`, the same as `INSERT INTO`. The
 [read rules](/docs/2.1.0-rc3/security/access-control) also apply to the tables of the query.
 
 ## `SELECT`
@@ -334,7 +337,7 @@ SHOW INDEXES ON measurements;   -- Lance tables
 ## Show the table sizes
 
 `beacon.system.table_sizes` has one row for each managed table. Use it to find the tables that fill
-`beacon.db`. Only a super-user can read it.
+`beacon.db`. Only the admin can read it.
 
 ```sql
 SELECT table_name, row_count, bytes_on_disk
