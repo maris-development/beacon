@@ -15,6 +15,7 @@ mod actions;
 pub(crate) mod crawler;
 mod definition;
 pub(crate) mod functions;
+mod insert_by_name;
 mod logical;
 mod lower;
 pub(crate) mod materialized_view;
