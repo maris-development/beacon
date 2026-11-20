@@ -6,7 +6,7 @@ use arrow::{
 };
 use beacon_nd_array::{
     arrow::{
-        file_read::FileRead,
+        file_read::{nd_adapter_factory, FileRead},
         metrics::ReadMetrics,
         morsel::{morsel_scan, MorselSource, OpenFile},
         partition::FilePartitions,
@@ -20,6 +20,7 @@ use datafusion::{
         table_schema::TableSchema,
     },
     physical_expr::{conjunction, projection::ProjectionExprs, PhysicalExpr},
+    physical_expr_adapter::PhysicalExprAdapterFactory,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
@@ -115,6 +116,7 @@ impl FileSource for NetCDFSource {
 
         Ok(Arc::new(NetCDFOpener::new(
             projected_schema,
+            nd_adapter_factory(base_config),
             self.read_dimensions.clone(),
             self.skip,
             self.batch_size,
@@ -241,6 +243,8 @@ impl FileSource for NetCDFSource {
 /// [`RecordBatch`]es.
 struct NetCDFOpener {
     projected_schema: SchemaRef,
+    /// The expression adapter of the scan config. It maps each file.
+    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
     read_dimensions: Option<Vec<String>>,
     skip: SkipFiles,
     batch_size: usize,
@@ -264,6 +268,7 @@ impl NetCDFOpener {
     #[allow(clippy::too_many_arguments)]
     fn new(
         projected_schema: SchemaRef,
+        adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
         read_dimensions: Option<Vec<String>>,
         skip: SkipFiles,
         batch_size: usize,
@@ -278,6 +283,7 @@ impl NetCDFOpener {
         let files = Arc::new(NetCDFFiles {
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
+            adapter_factory: Arc::clone(&adapter_factory),
             read_dimensions: read_dimensions.clone(),
             skip,
             batch_size,
@@ -290,6 +296,7 @@ impl NetCDFOpener {
             morsel,
             files,
             projected_schema,
+            adapter_factory,
             read_dimensions,
             skip,
             batch_size,
@@ -317,6 +324,7 @@ impl NetCDFOpener {
         input: NetcdfInput,
         object: ObjectMeta,
         projected_schema: SchemaRef,
+        adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
         read_dimensions: Option<Vec<String>>,
         skip: SkipFiles,
         batch_size: usize,
@@ -334,6 +342,7 @@ impl NetCDFOpener {
             FileRead::plan(
                 dataset,
                 projected_schema,
+                adapter_factory,
                 batch_size,
                 predicate,
                 partitions,
@@ -400,6 +409,8 @@ impl NetCDFOpener {
 struct NetCDFFiles {
     object_store: Arc<dyn object_store::ObjectStore>,
     projected_schema: SchemaRef,
+    /// The expression adapter of the scan config. It maps each file.
+    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
     read_dimensions: Option<Vec<String>>,
     skip: SkipFiles,
     batch_size: usize,
@@ -434,6 +445,7 @@ impl OpenFile for NetCDFFiles {
         FileRead::plan(
             dataset,
             self.projected_schema.clone(),
+            Arc::clone(&self.adapter_factory),
             self.batch_size,
             self.predicate.clone(),
             FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
@@ -476,6 +488,7 @@ impl FileOpener for NetCDFOpener {
             input,
             file.object_meta,
             self.projected_schema.clone(),
+            Arc::clone(&self.adapter_factory),
             self.read_dimensions.clone(),
             self.skip,
             self.batch_size,

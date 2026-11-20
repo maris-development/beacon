@@ -1298,7 +1298,6 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_read_dimensions_limits_schema() {
-        use datafusion::catalog::TableProvider;
 
         let ctx = SessionContext::new();
         let store_dir = concat!(
@@ -1353,7 +1352,6 @@ mod tests {
 
     #[tokio::test]
     async fn schema_includes_arrays_and_attributes() {
-        use datafusion::catalog::TableProvider;
 
         let ctx = SessionContext::new();
         register_example(&ctx).await;

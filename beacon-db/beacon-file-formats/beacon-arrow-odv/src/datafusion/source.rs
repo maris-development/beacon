@@ -5,17 +5,17 @@
 
 use std::sync::Arc;
 
-use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
+use beacon_datafusion_ext::expr_adapter::{BatchAdapter, scan_adapter_factory};
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use datafusion::{
     common::exec_datafusion_err,
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     physical_expr::{LexOrdering, projection::ProjectionExprs},
+    physical_expr_adapter::PhysicalExprAdapterFactory,
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
@@ -32,8 +32,6 @@ use super::OdvFormat;
 /// It supports schema overrides, column projection, statistics, and metrics.
 #[derive(Debug, Clone)]
 pub struct OdvSource {
-    /// Optional factory for schema adapters.
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     /// The table schema (file schema + partition columns).
     table_schema: TableSchema,
     /// Execution plan metrics.
@@ -41,7 +39,8 @@ pub struct OdvSource {
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
     /// The rule that merged the table schema. It decides which casts read
-    /// null. The format sets it from the session when it plans.
+    /// null when the scan config holds no adapter. The format sets it from the
+    /// session when it plans.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
@@ -50,7 +49,6 @@ impl OdvSource {
     /// default merge rule.
     pub fn new(table_schema: TableSchema) -> Self {
         Self {
-            schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             projection: None,
@@ -87,7 +85,7 @@ impl FileSource for OdvSource {
         Ok(Arc::new(OdvOpener {
             projected_schema,
             object_store,
-            type_widening: Arc::clone(&self.type_widening),
+            adapter_factory: scan_adapter_factory(base_config, self.type_widening.as_ref()),
         }))
     }
 
@@ -120,25 +118,6 @@ impl FileSource for OdvSource {
         "txt"
     }
 
-    /// Returns a new [`FileSource`] with the given schema adapter factory.
-    fn with_schema_adapter_factory(
-        &self,
-        factory: Arc<dyn SchemaAdapterFactory>,
-    ) -> datafusion::error::Result<Arc<dyn FileSource>> {
-        Ok(Arc::new(Self {
-            table_schema: self.table_schema.clone(),
-            execution_plan_metrics: self.execution_plan_metrics.clone(),
-            schema_adapter_factory: Some(factory),
-            projection: self.projection.clone(),
-            type_widening: Arc::clone(&self.type_widening),
-        }))
-    }
-
-    /// Returns the schema adapter factory, if any.
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
-    }
-
     fn projection(&self) -> Option<&ProjectionExprs> {
         self.projection.as_ref()
     }
@@ -167,8 +146,8 @@ struct OdvOpener {
     projected_schema: SchemaRef,
     /// Object store for file access.
     object_store: Arc<dyn ObjectStore>,
-    /// The rule that merged the table schema. It decides which casts read null.
-    type_widening: Arc<dyn ArrowTypeWideningStrategy>,
+    /// The expression adapter of the scan config. It maps each file.
+    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
 }
 
 impl FileOpener for OdvOpener {
@@ -176,7 +155,7 @@ impl FileOpener for OdvOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let projected_schema = self.projected_schema.clone();
         let object_store = self.object_store.clone();
-        let type_widening = Arc::clone(&self.type_widening);
+        let adapter_factory = Arc::clone(&self.adapter_factory);
         let compression = OdvFormat::infer_compression(&file.object_meta);
 
         Ok(Box::pin(async move {
@@ -207,8 +186,8 @@ impl FileOpener for OdvOpener {
             // Adapt decoded batches onto the projected output schema: reorder,
             // cast, and null-fill columns the file lacks.
             let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
-            let adapter = batch_adapter_factory(projected_schema, type_widening)
-                .make_adapter(&source_schema)?;
+            let adapter =
+                BatchAdapter::try_new(projected_schema, &source_schema, adapter_factory.as_ref())?;
 
             // Open and decode the file body
             let body_stream = object_store

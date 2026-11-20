@@ -373,7 +373,9 @@ mod tests {
     use arrow::array::{ArrayRef, AsArray, Int32Array};
     use arrow::datatypes::{DataType, Field, Float64Type, Int32Type, Schema};
     use arrow::record_batch::RecordBatch;
-    use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
+    use beacon_datafusion_ext::type_widening::{
+        ArrowTypeWideningStrategy, DefaultArrowTypeWidening,
+    };
     use datafusion::datasource::listing::PartitionedFile;
     use datafusion::datasource::physical_plan::{FileOpener, FileScanConfigBuilder};
     use datafusion::execution::object_store::ObjectStoreUrl;
@@ -567,7 +569,7 @@ mod tests {
             128 * 1024,
             None,
             &Default::default(),
-            Arc::new(DefaultArrowTypeWidening::new()),
+            DefaultArrowTypeWidening::new().physical_expr_adapter_factory(),
         );
         let stream = opener
             .open(PartitionedFile::from(object))
@@ -846,7 +848,7 @@ mod tests {
             128 * 1024,
             None,
             &Default::default(),
-            Arc::new(DefaultArrowTypeWidening::new()),
+            DefaultArrowTypeWidening::new().physical_expr_adapter_factory(),
         );
         let stream = opener
             .open(PartitionedFile::from(object))

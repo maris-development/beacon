@@ -40,8 +40,7 @@ pub(crate) type ScanStatistics<'a> = (&'a dyn ExternalTableStatisticsProvider, &
 /// Plans a scan of `table` and prunes its files with the provider of `statistics`.
 ///
 /// The scan config gets the adapter of `type_widening`, the strategy of the
-/// table. Only a format that reads the `PhysicalExprAdapterFactory` of its
-/// config uses it, which is Parquet.
+/// table. Every format reads the `PhysicalExprAdapterFactory` of its config.
 ///
 /// `errors` decides what a file that the scan cannot read does: it fails the
 /// scan with the table, the file type and the file, or it ends and the scan

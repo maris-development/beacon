@@ -210,7 +210,7 @@ mod tests {
     use beacon_datafusion_ext::nd::{
         decode_nd_record_batch, encode_nd_record_batch, encoded_schema,
     };
-    use beacon_datafusion_ext::scan_adapt::BatchAdapter;
+    use beacon_datafusion_ext::expr_adapter::BatchAdapter;
     use beacon_nd_execution::NdRecordBatchExt;
     use beacon_datafusion_ext::type_widening::{ArrowTypeWidening, DefaultArrowTypeWidening};
     use std::path::Path;
@@ -269,9 +269,10 @@ mod tests {
         for chunk in source.chunks() {
             let nd = source.poll_next(chunk).await.unwrap().unwrap();
             let encoded = encode_nd_record_batch(&nd).unwrap();
-            let adapted = BatchAdapter::try_new(Arc::clone(&target), &encoded.schema(), &*strict())
+            let factory = strict().physical_expr_adapter_factory();
+            let adapted = BatchAdapter::try_new(Arc::clone(&target), &encoded.schema(), &*factory)
                 .unwrap()
-                .adapt(&encoded)
+                .adapt_batch(&encoded)
                 .unwrap();
             chunks.push(decode_nd_record_batch(&adapted).unwrap());
         }

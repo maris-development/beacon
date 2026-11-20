@@ -545,6 +545,7 @@ mod tests {
             FileRead::plan(
                 dataset(file.object_meta.size as usize).await,
                 no_columns(),
+                crate::arrow::file_read::default_adapter_factory(),
                 self.batch_size,
                 None,
                 crate::arrow::partition::FilePartitions::none(),

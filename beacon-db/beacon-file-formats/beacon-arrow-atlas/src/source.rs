@@ -25,7 +25,7 @@ use futures::{FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use tokio_util::sync::CancellationToken;
 
-use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
+use beacon_datafusion_ext::expr_adapter::{ExprAdapterOpener, scan_adapter_factory};
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 
 use crate::{
@@ -54,7 +54,8 @@ pub struct AtlasSource {
     /// The scan's queues, one per collection, shared by every partition.
     queues: Arc<CollectionQueues>,
     /// The rule that merged the table schema. It decides which casts read
-    /// null. The format sets it from the session when it plans.
+    /// null when the scan config holds no adapter. The format sets it from the
+    /// session when it plans.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
     /// The query's token. The format sets it from the session when it plans;
     /// until then it is one that never fires.
@@ -146,7 +147,7 @@ impl FileSource for AtlasSource {
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
-        _base_config: &FileScanConfig,
+        base_config: &FileScanConfig,
         partition: usize,
     ) -> Result<Arc<dyn FileOpener>> {
         self.require_projection()?;
@@ -168,7 +169,8 @@ impl FileSource for AtlasSource {
             scan_metrics: AtlasScanMetrics::new(&self.execution_plan_metrics, partition),
             queues: Arc::clone(&self.queues),
         });
-        let adapting = AdaptingOpener::wrap(raw, read_schema, Arc::clone(&self.type_widening));
+        let factory = scan_adapter_factory(base_config, self.type_widening.as_ref());
+        let adapting = ExprAdapterOpener::wrap(raw, read_schema, factory);
         ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
     }
 
@@ -335,10 +337,10 @@ mod tests {
             scan_metrics: metrics.clone(),
             queues: Arc::new(CollectionQueues::new()),
         });
-        let opener = AdaptingOpener::wrap(
+        let opener = ExprAdapterOpener::wrap(
             raw,
             Arc::clone(&schema),
-            Arc::new(DefaultArrowTypeWidening::new()),
+            DefaultArrowTypeWidening::new().physical_expr_adapter_factory(),
         );
         Fixture {
             opener,

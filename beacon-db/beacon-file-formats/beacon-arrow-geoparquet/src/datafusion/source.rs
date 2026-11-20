@@ -6,7 +6,6 @@ use datafusion::{
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     physical_expr::{conjunction, projection::ProjectionExprs},
@@ -19,6 +18,7 @@ use datafusion::{
 use datafusion_datasource::projection::{ProjectionOpener, SplitProjection};
 use object_store::ObjectStore;
 
+use beacon_datafusion_ext::expr_adapter::scan_adapter_factory;
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 
 use crate::datafusion::{
@@ -29,7 +29,6 @@ use crate::datafusion::{
 /// A [`FileSource`] that produces [`GeoParquetOpener`]s for the scanned files.
 #[derive(Debug, Clone)]
 pub struct GeoParquetSource {
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     /// The table schema (file schema + partition columns).
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
@@ -48,14 +47,14 @@ pub struct GeoParquetSource {
     /// the filter itself stays above the scan and decides every surviving row.
     query_box: Option<QueryBox>,
     /// The rule that merged the table schema. It decides which casts read
-    /// null. The format sets it from the session when it plans.
+    /// null when the scan config holds no adapter. The format sets it from the
+    /// session when it plans.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
 impl GeoParquetSource {
     pub fn new(table_schema: TableSchema) -> Self {
         Self {
-            schema_adapter_factory: None,
             projection: SplitProjection::unprojected(&table_schema),
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
@@ -87,7 +86,7 @@ impl FileSource for GeoParquetSource {
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
-        _base_config: &FileScanConfig,
+        base_config: &FileScanConfig,
         _partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
         let file_schema = self.table_schema.file_schema();
@@ -101,7 +100,7 @@ impl FileSource for GeoParquetSource {
             self.batch_size,
             self.query_box.clone(),
             &self.execution_plan_metrics,
-            Arc::clone(&self.type_widening),
+            scan_adapter_factory(base_config, self.type_widening.as_ref()),
         )) as Arc<dyn FileOpener>;
 
         ProjectionOpener::try_new(self.projection.clone(), opener, file_schema)
@@ -124,20 +123,6 @@ impl FileSource for GeoParquetSource {
 
     fn file_type(&self) -> &str {
         "geoparquet"
-    }
-
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
-    }
-
-    fn with_schema_adapter_factory(
-        &self,
-        factory: Arc<dyn SchemaAdapterFactory>,
-    ) -> datafusion::error::Result<Arc<dyn FileSource>> {
-        Ok(Arc::new(Self {
-            schema_adapter_factory: Some(factory),
-            ..self.clone()
-        }))
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {
