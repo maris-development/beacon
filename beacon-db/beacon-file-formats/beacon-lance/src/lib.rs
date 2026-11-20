@@ -40,7 +40,7 @@ pub use definition::LanceTableDefinition;
 pub use index::{
     IndexInfo, ScalarIndexKind, create_default_indexes, create_index, drop_index, list_indices,
 };
-pub use io::WriteKind;
+pub use io::{WriteKind, lance_compatible_type};
 pub use mutate::{delete_rows, update_rows};
 pub use provider::LanceTable;
 pub use size::{TableSize, table_size};

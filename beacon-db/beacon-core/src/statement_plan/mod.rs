@@ -15,6 +15,7 @@ mod actions;
 pub(crate) mod crawler;
 mod definition;
 pub(crate) mod functions;
+#[allow(dead_code)]
 mod insert_by_name;
 mod logical;
 mod lower;
