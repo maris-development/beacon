@@ -33,7 +33,7 @@ use datafusion::{
     prelude::{SQLOptions, SessionContext},
 };
 
-use crate::parser::statement::{
+use beacon_sql_parser::statement::{
     AttachStatement, CompactTableStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropIndexStatement, DropSecretStatement, RefreshStatement,
@@ -646,8 +646,8 @@ pub(crate) async fn execute_statement_plan_tracked(
 mod tests {
     use super::*;
 
-    use crate::parser::beacon_parser::BeaconParser;
-    use crate::parser::statement::BeaconStatement;
+    use beacon_sql_parser::beacon_parser::BeaconParser;
+    use beacon_sql_parser::statement::BeaconStatement;
 
     /// Lower a beacon statement the way `Runtime::lower_sql` does for the
     /// non-DataFusion arms, so the tests exercise the real node shapes.

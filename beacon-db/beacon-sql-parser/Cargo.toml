@@ -1,0 +1,11 @@
+[package]
+name = "beacon-sql-parser"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+
+# Beacon's SQL dialect on top of the DataFusion parser. No engine dependencies.
+
+[dependencies]
+anyhow = { workspace = true }
+datafusion = { workspace = true }

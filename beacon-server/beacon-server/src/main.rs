@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn a_runtime_thread_plans_an_expression_at_the_depth_limit() {
         let runtime = build_runtime("test-deep", 1).expect("a runtime");
-        let depth = beacon_core::parser::expression_depth::MAX_EXPRESSION_DEPTH;
+        let depth = beacon_sql_parser::expression_depth::MAX_EXPRESSION_DEPTH;
         let sql = format!("SELECT {}", vec!["1"; depth].join("+"));
 
         let rows = runtime

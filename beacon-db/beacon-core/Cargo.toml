@@ -38,8 +38,6 @@ parking_lot = { workspace = true}
 sysinfo = {workspace = true}
 uuid = {workspace = true}
 chrono = { workspace = true }
-cast = {workspace = true}
-geojson = {workspace = true}
 num_cpus = {workspace = true}
 url = { workspace = true }
 typetag = { workspace = true }
@@ -65,6 +63,8 @@ beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
 beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
+beacon-sql-parser = { path = "../beacon-sql-parser" }
+beacon-json-query = { path = "../beacon-json-query" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-external-table = { path = "../beacon-external-table" }
 beacon-nd-execution = { path = "../beacon-nd-execution" }
@@ -89,8 +89,6 @@ libc = "=0.2.189"
 # Writes the Atlas fixtures the read tests read; the atlas writer takes ndarray
 # views, and Beacon itself never writes a collection.
 ndarray = { workspace = true }
-# The GeoJSON filter of the JSON query renders `ST_Within`; its test registers the set.
-datafusion-spatial = { workspace = true }
 deltalake = { workspace = true }
 # Writes the Iceberg fixtures the read tests read; Beacon itself never writes Iceberg.
 iceberg = { workspace = true }
