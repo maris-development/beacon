@@ -2,7 +2,7 @@
 
 Date: 2026-11-20 (revision 4; replaces the designs of 2026-10-14)
 Branch: `feature/netcdf-reader-refactor-984e0d`
-Status: design, for review
+Status: design, for review (revision 5: no scan without a file column)
 
 Earlier revisions planned a two-format split and a shared nd scan engine. Both are dropped. netCDF-C is gone from main, and the user wants no shared interface. This design changes one crate.
 
@@ -22,7 +22,7 @@ Earlier revisions planned a two-format split and a shared nd scan engine. Both a
 | Chunks | The native chunk shape, else C order at `batch_size`. Same grid as today. |
 | Chunk pruning | Kept. A filter on a 1-D coordinate drops the chunks that no row can match. |
 | Large files | With fewer files than partitions, the scan cuts a file into slices. |
-| COUNT(*) | Counted from chunk shapes. No array data is read. |
+| No file column | A scan that projects no file column is an error. This covers `COUNT(*)` and a query of only partition columns. A row count comes from a real column: `COUNT(column)`. |
 | Ragged | Not supported. A clear error at schema inference and at scan. With `read_dimensions` and `skip_unbroadcastable`, a ragged file is skipped. HDF5 still reads ragged files. |
 | Unchanged | `NetcdfFormat`, the factory, the options (`read_dimensions`, `skip_unbroadcastable`, `skip_invalid_files`), the writer, the statistics, the schema fingerprint, SQL and config. |
 
@@ -36,11 +36,11 @@ beacon-arrow-netcdf/src/datafusion/
   scan/
     mod.rs          module docs, re-export of NetcdfSource
     source.rs       NetcdfSource: the FileSource
-    chunks.rs       FileScan: projection, chunk list, read of one chunk, row counts
+    chunks.rs       FileScan: projection, chunk list, read of one chunk
     prune.rs        coordinate masks and the chunk test
-    morsel.rs       NetcdfMorselizer, planner states, the two morsels
+    morsel.rs       NetcdfMorselizer, planner states, ChunkMorsel
     slices.rs       NetcdfSlice, slice_files, spread_files
-    output.rs       output modes, partition columns, the batch adapter
+    output.rs       projected columns, partition columns, the batch adapter
 ```
 
 - `beacon-arrow-netcdf/Cargo.toml` adds `datafusion-datasource = { workspace = true }`. The `datafusion` crate does not re-export `morsel`.
@@ -77,7 +77,7 @@ pub struct NetcdfSource {
 | `FileSource` method | Behavior |
 |---|---|
 | `create_file_opener` | `not_impl_err!("NetCDF scans use create_morselizer")`. |
-| `create_morselizer` | One `ReadMetrics` per partition. Builds `NetcdfMorselizer`. |
+| `create_morselizer` | If the projected schema holds no file column, return the error of section 4.6. Else make one `ReadMetrics` per partition and build `NetcdfMorselizer`. |
 | `table_schema`, `with_batch_size`, `metrics`, `projection`, `try_pushdown_projection` | As `NetCDFSource` today. |
 | `file_type` | `"netcdf"`. |
 | `try_pushdown_filters` | As today: keep the conjunction as `predicate`, answer `PushedDown::No`. The `FilterExec` stays above the scan. |
@@ -106,7 +106,6 @@ impl FileScan {
 - **Grid rule, same as today.** The array of the highest rank sets the target dimensions. If its chunk shape differs from its shape, the native chunk shape is the chunk shape. Else the chunk fills from the last axis up to `batch_size` elements.
 - **Read.** For each projected array: map the chunk onto the axes of the array, call `NdArrayD::subset`, convert with `ndarray_to_arrow_array`, build an `NdArrowArray`. A coordinate is read one time per chunk, not one time per row.
 - **Fit.** An array that is not a scalar must lie on the target dimensions, in order. If not, `try_new` returns an error that names the array.
-- **Count.** For COUNT(*), `try_new` gets every array of the dataset, so the grid is the grid of the widest array. A dataset with no arrays has no chunks.
 
 ### 4.3 Pruning (`scan/prune.rs`)
 
@@ -136,14 +135,13 @@ open_future  [I/O]
    open the dataset                  an error with skip_invalid_files: warn, Skipped
    project_read_dimensions_or_skip   skipped by the option: Skipped
    a ragged dataset                  NotImplemented error
-   resolve the output mode           Nothing -> Done
+   the file has none of the columns  -> Done
    FileScan::try_new
    chunks = slice range  i*n/K .. (i+1)*n/K   of the full chunk list
    masks  = coordinate_masks(..)     only when a predicate exists
    keep the chunks that is_pruned rejects; add the others to chunks_pruned / rows_pruned
    no chunk left                     -> Done
-   Rows mode                         -> Count{file}
-   Columns mode                      -> Read{file, next: 0, ready: None}
+   otherwise                         -> Read{file, next: 0, ready: None}
 
 Read{file, next, ready}.plan()                 CPU only
    morsel = ready.map(ChunkMorsel)
@@ -154,12 +152,10 @@ read_future(k)  [I/O]
    FileScan::read(chunk k)           chunks_read += 1, rows_read += rows
    -> Read{file, next: k+1, ready: Some(batch)}
 
-Count{file}.plan() -> Some(plan with one CountMorsel)   no I/O
 Skipped: files_skipped += 1 (slice 0 only), then Done
 Done.plan()        -> Ok(None)
 
 ChunkMorsel::into_stream   CPU: encode_nd_record_batch -> partition columns -> adapt to the projected schema
-CountMorsel::into_stream   CPU: count batches of <= batch_size rows, with partition columns if wanted
 ```
 
 Every error gets the context `"NetCDF file {path}"`, plus `" slice i of K"` for a slice and `", chunk k of n"` for a read.
@@ -192,10 +188,9 @@ pub(super) struct NetcdfSlice { pub index: u32, pub count: u32 }
 
 ### 4.6 Output (`scan/output.rs`)
 
-Three modes, with today's rules:
-- **Columns:** the query wants file columns. Each batch is nd-encoded, gets the partition columns as rank-0 arrays, and goes through the batch adapter onto the projected schema. A column that the file does not have becomes null.
-- **Rows:** COUNT(*), or only partition columns.
-- **Nothing:** the query wants file columns and the file has none of them.
+- Each batch is nd-encoded, gets the partition columns as rank-0 arrays, and goes through the batch adapter onto the projected schema. A column that the file does not have becomes null.
+- A file that has none of the wanted columns gives no batch.
+- **No file column in the projection is an error.** `create_morselizer` returns: "a NetCDF scan needs at least one file column; use COUNT(column) in place of COUNT(*)". The scan has no rows-only mode and no count morsel.
 
 A partition column shadows a file variable with the same name.
 
@@ -214,7 +209,7 @@ A partition column shadows a file variable with the same name.
 ## 6. Behavior changes
 
 1. **Ragged NetCDF files give an error:** "NetCDF file X: 'X' is a ragged dataset; the NetCDF reader does not support ragged datasets yet". WOD files read through HDF5 only.
-2. **COUNT(*) reads no array data.** A dataset with no arrays gives 0 rows.
+2. **`COUNT(*)` and a query of only partition columns give an error.** Use `COUNT(column)`. The count is then the row count of the grid that the projected columns span: `COUNT(lat)` on a `time x lat x lon` file counts the `lat` values, not the grid cells.
 3. **The next file does not open early.** Today a partition opens its next file while it reads the current one.
 4. **A slice opens the file again.** A file on K partitions costs K header reads, and K coordinate reads when a predicate exists.
 5. **Scan errors name the file in one fixed form.**
@@ -224,18 +219,20 @@ A partition column shadows a file variable with the same name.
 **Kept as they are:** every NetCDF read test on a regular file, also the pruning tests (`a_predicate_reaches_the_scan_and_skips_its_chunks`, the metrics test, `a_pruned_scan_counts_what_the_coordinate_says_it_should`), the partition tests, the skip-option tests and the batch-size test.
 
 **Rewritten:**
+- Every test that runs `count(*)` on a NetCDF table changes to `count(<column>)` on a full-grid column. This also applies to `partition_coverage_tests.rs` and to the `beacon-core` NetCDF tests.
 - The tests that read `morsel_files()` or assert one standing entry per partition: they assert `target` groups, K slices of one file and no byte range.
 - The tests that use `wod_ctd_1964.nc` as an ordinary file move to `gridded-example.nc` or to a small regular file that the test writes. This also applies to the `beacon-core` tests that read the WOD fixture through NetCDF.
 
 **New unit tests in `scan/`:**
 - The chunk grid equals the legacy grid for a native-chunk file and for a contiguous file.
 - An array that does not fit the grid gives an error with its name.
-- No planner state gives an empty `MorselPlan`: a skipped file, a Nothing file and a fully pruned file all finish.
+- No planner state gives an empty `MorselPlan`: a skipped file, a file with none of the columns and a fully pruned file all finish.
 - Slices cover each chunk one time. Only slice 0 counts `files_skipped`. The prune counts of K slices sum to the count of one scan.
 - A predicate that changes between two slice opens reads no chunk twice.
 - `repartitioned`: `target` groups; `None` with an ordering or `target <= 1`; zero entries; no slice of a slice; `statistics = None`; no byte range.
 
 **New end-to-end tests:**
+- `SELECT count(*)` and `SELECT <partition column>` alone fail with the error of section 4.6.
 - A ragged file is refused at schema inference and at scan. A collection with one ragged file names that file.
 - One file on 4 partitions returns the same rows as on 1, with and without a filter.
 - `LIMIT 5` reads only the first chunks of a file with hundreds of chunks.
@@ -250,12 +247,12 @@ A partition column shadows a file variable with the same name.
 ## 8. Docs and changelog
 
 2.1.0-rc3 pages:
-- `formats/netcdf.md`: ragged NetCDF is not supported; read such files as HDF5.
+- `formats/netcdf.md`: ragged NetCDF is not supported; read such files as HDF5. `COUNT(*)` is not supported; use `COUNT(column)`.
 - Pages that read a WOD file through `read_netcdf` get a regular example or a note.
 
 `CHANGELOG.md` `[Unreleased]`:
 - **Changed:** NetCDF scans run on DataFusion morsels.
-- **Changed:** COUNT(*) on NetCDF reads no array data.
+- **Removed:** `COUNT(*)` and partition-only queries on NetCDF tables. Use `COUNT(column)`.
 - **Removed:** ragged NetCDF support for `STORED AS NC` and `read_netcdf`.
 
 ## 9. Commit sequence
@@ -280,4 +277,5 @@ A partition column shadows a file variable with the same name.
 2. **Throughput.** One I/O per partition, and no early open of the next file. The timing check measures this.
 3. **Slices.** Each slice opens the file and reads the filter coordinates again.
 4. **Ragged NetCDF fails**, while HDF5 still reads the same file.
-5. **Two copies of the chunk grid rule** exist, here and in `beacon-nd-array`, until the other formats move or the legacy engine goes away. A parity test guards the grid.
+5. **`COUNT(*)` fails on NetCDF tables.** Clients and tools that send `COUNT(*)` (previews, row counters, BI tools) get the error. The same query on HDF5, Zarr and Parquet tables still works.
+6. **Two copies of the chunk grid rule** exist, here and in `beacon-nd-array`, until the other formats move or the legacy engine goes away. A parity test guards the grid.
