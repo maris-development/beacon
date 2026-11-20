@@ -4,3 +4,4 @@
 //! drops the chunks a filter excludes, and reads one chunk per morsel.
 
 mod chunks;
+mod prune;
