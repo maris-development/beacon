@@ -1,13 +1,16 @@
 //! The scan: what it reads, and the batches it yields.
 //!
-//! `ScanSpec` is shared by every stage. Each `DatasetStream` pops datasets
-//! from a shared `CollectionQueue`, so one partition reads each dataset.
+//! `ScanSpec` is shared by every stage. Each `DatasetStream` walks the
+//! collections in one order, and pops datasets from the shared
+//! `CollectionQueue` of the collection at hand, so one partition reads each
+//! dataset.
 
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use anyhow::Context as _;
@@ -16,15 +19,15 @@ use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::nd::{NdRecordBatch, encode_nd_record_batch, logical_schema};
 use beacon_nd_array::dataset::source::DatasetSource;
 use datafusion::{error::Result, physical_plan::PhysicalExpr};
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::{Stream, StreamExt, TryStreamExt};
-use object_store::{ObjectMeta, ObjectStore, path::Path};
-use parking_lot::{Mutex, RwLock};
+use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
+use object_store::{ObjectMeta, ObjectStore};
+use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::metrics::AtlasScanMetrics;
-use crate::open::AtlasReaderCache;
 use beacon_nd_array::dataset::UnbroadcastableDataset;
 
 use crate::view::AtlasView;
@@ -76,14 +79,11 @@ pub(crate) fn cancelled() -> anyhow::Error {
     anyhow::anyhow!("the query was cancelled")
 }
 
-/// One cell per collection. The cell fills on the first open and never again.
-type Cells = HashMap<Path, Arc<OnceCell<Arc<CollectionQueue>>>>;
-
-/// The queues of one scan, one per collection, keyed by the container's path.
-/// Shared by every partition through the source.
+/// The walk of one scan over its collections. Shared by every partition
+/// through the source; the first partition to open the scan creates it.
 #[derive(Default, Clone)]
 pub struct CollectionQueues {
-    cells: Arc<RwLock<Cells>>,
+    walk: Arc<Mutex<Option<Arc<CollectionWalk>>>>,
 }
 
 impl Debug for CollectionQueues {
@@ -97,37 +97,106 @@ impl CollectionQueues {
         Self::default()
     }
 
-    /// One stream over the collection at `object_meta`.
-    /// The first call opens it and queues its datasets; every call gets a
-    /// stream over the shared queue.
-    pub(crate) async fn open(
+    /// One consumer of the walk over `collections`.
+    ///
+    /// The first call fixes the walk. Every later call joins it at the first
+    /// collection, and finds a drained one empty.
+    pub(crate) fn open(
         &self,
-        cache: Option<&AtlasReaderCache>,
         store: Arc<dyn ObjectStore>,
-        object_meta: ObjectMeta,
+        collections: Arc<[ObjectMeta]>,
         spec: Arc<ScanSpec>,
         scan_metrics: AtlasScanMetrics,
-    ) -> anyhow::Result<DatasetStream> {
-        let cell = Arc::clone(
-            self.cells
-                .write()
-                .entry(object_meta.location.clone())
-                .or_default(),
+    ) -> DatasetStream {
+        let walk = Arc::clone(
+            self.walk
+                .lock()
+                .get_or_insert_with(|| Arc::new(CollectionWalk::new(store, collections, spec))),
         );
-        let queue = cell
+        DatasetStream::new(walk, scan_metrics)
+    }
+}
+
+/// Every collection of one scan, read one after another.
+///
+/// Every partition reads the collection at hand, so only it and the next
+/// one are open. A collection is released when its queue drains.
+pub(crate) struct CollectionWalk {
+    store: Arc<dyn ObjectStore>,
+    collections: Arc<[ObjectMeta]>,
+    spec: Arc<ScanSpec>,
+    /// One cell per collection. The cell fills on the first open and never again.
+    cells: Vec<OnceCell<Arc<CollectionQueue>>>,
+    /// Set when an early open of the collection has started.
+    prefetched: Vec<AtomicBool>,
+}
+
+impl CollectionWalk {
+    fn new(
+        store: Arc<dyn ObjectStore>,
+        collections: Arc<[ObjectMeta]>,
+        spec: Arc<ScanSpec>,
+    ) -> Self {
+        let n = collections.len();
+        Self {
+            store,
+            collections,
+            spec,
+            cells: (0..n).map(|_| OnceCell::new()).collect(),
+            prefetched: (0..n).map(|_| AtomicBool::new(false)).collect(),
+        }
+    }
+
+    /// The queue of collection `index`, and an early open of the next one.
+    async fn queue(
+        self: Arc<Self>,
+        index: usize,
+        scan_metrics: AtlasScanMetrics,
+    ) -> anyhow::Result<Arc<CollectionQueue>> {
+        self.prefetch(index + 1, &scan_metrics);
+        self.open(index, &scan_metrics).await
+    }
+
+    /// The queue of collection `index`. The first call opens it.
+    async fn open(
+        &self,
+        index: usize,
+        scan_metrics: &AtlasScanMetrics,
+    ) -> anyhow::Result<Arc<CollectionQueue>> {
+        self.cells[index]
             .get_or_try_init(|| {
-                CollectionQueue::open(cache, store, object_meta, spec, &scan_metrics)
+                CollectionQueue::open(
+                    Arc::clone(&self.store),
+                    self.collections[index].clone(),
+                    Arc::clone(&self.spec),
+                    scan_metrics,
+                )
             })
             .await
-            .cloned()?;
-        Ok(queue.stream(scan_metrics))
+            .cloned()
+    }
+
+    /// Open collection `index` in the background, once, so the partitions do
+    /// not wait for its footers when they reach it.
+    fn prefetch(self: &Arc<Self>, index: usize, scan_metrics: &AtlasScanMetrics) {
+        if index >= self.cells.len()
+            || self.spec.cancel.is_cancelled()
+            || self.prefetched[index].swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let walk = Arc::clone(self);
+        let scan_metrics = scan_metrics.clone();
+        tokio::spawn(async move {
+            // A failed open leaves the cell empty; the partition that opens it next reports the error.
+            let _ = walk.open(index, &scan_metrics).await;
+        });
     }
 }
 
 /// One collection's datasets left to read, and the view they read through.
 /// Holds no read state, so partitions share it freely.
 pub(crate) struct CollectionQueue {
-    spec: Arc<ScanSpec>,
     pending: Mutex<Pending>,
 }
 
@@ -143,8 +212,10 @@ impl CollectionQueue {
     /// Open the collection, prune its datasets, and queue the survivors.
     ///
     /// A cancelled query stops the open where it stands and reports the error.
+    ///
+    /// The open bypasses the reader cache, so the collection's segments and
+    /// block cache go with the view.
     async fn open(
-        cache: Option<&AtlasReaderCache>,
         store: Arc<dyn ObjectStore>,
         object_meta: ObjectMeta,
         spec: Arc<ScanSpec>,
@@ -153,7 +224,7 @@ impl CollectionQueue {
         let cancel = spec.cancel.clone();
         let opening = async move {
             let open_timer = scan_metrics.open_time.timer();
-            let view = AtlasView::new(cache, store, object_meta, Arc::clone(&spec)).await?;
+            let view = AtlasView::new(None, store, object_meta, spec).await?;
             drop(open_timer);
             let datasets = view.list_datasets(scan_metrics).await?.into();
             let pending = Pending {
@@ -161,7 +232,6 @@ impl CollectionQueue {
                 datasets,
             };
             Ok(Arc::new(Self {
-                spec,
                 pending: Mutex::new(pending),
             }))
         };
@@ -186,26 +256,36 @@ impl CollectionQueue {
             .expect("the view lives until the last dataset is popped");
         Some((dataset, view))
     }
-
-    /// One consumer of the queue. It starts on no dataset, and counts the
-    /// datasets it reads on `scan_metrics`.
-    fn stream(self: Arc<Self>, scan_metrics: AtlasScanMetrics) -> DatasetStream {
-        DatasetStream {
-            queue: self,
-            scan_metrics,
-            current: None,
-        }
-    }
 }
 
-/// One consumer of a collection's shared queue. Streams one nd-encoded
-/// batch per stored chunk of each dataset it pops.
+/// One consumer of the walk. Streams one nd-encoded batch per stored chunk
+/// of each dataset it pops, collection after collection.
 pub(crate) struct DatasetStream {
-    queue: Arc<CollectionQueue>,
+    walk: Arc<CollectionWalk>,
+    /// The collection this consumer reads, as an index into the walk.
+    index: usize,
+    /// The queue of that collection, once open.
+    queue: Option<Arc<CollectionQueue>>,
+    /// The open of that queue, while it runs.
+    opening: Option<BoxFuture<'static, anyhow::Result<Arc<CollectionQueue>>>>,
     /// The partition's metrics. The datasets this consumer reads count here.
     scan_metrics: AtlasScanMetrics,
     /// The dataset this consumer is draining, if any.
     current: Option<BoxStream<'static, anyhow::Result<RecordBatch>>>,
+}
+
+impl DatasetStream {
+    /// A consumer at the first collection, on no dataset yet.
+    fn new(walk: Arc<CollectionWalk>, scan_metrics: AtlasScanMetrics) -> Self {
+        Self {
+            walk,
+            index: 0,
+            queue: None,
+            opening: None,
+            scan_metrics,
+            current: None,
+        }
+    }
 }
 
 impl Stream for DatasetStream {
@@ -213,8 +293,9 @@ impl Stream for DatasetStream {
     type Item = anyhow::Result<RecordBatch>;
 
     /// The next batch of the dataset in hand, or the first batch of the next
-    /// dataset on the queue. The stream ends when the queue is empty and the
-    /// dataset in hand is drained, and errors when the query is cancelled.
+    /// dataset on the walk. The stream ends when the last collection's queue
+    /// is empty and the dataset in hand is drained, and errors when the query
+    /// is cancelled.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
@@ -225,19 +306,44 @@ impl Stream for DatasetStream {
                     Poll::Pending => return Poll::Pending,
                 }
             }
-            if this.queue.spec.cancel.is_cancelled() {
+            if this.walk.spec.cancel.is_cancelled() {
                 return Poll::Ready(Some(Err(cancelled())));
             }
-            match this.queue.next_dataset() {
-                Some((dataset, view)) => {
-                    this.current = Some(dataset_batches(
-                        view,
-                        Arc::clone(&this.queue.spec),
-                        this.scan_metrics.clone(),
-                        dataset,
-                    ));
+            if let Some(queue) = &this.queue {
+                match queue.next_dataset() {
+                    Some((dataset, view)) => {
+                        this.current = Some(dataset_batches(
+                            view,
+                            Arc::clone(&this.walk.spec),
+                            this.scan_metrics.clone(),
+                            dataset,
+                        ));
+                    }
+                    None => {
+                        this.queue = None;
+                        this.index += 1;
+                    }
                 }
-                None => return Poll::Ready(None),
+                continue;
+            }
+            if this.index >= this.walk.collections.len() {
+                return Poll::Ready(None);
+            }
+            let opening = this.opening.get_or_insert_with(|| {
+                Arc::clone(&this.walk)
+                    .queue(this.index, this.scan_metrics.clone())
+                    .boxed()
+            });
+            match opening.poll_unpin(cx) {
+                Poll::Ready(Ok(queue)) => {
+                    this.opening = None;
+                    this.queue = Some(queue);
+                }
+                Poll::Ready(Err(error)) => {
+                    this.opening = None;
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Pending => return Poll::Pending,
             }
         }
     }
@@ -320,6 +426,7 @@ mod tests {
     use datafusion::physical_plan::PhysicalExpr;
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion::scalar::ScalarValue;
+    use object_store::ObjectStoreExt;
     use std::path::Path;
 
     /// The logical schema of a fixture, the one a scan is built on.
@@ -341,25 +448,66 @@ mod tests {
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: AtlasScanMetrics,
     ) -> DatasetStream {
-        open_with(queues, dir, predicate, metrics, CancellationToken::new())
-            .await
-            .unwrap()
+        open_with(queues, dir, predicate, metrics, CancellationToken::new()).await
     }
 
-    /// [`stream`], on a query `cancel` stops, and without the unwrap.
+    /// [`stream`], on a query `cancel` stops.
     async fn open_with(
         queues: &CollectionQueues,
         dir: &Path,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: AtlasScanMetrics,
         cancel: CancellationToken,
-    ) -> anyhow::Result<DatasetStream> {
+    ) -> DatasetStream {
         let (store, marker) = test_support::store_and_marker(dir);
         let projected = Arc::new(encoded_schema(logical_schema(dir).await.as_ref()));
         let spec = ScanSpec::new(projected, None, predicate, cancel).unwrap();
-        queues
-            .open(None, store, marker, Arc::new(spec), metrics)
-            .await
+        queues.open(store, Arc::from(vec![marker]), Arc::new(spec), metrics)
+    }
+
+    /// Collections `names` under `root`, each with the two datasets of
+    /// `two_datasets`, with one store over `root` and their markers in walk order.
+    async fn collections(
+        root: &Path,
+        names: &[&str],
+    ) -> (Arc<dyn ObjectStore>, Arc<[ObjectMeta]>, SchemaRef) {
+        for name in names {
+            test_support::two_datasets(&root.join(format!("{name}.atlas"))).await;
+        }
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(root).unwrap());
+        let mut markers = Vec::new();
+        for name in names {
+            let path = object_store::path::Path::from(format!(
+                "{name}.atlas/{}",
+                crate::discover::ATLAS_MARKER
+            ));
+            markers.push(store.head(&path).await.unwrap());
+        }
+        let schema = logical_schema(&root.join(format!("{}.atlas", names[0]))).await;
+        (store, markers.into(), schema)
+    }
+
+    /// The walk of `queues`, once a stream has created it.
+    fn walk(queues: &CollectionQueues) -> Arc<CollectionWalk> {
+        Arc::clone(
+            queues
+                .walk
+                .lock()
+                .as_ref()
+                .expect("a stream created the walk"),
+        )
+    }
+
+    /// Whether collection `index` of the walk has released its view.
+    fn released(walk: &CollectionWalk, index: usize) -> bool {
+        walk.cells[index]
+            .get()
+            .expect("the collection was opened")
+            .pending
+            .lock()
+            .view
+            .is_none()
     }
 
     /// A token that fires between two datasets ends the stream with an error,
@@ -378,8 +526,7 @@ mod tests {
             AtlasScanMetrics::new(&set, 0),
             cancel.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         let winter = stream.try_next().await.unwrap().unwrap();
         assert_eq!(rows(&[winter]), vec![4], "the first dataset reads whole");
@@ -403,22 +550,130 @@ mod tests {
         let metrics = AtlasScanMetrics::new(&set, 0);
         let cancel = CancellationToken::new();
         cancel.cancel();
+        let queues = CollectionQueues::new();
 
-        let opened = open_with(
-            &CollectionQueues::new(),
-            tmp.path(),
-            None,
-            metrics.clone(),
-            cancel,
-        )
-        .await;
+        let mut stream = open_with(&queues, tmp.path(), None, metrics.clone(), cancel).await;
 
-        let error = match opened {
-            Ok(_) => panic!("nothing opens for a cancelled query"),
-            Err(error) => error.to_string(),
-        };
+        let error = stream
+            .try_next()
+            .await
+            .expect_err("nothing opens for a cancelled query")
+            .to_string();
         assert!(error.contains("cancelled"), "{error}");
+        assert!(walk(&queues).cells[0].get().is_none(), "nothing was opened");
         assert_eq!(metrics.datasets_scanned.value(), 0);
+    }
+
+    /// One stream reads every collection of the walk in order, and each
+    /// collection is released once its queue drains.
+    #[tokio::test]
+    async fn the_walk_reads_collections_in_order_and_releases_each() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, markers, schema) = collections(tmp.path(), &["a", "b", "c"]).await;
+        let spec = ScanSpec::new(
+            Arc::new(encoded_schema(&schema)),
+            None,
+            None,
+            CancellationToken::new(),
+        )
+        .unwrap();
+        let set = ExecutionPlanMetricsSet::new();
+        let metrics = AtlasScanMetrics::new(&set, 0);
+        let queues = CollectionQueues::new();
+        let mut stream = queues.open(store, markers, Arc::new(spec), metrics.clone());
+
+        let mut read = Vec::new();
+        while let Some(batch) = stream.try_next().await.unwrap() {
+            read.push(batch);
+            // Datasets of a later collection are only read once the earlier one is drained.
+            let walk = walk(&queues);
+            if read.len() == 3 {
+                assert!(released(&walk, 0), "collection a is drained and released");
+            }
+        }
+
+        assert_eq!(rows(&read), vec![4, 3, 4, 3, 4, 3], "a, then b, then c");
+        let walk = walk(&queues);
+        for index in 0..3 {
+            assert!(released(&walk, index), "collection {index} was released");
+        }
+        assert_eq!(metrics.datasets_scanned.value(), 6);
+    }
+
+    /// The open of a collection starts the open of the next one, so the
+    /// partitions do not wait for it when they arrive.
+    #[tokio::test]
+    async fn the_next_collection_opens_early() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, markers, schema) = collections(tmp.path(), &["a", "b", "c"]).await;
+        let spec = ScanSpec::new(
+            Arc::new(encoded_schema(&schema)),
+            None,
+            None,
+            CancellationToken::new(),
+        )
+        .unwrap();
+        let set = ExecutionPlanMetricsSet::new();
+        let queues = CollectionQueues::new();
+        let mut stream = queues.open(
+            store,
+            markers,
+            Arc::new(spec),
+            AtlasScanMetrics::new(&set, 0),
+        );
+
+        stream
+            .try_next()
+            .await
+            .unwrap()
+            .expect("a first batch of a");
+        let walk = walk(&queues);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while walk.cells[1].get().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("b opens while a is read");
+
+        assert!(walk.cells[2].get().is_none(), "c waits until b is reached");
+    }
+
+    /// Two streams on one walk read each dataset of every collection once.
+    #[tokio::test]
+    async fn two_streams_on_one_walk_read_each_dataset_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, markers, schema) = collections(tmp.path(), &["a", "b"]).await;
+        let spec = Arc::new(
+            ScanSpec::new(
+                Arc::new(encoded_schema(&schema)),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .unwrap(),
+        );
+        let set = ExecutionPlanMetricsSet::new();
+        let metrics = AtlasScanMetrics::new(&set, 0);
+        let queues = CollectionQueues::new();
+        let first = queues.open(
+            Arc::clone(&store),
+            Arc::clone(&markers),
+            Arc::clone(&spec),
+            metrics.clone(),
+        );
+        let second = queues.open(store, markers, spec, metrics.clone());
+
+        let (a, b) = tokio::join!(
+            first.try_collect::<Vec<_>>(),
+            second.try_collect::<Vec<_>>()
+        );
+
+        let mut all = rows(&a.unwrap());
+        all.extend(rows(&b.unwrap()));
+        all.sort_unstable();
+        assert_eq!(all, vec![3, 3, 4, 4]);
+        assert_eq!(metrics.datasets_scanned.value(), 4);
     }
 
     /// A stream over a fixture, with `skip_unbroadcastable` set as given.
@@ -432,10 +687,7 @@ mod tests {
         let spec = ScanSpec::new(projected, None, None, CancellationToken::new())
             .unwrap()
             .with_skip_unbroadcastable(skip_unbroadcastable);
-        CollectionQueues::new()
-            .open(None, store, marker, Arc::new(spec), metrics)
-            .await
-            .unwrap()
+        CollectionQueues::new().open(store, Arc::from(vec![marker]), Arc::new(spec), metrics)
     }
 
     /// `mixed` holds columns on two grids and no list says which one to read.
@@ -484,6 +736,7 @@ mod tests {
     fn the_queues_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<CollectionQueues>();
+        assert_send_sync::<CollectionWalk>();
         assert_send_sync::<CollectionQueue>();
     }
 
@@ -551,9 +804,7 @@ mod tests {
 
         // The drained queue released its collection. A late stream finds
         // nothing to read and reopens nothing.
-        let (_, marker) = test_support::store_and_marker(tmp.path());
-        let cell = Arc::clone(queues.cells.read().get(&marker.location).unwrap());
-        assert!(cell.get().unwrap().pending.lock().view.is_none());
+        assert!(released(&walk(&queues), 0));
         let mut third = stream(&queues, tmp.path(), None, metrics.clone()).await;
         assert!(third.try_next().await.unwrap().is_none());
         assert_eq!(metrics.datasets_scanned.value(), 2, "nothing was reread");
