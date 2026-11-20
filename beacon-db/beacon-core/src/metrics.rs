@@ -268,6 +268,12 @@ fn collect_scan_totals(plan: &dyn ExecutionPlan, totals: &mut ScanTotals) {
                 .collect()
         })
         .unwrap_or_default();
+    // A scan can read one file in several slices. Each slice repeats its location.
+    let mut seen = std::collections::HashSet::new();
+    let files: Vec<&object_store::ObjectMeta> = files
+        .into_iter()
+        .filter(|file| seen.insert(&file.location))
+        .collect();
 
     totals.bytes += bytes_scanned.unwrap_or_else(|| files.iter().map(|file| file.size).sum());
     totals
@@ -370,6 +376,35 @@ mod tests {
     use super::*;
 
     use datafusion::prelude::SessionContext;
+
+    /// A file that a scan reads in slices counts once in the totals.
+    #[test]
+    fn a_sliced_file_counts_once() {
+        use arrow::datatypes::{DataType, Field, Schema};
+        use beacon_arrow_netcdf::datafusion::NetcdfSource;
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder};
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("V0", DataType::Float64, true)]));
+        let source = NetcdfSource::new(None, TableSchema::from_file_schema(schema));
+        // Four entries of one file, as four slices give.
+        let groups = (0..4)
+            .map(|_| FileGroup::new(vec![PartitionedFile::new("data/a.nc", 1000)]))
+            .collect();
+        let config =
+            FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), Arc::new(source))
+                .with_file_groups(groups)
+                .build();
+        let plan = DataSourceExec::from_data_source(config);
+
+        let mut totals = ScanTotals::default();
+        collect_scan_totals(plan.as_ref(), &mut totals);
+
+        assert_eq!(totals.bytes, 1000);
+        assert_eq!(totals.files, vec!["data/a.nc".to_string()]);
+    }
 
     /// Run a small query to completion and return its (metrics-populated)
     /// physical plan. `explain_analyze_pg_json` documents that the plan must have

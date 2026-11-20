@@ -1,29 +1,21 @@
 //! `PARTITIONED BY` over a netCDF collection, through the runtime.
 //!
-//! A partition column is in the *path* of a file rather than inside it, and
-//! DataFusion's `FileStream` appends its value per plan entry — which it can do
-//! only because an entry is a file. A netCDF scan reads a whole collection
-//! behind one entry, so the reader appends the values itself, per file. These
-//! tests drive the statement a user writes and read what comes back.
+//! A partition column is in the *path* of a file rather than inside it. The
+//! netCDF scan appends the value of each file to every batch it reads from that
+//! file. These tests drive the statement a user writes and read what comes back.
+//!
+//! A netCDF scan needs at least one file column, so each query reads `V0`.
 
 mod common;
 
 use common::{column_strings, runtime, scalar_i64, total_rows};
 
-/// The WOD CTD fixture shipped with the netCDF reader.
-fn netcdf_fixture() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("beacon-file-formats/beacon-arrow-netcdf/test_files/wod_ctd_1964.nc")
-}
-
-/// One copy of the fixture per `year=` directory, under `obs/`.
+/// One regular file per `year=` directory, under `obs/`.
 fn write_collection(datasets: &std::path::Path, years: &[&str]) {
     for year in years {
         let dir = datasets.join("obs").join(format!("year={year}"));
         std::fs::create_dir_all(&dir).expect("the partition directory is created");
-        std::fs::copy(netcdf_fixture(), dir.join("ctd.nc")).expect("the fixture is copied");
+        common::write_regular_netcdf(&dir.join("ctd.nc"), 4000);
     }
 }
 
@@ -52,7 +44,10 @@ async fn a_partitioned_netcdf_table_reads_every_directory() {
 
     // The column is in the table, and holds the directory names.
     let years = rt
-        .sql("SELECT DISTINCT CAST(year AS VARCHAR) AS y FROM observations ORDER BY y")
+        .sql(
+            "SELECT DISTINCT CAST(year AS VARCHAR) AS y FROM observations \
+             WHERE \"V0\" >= 0 ORDER BY y",
+        )
         .await;
     assert_eq!(
         column_strings(&years, 0),
@@ -64,11 +59,12 @@ async fn a_partitioned_netcdf_table_reads_every_directory() {
     // and the table holds both.
     let counted = rt
         .sql(
-            "SELECT CAST(year AS VARCHAR) AS y, count(*) AS n \
+            "SELECT CAST(year AS VARCHAR) AS y, count(\"V0\") AS n \
              FROM observations GROUP BY y ORDER BY y",
         )
         .await;
-    let per_directory = scalar_i64(&rt.sql("SELECT count(*) FROM observations").await) / 2;
+    let per_directory =
+        scalar_i64(&rt.sql("SELECT count(\"V0\") FROM observations").await) / 2;
     assert!(per_directory > 0, "the fixture holds rows");
 
     let counts =
@@ -95,9 +91,9 @@ async fn a_filter_on_the_partition_column_reads_one_directory() {
     )
     .await;
 
-    let whole = scalar_i64(&rt.sql("SELECT count(*) FROM observations").await);
+    let whole = scalar_i64(&rt.sql("SELECT count(\"V0\") FROM observations").await);
     let one = scalar_i64(
-        &rt.sql("SELECT count(*) FROM observations WHERE year = '1965'")
+        &rt.sql("SELECT count(\"V0\") FROM observations WHERE year = '1965'")
             .await,
     );
 
@@ -108,7 +104,7 @@ async fn a_filter_on_the_partition_column_reads_one_directory() {
     let selected = rt
         .sql(
             "SELECT DISTINCT CAST(year AS VARCHAR) AS y \
-             FROM observations WHERE year = '1965'",
+             FROM observations WHERE year = '1965' AND \"V0\" >= 0",
         )
         .await;
     assert_eq!(column_strings(&selected, 0), vec!["1965".to_string()]);

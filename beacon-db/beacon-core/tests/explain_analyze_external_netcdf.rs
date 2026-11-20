@@ -14,25 +14,16 @@ mod common;
 use common::{runtime, total_rows};
 use datafusion::arrow::array::{Array, StringArray};
 
-/// The WOD CTD fixture shipped with the NetCDF reader.
-fn netcdf_fixture() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("beacon-file-formats/beacon-arrow-netcdf/test_files/wod_ctd_1964.nc")
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn explain_analyze_over_external_netcdf_returns_metrics() {
     let rt = runtime("explain-analyze-nc").await;
 
-    // Copy the WOD CTD fixture into the datasets dir so it can back an external
+    // Write a regular file into the datasets dir so it can back an external
     // table addressed by a datasets-relative location.
     let rel = "explain_analyze_external.nc";
-    std::fs::copy(netcdf_fixture(), rt.datasets_dir().join(rel))
-        .expect("copy NetCDF fixture into datasets dir");
+    common::write_regular_netcdf(&rt.datasets_dir().join(rel), 4000);
 
-    let table = "wod_explain";
+    let table = "nc_explain";
     rt.sql(&format!(
         "CREATE EXTERNAL TABLE {table} STORED AS NC LOCATION '{rel}'"
     ))

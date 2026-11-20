@@ -63,7 +63,8 @@ def test_read_netcdf_select_star(client, netcdf_file):
     assert EXPECTED_VARS <= set(header), header
     # The grid is large (time=1, lat=1208, lon=1920), so the flattened scan
     # returns well over a thousand rows.
-    n = client.count(f"SELECT * FROM read_netcdf(['{netcdf_file}'])")
+    # A NetCDF scan needs a file column, so the count names one.
+    n = int(float(client.scalar(f"SELECT count(lat) AS n FROM read_netcdf(['{netcdf_file}'])")))
     assert n > 1000
 
 
@@ -123,7 +124,7 @@ def test_nd_netcdf_output_roundtrip(client, datasets_dir):
     assert data[:3] == b"CDF" or data[:4] == b"\x89HDF", data[:8]
 
     rel = _write_to_datasets(datasets_dir, "roundtrip/nd.nc", data)
-    n = client.count(f"SELECT * FROM read_netcdf(['{rel}'])")
+    n = int(float(client.scalar(f"SELECT count(time) AS n FROM read_netcdf(['{rel}'])")))
     # 50 unique time values -> 50 cells along the single dimension.
     assert n == 50
     assert "temperature" in client.sql_rows(f"SELECT * FROM read_netcdf(['{rel}']) LIMIT 1")[0]

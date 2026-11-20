@@ -14,7 +14,7 @@ fn seed(rt: TestRuntime) -> TestRuntime {
     write_file(&rt.datasets_dir().join("r/two.csv"), "v,name\n3,c\n");
     std::fs::copy(parquet_fixture(), rt.datasets_dir().join("pq.parquet"))
         .expect("copy parquet fixture");
-    std::fs::copy(netcdf_fixture(), rt.datasets_dir().join("wod.nc")).expect("copy netcdf fixture");
+    common::write_regular_netcdf(&rt.datasets_dir().join("regular.nc"), 4000);
     // A NetCDF-4 file *is* HDF5, so the same bytes serve `read_hdf5`.
     std::fs::copy(netcdf_fixture(), rt.datasets_dir().join("wod.h5"))
         .expect("copy netcdf fixture as hdf5");
@@ -128,13 +128,9 @@ async fn read_parquet_scans_the_fixture() {
 async fn read_netcdf_scans_the_fixture() {
     let rt = seeded("read-netcdf").await;
 
-    // `SELECT *` over an nd format narrows to a broadcast-compatible default
-    // dimension set; the point here is only that rows come back at all.
-    let rows = rt.sql("SELECT * FROM read_netcdf('wod.nc') LIMIT 5").await;
-    assert!(
-        total_rows(&rows) > 0,
-        "the WOD CTD fixture should yield rows"
-    );
+    // The point here is only that rows come back at all.
+    let rows = rt.sql("SELECT * FROM read_netcdf('regular.nc') LIMIT 5").await;
+    assert!(total_rows(&rows) > 0, "the fixture should yield rows");
 }
 
 /// `read_hdf5` reads a NetCDF-4 file.
