@@ -81,9 +81,9 @@ INSERT INTO <table> BY NAME <query>
 
 ```sql
 CREATE EXTERNAL TABLE argo_lance (platform VARCHAR, time TIMESTAMP, temp DOUBLE)
-STORED AS LANCE LOCATION 's3://bucket/argo.lance';
+STORED AS LANCE LOCATION 'lance/argo.lance';
 
-INSERT INTO argo_lance BY NAME SELECT * FROM argo_netcdf;
+INSERT INTO argo_lance BY NAME SELECT platform, time, temp, psal FROM argo_netcdf;
 ```
 
 Only a Lance table adds new columns: a managed Lance table or a
@@ -100,12 +100,18 @@ keep the whole query result in memory.
 - A table column that the query does not have gets `NULL`.
 - A table column that is not nullable must be in the query. If not, the statement fails before a
   write.
+- A `NULL` value in a column that is not nullable stops the statement with an error. Beacon writes
+  no rows.
 
 ### Add new columns
 
 A query column that is not in a Lance table becomes a new column of the table. Beacon adds all new
 columns in one step, before it writes the rows. A new column is nullable. The rows that the table
-holds before the insert read `NULL` in that column.
+holds before the insert read `NULL` in that column. In the example above, `psal` becomes a new
+column.
+
+Lance does not accept a column name that contains a dot (`.`). Beacon refuses such a new column
+before it changes the table. Rename the column with `AS`, or remove it from the query.
 
 Only a Lance table adds columns. On another table type, a query column that is not in the table is an
 error. The error names the columns.
@@ -128,7 +134,7 @@ columns stay in the table. They hold only `NULL`. Remove them with `ALTER TABLE 
 necessary.
 
 `EXPLAIN INSERT INTO ... BY NAME` shows how Beacon maps the columns. It does not add columns to the
-table.
+table. `EXPLAIN ANALYZE` does not accept `INSERT INTO ... BY NAME`.
 
 ### NetCDF sources
 
@@ -139,9 +145,14 @@ limits:
 - A query fails when its columns have disjoint dimensions. `SELECT *` can fail for this reason.
   Select the columns that share dimensions. Or set `read_dimensions` on the NetCDF table. See
   [NetCDF options](/docs/2.1.0-rc3/formats/netcdf#options).
-- [Attribute columns](/docs/2.1.0-rc3/formats/netcdf#variable-attributes) (`var.attr`) also become
-  Lance columns. Many different attributes make a very wide table. Lance is slow with many columns.
-  Select only the columns that you need.
+- [Attribute columns](/docs/2.1.0-rc3/formats/netcdf#variable-attributes) (`var.attr`) have a dot
+  in the name. Lance does not accept them as new columns, so `SELECT *` can fail for this reason
+  too. Leave them out of the select list, or rename them with `AS`:
+
+  ```sql
+  INSERT INTO argo_lance BY NAME
+  SELECT platform, time, temp, "temp.units" AS temp_units FROM argo_netcdf;
+  ```
 
 ### Errors
 
@@ -151,6 +162,8 @@ limits:
 | Column that is not nullable and is not in the query | `Column '<c>' is not nullable and the source does not have it` |
 | New columns on a table that is not Lance | `Table '<t>' does not have the columns <list>; only Lance tables add columns` |
 | Two query columns with the same name | `The source has the column '<c>' more than one time` |
+| New column names with a dot | `Lance does not accept the column names <list>; a name must not contain '.'. Rename them with AS` |
+| Write to a pinned Lance table | `Lance table '<name>' is pinned to version <n> and is read-only` |
 
 Only the admin can run `INSERT INTO ... BY NAME`, the same as `INSERT INTO`. The
 [read rules](/docs/2.1.0-rc3/security/access-control) also apply to the tables of the query.

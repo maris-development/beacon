@@ -232,13 +232,28 @@ A Lance external table is not read-only. It supports the same statements as a
 
 #### Location
 
-`LOCATION` points at the **dataset directory**. Do not give a glob of files. The location rules are
-the same as for `STORED AS DELTA`:
+`LOCATION` points at the **dataset directory**:
 
-- A relative path is in the dataset storage of Beacon.
-- A path with a scheme, for example `file://` or `s3://`, uses the object store for that scheme.
+- A relative path is in the datasets store of Beacon. This is also true when the datasets store is
+  an S3 bucket (`BEACON_S3_DATASETS`). Use a relative path for a dataset in that store.
+- A path with a scheme, for example `s3://other-bucket/argo.lance`, uses the object store that the
+  server has for that URL.
+- A location with a glob character (`*`, `?`, `[` or `]`) is an error.
 
-Beacon uses the object store configuration of the server. A Lance table needs no other credentials.
+The server builds the store of a URL with a scheme from the `AWS_*` environment or from a matching
+[secret](/docs/2.1.0-rc3/sql/secrets). It does not use the endpoint of `BEACON_S3_DATASETS`. For an
+S3 bucket that is not the datasets store, create a secret for the bucket first:
+
+```sql
+CREATE SECRET other_bucket (TYPE S3, KEY_ID '…', SECRET '…', REGION 'eu-west-1',
+  SCOPE 's3://other-bucket');
+
+CREATE EXTERNAL TABLE argo_other
+STORED AS LANCE
+LOCATION 's3://other-bucket/argo.lance'
+```
+
+A Lance table does not accept `PARTITIONED BY`.
 
 #### Columns
 
@@ -256,7 +271,7 @@ Register a dataset that exists:
 ```sql
 CREATE EXTERNAL TABLE argo_lance
 STORED AS LANCE
-LOCATION 's3://bucket/argo.lance'
+LOCATION 'lance/argo.lance'
 ```
 
 Create a new empty dataset:
@@ -264,18 +279,19 @@ Create a new empty dataset:
 ```sql
 CREATE EXTERNAL TABLE argo_lance (platform VARCHAR, time TIMESTAMP, temp DOUBLE)
 STORED AS LANCE
-LOCATION 's3://bucket/argo.lance'
+LOCATION 'lance/argo.lance'
 ```
 
 #### Pin a version
 
 `OPTIONS ('version' '<n>')` pins the table to version `n` of the dataset. A pinned table is
-**read-only**. Each write to it gives an error.
+**read-only**. Each write to it gives an error: `INSERT`, `INSERT INTO ... BY NAME`, `DELETE`,
+`UPDATE`, `ALTER TABLE`, `CREATE INDEX`, `DROP INDEX` and `COMPACT TABLE`.
 
 ```sql
 CREATE EXTERNAL TABLE argo_v1
 STORED AS LANCE
-LOCATION 's3://bucket/argo.lance'
+LOCATION 'lance/argo.lance'
 OPTIONS ('version' '1')
 ```
 
@@ -309,7 +325,11 @@ Beacon and other tools can write to the same dataset:
 | --- | --- |
 | Column list on a dataset that exists | `Lance external tables take their columns from the dataset; remove the column list` |
 | No dataset and no column list | `No Lance dataset at '<location>'; add a column list to create one` |
-| Write to a pinned table | `Lance table '<name>' is pinned to version n and is read-only` |
+| Write to a pinned table | `Lance table '<name>' is pinned to version <n> and is read-only` |
+| Glob character in the location | `A Lance location cannot contain a glob: '<location>'` |
+| No object store for the URL | `No object store is registered for '<location>': <reason>` |
+| Unknown key in `OPTIONS` | `Unknown option '<key>' for a Lance table` |
+| `PARTITIONED BY` on a Lance table | `STORED AS LANCE does not support PARTITIONED BY` |
 
 ## Partitioned data
 
