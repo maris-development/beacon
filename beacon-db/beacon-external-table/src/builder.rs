@@ -105,7 +105,6 @@ impl ExternalTableBuilder {
             )?,
             use_listing_cache: false,
             use_statistics_pruning: bool_table_option(&cmd.options, USE_STATISTICS_PRUNING_OPTION)?,
-            use_statistics_cache: false,
         };
         // A CREATE reports a statistics problem, such as too many columns, as its error.
         Ok(Self {
@@ -343,7 +342,6 @@ mod tests {
             skip_invalid_files_on_scan: false,
             use_listing_cache: false,
             use_statistics_pruning: true,
-            use_statistics_cache: false,
         }
     }
 
