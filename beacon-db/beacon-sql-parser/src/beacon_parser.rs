@@ -11,8 +11,15 @@ use super::statement::{
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropIndexStatement, DropSecretStatement, RefreshStatement,
     AnalyzeFilesStatement, RunCrawlerStatement, ShowIndexesStatement,
-    SummarizeStatement, InstallStatement, UninstallStatement,
+    SummarizeStatement, InstallStatement, UninstallStatement, InsertByNameStatement,
 };
+
+/// The form of an `INSERT` with respect to `BY NAME`.
+enum InsertByNameShape {
+    NotByName,
+    ByName,
+    WithColumnList,
+}
 
 /// A parser that extends `DFParser` with custom Beacon SQL syntax.
 pub struct BeaconParser<'a> {
@@ -123,9 +130,81 @@ impl<'a> BeaconParser<'a> {
             return self.parse_analyze_files();
         }
 
+        match self.insert_by_name_shape() {
+            InsertByNameShape::NotByName => {}
+            InsertByNameShape::ByName => return self.parse_insert_by_name(),
+            InsertByNameShape::WithColumnList => {
+                return Err(DataFusionError::Plan(
+                    "INSERT ... BY NAME does not take a column list".to_string(),
+                ));
+            }
+        }
+
         let df_statement = Box::new(self.df_parser.parse_statement()?);
 
         Ok(BeaconStatement::DFStatement(df_statement))
+    }
+
+    /// Look ahead for `INSERT INTO <name> [(...)] BY NAME` without consuming tokens.
+    fn insert_by_name_shape(&self) -> InsertByNameShape {
+        let parser = &self.df_parser.parser;
+        let is_word = |n: usize, value: &str| {
+            matches!(&parser.peek_nth_token(n).token, Token::Word(w) if w.value.eq_ignore_ascii_case(value))
+        };
+        if !(is_word(0, "INSERT") && is_word(1, "INTO")) {
+            return InsertByNameShape::NotByName;
+        }
+        if !matches!(parser.peek_nth_token(2).token, Token::Word(_)) {
+            return InsertByNameShape::NotByName;
+        }
+        let mut n = 3;
+        while parser.peek_nth_token(n).token == Token::Period
+            && matches!(parser.peek_nth_token(n + 1).token, Token::Word(_))
+        {
+            n += 2;
+        }
+        let has_column_list = parser.peek_nth_token(n).token == Token::LParen;
+        if has_column_list {
+            // Skip to the matching `)` of the column list.
+            let mut depth = 0usize;
+            loop {
+                match parser.peek_nth_token(n).token {
+                    Token::LParen => depth += 1,
+                    Token::RParen => depth -= 1,
+                    Token::EOF => return InsertByNameShape::NotByName,
+                    _ => {}
+                }
+                n += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        if !(is_word(n, "BY") && is_word(n + 1, "NAME")) {
+            InsertByNameShape::NotByName
+        } else if has_column_list {
+            InsertByNameShape::WithColumnList
+        } else {
+            InsertByNameShape::ByName
+        }
+    }
+
+    /// Parse: INSERT INTO <table> BY NAME <query>
+    fn parse_insert_by_name(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // INSERT
+        self.df_parser.parser.next_token(); // INTO
+        let table = self.parse_object_name()?;
+        self.df_parser.parser.next_token(); // BY
+        self.df_parser.parser.next_token(); // NAME
+        let query = self
+            .df_parser
+            .parser
+            .parse_query()
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(BeaconStatement::InsertByName(InsertByNameStatement {
+            table,
+            query,
+        }))
     }
 
     /// Whether the next two tokens are `ANALYZE FILES`.
@@ -1146,5 +1225,72 @@ mod tests {
             .unwrap()
             .parse_single_statement()
             .is_err());
+    }
+
+    #[test]
+    fn parses_insert_by_name() {
+        let sql = "INSERT INTO obs BY NAME SELECT * FROM nc";
+        let stmt = BeaconParser::new(sql)
+            .unwrap()
+            .parse_single_statement()
+            .unwrap();
+        match &stmt {
+            BeaconStatement::InsertByName(s) => assert_eq!(s.table.to_string(), "obs"),
+            other => panic!("expected InsertByName, got {other:?}"),
+        }
+        assert_eq!(stmt.to_string(), sql);
+    }
+
+    #[test]
+    fn insert_by_name_with_schema_name() {
+        let sql = "INSERT INTO s.obs BY NAME SELECT a FROM t";
+        let stmt = BeaconParser::new(sql)
+            .unwrap()
+            .parse_single_statement()
+            .unwrap();
+        match &stmt {
+            BeaconStatement::InsertByName(s) => assert_eq!(s.table.0.len(), 2),
+            other => panic!("expected InsertByName, got {other:?}"),
+        }
+        assert_eq!(stmt.to_string(), sql);
+    }
+
+    #[test]
+    fn insert_by_name_rejects_column_list() {
+        let sql = "INSERT INTO obs (a) BY NAME SELECT a FROM t";
+        let err = BeaconParser::new(sql)
+            .unwrap()
+            .parse_single_statement()
+            .expect_err("a column list with BY NAME must fail");
+        assert!(
+            err.to_string()
+                .contains("INSERT ... BY NAME does not take a column list"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn plain_insert_is_unchanged() {
+        for sql in [
+            "INSERT INTO obs SELECT * FROM t",
+            "INSERT INTO obs (a, b) SELECT a, b FROM t",
+            "INSERT INTO obs VALUES (1)",
+        ] {
+            let stmt = BeaconParser::new(sql)
+                .unwrap()
+                .parse_single_statement()
+                .unwrap();
+            assert!(matches!(stmt, BeaconStatement::DFStatement(_)), "{sql}");
+        }
+    }
+
+    #[test]
+    fn name_is_not_reserved() {
+        let sql = "SELECT name FROM by_name";
+        let stmt = BeaconParser::new(sql)
+            .unwrap()
+            .parse_single_statement()
+            .unwrap();
+        assert!(matches!(stmt, BeaconStatement::DFStatement(_)));
     }
 }
