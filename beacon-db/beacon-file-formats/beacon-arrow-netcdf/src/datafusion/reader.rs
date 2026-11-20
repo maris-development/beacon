@@ -93,6 +93,8 @@ pub async fn fetch_schema(
     else {
         return Ok(Arc::new(arrow::datatypes::Schema::empty()));
     };
+    // The scan does not read a ragged dataset, so the table must not get its columns.
+    crate::datafusion::scan::refuse_ragged(&dataset)?;
 
     let schema =
         beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset).map_err(|e| {

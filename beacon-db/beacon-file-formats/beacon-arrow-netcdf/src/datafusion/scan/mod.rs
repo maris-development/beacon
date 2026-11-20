@@ -4,7 +4,11 @@
 //! drops the chunks a filter excludes, and reads one chunk per morsel.
 
 mod chunks;
+mod morsel;
+mod output;
 mod prune;
 mod slices;
-mod output;
-mod morsel;
+mod source;
+
+pub(in crate::datafusion) use output::refuse_ragged;
+pub use source::NetcdfSource;

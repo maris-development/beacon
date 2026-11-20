@@ -36,6 +36,8 @@ pub async fn generate_statistics(
         .open()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open NetCDF dataset {location}: {e}"))?;
+    // The scan refuses a ragged file, so its statistics would prune nothing real.
+    crate::datafusion::scan::refuse_ragged(&dataset).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     statistics_for_dataset(&dataset, table_schema).await
 }

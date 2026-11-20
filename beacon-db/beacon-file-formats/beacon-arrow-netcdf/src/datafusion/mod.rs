@@ -25,7 +25,6 @@ use object_store::{ObjectMeta, ObjectStore};
 use crate::datafusion::{
     options::NetcdfOptions,
     sink::{NetCDFNdSink, NetCDFSink},
-    source::NetCDFSource,
 };
 
 pub const NETCDF_EXTENSION: &str = "nc";
@@ -40,8 +39,9 @@ pub mod options;
 mod partition_coverage_tests;
 pub mod reader;
 mod scan;
+
+pub use scan::NetcdfSource;
 pub mod sink;
-pub mod source;
 pub mod statistics;
 pub mod table_function;
 
@@ -434,7 +434,7 @@ impl FileFormat for NetcdfFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = NetCDFSource::new(self.options.read_dimensions.clone(), table_schema)
+        let source = NetcdfSource::new(self.options.read_dimensions.clone(), table_schema)
             .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
             .with_skip_invalid_files(self.options.skip_invalid_files)
             .with_projection(projection);
@@ -516,7 +516,7 @@ impl FileFormat for NetcdfFormat {
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
         Arc::new(
-            NetCDFSource::new(self.options.read_dimensions.clone(), table_schema)
+            NetcdfSource::new(self.options.read_dimensions.clone(), table_schema)
                 .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
                 .with_skip_invalid_files(self.options.skip_invalid_files),
         )
@@ -1056,81 +1056,57 @@ pub(super) mod format_tests {
         );
     }
 
-    /// The split minimum a scan takes from its session
-    /// (`repartition_file_min_size`), and what these tests pass by hand.
+    /// The `repartition_file_min_size` that these tests pass by hand. The scan ignores it.
     const MIN_SHARE_SIZE: usize = 10 * 1024 * 1024;
 
-    /// A scan of any size plans one entry per partition, and one queue.
-    ///
-    /// Size decides nothing here. It used to: a file under the minimum was left
-    /// whole, and one over it went into every partition's group with a share.
-    /// Both were guesses made at plan time, and both were measured losing to no
-    /// guess at all. A queue does not guess — whoever is free takes the next
-    /// file, and a partition with nothing left helps divide an open one.
+    /// A scan gets one group per partition. A lone file is cut into slices, and
+    /// no entry is a byte range.
     #[test]
-    fn a_scan_plans_one_entry_per_partition_whatever_its_files() {
+    fn a_scan_spreads_whole_files_and_slices_a_lone_file() {
         use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder};
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
 
-        const PARTITIONS: usize = 4;
+        let table_schema = TableSchema::from_file_schema(Arc::new(
+            arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+                "V0",
+                arrow::datatypes::DataType::Float64,
+                true,
+            )]),
+        ));
+        let source = NetcdfSource::new(None, table_schema);
+        let config_of = |files: usize| {
+            let groups = (0..files)
+                .map(|i| FileGroup::new(vec![PartitionedFile::new(format!("f{i}.nc"), 1000)]))
+                .collect();
+            FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), Arc::new(source.clone()))
+                .with_file_groups(groups)
+                .build()
+        };
 
-        // One file well under the old minimum, one well over, and a collection.
-        let scans: Vec<(&str, Vec<PartitionedFile>)> = vec![
-            (
-                "one small file",
-                vec![PartitionedFile::new("small.nc", 1024 * 1024)],
-            ),
-            (
-                "one large file",
-                vec![PartitionedFile::new("large.nc", 64 * 1024 * 1024)],
-            ),
-            (
-                "many files",
-                (0..500)
-                    .map(|i| PartitionedFile::new(format!("f-{i}.nc"), 1024 * 1024))
-                    .collect(),
-            ),
-        ];
+        // Twelve files on four partitions: whole files, three in each group.
+        let many = source
+            .repartitioned(4, 0, None, &config_of(12))
+            .unwrap()
+            .expect("the scan repartitions");
+        assert_eq!(many.file_groups.len(), 4);
+        assert!(many.file_groups.iter().all(|group| group.files().len() == 3));
 
-        for (what, files) in scans {
-            let table_schema =
-                TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-            let source = NetCDFSource::new(None, table_schema);
-            let count = files.len();
-            let mut builder = FileScanConfigBuilder::new(
-                ObjectStoreUrl::local_filesystem(),
-                Arc::new(source.clone()) as Arc<dyn FileSource>,
-            );
-            for file in files {
-                builder = builder.with_file(file);
-            }
-            let config = builder.build();
-
-            let planned = source
-                .repartitioned(PARTITIONS, MIN_SHARE_SIZE, None, &config)
-                .unwrap()
-                .unwrap_or_else(|| panic!("{what}: a scan is planned morsel-driven"));
-
-            assert_eq!(planned.file_groups.len(), PARTITIONS, "{what}");
-            for group in &planned.file_groups {
-                assert_eq!(
-                    group.len(),
-                    1,
-                    "{what}: one standing entry, not a file list"
-                );
-            }
-
-            let planned_source = planned
-                .file_source()
-                .downcast_ref::<NetCDFSource>()
-                .expect("the config carries a NetCDFSource");
-            assert_eq!(
-                planned_source.morsel_files(),
-                Some(count),
-                "{what}: every file is in the queue the openers draw from"
-            );
+        // One file on four partitions: four slices of it.
+        let one = source
+            .repartitioned(4, 0, None, &config_of(1))
+            .unwrap()
+            .expect("the scan repartitions");
+        assert_eq!(one.file_groups.len(), 4);
+        for group in &one.file_groups {
+            assert_eq!(group.files().len(), 1);
+            assert!(group.files()[0].range.is_none());
+            assert_eq!(group.files()[0].object_meta.location.as_ref(), "f0.nc");
         }
+
+        // One partition: the scan stays as it is planned.
+        assert!(source.repartitioned(1, 0, None, &config_of(3)).unwrap().is_none());
     }
 
     /// A hive-partitioned table over copies of `GRIDDED_FILE`: one file per
@@ -1433,9 +1409,8 @@ pub(super) mod format_tests {
 
     /// The same values come back when the scan divides over many partitions.
     ///
-    /// That is the morsel path: every partition draws from one queue, and the
-    /// entry it is handed stands for the scan rather than for a file. The values
-    /// travel on the queued files instead.
+    /// The scan cuts each file into slices, and any partition can read any
+    /// slice. The partition values travel on every slice of a file.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_parallel_partitioned_scan_keeps_the_values_apart() {
         let dir = tempfile::tempdir().unwrap();
@@ -1490,7 +1465,7 @@ pub(super) mod format_tests {
             arrow::datatypes::Field::new("time", arrow::datatypes::DataType::Int64, true),
         ]));
         let table_schema = TableSchema::from_file_schema(schema.clone());
-        let source = NetCDFSource::new(None, table_schema);
+        let source = NetcdfSource::new(None, table_schema);
         let config = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
@@ -1514,9 +1489,7 @@ pub(super) mod format_tests {
 
     /// A session with `target_partitions` partitions.
     ///
-    /// Nothing is done to the split minimum here, so a test that wants a share
-    /// has to bring a file large enough to earn one under the session default
-    /// ([`MIN_SHARE_SIZE`]).
+    /// A lone file is cut into one slice per partition, whatever its size.
     fn splitting_session(target_partitions: usize, batch_size: usize) -> SessionContext {
         let config = SessionConfig::new()
             .with_target_partitions(target_partitions)
@@ -1538,17 +1511,14 @@ pub(super) mod format_tests {
     /// How many rows it writes in each.
     const LARGE_ROWS: usize = 100_000;
 
-    /// Write a netCDF-4 file larger than [`MIN_SHARE_SIZE`], and return its path.
-    ///
-    /// Every bundled fixture is hundreds of KB, well under the minimum, so a
-    /// test that needs a real split has to make its own file.
+    /// Write a netCDF-4 file of 20 columns and 100k rows, and return its path.
     ///
     /// It is written **wide** rather than long, and that is not a free choice.
     /// `oxcdf` cannot read this writer's output once a single variable grows
     /// past roughly 200k values: it fails with "chunk at […] was neither cached
     /// nor fetched" while netcdf-c reads the same bytes. The limit follows one
     /// variable's chunk count, not the file's size, so 20 columns of 100k values
-    /// clears the minimum with room to spare and still reads back. Measured:
+    /// gives a file of several chunks that still reads back. Measured:
     /// 20x100k is 16.3 MB and reads; 12x200k is 19.4 MB and does not.
     ///
     /// The caller holds the [`TempDir`](tempfile::TempDir) for as long as the
@@ -1589,7 +1559,7 @@ pub(super) mod format_tests {
     /// single column, numbered so that no two files hold the same values.
     ///
     /// Uneven on purpose: a scan of equal files divides the same way however it
-    /// is divided, and would hide a queue that handed one file out twice.
+    /// is divided, and would hide a scan that read one file twice.
     fn write_netcdf_collection(count: usize, rows: usize) -> (tempfile::TempDir, PathBuf) {
         use arrow::array::{ArrayRef, Float64Array};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -1628,10 +1598,9 @@ pub(super) mod format_tests {
     /// A collection scanned on many partitions returns exactly what one
     /// partition returns.
     ///
-    /// This is the shape the morsel queue exists for, and the guard on it. The
-    /// partitions take files from one queue, so nothing at plan time says which
-    /// partition reads what — and nothing but the answer says whether a file was
-    /// handed out twice or not at all. `count(*)` catches both. `sum` catches a
+    /// The partitions take files from one shared list as they become free, so
+    /// nothing at plan time says which partition reads what. Only the answer
+    /// says whether a file was read twice or not at all. `count(*)` catches both. `sum` catches a
     /// file read from the wrong place, and `min`/`max` catch a partial read.
     /// None of those raise an error on their own.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1672,7 +1641,7 @@ pub(super) mod format_tests {
         assert_eq!(
             summary(&split).await,
             whole_summary,
-            "eight partitions over one queue read the collection exactly once"
+            "eight partitions read the collection exactly once"
         );
     }
 
@@ -1800,18 +1769,16 @@ pub(super) mod format_tests {
         node.output_partitioning().partition_count()
     }
 
-    /// A file over the split minimum scans in several partitions, and returns
+    /// One file scans in several partitions, and returns
     /// the same rows it returns in one.
     ///
     /// The partition count is the point of the feature. The row check is the
-    /// guard on it: `count(*)` catches a share that overlapped another or a gap
-    /// between two, and `min`/`max` catch a share that read the wrong region.
+    /// guard on it: `count(*)` catches a slice that overlapped another or a gap
+    /// between two, and `min`/`max` catch a slice that read the wrong region.
     /// None of those raise an error on their own.
     ///
-    /// This is the only test that reaches the split the way a query does: a real
-    /// file over the real minimum, planned and executed through SQL. The others
-    /// hand the opener its ranges directly, because no bundled fixture is large
-    /// enough for a scan to split one.
+    /// This test reaches the slices the way a query does: a real file, planned
+    /// and executed through SQL.
     #[tokio::test]
     async fn a_large_file_splits_and_returns_the_same_rows() {
         const QUERY: &str = r#"SELECT count(*), count("V0"), min("V0"), max("V0") FROM one"#;
@@ -1892,7 +1859,7 @@ pub(super) mod format_tests {
             register_path(&split, "one", &file).await;
 
             // Guard the guard: the count below proves nothing if the scan under
-            // it was never shared in the first place.
+            // it was never sliced in the first place.
             let plan = split
                 .sql(r#"SELECT count("V0") FROM one"#)
                 .await
@@ -1903,14 +1870,14 @@ pub(super) mod format_tests {
             assert_eq!(
                 scan_partitions(&plan),
                 target_partitions,
-                "the count scan must be shared:\n{}",
+                "the count scan must be sliced:\n{}",
                 datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
             );
 
             assert_eq!(
                 count(&split).await,
                 expected,
-                "target_partitions={target_partitions}: the shared file is counted once"
+                "target_partitions={target_partitions}: the sliced file is counted once"
             );
         }
     }
@@ -2279,5 +2246,314 @@ mod extension_tests {
         let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
         assert_eq!(paths, ["a.nc", "b.nc3", "c.nc4", "d.netcdf", "f.NC4"]);
         assert!(datasets.iter().all(|d| d.format == "nc"));
+    }
+}
+
+/// The morsel scan, through SQL.
+#[cfg(test)]
+mod scan_tests {
+    use std::sync::Arc;
+
+    use arrow::array::AsArray;
+    use arrow::datatypes::{Float64Type, Int64Type};
+    use beacon_datafusion_ext::fast_object::FastObjectTable;
+    use datafusion::datasource::listing::{
+        ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+    };
+    use datafusion::error::DataFusionError;
+    use datafusion::execution::object_store::ObjectStoreUrl;
+    use datafusion::execution::session_state::SessionStateBuilder;
+    use datafusion::physical_plan::execution_plan::reset_plan_states;
+    use datafusion::physical_plan::{collect, ExecutionPlan};
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    use futures::StreamExt;
+    use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt, PutPayload};
+
+    use super::format_tests::write_regular_netcdf;
+    use super::*;
+
+    const GRIDDED_FILE: &str = "gridded-example.nc";
+    const WOD_FILE: &str = "wod_ctd_1964.nc";
+
+    fn test_file(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test_files")
+            .join(name)
+    }
+
+    fn format() -> Arc<NetcdfFormat> {
+        Arc::new(NetcdfFormat::new(
+            Arc::new(ListingFactory::dynamic()),
+            NetcdfOptions::default(),
+        ))
+    }
+
+    fn session(target_partitions: usize, batch_size: usize) -> SessionContext {
+        let config = SessionConfig::new()
+            .with_target_partitions(target_partitions)
+            .with_batch_size(batch_size)
+            .with_extension(
+                beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(),
+            );
+        let state = SessionStateBuilder::new()
+            .with_config(config)
+            .with_default_features()
+            .build();
+        SessionContext::new_with_state(state)
+    }
+
+    async fn register(ctx: &SessionContext, table: &str, path: &std::path::Path) {
+        let url = ListingTableUrl::parse(path.to_string_lossy()).unwrap();
+        let listing = FastObjectTable::try_new(&ctx.state(), format(), vec![url])
+            .await
+            .unwrap_or_else(|e| panic!("register {}: {e}", path.display()));
+        ctx.register_table(table, Arc::new(listing)).unwrap();
+    }
+
+    /// The sum of the scan counter `name` over all partitions of the leaf scan.
+    fn scan_counter(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
+        let mut node = Arc::clone(plan);
+        while let Some(child) = node.children().first() {
+            node = Arc::clone(child);
+        }
+        node.metrics()
+            .and_then(|metrics| metrics.sum_by_name(name))
+            .map_or(0, |value| value.as_usize())
+    }
+
+    async fn error_of(ctx: &SessionContext, sql: &str) -> DataFusionError {
+        match ctx.sql(sql).await {
+            Err(e) => e,
+            Ok(frame) => frame.collect().await.expect_err("the query fails"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scan_with_no_file_column_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_regular_netcdf(dir.path(), "data.nc", 4000);
+        let ctx = session(1, 1000);
+        register(&ctx, "t", &path).await;
+
+        let error = error_of(&ctx, "SELECT count(*) FROM t").await;
+
+        let text = error.to_string();
+        assert!(
+            text.contains("needs at least one file column") && text.contains("COUNT(column)"),
+            "{text}"
+        );
+
+        let counted = ctx
+            .sql(r#"SELECT count("V0") FROM t"#)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(counted[0].column(0).as_primitive::<Int64Type>().value(0), 4000);
+    }
+
+    #[tokio::test]
+    async fn a_ragged_file_is_refused_at_schema_and_at_scan() {
+        let ctx = session(1, 1000);
+        let url = ListingTableUrl::parse(test_file(WOD_FILE).to_string_lossy()).unwrap();
+
+        let error = FastObjectTable::try_new(&ctx.state(), format(), vec![url.clone()])
+            .await
+            .err()
+            .expect("a ragged file has no schema");
+        let text = error.to_string();
+        assert!(text.contains("ragged") && text.contains(WOD_FILE), "{text}");
+
+        // A table with a given schema skips inference, so the scan gives the error.
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+            "z",
+            arrow::datatypes::DataType::Float32,
+            true,
+        )]));
+        let options = ListingOptions::new(format())
+            .with_file_extension("")
+            .with_collect_stat(false);
+        let config = ListingTableConfig::new(url)
+            .with_listing_options(options)
+            .with_schema(schema);
+        ctx.register_table("ragged", Arc::new(ListingTable::try_new(config).unwrap()))
+            .unwrap();
+        let error = error_of(&ctx, "SELECT z FROM ragged").await;
+        let text = error.to_string();
+        assert!(text.contains("ragged") && text.contains(WOD_FILE), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_collection_with_one_ragged_file_names_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_regular_netcdf(dir.path(), "a_regular.nc", 4000);
+        std::fs::copy(test_file(WOD_FILE), dir.path().join(WOD_FILE)).unwrap();
+        let ctx = session(1, 1000);
+        let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
+
+        let error = FastObjectTable::try_new(&ctx.state(), format(), vec![url])
+            .await
+            .err()
+            .expect("the ragged file fails the schema");
+
+        assert!(error.to_string().contains(WOD_FILE), "{error}");
+    }
+
+    #[tokio::test]
+    async fn one_file_on_four_partitions_returns_the_same_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_regular_netcdf(dir.path(), "data.nc", 40_000);
+        let queries = [
+            r#"SELECT count("V0"), min("V0"), max("V0"), sum("V0") FROM t"#,
+            r#"SELECT count("V0"), min("V0"), max("V0"), sum("V0") FROM t WHERE "V0" > 25000"#,
+        ];
+
+        for sql in queries {
+            let one = session(1, 1000);
+            register(&one, "t", &path).await;
+            let four = session(4, 1000);
+            register(&four, "t", &path).await;
+
+            let expected = one.sql(sql).await.unwrap().collect().await.unwrap();
+            let got = four.sql(sql).await.unwrap().collect().await.unwrap();
+
+            assert_eq!(got, expected, "{sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_limit_reads_only_the_first_chunks() {
+        let ctx = session(1, 4096);
+        register(&ctx, "gridded", &test_file(GRIDDED_FILE)).await;
+        let plan = ctx
+            .sql("SELECT sea_ice_fraction FROM gridded LIMIT 5")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+
+        let batches = collect(Arc::clone(&plan), ctx.task_ctx()).await.unwrap();
+
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 5);
+        // The array is contiguous: 2 rows of `lon` per chunk at 4096, so 604 chunks.
+        let read = scan_counter(&plan, "chunks_read");
+        assert!(read <= 3, "read {read} of 604 chunks for LIMIT 5");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_stream_stops_the_scan() {
+        let ctx = session(1, 4096);
+        register(&ctx, "gridded", &test_file(GRIDDED_FILE)).await;
+
+        let mut stream = ctx
+            .sql("SELECT sea_ice_fraction FROM gridded")
+            .await
+            .unwrap()
+            .execute_stream()
+            .await
+            .unwrap();
+        let first = stream.next().await.expect("the scan yields a batch").unwrap();
+        assert!(first.num_rows() > 0);
+        drop(stream);
+
+        // The session still answers after the drop.
+        let again = ctx
+            .sql("SELECT count(lat) FROM gridded")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(again[0].column(0).as_primitive::<Int64Type>().value(0), 1208);
+    }
+
+    #[tokio::test]
+    async fn a_removed_file_fails_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_regular_netcdf(dir.path(), "gone.nc", 4000);
+        let ctx = session(1, 1000);
+        register(&ctx, "t", &path).await;
+        // The plan lists the file. It goes away before the scan opens it.
+        let plan = ctx
+            .sql(r#"SELECT "V0" FROM t"#)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let error = collect(plan, ctx.task_ctx())
+            .await
+            .expect_err("the file is gone");
+
+        assert!(error.to_string().contains("gone.nc"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_scan_reads_from_an_object_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_regular_netcdf(dir.path(), "data.nc", 4000);
+        let ctx = session(2, 1000);
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        store
+            .put(
+                &Path::from("bucket/data.nc"),
+                PutPayload::from(std::fs::read(&path).unwrap()),
+            )
+            .await
+            .unwrap();
+        let memory = ObjectStoreUrl::parse("memory://").unwrap();
+        ctx.register_object_store(memory.as_ref(), store);
+
+        let url = ListingTableUrl::parse("memory:///bucket/data.nc").unwrap();
+        let options = ListingOptions::new(format())
+            .with_file_extension("")
+            .with_collect_stat(false);
+        let config = ListingTableConfig::new(url)
+            .with_listing_options(options)
+            .infer_schema(&ctx.state())
+            .await
+            .unwrap();
+        ctx.register_table("remote", Arc::new(ListingTable::try_new(config).unwrap()))
+            .unwrap();
+
+        let batches = ctx
+            .sql(r#"SELECT count("V0"), sum("V0") FROM remote"#)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        assert_eq!(batches[0].column(0).as_primitive::<Int64Type>().value(0), 4000);
+        assert_eq!(
+            batches[0].column(1).as_primitive::<Float64Type>().value(0),
+            (0..4000).sum::<i64>() as f64
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_runs_again_returns_the_same_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_regular_netcdf(dir.path(), "data.nc", 40_000);
+        let ctx = session(4, 1000);
+        register(&ctx, "t", &path).await;
+        let plan = ctx
+            .sql(r#"SELECT count("V0"), sum("V0") FROM t"#)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+
+        let first = collect(Arc::clone(&plan), ctx.task_ctx()).await.unwrap();
+        // The plan keeps its drained file queue until its state is reset.
+        let plan = reset_plan_states(plan).unwrap();
+        let second = collect(plan, ctx.task_ctx()).await.unwrap();
+
+        assert_eq!(first, second);
     }
 }

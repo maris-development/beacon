@@ -126,7 +126,7 @@ impl FileOutput {
 }
 
 /// The error for a ragged dataset, which this scan does not read.
-pub(super) fn refuse_ragged(dataset: &AnyDataset) -> Result<()> {
+pub(in crate::datafusion) fn refuse_ragged(dataset: &AnyDataset) -> Result<()> {
     match dataset {
         AnyDataset::Regular(_) => Ok(()),
         AnyDataset::Ragged { .. } => Err(ragged_error(dataset.name())),
