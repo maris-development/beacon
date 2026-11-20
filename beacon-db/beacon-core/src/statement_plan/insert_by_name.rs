@@ -29,7 +29,7 @@ pub(crate) enum ColumnSource {
 }
 
 /// How the source columns of a `BY NAME` insert fill the target columns.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ByNameMapping {
     /// Source columns that the target does not have, in source order.
     /// The caller adds them at the end of the target.
@@ -80,7 +80,7 @@ pub(crate) fn map_by_name(
         .map(|f| {
             Field::new(
                 f.name(),
-                beacon_lance::io::lance_compatible_type(f.data_type()),
+                beacon_lance::lance_compatible_type(f.data_type()),
                 true,
             )
         })
@@ -140,7 +140,11 @@ pub(crate) fn map_by_name(
 /// Project `child` to `target` with `mapping`.
 ///
 /// `target` is the widened target schema. The output has its field names,
-/// types and nullability. A value that does not cast gives an error.
+/// types and metadata. A value that does not cast gives an error.
+///
+/// An output field is nullable when the source column or the target field is
+/// nullable. A nullable source column on a non-nullable target column keeps
+/// its NULL values. The insert must reject them.
 pub(crate) fn by_name_projection(
     child: Arc<dyn ExecutionPlan>,
     mapping: &ByNameMapping,
@@ -193,7 +197,7 @@ fn fit_to_field(
     {
         expr
     } else {
-        // The target field sets the output nullability and metadata.
+        // The target field sets the output type and metadata, not the nullability.
         Arc::new(CastExpr::new_with_target_field(
             expr,
             Arc::clone(target),
@@ -235,7 +239,7 @@ mod tests {
 
     use std::sync::Arc;
 
-    use arrow::array::{Array, Float64Array, Int32Array, StringArray};
+    use arrow::array::{Array, Float64Array, Int32Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Fields, Schema};
     use arrow::record_batch::RecordBatch;
     use datafusion::datasource::memory::MemorySourceConfig;
@@ -476,5 +480,28 @@ mod tests {
         let plan = by_name_projection(child, &mapping, target).unwrap();
         let result = collect(plan, Arc::new(TaskContext::default())).await;
         assert!(result.is_err(), "a failed cast must not become NULL");
+    }
+
+    #[tokio::test]
+    async fn projection_keeps_source_nullability_on_not_null_target() {
+        let source = Arc::new(schema(vec![nullable("a", DataType::Int64)]));
+        let batch = RecordBatch::try_new(
+            source.clone(),
+            vec![Arc::new(Int64Array::from(vec![Some(1), None]))],
+        )
+        .unwrap();
+        let child = MemorySourceConfig::try_new_exec(&[vec![batch]], source.clone(), None).unwrap();
+        let target = Arc::new(schema(vec![Field::new("a", DataType::Int64, false)]));
+        let mapping = map_by_name(&source, &target, false, "t").unwrap();
+        assert_eq!(mapping.columns, vec![ColumnSource::Source { index: 0 }]);
+        let plan = by_name_projection(child, &mapping, target).unwrap();
+        assert!(plan.schema().field(0).is_nullable());
+
+        // The projection does not reject the NULL; the insert must do that.
+        let batches = collect(plan, Arc::new(TaskContext::default()))
+            .await
+            .unwrap();
+        assert!(batches[0].schema().field(0).is_nullable());
+        assert_eq!(batches[0].column(0).null_count(), 1);
     }
 }
