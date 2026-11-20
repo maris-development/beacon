@@ -162,8 +162,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
         }
 
         Ok(Arc::new(self.build_format(
-            options,
-            // A query never computes statistics. See `create_for_analysis`.
+            options, // A query never computes statistics. See `create_for_analysis`.
             false,
         )))
     }
@@ -175,7 +174,6 @@ impl FileFormatFactory for NetCDFFormatFactory {
             false,
         ))
     }
-
 }
 
 impl GetExt for NetCDFFormatFactory {
@@ -380,10 +378,7 @@ impl FileFormat for NetcdfFormat {
         session_widening(state)
             .merge_schemas(&label_by_object(objects, &schemas))
             .map_err(|e| {
-                exec_datafusion_err!(
-                    "Failed to merge the schemas of the NetCDF datasets: {}",
-                    e
-                )
+                exec_datafusion_err!("Failed to merge the schemas of the NetCDF datasets: {}", e)
             })
     }
 
@@ -434,9 +429,7 @@ impl FileFormat for NetcdfFormat {
         ));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
             encoded_file_schema,
-            beacon_nd_array::arrow::partition::encoded_partition_cols(
-                conf.table_partition_cols(),
-            ),
+            beacon_nd_array::arrow::partition::encoded_partition_cols(conf.table_partition_cols()),
         );
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
@@ -554,11 +547,7 @@ pub(super) mod format_tests {
     }
 
     /// Write one small regular file: column `V0` holds `0.0, 1.0, ..` for `rows` rows.
-    pub(super) fn write_regular_netcdf(
-        dir: &std::path::Path,
-        name: &str,
-        rows: usize,
-    ) -> PathBuf {
+    pub(super) fn write_regular_netcdf(dir: &std::path::Path, name: &str, rows: usize) -> PathBuf {
         use arrow::array::{ArrayRef, Float64Array};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
@@ -571,8 +560,9 @@ pub(super) mod format_tests {
             DataType::Float64,
             false,
         )]));
-        let values: ArrayRef =
-            Arc::new(Float64Array::from_iter_values((0..rows).map(|row| row as f64)));
+        let values: ArrayRef = Arc::new(Float64Array::from_iter_values(
+            (0..rows).map(|row| row as f64),
+        ));
         let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
 
         let path = dir.join(name);
@@ -1036,9 +1026,9 @@ pub(super) mod format_tests {
                 SessionConfig::new()
                     .with_target_partitions(files)
                     .with_extension(
-                    beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(
+                        beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(
+                        ),
                     ),
-                ),
             )
             .with_default_features()
             .build();
@@ -1075,13 +1065,10 @@ pub(super) mod format_tests {
         use datafusion::datasource::table_schema::TableSchema;
         use datafusion::execution::object_store::ObjectStoreUrl;
 
-        let table_schema = TableSchema::from_file_schema(Arc::new(
-            arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
-                "V0",
-                arrow::datatypes::DataType::Float64,
-                true,
-            )]),
-        ));
+        let table_schema =
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::new(vec![
+                arrow::datatypes::Field::new("V0", arrow::datatypes::DataType::Float64, true),
+            ])));
         let source = NetcdfSource::new(None, table_schema);
         let config_of = |files: usize| {
             let groups = (0..files)
@@ -1098,7 +1085,10 @@ pub(super) mod format_tests {
             .unwrap()
             .expect("the scan repartitions");
         assert_eq!(many.file_groups.len(), 4);
-        assert!(many.file_groups.iter().all(|group| group.files().len() == 3));
+        assert!(many
+            .file_groups
+            .iter()
+            .all(|group| group.files().len() == 3));
 
         // One file on four partitions: four slices of it.
         let one = source
@@ -1113,7 +1103,10 @@ pub(super) mod format_tests {
         }
 
         // One partition: the scan stays as it is planned.
-        assert!(source.repartitioned(1, 0, None, &config_of(3)).unwrap().is_none());
+        assert!(source
+            .repartitioned(1, 0, None, &config_of(3))
+            .unwrap()
+            .is_none());
     }
 
     /// A hive-partitioned table over copies of `GRIDDED_FILE`: one file per
@@ -1175,7 +1168,11 @@ pub(super) mod format_tests {
         for file in [GRIDDED_FILE, WOD_FILE] {
             std::fs::copy(test_file(file), dir.path().join(file)).unwrap();
         }
-        let dims = Some(vec!["time".to_string(), "lat".to_string(), "lon".to_string()]);
+        let dims = Some(vec![
+            "time".to_string(),
+            "lat".to_string(),
+            "lon".to_string(),
+        ]);
         let ctx = session();
 
         let strict = NetcdfOptions {
@@ -1204,7 +1201,11 @@ pub(super) mod format_tests {
             .unwrap();
         let read: usize = batches.iter().map(|batch| batch.num_rows()).sum();
 
-        assert_eq!(read, rows_in_one_file(&ctx, "lat").await, "the gridded file alone");
+        assert_eq!(
+            read,
+            rows_in_one_file(&ctx, "lat").await,
+            "the gridded file alone"
+        );
     }
 
     /// A file the reader cannot open fails the table and names the file.
@@ -1238,8 +1239,15 @@ pub(super) mod format_tests {
         let read: usize = batches.iter().map(|batch| batch.num_rows()).sum();
 
         // Assert
-        assert!(error.contains("broken.nc"), "the error must name the file: {error}");
-        assert_eq!(read, rows_in_one_file(&ctx, "lat").await, "the gridded file alone");
+        assert!(
+            error.contains("broken.nc"),
+            "the error must name the file: {error}"
+        );
+        assert_eq!(
+            read,
+            rows_in_one_file(&ctx, "lat").await,
+            "the gridded file alone"
+        );
     }
 
     /// The `OPTIONS` of `CREATE EXTERNAL TABLE` reach the format.
@@ -1372,9 +1380,8 @@ pub(super) mod format_tests {
         let batch = &counted[0];
         assert_eq!(batch.num_rows(), 2, "one row per partition directory");
         let years = arrow::array::AsArray::as_string::<i32>(batch.column(0));
-        let counts = arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(
-            batch.column(1),
-        );
+        let counts =
+            arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(batch.column(1));
         assert_eq!((years.value(0), years.value(1)), ("2023", "2024"));
         assert_eq!(
             (counts.value(0), counts.value(1)),
@@ -1446,9 +1453,8 @@ pub(super) mod format_tests {
 
         let batch = &counted[0];
         let years = arrow::array::AsArray::as_string::<i32>(batch.column(0));
-        let counts = arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(
-            batch.column(1),
-        );
+        let counts =
+            arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(batch.column(1));
         assert_eq!(batch.num_rows(), 2);
         assert_eq!((years.value(0), years.value(1)), ("2023", "2024"));
         assert_eq!(
@@ -1755,7 +1761,12 @@ pub(super) mod format_tests {
         let mut read = Vec::new();
         for batch in &batches {
             let column = arrow::compute::cast(batch.column(0), &DataType::Utf8).unwrap();
-            read.extend(column.as_string::<i32>().iter().map(|v| v.map(str::to_string)));
+            read.extend(
+                column
+                    .as_string::<i32>()
+                    .iter()
+                    .map(|v| v.map(str::to_string)),
+            );
         }
         assert_eq!(read, [Some("a".to_string()), Some(String::new())]);
     }
@@ -2113,7 +2124,8 @@ pub(super) mod format_tests {
 
         // No predicate: everything is read, nothing is skipped, and the rows are
         // the grid's own — not the one-row-per-chunk the scan emits.
-        let (chunks, rows, pruned, pruned_rows) = counters("SELECT analysed_sst, lat FROM gridded").await;
+        let (chunks, rows, pruned, pruned_rows) =
+            counters("SELECT analysed_sst, lat FROM gridded").await;
         assert!(chunks > 1, "the fixture must hold several chunks");
         assert!(
             rows > chunks,
@@ -2242,7 +2254,15 @@ mod extension_tests {
     #[test]
     fn discovery_keeps_every_netcdf_extension() {
         let objects: Vec<ObjectMeta> = [
-            "a.nc", "b.nc3", "c.nc4", "d.netcdf", "e.cdf", "f.NC4", "g.h5", "h.ncml", "i.parquet",
+            "a.nc",
+            "b.nc3",
+            "c.nc4",
+            "d.netcdf",
+            "e.cdf",
+            "f.NC4",
+            "g.h5",
+            "h.ncml",
+            "i.parquet",
         ]
         .into_iter()
         .map(object_meta)
@@ -2334,7 +2354,8 @@ mod scan_tests {
         while let Some(child) = node.children().first() {
             node = Arc::clone(child);
         }
-        datafusion::physical_plan::ExecutionPlanProperties::output_partitioning(&node).partition_count()
+        datafusion::physical_plan::ExecutionPlanProperties::output_partitioning(&node)
+            .partition_count()
     }
 
     async fn error_of(ctx: &SessionContext, sql: &str) -> DataFusionError {
@@ -2366,7 +2387,10 @@ mod scan_tests {
             .collect()
             .await
             .unwrap();
-        assert_eq!(counted[0].column(0).as_primitive::<Int64Type>().value(0), 4000);
+        assert_eq!(
+            counted[0].column(0).as_primitive::<Int64Type>().value(0),
+            4000
+        );
     }
 
     #[tokio::test]
@@ -2386,11 +2410,9 @@ mod scan_tests {
         assert!(text.contains("ragged") && text.contains(WOD_FILE), "{text}");
 
         // A table with a given schema skips inference, so the scan gives the error.
-        let schema = Arc::new(arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
-            "z",
-            arrow::datatypes::DataType::Float32,
-            true,
-        )]));
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("z", arrow::datatypes::DataType::Float32, true),
+        ]));
         let options = ListingOptions::new(format())
             .with_file_extension("")
             .with_collect_stat(false);
@@ -2446,7 +2468,11 @@ mod scan_tests {
             let got = collect(Arc::clone(&plan), four.task_ctx()).await.unwrap();
 
             assert_eq!(got, expected, "{sql}");
-            assert_eq!(scan_partitions(&plan), 4, "the file is cut into 4 slices: {sql}");
+            assert_eq!(
+                scan_partitions(&plan),
+                4,
+                "the file is cut into 4 slices: {sql}"
+            );
         }
     }
 
@@ -2484,7 +2510,11 @@ mod scan_tests {
             .unwrap();
         let mut stream =
             datafusion::physical_plan::execute_stream(Arc::clone(&plan), ctx.task_ctx()).unwrap();
-        let first = stream.next().await.expect("the scan yields a batch").unwrap();
+        let first = stream
+            .next()
+            .await
+            .expect("the scan yields a batch")
+            .unwrap();
         assert!(first.num_rows() > 0);
         drop(stream);
 
@@ -2500,7 +2530,10 @@ mod scan_tests {
             .collect()
             .await
             .unwrap();
-        assert_eq!(again[0].column(0).as_primitive::<Int64Type>().value(0), 1208);
+        assert_eq!(
+            again[0].column(0).as_primitive::<Int64Type>().value(0),
+            1208
+        );
     }
 
     /// A count of a coordinate counts its own values, whatever the batch size.
@@ -2585,7 +2618,10 @@ mod scan_tests {
             .await
             .unwrap();
 
-        assert_eq!(batches[0].column(0).as_primitive::<Int64Type>().value(0), 4000);
+        assert_eq!(
+            batches[0].column(0).as_primitive::<Int64Type>().value(0),
+            4000
+        );
         assert_eq!(
             batches[0].column(1).as_primitive::<Float64Type>().value(0),
             (0..4000).sum::<i64>() as f64
