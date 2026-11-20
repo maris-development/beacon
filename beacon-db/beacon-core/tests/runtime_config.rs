@@ -40,7 +40,7 @@ fn json_query_without_from() -> Query {
 async fn rows_from_default_table(rt: &TestRuntime) -> usize {
     let batches = rt
         .runtime
-        .run_query(json_query_without_from(), beacon_core::AuthIdentity::system())
+        .run_query(json_query_without_from(), beacon_core::plan_validator::allow_all())
         .await
         .expect("a from-less query should resolve the configured default table")
         .into_record_stream()

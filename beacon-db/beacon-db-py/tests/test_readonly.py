@@ -1,10 +1,10 @@
-"""Read-only connections, and the privilege gate on write-convenience methods.
+"""Read-only connections, and the read-only check on write-convenience methods.
 
 `connect(read_only=True)` opens a database that refuses every write — DDL/DML and beacon's
 side-effecting statements (`ATTACH`, `CREATE SECRET`, …) — while reads (`SELECT`, `SHOW …`) work.
 The file is still opened with an exclusive lock (a per-connection writability guarantee, not yet
 multi-process concurrency). Separately, the `attach`/`detach` convenience methods bypass the engine
-query path, so they carry the same read-only / super-user gate the SQL path applies.
+query path, so they apply the read-only check themselves.
 """
 
 from __future__ import annotations
@@ -63,25 +63,16 @@ def test_read_only_refuses_append_and_attach(db):
     ro.close()
 
 
-# ----------------------------------------------------------------------------------------
-# attach/detach honor the auth super-user gate (they bypass the SQL validation path)
-# ----------------------------------------------------------------------------------------
+def test_read_only_refuses_detach(db):
+    ro = beacondb.connect(db, read_only=True)
+    with pytest.raises(beacondb.NotPermittedError, match="read-only"):
+        ro.detach("r")
+    ro.close()
 
 
-def test_anonymous_session_cannot_attach_or_detach():
-    con = beacondb.connect(
-        ":memory:", auth=True, admin_username="admin", admin_password="pw"
-    )
-    assert con.whoami()["is_super_user"] is False
-    with pytest.raises(beacondb.NotPermittedError):
-        con.attach("r", "beacon://127.0.0.1:1")
-    with pytest.raises(beacondb.NotPermittedError):
-        con.detach("r")
-
-
-def test_auth_off_allows_attach_path():
-    # With auth off the local session is a super-user, so the gate passes (the attach then fails
-    # only because the endpoint is unreachable — a DatabaseError, not a permission error).
+def test_read_write_allows_attach_path():
+    # A read-write connection passes the check. The attach then fails only because the endpoint
+    # is unreachable, so the error is not a NotPermittedError.
     con = beacondb.connect(":memory:")
     with pytest.raises(beacondb.Error) as excinfo:
         con.attach("r", "beacon://127.0.0.1:1")

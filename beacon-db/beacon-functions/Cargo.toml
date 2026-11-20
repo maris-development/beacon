@@ -8,7 +8,7 @@ rust-version.workspace = true
 [features]
 # PROJ is on by default, so a standard build ships `ST_Transform` — the one spatial function that
 # reprojects coordinates. It links PROJ, a C++ library, so the machine needs PROJ 9.6.2 or later
-# and pkg-config. That puts PROJ beside netCDF and HDF5: a native library the build requires.
+# and pkg-config. PROJ is then a native library that the build requires.
 #
 # `--no-default-features` drops the function and the native dependency with it. The build then
 # needs no PROJ at all, and every other spatial function stays.
@@ -52,6 +52,6 @@ beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
 beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
 beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
-beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-external-table = { path = "../beacon-external-table" }
 datafusion-spatial = { workspace=true }

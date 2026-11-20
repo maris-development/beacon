@@ -24,9 +24,8 @@ table. The table then survives a reopen. It also goes with the file:
 con.register("kept", pd.DataFrame({"x": [1, 2, 3]}), persist=True)
 ```
 
-`persist=True` runs real DDL. It needs write privileges. A super-user has them, and that is the
-default with auth off. It does not overwrite an existing table. Drop the table first. `register()`
-always needs `pyarrow`.
+`persist=True` runs real DDL. A read-only connection refuses it. It does not overwrite an existing
+table. Drop the table first. `register()` always needs `pyarrow`.
 
 ## Append to an existing table
 
@@ -37,8 +36,8 @@ Use `con.append(name, frame)` to add rows to an **existing** managed table. It r
 con.append("obs", pd.DataFrame({"a": [4, 5]}))   # errors if `obs` doesn't exist
 ```
 
-`append` uses the normal query path. The usual write rules therefore apply, such as auth and
-read-only. It gives a clear error if the table does not exist. It also gives a clear error if the
+`append` uses the normal query path. The usual write rules therefore apply, such as read-only. It
+gives a clear error if the table does not exist. It also gives a clear error if the
 columns do not match.
 
 ## Managed tables in SQL

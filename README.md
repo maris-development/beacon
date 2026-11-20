@@ -55,7 +55,7 @@ when you restart or replace the container. Without the mount, a new container st
 Copy files into `./datasets`. Beacon finds them. You register nothing first.
 
 Beacon reads Parquet, GeoParquet, NetCDF, HDF5, Zarr, Icechunk, Atlas, CSV, Arrow IPC, GeoTIFF,
-Delta Lake, Apache Iceberg, ODV ASCII and BBF.
+Delta Lake, Apache Iceberg and ODV ASCII.
 
 A path in a query is relative to the datasets root. A file at `./datasets/obs/a.parquet` is
 `obs/a.parquet`. Do not repeat `datasets/`. Do not write an `s3://` scheme.
@@ -141,9 +141,8 @@ Documentation home: <https://maris-development.github.io/beacon/>
 
 ## Contributing
 
-Beacon is a Rust workspace. A build needs Rust 1.94 or later, the netCDF and HDF5 libraries,
-PROJ 9.6.2 or later, and `pkg-config`. The BBF reader is a git submodule, so clone with
-`--recurse-submodules`. Build and test it:
+Beacon is a Rust workspace. A build needs Rust 1.94 or later, PROJ 9.6.2 or later, and
+`pkg-config`. Build and test it:
 
 ```bash
 git clone --recurse-submodules https://github.com/maris-development/beacon.git

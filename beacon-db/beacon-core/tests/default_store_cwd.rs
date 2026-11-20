@@ -18,7 +18,6 @@ use arrow::array::Int64Array;
 use arrow::record_batch::RecordBatch;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
-use beacon_core::AuthIdentity;
 use futures::TryStreamExt;
 
 /// Serializes every test that repoints the process-wide working directory. Held
@@ -48,13 +47,12 @@ async fn bare_runtime() -> Runtime {
         .expect("a bare builder should build")
 }
 
-/// Runs a statement as the system identity. A bare builder bootstraps no
-/// super-user, and `auth_enforce` is off by default.
+/// Runs a statement with full access.
 async fn sql(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
     runtime
         .run_query(
             beacon_core::query::Query::sql(sql.to_string()),
-            AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await
         .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))

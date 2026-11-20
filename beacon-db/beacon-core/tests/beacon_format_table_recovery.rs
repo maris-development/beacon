@@ -1,9 +1,9 @@
 //! Startup recovery must be able to rebuild tables stored in **beacon's own** file
 //! formats, not just DataFusion's built-ins.
 //!
-//! An external table's persisted definition names its format (`STORED AS BBF`),
+//! An external table's persisted definition names its format (`STORED AS ZARR`),
 //! resolved at recovery through `SessionState::get_file_format_factory`. Beacon
-//! registers its formats — NetCDF, BBF, Atlas, Zarr, GeoTIFF, GeoParquet, HDF5 —
+//! registers its formats — NetCDF, Atlas, Zarr, GeoTIFF, GeoParquet, HDF5 —
 //! on the session; DataFusion ships CSV/Parquet/Arrow/JSON. If recovery runs before
 //! beacon's registration, a table in a beacon format fails to rebuild with
 //! "Could not find FileFormat" and is *skipped*, so it silently disappears from the
@@ -34,7 +34,7 @@ async fn write_hdf5_fixture(rt: &common::TestRuntime, rel: &str) {
     query.output = Some(serde_json::from_value(json!({ "format": "hdf5" })).expect("valid output"));
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("hdf5 output query should run");
 
@@ -97,7 +97,6 @@ async fn beacon_file_formats_are_registered_on_the_session() {
     // Written as external tables because that is the path recovery replays; a
     // format that does not resolve fails here the same way it fails on restart.
     for (name, format) in [
-        ("f_bbf", "BBF"),
         ("f_zarr", "ZARR"),
         ("f_tiff", "TIFF"),
         ("f_geoparquet", "GEOPARQUET"),
@@ -118,4 +117,17 @@ async fn beacon_file_formats_are_registered_on_the_session() {
             );
         }
     }
+}
+
+/// BBF is not a format of this runtime.
+#[tokio::test(flavor = "multi_thread")]
+async fn bbf_is_not_a_file_format() {
+    let rt = common::runtime("bbf-removed").await;
+    let err = rt
+        .try_sql("CREATE EXTERNAL TABLE f_bbf STORED AS BBF LOCATION 'missing/'")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Could not find FileFormat"), "{err}");
+    assert!(rt.try_sql("SELECT * FROM read_bbf('x.bbf')").await.is_err());
 }

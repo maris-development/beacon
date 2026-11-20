@@ -4,25 +4,9 @@ version.workspace = true
 edition = "2021"
 
 rust-version.workspace = true
-[features]
-# Build netCDF-c and HDF5 from source and link them statically, instead of linking the system
-# libraries. Off by default (dynamic linking is faster to build and fine for local dev / the
-# server, which control their own environment); turned on for the distributable Python wheels so
-# they carry netCDF/HDF5 and need nothing installed — the only way to build a portable Windows
-# wheel. Requires `cmake` at build time (netcdf-src/hdf5-src build with it).
-static = ["netcdf/static", "netcdf-sys/static"]
 
 [dependencies]
-# The `ndarray` requirement of this fork is `>=0.15,<=0.17`, and `lance-index`
-# holds 0.16 in the same graph. A full re-resolve can therefore move this crate
-# onto 0.16 while the workspace stays on 0.17, and the writer below then fails
-# to compile. `Cargo.lock` pins it to 0.17.2. Edit that entry by hand rather
-# than re-resolve, until the fork narrows its own requirement.
-netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["ndarray"], version = "0.11.1"}
-netcdf-sys = { git ="https://github.com/robinskil/netcdf.git", package = "netcdf-sys" }
-# The second reader. It is always compiled; the format picks between the two at
-# runtime (see `datafusion::ReaderBackend`). It is pure Rust and pulls in no C
-# library, so it costs the build almost nothing.
+# The reader and the writer. It is pure Rust and pulls in no C library.
 oxcdf = { workspace = true }
 arrow = { workspace = true }
 
@@ -36,7 +20,6 @@ ndarray = "0.17"
 ordered-float = { workspace = true }
 num-traits = {workspace = true}
 hifitime = {workspace = true}
-bytemuck = {workspace = true}
 julian = {workspace = true}
 tracing = { workspace = true }
 serde = { workspace = true }
@@ -46,6 +29,7 @@ datafusion = { workspace = true }
 chrono = { workspace = true }
 
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-nd-execution = { path = "../../beacon-nd-execution" }
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-common = { path = "../../beacon-common" }
 

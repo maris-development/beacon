@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-server/beacon-dap", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-iceberg", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-erddap", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-stats", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
+members = ["beacon-server/beacon-server", "beacon-server/beacon-server-config", "beacon-server/beacon-mcp", "beacon-server/beacon-dap", "beacon-server/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-sql-parser", "beacon-db/beacon-json-query", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-remote", "beacon-db/beacon-external-table", "beacon-db/beacon-ffi", "beacon-db/beacon-ffi/beacon-ffi-abi", "beacon-db/beacon-ffi/beacon-ffi-object-store", "beacon-db/beacon-ffi/beacon-ffi-scalar-functions", "beacon-db/beacon-ffi/beacon-ffi-file-format", "beacon-db/beacon-ffi/beacon-ffi-host", "beacon-db/beacon-ffi/beacon-ffi-table-type", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-iceberg", "beacon-db/beacon-file-formats/beacon-icechunk", "beacon-db/beacon-file-formats/beacon-erddap", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-file-statistics", "beacon-db/beacon-functions", "beacon-db/beacon-nd-encoding", "beacon-db/beacon-object-store", "beacon-db/beacon-nd-execution", "beacon-db/beacon-plugin/beacon-plugin-formats", "beacon-db/beacon-plugin/beacon-plugin-registry", "beacon-db/beacon-plugin/beacon-plugin-sdk", "beacon-db/beacon-plugin/beacon-plugin-tables", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
 
 [workspace.package]
 
-version = "2.1.0-rc.1"
+version = "2.1.0-rc.3"
 
 rust-version = "1.95"
 
@@ -14,11 +14,13 @@ tokio-util = {version = "0.7.13", features = ["io"]}
 futures = "0.3.31"
 futures-util = "0.3.31"
 async-trait = "0.1.88"
+async-ffi = "0.5"
 bytes = "1.10.0"
 flume = {version = "0.11.1", features = ["async"]}
 parking_lot = {version = "0.12.3", features = ["send_guard", "serde"]}
 ordered-float = {version = "5.1.0", features = ["serde"]}
 num_cpus = "1.17.0"
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 
 utoipa = { version= "=5.3.1", features = ["chrono","preserve_order", "preserve_path_order","rc_schema", "axum_extras"] }
 utoipa-axum = "0.2.0"
@@ -35,7 +37,12 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-appender = "0.2.4"
 tracing-test = { version = "0.2.5", features = ["no-env-filter"]}
 glob = "0.3.2"
+semver = { version = "1.0", features = ["serde"] }
+toml = "0.8"
 tempfile = "3.15.0"
+tar = "0.4.46"
+flate2 = "1.1.9"
+sha2 = "0.10.9"
 
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 
@@ -69,6 +76,16 @@ iceberg = { git = "https://github.com/apache/iceberg-rust.git", tag = "v0.11.0-r
 iceberg-datafusion = { git = "https://github.com/apache/iceberg-rust.git", tag = "v0.11.0-rc.2" }
 datafusion = "^54.1"
 
+datafusion-common = "^54.1"
+datafusion-ffi = "^54.1"
+datafusion-proto = { version = "^54.1", default-features = false }
+datafusion-proto-common = "^54.1"
+
+stabby = "72.1.1"
+
+# Opens native plugin libraries.
+libloading = "0.8"
+
 datafusion-datasource = "^54.1"
 
 datafusion-datasource-parquet = "^54.1"
@@ -87,9 +104,9 @@ object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] 
 # crate's bytes is a change to the format Beacon reads. Pin it exactly.
 atlas-rust = "=0.17.2"
 
-oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.4.0", features = ["async", "object-store", "ndarray"] }
+oxcdf = { git = "https://github.com/robinskil/oxcdf.git", tag = "v0.6.0", version = "0.6.0", features = ["async", "object-store", "ndarray", "write"] }
 
-oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", version = "0.4.0", features = ["async", "object-store"] }
+oxcdf-hdf5 = { git = "https://github.com/robinskil/oxcdf.git", tag = "v0.6.0", version = "0.6.0", features = ["async", "object-store"] }
 tonic = "0.14.1"
 
 

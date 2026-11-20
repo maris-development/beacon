@@ -1,0 +1,10 @@
+[package]
+name = "beacon-ffi-abi"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "ABI version and panic helpers of the Beacon plugin FFI"
+license = "AGPL-3.0-only"
+repository = "https://github.com/maris-development/beacon"
+
+[dependencies]

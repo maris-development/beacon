@@ -11,15 +11,19 @@
 //! integer beside a duration, a duration beside a timestamp, and a number or a
 //! string beside a binary. A time of day keeps the rule of the default strategy.
 
+use std::sync::Arc;
+
 use arrow_schema::{ArrowError, DataType, SchemaRef, TimeUnit};
 
 use super::common::{
     self, Resolved, StatedTypes, finer_unit, incompatible_types, integer_join, wider, zone_join,
 };
 use super::{ArrowTypeWideningStrategy, LabeledSchema, TypeConflict};
+use crate::scan_adapt::lenient_cast_adapter_factory;
+use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 
 /// Merges the schemas of a table with the rules of the [module docs](self).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NumpyArrowTypeWidening {
     /// What the merge does with a column that no type holds.
     pub on_conflict: TypeConflict,
@@ -41,7 +45,12 @@ impl NumpyArrowTypeWidening {
     }
 }
 
+#[typetag::serde]
 impl ArrowTypeWideningStrategy for NumpyArrowTypeWidening {
+    fn physical_expr_adapter_factory(&self) -> Arc<dyn PhysicalExprAdapterFactory> {
+        lenient_cast_adapter_factory(Arc::new(*self))
+    }
+
     fn is_order_independent(&self) -> bool {
         // The set decides, and a chunk result hides the set.
         false
@@ -976,5 +985,33 @@ mod tests {
     fn the_method_reads_every_schema_in_one_fold() {
         assert!(!NumpyArrowTypeWidening::new().is_order_independent());
         assert!(!NumpyArrowTypeWidening::keeping_first_type().is_order_independent());
+    }
+
+    const STRATEGY: NumpyArrowTypeWidening = NumpyArrowTypeWidening::keeping_first_type();
+
+    #[test]
+    fn the_adapter_widens_a_file_column() {
+        let file: arrow::array::ArrayRef = Arc::new(arrow::array::Int32Array::from(vec![1, 2]));
+        let read = crate::scan_adapt::adapt_column(&STRATEGY, file, DataType::Int64).unwrap();
+        let read = read.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        assert_eq!(read.values(), &[1, 2]);
+    }
+
+    #[test]
+    fn the_adapter_reads_a_binary_file_column_as_null_for_a_number() {
+        // Numpy promotes a number beside a string, but never beside a binary.
+        let file: arrow::array::ArrayRef =
+            Arc::new(arrow::array::BinaryArray::from_vec(vec![b"abc", b"7"]));
+        let read = crate::scan_adapt::adapt_column(&STRATEGY, file, DataType::Int64).unwrap();
+        assert_eq!(read.data_type(), &DataType::Int64);
+        assert_eq!(read.null_count(), 2);
+    }
+
+    #[test]
+    fn the_adapter_keeps_a_strict_cast_for_a_promoted_pair() {
+        // A number beside a string promotes, so a value the cast cannot hold is an error.
+        let file: arrow::array::ArrayRef =
+            Arc::new(arrow::array::StringArray::from(vec!["abc"]));
+        assert!(crate::scan_adapt::adapt_column(&STRATEGY, file, DataType::Int64).is_err());
     }
 }

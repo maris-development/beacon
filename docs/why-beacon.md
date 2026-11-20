@@ -51,7 +51,7 @@ by column name. It reads the collection as one table. See
 [Coming from xarray](/docs/2.0.2/coming-from-xarray).
 
 **Beacon needs no conversion step.** It reads NetCDF, Zarr, Parquet, GeoParquet, CSV, ODV, HDF5,
-Arrow, GeoTIFF, Delta and BBF in place. You run no import job. You keep no second copy.
+Arrow, GeoTIFF and Delta in place. You run no import job. You keep no second copy.
 
 **Beacon gives one set of names.** Register a glob once as a table or a view. Users then query a
 name. You can move the storage later. No saved query breaks. See

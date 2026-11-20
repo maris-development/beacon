@@ -8,12 +8,8 @@ netCDF/Zarr/Parquet files on disk, remote SQL databases — is referenced from i
     con = beacondb.connect("beacon.db")
     con.sql("SELECT 1 AS a").fetchall()
 
-Auth is off by default: opening a file locally needs no credentials and permits everything,
-the usual contract for a file-backed embedded database. Pass ``auth=True`` to switch on
-beacon's RBAC, where a session is anonymous and read-only until credentials are supplied::
-
-    con = beacondb.connect("beacon.db", auth=True, username="analyst", password=...)
-    con.whoami()
+The embedded database has no users. The process that opens the file has full access.
+Users and roles belong to the Beacon server. Pass ``read_only=True`` to refuse all writes.
 """
 
 from __future__ import annotations

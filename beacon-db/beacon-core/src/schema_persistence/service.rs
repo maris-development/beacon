@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use object_store::ObjectStoreExt;
 
-use beacon_datafusion_ext::table_ext::{
-    ExternalTable, MaterializedView, TableDefinition, ViewTableDefinition,
-};
+use beacon_datafusion_ext::table_ext::{MaterializedView, TableDefinition, ViewTableDefinition};
+use beacon_external_table::ExternalTable;
 use datafusion::{
     catalog::TableProvider, datasource::ViewTable, error::DataFusionError,
     execution::object_store::ObjectStoreUrl, prelude::SessionContext,
@@ -228,10 +227,10 @@ pub fn definition_from_provider(
     if let Some(table) = table.downcast_ref::<beacon_lance::LanceTable>() {
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(table) = table.downcast_ref::<ExternalTable>() {
-        Ok(Arc::new(table.definition().clone()))
+        Ok(Arc::new(table.definition()))
     } else if let Some(table) = table.downcast_ref::<MaterializedView>() {
         Ok(Arc::new(table.definition().clone()))
-    } else if let Some(definition) = beacon_datafusion_ext::remote::remote_table_definition(table) {
+    } else if let Some(definition) = beacon_remote::remote_table_definition(table) {
         Ok(Arc::new(definition))
     } else if let Some(table) = table.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
         Ok(Arc::new(table.definition().clone()))
@@ -243,6 +242,8 @@ pub fn definition_from_provider(
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(definition) = beacon_sql_databases::sql_database_table_definition(table) {
         Ok(Arc::new(definition))
+    } else if let Some(table) = table.downcast_ref::<beacon_plugin_tables::PluginTable>() {
+        Ok(Arc::new(table.definition().clone()))
     } else if let Some(table) = table.downcast_ref::<ViewTable>() {
         let definition =
             ViewTableDefinition::try_from_view(table_name, table).map_err(|error| {

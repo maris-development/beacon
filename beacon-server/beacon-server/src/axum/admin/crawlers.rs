@@ -7,7 +7,7 @@ use ::axum::{
     http::StatusCode,
     Extension, Json,
 };
-use beacon_core::AuthIdentity;
+use beacon_auth::AuthIdentity;
 use serde_json::Value;
 
 use crate::api::{CrawlReportView, CrawlerView, CreateCrawlerRequest, TableNamingView};

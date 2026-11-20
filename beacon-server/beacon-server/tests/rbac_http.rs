@@ -19,7 +19,7 @@ use ::axum::{
     http::{header, Request, StatusCode},
     Router,
 };
-use beacon_core::runtime::Runtime;
+use beacon_server::Server;
 use common::{basic, config, unique};
 use futures::TryStreamExt;
 use serde_json::Value;
@@ -76,11 +76,11 @@ fn json(bytes: &[u8]) -> Value {
 }
 
 /// Seed managed tables (as the system identity) so enforcement tests have data.
-async fn seed(runtime: &Runtime, sql: &str) {
+async fn seed(runtime: &Server, sql: &str) {
     runtime
         .run_query(
             beacon_core::query::Query::sql(sql.to_string()),
-            beacon_core::AuthIdentity::system(),
+            beacon_auth::AuthIdentity::system(),
         )
         .await
         .unwrap_or_else(|e| panic!("seed failed: {sql}: {e}"))
@@ -269,7 +269,7 @@ async fn enforcement_grants_allow_and_denies_block() {
     // Two tables with a row each (unique names to avoid cross-test collisions).
     let t1 = unique("t1");
     let t2 = unique("t2");
-    let rt = harness.server.runtime();
+    let rt = &harness.server;
     seed(rt, &format!("CREATE TABLE {t1} (a BIGINT)")).await;
     seed(rt, &format!("INSERT INTO {t1} VALUES (1)")).await;
     seed(rt, &format!("CREATE TABLE {t2} (a BIGINT)")).await;
@@ -324,7 +324,7 @@ async fn listings_show_only_what_the_callers_role_grants() {
 
     let granted = unique("granted");
     let hidden = unique("hidden");
-    let rt = harness.server.runtime();
+    let rt = &harness.server;
     for table in [&granted, &hidden] {
         seed(rt, &format!("CREATE TABLE {table} (a BIGINT)")).await;
     }

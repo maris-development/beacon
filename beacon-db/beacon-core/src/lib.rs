@@ -1,10 +1,10 @@
-mod auth_store;
 pub mod crawler;
 pub mod embedded;
 pub mod comments;
-pub mod file_stats;
 pub mod metrics;
-pub mod parser;
+mod name_rule;
+pub mod plan_validator;
+pub mod plugins;
 pub mod query;
 pub mod query_cpu;
 pub mod query_row_limit;
@@ -20,9 +20,9 @@ mod statement_plan;
 mod table_name;
 pub(crate) mod system_schema;
 
-// Re-export the auth types the transports (HTTP, Flight SQL) need, so they depend
-// on the auth model through beacon-core rather than directly on beacon-auth.
-pub use beacon_auth::{self, AuthContext, AuthIdentity, Credential};
+/// The building block of a `beacon.system` table, for
+/// [`Runtime::register_system_table`](runtime::Runtime::register_system_table).
+pub use system_schema::{Snapshot, SystemTable};
 
 /// How a transport names a table for [`Runtime::table_arrow_schema`](runtime::Runtime::table_arrow_schema):
 /// re-exported so naming one does not require a direct DataFusion dependency.

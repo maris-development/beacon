@@ -1,10 +1,8 @@
 //! Integration coverage for the embedded entry point ([`beacon_core::embedded`]).
 //!
 //! These tests pin the contract the Python bindings depend on: opening a database in-process,
-//! and the two auth modes behaving as documented — auth off means a local super-user with
-//! enforcement off (everything works, no credentials), auth on means anonymous-until-proven
-//! otherwise. They go through `Database` only, never `RuntimeBuilder`, because that is exactly
-//! what an embedder sees.
+//! with full access for the process that opens it. They go through `Database` only, never
+//! `RuntimeBuilder`, because that is exactly what an embedder sees.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,31 +10,23 @@ use std::sync::Arc;
 use arrow::array::Int64Array;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use beacon_core::embedded::{AuthMode, Database, DbPath, OpenOptions};
-use beacon_core::{AuthIdentity, Credential};
+use beacon_core::embedded::{Database, DbPath, OpenOptions};
 use futures::TryStreamExt;
 use tempfile::TempDir;
 
-const ADMIN_USERNAME: &str = "test-admin";
-const ADMIN_PASSWORD: &str = "test-admin-password";
-
-/// Opens an in-memory database with the given auth mode. Crawlers are disabled: nothing here
-/// needs them, and a test process should spawn no background schedulers.
-async fn open_memory(auth: AuthMode) -> Database {
-    let mut options = OpenOptions::new().with_auth(auth);
+/// Opens an in-memory database. Crawlers are disabled: nothing here needs them, and a test
+/// process should spawn no background schedulers.
+async fn open_memory() -> Database {
+    let mut options = OpenOptions::new();
     options.crawlers.enable = false;
     Database::open(DbPath::Memory, options)
         .await
         .expect("open in-memory database")
 }
 
-/// Runs SQL as `identity`, collecting the streamed batches.
-async fn try_sql(
-    db: &Database,
-    sql: &str,
-    identity: AuthIdentity,
-) -> anyhow::Result<Vec<RecordBatch>> {
-    db.sql(sql, identity)
+/// Runs SQL, collecting the streamed batches.
+async fn try_sql(db: &Database, sql: &str) -> anyhow::Result<Vec<RecordBatch>> {
+    db.sql(sql)
         .await?
         .into_record_stream()?
         .try_collect::<Vec<_>>()
@@ -44,8 +34,8 @@ async fn try_sql(
         .map_err(Into::into)
 }
 
-async fn sql(db: &Database, sql_text: &str, identity: AuthIdentity) -> Vec<RecordBatch> {
-    try_sql(db, sql_text, identity)
+async fn sql(db: &Database, sql_text: &str) -> Vec<RecordBatch> {
+    try_sql(db, sql_text)
         .await
         .unwrap_or_else(|e| panic!("SQL failed: {sql_text}\n{e}"))
 }
@@ -55,145 +45,41 @@ fn total_rows(batches: &[RecordBatch]) -> usize {
 }
 
 // --------------------------------------------------------------------------------------------
-// Auth disabled — the default: no credentials, full access
+// Access — possession of the database is full control
 // --------------------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_mode_is_auth_disabled_local_super_user() {
-    let db = open_memory(AuthMode::default()).await;
-
-    assert!(!db.auth_enabled(), "auth is off by default");
-    let identity = db
-        .default_identity()
-        .expect("a credential-less identity exists when auth is disabled");
-    assert_eq!(identity.username, beacon_core::beacon_auth::LOCAL_USERNAME);
-    assert!(
-        identity.is_super_user,
-        "the local embedded identity is a super-user, or DDL would be rejected"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn auth_disabled_permits_ddl_dml_and_reads() {
-    let db = open_memory(AuthMode::Disabled).await;
-    let me = db.require_default_identity().unwrap();
+async fn the_database_permits_ddl_dml_and_reads() {
+    let db = open_memory().await;
 
     // The read path.
-    let rows = sql(&db, "SELECT 1 AS a", me.clone()).await;
-    assert_eq!(total_rows(&rows), 1);
+    assert_eq!(total_rows(&sql(&db, "SELECT 1 AS a").await), 1);
 
-    // DDL: rejected outright for a non-super identity, so this proves the local identity
-    // clears `validate_query_plan`.
-    sql(&db, "CREATE VIEW v AS SELECT 42 AS answer", me.clone()).await;
-    let rows = sql(&db, "SELECT answer FROM v", me.clone()).await;
-    assert_eq!(total_rows(&rows), 1);
+    // DDL and DML.
+    sql(&db, "CREATE TABLE t (a BIGINT)").await;
+    sql(&db, "INSERT INTO t VALUES (1), (2)").await;
+    sql(&db, "CREATE VIEW v AS SELECT a FROM t").await;
+    assert_eq!(total_rows(&sql(&db, "SELECT a FROM v").await), 2);
 
-    // The internal auth tables are super-user-only *always*, independent of enforcement —
-    // reading them is the sharpest available check that this identity really is privileged.
-    let users = sql(&db, "SELECT * FROM beacon.system.users", me).await;
-    assert!(
-        !users.is_empty(),
-        "the local identity can read the auth directory"
-    );
+    // The metadata schemas are readable too.
+    let tables = sql(&db, "SELECT * FROM information_schema.tables").await;
+    assert!(total_rows(&tables) > 0);
 }
 
+/// The engine has no users. A statement that manages them is not a statement of the engine.
 #[tokio::test(flavor = "multi_thread")]
-async fn auth_disabled_rejects_credentials_instead_of_ignoring_them() {
-    let db = open_memory(AuthMode::Disabled).await;
+async fn the_database_has_no_user_statements() {
+    let db = open_memory().await;
 
-    let err = db
-        .authenticate(&Credential::basic(ADMIN_USERNAME, ADMIN_PASSWORD))
-        .await
-        .expect_err("credentials must not be silently accepted when auth is disabled");
-    let message = err.to_string();
-    assert!(
-        message.contains("auth disabled"),
-        "the error should explain the mode, got: {message}"
-    );
-}
-
-// --------------------------------------------------------------------------------------------
-// Auth enabled — anonymous until credentials are supplied
-// --------------------------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread")]
-async fn auth_enabled_defaults_to_anonymous_and_blocks_privileged_work() {
-    let db = open_memory(AuthMode::enabled_with_admin(ADMIN_USERNAME, ADMIN_PASSWORD)).await;
-
-    assert!(db.auth_enabled());
-    let anon = db
-        .require_default_identity()
-        .expect("anonymous access is enabled by default");
-    assert_eq!(anon.username, beacon_core::beacon_auth::ANONYMOUS_USERNAME);
-    assert!(!anon.is_super_user);
-
-    // Reads that touch no protected object still work.
-    assert_eq!(total_rows(&sql(&db, "SELECT 1 AS a", anon.clone()).await), 1);
-
-    // DDL requires the super-user.
-    let err = try_sql(&db, "CREATE VIEW v AS SELECT 1", anon.clone())
-        .await
-        .expect_err("anonymous may not run DDL");
-    assert!(
-        err.to_string().contains("not permitted"),
-        "unexpected error: {err}"
-    );
-
-    // The auth directory is fenced off regardless of enforcement.
-    let err = try_sql(&db, "SELECT * FROM beacon.system.users", anon)
-        .await
-        .expect_err("anonymous may not read the auth directory");
-    assert!(
-        err.to_string().contains("permission denied"),
-        "unexpected error: {err}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn auth_enabled_admin_credentials_unlock_full_access() {
-    let db = open_memory(AuthMode::enabled_with_admin(ADMIN_USERNAME, ADMIN_PASSWORD)).await;
-
-    let admin = db
-        .authenticate(&Credential::basic(ADMIN_USERNAME, ADMIN_PASSWORD))
-        .await
-        .expect("admin credentials authenticate");
-    assert!(admin.is_super_user);
-
-    sql(&db, "CREATE VIEW v AS SELECT 7 AS lucky", admin.clone()).await;
-    assert_eq!(
-        total_rows(&sql(&db, "SELECT lucky FROM v", admin).await),
-        1,
-        "the admin can create and read a view"
-    );
-
-    // Wrong password stays rejected.
-    assert!(db
-        .authenticate(&Credential::basic(ADMIN_USERNAME, "wrong"))
+    for statement in [
+        "CREATE USER alice WITH PASSWORD 'pw'",
+        "GRANT SELECT ON TABLE t TO ROLE reader",
+    ] {
+        assert!(try_sql(&db, statement).await.is_err(), "{statement}");
+    }
+    assert!(try_sql(&db, "SELECT * FROM beacon.system.users")
         .await
         .is_err());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn auth_enabled_without_anonymous_makes_credentials_mandatory() {
-    let db = open_memory(
-        AuthMode::enabled_with_admin(ADMIN_USERNAME, ADMIN_PASSWORD).without_anonymous(),
-    )
-    .await;
-
-    assert!(db.default_identity().is_none());
-    let err = db
-        .require_default_identity()
-        .expect_err("a credential-less session must be refused, not downgraded to an empty identity");
-    assert!(
-        err.to_string().contains("requires credentials"),
-        "unexpected error: {err}"
-    );
-
-    // Credentials still work.
-    assert!(db
-        .authenticate(&Credential::basic(ADMIN_USERNAME, ADMIN_PASSWORD))
-        .await
-        .is_ok());
 }
 
 // --------------------------------------------------------------------------------------------
@@ -214,15 +100,13 @@ async fn file_database_persists_across_reopen() {
         let db = Database::open(db_file.clone(), options.clone())
             .await
             .expect("create database file");
-        let me = db.require_default_identity().unwrap();
         sql(
             &db,
             "CREATE TABLE persisted AS SELECT 1 AS id, 'kept' AS label",
-            me.clone(),
         )
         .await;
         assert_eq!(
-            total_rows(&sql(&db, "SELECT * FROM persisted", me).await),
+            total_rows(&sql(&db, "SELECT * FROM persisted").await),
             1
         );
     } // dropped -> the exclusive lock on beacon.db is released
@@ -232,8 +116,7 @@ async fn file_database_persists_across_reopen() {
     let reopened = Database::open(db_file, options)
         .await
         .expect("reopen the same database file");
-    let me = reopened.require_default_identity().unwrap();
-    let rows = sql(&reopened, "SELECT * FROM persisted", me).await;
+    let rows = sql(&reopened, "SELECT * FROM persisted").await;
     assert_eq!(
         total_rows(&rows),
         1,
@@ -266,8 +149,7 @@ async fn registered_table_is_queryable_but_not_persisted() {
         db.register_batches("py_df", arrow_schema.clone(), vec![batch])
             .expect("register in-memory table");
 
-        let me = db.require_default_identity().unwrap();
-        let rows = sql(&db, "SELECT sum(a) AS s FROM py_df", me).await;
+        let rows = sql(&db, "SELECT sum(a) AS s FROM py_df").await;
         assert_eq!(total_rows(&rows), 1, "the registered table is queryable by name");
 
         assert!(db.deregister_table("py_df").unwrap(), "unregister reports it existed");
@@ -276,8 +158,7 @@ async fn registered_table_is_queryable_but_not_persisted() {
 
     // Reopen: the registered table must be gone (it was never written into the file).
     let reopened = Database::open(db_file, options).await.expect("reopen");
-    let me = reopened.require_default_identity().unwrap();
-    let err = try_sql(&reopened, "SELECT * FROM py_df", me)
+    let err = try_sql(&reopened, "SELECT * FROM py_df")
         .await
         .expect_err("a session-only table must not survive a reopen");
     assert!(
@@ -308,17 +189,15 @@ async fn persisted_batches_survive_a_reopen() {
         let db = Database::open(db_file.clone(), options.clone())
             .await
             .expect("open database");
-        let me = db.require_default_identity().unwrap();
-        db.persist_batches("kept", arrow_schema.clone(), vec![batch], me.clone())
+        db.persist_batches("kept", arrow_schema.clone(), vec![batch])
             .await
             .expect("persist batches into a managed table");
-        let rows = sql(&db, "SELECT sum(x) AS s FROM kept", me).await;
+        let rows = sql(&db, "SELECT sum(x) AS s FROM kept").await;
         assert_eq!(total_rows(&rows), 1);
     } // drop -> release the lock
 
     let reopened = Database::open(db_file, options).await.expect("reopen");
-    let me = reopened.require_default_identity().unwrap();
-    let rows = sql(&reopened, "SELECT sum(x) AS s FROM kept", me).await;
+    let rows = sql(&reopened, "SELECT sum(x) AS s FROM kept").await;
     assert_eq!(
         total_rows(&rows),
         1,
@@ -352,14 +231,8 @@ async fn second_open_of_a_locked_file_fails_with_a_useful_message() {
 
 /// An embedder reads HDF5 with the pure-Rust reader, as the server does.
 ///
-/// `Hdf5Config` and `NetcdfConfig` both default `use_rust_reader` to true (#400), and
-/// `Database::open` overrides neither. This pins that default from the embedded host, so
-/// a change to it cannot silently make one query return two different tables on the two
-/// hosts.
-///
-/// The probe is the reader difference itself: `nested-groups.h5` keeps its datasets two
-/// group levels deep, and netcdf-c reports only the root group. Under netcdf-c the two
-/// nested columns do not exist and this query fails to plan.
+/// The probe is `nested-groups.h5`, which keeps its datasets two group levels deep. Only
+/// the pure-Rust reader reports the two nested columns.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_embedded_default_reads_hdf5_with_the_rust_reader() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -367,7 +240,7 @@ async fn the_embedded_default_reads_hdf5_with_the_rust_reader() {
         .expect("beacon-db")
         .join("beacon-file-formats/beacon-arrow-hdf5/test_files/nested-groups.h5");
 
-    let db = open_memory(AuthMode::Disabled).await;
+    let db = open_memory().await;
     let batches = sql(
         &db,
         &format!(
@@ -375,7 +248,6 @@ async fn the_embedded_default_reads_hdf5_with_the_rust_reader() {
                FROM read_hdf5('{}')"#,
             fixture.display()
         ),
-        AuthIdentity::local(),
     )
     .await;
 

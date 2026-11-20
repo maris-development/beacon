@@ -1,12 +1,12 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
+use crate::plugins::{PluginRegistry, PluginStatus};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
 use beacon_arrow_atlas::{AtlasFormatFactory, AtlasOptions};
-use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
 use beacon_arrow_hdf5::Hdf5Config;
@@ -16,23 +16,18 @@ use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
 use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
 use beacon_arrow_zarr::ZarrConfig;
-use beacon_auth::{
-    AuthContext, BasicAuthProvider, InMemoryUserStore, RoleProvider, RoleStore, UserDirectory,
-};
 use beacon_datafusion_ext::{
     consts::{DEFAULT_DB_STORE_URL_OBJECT_URL, TMP_STORE_URL_OBJECT_URL},
     format_ext::{new_file_format_registry_handle, FileFormatFactoryExt, FileFormatRegistry},
     listing_factory::{DefaultStore, ListingFactory, RootStore},
-    listing_table_factory_ext::ListingTableFactoryExt,
-    nd::{NdFilterPushdown, NdProjectionPushdown},
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
-    stats_cache::BeaconFileStatisticsCache,
     type_widening::{
         ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening, TypeConflict,
     },
 };
 use beacon_functions::register_functions;
+use beacon_nd_execution::{NdFilterPushdown, NdProjectionPushdown};
 use beacon_redb_store::RedbStore;
 use datafusion::{
     execution::{
@@ -47,12 +42,11 @@ use datafusion::{
     prelude::{SessionConfig, SessionContext},
 };
 use object_store::ObjectStore;
-use parking_lot::Mutex;
 use tempfile::env::temp_dir;
 use tokio::runtime::Handle;
+use url::Url;
 
 use crate::{
-    auth_store::TablesAuthStore,
     query_executor::QueryExecutor,
     runtime::Runtime,
     settings::{SqlSettings, SqlStreamCoalesceSettings},
@@ -66,6 +60,10 @@ pub struct RuntimeBuilder {
 
     pub db_path: Option<PathBuf>,
     pub tmp_dir_path: Option<PathBuf>,
+    /// The plugins directory, the only store of the plugins. `None` loads no plugins.
+    pub plugins_dir: Option<PathBuf>,
+    /// `(name, source)` pairs to install at startup when the name has no registry entry.
+    pub startup_plugins: Vec<(String, String)>,
     /// The default datasets store: the URL bare dataset paths resolve against,
     /// paired with the physical [`RootStore`] it maps to (a local directory or an
     /// https base) that native readers open files under. `None` => dynamic mode:
@@ -79,9 +77,9 @@ pub struct RuntimeBuilder {
     /// the store itself (e.g. an application that also reads and writes files
     /// through it) and needs the runtime to query the very same instance.
     pub default_store_instance: Option<Arc<dyn ObjectStore>>,
-
-    pub admin_username: Option<String>,
-    pub admin_password: Option<String>,
+    /// The location of the datasets store that plugin tables get. `None` derives it
+    /// from the root of [`Self::default_store`].
+    pub datasets_base_url: Option<Url>,
 
     pub vm_memory_limit: Option<usize>,
     pub vm_cpu_limit: Option<usize>,
@@ -100,13 +98,8 @@ pub struct RuntimeBuilder {
     pub hdf5: Hdf5Config,
     pub zarr: ZarrConfig,
 
-    pub auth_provider: Option<Arc<dyn beacon_auth::AuthProvider>>,
     pub secrets_encryption_key: Option<[u8; 32]>,
 
-    /// Username resolving unauthenticated access. `None` disables anonymous access.
-    pub anonymous_username: Option<String>,
-    /// Whether table-level grants are enforced for non-super-users.
-    pub auth_enforce: bool,
     /// Whether the runtime refuses all writes (a read-only open).
     pub read_only: bool,
 
@@ -148,18 +141,19 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the location of the datasets store that plugin tables get, such as
+    /// `s3://bucket/`. Without it, the root of [`Self::with_default_store`] gives the URL.
+    pub fn with_datasets_base_url(mut self, url: Url) -> Self {
+        self.datasets_base_url = Some(url);
+        self
+    }
+
     /// Register `store` under the default store's URL instead of building one from
     /// the configured [`RootStore`]. Use with [`Self::with_default_store`], which
     /// still supplies the URL and the root that native readers resolve paths
     /// against.
     pub fn with_default_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.default_store_instance = Some(store);
-        self
-    }
-
-    pub fn with_admin_credentials(mut self, username: String, password: String) -> Self {
-        self.admin_username = Some(username);
-        self.admin_password = Some(password);
         self
     }
 
@@ -198,8 +192,8 @@ impl RuntimeBuilder {
 
     /// Configures the crawler subsystem. `CrawlerConfig::enable = false` builds a
     /// runtime with no crawler at all (crawler DDL then errors).
-    /// Configures the background file-statistics subsystem.
-    /// `FileStatsConfig::enable = false` builds a runtime with no collector.
+    /// Configures the file statistics of external tables.
+    /// `FileStatsConfig::enable = false` builds a runtime without file statistics.
     pub fn with_file_stats(mut self, file_stats: beacon_common::FileStatsConfig) -> Self {
         self.file_stats = file_stats;
         self
@@ -234,11 +228,6 @@ impl RuntimeBuilder {
     /// Replaces the whole Zarr reader configuration.
     pub fn with_zarr_config(mut self, zarr: ZarrConfig) -> Self {
         self.zarr = zarr;
-        self
-    }
-
-    pub fn with_auth_provider(mut self, provider: Arc<dyn beacon_auth::AuthProvider>) -> Self {
-        self.auth_provider = Some(provider);
         self
     }
 
@@ -279,26 +268,25 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Enables anonymous access, resolving unauthenticated callers to `username`.
-    /// The user is created (password-less, roleless) at build time if absent.
-    pub fn with_anonymous_user(mut self, username: impl Into<String>) -> Self {
-        self.anonymous_username = Some(username.into());
+    /// Enables function plugins, with `path` as their plugins directory.
+    /// Use one runtime per plugins directory.
+    pub fn with_plugins_dir(mut self, path: PathBuf) -> Self {
+        self.plugins_dir = Some(path);
         self
     }
 
-    /// Enables table-level grant enforcement for non-super-users. Off by default:
-    /// without it, any authenticated identity may read any table.
+    /// Sets the plugins to install at startup, as `(name, source)` pairs.
+    pub fn with_startup_plugins(mut self, plugins: Vec<(String, String)>) -> Self {
+        self.startup_plugins = plugins;
+        self
+    }
+
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
     }
 
-    pub fn with_auth_enforcement(mut self, enforce: bool) -> Self {
-        self.auth_enforce = enforce;
-        self
-    }
-
-    pub async fn build(mut self) -> anyhow::Result<Runtime> {
+    pub async fn build(self) -> anyhow::Result<Runtime> {
         let runtime_handle = match &self.runtime_handle {
             Some(handle) => handle.clone(),
             None => Handle::try_current().map_err(|_| {
@@ -306,35 +294,30 @@ impl RuntimeBuilder {
             })?,
         };
 
-        // The planner's late-filled weak handle to the session. Created here so both the auth store
-        // and the query planner share the same cell; it is filled once the session exists.
+        // The planner's late-filled weak handle to the session. It is filled once the session
+        // exists.
         let session_cell = new_session_cell();
-
-        // Built before the session so it can be published as a session extension: the `AuthExec`
-        // node recovers it from there to apply auth DDL. Unhydrated — the db-backed store
-        // reaches its tables through `session_cell`, which does not yet point anywhere.
-        let AuthSetup {
-            context: auth_context,
-            store: auth_store,
-        } = init_auth_context(&self, session_cell.clone()).await?;
-        let auth_context = Arc::new(auth_context);
-
-        let (session_ctx, redb_store) =
-            init_session_ctx(&self, auth_context.clone(), session_cell.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
+        let plugins = Arc::new(PluginRegistry::default());
+        let session_ctx = init_session_ctx(
+            &self,
+            session_cell.clone(),
+            plugins.clone(),
+            &runtime_handle,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
 
         // Formats and functions FIRST — before any persisted table is rebuilt.
         //
         // Startup recovery reconstructs each table from its stored definition, and an
-        // external table's definition names its format (`STORED AS BBF`), which is
+        // external table's definition names its format (`STORED AS ZARR`), which is
         // resolved through `SessionState::get_file_format_factory`. Register these
         // after recovery and only DataFusion's built-ins (CSV/Parquet/Arrow/JSON) are
-        // present, so every table in a *beacon* format — BBF, Atlas, Zarr, GeoTIFF,
+        // present, so every table in a *beacon* format — Atlas, Zarr, GeoTIFF,
         // GeoParquet, NetCDF, HDF5 — fails to rebuild with "Could not find FileFormat"
         // and is skipped, i.e. silently vanishes from the catalog on restart.
         // Table functions come along for the same reason: a persisted view's SQL can
-        // call `read_bbf(...)`, which must resolve while the view is being rebuilt.
+        // call `read_zarr(...)`, which must resolve while the view is being rebuilt.
         //
         // Neither depends on the catalog: both read only the session config
         // (`ListingFactory`, the `FileFormatRegistry` handle) set up with the session.
@@ -352,20 +335,18 @@ impl RuntimeBuilder {
         );
 
         // Install the persistent schema provider and load the tables already in the
-        // tables store into the catalog. This must run before `ensure_tables` below:
-        // on a restart the auth `__beacon_*` tables already exist in the store, and
+        // tables store into the catalog. This must run before `ensure_table` below:
+        // on a restart the internal `__beacon_*` tables already exist in the store, and
         // only a hydrated catalog lets their `CREATE TABLE IF NOT EXISTS` see them —
         // otherwise the managed-table create path re-creates them and Lance rejects
         // the duplicate dataset.
-        register_schema_provider(&runtime_handle, &session_ctx).await?;
-
-        // The session and its tables now exist and the session cell is filled, so the auth store can
-        // reach its tables. Ensure they exist, hydrate the in-memory user/role copies from whatever
-        // is already there (spawning from an already-populated store across a restart), then
-        // bootstrap. All idempotent, so this is safe on every start.
-        auth_store.ensure_tables().await?;
-        auth_context.hydrate().await?;
-        bootstrap_auth(&self, &auth_context).await?;
+        register_schema_provider(
+            &runtime_handle,
+            &session_ctx,
+            self.plugins_dir.as_deref(),
+            &self.startup_plugins,
+        )
+        .await?;
 
         // Query metrics land in an internal managed table, so they survive a restart
         // and are queryable like anything else. Created here — after the schema
@@ -377,12 +358,19 @@ impl RuntimeBuilder {
         ));
         query_metrics.ensure_table().await?;
 
-        // `beacon.system` — the auth directory and query metrics as SQL tables.
-        register_system_schema(&session_ctx, session_cell.clone(), auth_context.clone())?;
+        // `beacon.system` — the runtime state and the query metrics as SQL tables.
+        let system_schema =
+            register_system_schema(&session_ctx, session_cell.clone(), plugins.clone())?;
 
         init_crawler_manager(&self, &session_ctx, session_cell.clone(), file_formats).await?;
 
-        let file_stats = init_file_stats(&self, &session_ctx, session_cell, redb_store).await?;
+        // `build_session_config` created the engine, so the tables loaded above
+        // registered with it already.
+        let file_stats = session_ctx
+            .state()
+            .config()
+            .get_extension::<beacon_file_statistics::FileStatistics>()
+            .map(|engine| engine.as_ref().clone());
 
         // Event-driven external-table refresh was removed; external tables become
         // current on an explicit `REFRESH` only.
@@ -396,105 +384,16 @@ impl RuntimeBuilder {
             executor: QueryExecutor::new(runtime_handle),
             session_ctx,
             query_metrics,
-            auth: auth_context,
-            auth_enforce: self.auth_enforce,
+            system_schema,
             read_only: self.read_only,
             file_stats,
+            plugins,
+            plugins_dir: self.plugins_dir,
 
             tmp_dir,
         })
     }
 }
-
-/// Builds the file-statistics service and starts its timer.
-///
-/// `None` when the subsystem is off, or when there is no on-disk database: the
-/// registry needs redb tables, and an in-memory store has none to offer.
-async fn init_file_stats(
-    builder: &RuntimeBuilder,
-    session_ctx: &Arc<SessionContext>,
-    session_cell: SessionCell,
-    redb_store: Option<RedbStore>,
-) -> anyhow::Result<Option<Arc<crate::file_stats::FileStatsService>>> {
-    if !builder.file_stats.enable {
-        return Ok(None);
-    }
-    let Some(redb) = redb_store else {
-        tracing::warn!(
-            "file statistics are enabled but this runtime has no database file; \
-             the registry needs one, so the subsystem stays off"
-        );
-        return Ok(None);
-    };
-    let Some(datasets) = builder
-        .default_store
-        .as_ref()
-        .map(|store| store.url.clone())
-    else {
-        tracing::warn!(
-            "file statistics are enabled but no datasets store is configured; \
-             there is nothing to discover, so the subsystem stays off"
-        );
-        return Ok(None);
-    };
-
-    let registry = Arc::new(beacon_file_stats::Registry::from_database(redb.database())?);
-    let objects: Arc<dyn ObjectStore> = Arc::new(redb);
-    let store = Arc::new(
-        beacon_file_stats::FileStatsStore::open(
-            registry,
-            objects,
-            object_store::path::Path::from(FILE_STATS_PREFIX),
-        )
-        .await?,
-    );
-
-    let analyzer = Arc::new(crate::file_stats::FormatFileAnalyzer::new(
-        session_cell.clone(),
-        datasets.clone(),
-    ));
-    let service = crate::file_stats::FileStatsService::new(
-        store,
-        analyzer,
-        session_cell,
-        datasets,
-        builder.file_stats.clone(),
-    );
-    service.start();
-
-    // Publish the store so a scan can prune against it. Only now, once it is
-    // openable: a handle filled with a half-built store would have scans pruning
-    // on statistics that are not there yet.
-    if let Some(handle) = session_ctx
-        .state()
-        .config()
-        .get_extension::<std::sync::OnceLock<Arc<beacon_file_stats::FileStatsStore>>>()
-    {
-        let _ = handle.set(service.store().clone());
-    }
-    if let Some(handle) = session_ctx
-        .state()
-        .config()
-        .get_extension::<std::sync::OnceLock<Arc<crate::file_stats::FileStatsService>>>()
-    {
-        let _ = handle.set(service.clone());
-    }
-
-    tracing::info!(
-        interval_secs = builder.file_stats.interval_secs,
-        concurrency = builder.file_stats.concurrency,
-        // The timer consumes its first tick, so nothing happens for one whole
-        // interval. Say so here: on the 900-second default, a quiet quarter of an
-        // hour otherwise reads as a subsystem that never started.
-        first_pass_in_secs = builder.file_stats.interval_secs,
-        on_startup = builder.file_stats.on_startup,
-        "file statistics subsystem started; run ANALYZE FILES to fill it now"
-    );
-    Ok(Some(service))
-}
-
-/// Where the statistics live inside the database's object namespace.
-const FILE_STATS_PREFIX: &str = "__file_stats__";
 
 /// Builds the crawler manager, loads persisted crawlers and starts their triggers,
 /// then publishes it through the session-extension handle so `CREATE/RUN/DROP
@@ -537,89 +436,21 @@ async fn init_crawler_manager(
     Ok(())
 }
 
-/// The auth context plus the tables-backed store that has to be brought online once the session
-/// (and its tables) exist. Kept separate so `build` can drive the ordering: build unhydrated →
-/// create session → ensure tables → hydrate → bootstrap.
-struct AuthSetup {
-    context: AuthContext,
-    store: Arc<TablesAuthStore>,
-}
-
-/// Builds the auth context around the tables-backed store, **unhydrated**.
-///
-/// The store persists users, roles and grants in the internal managed tables and reaches them
-/// through `session_cell` — which is filled only after the session exists — so the in-memory copies
-/// stay empty until `build` hydrates them. Roles are always tables-backed; the user store is
-/// tables-backed only for the default Basic provider (a custom provider, e.g. OIDC, owns its own
-/// user directory, which beacon does not persist).
-///
-/// The config-defined super-user is set here (it is never stored in the tables — the only way to be
-/// a super-user is the `BEACON_ADMIN_*` credential), and anonymous access is recorded so
-/// `anonymous_enabled` reflects config immediately; the anonymous *user* is seeded in
-/// [`bootstrap_auth`], after the tables are reachable.
-async fn init_auth_context(
-    builder: &RuntimeBuilder,
-    session_cell: SessionCell,
-) -> anyhow::Result<AuthSetup> {
-    let store = Arc::new(TablesAuthStore::new(session_cell));
-    let role_provider = RoleProvider::with_store(store.clone() as Arc<dyn RoleStore>);
-
-    let provider: Arc<dyn beacon_auth::AuthProvider> = match &builder.auth_provider {
-        Some(auth_provider) => auth_provider.clone(),
-        None => {
-            let user_store = Arc::new(InMemoryUserStore::with_store(
-                store.clone() as Arc<dyn UserDirectory>
-            ));
-            Arc::new(BasicAuthProvider::with_user_store(user_store))
-        }
-    };
-
-    let mut context = AuthContext::with_role_provider(provider, role_provider);
-
-    if let (Some(username), Some(password)) = (&builder.admin_username, &builder.admin_password) {
-        context.set_super_user(username, password);
-    }
-
-    if let Some(anonymous) = &builder.anonymous_username {
-        context.set_anonymous_user(anonymous);
-    }
-
-    Ok(AuthSetup { context, store })
-}
-
-/// Idempotent bootstrap, run on every start once the tables are hydrated: seed the anonymous
-/// principal (password-less, roleless) when anonymous access is enabled. Admins can later grant it
-/// read-only roles via `GRANT ROLE <role> TO USER <anonymous>`. Re-running against a populated store
-/// is a no-op (the user already exists in the hydrated copy).
-async fn bootstrap_auth(builder: &RuntimeBuilder, auth: &Arc<AuthContext>) -> anyhow::Result<()> {
-    if let Some(anonymous) = &builder.anonymous_username {
-        if !auth.user_exists(anonymous).await {
-            auth.create_user(anonymous, "").await?;
-        }
-    }
-    Ok(())
-}
-
 /// Builds the session state, including the runtime environment, and returns a new session context. The
-/// session cell is filled with a weak reference to the session context so that the auth store and
-/// query planner can reach it once it exists.
+/// session cell is filled with a weak reference to the session context so that the query planner
+/// can reach it once it exists.
 ///
 /// Functions and File Formats ARE NOT REGISTERED HERE. This is done in `register_functions` after the session context is built.
 async fn init_session_ctx(
     builder: &RuntimeBuilder,
-    auth_context: Arc<AuthContext>,
     session_cell: SessionCell,
-) -> anyhow::Result<(Arc<SessionContext>, Option<RedbStore>)> {
-    // The concrete store is returned alongside the trait object: the
-    // file-statistics registry is a B-tree, not an object, and keeping it inside
-    // the same beacon.db needs `RedbStore::database()`. An in-memory database has
-    // no such handle, so file statistics are unavailable there.
-    let redb = match &builder.db_path {
-        Some(db_path) => Some(RedbStore::open(db_path)?),
-        None => None,
-    };
-    let db_store: Arc<dyn ObjectStore> = match &redb {
-        Some(store) => Arc::new(store.clone()),
+    plugins: Arc<PluginRegistry>,
+    runtime_handle: &Handle,
+) -> anyhow::Result<Arc<SessionContext>> {
+    // An in-memory database keeps its tables, and the statistics of its
+    // external tables, in memory.
+    let db_store: Arc<dyn ObjectStore> = match &builder.db_path {
+        Some(db_path) => Arc::new(RedbStore::open(db_path)?),
         None => Arc::new(object_store::memory::InMemory::new()),
     };
 
@@ -633,12 +464,23 @@ async fn init_session_ctx(
     let config = build_session_config(
         builder,
         secrets_store.clone(),
-        auth_context,
         db_store.clone(),
-    )?;
+        session_cell.clone(),
+        runtime_handle,
+    )?
+    // Statement planning reads function owners from here.
+    .with_extension(plugins.clone());
     let runtime_env = runtime_env_builder(builder, secrets_store.clone())?;
 
-    let session_state = build_session_state(builder, config, runtime_env, session_cell.clone())?;
+    let session_state = build_session_state(
+        builder,
+        config,
+        runtime_env,
+        session_cell.clone(),
+        Arc::new(crate::plugins::NativePluginFunctions(
+            plugins.native_function_names(),
+        )),
+    )?;
 
     let session_ctx = Arc::new(SessionContext::new_with_state(session_state));
 
@@ -676,12 +518,14 @@ async fn init_session_ctx(
     )?);
     session_ctx.register_object_store(TMP_STORE_URL_OBJECT_URL.as_ref(), tmp_store);
 
-    Ok((session_ctx, redb))
+    Ok(session_ctx)
 }
 
 async fn register_schema_provider(
     runtime_handle: &Handle,
     session_ctx: &Arc<SessionContext>,
+    plugins_dir: Option<&Path>,
+    startup_plugins: &[(String, String)],
 ) -> anyhow::Result<()> {
     // The provider blocks on this handle from inside DataFusion's sync API. It
     // must be the query runtime, not the runtime `build` happens to run on.
@@ -696,6 +540,19 @@ async fn register_schema_provider(
         .ok_or(anyhow::anyhow!("Failed to get catalog 'beacon'"))?
         .register_schema("public", schema_provider.clone())?;
 
+    // User functions can call plugin functions, so the plugins load first.
+    let registry = session_ctx
+        .state()
+        .config()
+        .get_extension::<PluginRegistry>();
+    if let (Some(plugins_dir), Some(registry)) = (plugins_dir, registry) {
+        crate::plugins::loader::load_installed(session_ctx, &registry, plugins_dir).await;
+        install_startup_plugins(session_ctx, &registry, plugins_dir, startup_plugins).await;
+    }
+
+    // Views can call SQL functions, so the functions load first.
+    crate::statement_plan::functions::load_persisted_functions(session_ctx).await;
+
     init_tables(
         &session_ctx,
         &schema_provider,
@@ -706,6 +563,46 @@ async fn register_schema_provider(
     load_persisted_secrets_into_store(session_ctx).await;
 
     Ok(())
+}
+
+/// Installs each configured plugin that has no registry entry. A failure is logged.
+async fn install_startup_plugins(
+    session_ctx: &Arc<SessionContext>,
+    registry: &PluginRegistry,
+    plugins_dir: &Path,
+    plugins: &[(String, String)],
+) {
+    use crate::plugins::loader::{install_with_kind, InstallError};
+
+    for (name, source) in plugins {
+        // A failed plugin stays failed until UNINSTALL, so it is not retried on each start.
+        let known = registry
+            .snapshot()
+            .into_iter()
+            .find(|entry| entry.name == *name && entry.status != PluginStatus::Uninstalled);
+        if let Some(entry) = known {
+            if let Some(record) = entry.record.filter(|record| record.source != *source) {
+                tracing::warn!(
+                    "Plugin '{name}' stays at its stored source '{}', not '{source}': run UNINSTALL {name} to change it",
+                    record.source
+                );
+            }
+            continue;
+        }
+        match install_with_kind(session_ctx, registry, plugins_dir, name, source).await {
+            Ok(()) => {}
+            // The next start tries the download again.
+            Err(InstallError::Fetch(error)) => {
+                tracing::error!("Failed to install plugin '{name}' from '{source}': {error:#}");
+            }
+            // The same archive fails again, so the plugin shows as failed until UNINSTALL.
+            Err(InstallError::Check(error)) => {
+                let reason = format!("{error:#}");
+                tracing::error!("Failed to install plugin '{name}' from '{source}': {reason}");
+                registry.add_failed(name.clone(), None, None, reason);
+            }
+        }
+    }
 }
 
 /// Load any secrets persisted (encrypted) in the database file into the in-memory secret store.
@@ -735,58 +632,46 @@ async fn load_persisted_secrets_into_store(session_ctx: &Arc<SessionContext>) {
     }
 }
 
-/// Registers the read-only `beacon.system` schema (users, roles, query metrics)
+/// Registers the read-only `beacon.system` schema (comments, plugins, query metrics)
 /// so runtime introspection is reachable through SQL. Takes the session cell
 /// rather than the session: `query_metrics` resolves to its managed table on
 /// each access, and a strong handle here would leak the session.
+///
+/// Returns the provider, so the runtime can add the tables of the host application.
 fn register_system_schema(
     session_ctx: &Arc<SessionContext>,
     session_cell: SessionCell,
-    auth: Arc<AuthContext>,
-) -> anyhow::Result<()> {
-    // The same late-filled handle the scan path prunes against, so the tables
-    // show whatever the subsystem has at query time. Absent on a session built
-    // without the extension, which reads as "no rows".
-    let file_stats = session_ctx
-        .state()
-        .config()
-        .get_extension::<std::sync::OnceLock<Arc<beacon_file_stats::FileStatsStore>>>()
-        .unwrap_or_else(beacon_file_stats::new_file_stats_handle);
-    let provider = Arc::new(SystemSchemaProvider::new(
-        session_cell,
-        auth,
-        file_stats.clone(),
-    ));
+    plugins: Arc<PluginRegistry>,
+) -> anyhow::Result<Arc<SystemSchemaProvider>> {
+    let provider = Arc::new(SystemSchemaProvider::new(session_cell, plugins));
 
     session_ctx
         .catalog("beacon")
         .ok_or_else(|| anyhow::anyhow!("Failed to get catalog 'beacon'"))?
-        .register_schema(SYSTEM_SCHEMA_NAME, provider)?;
+        // `Arc::clone` shares the provider; the catalog and the runtime hold the same one.
+        .register_schema(SYSTEM_SCHEMA_NAME, Arc::clone(&provider) as _)?;
 
-    // `file_statistics(path)` reads the same handle. It is a function rather than
-    // a table because it takes the file to report on; the authorization walk
-    // covers it by its provider, since a function carries no schema name.
+    // A function, not a table, because it takes the table to report on. The
+    // authorization walk finds it by its provider, because a function has no schema.
     session_ctx.register_udtf(
-        crate::system_schema::FILE_STATISTICS_FUNCTION,
-        Arc::new(crate::system_schema::FileStatisticsFunc::new(file_stats)),
+        crate::system_schema::TABLE_STATISTICS_FUNCTION,
+        Arc::new(crate::system_schema::TableStatisticsFunc),
     );
 
-    Ok(())
+    Ok(provider)
 }
 
 fn register_file_formats(
     builder: &RuntimeBuilder,
     session_ctx: &Arc<SessionContext>,
 ) -> anyhow::Result<Vec<Arc<dyn FileFormatFactoryExt>>> {
-    // The NetCDF factory resolves object paths to native reader paths through the
-    // `ListingFactory`, so it must already be registered (it is, as a session config
-    // extension built in `build_session_config`). Read it before taking the write lock.
+    // The format factories need the `ListingFactory`. Read it before taking the write lock.
     let listing_factory = session_ctx
         .state()
         .config()
         .get_extension::<ListingFactory>()
         .ok_or_else(|| anyhow::anyhow!("ListingFactory must be registered before file formats"))?;
-    // NetCDF and Zarr write through local files, so they share the tmp store root.
+    // Zarr writes through local files in the tmp store root.
     let native_output_dir = builder.tmp_dir_path.clone().unwrap_or_else(temp_dir);
 
     let state_ref = session_ctx.state_ref();
@@ -801,23 +686,19 @@ fn register_file_formats(
             ZarrFormatFactory::new(builder.zarr.clone()).with_output_dir(native_output_dir.clone()),
         ),
         Arc::new(AtlasFormatFactory::new(AtlasOptions::default())),
-        Arc::new(BBFFormatFactory),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
             listing_factory.clone(),
-            native_output_dir.clone(),
             NetcdfOptions::default(),
             builder.netcdf.clone(),
         )),
-        // HDF5 (its own crate — a NetCDF-4 file is HDF5). It reads through the netCDF reader
-        // when `builder.hdf5.use_rust_reader` is off, and it writes through it either way. In
+        // HDF5 (its own crate — a NetCDF-4 file is HDF5). It writes through the netCDF format. In
         // the `formats` vec so beacon's format registry keys it by `.h5`/`.hdf5` and dataset
         // discovery picks those files up. Registered under `hdf5` in DataFusion's native registry
         // by the loop below.
         Arc::new(beacon_arrow_hdf5::Hdf5FormatFactory::new(
             NetCDFFormatFactory::new(
                 listing_factory.clone(),
-                native_output_dir.clone(),
                 NetcdfOptions::default(),
                 builder.netcdf.clone(),
             ),
@@ -833,7 +714,6 @@ fn register_file_formats(
     let hdf5_h5 = beacon_arrow_hdf5::Hdf5FormatFactory::new(
         NetCDFFormatFactory::new(
             listing_factory.clone(),
-            native_output_dir.clone(),
             NetcdfOptions::default(),
             builder.netcdf.clone(),
         ),
@@ -842,9 +722,8 @@ fn register_file_formats(
     .with_ext("h5");
     state.register_file_format(Arc::new(hdf5_h5), true)?;
 
-    // Fill the handle registered on the session config. Without this the
-    // external-table builder cannot reach `create_with_native_root`, and a netCDF
-    // external table is built with a resolver that fails on every object.
+    // Fill the handle registered on the session config. The external-table
+    // builder and the file analyzer find the Beacon format factories through it.
     let handle = state
         .config()
         .get_extension::<OnceLock<FileFormatRegistry>>()
@@ -861,6 +740,7 @@ fn build_session_state(
     session_config: SessionConfig,
     runtime_env: Arc<RuntimeEnv>,
     session_cell: SessionCell,
+    plugin_functions: Arc<dyn beacon_remote::LocalFunctions>,
 ) -> anyhow::Result<datafusion::execution::context::SessionState> {
     // Narrow every scan to the columns the query reads before any other rule.
     // CSE copies every input column into an intermediate projection, one linear
@@ -870,14 +750,19 @@ fn build_session_state(
     // This is DataFusion's default logical rule set with `BeaconFederationRule`
     // inserted, so replacing the defaults with it is intentional: sub-plans rooted
     // at remote tables get pushed down. The matching `FederatedPlanner` lives in
-    // `BeaconQueryPlanner`'s extension planners.
-    optimizer_rules.extend(beacon_datafusion_ext::remote::federation_optimizer_rules());
+    // `BeaconQueryPlanner`'s extension planners. Native plugin calls stay local.
+    optimizer_rules
+        .extend(beacon_remote::federation_optimizer_rules_with(plugin_functions));
 
     let mut state_builder = SessionStateBuilder::new()
         .with_config(session_config)
         .with_runtime_env(runtime_env)
         .with_default_features()
         .with_optimizer_rules(optimizer_rules)
+        // After type coercion and before filter pushdown: hooked calls become plain predicates.
+        .with_analyzer_rule(Arc::new(crate::plugins::hooks_rule::FunctionHooksRule::new(
+            session_cell.clone(),
+        )))
         .with_query_planner(Arc::new(BeaconQueryPlanner::new(session_cell.clone())));
 
     // Opt-in nd-pipeline optimizers. Appended to (never replacing) the default
@@ -895,12 +780,33 @@ fn build_session_state(
     Ok(state_builder.build())
 }
 
+/// The location of the datasets store for plugin tables: `explicit`, or the root of
+/// `default` as a URL that ends with `/`. `None` without a datasets store.
+pub(crate) fn datasets_base_url(default: Option<&DefaultStore>, explicit: Option<&Url>) -> Option<Url> {
+    if let Some(url) = explicit {
+        return Some(url.clone());
+    }
+    match &default?.root {
+        RootStore::FileSystem(dir) => {
+            // A relative root has no URL form.
+            let dir = std::path::absolute(dir).ok()?;
+            Url::from_directory_path(dir).ok()
+        }
+        RootStore::HttpsStore(base) => {
+            Url::parse(&format!("{}/", base.trim_end_matches('/'))).ok()
+        }
+    }
+}
+
 fn build_session_config(
     builder: &RuntimeBuilder,
     secrets_store: Arc<SecretStore>,
-    auth_context: Arc<AuthContext>,
     db_store: Arc<dyn ObjectStore>,
+    session_cell: SessionCell,
+    runtime_handle: &Handle,
 ) -> anyhow::Result<SessionConfig> {
+    // The managed tables and the statistics tables share one warehouse.
+    let warehouse = Arc::new(beacon_lance::LanceWarehouse::new(db_store));
     // Plan-time code reaches these settings through the SessionConfig extensions,
     // where no `Runtime` handle is available.
     let mut config = SessionConfig::new()
@@ -913,23 +819,11 @@ fn build_session_config(
         .with_information_schema(true)
         .with_collect_statistics(true)
         .with_spill_compression(datafusion::config::SpillCompression::Lz4Frame)
-        // Recovered by the `AuthExec` node to apply auth DDL (CREATE USER/ROLE, GRANT, ...).
-        .with_extension(auth_context)
         // Routes managed Lance tables through beacon's tables store. Per-runtime (no
         // process globals), so managed-table CRUD stays isolated.
-        .with_extension(Arc::new(beacon_lance::LanceWarehouse::new(
-            db_store.clone(),
-        )))
+        .with_extension(Arc::clone(&warehouse))
         // Late-filled by `init_crawler_manager` once the data lake and tables exist.
         .with_extension(new_crawler_manager_handle())
-        // Late-filled by `init_file_stats`, and left empty when the subsystem is
-        // off. A scan reads it to prune its file list; empty simply means no
-        // pruning, which is always a correct answer.
-        .with_extension(beacon_file_stats::new_file_stats_handle())
-        // Late-filled by `init_file_stats`. `ANALYZE FILES` reaches the service
-        // through this; an empty handle is what makes that statement say the
-        // subsystem is off rather than silently doing nothing.
-        .with_extension(crate::file_stats::new_file_stats_service_handle())
         .with_extension(secrets_store.clone())
         // The rule for every schema merge in this process. Each format merges
         // the files behind one URL. `FastObjectTable` merges the URLs behind one
@@ -947,12 +841,27 @@ fn build_session_config(
         // by their scheme, bare paths against the cwd).
         .with_extension(Arc::new(build_listing_factory(builder)))
         // The store a `CREATE EXTERNAL TABLE` LOCATION is resolved against.
-        .with_extension(Arc::new(ListingTableFactoryExt))
+        .with_extension(Arc::new(beacon_external_table::ExternalTableFactory))
         // Late-filled by `register_file_formats` once the factories exist. The only
         // route back to a format's `FileFormatFactoryExt` — DataFusion's own
         // registry erases the `Ext` type — which the external-table builder needs
         // to hand a natively-read format its root store.
         .with_extension(new_file_format_registry_handle())
+        // The file formats of each installed plugin, for an uninstall.
+        .with_extension(Arc::new(beacon_plugin_formats::InstalledFormats::default()))
+        // What the table types of each plugin get: the query runtime and the datasets URLs.
+        .with_extension(Arc::new(beacon_plugin_tables::PluginHostInfo {
+            runtime: runtime_handle.clone(),
+            datasets_url: builder.default_store.as_ref().map(|store| store.url.clone()),
+            datasets_base_url: datasets_base_url(
+                builder.default_store.as_ref(),
+                builder.datasets_base_url.as_ref(),
+            ),
+        }))
+        // The table types of each installed plugin, for `STORED AS` and an uninstall.
+        .with_extension(Arc::new(
+            beacon_plugin_tables::InstalledTableTypes::default(),
+        ))
         // Recovered by the JSON query compiler (default table, projection pushdown).
         .with_extension(Arc::new(builder.sql.clone()))
         // Recovered when a statement's result stream is built, to merge the small
@@ -960,6 +869,27 @@ fn build_session_config(
         .with_extension(Arc::new(CoalesceSqlStream::new(
             builder.sql.stream_coalesce,
         )));
+    // The engine exists before `init_tables`, so the tables that load at startup
+    // register at once. Their refreshes wait until the session cell is filled.
+    if builder.file_stats.enable {
+        let engine = beacon_file_statistics::FileStatistics::new(
+            beacon_file_statistics::Config::default()
+                .with_concurrency(builder.file_stats.concurrency)
+                .with_max_refreshes(builder.file_stats.max_refreshes),
+            runtime_handle.clone(),
+            session_cell,
+            warehouse,
+        );
+        // The scan and the table builder use the trait; `ANALYZE FILES` and
+        // `table_statistics()` use the engine.
+        config = config
+            .with_extension(Arc::new(
+                beacon_external_table::statistics_cache::ExternalTableStatistics(Arc::new(
+                    engine.clone(),
+                )),
+            ))
+            .with_extension(Arc::new(engine));
+    }
     config
         .options_mut()
         .execution
@@ -1048,11 +978,77 @@ fn runtime_env_builder(
                 .unwrap_or_else(default_vm_memory_limit),
         )))
         .with_cache_manager(CacheManagerConfig {
-            file_statistics_cache: Some(Arc::new(BeaconFileStatisticsCache::default())),
             list_files_cache_limit: 0,
             ..Default::default()
         })
         .with_object_store_registry(Arc::new(object_store_registry));
 
     Ok(Arc::new(runtime_env_builder.build()?))
+}
+
+#[cfg(test)]
+mod datasets_base_url_tests {
+    use super::*;
+
+    fn default_store(root: RootStore) -> DefaultStore {
+        DefaultStore::new(ObjectStoreUrl::parse("datasets://").unwrap(), root)
+    }
+
+    #[test]
+    fn base_url_of_a_local_root_is_a_file_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = default_store(RootStore::FileSystem(dir.path().to_path_buf()));
+        let url = datasets_base_url(Some(&store), None).unwrap();
+        assert_eq!(url.scheme(), "file");
+        assert!(url.as_str().ends_with('/'), "{url}");
+        assert_eq!(url.to_file_path().unwrap(), dir.path());
+    }
+
+    #[test]
+    fn base_url_of_an_https_root_ends_with_a_slash() {
+        let store = default_store(RootStore::HttpsStore("https://h/b/p".to_string()));
+        let url = datasets_base_url(Some(&store), None).unwrap();
+        assert_eq!(url.as_str(), "https://h/b/p/");
+        let store = default_store(RootStore::HttpsStore("https://h/b/p/".to_string()));
+        let url = datasets_base_url(Some(&store), None).unwrap();
+        assert_eq!(url.as_str(), "https://h/b/p/");
+    }
+
+    #[test]
+    fn explicit_base_url_wins() {
+        let store = default_store(RootStore::HttpsStore("https://h/b".to_string()));
+        let explicit = Url::parse("s3://bucket/").unwrap();
+        let url = datasets_base_url(Some(&store), Some(&explicit)).unwrap();
+        assert_eq!(url.as_str(), "s3://bucket/");
+    }
+
+    #[test]
+    fn no_default_store_has_no_base_url() {
+        assert_eq!(datasets_base_url(None, None), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_session_carries_the_plugin_host_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let datasets = dir.path().join("datasets");
+        std::fs::create_dir_all(&datasets).unwrap();
+        let runtime = RuntimeBuilder::new()
+            .with_default_store(
+                ObjectStoreUrl::parse("datasets://").unwrap(),
+                RootStore::FileSystem(datasets),
+            )
+            .with_tmp_dir_path(dir.path().join("tmp"))
+            .build()
+            .await
+            .unwrap();
+        let info = runtime
+            .session_ctx
+            .state()
+            .config()
+            .get_extension::<beacon_plugin_tables::PluginHostInfo>()
+            .expect("the plugin host info");
+        assert_eq!(info.datasets_url.as_ref().unwrap().as_str(), "datasets:///");
+        let base = info.datasets_base_url.as_ref().unwrap();
+        assert_eq!(base.to_file_path().unwrap(), dir.path().join("datasets"));
+    }
 }

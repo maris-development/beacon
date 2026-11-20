@@ -1,14 +1,9 @@
 //! A CF time variable must null its `_FillValue` cells.
 //!
-//! Regression test for a wrong value, not for a missing one. Both readers used
-//! to drop the `_FillValue` of a time variable, so the Arrow layer masked
-//! nothing and every fill cell reached a query as a real date. A variable with
-//! `units = "days since 1970-01-01"` and `_FillValue = -32768` gave `1880-03-15`
-//! for each of those cells. The date passed a filter and joined a group.
-//!
-//! The two readers share one CF conversion, so the fixture and the assertions
-//! are shared too. Each reader decodes the same file and must give the same
-//! nulls and the same values.
+//! Without the `_FillValue`, the Arrow layer masks nothing and every fill cell
+//! reaches a query as a real date. A variable with
+//! `units = "days since 1970-01-01"` and `_FillValue = -32768` gives `1880-03-15`
+//! for each of those cells. The date passes a filter and joins a group.
 
 use std::sync::Arc;
 
@@ -33,29 +28,18 @@ const MAX_NS_ERROR: i64 = 1_000;
 /// Cell order: day 0, fill, day 1, fill.
 fn write_fixture(directory: &std::path::Path) -> std::path::PathBuf {
     let path = directory.join(FILE);
-    {
-        let mut nc = netcdf::create(&path).expect("create the fixture");
-        nc.add_dimension("obs", 4).unwrap();
-        let mut variable = nc.add_variable::<i16>("time", &["obs"]).unwrap();
-        // netCDF-4 refuses a `_FillValue` after the first write, so set the
-        // attributes first.
-        variable.put_attribute("_FillValue", FILL).unwrap();
-        variable
-            .put_attribute("units", "days since 1970-01-01")
-            .unwrap();
-        variable
-            .put_values(&[0i16, FILL, 1, FILL], netcdf::Extents::All)
-            .unwrap();
-    }
+    let mut nc = oxcdf::create(&path).expect("create the fixture");
+    nc.add_dimension("obs", 4).unwrap();
+    let mut variable = nc.add_variable::<i16>("time", &["obs"]).unwrap();
+    // netCDF-4 refuses a `_FillValue` after the first write, so set the
+    // attributes first.
+    variable.set_fill_value(FILL).unwrap();
+    variable
+        .put_attribute("units", "days since 1970-01-01")
+        .unwrap();
+    variable.put_values(&[0i16, FILL, 1, FILL], ..).unwrap();
+    nc.close().expect("close the fixture");
     path
-}
-
-/// The `time` array of the fixture, through the netcdf-c reader.
-fn read_with_netcdf_c(path: &std::path::Path) -> Arc<dyn NdArrayD> {
-    crate::reader::read_arrays(path)
-        .expect("read the fixture with netcdf-c")
-        .swap_remove("time")
-        .expect("the fixture holds a 'time' variable")
 }
 
 /// The `time` array of the fixture, through the oxcdf reader.
@@ -122,27 +106,6 @@ fn assert_fill_cells_are_null(array: &TimestampNanosecondArray, reader: &str) {
     );
 }
 
-// ── netcdf-c ───────────────────────────────────────────────────────────────
-
-#[test]
-fn netcdf_c_decodes_the_fill_value_of_a_time_variable() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = write_fixture(directory.path());
-
-    let array = read_with_netcdf_c(&path);
-    let fill = futures::executor::block_on(fill_value(&array));
-    assert_fill_matches_cf_arithmetic(fill, "netcdf-c");
-}
-
-#[tokio::test]
-async fn netcdf_c_nulls_the_fill_cells_of_a_time_variable() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = write_fixture(directory.path());
-
-    let array = as_arrow(&read_with_netcdf_c(&path)).await;
-    assert_fill_cells_are_null(&array, "netcdf-c");
-}
-
 // ── oxcdf ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -161,23 +124,4 @@ async fn oxcdf_nulls_the_fill_cells_of_a_time_variable() {
 
     let array = as_arrow(&read_with_oxcdf(directory.path()).await).await;
     assert_fill_cells_are_null(&array, "oxcdf");
-}
-
-// ── Parity ─────────────────────────────────────────────────────────────────
-
-/// The same file gives the same answer on both readers. A dataset must not
-/// change its values when the reader flag changes.
-#[tokio::test]
-async fn both_readers_null_the_same_cells() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = write_fixture(directory.path());
-
-    let c = as_arrow(&read_with_netcdf_c(&path)).await;
-    let rust = as_arrow(&read_with_oxcdf(directory.path()).await).await;
-
-    assert_eq!(
-        c.nulls().map(|n| n.iter().collect::<Vec<_>>()),
-        rust.nulls().map(|n| n.iter().collect::<Vec<_>>())
-    );
-    assert_eq!(c.values(), rust.values());
 }

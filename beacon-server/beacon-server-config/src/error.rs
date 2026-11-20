@@ -29,6 +29,10 @@ pub enum ConfigError {
     #[error("invalid BEACON_LOG_LEVEL: {0}")]
     InvalidLogLevel(String),
 
+    /// `BEACON_LOG_OUTPUT` was set to something other than `stdout`, `file` or `both`.
+    #[error("invalid BEACON_LOG_OUTPUT: {0}")]
+    InvalidLogOutput(String),
+
     /// `BEACON_WORKER_THREADS` or `BEACON_API_THREADS` was set to zero.
     #[error("invalid thread count: {0}")]
     InvalidThreads(String),
@@ -36,6 +40,10 @@ pub enum ConfigError {
     /// `BEACON_SECRETS_KEY` was set but is not a base64-encoded 32-byte key.
     #[error("invalid BEACON_SECRETS_KEY: {0}")]
     InvalidSecretsKey(String),
+
+    /// `BEACON_PLUGINS` holds an entry that is not `name=source`.
+    #[error("{0}")]
+    InvalidPlugins(String),
 
     /// A required data directory could not be created.
     #[error("failed to create directory {}: {source}", .path.display())]

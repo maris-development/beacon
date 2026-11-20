@@ -137,38 +137,6 @@ impl UserDefinedLogicalNodeCore for CreateMaterializedViewNode {
     }
 }
 
-/// Logical node for the auth-management statements (CREATE/DROP USER/ROLE, GRANT/DENY/REVOKE).
-///
-/// The [`AuthStatement`] AST lacks `PartialOrd`/`Hash`, so it is carried in a [`Keyed`] wrapper
-/// whose stable key is the statement's SQL rendering. Produces no rows.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
-pub(crate) struct AuthNode {
-    pub(crate) statement: Keyed<crate::parser::statement::AuthStatement>,
-}
-
-impl UserDefinedLogicalNodeCore for AuthNode {
-    fn name(&self) -> &str {
-        "Auth"
-    }
-    fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![]
-    }
-    fn schema(&self) -> &DFSchemaRef {
-        empty_schema()
-    }
-    fn expressions(&self) -> Vec<Expr> {
-        vec![]
-    }
-    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Auth: {}", self.statement.payload)
-    }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self {
-            statement: self.statement.clone(),
-        })
-    }
-}
-
 /// Logical node for `REFRESH [TABLE] <name>`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct RefreshNode {
@@ -366,15 +334,11 @@ impl UserDefinedLogicalNodeCore for RunCrawlerNode {
     }
 }
 
-/// The report `ANALYZE FILES` returns.
+/// The report `ANALYZE FILES` returns: one row for each table with a requested refresh.
 pub(crate) fn analyze_files_arrow_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
-        Field::new("discovered", DataType::UInt64, false),
-        Field::new("requeued", DataType::UInt64, false),
-        Field::new("analyzed", DataType::UInt64, false),
-        Field::new("failed", DataType::UInt64, false),
-        Field::new("segments", DataType::UInt64, false),
-        Field::new("pending", DataType::UInt64, false),
+        Field::new("table", DataType::Utf8, false),
+        Field::new("status", DataType::Utf8, false),
     ]))
 }
 
@@ -388,16 +352,16 @@ fn analyze_files_df_schema() -> &'static DFSchemaRef {
     })
 }
 
-/// Logical node for `ANALYZE FILES ['<prefix>'] [FORCE]`.
+/// Logical node for `ANALYZE FILES [<table>]`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct AnalyzeFilesNode {
-    pub(crate) prefix: Option<String>,
-    pub(crate) force: bool,
+    /// The table to refresh. `None` refreshes each table with statistics.
+    pub(crate) table: Option<String>,
 }
 
 impl AnalyzeFilesNode {
-    pub(crate) fn new(prefix: Option<String>, force: bool) -> Self {
-        Self { prefix, force }
+    pub(crate) fn new(table: Option<String>) -> Self {
+        Self { table }
     }
 }
 
@@ -415,16 +379,11 @@ impl UserDefinedLogicalNodeCore for AnalyzeFilesNode {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "AnalyzeFiles: prefix={:?} force={}",
-            self.prefix, self.force
-        )
+        write!(f, "AnalyzeFiles: table={:?}", self.table)
     }
     fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
         Ok(Self {
-            prefix: self.prefix.clone(),
-            force: self.force,
+            table: self.table.clone(),
         })
     }
 }
@@ -469,7 +428,7 @@ impl UserDefinedLogicalNodeCore for DropCrawlerNode {
 pub(crate) struct AttachNode {
     pub(crate) name: String,
     pub(crate) url: String,
-    pub(crate) credential: beacon_datafusion_ext::remote::RemoteCredential,
+    pub(crate) credential: beacon_remote::RemoteCredential,
     /// Name of a `TYPE BEACON` secret to authenticate with, resolved at execution. Mutually
     /// exclusive with an inline `credential`.
     pub(crate) secret: Option<String>,
@@ -480,7 +439,7 @@ impl AttachNode {
     pub(crate) fn new(
         name: String,
         url: String,
-        credential: beacon_datafusion_ext::remote::RemoteCredential,
+        credential: beacon_remote::RemoteCredential,
         secret: Option<String>,
         tls: bool,
     ) -> Self {
@@ -518,6 +477,76 @@ impl UserDefinedLogicalNodeCore for AttachNode {
             credential: self.credential.clone(),
             secret: self.secret.clone(),
             tls: self.tls,
+        })
+    }
+}
+
+/// Logical node for `INSTALL <name> FROM '<source>'`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct InstallPluginNode {
+    pub(crate) name: String,
+    pub(crate) source: String,
+    /// The plugins directory of the runtime. `None` when plugins are disabled.
+    pub(crate) plugins_dir: Option<std::path::PathBuf>,
+}
+
+impl UserDefinedLogicalNodeCore for InstallPluginNode {
+    fn name(&self) -> &str {
+        "InstallPlugin"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "InstallPlugin: name={} source={}",
+            self.name, self.source
+        )
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+            source: self.source.clone(),
+            plugins_dir: self.plugins_dir.clone(),
+        })
+    }
+}
+
+/// Logical node for `UNINSTALL <name>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct UninstallPluginNode {
+    pub(crate) name: String,
+    /// The plugins directory of the runtime. `None` when plugins are disabled.
+    pub(crate) plugins_dir: Option<std::path::PathBuf>,
+}
+
+impl UserDefinedLogicalNodeCore for UninstallPluginNode {
+    fn name(&self) -> &str {
+        "UninstallPlugin"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "UninstallPlugin: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+            plugins_dir: self.plugins_dir.clone(),
         })
     }
 }
@@ -966,6 +995,88 @@ impl UserDefinedLogicalNodeCore for ShowCreateTableNode {
     }
 }
 
+/// Logical node for `CREATE [OR REPLACE] FUNCTION`. It holds the statement
+/// text, which the physical node plans and stores.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct CreateFunctionNode {
+    pub(crate) definition: String,
+}
+
+impl UserDefinedLogicalNodeCore for CreateFunctionNode {
+    fn name(&self) -> &str {
+        "CreateFunction"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "CreateFunction: {}", self.definition)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            definition: self.definition.clone(),
+        })
+    }
+}
+
+/// Arrow schema produced by `SHOW CREATE FUNCTION`.
+pub(crate) fn show_create_function_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("function_name", DataType::Utf8, false),
+                Field::new("definition", DataType::Utf8, false),
+            ]))
+        })
+        .clone()
+}
+
+fn show_create_function_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(show_create_function_arrow_schema().as_ref().clone())
+                .expect("SHOW CREATE FUNCTION schema is valid"),
+        )
+    })
+}
+
+/// Logical node for `SHOW CREATE FUNCTION <name>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct ShowCreateFunctionNode {
+    pub(crate) name: String,
+}
+
+impl UserDefinedLogicalNodeCore for ShowCreateFunctionNode {
+    fn name(&self) -> &str {
+        "ShowCreateFunction"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        show_create_function_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ShowCreateFunction: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+        })
+    }
+}
+
 /// The report `COMPACT TABLE` returns.
 pub(crate) fn compact_table_arrow_schema() -> Arc<Schema> {
     static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
@@ -1125,9 +1236,10 @@ pub(crate) enum CommentTarget {
         table: TableReference,
         column: String,
     },
+    Function(String),
 }
 
-/// Logical node for `COMMENT ON TABLE | COLUMN <name> IS '<text>' | NULL`.
+/// Logical node for `COMMENT ON TABLE | COLUMN | FUNCTION <name> IS '<text>' | NULL`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct CommentOnNode {
     pub(crate) target: CommentTarget,
@@ -1155,6 +1267,7 @@ impl UserDefinedLogicalNodeCore for CommentOnNode {
             CommentTarget::Column { table, column } => {
                 write!(f, "CommentOn: table={table} column={column}")
             }
+            CommentTarget::Function(name) => write!(f, "CommentOn: function={name}"),
         }
     }
     fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {

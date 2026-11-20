@@ -9,9 +9,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, UInt64Array};
 use arrow::datatypes::{Schema, SchemaRef};
-use arrow::record_batch::RecordBatch;
 use datafusion::{
     error::{DataFusionError, Result},
     execution::{SendableRecordBatchStream, TaskContext},
@@ -28,10 +26,11 @@ use datafusion::{
 use futures::{StreamExt, TryStreamExt};
 
 use super::{
-    actions, crawler,
+    actions, crawler, functions,
     logical::{
         analyze_files_arrow_schema, compact_table_arrow_schema, count_arrow_schema,
-        run_crawler_arrow_schema, show_crawlers_arrow_schema, show_create_table_arrow_schema,
+        run_crawler_arrow_schema, show_crawlers_arrow_schema, show_create_function_arrow_schema,
+        show_create_table_arrow_schema,
         show_indexes_arrow_schema, show_secrets_arrow_schema, AlterTableSpec, CommentTarget,
         Mutation,
     },
@@ -295,40 +294,6 @@ macro_rules! side_effect_exec {
     };
 }
 
-/// Physical node for the auth-management statements (CREATE/DROP USER/ROLE, GRANT/DENY/REVOKE).
-#[derive(Debug)]
-pub(crate) struct AuthExec {
-    statement: crate::parser::statement::AuthStatement,
-    session: SessionCell,
-    cache: Arc<PlanProperties>,
-}
-
-impl AuthExec {
-    pub(crate) fn new(
-        statement: crate::parser::statement::AuthStatement,
-        session: SessionCell,
-    ) -> Self {
-        Self {
-            statement,
-            session,
-            cache: Arc::new(side_effect_properties()),
-        }
-    }
-    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AuthExec: {}", self.statement)
-    }
-}
-
-side_effect_exec!(AuthExec, "AuthExec", |exec: &AuthExec| {
-    let session = upgrade_session(&exec.session)?;
-    let statement = exec.statement.clone();
-    Ok(side_effect_stream(async move {
-        super::auth::apply_auth_statement(&session, &statement)
-            .await
-            .map_err(to_df_err)
-    }))
-});
-
 /// Physical node for `DROP TABLE`.
 #[derive(Debug)]
 pub(crate) struct DropTableExec {
@@ -403,7 +368,7 @@ side_effect_exec!(
 pub(crate) struct AttachExec {
     name: String,
     url: String,
-    credential: beacon_datafusion_ext::remote::RemoteCredential,
+    credential: beacon_remote::RemoteCredential,
     secret: Option<String>,
     tls: bool,
     session: SessionCell,
@@ -414,7 +379,7 @@ impl AttachExec {
     pub(crate) fn new(
         name: String,
         url: String,
-        credential: beacon_datafusion_ext::remote::RemoteCredential,
+        credential: beacon_remote::RemoteCredential,
         secret: Option<String>,
         tls: bool,
         session: SessionCell,
@@ -479,6 +444,117 @@ side_effect_exec!(DetachExec, "DetachExec", |exec: &DetachExec| {
             .map_err(to_df_err)
     }))
 });
+
+/// The plugin registry of `session` and the plugins directory, or an error when plugins are disabled.
+fn plugin_setup(
+    session: &SessionContext,
+    plugins_dir: Option<&std::path::Path>,
+) -> anyhow::Result<(Arc<crate::plugins::PluginRegistry>, std::path::PathBuf)> {
+    let registry = session
+        .state()
+        .config()
+        .get_extension::<crate::plugins::PluginRegistry>();
+    match (registry, plugins_dir) {
+        (Some(registry), Some(dir)) => Ok((registry, dir.to_path_buf())),
+        _ => anyhow::bail!("plugins are disabled: this runtime has no plugins directory"),
+    }
+}
+
+/// Physical node for `INSTALL <name> FROM '<source>'`.
+#[derive(Debug)]
+pub(crate) struct InstallPluginExec {
+    name: String,
+    source: String,
+    plugins_dir: Option<std::path::PathBuf>,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl InstallPluginExec {
+    pub(crate) fn new(
+        name: String,
+        source: String,
+        plugins_dir: Option<std::path::PathBuf>,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            name,
+            source,
+            plugins_dir,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "InstallPluginExec: name={} source={}",
+            self.name, self.source
+        )
+    }
+}
+
+side_effect_exec!(
+    InstallPluginExec,
+    "InstallPluginExec",
+    |exec: &InstallPluginExec| {
+        let session = upgrade_session(&exec.session)?;
+        let name = exec.name.clone();
+        let source = exec.source.clone();
+        let plugins_dir = exec.plugins_dir.clone();
+        Ok(side_effect_stream(async move {
+            let result = async {
+                let (registry, dir) = plugin_setup(&session, plugins_dir.as_deref())?;
+                crate::plugins::loader::install(&session, &registry, &dir, &name, &source).await
+            };
+            result.await.map_err(to_df_err)
+        }))
+    }
+);
+
+/// Physical node for `UNINSTALL <name>`.
+#[derive(Debug)]
+pub(crate) struct UninstallPluginExec {
+    name: String,
+    plugins_dir: Option<std::path::PathBuf>,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl UninstallPluginExec {
+    pub(crate) fn new(
+        name: String,
+        plugins_dir: Option<std::path::PathBuf>,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            name,
+            plugins_dir,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UninstallPluginExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(
+    UninstallPluginExec,
+    "UninstallPluginExec",
+    |exec: &UninstallPluginExec| {
+        let session = upgrade_session(&exec.session)?;
+        let name = exec.name.clone();
+        let plugins_dir = exec.plugins_dir.clone();
+        Ok(side_effect_stream(async move {
+            let result = async {
+                let (registry, dir) = plugin_setup(&session, plugins_dir.as_deref())?;
+                crate::plugins::loader::uninstall(&session, &registry, &dir, &name).await
+            };
+            result.await.map_err(to_df_err)
+        }))
+    }
+);
 
 /// Physical node for `CREATE SECRET <name> (...)`.
 #[derive(Debug)]
@@ -702,6 +778,71 @@ side_effect_exec!(CreateViewExec, "CreateViewExec", |exec: &CreateViewExec| {
     let or_replace = exec.or_replace;
     Ok(side_effect_stream(async move {
         actions::create_view(&session, &name, &input, &definition, or_replace)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `CREATE [OR REPLACE] FUNCTION`.
+#[derive(Debug)]
+pub(crate) struct CreateFunctionExec {
+    definition: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl CreateFunctionExec {
+    pub(crate) fn new(definition: String, session: SessionCell) -> Self {
+        Self {
+            definition,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CreateFunctionExec: {}", self.definition)
+    }
+}
+
+side_effect_exec!(CreateFunctionExec, "CreateFunctionExec", |exec: &CreateFunctionExec| {
+    let session = upgrade_session(&exec.session)?;
+    let definition = exec.definition.clone();
+    Ok(side_effect_stream(async move {
+        functions::create_function(&session, &definition)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `DROP FUNCTION [IF EXISTS] <name>`.
+#[derive(Debug)]
+pub(crate) struct DropFunctionExec {
+    name: String,
+    if_exists: bool,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl DropFunctionExec {
+    pub(crate) fn new(name: String, if_exists: bool, session: SessionCell) -> Self {
+        Self {
+            name,
+            if_exists,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DropFunctionExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(DropFunctionExec, "DropFunctionExec", |exec: &DropFunctionExec| {
+    let session = upgrade_session(&exec.session)?;
+    let name = exec.name.clone();
+    let if_exists = exec.if_exists;
+    Ok(side_effect_stream(async move {
+        functions::drop_function(&session, &name, if_exists)
             .await
             .map_err(to_df_err)
     }))
@@ -1098,23 +1239,20 @@ impl ExecutionPlan for RunCrawlerExec {
     }
 }
 
-/// Physical node for `ANALYZE FILES ['<prefix>'] [FORCE]`.
+/// Physical node for `ANALYZE FILES [<table>]`.
 #[derive(Debug)]
 pub(crate) struct AnalyzeFilesExec {
-    prefix: Option<String>,
-    force: bool,
+    table: Option<String>,
     session: SessionCell,
     cache: Arc<PlanProperties>,
 }
 
 impl AnalyzeFilesExec {
-    pub(crate) fn new(prefix: Option<String>, force: bool, session: SessionCell) -> Self {
+    pub(crate) fn new(table: Option<String>, session: SessionCell) -> Self {
         Self {
-            prefix,
-            force,
+            table,
             session,
-            // Row-producing: the pass report is the result, the way RUN CRAWLER
-            // returns its crawl report.
+            // The refresh report of each table is the result.
             cache: Arc::new(plan_properties(analyze_files_arrow_schema())),
         }
     }
@@ -1123,11 +1261,9 @@ impl AnalyzeFilesExec {
 impl DisplayAs for AnalyzeFilesExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => write!(
-                f,
-                "AnalyzeFilesExec: prefix={:?} force={}",
-                self.prefix, self.force
-            ),
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "AnalyzeFilesExec: table={:?}", self.table)
+            }
             DisplayFormatType::TreeRender => write!(f, "AnalyzeFilesExec"),
         }
     }
@@ -1155,41 +1291,12 @@ impl ExecutionPlan for AnalyzeFilesExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let session = upgrade_session(&self.session)?;
-        let prefix = self.prefix.clone();
-        let force = self.force;
+        let table = self.table.clone();
         let schema = analyze_files_arrow_schema();
-
         let stream = futures::stream::once(async move {
-            let handle = session
-                .state()
-                .config()
-                .get_extension::<std::sync::OnceLock<Arc<crate::file_stats::FileStatsService>>>()
-                .and_then(|handle| handle.get().cloned());
-            let Some(service) = handle else {
-                return Err(datafusion::error::DataFusionError::Plan(
-                    "file statistics are not enabled on this runtime; set \
-                     BEACON_FILE_STATS_ENABLE=true"
-                        .to_string(),
-                ));
-            };
-
-            let pass = service
-                .analyze_now(prefix.as_deref(), force)
+            actions::analyze_files(&session, table.as_deref())
                 .await
-                .map_err(to_df_err)?;
-
-            RecordBatch::try_new(
-                analyze_files_arrow_schema(),
-                vec![
-                    Arc::new(UInt64Array::from(vec![pass.discovered as u64])) as ArrayRef,
-                    Arc::new(UInt64Array::from(vec![pass.requeued as u64])),
-                    Arc::new(UInt64Array::from(vec![pass.analyzed as u64])),
-                    Arc::new(UInt64Array::from(vec![pass.failed as u64])),
-                    Arc::new(UInt64Array::from(vec![pass.segments as u64])),
-                    Arc::new(UInt64Array::from(vec![pass.pending])),
-                ],
-            )
-            .map_err(Into::into)
+                .map_err(to_df_err)
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
@@ -1486,6 +1593,66 @@ impl ExecutionPlan for ShowCreateTableExec {
     }
 }
 
+/// Physical node for `SHOW CREATE FUNCTION <name>`. Produces one row.
+#[derive(Debug)]
+pub(crate) struct ShowCreateFunctionExec {
+    name: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl ShowCreateFunctionExec {
+    pub(crate) fn new(name: String, session: SessionCell) -> Self {
+        Self {
+            name,
+            session,
+            cache: Arc::new(plan_properties(show_create_function_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for ShowCreateFunctionExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "ShowCreateFunctionExec: name={}", self.name)
+            }
+            DisplayFormatType::TreeRender => write!(f, "ShowCreateFunctionExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for ShowCreateFunctionExec {
+    fn name(&self) -> &str {
+        "ShowCreateFunctionExec"
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let batch = functions::show_create_function(&session, &self.name).map_err(to_df_err);
+        let stream = futures::stream::once(async move { batch });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            show_create_function_arrow_schema(),
+            stream,
+        )))
+    }
+}
+
 /// Physical node for `COMPACT TABLE <table> [WITH (...)]`. Produces one report row.
 #[derive(Debug)]
 pub(crate) struct CompactTableExec {
@@ -1588,6 +1755,7 @@ impl CommentOnExec {
             CommentTarget::Column { table, column } => {
                 write!(f, "CommentOnExec: table={table} column={column}")
             }
+            CommentTarget::Function(name) => write!(f, "CommentOnExec: function={name}"),
         }
     }
 }
@@ -1604,6 +1772,9 @@ side_effect_exec!(CommentOnExec, "CommentOnExec", |exec: &CommentOnExec| {
             }
             CommentTarget::Column { table, column } => {
                 comments::comment_on_column(&session, &table, &column, comment, if_exists).await
+            }
+            CommentTarget::Function(name) => {
+                functions::comment_on_function(&session, &name, comment, if_exists).await
             }
         }
         .map_err(to_df_err)

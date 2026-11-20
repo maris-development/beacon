@@ -35,9 +35,9 @@ Point a server at your archive. Connect a client. Write queries.
 ## Choose a version
 
 <div class="dgrid">
-  <a class="dcard" href="docs/2.1.0-rc1/introduction">
+  <a class="dcard" href="docs/2.1.0-rc3/introduction">
     <span class="dcard-head">
-      <span class="dcard-title mono">2.1.0-rc1</span>
+      <span class="dcard-title mono">2.1.0-rc3</span>
       <span class="dcard-tag">Pre-release</span>
     </span>
     <span class="dcard-body">This is the upcoming 2.1 release.</span>
@@ -90,7 +90,7 @@ Beacon 2.0.2 is the current release. A 1.8.0 server does not upgrade in place. R
   <a class="dcard" href="docs/2.0.2/formats/">
     <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg></span>
     <span class="dcard-title">Read your formats</span>
-    <span class="dcard-body">Beacon reads NetCDF, HDF5, Zarr, Icechunk, Atlas, Parquet, GeoParquet, CSV, ODV, Arrow, GeoTIFF, Iceberg, Delta and BBF.</span>
+    <span class="dcard-body">Beacon reads NetCDF, HDF5, Zarr, Icechunk, Atlas, Parquet, GeoParquet, CSV, ODV, Arrow, GeoTIFF, Iceberg and Delta.</span>
   </a>
   <a class="dcard" href="docs/2.0.2/server/configuration">
     <span class="dcard-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></span>

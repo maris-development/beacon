@@ -3,149 +3,37 @@ use std::sync::Arc;
 use beacon_nd_array::dataset::AnyDataset;
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::datafusion::object_meta_resolver::{DefaultNetCDFObjectResolver, NetCDFObjectResolver};
-
-/// Which reader opens a NetCDF file.
+/// Where the reader gets the bytes of one NetCDF object.
 ///
-/// The two readers produce the same dataset, so this only decides how the bytes
-/// are fetched and decoded. See [`crate::oxcdf_reader`] for the trade-off.
-///
-/// This is the bare choice, small enough to key a schema by. [`FileAccess`] is
-/// the choice plus whatever that reader needs to reach a file.
-///
-/// `oxcdf` is the default. `BEACON_NETCDF_USE_RUST_READER=false` and
-/// `BEACON_HDF5_USE_RUST_READER=false` select netcdf-c, and so does
-/// `OPTIONS ('use_rust_reader' 'false')` on one table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum ReaderBackend {
-    /// `oxcdf`, pure Rust over `object_store`. The default.
-    #[default]
-    Oxcdf,
-    /// netcdf-c, through its Rust bindings. The fallback.
-    NetcdfC,
-}
-
-/// How a table reaches its files, and which reader opens them.
-///
-/// The two readers do not need the same things, so each variant carries exactly
-/// what its reader needs and nothing else. That is the point of the type: a
-/// format cannot hold a resolver the reader never consults, and it cannot pick
-/// netcdf-c without one.
+/// `oxcdf` range-reads the object through the store. No local copy is made, so
+/// this also covers s3, gs and az. The format, the statistics and the opener
+/// all build one of these, so they cannot disagree about a file.
 #[derive(Debug, Clone)]
-pub enum FileAccess {
-    /// netcdf-c opens a path itself, so it cannot work without a resolver to
-    /// turn an object path into that path.
-    NetcdfC {
-        /// Builds the native path netcdf-c opens, from the table's root store.
-        resolver: Arc<dyn NetCDFObjectResolver>,
-    },
-    /// `oxcdf` reads byte ranges through the scan's own object store. It needs
-    /// nothing else, which is why this variant carries nothing.
-    Oxcdf,
-}
-
-impl Default for FileAccess {
-    /// netcdf-c with a resolver that cannot resolve anything.
-    ///
-    /// This is the "no location was supplied" state, which
-    /// [`FileFormatFactory::create`](datafusion::datasource::file_format::FileFormatFactory::create)
-    /// and [`FileFormatFactory::default`](datafusion::datasource::file_format::FileFormatFactory::default)
-    /// produce. A scan on it fails per object, naming the path it could not
-    /// resolve. See [`FileFormatFactoryExt::create_with_native_root`](beacon_datafusion_ext::format_ext::FileFormatFactoryExt::create_with_native_root)
-    /// for the path that supplies one.
-    fn default() -> Self {
-        Self::NetcdfC {
-            resolver: Arc::new(DefaultNetCDFObjectResolver),
-        }
-    }
-}
-
-impl FileAccess {
-    /// netcdf-c, reading through `resolver`.
-    pub fn netcdf_c(resolver: Arc<dyn NetCDFObjectResolver>) -> Self {
-        Self::NetcdfC { resolver }
-    }
-
-    /// The reader this access uses.
-    pub fn backend(&self) -> ReaderBackend {
-        match self {
-            FileAccess::NetcdfC { .. } => ReaderBackend::NetcdfC,
-            FileAccess::Oxcdf => ReaderBackend::Oxcdf,
-        }
-    }
-
-    /// Describe where one object's bytes come from.
-    ///
-    /// netcdf-c resolves the object to a native path. `oxcdf` takes the scan's
-    /// store and the object path as they are, so it also reads s3, gs and az.
-    /// The format, the statistics and the opener all come through here, so they
-    /// can never disagree about a file.
-    pub fn input_for(
-        &self,
-        store: &Arc<dyn ObjectStore>,
-        object: &ObjectMeta,
-    ) -> datafusion::error::Result<NetcdfInput> {
-        match self {
-            FileAccess::NetcdfC { resolver } => {
-                let native_path = resolver.resolve(object).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to resolve object metadata (path) to NetCDF native path: {e}"
-                    ))
-                })?;
-                Ok(NetcdfInput::NetcdfC(native_path))
-            }
-            FileAccess::Oxcdf => Ok(NetcdfInput::Oxcdf {
-                store: store.clone(),
-                path: object.location.clone(),
-            }),
-        }
-    }
-}
-
-/// Where a reader gets the bytes of one NetCDF object.
-///
-/// The variant also names the reader: netcdf-c opens a path itself, and `oxcdf`
-/// reads through the object store. Build one with [`FileAccess::input_for`].
-#[derive(Debug, Clone)]
-pub enum NetcdfInput {
-    /// netcdf-c opens this native path directly. It is a local path, or an
-    /// `http(s)` URL that carries the `#mode=bytes` suffix.
-    NetcdfC(String),
-    /// `oxcdf` range-reads the object through the store. No local copy is made,
-    /// so this also covers s3, gs and az.
-    Oxcdf {
-        /// The store the object lives in.
-        store: Arc<dyn ObjectStore>,
-        /// The object, relative to that store.
-        path: object_store::path::Path,
-    },
+pub struct NetcdfInput {
+    /// The store the object lives in.
+    pub store: Arc<dyn ObjectStore>,
+    /// The object, relative to that store. Its size spares the reader a
+    /// `head` request.
+    pub object: ObjectMeta,
 }
 
 impl NetcdfInput {
-    /// The reader this input belongs to.
-    pub fn backend(&self) -> ReaderBackend {
-        match self {
-            NetcdfInput::NetcdfC(_) => ReaderBackend::NetcdfC,
-            NetcdfInput::Oxcdf { .. } => ReaderBackend::Oxcdf,
+    /// The input for `object` in `store`.
+    pub fn new(store: &Arc<dyn ObjectStore>, object: &ObjectMeta) -> Self {
+        Self {
+            store: store.clone(),
+            object: object.clone(),
         }
     }
 
     /// The location to name in an error message.
     pub fn location(&self) -> String {
-        match self {
-            NetcdfInput::NetcdfC(path) => path.clone(),
-            NetcdfInput::Oxcdf { path, .. } => path.to_string(),
-        }
+        self.object.location.to_string()
     }
 
     /// Open the dataset this input points at.
     pub async fn open(self) -> anyhow::Result<AnyDataset> {
-        match self {
-            NetcdfInput::NetcdfC(path) => crate::reader::open_dataset(path).await,
-            NetcdfInput::Oxcdf { store, path } => {
-                crate::oxcdf_reader::open_dataset(store, path).await
-            }
-        }
+        crate::oxcdf_reader::open_object(self.store, &self.object).await
     }
 }
 
@@ -162,19 +50,37 @@ impl NetcdfInput {
 /// With `skip_unbroadcastable`, a file the list does not fit gets an empty
 /// schema, the same way the scan reads no row from it.
 ///
+/// With `skip_invalid_files`, a file the reader cannot open gets an empty
+/// schema and a warning, the same way the scan reads no row from it.
+///
 /// A repeated inference of the same file is answered by the schema cache of
 /// [`beacon_datafusion_ext::format_ext`], above this function, so this one
 /// always opens the file.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be opened and `skip_invalid_files`
+/// is off, or when its dimensions or types do not convert to Arrow.
 pub async fn fetch_schema(
     input: NetcdfInput,
     read_dimensions: Option<Vec<String>>,
     skip_unbroadcastable: bool,
+    skip_invalid_files: bool,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
-    let dataset = input.open().await.map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!(
-            "Failed to open NetCDF dataset for schema inference: {e}"
-        ))
-    })?;
+    // The input moves into `open`, so keep its location only when a skip needs it.
+    let location = skip_invalid_files.then(|| input.location());
+    let dataset = match (input.open().await, location) {
+        (Ok(dataset), _) => dataset,
+        (Err(e), Some(location)) => {
+            tracing::warn!(file = %location, error = %e, "skipping an unreadable NetCDF file");
+            return Ok(Arc::new(arrow::datatypes::Schema::empty()));
+        }
+        (Err(e), None) => {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "Failed to open NetCDF dataset for schema inference: {e}"
+            )))
+        }
+    };
 
     // A skipped file gives the table no column.
     let Some(dataset) = beacon_nd_array::dataset::project_read_dimensions_or_skip(
@@ -196,15 +102,4 @@ pub async fn fetch_schema(
         })?;
 
     Ok(schema.into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The Rust reader is the default. netcdf-c is reached by asking for it.
-    #[test]
-    fn the_default_backend_is_the_rust_reader() {
-        assert_eq!(ReaderBackend::default(), ReaderBackend::Oxcdf);
-    }
 }

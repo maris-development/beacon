@@ -25,7 +25,7 @@ fn csv_query(sql: &str) -> Query {
 /// (`QueryResult` is not `Debug`, so `Result::expect_err` is unavailable.)
 async fn expect_output_error(runtime: &Runtime, sql: &str) -> String {
     match runtime
-        .run_query(csv_query(sql), beacon_core::AuthIdentity::system())
+        .run_query(csv_query(sql), beacon_core::plan_validator::allow_all())
         .await
     {
         Ok(_) => panic!("expected an error for: {sql}"),
@@ -43,7 +43,7 @@ async fn output_on_non_row_producing_statement_is_a_clear_error() {
     let _ = runtime
         .run_query(
             Query::sql(format!("DROP TABLE IF EXISTS {table}")),
-            beacon_core::AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await;
 
@@ -64,7 +64,7 @@ async fn output_on_non_row_producing_statement_is_a_clear_error() {
     runtime
         .run_query(
             Query::sql(format!("CREATE TABLE {table} (id BIGINT)")),
-            beacon_core::AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await
         .expect("create table should succeed without output");
@@ -77,7 +77,7 @@ async fn output_on_non_row_producing_statement_is_a_clear_error() {
     let _ = runtime
         .run_query(
             Query::sql(format!("DROP TABLE IF EXISTS {table}")),
-            beacon_core::AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await;
 }
@@ -90,7 +90,7 @@ async fn output_on_select_still_succeeds() {
         .runtime
         .run_query(
             csv_query("SELECT 1 AS a"),
-            beacon_core::AuthIdentity::system(),
+            beacon_core::plan_validator::allow_all(),
         )
         .await
         .expect("SELECT with output should succeed");

@@ -1,5 +1,5 @@
 ---
-description: Build the BeaconDB wheel from source. This page covers the native toolchain that the engine links, and the portable static-netcdf build.
+description: Build the BeaconDB wheel from source. This page covers the native toolchain that the engine links, and the portable wheel build.
 ---
 
 # Building from source
@@ -8,7 +8,6 @@ description: Build the BeaconDB wheel from source. This page covers the native t
 engine links. A Rust compiler alone is not enough:
 
 - **protoc**. Lance generates protobuf at build time.
-- **HDF5 and netCDF** headers and libraries. The netCDF reader and writer need them.
 - **PROJ, 9.6.2 or later**, and pkg-config. The `ST_Transform` spatial function links it. A
   machine without it still builds: the build compiles PROJ from source instead, which needs
   **cmake** and the **sqlite3** program. `--no-default-features` drops `ST_Transform` and PROJ
@@ -16,11 +15,14 @@ engine links. A Rust compiler alone is not enough:
 - A Rust toolchain, **1.95 or later**. See `rust-version` in the workspace `Cargo.toml`. The
   `rust-toolchain.toml` file here selects stable for local development.
 
+Beacon reads and writes NetCDF and HDF5 with a pure-Rust library. The build needs no netCDF or HDF5
+library.
+
 ```bash
 # macOS
-brew install protobuf hdf5 netcdf proj pkg-config
+brew install protobuf proj pkg-config
 # Debian/Ubuntu
-sudo apt-get install -y protobuf-compiler libhdf5-dev libnetcdf-dev libproj-dev pkg-config
+sudo apt-get install -y protobuf-compiler libproj-dev pkg-config
 
 pip install maturin
 maturin develop            # build + install into the current venv (debug)
@@ -31,15 +33,15 @@ The wheel is **abi3** (`cp310-abi3`). One wheel per platform therefore covers CP
 The wheel ships `py.typed` and the `_beacondb.pyi` type stubs. The stubs include the `read_*` readers
 from the catalog.
 
-## Portable wheels (`static-netcdf`, `spatial-proj-bundled`)
+## Portable wheels (`spatial-proj-bundled`)
 
-A wheel for distribution links every native library **statically**. The build compiles netCDF, HDF5
-and PROJ from source. The wheel then carries them and needs no system library. This is the only way
-to ship a portable **Windows** wheel:
+A wheel for distribution links every native library **statically**. The build compiles PROJ from
+source. The wheel then carries it and needs no system library. This is the only way to ship a
+portable **Windows** wheel:
 
 ```bash
 # needs protoc, cmake and the sqlite3 program
-maturin build --release --features static-netcdf,spatial-proj-bundled
+maturin build --release --features spatial-proj-bundled
 ```
 
 PROJ keeps its CRS database, `proj.db`, in a file beside the library. A static build embeds that
@@ -89,14 +91,13 @@ new download on every build.
 
 ### What you still need
 
-A source build uses the **default** features of the crate. Those features link netCDF and HDF5
-**dynamically**. The build therefore needs a C and C++ toolchain and the system HDF5 and netCDF
-packages. It also needs PROJ, or cmake and sqlite3 to build PROJ from source. The published wheels
-need none of this. To build the fully static variant, pass the features through the PEP 517 hook of
-maturin. You then need `cmake` instead of the HDF5 and netCDF development packages:
+A source build uses the **default** features of the crate. The build therefore needs a C and C++
+toolchain. It also needs PROJ, or cmake and sqlite3 to build PROJ from source. The published wheels
+need none of this. To build the fully static variant, pass the feature through the PEP 517 hook of
+maturin. You then need `cmake` and the `sqlite3` program instead of the PROJ package:
 
 ```bash
-MATURIN_PEP517_ARGS="--features static-netcdf,spatial-proj-bundled" pip install beacondb
+MATURIN_PEP517_ARGS="--features spatial-proj-bundled" pip install beacondb
 ```
 
 `pip install beacondb --no-binary beacondb` forces a source build on a platform with a wheel.
@@ -107,11 +108,11 @@ Beacon publishes no musllinux wheel at this moment. On Alpine, pip therefore use
 compiles the engine. The supported fix is a glibc image such as `python:3.12-slim`. A build from
 source is the fallback if you must stay on musl.
 
-Rust and protoc install themselves, as described above. Alpine therefore needs only the C toolchain,
-the netCDF and HDF5 libraries, and what a source build of PROJ uses:
+Rust and protoc install themselves, as described above. Alpine therefore needs only the C toolchain
+and what a source build of PROJ uses:
 
 ```bash
-apk add --no-cache build-base linux-headers hdf5-dev netcdf-dev cmake sqlite
+apk add --no-cache build-base linux-headers cmake sqlite
 pip install beacondb
 ```
 
@@ -137,10 +138,6 @@ You can also add `rust cargo protobuf-dev`. This is optional. It helps if you bu
 system toolchain avoids a download of about 200 MB of rustup on every build. It also avoids the order
 problem above.
 
-You can skip `hdf5-dev` and `netcdf-dev`. The build then compiles netCDF and HDF5 from source into
-the extension. Replace those two packages with `cmake perl` and use the `MATURIN_PEP517_ARGS` form
-above. The result is more self-contained, but the build takes much longer.
-
-Both routes need a long compile. The build makes a full DataFusion, Lance and netCDF engine from
-scratch. CI uses the same `static-netcdf` route for the musllinux wheels. The workflow still holds
-its `apk` branch. A change to the matrix therefore restores those wheels.
+The build needs a long compile. It compiles the full engine, with DataFusion and Lance, from source.
+CI builds no musllinux wheel at this moment. The workflow still holds its `apk` branch. A change to
+the matrix therefore restores those wheels.

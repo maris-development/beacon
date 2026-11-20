@@ -1,7 +1,7 @@
 //! High-level writers for serializing Arrow record batches into NetCDF.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::Arc,
@@ -18,11 +18,14 @@ use tempfile::SpooledTempFile;
 
 use crate::attributes::{AttributeCombiner, AttributePlan, AttributeTarget};
 use crate::datafusion::options::NetcdfWriterOptions;
-use crate::encoders::{Encoder, EncoderOptions};
+use crate::encoders::{discard, Encoder, EncoderOptions};
 
 /// Generic writer backed by an [`Encoder`] implementation.
+///
+/// [`close`](Self::close) puts the file at its path. A drop without a close leaves no file.
 pub struct Writer<E: Encoder> {
-    encoder: E,
+    /// `None` after the close.
+    encoder: Option<E>,
 }
 
 impl<E: Encoder> Writer<E> {
@@ -37,11 +40,19 @@ impl<E: Encoder> Writer<E> {
         schema: SchemaRef,
         options: &EncoderOptions,
     ) -> anyhow::Result<Self> {
-        let nc_file = netcdf::create(path).map_err(|e| anyhow::anyhow!(e))?;
+        let nc_file = oxcdf::create(path).map_err(|e| anyhow::anyhow!(e))?;
 
         let encoder = E::create(nc_file, schema, options).map_err(|e| anyhow::anyhow!(e))?;
 
-        Ok(Self { encoder })
+        Ok(Self {
+            encoder: Some(encoder),
+        })
+    }
+
+    fn encoder(&mut self) -> anyhow::Result<&mut E> {
+        self.encoder
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("the NetCDF writer is closed"))
     }
 
     /// Write one Arrow record batch into the target NetCDF file.
@@ -49,7 +60,7 @@ impl<E: Encoder> Writer<E> {
         &mut self,
         record_batch: arrow::record_batch::RecordBatch,
     ) -> anyhow::Result<()> {
-        self.encoder
+        self.encoder()?
             .write_record_batch(record_batch)
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -59,14 +70,38 @@ impl<E: Encoder> Writer<E> {
     /// Write attributes. Call this before the first batch.
     pub fn put_attributes(
         &mut self,
-        attributes: &[(AttributeTarget, netcdf::AttributeValue)],
+        attributes: &[(AttributeTarget, oxcdf::AttributeValue)],
     ) -> anyhow::Result<()> {
+        let encoder = self.encoder()?;
         for (target, value) in attributes {
-            self.encoder
+            encoder
                 .put_attribute(target.variable(), target.name(), value.clone())
                 .map_err(|e| anyhow::anyhow!(e))?;
         }
         Ok(())
+    }
+
+    /// Write the file and put it at its path. An error leaves no file at the path.
+    pub fn close(self) -> anyhow::Result<()> {
+        self.into_file()?.close().map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Give back the open NetCDF file, to close or upload it.
+    ///
+    /// A drop of the file puts it at its path.
+    pub fn into_file(mut self) -> anyhow::Result<oxcdf::FileMut> {
+        self.encoder
+            .take()
+            .map(E::into_file)
+            .ok_or_else(|| anyhow::anyhow!("the NetCDF writer is closed"))
+    }
+}
+
+impl<E: Encoder> Drop for Writer<E> {
+    fn drop(&mut self) {
+        if let Some(encoder) = self.encoder.take() {
+            discard(encoder.into_file());
+        }
     }
 }
 
@@ -197,6 +232,18 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
 
     /// Finalize buffered data and write the NetCDF file.
     pub fn finish(&mut self) -> anyhow::Result<()> {
+        self.finish_writer()?.close()
+    }
+
+    /// Finalize buffered data and give back the open NetCDF file, to close or upload it.
+    ///
+    /// A drop of the file puts it at its path.
+    pub fn finish_file(&mut self) -> anyhow::Result<oxcdf::FileMut> {
+        self.finish_writer()?.into_file()
+    }
+
+    /// Write the buffered data into a new NetCDF writer for the path.
+    fn finish_writer(&mut self) -> anyhow::Result<Writer<E>> {
         self.writer.finish().map_err(|e| anyhow::anyhow!(e))?;
         let plan = match self.combiner.take() {
             Some(combiner) => combiner.resolve()?,
@@ -238,19 +285,25 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
 
         // A batch with no column has no row count, so the file keeps its attributes only.
         if kept_columns.is_empty() {
-            return Ok(());
+            return Ok(nc_writer);
         }
 
-        for batch in reader {
-            let batch = batch.map_err(|e| anyhow::anyhow!(e))?;
-            let batch = batch
-                .project(&kept_columns)
-                .map_err(|e| anyhow::anyhow!(e))?;
-            let updated_batch = Self::map_record_batch(batch, updated_schema.clone())?;
+        let batches = reader
+            .map(|batch| -> anyhow::Result<RecordBatch> { Ok(batch?.project(&kept_columns)?) });
+        // A compressed chunk goes to the file only when one write covers the whole chunk.
+        let whole_chunks = encoder_options
+            .chunk_rows
+            .filter(|_| encoder_options.compression.is_some());
+        let batches: Box<dyn Iterator<Item = anyhow::Result<RecordBatch>>> = match whole_chunks {
+            Some(rows) => Box::new(WholeChunks::new(batches, rows)),
+            None => Box::new(batches),
+        };
+        for batch in batches {
+            let updated_batch = Self::map_record_batch(batch?, updated_schema.clone())?;
             nc_writer.write_record_batch(updated_batch)?;
         }
 
-        Ok(())
+        Ok(nc_writer)
     }
 
     fn map_record_batch(
@@ -275,6 +328,73 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         }
 
         Ok(RecordBatch::try_new(schema, arrays)?)
+    }
+}
+
+/// Regroups batches into batches of `rows` rows. The last batch can hold fewer rows.
+///
+/// It keeps only the rows that do not yet fill a batch.
+struct WholeChunks<I> {
+    batches: I,
+    rows: usize,
+    /// Rows that do not yet fill a batch, in input order.
+    pending: VecDeque<RecordBatch>,
+    pending_rows: usize,
+}
+
+impl<I> WholeChunks<I> {
+    fn new(batches: I, rows: usize) -> Self {
+        Self {
+            batches,
+            rows: rows.max(1),
+            pending: VecDeque::new(),
+            pending_rows: 0,
+        }
+    }
+
+    /// Remove the first `rows` pending rows and return them as one batch.
+    fn take(&mut self, rows: usize) -> anyhow::Result<RecordBatch> {
+        let mut parts = Vec::new();
+        let mut missing = rows;
+        while missing > 0 {
+            let Some(batch) = self.pending.pop_front() else {
+                break;
+            };
+            if batch.num_rows() > missing {
+                parts.push(batch.slice(0, missing));
+                self.pending
+                    .push_front(batch.slice(missing, batch.num_rows() - missing));
+                missing = 0;
+            } else {
+                missing -= batch.num_rows();
+                parts.push(batch);
+            }
+        }
+        self.pending_rows -= rows - missing;
+        match parts.len() {
+            1 => Ok(parts.remove(0)),
+            _ => Ok(arrow::compute::concat_batches(&parts[0].schema(), &parts)?),
+        }
+    }
+}
+
+impl<I: Iterator<Item = anyhow::Result<RecordBatch>>> Iterator for WholeChunks<I> {
+    type Item = anyhow::Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.pending_rows < self.rows {
+            match self.batches.next() {
+                Some(Ok(batch)) if batch.num_rows() == 0 => {}
+                Some(Ok(batch)) => {
+                    self.pending_rows += batch.num_rows();
+                    self.pending.push_back(batch);
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None if self.pending_rows == 0 => return None,
+                None => return Some(self.take(self.pending_rows)),
+            }
+        }
+        Some(self.take(self.rows))
     }
 }
 
@@ -318,7 +438,7 @@ mod tests {
     use crate::{attributes::CombineAttrs, encoders::default::DefaultEncoder};
     use arrow::array::{DictionaryArray, Float64Array, TimestampNanosecondArray};
     use arrow::datatypes::{Int32Type, Schema, TimeUnit};
-    use netcdf::AttributeValue;
+    use oxcdf::{AttributeValue, NetcdfFile};
 
     fn write(
         path: &Path,
@@ -347,15 +467,31 @@ mod tests {
         writer.finish()
     }
 
-    fn str_attribute(file: &netcdf::File, variable: Option<&str>, name: &str) -> Option<String> {
-        let value = match variable {
-            Some(variable) => file.variable(variable)?.attribute(name)?.value().ok()?,
-            None => file.attribute(name)?.value().ok()?,
+    fn open(path: &Path) -> NetcdfFile {
+        oxcdf::open(path).expect("open the file")
+    }
+
+    fn str_attribute(file: &NetcdfFile, variable: Option<&str>, name: &str) -> Option<String> {
+        let attribute = match variable {
+            Some(variable) => file.variable(variable)?.attribute(name)?,
+            None => file.attribute(name)?,
         };
-        match value {
-            AttributeValue::Str(value) => Some(value),
+        match &attribute.value {
+            AttributeValue::Str(value) => Some(value.clone()),
             _ => None,
         }
+    }
+
+    fn values(file: &NetcdfFile, variable: &str) -> Vec<f64> {
+        file.variable(variable).unwrap().get_values(..).unwrap()
+    }
+
+    fn strings(file: &NetcdfFile, variable: &str) -> Vec<String> {
+        file.variable(variable).unwrap().get_strings(..).unwrap()
+    }
+
+    fn chunk_shape(file: &NetcdfFile, variable: &str) -> Option<Vec<usize>> {
+        file.variable(variable).unwrap().chunking().unwrap()
     }
 
     fn units_schema() -> SchemaRef {
@@ -396,7 +532,7 @@ mod tests {
         .unwrap();
         write(&path, schema, vec![batch], None);
 
-        let file = netcdf::open(&path).unwrap();
+        let file = open(&path);
         assert!(file.variable("temp.units").is_some());
         assert_eq!(str_attribute(&file, Some("temp"), "units"), None);
     }
@@ -412,7 +548,7 @@ mod tests {
         ];
         write(&path, schema, batches, Some(CombineAttrs::Identical));
 
-        let file = netcdf::open(&path).unwrap();
+        let file = open(&path);
         assert_eq!(
             str_attribute(&file, Some("temp"), "units").as_deref(),
             Some("degC")
@@ -434,7 +570,7 @@ mod tests {
         ];
         write(&path, schema, batches, Some(CombineAttrs::Identical));
 
-        let file = netcdf::open(&path).unwrap();
+        let file = open(&path);
         assert_eq!(str_attribute(&file, Some("temp"), "units"), None);
         assert_eq!(file.variable("temp.units").unwrap().len(), 2);
         assert_eq!(file.variable("global.title").unwrap().len(), 2);
@@ -463,7 +599,7 @@ mod tests {
         .unwrap();
         write(&path, schema, vec![batch], Some(CombineAttrs::Identical));
 
-        let file = netcdf::open(&path).unwrap();
+        let file = open(&path);
         assert_eq!(
             str_attribute(&file, Some("temp"), "units").as_deref(),
             Some("degC")
@@ -495,7 +631,7 @@ mod tests {
         .unwrap();
         write(&path, schema, vec![batch], Some(CombineAttrs::Identical));
 
-        let file = netcdf::open(&path).unwrap();
+        let file = open(&path);
         assert_eq!(
             str_attribute(&file, Some("time"), "units").as_deref(),
             Some("nanoseconds since 1970-01-01T00:00:00Z")
@@ -526,9 +662,9 @@ mod tests {
             Some(CombineAttrs::Identical),
         );
 
-        let file = netcdf::open(&path).unwrap();
+        let file = open(&path);
         assert_eq!(str_attribute(&file, None, "title").as_deref(), Some("Argo"));
-        assert_eq!(file.variables().count(), 0);
+        assert_eq!(file.variables().len(), 0);
     }
 
     #[test]
@@ -537,7 +673,7 @@ mod tests {
         let path = dir.path().join("empty.nc");
         write(&path, units_schema(), vec![], Some(CombineAttrs::Identical));
 
-        let file = netcdf::open(&path).unwrap();
+        let file = open(&path);
         assert!(file.variable("temp").is_some());
         assert!(file.variable("temp.units").is_none());
         assert_eq!(str_attribute(&file, Some("temp"), "units"), None);
@@ -616,17 +752,11 @@ mod tests {
         .unwrap();
         write_with(&packed, schema.clone(), batches(), compressed(4)).unwrap();
 
-        let plain = netcdf::open(&plain).unwrap();
-        let packed = netcdf::open(&packed).unwrap();
-        let values = |file: &netcdf::File| -> Vec<f64> {
-            file.variable("value").unwrap().get_values(..).unwrap()
-        };
-        let names = |file: &netcdf::File| -> Vec<String> {
-            file.variable("name").unwrap().get_strings(..).unwrap()
-        };
-        assert_eq!(values(&packed).len(), 100_000);
-        assert_eq!(values(&packed), values(&plain));
-        assert_eq!(names(&packed), names(&plain));
+        let plain = open(&plain);
+        let packed = open(&packed);
+        assert_eq!(values(&packed, "value").len(), 100_000);
+        assert_eq!(values(&packed, "value"), values(&plain, "value"));
+        assert_eq!(strings(&packed, "name"), strings(&plain, "name"));
     }
 
     #[test]
@@ -646,9 +776,100 @@ mod tests {
         )
         .unwrap();
 
-        let file = netcdf::open(&path).unwrap();
-        let chunking = file.variable("value").unwrap().chunking().unwrap();
-        assert_eq!(chunking, Some(vec![1000]));
+        assert_eq!(chunk_shape(&open(&path), "value"), Some(vec![1000]));
+    }
+
+    #[test]
+    fn a_compressed_write_of_part_chunks_reads_back_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("parts.nc");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            true,
+        )]));
+        let batch = |start: usize| {
+            let values: Vec<f64> = (start..start + 3).map(|v| v as f64).collect();
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Float64Array::from(values))])
+                .unwrap()
+        };
+        let options = NetcdfWriterOptions {
+            chunk_rows: std::num::NonZeroUsize::new(4),
+            ..compressed(4)
+        };
+        write_with(
+            &path,
+            schema.clone(),
+            vec![batch(0), batch(3), batch(6)],
+            options,
+        )
+        .unwrap();
+
+        let file = open(&path);
+        assert_eq!(chunk_shape(&file, "value"), Some(vec![4]));
+        let expected: Vec<f64> = (0..9).map(|v| v as f64).collect();
+        assert_eq!(values(&file, "value"), expected);
+    }
+
+    fn int_batches(sizes: &[usize]) -> Vec<anyhow::Result<RecordBatch>> {
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, false)]));
+        let mut next = 0;
+        sizes
+            .iter()
+            .map(|&size| {
+                let values: Vec<i32> = (next..next + size as i32).collect();
+                next += size as i32;
+                Ok(RecordBatch::try_new(
+                    schema.clone(),
+                    vec![Arc::new(arrow::array::Int32Array::from(values))],
+                )?)
+            })
+            .collect()
+    }
+
+    /// The batch sizes and the values that `WholeChunks` gives for `sizes` and `rows`.
+    fn regroup(sizes: &[usize], rows: usize) -> (Vec<usize>, Vec<i32>) {
+        let batches: Vec<RecordBatch> = WholeChunks::new(int_batches(sizes).into_iter(), rows)
+            .collect::<anyhow::Result<_>>()
+            .unwrap();
+        let values = batches
+            .iter()
+            .flat_map(|batch| {
+                let column = batch.column(0).as_any();
+                let column = column.downcast_ref::<arrow::array::Int32Array>().unwrap();
+                column.values().to_vec()
+            })
+            .collect();
+        (batches.iter().map(RecordBatch::num_rows).collect(), values)
+    }
+
+    #[test]
+    fn whole_chunks_joins_small_batches() {
+        assert_eq!(regroup(&[3, 3, 3], 4), (vec![4, 4, 1], (0..9).collect()));
+    }
+
+    #[test]
+    fn whole_chunks_splits_a_large_batch() {
+        assert_eq!(regroup(&[8], 4), (vec![4, 4], (0..8).collect()));
+    }
+
+    #[test]
+    fn whole_chunks_keeps_a_short_last_batch() {
+        assert_eq!(regroup(&[2], 4), (vec![2], vec![0, 1]));
+    }
+
+    #[test]
+    fn whole_chunks_gives_no_batch_for_no_input() {
+        assert_eq!(regroup(&[], 4), (vec![], vec![]));
+        assert_eq!(regroup(&[0, 0], 4), (vec![], vec![]));
+    }
+
+    #[test]
+    fn whole_chunks_passes_an_error_on() {
+        let mut input = int_batches(&[3]);
+        input.push(Err(anyhow::anyhow!("a broken batch")));
+        let mut chunks = WholeChunks::new(input.into_iter(), 4);
+        assert!(chunks.next().unwrap().is_err());
     }
 
     #[test]
@@ -664,8 +885,187 @@ mod tests {
         )
         .unwrap();
 
-        let file = netcdf::open(&path).unwrap();
-        let chunking = file.variable("value").unwrap().chunking().unwrap();
-        assert_eq!(chunking, Some(vec![10]));
+        assert_eq!(chunk_shape(&open(&path), "value"), Some(vec![10]));
+    }
+
+    /// Write `batches` with a plain [`Writer`].
+    fn write_plain(
+        path: &Path,
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> anyhow::Result<()> {
+        let mut writer = Writer::<DefaultEncoder>::new(path, schema)?;
+        for batch in batches {
+            writer.write_record_batch(batch)?;
+        }
+        writer.close()
+    }
+
+    fn name_batch(names: Vec<Option<&str>>) -> (SchemaRef, RecordBatch) {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, true)]));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(names))]).unwrap();
+        (schema, batch)
+    }
+
+    #[test]
+    fn a_null_string_is_written_as_an_empty_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("null.nc");
+        let (schema, batch) = name_batch(vec![Some("a"), None, Some("c")]);
+        write_plain(&path, schema, vec![batch]).unwrap();
+
+        assert_eq!(strings(&open(&path), "name"), ["a", "", "c"]);
+    }
+
+    #[test]
+    fn a_string_is_cut_at_an_interior_nul() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nul.nc");
+        let (schema, batch) = name_batch(vec![Some("ab\0cd")]);
+        write_plain(&path, schema, vec![batch]).unwrap();
+
+        assert_eq!(strings(&open(&path), "name"), ["ab"]);
+    }
+
+    #[test]
+    fn a_fixed_size_string_is_a_char_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("char.nc");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "code",
+            DataType::FixedSizeBinary(4),
+            true,
+        )]));
+        let codes = FixedSizeBinaryArray::try_from_iter(
+            [b"ab\0\0".as_slice(), b"wxyz".as_slice()].into_iter(),
+        )
+        .unwrap();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(codes)]).unwrap();
+        write_plain(&path, schema, vec![batch]).unwrap();
+
+        let file = open(&path);
+        let code = file.variable("code").unwrap();
+        assert_eq!(code.dimensions.len(), 2);
+        assert_eq!(file.dimension_len(&code.dimensions[1]), Some(4));
+        assert_eq!(code.get_raw_values(..).unwrap(), b"ab\0\0wxyz");
+    }
+
+    #[test]
+    fn a_result_with_zero_rows_gives_a_file_that_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero.nc");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            true,
+        )]));
+        write_plain(&path, schema, vec![]).unwrap();
+
+        assert_eq!(open(&path).variable("value").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_failed_create_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("out.nc");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            true,
+        )]));
+        assert!(Writer::<DefaultEncoder>::new(&path, schema).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn an_unsupported_column_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("date.nc");
+        let schema = Arc::new(Schema::new(vec![Field::new("day", DataType::Date32, true)]));
+        assert!(Writer::<DefaultEncoder>::new(&path, schema).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_writer_dropped_without_close_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dropped.nc");
+        let (schema, batch) = name_batch(vec![Some("a")]);
+        let mut writer = Writer::<DefaultEncoder>::new(&path, schema).unwrap();
+        writer.write_record_batch(batch).unwrap();
+        drop(writer);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn an_attribute_above_64_kib_fails_and_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.nc");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Float64, true),
+            Field::new("temp.comment", DataType::Utf8, true),
+        ]));
+        let comment = "x".repeat(70_000);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(StringArray::from(vec![comment.as_str()])),
+            ],
+        )
+        .unwrap();
+        let options = NetcdfWriterOptions {
+            combine_attrs: Some(CombineAttrs::Identical),
+            ..Default::default()
+        };
+
+        let error = write_with(&path, schema, vec![batch], options).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("comment"), "{text}");
+        assert!(text.contains("temp"), "{text}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// Write a file with one Float64 variable and the global attribute `title`.
+    fn write_title(path: &Path, title: AttributeValue) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            true,
+        )]));
+        let mut writer = Writer::<DefaultEncoder>::new(path, schema).unwrap();
+        let target = AttributeTarget::Global {
+            name: "title".to_string(),
+        };
+        writer.put_attributes(&[(target, title)]).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn a_text_attribute_is_cut_at_an_interior_nul() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("title.nc");
+        write_title(&path, AttributeValue::Str("ab\0cd".to_string()));
+
+        assert_eq!(
+            str_attribute(&open(&path), None, "title").as_deref(),
+            Some("ab")
+        );
+    }
+
+    #[test]
+    fn each_text_of_a_list_attribute_is_cut_at_an_interior_nul() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("titles.nc");
+        let titles = vec!["x\0y".to_string(), "z".to_string()];
+        write_title(&path, AttributeValue::Strs(titles));
+
+        let file = open(&path);
+        let value = &file.attribute("title").unwrap().value;
+        assert_eq!(
+            value,
+            &AttributeValue::Strs(vec!["x".to_string(), "z".to_string()])
+        );
     }
 }

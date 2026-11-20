@@ -14,7 +14,6 @@ use beacon_core::embedded::Database;
 use beacon_core::query::output::{Output, OutputFormat};
 use beacon_core::query::{InnerQuery, Query};
 use beacon_core::query_result::QueryOutput;
-use beacon_core::AuthIdentity;
 use futures::TryStreamExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
@@ -23,19 +22,12 @@ use crate::errors::{map_engine_error, not_supported, programming_error};
 use crate::result::ResultSet;
 use crate::runtime::block_on;
 
-/// Runs `sql` as `identity` and collects the whole result, with the GIL released while the
-/// engine works.
-pub fn run_sql(
-    py: Python<'_>,
-    database: &Arc<Database>,
-    identity: &AuthIdentity,
-    sql: String,
-) -> PyResult<ResultSet> {
+/// Runs `sql` and collects the whole result, with the GIL released while the engine works.
+pub fn run_sql(py: Python<'_>, database: &Arc<Database>, sql: String) -> PyResult<ResultSet> {
     let database = database.clone();
-    let identity = identity.clone();
 
     let (schema, batches) = block_on(py, async move {
-        let stream = database.sql(sql, identity).await?.into_record_stream()?;
+        let stream = database.sql(sql).await?.into_record_stream()?;
         let schema = stream.schema();
         let batches: Vec<RecordBatch> = stream.try_collect().await?;
         Ok::<_, anyhow::Error>((schema, batches))
@@ -50,14 +42,12 @@ pub fn run_sql(
 pub fn run_query_collected(
     py: Python<'_>,
     database: &Arc<Database>,
-    identity: &AuthIdentity,
     query: Query,
 ) -> PyResult<ResultSet> {
     let database = database.clone();
-    let identity = identity.clone();
 
     let (schema, batches) = block_on(py, async move {
-        let stream = database.run_query(query, identity).await?.into_record_stream()?;
+        let stream = database.run_query(query).await?.into_record_stream()?;
         let schema = stream.schema();
         let batches: Vec<RecordBatch> = stream.try_collect().await?;
         Ok::<_, anyhow::Error>((schema, batches))
@@ -74,16 +64,14 @@ pub fn run_query_collected(
 pub fn run_sql_with_params(
     py: Python<'_>,
     database: &Arc<Database>,
-    identity: &AuthIdentity,
     sql: String,
     params: Vec<datafusion::scalar::ScalarValue>,
 ) -> PyResult<ResultSet> {
     let database = database.clone();
-    let identity = identity.clone();
 
     let (schema, batches) = block_on(py, async move {
         let stream = database
-            .sql_with_params(sql, params, identity)
+            .sql_with_params(sql, params)
             .await?
             .into_record_stream()?;
         let schema = stream.schema();
@@ -100,17 +88,11 @@ pub fn run_sql_with_params(
 /// The stream carries its schema before the first poll, so this sets up the physical plan but
 /// runs no row work. It is not free — a `ListingTable` may list files at plan time — which is
 /// why `Relation.columns`/`types` document a cost.
-pub fn schema_of(
-    py: Python<'_>,
-    database: &Arc<Database>,
-    identity: &AuthIdentity,
-    sql: String,
-) -> PyResult<SchemaRef> {
+pub fn schema_of(py: Python<'_>, database: &Arc<Database>, sql: String) -> PyResult<SchemaRef> {
     let database = database.clone();
-    let identity = identity.clone();
 
     block_on(py, async move {
-        let stream = database.sql(sql, identity).await?.into_record_stream()?;
+        let stream = database.sql(sql).await?.into_record_stream()?;
         Ok::<_, anyhow::Error>(stream.schema())
     })?
     .map_err(map_engine_error)
@@ -124,7 +106,6 @@ pub fn schema_of(
 pub fn run_to_file(
     py: Python<'_>,
     database: &Arc<Database>,
-    identity: &AuthIdentity,
     sql: String,
     format: OutputFormat,
     destination: PathBuf,
@@ -140,7 +121,6 @@ pub fn run_to_file(
     }
 
     let database = database.clone();
-    let identity = identity.clone();
 
     block_on(py, async move {
         let query = Query {
@@ -148,12 +128,14 @@ pub fn run_to_file(
             output: Some(Output { format }),
             params: Vec::new(),
         };
-        let result = database.run_query(query, identity).await?;
+        let result = database.run_query(query).await?;
         match result.query_output {
             QueryOutput::File(file) => {
-                tokio::fs::copy(file.path(), &destination).await.map_err(|e| {
-                    anyhow::anyhow!("failed to write output to {}: {e}", destination.display())
-                })?;
+                tokio::fs::copy(file.path(), &destination)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to write output to {}: {e}", destination.display())
+                    })?;
                 Ok(())
             }
             // An output format always produces a file; a stream here is an engine invariant break.
@@ -172,7 +154,11 @@ pub fn run_to_file(
 fn url_scheme(path: &std::path::Path) -> Option<String> {
     let text = path.to_str()?;
     let (scheme, _rest) = text.split_once("://")?;
-    if !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') {
+    if !scheme.is_empty()
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+    {
         Some(scheme.to_string())
     } else {
         None

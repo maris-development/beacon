@@ -4,11 +4,6 @@ version.workspace = true
 edition = "2021"
 
 rust-version.workspace = true
-[features]
-# Build netCDF-c and HDF5 from source and link them statically. Forwarded to
-# `beacon-arrow-netcdf` (the reader this crate delegates to by default); off by default. Used for
-# the portable Python wheels.
-static = ["beacon-arrow-netcdf/static"]
 
 [dependencies]
 arrow = { workspace = true }
@@ -30,12 +25,11 @@ chrono = { workspace = true }
 oxcdf = { workspace = true }
 oxcdf-hdf5 = { workspace = true }
 
-# The default read path, and every write path. A NetCDF-4 file *is* HDF5, and netCDF-c's HDF5
-# dispatch also opens plain HDF5 files. So this crate owns the HDF5 *identity* (names, `.h5`/`.hdf5`
-# extensions, `STORED AS {h5,hdf5}`, `read_hdf5`) and delegates to beacon-arrow-netcdf unless the
-# Rust reader is turned on.
+# Every write path, and the conversion code of the reader. A NetCDF-4 file is HDF5. This crate owns
+# the HDF5 identity (names, `.h5`/`.hdf5` extensions, `STORED AS {h5,hdf5}`, `read_hdf5`).
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-nd-execution = { path = "../../beacon-nd-execution" }
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-common = { path = "../../beacon-common" }
 

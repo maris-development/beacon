@@ -28,6 +28,10 @@ pub struct NetcdfOptions {
     /// instead of failing the query.
     #[serde(default)]
     pub skip_unbroadcastable: bool,
+    /// Skip a file the reader cannot open, with a warning, instead of failing
+    /// the query.
+    #[serde(default)]
+    pub skip_invalid_files: bool,
     /// Columns to use as NetCDF dimensions when **writing**.
     ///
     /// * `None` / empty → flat output via [`NetCDFSink`](super::sink::NetCDFSink)

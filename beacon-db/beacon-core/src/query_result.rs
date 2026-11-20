@@ -12,6 +12,28 @@ pub struct QueryResult {
 }
 
 impl QueryResult {
+    /// A result with no columns and no rows, and no entry in the query metrics.
+    ///
+    /// For a statement that the host application runs itself, such as a statement
+    /// that manages the users of a server.
+    pub fn empty() -> Self {
+        let schema = Arc::new(arrow::datatypes::Schema::empty());
+        let stream = Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema,
+                futures::stream::empty(),
+            ),
+        );
+        Self {
+            query_output: QueryOutput::Stream(ArrowOutputStream {
+                stream,
+                recorder: None,
+                recording: None,
+            }),
+            query_id: uuid::Uuid::new_v4(),
+        }
+    }
+
     /// Extract the (metrics-tracked) record-batch stream, erroring if the result
     /// is file-backed. Used by transports that only stream results (e.g. Flight SQL).
     pub fn into_record_stream(self) -> anyhow::Result<ArrowOutputStream> {
@@ -108,8 +130,11 @@ impl QueryOutputFile {
 /// recording the query's metrics when it ends.
 pub struct ArrowOutputStream {
     stream: SendableRecordBatchStream,
-    metrics: Arc<MetricsTracker>,
-    store: Arc<crate::query_metrics_store::QueryMetricsStore>,
+    /// The metrics of the query and the store that records them. `None` records nothing.
+    recorder: Option<(
+        Arc<MetricsTracker>,
+        Arc<crate::query_metrics_store::QueryMetricsStore>,
+    )>,
     /// The in-flight metrics write, once the inner stream has ended.
     ///
     /// Recording is a write to a managed table, so it cannot happen inline in a
@@ -130,8 +155,7 @@ impl ArrowOutputStream {
     ) -> Self {
         Self {
             stream,
-            metrics,
-            store,
+            recorder: Some((metrics, store)),
             recording: None,
         }
     }
@@ -160,24 +184,26 @@ impl Stream for ArrowOutputStream {
         }
 
         let poll = std::pin::Pin::new(&mut self.stream).poll_next(cx);
+        let Some((metrics, store)) = &self.recorder else {
+            return poll;
+        };
         match &poll {
             // On receiving a batch, update the output metrics.
             std::task::Poll::Ready(Some(Ok(batch))) => {
-                self.metrics.add_output_rows(batch.num_rows() as u64);
-                self.metrics
-                    .add_output_bytes(batch.get_array_memory_size() as u64);
+                metrics.add_output_rows(batch.num_rows() as u64);
+                metrics.add_output_bytes(batch.get_array_memory_size() as u64);
             }
             // When the stream is finished, record the consolidated metrics. The
             // write is polled on the next turn (below), so this poll yields
             // rather than reporting the end straight away.
             std::task::Poll::Ready(None) => {
-                let consolidated = self.metrics.get_consolidated_metrics();
+                let consolidated = metrics.get_consolidated_metrics();
                 tracing::info!(
                     "Stream output size in bytes: {}",
                     consolidated.result_size_in_bytes
                 );
                 tracing::info!("Stream output rows: {}", consolidated.result_num_rows);
-                let store = self.store.clone();
+                let store = store.clone();
                 self.recording = Some(Box::pin(async move { store.record(consolidated).await }));
                 cx.waker().wake_by_ref();
                 return std::task::Poll::Pending;

@@ -201,7 +201,9 @@ impl LanceWarehouse {
             .as_ref()
             .map(|u| u.path().trim_start_matches('/').to_string())
             .unwrap_or_default();
-        object_store::path::Path::from(path)
+        // `Url::path` is percent-encoded; the store keys hold the decoded name.
+        object_store::path::Path::from_url_path(&path)
+            .unwrap_or_else(|_| object_store::path::Path::from(path))
     }
 
     /// The write lock guarding a given dataset URI (created on first use).
@@ -254,6 +256,16 @@ mod tests {
         assert_eq!(
             LanceWarehouse::object_path(uri).as_ref(),
             "lance/beacon/orders.lance"
+        );
+    }
+
+    /// The prefix must match the store keys, which hold the decoded name.
+    #[test]
+    fn object_path_decodes_the_uri_path() {
+        let uri = warehouse().table_uri(&["beacon".to_string()], "odd name é");
+        assert_eq!(
+            LanceWarehouse::object_path(&uri).as_ref(),
+            "lance/beacon/odd name é.lance"
         );
     }
 

@@ -1,0 +1,87 @@
+name: sdk-asan
+
+# Checks the unsafe FFI code of the plugin SDK. Only the SDK and the beacon-ffi crates run, so the
+# jobs stay short.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "beacon-db/beacon-plugin/beacon-plugin-sdk/**"
+      - "beacon-db/beacon-ffi/**"
+      - "Cargo.lock"
+      - ".github/workflows/sdk-asan.yml"
+  pull_request:
+    paths:
+      - "beacon-db/beacon-plugin/beacon-plugin-sdk/**"
+      - "beacon-db/beacon-ffi/**"
+      - "Cargo.lock"
+      - ".github/workflows/sdk-asan.yml"
+  workflow_dispatch:
+
+# A new push to a PR stops the old run. Runs on main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Miri and the sanitizers need nightly. A pinned date keeps a nightly regression out of CI.
+  NIGHTLY: nightly-2026-10-20
+  # The crates with the FFI tables, and the SDK that re-exports them.
+  FFI_CRATES: >-
+    -p beacon-ffi-abi -p beacon-ffi-object-store -p beacon-ffi-scalar-functions
+    -p beacon-ffi-file-format -p beacon-ffi-host -p beacon-ffi-table-type -p beacon-plugin-sdk
+
+jobs:
+  miri:
+    name: Miri (beacon-plugin-sdk)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (${{ env.NIGHTLY }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: miri, rust-src
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: miri
+
+      - name: Run Miri
+        # DataFusion reads the clock, which Miri blocks in isolation mode.
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo +${{ env.NIGHTLY }} miri test --locked ${{ env.FFI_CRATES }} --lib
+
+  asan:
+    name: AddressSanitizer (beacon-plugin-sdk)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -Zsanitizer=address
+      ASAN_OPTIONS: detect_leaks=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (${{ env.NIGHTLY }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: rust-src
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: asan
+
+      # --target keeps the sanitizer out of build scripts and proc macros. build-std instruments std too.
+      - name: Run tests with AddressSanitizer
+        run: >
+          cargo +${{ env.NIGHTLY }} test --locked ${{ env.FFI_CRATES }} --lib
+          -Zbuild-std --target x86_64-unknown-linux-gnu

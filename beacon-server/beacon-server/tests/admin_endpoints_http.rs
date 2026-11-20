@@ -364,10 +364,9 @@ async fn table_comments_get_put_and_delete() {
     let (router, harness, cfg) = app(config(false)).await;
     let admin = admin(&cfg);
     harness.server
-        .runtime()
         .run_query(
             beacon_core::query::Query::sql("CREATE TABLE obs (id BIGINT, name VARCHAR)".to_string()),
-            beacon_core::AuthIdentity::system(),
+            beacon_auth::AuthIdentity::system(),
         )
         .await
         .expect("create table");
@@ -405,10 +404,9 @@ async fn table_comments_reject_an_unknown_column_or_table() {
     let (router, harness, cfg) = app(config(false)).await;
     let admin = admin(&cfg);
     harness.server
-        .runtime()
         .run_query(
             beacon_core::query::Query::sql("CREATE TABLE obs (id BIGINT)".to_string()),
-            beacon_core::AuthIdentity::system(),
+            beacon_auth::AuthIdentity::system(),
         )
         .await
         .expect("create table");

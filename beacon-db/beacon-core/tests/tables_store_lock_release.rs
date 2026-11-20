@@ -13,7 +13,6 @@ use std::path::Path;
 use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
-use beacon_core::AuthIdentity;
 use beacon_datafusion_ext::listing_factory::RootStore;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use futures::TryStreamExt;
@@ -43,7 +42,7 @@ fn seed_src_csv(root: &Path) {
 }
 
 async fn sql(rt: &Runtime, q: &str) {
-    rt.run_query(Query::sql(q.to_string()), AuthIdentity::system())
+    rt.run_query(Query::sql(q.to_string()), beacon_core::plan_validator::allow_all())
         .await
         .unwrap_or_else(|e| panic!("{q}: {e}"))
         .into_record_stream()

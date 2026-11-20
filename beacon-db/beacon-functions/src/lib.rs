@@ -6,13 +6,12 @@ use tokio::runtime::Handle;
 
 use crate::{
     blue_cloud::register_blue_cloud_udfs, file_formats::register_table_functions,
-    metadata::register_metadata_functions, util::register_util_udfs,
+    util::register_util_udfs,
 };
 
 pub mod blue_cloud;
 pub mod file_formats;
 pub mod listing;
-pub mod metadata;
 pub mod util;
 
 /// Registers every Beacon UDF and table function on `session_context`.
@@ -36,15 +35,10 @@ pub fn register_functions(
     register_util_udfs(session_context.as_ref());
     register_blue_cloud_udfs(session_context.as_ref());
 
-    // Both builders only *construct* their functions; registering them on the session
+    // The builder only *constructs* the functions; registering them on the session
     // is this function's job.
-    let mut table_functions =
-        register_metadata_functions(session_context.clone(), runtime_handle.clone());
-    table_functions.extend(register_table_functions(
-        runtime_handle,
-        session_context.clone(),
-        file_formats,
-    ));
+    let table_functions =
+        register_table_functions(runtime_handle, session_context.clone(), file_formats);
 
     for table_function in table_functions.iter() {
         session_context.register_udtf(

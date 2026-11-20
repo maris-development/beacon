@@ -8,8 +8,9 @@ use beacon_datafusion_ext::consts::TMP_STORE_URL_OBJECT_URL;
 use datafusion::prelude::SessionContext;
 use futures::TryStreamExt;
 
+use beacon_sql_parser::{beacon_parser::BeaconParser, statement::BeaconStatement};
 use crate::{
-    parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
+    plan_validator::{PlanFacts, PlanValidator, QueryLimits, TableFacts},
     query_cpu::QueryCpuMeter,
     query_executor::QueryExecutor,
     query_metrics_store::QueryMetricsStore,
@@ -18,14 +19,17 @@ use crate::{
 
 /// Beacon's single execution layer.
 ///
-/// The interface is deliberately narrow: authenticate a caller, then run a query.
+/// The interface is deliberately narrow: run a query, with a [`PlanValidator`] that
+/// permits or refuses the plan. The runtime knows no users and no roles. A host
+/// application gives the validator of its caller, and the embedded database gives
+/// [`AllowAll`](crate::plan_validator::AllowAll).
 /// Most of what a consumer wants to know — comments, crawlers, the tables in a
 /// schema — is reachable as SQL (`beacon.system.comments`, `SHOW CRAWLERS`, a scan), so
 /// they ask for it in a query and map the resulting `RecordBatch`es into their
 /// own types rather than calling a typed accessor per thing.
 ///
-/// What is left here is what a caller *cannot* ask for themselves: reads of the
-/// metadata schemas, which are the super-user's alone ([`Self::visible_tables`],
+/// What is left here is what a caller *cannot* always ask for themselves: reads of the
+/// metadata schemas, which a validator can refuse ([`Self::visible_tables`],
 /// [`Self::show_functions`]), a table's schema straight from its provider
 /// ([`Self::table_arrow_schema`]), and the runtime's own bookkeeping
 /// ([`Self::get_query_metrics`]). Those answer in Arrow and in beacon's own
@@ -44,19 +48,21 @@ pub struct Runtime {
     /// Where a completed query's metrics are written: the managed table that
     /// `beacon.system.query_metrics` exposes, which is how callers read them.
     pub(crate) query_metrics: Arc<QueryMetricsStore>,
-    /// Authentication + authorization context (users, roles, grants). Shared, owned by the runtime.
-    pub(crate) auth: Arc<beacon_auth::AuthContext>,
-
-    /// Whether table-level grants are enforced for non-super-users.
-    pub(crate) auth_enforce: bool,
+    /// The `beacon.system` schema. The catalog holds the same provider.
+    pub(crate) system_schema: Arc<crate::system_schema::SystemSchemaProvider>,
 
     /// Whether this runtime was opened read-only: any statement that does not produce a result set
     /// (writes, DDL/DML, and beacon's side-effecting extension statements) is refused.
     pub(crate) read_only: bool,
 
-    /// The background file-statistics service, when enabled. Held so the runtime
-    /// owns its timer: dropping the runtime aborts it.
-    pub(crate) file_stats: Option<Arc<crate::file_stats::FileStatsService>>,
+    /// The file-statistics engine, when enabled. The session config holds the
+    /// same engine; dropping the runtime stops its refresh tasks.
+    pub(crate) file_stats: Option<beacon_file_statistics::FileStatistics>,
+
+    /// The installed function plugins. The session config holds the same registry.
+    pub(crate) plugins: Arc<crate::plugins::PluginRegistry>,
+    /// The plugins directory, the only store of the plugins. `None` disables plugins.
+    pub(crate) plugins_dir: Option<PathBuf>,
 
     /// tmp directory for storing temporary files (e.g. for query output)
     pub(crate) tmp_dir: PathBuf,
@@ -67,74 +73,86 @@ impl Runtime {
         env!("CARGO_PKG_VERSION")
     }
 
-    /// The runtime's auth context (users, roles, grants).
-    pub fn auth(&self) -> &Arc<beacon_auth::AuthContext> {
-        &self.auth
-    }
-
-    /// Resolves a credential to an identity, erroring when it is not valid.
-    pub async fn authenticate(
-        &self,
-        credential: &beacon_auth::Credential,
-    ) -> anyhow::Result<beacon_auth::AuthIdentity> {
-        self.auth.authenticate(credential).await
-    }
-
-    /// Resolves the anonymous principal's identity, erroring when anonymous access is disabled.
-    pub async fn authenticate_anonymous(&self) -> anyhow::Result<beacon_auth::AuthIdentity> {
-        self.auth.authenticate_anonymous().await
-    }
-
-    /// Whether anonymous access is enabled.
-    pub fn anonymous_enabled(&self) -> bool {
-        self.auth.anonymous_enabled()
-    }
-
-    /// Whether reads of `identity` are checked against its roles.
-    pub fn checks_reads_of(&self, identity: &beacon_auth::AuthIdentity) -> bool {
-        self.auth_enforce && !identity.is_super_user
-    }
-
-    /// Whether `identity` may read the file at `path`, relative to the datasets root.
+    /// Adds the read-only table `beacon.system.<name>` of the host application.
     ///
-    /// For a transport that lists files on a caller's behalf and shows only what the caller
-    /// could go on to read.
-    pub fn can_read_path(&self, identity: &beacon_auth::AuthIdentity, path: &str) -> bool {
-        !self.checks_reads_of(identity)
-            || self.auth.is_allowed(
-                &identity.roles,
-                beacon_auth::Privilege::Select,
-                &beacon_auth::ConcreteTarget::Path(path.to_string()),
-            )
+    /// The server adds its users and roles this way. Build the table with
+    /// [`SystemTable`](crate::SystemTable).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The table name in the `system` schema
+    /// * `table` - The table provider
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the schema already holds a table with this name.
+    pub fn register_system_table(
+        &self,
+        name: &str,
+        table: Arc<dyn datafusion::catalog::TableProvider>,
+    ) -> anyhow::Result<()> {
+        self.system_schema.add_table(name, table)
+    }
+
+    /// Whether the catalog holds `table`. The reserved `__beacon_*` tables count too, although
+    /// no catalog list shows them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog or the schema of `table` does not exist.
+    pub fn table_exists(
+        &self,
+        table: impl Into<datafusion::sql::TableReference>,
+    ) -> anyhow::Result<bool> {
+        Ok(self.session_ctx.table_exist(table.into())?)
+    }
+
+    /// The facts of `table` that a [`PlanValidator`] checks, with each spelling of its name.
+    pub fn table_facts(&self, table: impl Into<datafusion::sql::TableReference>) -> TableFacts {
+        TableFacts::new(table.into(), &self.session_ctx)
     }
 
     /// Execute a client query (JSON or SQL) and return a metrics-tracked result.
     ///
     /// The single entry point for query execution: the JSON form is compiled by
     /// beacon's query compiler, the SQL form goes through beacon's SQL parser, and
-    /// both are lowered to a `LogicalPlan` and validated against the caller's
-    /// privileges (`is_super_user`). The plan then runs through the unified
+    /// both are lowered to a `LogicalPlan`. `validator` then permits or refuses
+    /// the plan. The plan then runs through the unified
     /// `create_physical_plan -> execute_stream` pipeline. Without an `output`
     /// format the result is streamed (metrics recorded as the client drains);
     /// with one, the result is written to a temporary file in that format and
     /// returned as a file download.
     ///
-    /// The CPU budget of the query comes from the `query_cpu_limit_ms` setting
-    /// of the caller's roles; see [`crate::query_cpu::budget_for`]. It covers
-    /// planning and execution. A query that goes over it fails with a "CPU
-    /// budget" error.
-    #[tracing::instrument(skip(self, query, identity))]
+    /// The limits of the query come from [`PlanValidator::limits`]. The CPU
+    /// budget covers planning and execution. A query that goes over it fails
+    /// with a "CPU budget" error.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The JSON or SQL query, with its output format and parameters
+    /// * `validator` - The access check of the caller
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query does not plan, when `validator` refuses
+    /// the plan, when a read-only database gets a write, or when execution fails.
+    #[tracing::instrument(skip(self, query, validator))]
     pub async fn run_query(
         &self,
         query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
+        validator: Arc<dyn PlanValidator>,
     ) -> anyhow::Result<QueryResult> {
-        let meter = QueryCpuMeter::new(crate::query_cpu::budget_for(&self.auth, &identity));
+        let limits = validator.limits();
+        let meter = QueryCpuMeter::new(limits.cpu_budget);
         // Planning reads metadata too, so the whole query moves to the executor.
         let runtime = self.clone();
         let metered = meter.meter_future({
             let meter = meter.clone();
-            async move { runtime.run_query_on_executor(query, identity, meter).await }
+            async move {
+                runtime
+                    .run_query_on_executor(query, validator.as_ref(), limits, meter)
+                    .await
+            }
         });
         self.executor.run(metered).await
     }
@@ -143,7 +161,8 @@ impl Runtime {
     async fn run_query_on_executor(
         &self,
         query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
+        validator: &dyn PlanValidator,
+        limits: QueryLimits,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
         let query_id = uuid::Uuid::new_v4();
@@ -164,7 +183,9 @@ impl Runtime {
                 .with_param_values(params)
                 .map_err(|e| anyhow::anyhow!("failed to bind query parameters: {e}"))?;
         }
-        crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
+        validator
+            .validate(&PlanFacts::new(&plan, &self.session_ctx))
+            .await?;
         // A read-only database refuses anything that would mutate it. `plan_produces_result_set`
         // is the read/write discriminator: reads (SELECT, VALUES, `SHOW …`) produce rows; every
         // write (DDL/DML/COPY/SET and beacon's side-effecting extension statements, e.g. `ATTACH`,
@@ -174,15 +195,8 @@ impl Runtime {
                 "this database was opened read-only; writes are not permitted on this connection"
             );
         }
-        crate::statement_plan::authorize_logical_plan(
-            &plan,
-            &self.session_ctx,
-            &self.auth,
-            &identity,
-            self.auth_enforce,
-        )
-        .await?;
 
+        let metrics = MetricsTracker::new(query_json, query_id, validator.caller());
         match output {
             Some(output) => {
                 // An output format wraps the plan in a `COPY TO`, which only
@@ -195,41 +209,26 @@ impl Runtime {
                          (e.g. SELECT); this statement produces no result set to export"
                     );
                 }
-                self.run_query_to_file(
-                    plan,
-                    output,
-                    query_id,
-                    query_json,
-                    &identity,
-                    cpu_meter,
-                )
-                .await
+                self.run_query_to_file(plan, output, metrics, limits.output_row_limit, cpu_meter)
+                    .await
             }
             None => {
-                self.run_query_to_stream(
-                    plan,
-                    query_id,
-                    query_json,
-                    &identity,
-                    cpu_meter,
-                )
-                .await
+                self.run_query_to_stream(plan, metrics, limits.output_row_limit, cpu_meter)
+                    .await
             }
         }
     }
 
     /// Stream the plan's results, wrapping the stream so output rows/bytes are
-    /// recorded under `query_id` as the client drains it.
+    /// recorded in `metrics` as the client drains it.
     async fn run_query_to_stream(
         &self,
         plan: datafusion::logical_expr::LogicalPlan,
-        query_id: uuid::Uuid,
-        query_json: serde_json::Value,
-        identity: &beacon_auth::AuthIdentity,
+        metrics: Arc<MetricsTracker>,
+        output_row_limit: Option<u64>,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
-        let output_row_limit = crate::query_row_limit::row_limit_for(&self.auth, identity);
-        let metrics = MetricsTracker::new(query_json, query_id, &identity.username);
+        let query_id = metrics.query_id;
         metrics.set_cpu_meter(cpu_meter.clone());
         metrics.set_logical_plan(&plan);
         // Record the optimized logical plan alongside the parsed one. `optimize`
@@ -263,26 +262,20 @@ impl Runtime {
 
     /// Write the plan's results to a temporary file in the requested `output`
     /// format (via a `COPY TO`) and return a file download. The file write is
-    /// driven to completion here and its metrics recorded under `query_id`.
+    /// driven to completion here and its metrics recorded in `metrics`.
     async fn run_query_to_file(
         &self,
         plan: datafusion::logical_expr::LogicalPlan,
         output: crate::query::output::Output,
-        query_id: uuid::Uuid,
-        query_json: serde_json::Value,
-        identity: &beacon_auth::AuthIdentity,
+        metrics: Arc<MetricsTracker>,
+        output_row_limit: Option<u64>,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<QueryResult> {
-        let output_row_limit = crate::query_row_limit::row_limit_for(&self.auth, identity);
+        let query_id = metrics.query_id;
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         //
-        // `self.tmp_dir` is load-bearing coupling: it is both the tmp object store's
-        // root (where object-store writers land `tmp://<name>`) and the NetCDF/ODV
-        // factory's `output_dir` (registered from `storage.tmp_dir` in
-        // `register_file_formats`, where the native sinks reconstruct
-        // `output_dir.join(<name>)`). They MUST be the same directory or the written
-        // bytes are invisible to the returned `QueryOutputFile`.
+        // `self.tmp_dir` MUST be the tmp store root, or `QueryOutputFile` cannot see the bytes.
         let (copy_plan, output_file) = output
             .parse(
                 &self.session_ctx,
@@ -292,7 +285,6 @@ impl Runtime {
             )
             .await?;
 
-        let metrics = MetricsTracker::new(query_json, query_id, &identity.username);
         metrics.set_cpu_meter(cpu_meter.clone());
         metrics.set_logical_plan(&copy_plan);
         if let Ok(optimized) = self.session_ctx.state().optimize(&copy_plan) {
@@ -328,7 +320,8 @@ impl Runtime {
         })
     }
 
-    /// A registered table's Arrow schema, taken from the table provider itself.
+    /// A registered table's Arrow schema, taken from the table provider itself, when
+    /// `validator` permits the read.
     ///
     /// Deliberately **not** `SELECT * FROM t LIMIT 0`: planning a scan forces the
     /// whole read path to resolve, and for an N-dimensional table whose variables
@@ -341,50 +334,25 @@ impl Runtime {
     /// metadata; see [`TableComments::apply`](crate::comments::TableComments::apply).
     /// To get them, Beacon reads the small `comments.json` sidecar of the table.
     ///
-    /// Authorization matches the read path in
-    /// [`authorize_logical_plan`](crate::statement_plan::authorize_logical_plan):
-    /// the internal `__beacon_*` tables and the metadata schemas
-    /// (`beacon.system`, `information_schema`) are super-user only regardless of
-    /// enforcement, and otherwise a non-super-user needs `Select` on the table. A
-    /// schema is metadata about data the caller may not read, so it is gated the
-    /// same way the rows are.
+    /// A schema is metadata about data the caller may not read, so the same check
+    /// applies as for the rows.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table reference
+    /// * `validator` - The access check of the caller
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when [`PlanValidator::check_table`] refuses the table or
+    /// when the table does not resolve.
     pub async fn table_arrow_schema(
         &self,
         table: impl Into<datafusion::sql::TableReference>,
-        identity: &beacon_auth::AuthIdentity,
+        validator: &dyn PlanValidator,
     ) -> anyhow::Result<arrow::datatypes::SchemaRef> {
-        use beacon_auth::Privilege;
-        use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
-
         let table: datafusion::sql::TableReference = table.into();
-
-        if !identity.is_super_user {
-            if table.table().starts_with(INTERNAL_TABLE_PREFIX) {
-                anyhow::bail!(
-                    "permission denied: the internal '{INTERNAL_TABLE_PREFIX}*' tables are \
-                     restricted to the super-user"
-                );
-            }
-            if let Some(schema) = table
-                .schema()
-                .filter(|s| crate::system_schema::is_metadata_schema(s))
-            {
-                anyhow::bail!(
-                    "permission denied: the '{schema}' schema is restricted to the super-user"
-                );
-            }
-        }
-
-        if self.auth_enforce
-            && !identity.is_super_user
-            && !self.auth.is_allowed_any(
-                &identity.roles,
-                Privilege::Select,
-                &crate::statement_plan::table_targets(&table, &self.session_ctx),
-            )
-        {
-            anyhow::bail!("permission denied: SELECT on table {}", table.table());
-        }
+        validator.check_table(&TableFacts::new(table.clone(), &self.session_ctx))?;
 
         let provider = self
             .session_ctx
@@ -407,20 +375,21 @@ impl Runtime {
         (options.default_catalog, options.default_schema)
     }
 
-    /// The `information_schema.tables` rows `identity` is entitled to see, as
-    /// Arrow batches — `table_catalog`, `table_schema`, `table_name`,
-    /// `table_type`, ordered by the first three.
+    /// The `information_schema.tables` rows that `validator` permits, as Arrow
+    /// batches — `table_catalog`, `table_schema`, `table_name`, `table_type`,
+    /// ordered by the first three.
     ///
-    /// This is how a transport lists the catalog. It cannot query
-    /// `information_schema` as the caller any more — that schema is the
-    /// super-user's — so the runtime reads it as the engine and drops every row
-    /// [`Self::can_list_table`] rejects: no metadata schemas, no internal tables,
-    /// and, with grant enforcement on, only the tables the caller's roles grant
-    /// `Select` on. A listing therefore shows exactly what the caller could go on
-    /// to read.
+    /// This is how a transport lists the catalog for a caller that cannot read
+    /// `information_schema`. The runtime reads it as the engine and drops every
+    /// row that [`PlanValidator::check_table`] refuses. A listing therefore shows
+    /// exactly what the caller could go on to read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog read fails.
     pub async fn visible_tables(
         &self,
-        identity: &beacon_auth::AuthIdentity,
+        validator: &dyn PlanValidator,
     ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
         // Read directly through the session rather than `run_query`: this is the
         // engine reading its own catalog on a caller's behalf, so it is neither
@@ -437,11 +406,6 @@ impl Runtime {
             .collect()
             .await?;
 
-        // A super-user keeps every row, so there is nothing to filter or rebuild.
-        if identity.is_super_user {
-            return Ok(batches);
-        }
-
         let mut visible = Vec::with_capacity(batches.len());
         for batch in &batches {
             let column = |name: &str| {
@@ -455,49 +419,17 @@ impl Runtime {
             };
             let mask: arrow::array::BooleanArray = (0..batch.num_rows())
                 .map(|row| {
-                    Some(self.can_list_table(identity, Some(schemas.value(row)), names.value(row)))
+                    let reference = datafusion::sql::TableReference::partial(
+                        schemas.value(row),
+                        names.value(row),
+                    );
+                    let table = TableFacts::new(reference, &self.session_ctx);
+                    Some(validator.check_table(&table).is_ok())
                 })
                 .collect();
             visible.push(arrow::compute::filter_record_batch(batch, &mask)?);
         }
         Ok(visible)
-    }
-
-    /// Whether `identity` may see `schema`.`table` in a catalog listing.
-    ///
-    /// The same rule the read path enforces, asked ahead of time: a name a caller
-    /// could not read is a name they are not shown. `schema` is `None` for an
-    /// unqualified reference, which resolves in the default schema.
-    pub fn can_list_table(
-        &self,
-        identity: &beacon_auth::AuthIdentity,
-        schema: Option<&str>,
-        table: &str,
-    ) -> bool {
-        use beacon_auth::Privilege;
-        use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
-
-        if identity.is_super_user {
-            return true;
-        }
-        if table.starts_with(INTERNAL_TABLE_PREFIX) {
-            return false;
-        }
-        if schema.is_some_and(crate::system_schema::is_metadata_schema) {
-            return false;
-        }
-        // With enforcement off every table is readable, so listing them all is
-        // what the listing promises: what you see is what you can read.
-        let reference = match schema {
-            Some(schema) => datafusion::sql::TableReference::partial(schema, table),
-            None => datafusion::sql::TableReference::bare(table),
-        };
-        !self.auth_enforce
-            || self.auth.is_allowed_any(
-                &identity.roles,
-                Privilege::Select,
-                &crate::statement_plan::table_targets(&reference, &self.session_ctx),
-            )
     }
 
     /// DataFusion's function catalog — the `SHOW FUNCTIONS` result, as Arrow
@@ -512,7 +444,7 @@ impl Runtime {
     /// Engine documentation, not user data, so every caller may read it —
     /// including an anonymous one. That is why it is served from here rather than
     /// by running the statement as the caller: it reads `information_schema`,
-    /// which is super-user-only.
+    /// which a validator can refuse.
     pub async fn show_functions(&self) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
         Ok(self
             .session_ctx
@@ -535,17 +467,26 @@ impl Runtime {
     /// Explain a query without running it: returns its logical plan as
     /// PostgreSQL-style JSON (pgjson), the shape plan visualizers consume.
     ///
-    /// `EXPLAIN` is read-only — nothing is executed — so the plan is validated
-    /// against the *anonymous* permission set regardless of who is asking. A
-    /// caller must still be authorized to read the tables the plan touches.
+    /// `EXPLAIN` is read-only — nothing is executed — so only a plain read is
+    /// explained, for each caller. `validator` must also permit the tables that the
+    /// plan reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query does not plan, when the statement is not
+    /// a plain read, or when `validator` refuses the plan.
     pub async fn explain_query(
         &self,
         query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
+        validator: Arc<dyn PlanValidator>,
     ) -> anyhow::Result<String> {
         let runtime = self.clone();
         self.executor
-            .run(async move { runtime.explain_query_on_executor(query, identity).await })
+            .run(async move {
+                runtime
+                    .explain_query_on_executor(query, validator.as_ref())
+                    .await
+            })
             .await
     }
 
@@ -553,19 +494,13 @@ impl Runtime {
     async fn explain_query_on_executor(
         &self,
         query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
+        validator: &dyn PlanValidator,
     ) -> anyhow::Result<String> {
         // `output` (file format) is meaningless here: only the query body is planned.
         let plan = self.lower_query(query.inner).await?;
-        crate::statement_plan::validate_query_plan(&plan, false)?;
-        crate::statement_plan::authorize_logical_plan(
-            &plan,
-            &self.session_ctx,
-            &self.auth,
-            &identity,
-            self.auth_enforce,
-        )
-        .await?;
+        let facts = PlanFacts::new(&plan, &self.session_ctx);
+        facts.verify_unprivileged()?;
+        validator.validate(&facts).await?;
         // Bound to a local: the `Display` wrapper borrows `plan`, so formatting
         // it inline would drop `plan` while the temporary still holds the borrow.
         let pg_json = plan.display_pg_json().to_string();
@@ -577,24 +512,28 @@ impl Runtime {
     /// [`Self::explain_query`].
     ///
     /// Unlike `explain_query` this **executes** the plan to completion to
-    /// populate the metrics, so it applies the same gate the normal query path
-    /// uses: anonymous/role callers are held to `validate_query_plan`, while a
-    /// super-user may also analyze DDL/DML — with the same side effects running
-    /// it through `run_query` would have. A read-only runtime therefore refuses
-    /// anything that does not produce a result set, exactly as `run_query` does.
+    /// populate the metrics, so `validator` decides as it does for `run_query`.
+    /// A permitted DDL or DML statement runs with its side effects. A read-only
+    /// runtime therefore refuses anything that does not produce a result set,
+    /// exactly as `run_query` does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query does not plan, when `validator` refuses
+    /// the plan, when a read-only database gets a write, or when execution fails.
     pub async fn explain_analyze_query(
         &self,
         query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
+        validator: Arc<dyn PlanValidator>,
     ) -> anyhow::Result<String> {
         // The plan runs in full, so the CPU budget of `run_query` applies.
-        let meter = QueryCpuMeter::new(crate::query_cpu::budget_for(&self.auth, &identity));
+        let meter = QueryCpuMeter::new(validator.limits().cpu_budget);
         let runtime = self.clone();
         let metered = meter.meter_future({
             let meter = meter.clone();
             async move {
                 runtime
-                    .explain_analyze_query_on_executor(query, identity, meter)
+                    .explain_analyze_query_on_executor(query, validator.as_ref(), meter)
                     .await
             }
         });
@@ -605,24 +544,18 @@ impl Runtime {
     async fn explain_analyze_query_on_executor(
         &self,
         query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
+        validator: &dyn PlanValidator,
         cpu_meter: Arc<QueryCpuMeter>,
     ) -> anyhow::Result<String> {
         let plan = self.lower_query(query.inner).await?;
-        crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
+        validator
+            .validate(&PlanFacts::new(&plan, &self.session_ctx))
+            .await?;
         if self.read_only && !crate::statement_plan::plan_produces_result_set(&plan) {
             anyhow::bail!(
                 "this database was opened read-only; writes are not permitted on this connection"
             );
         }
-        crate::statement_plan::authorize_logical_plan(
-            &plan,
-            &self.session_ctx,
-            &self.auth,
-            &identity,
-            self.auth_enforce,
-        )
-        .await?;
 
         // Keep the `Arc` so per-node metrics can be read once the stream drains.
         // `execute_statement_plan` discards the plan, so create/execute are inlined.
@@ -648,7 +581,12 @@ impl Runtime {
         match inner {
             crate::query::InnerQuery::Sql(sql) => self.lower_sql(&sql).await,
             crate::query::InnerQuery::Json(body) => {
-                crate::query::compile_json_query(body, self.session_ctx.as_ref()).await
+                let settings = crate::settings::SqlSettings::from_session(&self.session_ctx);
+                let options = crate::query::JsonQueryOptions {
+                    default_table: settings.default_table,
+                    enable_pushdown_projection: settings.enable_pushdown_projection,
+                };
+                crate::query::compile_json_query(body, self.session_ctx.as_ref(), &options).await
             }
         }
     }
@@ -657,7 +595,6 @@ impl Runtime {
     /// `LogicalPlan`. The result is validated in `run_query` before execution.
     async fn lower_sql(&self, sql: &str) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
         match Self::parse_beacon_statement(sql)? {
-            BeaconStatement::Auth(statement) => Ok(crate::statement_plan::auth_plan(statement)),
             BeaconStatement::CreateMaterializedView(statement) => Ok(
                 crate::statement_plan::create_materialized_view_plan(statement),
             ),
@@ -695,6 +632,14 @@ impl Runtime {
             BeaconStatement::Detach(statement) => {
                 Ok(crate::statement_plan::detach_plan(statement))
             }
+            BeaconStatement::Install(statement) => Ok(crate::statement_plan::install_plan(
+                statement,
+                self.plugins_dir.clone(),
+            )),
+            BeaconStatement::Uninstall(statement) => Ok(crate::statement_plan::uninstall_plan(
+                statement,
+                self.plugins_dir.clone(),
+            )),
             BeaconStatement::CreateSecret(statement) => {
                 crate::statement_plan::create_secret_plan(statement)
             }
@@ -706,7 +651,7 @@ impl Runtime {
                 crate::statement_plan::summarize_plan(&self.session_ctx, statement).await
             }
             BeaconStatement::DFStatement(statement) => {
-                crate::parser::expression_depth::check_expression_depth(&statement)?;
+                beacon_sql_parser::expression_depth::check_expression_depth(&statement)?;
                 crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
             }
         }
@@ -746,8 +691,7 @@ mod test_support {
     /// Build a runtime over `root`: a local datasets store rooted at `root/datasets`
     /// (so a relative `LOCATION` resolves there), a tmp dir at `root/tmp`, and an
     /// in-memory tables store unless `db_path` is given (a persistent redb file, used
-    /// by the restart test). No admin is bootstrapped — tests authenticate as
-    /// `AuthIdentity::system()` (super-user) or `::empty()` (non-super).
+    /// by the restart test). Tests run as `allow_all()` or as `unprivileged()`.
     pub(crate) async fn build_runtime(root: &Path, db_path: Option<PathBuf>) -> Runtime {
         let datasets = root.join("datasets");
         let tmp = root.join("tmp");
@@ -786,7 +730,7 @@ mod materialized_view_tests {
         let batches = runtime
             .run_query(
                 crate::query::Query::sql(sql.to_string()),
-                beacon_auth::AuthIdentity::system(),
+                crate::plan_validator::allow_all(),
             )
             .await?
             .into_record_stream()?
@@ -904,7 +848,7 @@ mod client_query_tests {
         runtime
             .run_query(
                 crate::query::Query::sql(sql.to_string()),
-                beacon_auth::AuthIdentity::system(),
+                crate::plan_validator::allow_all(),
             )
             .await
             .expect("sql should run")
@@ -921,7 +865,7 @@ mod client_query_tests {
         runtime
             .run_query(
                 crate::query::Query::sql(sql.to_string()),
-                beacon_auth::AuthIdentity::system(),
+                crate::plan_validator::allow_all(),
             )
             .await?
             .into_record_stream()?
@@ -949,7 +893,7 @@ mod client_query_tests {
         let batches = runtime
             .run_query(
                 query(serde_json::json!({ "from": "t", "select": ["a", "b"] })),
-                beacon_auth::AuthIdentity::system(),
+                crate::plan_validator::allow_all(),
             )
             .await
             .expect("json query should run")
@@ -981,7 +925,7 @@ mod client_query_tests {
                     "select": ["a"],
                     "output": { "format": "csv" },
                 })),
-                beacon_auth::AuthIdentity::system(),
+                crate::plan_validator::allow_all(),
             )
             .await
             .expect("query with output should run");
@@ -997,9 +941,8 @@ mod client_query_tests {
         }
     }
 
-    /// NetCDF output goes through a custom `DataSink` that writes a real local
-    /// file (the netcdf-c writer cannot stream to an object store). This asserts
-    /// the file lands under the configured tmp store root — not the OS temp dir —
+    /// The NetCDF sink uploads its file through the tmp object store. This asserts
+    /// the file lands under the configured tmp store root, not the OS temp dir,
     /// and is non-empty.
     #[tokio::test(flavor = "multi_thread")]
     async fn query_with_netcdf_output_writes_under_configured_tmp() {
@@ -1017,7 +960,7 @@ mod client_query_tests {
                     "select": ["a"],
                     "output": { "format": "netcdf" },
                 })),
-                beacon_auth::AuthIdentity::system(),
+                crate::plan_validator::allow_all(),
             )
             .await
             .expect("netcdf query with output should run");
@@ -1057,7 +1000,7 @@ mod client_query_tests {
         runtime
             .run_query(
                 crate::query::Query::sql("SELECT * FROM val".to_string()),
-                beacon_auth::AuthIdentity::empty(),
+                crate::plan_validator::unprivileged(),
             )
             .await
             .expect("non-super SELECT should be allowed")
@@ -1071,7 +1014,7 @@ mod client_query_tests {
         runtime
             .run_query(
                 crate::query::Query::sql("CREATE TABLE val_2 (a BIGINT)".to_string()),
-                beacon_auth::AuthIdentity::empty(),
+                crate::plan_validator::unprivileged(),
             )
             .await
             .err()
@@ -1083,7 +1026,7 @@ mod client_query_tests {
                 crate::query::Query::sql(
                     "CREATE MATERIALIZED VIEW val_mv AS SELECT 1 AS a".to_string(),
                 ),
-                beacon_auth::AuthIdentity::empty(),
+                crate::plan_validator::unprivileged(),
             )
             .await
             .err()
@@ -1094,59 +1037,332 @@ mod client_query_tests {
         );
     }
 
-    /// A non-super-user cannot escalate its own privileges: all auth-management
-    /// statements are super-user-only (they lower to extension nodes), so a
-    /// role-limited caller cannot create a role, grant itself privileges, or create
-    /// users. A super-user can run the read-only variants.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn non_super_user_cannot_escalate_privileges() {
-        let rt = test_runtime().await;
-        let runtime = &rt.runtime;
+    /// A validator that refuses each statement and permits one output row.
+    struct RefuseAll;
 
-        // A caller holding a non-super role (no global ALL grant).
-        let limited = beacon_auth::AuthIdentity {
-            username: "alice".to_string(),
-            roles: vec!["reader".to_string()],
-            is_super_user: false,
-        };
-
-        for sql in [
-            "CREATE ROLE hacker",
-            "GRANT ALL TO ROLE reader",
-            "GRANT ALL TO ROLE hacker",
-            "CREATE USER bob WITH PASSWORD 'pw'",
-            "GRANT ROLE reader TO USER alice",
-        ] {
-            let err = runtime
-                .run_query(crate::query::Query::sql(sql.to_string()), limited.clone())
-                .await
-                .err()
-                .unwrap_or_else(|| panic!("non-super should be rejected: {sql}"));
-            assert!(
-                err.to_string().contains("super-user"),
-                "expected a super-user error for `{sql}`, got: {err}"
-            );
+    #[async_trait::async_trait]
+    impl crate::plan_validator::PlanValidator for RefuseAll {
+        fn caller(&self) -> &str {
+            "refused"
         }
 
-        // The super-user can create read-only roles and grant SELECT.
-        run_sql(runtime, "CREATE ROLE analyst").await;
-        run_sql(runtime, "GRANT SELECT ON TABLE t TO ROLE analyst").await;
+        fn limits(&self) -> crate::plan_validator::QueryLimits {
+            crate::plan_validator::QueryLimits::default()
+        }
 
-        // But even the super-user cannot grant write/management privileges to a role —
-        // roles are read-only, so there is no way to mint another super-user through SQL.
-        let err = runtime
+        async fn validate(
+            &self,
+            _facts: &crate::plan_validator::PlanFacts<'_>,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("refused by the test validator")
+        }
+
+        fn check_table(&self, _table: &crate::plan_validator::TableFacts) -> anyhow::Result<()> {
+            anyhow::bail!("refused by the test validator")
+        }
+
+        fn can_read_path(&self, _path: &str) -> bool {
+            false
+        }
+    }
+
+    /// The engine runs a plan only after the validator permits it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_validator_refusal_stops_the_query() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+
+        let error = runtime
             .run_query(
-                crate::query::Query::sql("GRANT ALL TO ROLE analyst".to_string()),
-                beacon_auth::AuthIdentity::system(),
+                crate::query::Query::sql("CREATE TABLE refused (a BIGINT)".to_string()),
+                std::sync::Arc::new(RefuseAll),
             )
             .await
             .err()
-            .expect("granting a write/ALL privilege to a role should be rejected");
+            .expect("the validator refuses the statement");
+
+        assert!(error.to_string().contains("refused by the test validator"));
+        let tables = runtime
+            .visible_tables(&crate::plan_validator::AllowAll)
+            .await
+            .expect("the catalog should list");
+        let rows: usize = tables.iter().map(|batch| batch.num_rows()).sum();
+        let refused = runtime.visible_tables(&RefuseAll).await.unwrap();
+        assert!(rows > 0);
+        assert_eq!(refused.iter().map(|batch| batch.num_rows()).sum::<usize>(), 0);
+        assert!(runtime
+            .table_arrow_schema("refused", &crate::plan_validator::AllowAll)
+            .await
+            .is_err());
+    }
+
+    /// `EXPLAIN` and `EXPLAIN ANALYZE` plan a statement, so they ask the validator too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explain_asks_the_validator() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        run_sql(runtime, "CREATE TABLE explained (a BIGINT)").await;
+        let query = || crate::query::Query::sql("SELECT * FROM explained".to_string());
+        let refuse = || std::sync::Arc::new(RefuseAll);
+
+        let explained = runtime
+            .explain_query(query(), crate::plan_validator::allow_all())
+            .await;
+        let analyzed = runtime
+            .explain_analyze_query(query(), crate::plan_validator::allow_all())
+            .await;
+        let explain_refused = runtime.explain_query(query(), refuse()).await;
+        let analyze_refused = runtime.explain_analyze_query(query(), refuse()).await;
+
+        assert!(explained.is_ok(), "{explained:?}");
+        assert!(analyzed.is_ok(), "{analyzed:?}");
+        for refused in [explain_refused, analyze_refused] {
+            let error = refused.expect_err("the validator refuses the plan");
+            assert!(error.to_string().contains("refused by the test validator"));
+        }
+    }
+
+    /// `EXPLAIN` runs nothing, so it explains only a plain read, also with full access.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explain_refuses_a_write_for_each_validator() {
+        let rt: TestRt = test_runtime().await;
+
+        let explained = rt
+            .runtime
+            .explain_query(
+                crate::query::Query::sql("CREATE TABLE never_made (a BIGINT)".to_string()),
+                crate::plan_validator::allow_all(),
+            )
+            .await;
+
+        assert!(explained.is_err());
+    }
+
+    /// A validator sees the plan after the engine binds the parameters.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_validator_gets_the_tables_of_the_plan() {
+        /// Records the table names of each plan that it permits.
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+
+        #[async_trait::async_trait]
+        impl crate::plan_validator::PlanValidator for Recorder {
+            fn caller(&self) -> &str {
+                "recorder"
+            }
+
+            fn limits(&self) -> crate::plan_validator::QueryLimits {
+                crate::plan_validator::QueryLimits::default()
+            }
+
+            async fn validate(
+                &self,
+                facts: &crate::plan_validator::PlanFacts<'_>,
+            ) -> anyhow::Result<()> {
+                let mut seen = self.0.lock().expect("the lock is not poisoned");
+                for read in facts.reads() {
+                    if let crate::plan_validator::PlanRead::Table(table) = read {
+                        seen.push(table.name().to_string());
+                    }
+                }
+                Ok(())
+            }
+
+            fn check_table(
+                &self,
+                _table: &crate::plan_validator::TableFacts,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            fn can_read_path(&self, _path: &str) -> bool {
+                true
+            }
+        }
+
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        run_sql(runtime, "CREATE TABLE left_t (a BIGINT)").await;
+        run_sql(runtime, "CREATE TABLE right_t (a BIGINT)").await;
+        run_sql(runtime, "CREATE VIEW both_v AS SELECT * FROM left_t JOIN right_t USING (a)").await;
+        let recorder = std::sync::Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+
+        runtime
+            .run_query(
+                crate::query::Query::sql("SELECT * FROM both_v".to_string()),
+                recorder.clone(),
+            )
+            .await
+            .expect("the recorder permits the query");
+
+        let mut seen = recorder.0.lock().expect("the lock is not poisoned").clone();
+        seen.sort();
+        seen.dedup();
         assert!(
-            err.to_string().contains("read-only"),
-            "expected a read-only-role error, got: {err}"
+            seen.iter().any(|name| name.contains("both_v"))
+                || (seen.iter().any(|name| name.contains("left_t"))
+                    && seen.iter().any(|name| name.contains("right_t"))),
+            "the validator must see the view or its tables: {seen:?}"
         );
     }
+
+    /// A host application adds a table to `beacon.system`, and a name is used once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_host_table_joins_the_system_schema() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        let schema = std::sync::Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
+        let table = || {
+            // Each scan gets its own handle to the schema.
+            let row_schema = schema.clone();
+            let snapshot: crate::Snapshot = std::sync::Arc::new(move || {
+                let row_schema = row_schema.clone();
+                Box::pin(async move {
+                    let values = std::sync::Arc::new(Int64Array::from(vec![1, 2, 3]));
+                    Ok(arrow::record_batch::RecordBatch::try_new(row_schema, vec![values])?)
+                })
+            });
+            std::sync::Arc::new(crate::SystemTable::new(schema.clone(), snapshot))
+        };
+
+        let added = runtime.register_system_table("host_rows", table());
+        let again = runtime.register_system_table("host_rows", table());
+        let reserved = runtime.register_system_table("query_metrics", table());
+        let rows: usize = runtime
+            .run_query(
+                crate::query::Query::sql("SELECT n FROM beacon.system.host_rows".to_string()),
+                crate::plan_validator::allow_all(),
+            )
+            .await
+            .expect("the host table reads")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the stream drains")
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum();
+
+        assert!(added.is_ok());
+        assert!(again.is_err(), "a name is used once");
+        assert!(reserved.is_err(), "`query_metrics` is a name of the engine");
+        assert_eq!(rows, 3);
+    }
+
+    /// The empty result of a host statement has no columns and no rows.
+    #[tokio::test]
+    async fn an_empty_result_has_no_columns_and_no_rows() {
+        let stream = crate::query_result::QueryResult::empty()
+            .into_record_stream()
+            .expect("an empty result is a stream");
+
+        let columns = stream.schema().fields().len();
+        let batches = stream.try_collect::<Vec<_>>().await.expect("the stream ends");
+
+        assert_eq!(columns, 0);
+        assert!(batches.is_empty());
+    }
+
+    /// `AllowAll` needs no identity: it runs DDL, DML and a read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn allow_all_runs_privileged_statements() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        let run = |sql: &str| {
+            runtime.run_query(
+                crate::query::Query::sql(sql.to_string()),
+                std::sync::Arc::new(crate::plan_validator::AllowAll),
+            )
+        };
+
+        for sql in [
+            "CREATE TABLE open_t (a BIGINT)",
+            "INSERT INTO open_t VALUES (1), (2)",
+        ] {
+            run(sql)
+                .await
+                .expect("AllowAll permits the statement")
+                .into_record_stream()
+                .expect("streamed result")
+                .try_collect::<Vec<_>>()
+                .await
+                .expect("the statement should drain");
+        }
+        let rows: usize = run("SELECT * FROM open_t")
+            .await
+            .expect("AllowAll permits the read")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the read should drain")
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum();
+
+        assert_eq!(rows, 2);
+        assert!(runtime
+            .table_arrow_schema("open_t", &crate::plan_validator::AllowAll)
+            .await
+            .is_ok());
+    }
+
+    /// A validator that permits each statement with a limit of one output row.
+    struct OneRow;
+
+    #[async_trait::async_trait]
+    impl crate::plan_validator::PlanValidator for OneRow {
+        fn caller(&self) -> &str {
+            "one-row"
+        }
+
+        fn limits(&self) -> crate::plan_validator::QueryLimits {
+            crate::plan_validator::QueryLimits {
+                output_row_limit: Some(1),
+                ..Default::default()
+            }
+        }
+
+        async fn validate(
+            &self,
+            _facts: &crate::plan_validator::PlanFacts<'_>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn check_table(&self, _table: &crate::plan_validator::TableFacts) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn can_read_path(&self, _path: &str) -> bool {
+            true
+        }
+    }
+
+    /// The limits of the validator apply to the query.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_row_limit_of_the_validator_applies() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+
+        let result = runtime
+            .run_query(
+                crate::query::Query::sql("SELECT * FROM (VALUES (1), (2), (3))".to_string()),
+                std::sync::Arc::new(OneRow),
+            )
+            .await
+            .expect("the validator permits the read")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await;
+
+        assert!(result.is_err(), "three rows pass a limit of one row");
+    }
+
 
     /// End-to-end index lifecycle on a Lance-backed managed table: CREATE INDEX,
     /// SHOW INDEXES (one row), DROP INDEX (zero rows) — exercising the parser,
@@ -1166,7 +1382,7 @@ mod client_query_tests {
                 runtime
                     .run_query(
                         crate::query::Query::sql(sql),
-                        beacon_auth::AuthIdentity::system(),
+                        crate::plan_validator::allow_all(),
                     )
                     .await
                     .expect("show indexes should run")
@@ -1208,7 +1424,7 @@ mod restart_tests {
         runtime
             .run_query(
                 crate::query::Query::sql(sql.to_string()),
-                beacon_auth::AuthIdentity::system(),
+                crate::plan_validator::allow_all(),
             )
             .await
             .expect("sql should run")
@@ -1223,7 +1439,7 @@ mod restart_tests {
         runtime
             .run_query(
                 crate::query::Query::sql(sql.to_string()),
-                beacon_auth::AuthIdentity::system(),
+                crate::plan_validator::allow_all(),
             )
             .await
             .expect("sql should run")
@@ -1291,10 +1507,10 @@ mod show_create_tests {
     async fn try_collect(
         runtime: &Runtime,
         sql: &str,
-        identity: beacon_auth::AuthIdentity,
+        validator: std::sync::Arc<dyn crate::plan_validator::PlanValidator>,
     ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
         Ok(runtime
-            .run_query(crate::query::Query::sql(sql.to_string()), identity)
+            .run_query(crate::query::Query::sql(sql.to_string()), validator)
             .await?
             .into_record_stream()?
             .try_collect::<Vec<_>>()
@@ -1302,7 +1518,7 @@ mod show_create_tests {
     }
 
     async fn run_sql(runtime: &Runtime, sql: &str) {
-        try_collect(runtime, sql, beacon_auth::AuthIdentity::system())
+        try_collect(runtime, sql, crate::plan_validator::allow_all())
             .await
             .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"));
     }
@@ -1310,7 +1526,7 @@ mod show_create_tests {
     /// The `definition` column of `SHOW CREATE TABLE <table>`.
     async fn definition(runtime: &Runtime, table: &str) -> Option<String> {
         let sql = format!("SHOW CREATE TABLE {table}");
-        let batches = try_collect(runtime, &sql, beacon_auth::AuthIdentity::system())
+        let batches = try_collect(runtime, &sql, crate::plan_validator::allow_all())
             .await
             .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"));
         assert_eq!(batches.len(), 1, "one batch for {table}");
@@ -1356,7 +1572,7 @@ mod show_create_tests {
         );
 
         // The CTAS input still ran: it copied the one matching row.
-        let rows: usize = try_collect(runtime, "SELECT * FROM copied", beacon_auth::AuthIdentity::system())
+        let rows: usize = try_collect(runtime, "SELECT * FROM copied", crate::plan_validator::allow_all())
             .await
             .unwrap()
             .iter()
@@ -1371,7 +1587,7 @@ mod show_create_tests {
         let runtime = &rt.runtime;
         run_sql(runtime, "CREATE TABLE secret_shape (a BIGINT)").await;
 
-        let err = try_collect(runtime, "SHOW CREATE TABLE missing", beacon_auth::AuthIdentity::system())
+        let err = try_collect(runtime, "SHOW CREATE TABLE missing", crate::plan_validator::allow_all())
             .await
             .expect_err("a missing table is an error");
         assert!(err.to_string().contains("missing"), "unexpected error: {err}");
@@ -1379,7 +1595,7 @@ mod show_create_tests {
         let err = try_collect(
             runtime,
             "SHOW CREATE TABLE secret_shape",
-            beacon_auth::AuthIdentity::empty(),
+            crate::plan_validator::unprivileged(),
         )
         .await
         .expect_err("only the super-user sees definitions");
@@ -1418,7 +1634,7 @@ mod crawler_sql_tests {
         runtime
             .run_query(
                 crate::query::Query::sql(sql.to_string()),
-                beacon_auth::AuthIdentity::system(),
+                crate::plan_validator::allow_all(),
             )
             .await
             .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))
@@ -1469,10 +1685,35 @@ mod crawler_sql_tests {
 // no SQL-builder function left to unit test.
 
 impl Runtime {
-    /// The background file-statistics service, when the subsystem is enabled and
-    /// this runtime has a database file to keep the registry in.
-    pub fn file_stats(&self) -> Option<&Arc<crate::file_stats::FileStatsService>> {
+    /// The file-statistics engine, when the subsystem is enabled.
+    pub fn file_stats(&self) -> Option<&beacon_file_statistics::FileStatistics> {
         self.file_stats.as_ref()
+    }
+
+    /// Checks a plugin archive, unpacks it into `<plugins_dir>/<name>/` and registers
+    /// its functions. `source` is recorded as given.
+    ///
+    /// It skips the `SHA256SUMS` and super-user checks. It exists for tests and
+    /// embedders.
+    #[doc(hidden)]
+    pub async fn install_plugin_archive(
+        &self,
+        name: &str,
+        archive: bytes::Bytes,
+        source: &str,
+    ) -> anyhow::Result<()> {
+        let plugins_dir = self.plugins_dir.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("plugins are disabled: this runtime has no plugins directory")
+        })?;
+        crate::plugins::loader::install_archive(
+            &self.session_ctx,
+            &self.plugins,
+            plugins_dir,
+            name,
+            archive,
+            source,
+        )
+        .await
     }
 }
 

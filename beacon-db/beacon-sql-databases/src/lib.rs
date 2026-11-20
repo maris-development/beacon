@@ -8,7 +8,7 @@
 //! `datafusion-federation`.
 //!
 //! The shape mirrors the federated remote-Beacon table
-//! (`beacon_datafusion_ext::remote`): a serializable [`SqlEngine`]-tagged
+//! (`beacon_remote`): a serializable [`SqlEngine`]-tagged
 //! definition builds a bare `FederatedTableProviderAdaptor` over the concrete
 //! `SQLTableSource` (so the federation optimizer still pushes work down and
 //! rewrites the remote table name), whose inner `SQLTable` is wrapped
@@ -111,7 +111,7 @@ impl SqlEngine {
     /// call would name a function neither one has, so they keep the plain unparse error rather
     /// than a wrong function name.
     ///
-    /// See [`beacon_datafusion_ext::remote::geometry_literals_to_calls`].
+    /// See [`beacon_remote::geometry_literals_to_calls`].
     pub fn rebuilds_geometry_constants(self) -> bool {
         match self {
             #[cfg(feature = "postgres")]

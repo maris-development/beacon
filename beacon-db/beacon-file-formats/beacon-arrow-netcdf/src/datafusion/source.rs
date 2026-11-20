@@ -28,7 +28,18 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt};
 use object_store::ObjectMeta;
 
-use super::reader::{FileAccess, NetcdfInput};
+use super::reader::NetcdfInput;
+
+/// Which files a scan reads past instead of failing the query.
+///
+/// `Copy`, so each opener and file task takes its own copy without a clone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SkipFiles {
+    /// Skip a file that does not fit `read_dimensions`.
+    unbroadcastable: bool,
+    /// Skip a file the reader cannot open.
+    invalid: bool,
+}
 
 /// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
 ///
@@ -36,12 +47,10 @@ use super::reader::{FileAccess, NetcdfInput};
 /// pipeline via a [`FileOpener`].
 #[derive(Debug, Clone)]
 pub struct NetCDFSource {
-    access: FileAccess,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     read_dimensions: Option<Vec<String>>,
-    /// Skip a file that does not fit `read_dimensions`, instead of failing.
-    skip_unbroadcastable: bool,
+    skip: SkipFiles,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// Projection pushed down by the scan, applied on top of the table schema.
@@ -55,17 +64,12 @@ pub struct NetCDFSource {
 }
 
 impl NetCDFSource {
-    pub fn new(
-        access: FileAccess,
-        read_dimensions: Option<Vec<String>>,
-        table_schema: TableSchema,
-    ) -> Self {
+    pub fn new(read_dimensions: Option<Vec<String>>, table_schema: TableSchema) -> Self {
         Self {
-            access,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             read_dimensions,
-            skip_unbroadcastable: false,
+            skip: SkipFiles::default(),
             batch_size: usize::MAX,
             predicate: None,
             projection: None,
@@ -75,7 +79,13 @@ impl NetCDFSource {
 
     /// The same source, skipping the files that cannot broadcast when `skip`.
     pub fn with_skip_unbroadcastable(mut self, skip: bool) -> Self {
-        self.skip_unbroadcastable = skip;
+        self.skip.unbroadcastable = skip;
+        self
+    }
+
+    /// The same source, skipping the files the reader cannot open when `skip`.
+    pub fn with_skip_invalid_files(mut self, skip: bool) -> Self {
+        self.skip.invalid = skip;
         self
     }
 
@@ -104,10 +114,9 @@ impl FileSource for NetCDFSource {
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(NetCDFOpener::new(
-            self.access.clone(),
             projected_schema,
             self.read_dimensions.clone(),
-            self.skip_unbroadcastable,
+            self.skip,
             self.batch_size,
             self.predicate.clone(),
             self.execution_plan_metrics.clone(),
@@ -130,11 +139,7 @@ impl FileSource for NetCDFSource {
     }
 
     fn supports_repartitioning(&self) -> bool {
-        tracing::trace!(
-            "NetCDFSource supports_repartitioning: access={:?}",
-            self.access
-        );
-        matches!(self.access, FileAccess::Oxcdf)
+        true
     }
 
     /// Put the scan's files in one queue, and point every partition at it.
@@ -156,11 +161,8 @@ impl FileSource for NetCDFSource {
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
-        tracing::trace!(
-            "NetCDFSource repartitioned: access={:?}, target_partitions={target_partitions}",
-            self.access,
-        );
-        if !self.supports_repartitioning() || output_ordering.is_some() || target_partitions <= 1 {
+        tracing::trace!("NetCDFSource repartitioned: target_partitions={target_partitions}");
+        if output_ordering.is_some() || target_partitions <= 1 {
             return Ok(None);
         }
 
@@ -240,17 +242,13 @@ impl FileSource for NetCDFSource {
 struct NetCDFOpener {
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
-    /// Skip a file that does not fit `read_dimensions`, instead of failing.
-    skip_unbroadcastable: bool,
+    skip: SkipFiles,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// This partition's counters, registered once. See [`ReadMetrics::new`].
     read_metrics: ReadMetrics,
     partition: usize,
-    /// How this opener reaches its files, and which reader opens them.
-    access: FileAccess,
-    /// The store the scan lists from. The `oxcdf` reader reads through it; the
-    /// netcdf-c reader ignores it and opens a resolved native path instead.
+    /// The store the scan lists from. The reader reads through it.
     object_store: Arc<dyn object_store::ObjectStore>,
     /// The scan's file queue, when it is planned morsel-driven. `Some` means the
     /// entry `FileStream` hands this opener is the scan, not a file.
@@ -265,10 +263,9 @@ struct NetCDFOpener {
 impl NetCDFOpener {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        access: FileAccess,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
-        skip_unbroadcastable: bool,
+        skip: SkipFiles,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ExecutionPlanMetricsSet,
@@ -279,11 +276,10 @@ impl NetCDFOpener {
     ) -> Self {
         let read_metrics = ReadMetrics::new(&metrics, partition);
         let files = Arc::new(NetCDFFiles {
-            access: access.clone(),
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
             read_dimensions: read_dimensions.clone(),
-            skip_unbroadcastable,
+            skip,
             batch_size,
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
@@ -295,12 +291,11 @@ impl NetCDFOpener {
             files,
             projected_schema,
             read_dimensions,
-            skip_unbroadcastable,
+            skip,
             batch_size,
             predicate,
             read_metrics,
             partition,
-            access,
             object_store,
             partition_fields,
         }
@@ -323,7 +318,7 @@ impl NetCDFOpener {
         object: ObjectMeta,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
-        skip_unbroadcastable: bool,
+        skip: SkipFiles,
         batch_size: usize,
         metrics: ReadMetrics,
         predicate: Option<Arc<dyn PhysicalExpr>>,
@@ -331,8 +326,7 @@ impl NetCDFOpener {
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let planning = metrics.clone();
         let plan = async move || {
-            let Some(dataset) =
-                Self::open_dataset(input, object, read_dimensions, skip_unbroadcastable).await?
+            let Some(dataset) = Self::open_dataset(input, object, read_dimensions, skip).await?
             else {
                 planning.files_skipped.add(1);
                 return Ok(FileRead::skipped());
@@ -359,20 +353,31 @@ impl NetCDFOpener {
 
     /// Open the file and narrow it to the dimensions this scan reads on.
     ///
-    /// `None` when the file does not fit the dimension list and
-    /// `skip_unbroadcastable` says to read past it.
+    /// `None` when `skip` says to read past the file: it does not fit the
+    /// dimension list, or the reader cannot open it.
     async fn open_dataset(
         input: NetcdfInput,
         object: ObjectMeta,
         read_dimensions: Option<Vec<String>>,
-        skip_unbroadcastable: bool,
+        skip: SkipFiles,
     ) -> datafusion::error::Result<Option<beacon_nd_array::dataset::AnyDataset>> {
-        let dataset = input.open().await.map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to open NetCDF dataset {}: {e}",
-                object.location,
-            ))
-        })?;
+        let dataset = match input.open().await {
+            Ok(dataset) => dataset,
+            Err(e) if skip.invalid => {
+                tracing::warn!(
+                    file = %object.location,
+                    error = %e,
+                    "skipping an unreadable NetCDF file"
+                );
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to open NetCDF dataset {}: {e}",
+                    object.location,
+                )))
+            }
+        };
 
         // Apply dimension projection before deriving the file schema. When no
         // explicit dimensions were requested, fall back to the dataset's
@@ -381,7 +386,7 @@ impl NetCDFOpener {
         beacon_nd_array::dataset::project_read_dimensions_or_skip(
             dataset,
             read_dimensions,
-            skip_unbroadcastable,
+            skip.unbroadcastable,
             None,
         )
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
@@ -393,11 +398,10 @@ impl NetCDFOpener {
 /// This is everything a [`MorselSource`] needs of the format. The queue holds
 /// the files; this says what opening one means.
 struct NetCDFFiles {
-    access: FileAccess,
     object_store: Arc<dyn object_store::ObjectStore>,
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
-    skip_unbroadcastable: bool,
+    skip: SkipFiles,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
@@ -407,23 +411,19 @@ struct NetCDFFiles {
 
 impl std::fmt::Debug for NetCDFFiles {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NetCDFFiles")
-            .field("access", &self.access)
-            .finish_non_exhaustive()
+        f.debug_struct("NetCDFFiles").finish_non_exhaustive()
     }
 }
 
 #[async_trait::async_trait]
 impl OpenFile for NetCDFFiles {
     async fn open(&self, file: &PartitionedFile) -> datafusion::error::Result<Arc<FileRead>> {
-        let input = self
-            .access
-            .input_for(&self.object_store, &file.object_meta)?;
+        let input = NetcdfInput::new(&self.object_store, &file.object_meta);
         let Some(dataset) = NetCDFOpener::open_dataset(
             input,
             file.object_meta.clone(),
             self.read_dimensions.clone(),
-            self.skip_unbroadcastable,
+            self.skip,
         )
         .await?
         else {
@@ -463,15 +463,12 @@ impl FileOpener for NetCDFOpener {
         }
 
         tracing::trace!(
-            "NetCDFOpener open: access={:?}, file={:?}, partition={}",
-            self.access,
+            "NetCDFOpener open: file={:?}, partition={}",
             file.object_meta.location,
             self.partition
         );
         let metrics = self.read_metrics.clone();
-        let input = self
-            .access
-            .input_for(&self.object_store, &file.object_meta)?;
+        let input = NetcdfInput::new(&self.object_store, &file.object_meta);
         let partitions =
             FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone());
 
@@ -480,7 +477,7 @@ impl FileOpener for NetCDFOpener {
             file.object_meta,
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
-            self.skip_unbroadcastable,
+            self.skip,
             self.batch_size,
             metrics,
             self.predicate.clone(),

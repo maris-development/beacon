@@ -5,9 +5,6 @@ edition = "2021"
 
 rust-version.workspace = true
 [features]
-# Statically build+link netCDF/HDF5 (see beacon-arrow-netcdf). Passed through for the Python
-# wheels; off by default.
-static-netcdf = ["beacon-arrow-netcdf/static", "beacon-arrow-hdf5/static"]
 # Enable the ODBC external-table engine (`STORED AS ODBC`), reaching SQL Server and any ODBC
 # source. Off by default: it needs a system ODBC driver manager (unixODBC) at build time and a
 # vendor driver (e.g. msodbcsql18) at runtime. PostgreSQL/MySQL are always on via the crate's
@@ -41,8 +38,6 @@ parking_lot = { workspace = true}
 sysinfo = {workspace = true}
 uuid = {workspace = true}
 chrono = { workspace = true }
-cast = {workspace = true}
-geojson = {workspace = true}
 num_cpus = {workspace = true}
 url = { workspace = true }
 typetag = { workspace = true }
@@ -52,11 +47,7 @@ secrecy = { workspace = true }
 base64 = { workspace = true }
 
 tracing = { workspace=true}
-# `file_statistics('argo/**')` matches registry paths with the same globbing the
-# `read_*` functions use for object paths.
-glob = { workspace = true }
 # Local dependencies
-beacon-auth = { path = "../beacon-auth" }
 beacon-common = { path = "../beacon-common" }
 beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-hdf5 = { path = "../beacon-file-formats/beacon-arrow-hdf5" }
@@ -70,10 +61,18 @@ beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
 beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
 beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
-beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
+beacon-sql-parser = { path = "../beacon-sql-parser" }
+beacon-json-query = { path = "../beacon-json-query" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-remote = { path = "../beacon-remote" }
+beacon-external-table = { path = "../beacon-external-table" }
+beacon-nd-execution = { path = "../beacon-nd-execution" }
+beacon-plugin-registry = { path = "../beacon-plugin/beacon-plugin-registry" }
+beacon-plugin-sdk = { path = "../beacon-plugin/beacon-plugin-sdk" }
+beacon-plugin-formats = { path = "../beacon-plugin/beacon-plugin-formats" }
+beacon-plugin-tables = { path = "../beacon-plugin/beacon-plugin-tables" }
 beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
 beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
@@ -81,7 +80,7 @@ beacon-icechunk = { path = "../beacon-file-formats/beacon-icechunk" }
 beacon-erddap = { path = "../beacon-file-formats/beacon-erddap" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
 beacon-redb-store = { path = "../beacon-redb-store" }
-beacon-file-stats = { path = "../beacon-file-stats", features = ["datafusion"] }
+beacon-file-statistics = { path = "../beacon-file-statistics" }
 
 # Reads the thread CPU clock for the per-query CPU budget.
 [target.'cfg(unix)'.dependencies]
@@ -91,12 +90,15 @@ libc = "=0.2.189"
 # Writes the Atlas fixtures the read tests read; the atlas writer takes ndarray
 # views, and Beacon itself never writes a collection.
 ndarray = { workspace = true }
-# The GeoJSON filter of the JSON query renders `ST_Within`; its test registers the set.
-datafusion-spatial = { workspace = true }
 deltalake = { workspace = true }
 # Writes the Iceberg fixtures the read tests read; Beacon itself never writes Iceberg.
 iceberg = { workspace = true }
 iceberg-datafusion = { workspace = true }
 tempfile = { workspace = true }
+# Builds a plugin archive with an unsafe entry.
+tar = { workspace = true }
+flate2 = { workspace = true }
+# Captures the error log of a stored function that a built-in replaced.
+tracing-subscriber = { workspace = true }
 # Unpacks the zipped Zarr stores that the zarr output format returns.
 zip = { workspace = true }

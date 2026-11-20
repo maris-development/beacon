@@ -83,6 +83,10 @@ impl QueryPlanner for BeaconQueryPlanner {
                 )))
             }
 
+            LogicalPlan::Ddl(DdlStatement::DropFunction(drop)) => Ok(Arc::new(
+                physical::DropFunctionExec::new(drop.name.clone(), drop.if_exists, session),
+            )),
+
             LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) => {
                 // The optimizer has already optimized the (CTAS) input; plan it as
                 // the child whose rows populate the table.
@@ -152,13 +156,6 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
         let any = node.as_any();
         let session = self.session.clone();
 
-        if let Some(auth) = any.downcast_ref::<logical::AuthNode>() {
-            return Ok(Some(Arc::new(physical::AuthExec::new(
-                auth.statement.payload.clone(),
-                session,
-            ))));
-        }
-
         if let Some(create) = any.downcast_ref::<logical::CreateMaterializedViewNode>() {
             return Ok(Some(Arc::new(physical::CreateMaterializedViewExec::new(
                 create.view_name.clone(),
@@ -209,8 +206,7 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
 
         if let Some(analyze) = any.downcast_ref::<logical::AnalyzeFilesNode>() {
             return Ok(Some(Arc::new(physical::AnalyzeFilesExec::new(
-                analyze.prefix.clone(),
-                analyze.force,
+                analyze.table.clone(),
                 session,
             ))));
         }
@@ -236,6 +232,23 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
         if let Some(detach) = any.downcast_ref::<logical::DetachNode>() {
             return Ok(Some(Arc::new(physical::DetachExec::new(
                 detach.name.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(install) = any.downcast_ref::<logical::InstallPluginNode>() {
+            return Ok(Some(Arc::new(physical::InstallPluginExec::new(
+                install.name.clone(),
+                install.source.clone(),
+                install.plugins_dir.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(uninstall) = any.downcast_ref::<logical::UninstallPluginNode>() {
+            return Ok(Some(Arc::new(physical::UninstallPluginExec::new(
+                uninstall.name.clone(),
+                uninstall.plugins_dir.clone(),
                 session,
             ))));
         }
@@ -304,6 +317,20 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
         if let Some(show) = any.downcast_ref::<logical::ShowCreateTableNode>() {
             return Ok(Some(Arc::new(physical::ShowCreateTableExec::new(
                 show.table.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(create) = any.downcast_ref::<logical::CreateFunctionNode>() {
+            return Ok(Some(Arc::new(physical::CreateFunctionExec::new(
+                create.definition.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(show) = any.downcast_ref::<logical::ShowCreateFunctionNode>() {
+            return Ok(Some(Arc::new(physical::ShowCreateFunctionExec::new(
+                show.name.clone(),
                 session,
             ))));
         }

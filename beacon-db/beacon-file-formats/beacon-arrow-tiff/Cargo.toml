@@ -23,6 +23,7 @@ async-tiff = {workspace = true}
 
 beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-nd-execution = { path = "../../beacon-nd-execution" }
 beacon-nd-array = { path = "../beacon-nd-array" }
 ndarray = {workspace = true}
 

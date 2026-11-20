@@ -2,6 +2,7 @@ name: TypeScript client
 
 on:
   push:
+    branches: [main]
     paths:
       - "beacon-clients/beacon-ts/**"
       - ".github/workflows/client-ts.yml"
@@ -9,6 +10,12 @@ on:
     paths:
       - "beacon-clients/beacon-ts/**"
       - ".github/workflows/client-ts.yml"
+  workflow_dispatch:
+
+# A new push to a PR stops the old run. Runs on main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

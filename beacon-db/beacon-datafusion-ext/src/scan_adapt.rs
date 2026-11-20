@@ -306,6 +306,37 @@ pub fn batch_adapter_factory(
         .with_adapter_factory(Arc::new(LenientCastAdapterFactory { strategy }))
 }
 
+/// The [`PhysicalExprAdapterFactory`] that adapts one file with `strategy`.
+///
+/// A cast that `strategy` reads leniently gives null for a value the type
+/// cannot hold. Every other cast is strict. See the [module docs](self).
+pub fn lenient_cast_adapter_factory(
+    strategy: Arc<dyn ArrowTypeWideningStrategy>,
+) -> Arc<dyn PhysicalExprAdapterFactory> {
+    Arc::new(LenientCastAdapterFactory { strategy })
+}
+
+/// Reads the one-column file `file` as a table column of `target` through the
+/// adapter of `strategy`.
+#[cfg(test)]
+pub(crate) fn adapt_column(
+    strategy: &dyn ArrowTypeWideningStrategy,
+    file: ArrayRef,
+    target: DataType,
+) -> Result<ArrayRef> {
+    use datafusion::physical_expr::expressions::Column;
+
+    let physical = Arc::new(Schema::new(vec![Field::new("v", file.data_type().clone(), true)]));
+    let logical = Arc::new(Schema::new(vec![Field::new("v", target, true)]));
+    let adapter = strategy
+        .physical_expr_adapter_factory()
+        .create(logical, Arc::clone(&physical))?;
+    let expr = adapter.rewrite(Arc::new(Column::new("v", 0)))?;
+    let rows = file.len();
+    let batch = RecordBatch::try_new(physical, vec![file])?;
+    expr.evaluate(&batch)?.into_array(rows)
+}
+
 /// Builds [`LenientCastAdapter`] for one file.
 #[derive(Debug)]
 struct LenientCastAdapterFactory {

@@ -2,7 +2,20 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+  workflow_dispatch:
+
+# A new push to a PR stops the old run. Runs on main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -16,23 +29,21 @@ jobs:
       # Report both legs; one failing shouldn't hide the other's result.
       fail-fast: false
       matrix:
+        # "1.95" is the declared MSRV (`rust-version` in the workspace Cargo.toml). Building at the
+        # floor is what keeps that claim honest — a post-1.95 feature fails here rather than
+        # silently breaking source builds for anyone on distro Rust.
+        # "stable" is what the released wheels are actually compiled with: maturin-action defaults
+        # to stable inside the manylinux container, and the host builds follow rust-toolchain.toml.
+        # Without this leg a stable-only regression would first surface during a release build.
+        # PRs run only the MSRV leg. The stable leg runs on main and on a manual run.
+        toolchain: ${{ fromJSON(github.event_name == 'pull_request' && '["1.95"]' || '["1.95", "stable"]') }}
         include:
-          # The declared MSRV (`rust-version` in the workspace Cargo.toml). Building at the floor is
-          # what keeps that claim honest — a post-1.95 feature fails here rather than silently
-          # breaking source builds for anyone on distro Rust.
           - toolchain: "1.95"
             lint: true
-          # What the released wheels are actually compiled with: maturin-action defaults to stable
-          # inside the manylinux container, and the host builds follow rust-toolchain.toml. Without
-          # this leg a stable-only regression would first surface during a release build.
-          - toolchain: stable
-            lint: false
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Check layer boundary (beacon-db must not depend on beacon-server)
         run: ./scripts/check-layer-boundary.sh
@@ -52,16 +63,15 @@ jobs:
             cmake \
             curl \
             libclang-dev \
-            libhdf5-dev \
-            libnetcdf-dev \
             libproj-dev \
             libsqlite3-dev \
-            netcdf-bin \
+            libssl-dev \
             pkg-config \
             protobuf-compiler \
             software-properties-common \
             sqlite3 \
-            wget
+            wget \
+            zlib1g-dev
 
       - name: Install Rust (${{ matrix.toolchain }})
         uses: dtolnay/rust-toolchain@stable
@@ -87,3 +97,47 @@ jobs:
 
       - name: Build
         run: cargo build --workspace
+
+  helm:
+    name: Helm lint and template
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for chart changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            chart:
+              - 'charts/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/publish-helm-chart.yml'
+
+      - name: Set up Helm
+        if: steps.changes.outputs.chart == 'true'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Lint chart
+        if: steps.changes.outputs.chart == 'true'
+        run: helm lint charts/beacon --strict
+
+      # Render the default values and the main optional branches of the templates.
+      - name: Render chart
+        if: steps.changes.outputs.chart == 'true'
+        run: |
+          helm template beacon charts/beacon > /dev/null
+          helm template beacon charts/beacon --set kind=StatefulSet > /dev/null
+          helm template beacon charts/beacon --set persistence.enabled=false --set replicaCount=0 > /dev/null
+          helm template beacon charts/beacon \
+            --set ingress.enabled=true \
+            --set beacon.s3.enabled=true --set beacon.s3.bucket=example \
+            --set beacon.oidc.enabled=true --set beacon.oidc.issuer=https://issuer.example.com/ \
+            --set beacon.oidc.jwksUrl=https://issuer.example.com/jwks.json > /dev/null

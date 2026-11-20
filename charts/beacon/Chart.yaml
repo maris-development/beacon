@@ -1,0 +1,24 @@
+apiVersion: v2
+name: beacon
+description: A Helm chart to deploy the Beacon data lake query engine on Kubernetes.
+type: application
+# Chart version — bump on chart changes (SemVer).
+version: 0.1.0
+# The Beacon server version this chart defaults to (see values.yaml image.tag).
+appVersion: "2.0.2"
+home: https://maris-development.github.io/beacon/
+sources:
+  - https://github.com/maris-development/beacon
+keywords:
+  - beacon
+  - datafusion
+  - data-lake
+  - query-engine
+  - netcdf
+  - zarr
+  - parquet
+  - arrow-flight-sql
+maintainers:
+  - name: Beacon community
+    url: https://github.com/maris-development/beacon
+icon: https://raw.githubusercontent.com/maris-development/beacon/main/docs/public/beacon-logo-small.png

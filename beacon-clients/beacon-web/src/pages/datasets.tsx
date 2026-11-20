@@ -84,7 +84,6 @@ const READ_FUNCTIONS: Record<string, string> = {
   geoparquet: "read_geoparquet",
   txt: "read_odv_ascii",
   tiff: "read_tiff",
-  bbf: "read_bbf",
   atlas: "read_atlas",
 };
 

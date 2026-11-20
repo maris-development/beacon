@@ -7,12 +7,13 @@ RUN apt-get install wget -y
 RUN apt-get install -y build-essential
 RUN apt-get install -y curl
 RUN apt-get install -y software-properties-common
-RUN apt-get install -y libnetcdf-dev
-RUN apt-get install -y netcdf-bin
-RUN apt-get install -y libhdf5-dev
 RUN apt-get install -y capnproto
 RUN apt-get install -y libclang-dev
 RUN apt-get install -y libsqlite3-dev
+# `openssl-sys` (MySQL and PostgreSQL drivers) links the system libssl.
+RUN apt-get install -y libssl-dev
+# `libz-sys` (flate2, zarrs) links the system zlib.
+RUN apt-get install -y zlib1g-dev
 RUN apt-get install -y cmake
 RUN apt-get install -y sqlite3
 # protoc: required at build time by the `lance` crate (beacon-lance managed tables)
@@ -64,8 +65,6 @@ COPY --from=webui /beacon-clients/beacon-web/dist /beacon/web
 #Install Dependencies
 RUN apt-get update
 RUN apt-get install -y curl
-RUN apt-get install -y netcdf-bin
-RUN apt-get install -y libnetcdf-dev
 # The server links PROJ, so the runtime image carries it too. `proj-data` holds `proj.db`, which
 # PROJ reads to resolve an EPSG code. Without that file `ST_Transform` fails, and it fails loudly:
 # PROJ reports the missing database instead of wrong coordinates.

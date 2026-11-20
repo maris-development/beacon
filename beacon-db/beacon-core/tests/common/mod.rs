@@ -15,6 +15,8 @@
 
 /// Builds Iceberg tables for the tests that read them.
 pub mod iceberg_fixture;
+/// Builds plugin archives for the plugin tests.
+pub mod plugins;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,16 +24,14 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
-use beacon_core::{AuthIdentity, Credential};
+use beacon_core::plan_validator::{
+    allow_all, PlanFacts, PlanValidator, QueryLimits, TableFacts,
+};
 use beacon_datafusion_ext::listing_factory::RootStore;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use futures::TryStreamExt;
 use tempfile::TempDir;
 
-pub const ADMIN_USERNAME: &str = "test-admin";
-pub const ADMIN_PASSWORD: &str = "test-admin-password";
-/// The built-in anonymous principal (re-exported through beacon-core).
-pub const ANONYMOUS_USERNAME: &str = beacon_core::beacon_auth::ANONYMOUS_USERNAME;
 
 /// The isolated storage layout a test runs against: a datasets directory (where
 /// the test writes the files it queries), a tmp directory (query-output files),
@@ -41,6 +41,7 @@ pub struct Storage {
     pub datasets_dir: PathBuf,
     pub tmp_dir: PathBuf,
     pub db_path: Option<PathBuf>,
+    pub plugins_dir: PathBuf,
 }
 
 /// Rebuilds an identical runtime over the same storage. `Fn` (not `FnOnce`) so
@@ -68,6 +69,11 @@ impl TestRuntime {
         &self.storage.tmp_dir
     }
 
+    /// The plugins directory, `<root>/plugins`.
+    pub fn plugins_dir(&self) -> PathBuf {
+        self.storage.plugins_dir.clone()
+    }
+
     /// Drops this runtime and builds a fresh one over the same storage, so a test can
     /// assert what survived. Only valid for [`restartable_runtime`].
     pub async fn restart(self) -> TestRuntime {
@@ -92,46 +98,86 @@ impl TestRuntime {
         }
     }
 
-    /// Authenticates the bootstrapped super-user.
-    pub async fn admin(&self) -> AuthIdentity {
-        self.runtime
-            .authenticate(&Credential::basic(ADMIN_USERNAME, ADMIN_PASSWORD))
-            .await
-            .expect("admin should authenticate")
+    /// The validator of the owner of the database: it permits each statement.
+    pub fn admin(&self) -> Arc<dyn PlanValidator> {
+        allow_all()
     }
 
-    /// Runs a statement as the super-user and collects its rows.
+    /// Runs a statement with full access and collects its rows.
     pub async fn sql(&self, sql: &str) -> Vec<RecordBatch> {
-        self.sql_as(sql, self.admin().await).await
+        self.sql_as(sql, allow_all()).await
     }
 
-    /// Runs a statement as `identity` and collects its rows, panicking on error.
-    pub async fn sql_as(&self, sql: &str, identity: AuthIdentity) -> Vec<RecordBatch> {
-        self.try_sql_as(sql, identity)
+    /// Runs a statement with `validator` and collects its rows, panicking on error.
+    pub async fn sql_as(&self, sql: &str, validator: Arc<dyn PlanValidator>) -> Vec<RecordBatch> {
+        self.try_sql_as(sql, validator)
             .await
             .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))
     }
 
-    /// Runs a statement as the super-user, surfacing errors to the caller.
+    /// Runs a statement with full access, surfacing errors to the caller.
     pub async fn try_sql(&self, sql: &str) -> anyhow::Result<Vec<RecordBatch>> {
-        self.try_sql_as(sql, self.admin().await).await
+        self.try_sql_as(sql, allow_all()).await
     }
 
-    /// Runs a statement as `identity`, surfacing errors to the caller.
+    /// Runs a statement with `validator`, surfacing errors to the caller.
     pub async fn try_sql_as(
         &self,
         sql: &str,
-        identity: AuthIdentity,
+        validator: Arc<dyn PlanValidator>,
     ) -> anyhow::Result<Vec<RecordBatch>> {
         let batches = self
             .runtime
-            .run_query(beacon_core::query::Query::sql(sql.to_string()), identity)
+            .run_query(beacon_core::query::Query::sql(sql.to_string()), validator)
             .await?
             .into_record_stream()?
             .try_collect::<Vec<_>>()
             .await?;
         Ok(batches)
     }
+}
+
+/// A validator for a caller without privileges, as a host application can write one.
+///
+/// It permits a plain read. It refuses DDL, DML, the internal tables and the metadata schemas.
+pub struct Unprivileged;
+
+#[async_trait::async_trait]
+impl PlanValidator for Unprivileged {
+    fn caller(&self) -> &str {
+        "reader"
+    }
+
+    fn limits(&self) -> QueryLimits {
+        QueryLimits::default()
+    }
+
+    async fn validate(&self, facts: &PlanFacts<'_>) -> anyhow::Result<()> {
+        facts.verify_unprivileged()?;
+        if facts.touches_internal_tables() {
+            anyhow::bail!("permission denied: internal tables are restricted to the super-user");
+        }
+        if let Some(surface) = facts.metadata_surface() {
+            anyhow::bail!("permission denied: {surface} is restricted to the super-user");
+        }
+        Ok(())
+    }
+
+    fn check_table(&self, table: &TableFacts) -> anyhow::Result<()> {
+        if table.is_internal() || table.metadata_schema().is_some() {
+            anyhow::bail!("permission denied: {} is restricted", table.name());
+        }
+        Ok(())
+    }
+
+    fn can_read_path(&self, _path: &str) -> bool {
+        true
+    }
+}
+
+/// [`Unprivileged`] as the shared trait object that the query methods take.
+pub fn unprivileged() -> Arc<dyn PlanValidator> {
+    Arc::new(Unprivileged)
 }
 
 /// Creates the temp root and the storage layout under it.
@@ -145,6 +191,7 @@ fn new_root(tag: &str) -> (Arc<TempDir>, Storage) {
         tmp_dir: root.path().join("tmp"),
         // In-memory tables store: independent per runtime, nothing persists.
         db_path: None,
+        plugins_dir: root.path().join("plugins"),
     };
     for dir in [&storage.datasets_dir, &storage.tmp_dir] {
         std::fs::create_dir_all(dir).expect("create storage dir");
@@ -154,7 +201,7 @@ fn new_root(tag: &str) -> (Arc<TempDir>, Storage) {
 
 /// The base builder every test runtime shares: a local datasets store rooted at
 /// `storage.datasets_dir` (so relative `LOCATION`s resolve there), the tmp store,
-/// an optional persistent tables store, and a bootstrapped super-user.
+/// and an optional persistent tables store.
 fn base_builder(storage: &Storage) -> RuntimeBuilder {
     let mut builder = RuntimeBuilder::new()
         .with_default_store(
@@ -162,14 +209,14 @@ fn base_builder(storage: &Storage) -> RuntimeBuilder {
             RootStore::FileSystem(storage.datasets_dir.clone()),
         )
         .with_tmp_dir_path(storage.tmp_dir.clone())
-        .with_admin_credentials(ADMIN_USERNAME.to_string(), ADMIN_PASSWORD.to_string());
+        .with_plugins_dir(storage.plugins_dir.clone());
     if let Some(db_path) = &storage.db_path {
         builder = builder.with_db_path(db_path.clone());
     }
     builder
 }
 
-/// Builds a runtime over `storage`, with the super-user bootstrapped.
+/// Builds a runtime over `storage`.
 async fn build_runtime(
     storage: &Storage,
     customize: &dyn Fn(RuntimeBuilder) -> RuntimeBuilder,
@@ -180,8 +227,8 @@ async fn build_runtime(
         .expect("runtime should build")
 }
 
-/// Builds a runtime with an isolated temp root, an ephemeral tables store and a
-/// bootstrapped super-user. `customize` tweaks the builder for the test at hand.
+/// Builds a runtime with an isolated temp root and an ephemeral tables store.
+/// `customize` tweaks the builder for the test at hand.
 pub async fn runtime_with(
     tag: &str,
     customize: impl FnOnce(RuntimeBuilder) -> RuntimeBuilder,
@@ -200,7 +247,7 @@ pub async fn runtime_with(
     }
 }
 
-/// The default test runtime: isolated storage, ephemeral tables, admin bootstrapped.
+/// The default test runtime: isolated storage and ephemeral tables.
 pub async fn runtime(tag: &str) -> TestRuntime {
     runtime_with(tag, |b| b).await
 }

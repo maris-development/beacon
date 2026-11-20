@@ -44,12 +44,9 @@ async fn system_tables_are_listed_in_information_schema() {
         names,
         vec![
             "comments",
-            "file_stats",
-            "file_stats_segments",
+            "plugins",
             "query_metrics",
-            "role_settings",
-            "roles",
-            "users"
+            "table_sizes"
         ],
         "the system schema should expose exactly these tables"
     );
@@ -209,6 +206,63 @@ async fn query_metrics_capture_the_logical_plans() {
     }
 }
 
+/// `table_sizes` reports the figures of a managed table after each write.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sizes_reports_a_managed_table() {
+    let rt = runtime("system-schema-table-sizes").await;
+    rt.sql("CREATE TABLE sized (id BIGINT)").await;
+    rt.sql("INSERT INTO sized VALUES (1), (2), (3)").await;
+    rt.sql("INSERT INTO sized VALUES (4), (5)").await;
+
+    let batches = rt
+        .sql(
+            "SELECT engine, row_count, fragment_count, version_count, bytes_on_disk \
+             FROM beacon.system.table_sizes WHERE table_name = 'sized'",
+        )
+        .await;
+
+    assert_eq!(total_rows(&batches), 1, "one row for the table");
+    let batch = &batches[0];
+    let figure = |column: usize| {
+        batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("the figure is UInt64")
+            .value(0)
+    };
+    assert_eq!(batch.column(0).as_string::<i32>().value(0), "lance");
+    assert_eq!((figure(1), figure(2), figure(3)), (5, 2, 3));
+    assert!(figure(4) > 0, "the table holds bytes");
+}
+
+/// `table_sizes` shows the internal tables and leaves out tables that Beacon
+/// does not store.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sizes_lists_internal_tables_and_no_views() {
+    let rt = runtime("system-schema-table-sizes-scope").await;
+    rt.sql("CREATE TABLE zeta (id BIGINT)").await;
+    rt.sql("CREATE TABLE alpha (id BIGINT)").await;
+    rt.sql("CREATE VIEW alpha_view AS SELECT id FROM alpha")
+        .await;
+
+    let batches = rt
+        .sql("SELECT table_name FROM beacon.system.table_sizes")
+        .await;
+
+    let names = common::column_strings(&batches, 0);
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "the rows are in name order");
+    assert!(names.iter().any(|name| name == "alpha"));
+    assert!(names.iter().any(|name| name == "zeta"));
+    assert!(
+        names.iter().any(|name| name.starts_with("__beacon_")),
+        "the internal tables are listed: {names:?}"
+    );
+    assert!(!names.iter().any(|name| name == "alpha_view"));
+}
+
 /// The system schema is read-only: it rejects `CREATE TABLE` into it.
 #[tokio::test(flavor = "multi_thread")]
 async fn system_schema_rejects_writes() {
@@ -225,77 +279,21 @@ async fn system_schema_rejects_writes() {
     );
 }
 
-/// The auth directory is readable as SQL by the super-user, completing the set:
-/// `CREATE USER` / `CREATE ROLE` / `GRANT` were already SQL, and now so is
-/// reading back what they did.
+/// A validator can refuse the whole schema, with the facts that the engine gives it.
 #[tokio::test(flavor = "multi_thread")]
-async fn auth_tables_expose_the_directory_to_the_super_user() {
-    let rt = runtime("system-schema-auth").await;
-
-    rt.sql("CREATE ROLE analyst").await;
-    rt.sql("CREATE USER alice WITH PASSWORD 'pw'").await;
-    rt.sql("GRANT ROLE analyst TO USER alice").await;
-
-    assert_eq!(
-        scalar_i64(
-            &rt.sql("SELECT count(*) FROM beacon.system.users WHERE username = 'alice'")
-                .await
-        ),
-        1,
-        "a user created through SQL should be listed"
-    );
-    assert_eq!(
-        scalar_i64(
-            &rt.sql("SELECT count(*) FROM beacon.system.roles WHERE role_name = 'analyst'")
-                .await
-        ),
-        1,
-        "a role created through SQL should be listed"
-    );
-
-    let batches = rt
-        .sql("SELECT username, roles FROM beacon.system.users WHERE username = 'alice'")
-        .await;
-    let roles = batches[0]
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("roles is Utf8")
-        .value(0);
-    let roles: Vec<String> =
-        serde_json::from_str(roles).expect("roles should be a JSON array");
-    assert!(
-        roles.iter().any(|r| r == "analyst"),
-        "alice's granted role should be listed, got: {roles:?}"
-    );
-
-    // Roles render their rules as JSON, and no password material is present
-    // anywhere in the users table.
-    let dumped = format!("{:?}", rt.sql("SELECT * FROM beacon.system.users").await);
-    assert!(
-        !dumped.contains("$argon2"),
-        "the users table must never expose password hashes"
-    );
-}
-
-/// The whole schema — not just the auth tables — is super-user-only, and
-/// *unconditionally* so: this runtime has grant enforcement off, which is the
-/// default and the case where a gate that depended on enforcement would leak.
-#[tokio::test(flavor = "multi_thread")]
-async fn system_schema_is_super_user_only_even_without_enforcement() {
+async fn a_validator_can_refuse_the_system_schema() {
     let rt = runtime("system-schema-auth-gate").await;
 
     for sql in [
-        "SELECT * FROM beacon.system.users",
-        "SELECT * FROM beacon.system.roles",
         // The rest of the schema is no more readable: query_metrics carries the
         // text and plans of what other users ran.
         "SELECT count(*) FROM beacon.system.query_metrics",
+        "SELECT * FROM beacon.system.table_sizes",
         // Reached indirectly: the gate matches the scan, not the statement shape.
-        "SELECT count(*) FROM (SELECT * FROM beacon.system.users)",
+        "SELECT count(*) FROM (SELECT * FROM beacon.system.comments)",
     ] {
         let err = rt
-            .try_sql_as(sql, beacon_core::AuthIdentity::empty())
+            .try_sql_as(sql, common::unprivileged())
             .await
             .err()
             .unwrap_or_else(|| panic!("non-super read should be rejected: {sql}"));
@@ -311,7 +309,7 @@ async fn system_schema_is_super_user_only_even_without_enforcement() {
     assert!(rt
         .try_sql_as(
             "SELECT count(*) FROM information_schema.routines",
-            beacon_core::AuthIdentity::empty()
+            common::unprivileged()
         )
         .await
         .is_err_and(|err| err.to_string().contains("super-user")));
@@ -344,7 +342,7 @@ async fn query_metrics_survive_a_restart() {
     assert_eq!(total_rows(&batches), 1, "the SELECT should be recorded");
     assert_eq!(
         common::column_strings(&batches, 1),
-        vec![common::ADMIN_USERNAME],
+        vec![beacon_core::plan_validator::ALLOW_ALL_CALLER],
         "the row names the principal that ran the query"
     );
     let query_id: uuid::Uuid = common::column_strings(&batches, 0)[0]

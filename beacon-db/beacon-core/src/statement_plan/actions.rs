@@ -7,11 +7,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use beacon_datafusion_ext::{
-    listing_table_factory_ext::ListingTableFactoryExt,
-    remote::{unresolved_schema, RemoteTableDefinition},
-    table_ext::{MaterializedView, TableDefinition},
-};
+use anyhow::Context;
+use beacon_datafusion_ext::table_ext::{MaterializedView, TableDefinition};
+use beacon_remote::{unresolved_schema, RemoteTableDefinition};
 use beacon_sql_databases::{EncryptedSecret, SqlDatabaseTableDefinition, SqlEngine};
 use datafusion::{
     catalog::TableProviderFactory,
@@ -58,6 +56,20 @@ pub(crate) async fn drop_table(
 
     session.deregister_table(name.clone())?;
 
+    // The file statistics of an external table go with it.
+    let external = provider
+        .as_ref()
+        .and_then(|provider| provider.downcast_ref::<beacon_external_table::ExternalTable>());
+    if let Some(external) = external {
+        if let Err(error) = external.drop_statistics().await {
+            tracing::warn!(
+                table = %name,
+                error = format!("{error:#}"),
+                "the table is dropped, but its file statistics stay"
+            );
+        }
+    }
+
     if let Some(prefix) = materialized_prefix {
         delete_tables_prefix(session, &prefix).await;
     }
@@ -77,7 +89,7 @@ pub(crate) async fn attach_remote(
     session: &Arc<SessionContext>,
     name: &str,
     url: &str,
-    credential: beacon_datafusion_ext::remote::RemoteCredential,
+    credential: beacon_remote::RemoteCredential,
     secret: Option<String>,
     tls: bool,
 ) -> anyhow::Result<()> {
@@ -88,7 +100,7 @@ pub(crate) async fn attach_remote(
             let stored = secret_store(session)?.get(&secret_name).ok_or_else(|| {
                 anyhow::anyhow!("ATTACH references secret '{secret_name}', which does not exist")
             })?;
-            beacon_datafusion_ext::remote::RemoteCredential::from_secret(&stored)?
+            beacon_remote::RemoteCredential::from_secret(&stored)?
         }
         None => credential,
     };
@@ -220,7 +232,44 @@ pub(crate) async fn show_secrets(
 /// Errors if a table with `cmd.name` already exists. `IF NOT EXISTS` keeps the
 /// existing table instead, and `OR REPLACE` overwrites it. The guard covers every
 /// `STORED AS` variant below, so no variant replaces a table the user did not drop.
+///
+/// `OR REPLACE` deletes the file statistics of the old table when the new table
+/// keeps none. A new table with statistics takes over the rows of the old one.
 pub(crate) async fn create_external_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+) -> anyhow::Result<()> {
+    let replaced = if cmd.or_replace {
+        session.table_provider(cmd.name.clone()).await.ok()
+    } else {
+        None
+    };
+    register_external_table(session, cmd).await?;
+
+    let Some(old) = replaced
+        .as_ref()
+        .and_then(|provider| provider.downcast_ref::<beacon_external_table::ExternalTable>())
+    else {
+        return Ok(());
+    };
+    let new = session.table_provider(cmd.name.clone()).await?;
+    let keeps_statistics = new
+        .downcast_ref::<beacon_external_table::ExternalTable>()
+        .is_some_and(|table| table.definition().use_statistics_pruning);
+    if !keeps_statistics {
+        if let Err(error) = old.drop_statistics().await {
+            tracing::warn!(
+                table = %cmd.name,
+                error = format!("{error:#}"),
+                "the table is replaced, but the file statistics of the old table stay"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Builds the table of `cmd` for its `STORED AS` type and registers it.
+async fn register_external_table(
     session: &Arc<SessionContext>,
     cmd: &CreateExternalTable,
 ) -> anyhow::Result<()> {
@@ -235,6 +284,7 @@ pub(crate) async fn create_external_table(
         )
         .await);
     }
+    crate::name_rule::check_new_name("Table", cmd.name.table())?;
 
     // `STORED AS REMOTE` registers a federated table pointing at another Beacon
     // instance, rather than a listing table over the datasets store.
@@ -276,9 +326,21 @@ pub(crate) async fn create_external_table(
     }
 
     let state = session.state();
+    // A `STORED AS` name of a plugin table type goes to the plugin factory.
+    if let Some(installed) = state
+        .config()
+        .get_extension::<beacon_plugin_tables::InstalledTableTypes>()
+    {
+        if let Some(table) =
+            beacon_plugin_tables::create_plugin_table(&state, &installed, cmd).await?
+        {
+            session.register_table(cmd.name.clone(), table)?;
+            return Ok(());
+        }
+    }
     let factory = state
         .config()
-        .get_extension::<ListingTableFactoryExt>()
+        .get_extension::<beacon_external_table::ExternalTableFactory>()
         .ok_or_else(|| anyhow::anyhow!("Listing-table factory is not registered on the session"))?;
     let created = factory.create(&state, cmd).await?;
     session.register_table(cmd.name.clone(), created)?;
@@ -544,6 +606,7 @@ pub(crate) async fn create_view(
     definition: &Option<String>,
     or_replace: bool,
 ) -> anyhow::Result<()> {
+    crate::name_rule::check_new_name("View", name.table())?;
     if !or_replace && session.table_exist(name.clone())? {
         return Err(crate::schema_persistence::default_table::already_exists_error(
             session,
@@ -603,6 +666,7 @@ pub(crate) async fn create_table(
         )
         .await);
     }
+    crate::name_rule::check_new_name("Table", &table_name)?;
 
     let arrow_schema = child.schema();
 
@@ -945,6 +1009,76 @@ pub(crate) async fn show_create_table(
     Ok(batch)
 }
 
+/// `ANALYZE FILES [<table>]`: request a background refresh of the file
+/// statistics of `table`, or of each table with statistics when `table` is `None`.
+///
+/// A refresh can run for hours, so this does not wait for it.
+///
+/// # Returns
+///
+/// One row for each table: `started`, or `queued` behind a refresh that runs now.
+///
+/// # Errors
+///
+/// Returns an error when file statistics are off, or `table` has no statistics.
+pub(crate) async fn analyze_files(
+    session: &Arc<SessionContext>,
+    table: Option<&str>,
+) -> anyhow::Result<arrow::record_batch::RecordBatch> {
+    use arrow::array::{ArrayRef, StringArray};
+
+    let engine = session
+        .state()
+        .config()
+        .get_extension::<beacon_file_statistics::FileStatistics>()
+        .context(
+            "file statistics are not enabled on this runtime; set BEACON_FILE_STATS_ENABLE=true",
+        )?;
+    let tables = match table {
+        Some(table) => vec![statistics_name(session, &engine, table).await?],
+        None => engine.tables(),
+    };
+    let statuses = tables
+        .iter()
+        .map(|table| Ok(engine.request_refresh(table)?.as_str()))
+        .collect::<anyhow::Result<Vec<&str>>>()?;
+
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        super::logical::analyze_files_arrow_schema(),
+        vec![
+            Arc::new(StringArray::from(tables)) as ArrayRef,
+            Arc::new(StringArray::from(statuses)),
+        ],
+    )?;
+    Ok(batch)
+}
+
+/// The name the statistics of the external table `table` are registered under:
+/// the name of its `CREATE EXTERNAL TABLE` statement.
+async fn statistics_name(
+    session: &Arc<SessionContext>,
+    engine: &beacon_file_statistics::FileStatistics,
+    table: &str,
+) -> anyhow::Result<String> {
+    let provider = session
+        .table_provider(crate::table_name::table_reference(table))
+        .await?;
+    let external = provider
+        .downcast_ref::<beacon_external_table::ExternalTable>()
+        .with_context(|| {
+            format!("'{table}' is not an external table, so it has no file statistics")
+        })?;
+    let name = external.definition().name;
+    if !engine.tables().contains(&name) {
+        anyhow::bail!(
+            "the table '{table}' has no file statistics; set the table option \
+             '{}' to 'true'",
+            beacon_external_table::definition::USE_STATISTICS_PRUNING_OPTION
+        );
+    }
+    Ok(name)
+}
+
 /// `COMPACT TABLE <table> [WITH (...)]`: merge a Lance table's small fragments
 /// into target-sized ones, materialize its deletions, and drop the superseded
 /// versions the retention window allows. Returns the report as a single row.
@@ -986,6 +1120,21 @@ fn sql_column_type_to_arrow(
         .build_schema(vec![column_def.clone()])
         .map_err(|error| anyhow::anyhow!("Unsupported column type: {error}"))?;
     Ok(schema.field(0).data_type().clone())
+}
+
+/// Convert SQL column definitions to an Arrow schema with the session's parser
+/// options, so names and string types match the planner.
+pub(crate) fn sql_columns_to_arrow_schema(
+    options: &datafusion::config::ConfigOptions,
+    columns: Vec<SqlColumnDef>,
+) -> anyhow::Result<arrow::datatypes::Schema> {
+    let provider = AlterTypeContextProvider {
+        options: options.clone(),
+    };
+    let planner = datafusion::sql::planner::SqlToRel::new(&provider);
+    planner
+        .build_schema(columns)
+        .map_err(|error| anyhow::anyhow!("Unsupported type: {error}"))
 }
 
 /// Minimal [`ContextProvider`] used only to convert SQL column types to Arrow

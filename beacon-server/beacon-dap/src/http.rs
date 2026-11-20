@@ -9,7 +9,7 @@ use axum::routing::get;
 use axum::{Extension, Router};
 use beacon_core::query::output::OutputFormat;
 use beacon_core::runtime::Runtime;
-use beacon_core::AuthIdentity;
+use beacon_core::plan_validator::PlanValidator;
 use datafusion::sql::TableReference;
 
 use crate::compile;
@@ -70,24 +70,25 @@ pub async fn basic_challenge(response: Response) -> Response {
 
 async fn dataset(
     State(runtime): State<Arc<Runtime>>,
-    Extension(identity): Extension<AuthIdentity>,
+    Extension(validator): Extension<Arc<dyn PlanValidator>>,
     Path(dataset): Path<String>,
     RawQuery(query): RawQuery,
 ) -> Response {
     let (table, suffix) = split_suffix(&dataset);
     let query = query.unwrap_or_default();
     let result = match suffix {
-        Suffix::Index => index_response(&runtime, &identity, table).await,
-        Suffix::Dds => dds_response(&runtime, &identity, table, &query).await,
-        Suffix::Das => das_response(&runtime, &identity, table).await,
-        Suffix::Dods => crate::data::dods_response(&runtime, identity, table, &query).await,
+        Suffix::Index => index_response(&runtime, validator.as_ref(), table).await,
+        Suffix::Dds => dds_response(&runtime, validator.as_ref(), table, &query).await,
+        Suffix::Das => das_response(&runtime, validator.as_ref(), table).await,
+        Suffix::Dods => crate::data::dods_response(&runtime, validator, table, &query).await,
         Suffix::Csv => {
-            crate::files::file_response(&runtime, identity, table, &query, OutputFormat::Csv).await
+            crate::files::file_response(&runtime, validator, table, &query, OutputFormat::Csv)
+                .await
         }
         Suffix::Nc => {
             crate::files::file_response(
                 &runtime,
-                identity,
+                validator,
                 table,
                 &query,
                 OutputFormat::NetCDF(Default::default()),
@@ -103,7 +104,7 @@ async fn dataset(
 /// cannot read.
 pub(crate) async fn load_schema(
     runtime: &Runtime,
-    identity: &AuthIdentity,
+    validator: &dyn PlanValidator,
     table: &str,
 ) -> Result<(TableReference, ServedSchema), DapError> {
     // The bare name keeps its case. A name with a `.` or a `"` may also be a qualified name.
@@ -114,7 +115,7 @@ pub(crate) async fn load_schema(
     let mut failure = None;
     for reference in references {
         match runtime
-            .table_arrow_schema(reference.clone(), identity)
+            .table_arrow_schema(reference.clone(), validator)
             .await
         {
             Ok(schema) => return Ok((reference, ServedSchema::from_arrow(&schema))),
@@ -134,10 +135,10 @@ pub(crate) async fn load_schema(
 
 async fn index_response(
     runtime: &Runtime,
-    identity: &AuthIdentity,
+    validator: &dyn PlanValidator,
     table: &str,
 ) -> Result<Response, DapError> {
-    load_schema(runtime, identity, table).await?;
+    load_schema(runtime, validator, table).await?;
     let links: Vec<String> = SUFFIXES
         .iter()
         .map(|(text, _)| format!("{table}{text}"))
@@ -151,11 +152,11 @@ async fn index_response(
 
 async fn dds_response(
     runtime: &Runtime,
-    identity: &AuthIdentity,
+    validator: &dyn PlanValidator,
     table: &str,
     query: &str,
 ) -> Result<Response, DapError> {
-    let (_, schema) = load_schema(runtime, identity, table).await?;
+    let (_, schema) = load_schema(runtime, validator, table).await?;
     let constraint = constraint::parse(query)?;
     let columns = compile::projected(&schema, &constraint.projection)?;
     Ok(dap2_response(
@@ -167,10 +168,10 @@ async fn dds_response(
 
 async fn das_response(
     runtime: &Runtime,
-    identity: &AuthIdentity,
+    validator: &dyn PlanValidator,
     table: &str,
 ) -> Result<Response, DapError> {
-    let (_, schema) = load_schema(runtime, identity, table).await?;
+    let (_, schema) = load_schema(runtime, validator, table).await?;
     Ok(dap2_response(
         "dods-das",
         "text/plain; charset=utf-8",

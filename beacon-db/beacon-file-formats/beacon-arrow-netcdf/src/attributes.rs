@@ -11,7 +11,7 @@ use arrow::{
     datatypes::{DataType, Field, Schema},
 };
 use datafusion::common::ScalarValue;
-use netcdf::AttributeValue;
+use oxcdf::AttributeValue;
 
 /// How the flat NetCDF writer combines the values of one attribute column.
 #[derive(
@@ -380,7 +380,7 @@ impl AttributeCombiner {
     }
 }
 
-/// Keep `column` as a variable. A global gets a name that libnetcdf accepts.
+/// Keep `column` as a variable. A global gets a valid NetCDF name.
 fn keep_as_variable(
     plan: &mut AttributePlan,
     columns: &HashSet<String>,
@@ -408,7 +408,6 @@ mod tests {
         TimestampNanosecondArray,
     };
     use arrow::datatypes::{Field, Float64Type, Schema, TimeUnit};
-    use netcdf::AttributeValue;
     use std::sync::Arc;
 
     fn schema(fields: &[(&str, DataType)]) -> Schema {

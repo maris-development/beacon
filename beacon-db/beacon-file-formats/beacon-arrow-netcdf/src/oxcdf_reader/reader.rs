@@ -4,9 +4,6 @@
 //! [`object_store`], turns every variable and attribute into a lazy
 //! [`NdArrayD`] wrapper, and returns the result as an [`AnyDataset`].
 //!
-//! This is the [`oxcdf`] twin of [`crate::reader`]. The two follow the same
-//! conventions, so a table keeps its schema when the reader changes.
-//!
 //! # CF conventions
 //!
 //! - A variable whose last dimension name starts with `string`, `strlen` or
@@ -56,8 +53,8 @@ use beacon_nd_array::{
     NdArrayD,
 };
 use indexmap::IndexMap;
-use object_store::{path::Path, ObjectStore};
-use oxcdf::AsyncNetcdfFile;
+use object_store::{path::Path, ObjectMeta, ObjectStore};
+use oxcdf::{async_source::AsyncObjectStoreSource, AsyncNetcdfFile, OpenOptions};
 
 use crate::dimensions::PhonyDimensions;
 use crate::oxcdf_reader::compat;
@@ -78,6 +75,42 @@ use crate::oxcdf_reader::compat;
 pub async fn open_dataset(store: Arc<dyn ObjectStore>, path: Path) -> anyhow::Result<AnyDataset> {
     let name = path.to_string();
     let file = Arc::new(AsyncNetcdfFile::open_store(store, path).await?);
+    dataset_from_file(name, file).await
+}
+
+/// Open the NetCDF object that `object` describes and return its contents as an
+/// [`AnyDataset`].
+///
+/// This is [`open_dataset`] for an object that a listing already found. The
+/// size comes from `object`, so the open sends no `head` request.
+///
+/// # Errors
+///
+/// Returns an error when the object cannot be opened, or when a variable uses a
+/// type this reader does not support.
+pub async fn open_object(
+    store: Arc<dyn ObjectStore>,
+    object: &ObjectMeta,
+) -> anyhow::Result<AnyDataset> {
+    let name = object.location.to_string();
+    let file = Arc::new(open_file(store, object).await?);
+    dataset_from_file(name, file).await
+}
+
+/// Open the file that `object` describes, with the size from `object`.
+///
+/// # Errors
+///
+/// Returns an error when the file metadata cannot be read.
+pub async fn open_file(
+    store: Arc<dyn ObjectStore>,
+    object: &ObjectMeta,
+) -> oxcdf::Result<AsyncNetcdfFile> {
+    let source = AsyncObjectStoreSource::with_size(store, object.location.clone(), object.size);
+    AsyncNetcdfFile::open_with(Arc::new(source), OpenOptions::remote()).await
+}
+
+async fn dataset_from_file(name: String, file: Arc<AsyncNetcdfFile>) -> anyhow::Result<AnyDataset> {
     let phony = PhonyDimensions::of_file(&file);
     let arrays = read_arrays(&file)?;
     // A file that names no dimension is an instrument file, and `SELECT *`
@@ -167,14 +200,6 @@ mod tests {
             .unwrap_or_else(|e| panic!("open {file}: {e}"))
     }
 
-    /// The same file, through the netcdf-c reader, for a side-by-side check.
-    async fn open_with_netcdf_c(file: &str) -> AnyDataset {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("test_files")
-            .join(file);
-        crate::reader::open_dataset(path).await.unwrap()
-    }
-
     // ── Opening ────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -190,6 +215,97 @@ mod tests {
         assert!(any.get_array("analysed_sst").is_some());
     }
 
+    /// A store that counts the `head` requests it gets.
+    #[derive(Debug)]
+    struct HeadCountingStore {
+        inner: Arc<dyn ObjectStore>,
+        heads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl std::fmt::Display for HeadCountingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HeadCountingStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for HeadCountingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            if options.head {
+                self.heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// A listed object carries its size, so the open sends no `head` request.
+    #[tokio::test]
+    async fn open_object_sends_no_head_request() {
+        use object_store::ObjectStoreExt;
+
+        let object = test_store().head(&Path::from(WOD_FILE)).await.unwrap();
+        let store = Arc::new(HeadCountingStore {
+            inner: test_store(),
+            heads: Default::default(),
+        });
+
+        let any = open_object(store.clone(), &object).await.unwrap();
+
+        assert!(!any.dataset().arrays.is_empty());
+        assert_eq!(store.heads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
     #[tokio::test]
     async fn open_dataset_returns_an_error_for_a_missing_object() {
         assert!(open_dataset(test_store(), Path::from("nope.nc"))
@@ -201,60 +317,6 @@ mod tests {
     async fn dataset_name_is_the_object_path() {
         let any = open(WOD_FILE).await;
         assert_eq!(any.name(), WOD_FILE);
-    }
-
-    // ── Parity with the netcdf-c reader ────────────────────────────────
-
-    /// Both readers must surface the same arrays. A table keeps its schema
-    /// when the reader flag changes only if this holds.
-    #[tokio::test]
-    async fn both_readers_surface_the_same_arrays() {
-        for file in [WOD_FILE, GRIDDED_FILE] {
-            let rust = open(file).await;
-            let c = open_with_netcdf_c(file).await;
-
-            let rust_keys: Vec<&String> = rust.dataset().arrays.keys().collect();
-            let c_keys: Vec<&String> = c.dataset().arrays.keys().collect();
-            assert_eq!(rust_keys, c_keys, "array names differ for {file}");
-
-            for key in rust_keys {
-                assert_eq!(
-                    rust.get_array(key).unwrap().datatype(),
-                    c.get_array(key).unwrap().datatype(),
-                    "data type of '{key}' differs for {file}"
-                );
-                assert_eq!(
-                    rust.get_array(key).unwrap().shape(),
-                    c.get_array(key).unwrap().shape(),
-                    "shape of '{key}' differs for {file}"
-                );
-            }
-        }
-    }
-
-    /// Values, not only names. `z` is a plain `f32` observation variable.
-    #[tokio::test]
-    async fn both_readers_read_the_same_f32_values() {
-        let rust = open(WOD_FILE).await;
-        let c = open_with_netcdf_c(WOD_FILE).await;
-
-        let rust_values = rust
-            .get_array("z")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<NdArray<f32>>()
-            .unwrap()
-            .clone_into_raw_vec()
-            .await;
-        let c_values = c
-            .get_array("z")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<NdArray<f32>>()
-            .unwrap()
-            .clone_into_raw_vec()
-            .await;
-        assert_eq!(rust_values, c_values);
     }
 
     /// The decoded `analysed_sst` values of a dataset.
@@ -315,43 +377,19 @@ mod tests {
         }
     }
 
-    /// Both readers must report the same chunk shape. The nd engine picks its
-    /// batch size from it, so a table keeps its batches when the reader changes.
-    #[tokio::test]
-    async fn both_readers_report_the_same_chunk_shape() {
-        for file in [WOD_FILE, GRIDDED_FILE] {
-            let rust = open(file).await;
-            let c = open_with_netcdf_c(file).await;
-
-            for key in rust.dataset().arrays.keys() {
-                assert_eq!(
-                    rust.get_array(key).unwrap().chunk_shape(),
-                    c.get_array(key).unwrap().chunk_shape(),
-                    "chunk shape of '{key}' differs for {file}"
-                );
-            }
-        }
-    }
-
     // ── CF decoding ────────────────────────────────────────────────────
 
     /// `analysed_sst` is packed `int16` with `scale_factor` and `add_offset`,
-    /// so it decodes to `f64`. The decoded values match the netcdf-c path, and
-    /// the real (non-fill) cells sit in a physical kelvin range.
+    /// so it decodes to `f64`. The real (non-fill) cells sit in a physical
+    /// kelvin range.
     #[tokio::test]
     async fn scale_and_offset_decode_to_f64() {
         let any = open(GRIDDED_FILE).await;
-        let c = open_with_netcdf_c(GRIDDED_FILE).await;
 
         let array = any.get_array("analysed_sst").unwrap();
         assert_eq!(array.datatype(), NdArrayDataType::F64);
 
         let rust_values = sst_values(&any).await;
-        assert_eq!(
-            rust_values,
-            sst_values(&c).await,
-            "decoded values must match"
-        );
 
         // The fill cells decode to the packed fill run through the same
         // arithmetic, so take the maximum to reach a real measurement.
@@ -382,20 +420,11 @@ mod tests {
     #[tokio::test]
     async fn fixed_size_char_variable_decodes_as_strings() {
         let any = open(WOD_FILE).await;
-        let c = open_with_netcdf_c(WOD_FILE).await;
 
-        // Find a string array that the netcdf-c reader also reports as strings.
-        let name = c
-            .dataset()
-            .arrays
-            .iter()
-            .find(|(_, array)| array.datatype() == NdArrayDataType::String)
-            .map(|(name, _)| name.clone())
-            .expect("the WOD file holds a string variable");
-
-        let array = any.get_array(&name).unwrap();
+        // `country` is `char country(casts, strnlen)` in the file.
+        let array = any.get_array("country").unwrap();
         assert_eq!(array.datatype(), NdArrayDataType::String);
-        assert_eq!(array.shape(), c.get_array(&name).unwrap().shape());
+        assert_eq!(array.dimensions(), vec!["casts".to_string()]);
     }
 
     // ── Attributes ─────────────────────────────────────────────────────

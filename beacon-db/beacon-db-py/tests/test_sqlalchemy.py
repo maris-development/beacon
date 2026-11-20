@@ -75,12 +75,31 @@ def test_pandas_read_sql(engine):
 
 
 def test_url_query_params_map_to_connect_kwargs():
-    # A file DB opened with auth on; the default super-user is off, so an anonymous session lands.
     from beacondb.sqlalchemy import BeacondbDialect
 
-    url = sa.engine.make_url("beacondb:///x.db?auth=true&batch_size=1024&datasets=/tmp/data")
+    url = sa.engine.make_url(
+        "beacondb:///x.db?read_only=true&batch_size=1024&datasets=/tmp/data"
+    )
     _, kwargs = BeacondbDialect().create_connect_args(url)
     assert kwargs["database"] == "x.db"
-    assert kwargs["auth"] is True
+    assert kwargs["read_only"] is True
     assert kwargs["batch_size"] == 1024
     assert kwargs["datasets"] == "/tmp/data"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "beacondb://user:pw@/x.db",
+        "beacondb://user@/x.db",
+        "beacondb:///x.db?username=u&password=p",
+        "beacondb:///x.db?auth=true",
+        "beacondb:///x.db?token=t",
+    ],
+)
+def test_url_with_user_or_credentials_is_refused(url):
+    # The embedded database has no users, so the dialect refuses user data in the URL.
+    from beacondb.sqlalchemy import BeacondbDialect
+
+    with pytest.raises(sa.exc.ArgumentError, match="has no users"):
+        BeacondbDialect().create_connect_args(sa.engine.make_url(url))

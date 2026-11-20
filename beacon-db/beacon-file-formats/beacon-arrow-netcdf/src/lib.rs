@@ -5,129 +5,36 @@
 //! - Writing Arrow record batches into NetCDF files.
 //! - Decoder/encoder building blocks for extending conversion behaviour.
 //!
-//! # Two readers
+//! # Reading and writing
 //!
-//! The crate reads a file in one of two ways:
-//!
-//! - [`oxcdf_reader`] calls [`oxcdf`], a pure-Rust reader. It is the default. It
-//!   holds no global lock and reads through `object_store`, so scans run in
-//!   parallel and S3, GCS and Azure need no local copy.
-//! - [`reader`] calls netcdf-c. It is the fallback, and it is the only path that
-//!   writes files.
-//!
-//! Both produce the same dataset. The
-//! [`use_rust_reader`](datafusion::NetcdfConfig::use_rust_reader) flag selects
-//! between them.
+//! [`oxcdf_reader`] reads through [`oxcdf`], a pure-Rust reader. It holds no
+//! global lock and reads through `object_store`, so scans run in parallel and
+//! S3, GCS and Azure need no local copy. [`writer`] and the N-dimensional sink
+//! write through [`oxcdf`].
 //!
 //! # Key modules
-//! - [`reader`]: high-level NetCDF -> Arrow reader API (netcdf-c).
-//! - [`oxcdf_reader`]: the same API over [`oxcdf`] and `object_store`.
+//! - [`oxcdf_reader`]: high-level NetCDF -> Arrow reader API.
 //! - [`writer`]: high-level Arrow -> NetCDF writer API.
-//! - [`compat`]: variable/attribute conversion helpers.
-//! - [`decoders`] and [`encoders`]: pluggable conversion components.
+//! - [`encoders`]: pluggable conversion components for the writer.
+//! - [`cf_time`]: CF time conversion.
 //! - [`dimensions`]: unifies the dimensions netCDF invents for a plain HDF5
 //!   file, so two groups of one file broadcast against each other.
 
-use std::ffi::{CStr, CString};
-
-use netcdf::{types::NcVariableType, NcTypeDescriptor};
-
 /// Encoder implementations for writing Arrow values to NetCDF variables.
 pub mod encoders;
-/// High-level NetCDF reader.
-pub mod reader;
 /// High-level NetCDF writer.
 pub mod writer;
 /// Folds `variable.attribute` columns into NetCDF attributes on write.
 pub mod attributes;
-/// Re-export of the `netcdf` crate used by this crate.
-pub use netcdf;
-/// Re-export of low-level `netcdf-sys` bindings.
-pub use netcdf_sys;
 /// Re-export of the pure-Rust `oxcdf` reader used by [`oxcdf_reader`].
 pub use oxcdf;
-/// Array backend implementations used by decoders.
-pub mod backend;
+/// CF time conversion.
+pub mod cf_time;
 #[cfg(test)]
 mod cf_time_fill_tests;
-/// Conversion helpers from NetCDF values to ND Arrow arrays.
-pub mod compat;
 /// DataFusion integration components.
 pub mod datafusion;
-/// Decoder implementations and decoder traits.
-pub mod decoders;
 /// Unifies the dimensions netCDF invents for a file that names none.
 pub mod dimensions;
 /// Pure-Rust NetCDF reader over `object_store`.
 pub mod oxcdf_reader;
-
-/// Placeholder wrapper for fixed-size string payload bytes.
-///
-/// The type is currently used as an internal marker in conversion paths.
-#[repr(transparent)]
-#[derive(Clone)]
-pub struct NcFixedSizedString(Vec<u8>);
-
-/// Wrapper for a single NetCDF `char` value.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct NcChar(u8);
-unsafe impl NcTypeDescriptor for NcChar {
-    fn type_descriptor() -> NcVariableType {
-        NcVariableType::Char
-    }
-}
-
-/// Wrapper around a raw C string pointer used by NetCDF string variables.
-///
-/// `NcString` mirrors the C-level representation expected by the NetCDF API.
-/// Prefer [`OwnedNcString`] for owned Rust values.
-#[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct NcString(*mut std::ffi::c_char);
-unsafe impl NcTypeDescriptor for NcString {
-    fn type_descriptor() -> NcVariableType {
-        NcVariableType::String
-    }
-}
-
-impl NcString {
-    /// Create a NetCDF string from a Rust `&str`.
-    ///
-    /// A C string cannot contain an interior NUL byte. If `s` has one (which a C
-    /// consumer would treat as the string terminator anyway), the value is
-    /// truncated at the first NUL and a warning is logged, rather than panicking.
-    pub fn new(s: &str) -> Self {
-        let c_str = CString::new(s).unwrap_or_else(|e| {
-            let nul = e.nul_position();
-            tracing::warn!(
-                nul_position = nul,
-                "NetCDF string contains an interior NUL byte; truncating at the first NUL"
-            );
-            // The prefix before the first NUL is by definition NUL-free.
-            CString::new(&s.as_bytes()[..nul]).expect("prefix before first NUL has no NUL byte")
-        });
-        let ptr = c_str.into_raw();
-        Self(ptr.cast())
-    }
-
-    /// Copy the pointed C string into an owned Rust [`String`].
-    pub fn copy_to_string(&self) -> String {
-        unsafe {
-            let c_str = CStr::from_ptr(self.0.cast());
-            let string = c_str.to_string_lossy().into_owned();
-            string
-        }
-    }
-}
-
-/// Owned string representation used by decoders and Arrow conversion.
-#[repr(transparent)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OwnedNcString(String);
-
-unsafe impl NcTypeDescriptor for OwnedNcString {
-    fn type_descriptor() -> NcVariableType {
-        panic!("Logical type only - not directly readable/writable as a NetCDF variable. Use decoders/encoders to convert to/from NcString or fixed-size string representations.")
-    }
-}

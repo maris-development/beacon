@@ -1,8 +1,8 @@
 """End-to-end tests for the beacondb bindings.
 
 These run against the real engine — no mocks — because the things worth pinning here are
-exactly the ones a mock would paper over: that auth modes resolve to the right identity,
-that the container file persists, and that engine errors land on the right PEP 249 class.
+exactly the ones a mock would paper over: that the container file persists, and that engine
+errors land on the right PEP 249 class.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import beacondb
 
 @pytest.fixture
 def mem():
-    """An in-memory database with auth off — the default mode."""
+    """An in-memory database."""
     with beacondb.connect(":memory:") as con:
         yield con
 
@@ -46,7 +46,7 @@ def test_exception_hierarchy_matches_pep_249():
         beacondb.NotSupportedError,
     ):
         assert issubclass(cls, beacondb.DatabaseError)
-    # An authorization denial is catchable as a plain ProgrammingError.
+    # A refused operation is catchable as a plain ProgrammingError.
     assert issubclass(beacondb.NotPermittedError, beacondb.ProgrammingError)
 
 
@@ -168,85 +168,15 @@ def test_second_connect_in_process_shares_the_locked_handle(tmp_path):
 
 
 # ----------------------------------------------------------------------------------------
-# Auth modes
+# No users
 # ----------------------------------------------------------------------------------------
 
 
-def test_auth_disabled_is_the_default_and_permits_everything(tmp_path):
-    con = beacondb.connect(str(tmp_path / "beacon.db"))
-    assert con.whoami() == {
-        "username": "local",
-        "roles": [],
-        "is_super_user": True,
-        "auth": False,
-    }
-    assert con.auth_enabled is False
-
-    con.execute("CREATE TABLE t AS SELECT 1 AS a")
-    con.execute("CREATE USER analyst WITH PASSWORD 'sekrit'")
-    # The auth directory is super-user-only in every mode, so reading it proves the identity
-    # really is privileged rather than merely unenforced.
-    assert con.sql("SELECT * FROM beacon.system.users").fetchall()
-    con.close()
-
-
-def test_credentials_with_auth_disabled_are_refused_not_ignored(tmp_path):
-    with pytest.raises(beacondb.ProgrammingError, match="auth is disabled"):
-        beacondb.connect(str(tmp_path / "beacon.db"), username="a", password="b")
-
-
-def test_auth_enabled_defaults_to_anonymous_and_blocks_privileged_work(tmp_path):
-    path = str(tmp_path / "beacon.db")
-    # Seed a user while auth is off, then reopen with auth on.
-    setup = beacondb.connect(path)
-    setup.execute("CREATE TABLE t AS SELECT 1 AS a")
-    setup.execute("CREATE ROLE readers")
-    setup.execute("CREATE USER analyst WITH PASSWORD 'sekrit'")
-    setup.execute("GRANT SELECT ON TABLE t TO ROLE readers")
-    setup.execute("GRANT ROLE readers TO USER analyst")
-    setup.close()
-
-    anon = beacondb.connect(
-        path, auth=True, admin_username="admin", admin_password="hunter2"
-    )
-    assert anon.whoami()["username"] == "anonymous"
-    assert anon.whoami()["is_super_user"] is False
-    assert anon.sql("SELECT 1 AS a").fetchall() == [(1,)]
-
-    with pytest.raises(beacondb.NotPermittedError):
-        anon.execute("CREATE TABLE u (a INT)")
-    with pytest.raises(beacondb.NotPermittedError):
-        anon.sql("SELECT * FROM beacon.system.users").fetchall()
-
-    analyst = anon.connect_as(username="analyst", password="sekrit")
-    assert analyst.whoami()["roles"] == ["readers"]
-    assert analyst.sql("SELECT * FROM t").fetchall() == [(1,)]
-
-    admin = anon.connect_as(username="admin", password="hunter2")
-    assert admin.whoami()["is_super_user"] is True
-    admin.execute("CREATE TABLE u AS SELECT 2 AS b")
-    assert admin.sql("SELECT * FROM u").fetchall() == [(2,)]
-
-    with pytest.raises(beacondb.OperationalError):
-        anon.connect_as(username="analyst", password="wrong")
-
-    for con in (anon, analyst, admin):
-        con.close()
-
-
-def test_mode_cannot_change_while_a_database_is_open(tmp_path):
-    path = str(tmp_path / "beacon.db")
-    con = beacondb.connect(path)
-    with pytest.raises(beacondb.ProgrammingError, match="already open"):
-        beacondb.connect(path, auth=True)
-    con.close()
-
-
-def test_connect_as_is_meaningless_without_auth(mem):
-    with pytest.raises(beacondb.ProgrammingError, match="auth disabled"):
-        mem.connect_as(username="a", password="b")
-    with pytest.raises(beacondb.ProgrammingError, match="auth disabled"):
-        mem.as_anonymous()
+@pytest.mark.parametrize("keyword", ["auth", "username", "password", "token"])
+def test_connect_takes_no_user_arguments(keyword):
+    # The embedded database has no users, so connect() has no user arguments.
+    with pytest.raises(TypeError):
+        beacondb.connect(":memory:", **{keyword: "x"})
 
 
 # ----------------------------------------------------------------------------------------

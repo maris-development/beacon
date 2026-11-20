@@ -1,28 +1,11 @@
 //! The pure-Rust HDF5 read path, built on [`oxcdf`] and [`oxcdf_hdf5`].
 //!
-//! This module is the second of the two readers this crate offers. The first
-//! one is netcdf-c, reached by delegating to
-//! [`beacon_arrow_netcdf`](beacon_arrow_netcdf::datafusion). Both produce an
-//! [`AnyDataset`](beacon_nd_array::dataset::AnyDataset), so a query gets the
-//! same schema and the same values from either one.
-//!
-//! # Why a second reader
-//!
-//! netcdf-c is not thread safe. Its Rust bindings put one process-global mutex
-//! around every call, and that mutex covers the input, the decompression and
-//! the type conversion. A scan of many files therefore runs one file at a time.
-//! netcdf-c also opens a local path or an `http(s)` URL only, so an object in a
-//! store needs a local copy first.
+//! This module is the reader of this crate. It produces an
+//! [`AnyDataset`](beacon_nd_array::dataset::AnyDataset).
 //!
 //! This reader parses the HDF5 container in Rust. It holds no lock, and it
 //! reads byte ranges through [`object_store`]. Scans run in parallel, and S3,
 //! GCS and Azure need no local copy.
-//!
-//! # Which reader runs
-//!
-//! This reader is the default. netcdf-c is the fallback: clear the
-//! `use_rust_reader` flag on [`Hdf5Config`](crate::Hdf5Config), or the
-//! `use_rust_reader` option of one table, to read through it instead.
 //!
 //! # What this reader adds over the netCDF one
 //!
@@ -56,7 +39,7 @@
 //!
 //! # Limits
 //!
-//! This reader reads. It does not write. Every write path stays on netcdf-c.
+//! This reader reads. It does not write. Every write goes to the NetCDF writer.
 //!
 //! # Layout
 //!
@@ -68,4 +51,4 @@ pub mod compound;
 /// High-level reader that opens an object and returns a dataset.
 pub mod open;
 
-pub use open::{open_dataset, read_arrays};
+pub use open::{open_dataset, open_object, read_arrays};

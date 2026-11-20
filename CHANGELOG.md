@@ -12,6 +12,12 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Added
 
+- **SQL functions.** `CREATE [OR REPLACE] FUNCTION f(a BIGINT) RETURNS VARCHAR RETURN <expression>`
+  makes a function from one scalar expression. Beacon puts the expression in place of each call, so
+  filters on it are pushed down. `DROP FUNCTION`, `SHOW CREATE FUNCTION` and
+  `COMMENT ON FUNCTION` complete the set. `SHOW FUNCTIONS` shows the argument names and the comment.
+  Functions survive a restart. Only the admin can create or drop one, and any user can call it.
+  ([#597](https://github.com/maris-development/beacon/issues/597))
 - **OPeNDAP DAP2 endpoint.** `GET /dap/{table}.dds`, `.das` and `.dods` serve each table as a DAP2
   dataset with one Sequence named `s`. Clients subset it with DAP2 value constraints, and Beacon
   runs them as SQL under the caller's grants. `.csv` and `.nc` give the subset as a file. pydap
@@ -32,6 +38,91 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   writes each variable with deflate. `chunk_rows` sets the rows in one chunk of `obs`, with a
   default of 65536. In SQL, use the keys `compression.level`, `compression.shuffle` and
   `chunk_rows`. ([#576](https://github.com/maris-development/beacon/issues/576))
+- **External table options.** `'skip_invalid_files_on_scan' 'true'` lets a query skip a file that it
+  cannot open or read. `'skip_invalid_files_on_inference' 'true'` lets schema inference skip such a
+  file. Beacon writes a warning for each file that it skips. `type_widening` and
+  `type_widening_on_conflict` set the schema merge rule of one table. `parallel_schema_inference`
+  infers the file schemas on parallel tasks. A scan error names the table, the file type and the
+  file. See [CREATE EXTERNAL TABLE](docs/docs/2.1.0-rc3/sql/create-external-table.md).
+
+### Changed
+
+- **The server owns users and roles.** The engine has no users, no roles and no identity. The server
+  checks each request, and it gives the engine the access rules of the caller. The server keeps
+  users, roles and rules in `beacon-auth.json`, next to `beacon.db`. On the first start, it copies
+  them from the internal tables of `beacon.db` and drops those tables. Make a backup of `beacon.db`
+  before the upgrade. Include the file in your backup. `CREATE USER`,
+  `CREATE ROLE`, `GRANT`, `DENY`, `REVOKE` and `ALTER ROLE` work as before on the server.
+  ([#669](https://github.com/maris-development/beacon/issues/669))
+- **Plugin tables read the Beacon object stores.** The table code of a plugin table type gets the
+  object stores of Beacon through `runtime_env().object_store(url)`. `datasets://` is the datasets
+  store, with the credentials of Beacon. Beacon resolves the `LOCATION` text for the plugin: the new
+  SDK type `Host` (from `Host::of(state)`) gives the store and the path with `open`, `listing_url`
+  and `resolve`, and a relative `LOCATION` is a path in the datasets store. A plugin cannot replace
+  a store of Beacon. The plugin SDK ABI is now 7. Rebuild each native plugin with the new
+  SDK, because Beacon refuses a plugin with SDK ABI 6.
+  ([#653](https://github.com/maris-development/beacon/issues/653))
+
+- **File statistics belong to an external table.** Set `'use_statistics_pruning' 'true'` in the
+  `OPTIONS` of a table. Beacon then keeps one statistics table for it in `beacon.db`, and a query on
+  the table prunes the files that cannot match. A refresh reads only the new and changed files.
+  `statistics_columns` names the columns, and a table with more than 1,000 range columns needs it.
+  `statistics_refresh_interval` sets the seconds between two refreshes, 900 by default.
+  `ANALYZE FILES [<table>]` starts a background refresh of one table or of each table, and returns
+  at once with one row per table: `started` or `queued`.
+  `table_statistics('<table>')` shows the statistics to the super-user. `DROP TABLE` deletes them.
+  `BEACON_FILE_STATS_MAX_REFRESHES`, 2 by default, limits the tables that refresh at the same time.
+  The `enable_statistics` option of a NetCDF, HDF5 or Zarr table now has effect. See
+  [File statistics](docs/docs/2.1.0-rc3/internals/file-statistics.md).
+- **Plugin functions get literal arguments as scalars.** A native plugin function gets each literal
+  argument as `ColumnarValue::Scalar`, not as an array with one copy per row. So a function can
+  require a constant argument, or prepare a constant one time per batch. The plugin SDK ABI is now
+  4. Rebuild each native plugin with the new SDK, because Beacon refuses a plugin with SDK ABI 3. A
+  body that accepts only `ColumnarValue::Array` must also accept a scalar. `invoke_arrays` still
+  gives arrays. ([#612](https://github.com/maris-development/beacon/issues/612))
+- **The NetCDF writer is pure Rust.** Beacon writes NetCDF and HDF5 output with oxcdf, not with the
+  netCDF-C library. Beacon writes a null value of a string column as an empty string. A string
+  variable has no `_FillValue`, so the value reads back as an empty string. An attribute above
+  64 KiB fails the write. Beacon cuts a string value and a text attribute at the first NUL byte. A
+  failed write leaves no file at the output path. ([#658](https://github.com/maris-development/beacon/issues/658))
+- **NetCDF output goes through the object store.** The NetCDF and HDF5 writers write through the
+  object store of the target, so a NetCDF `COPY` to a remote store uploads the file. A NetCDF or
+  HDF5 `COPY` to a local or relative path now writes to that path, not under the tmp folder. Beacon
+  writes the file to a temporary file in its tmp folder first, then uploads it. A failed write puts
+  no new object at the target. ([#658](https://github.com/maris-development/beacon/issues/658))
+
+### Removed
+
+- **Users in the embedded database.** `beacondb.connect()` has no `auth`, `username`, `password`,
+  `token`, `admin_username`, `admin_password` and `anonymous` arguments. `Connection.connect_as()`,
+  `as_anonymous()`, `whoami()` and `auth_enabled` are gone. The SQLAlchemy URL refuses a user name
+  and a password. A process that opens a `beacon.db` file has full access to it. The user
+  statements, such as `CREATE USER` and `GRANT`, fail in the embedded database. Use the Beacon
+  server for users and roles. ([#669](https://github.com/maris-development/beacon/issues/669))
+- **The datasets-wide file statistics.** `beacon.system.file_stats`, `beacon.system.file_stats_segments`
+  and `file_statistics(path)` are gone. A query on them now fails with "not found". Use
+  `table_statistics('<table>')`. The `read_*()` functions
+  no longer prune on file statistics, and the schema cache is gone. `ANALYZE FILES '<prefix>'` and
+  `ANALYZE FILES FORCE` are gone. The variables `BEACON_FILE_STATS_INTERVAL_SECS`,
+  `BEACON_FILE_STATS_ON_STARTUP`, `BEACON_FILE_STATS_BATCH_FILES`,
+  `BEACON_FILE_STATS_TARGET_GROUP_FILES`, `BEACON_FILE_STATS_MIN_GROUP_FILES`,
+  `BEACON_FILE_STATS_PREFIX_DEPTH`, `BEACON_FILE_STATS_SCAN_PREFIX`,
+  `BEACON_FILE_STATS_DISCOVERY_CHUNK` and `BEACON_FILE_STATS_SCHEMA_CACHE` have no effect.
+- **The file statistics cache.** `view_dataset_statistics(path)`,
+  `view_external_table_statistics(table_name)` and `view_statistics_cache()` are gone. No table
+  filled their cache. `BEACON_STATS_CACHE_CAPACITY` has no effect. Use
+  `table_statistics('<table>')`.
+- **The netCDF-C reader.** Beacon reads NetCDF and HDF5 only with the pure-Rust reader.
+  `BEACON_NETCDF_USE_RUST_READER` and `BEACON_HDF5_USE_RUST_READER` have no effect. The table
+  option `use_rust_reader` has no effect, and Beacon logs a warning for `'false'`.
+  ([#658](https://github.com/maris-development/beacon/issues/658))
+- **The `static-netcdf` feature and the netCDF-C build requirement.** A build of Beacon or of
+  `beacondb` needs no netCDF-C or HDF5 library. The `beacondb` wheels hold no netCDF-C or HDF5
+  library. `beacon-arrow-netcdf` no longer exports `NcChar`, `NcString`, `netcdf` and `netcdf_sys`.
+  ([#658](https://github.com/maris-development/beacon/issues/658))
+- **BBF.** `STORED AS BBF`, `read_bbf`, `read_bbf_schema`, the JSON `bbf` source and `fromBbf` in
+  the TypeScript client are gone. A stored BBF table is skipped at startup, with an error in the
+  log. Convert BBF data to a different format with an earlier release before the upgrade.
 
 ## [2.0.2] — 2026-10-13
 

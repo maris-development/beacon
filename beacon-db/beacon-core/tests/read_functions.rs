@@ -3,35 +3,10 @@
 
 mod common;
 
-use beacon_arrow_hdf5::Hdf5Config;
-use common::{runtime, runtime_with, scalar_i64, total_rows, write_file, TestRuntime};
+use common::{runtime, scalar_i64, total_rows, write_file, TestRuntime};
 
 async fn seeded(tag: &str) -> TestRuntime {
     seed(runtime(tag).await)
-}
-
-/// The same fixtures on a runtime that reads HDF5 with the pure-Rust reader.
-///
-/// That is the default, so this is `seeded` with the reader named. It stays
-/// named, because each test that uses it is about what this reader does.
-async fn seeded_with_rust_hdf5(tag: &str) -> TestRuntime {
-    seeded_with_hdf5_backend(tag, true).await
-}
-
-/// The same fixtures on a runtime that reads HDF5 with netcdf-c, the fallback.
-async fn seeded_with_netcdf_c_hdf5(tag: &str) -> TestRuntime {
-    seeded_with_hdf5_backend(tag, false).await
-}
-
-async fn seeded_with_hdf5_backend(tag: &str, use_rust_reader: bool) -> TestRuntime {
-    let rt = runtime_with(tag, |b| {
-        b.with_hdf5_config(Hdf5Config {
-            use_rust_reader,
-            ..Hdf5Config::default()
-        })
-    })
-    .await;
-    seed(rt)
 }
 
 fn seed(rt: TestRuntime) -> TestRuntime {
@@ -162,38 +137,24 @@ async fn read_netcdf_scans_the_fixture() {
     );
 }
 
-/// `read_hdf5` reads a NetCDF-4 file on either reader, and both count the same
-/// rows. The runtime default picks the reader.
+/// `read_hdf5` reads a NetCDF-4 file.
 #[tokio::test(flavor = "multi_thread")]
-async fn read_hdf5_counts_the_same_rows_on_either_reader() {
-    const COUNT: &str = "SELECT count(*) FROM read_hdf5('wod.h5')";
-
-    let netcdf_c = seeded_with_netcdf_c_hdf5("read-hdf5-netcdf-c").await;
-    let rows = scalar_i64(&netcdf_c.sql(COUNT).await);
+async fn read_hdf5_reads_a_netcdf4_file() {
+    let rt = seeded("read-hdf5-netcdf4").await;
+    let rows = scalar_i64(&rt.sql("SELECT count(*) FROM read_hdf5('wod.h5')").await);
     assert!(rows > 0, "the WOD CTD fixture should yield rows");
-
-    let rust = seeded_with_rust_hdf5("read-hdf5-rust").await;
-    assert_eq!(scalar_i64(&rust.sql(COUNT).await), rows);
 }
 
-/// A plain HDF5 file whose datasets live two group levels deep. The netCDF
-/// reader reports only the root group, so the column exists on the Rust reader
-/// alone.
+/// A plain HDF5 file whose datasets live two group levels deep.
 #[tokio::test(flavor = "multi_thread")]
-async fn read_hdf5_reaches_a_nested_group_on_the_rust_reader() {
+async fn read_hdf5_reaches_a_nested_group() {
     const SQL: &str = r#"SELECT "observations/qc/flag" FROM read_hdf5('nested.h5')"#;
 
-    let rust = seeded_with_rust_hdf5("read-hdf5-nested-rust").await;
+    let rust = seeded("read-hdf5-nested-rust").await;
     assert_eq!(
         total_rows(&rust.sql(SQL).await),
         12,
         "3 stations x 4 samples"
-    );
-
-    let netcdf_c = seeded_with_netcdf_c_hdf5("read-hdf5-nested-netcdf-c").await;
-    assert!(
-        netcdf_c.try_sql(SQL).await.is_err(),
-        "netcdf-c reports only the root group, so the column is not there"
     );
 }
 
@@ -201,7 +162,7 @@ async fn read_hdf5_reaches_a_nested_group_on_the_rust_reader() {
 /// comes back only when the list holds every one of its dimensions.
 #[tokio::test(flavor = "multi_thread")]
 async fn read_hdf5_takes_a_dimensions_argument() {
-    let rt = seeded_with_rust_hdf5("read-hdf5-dimensions").await;
+    let rt = seeded("read-hdf5-dimensions").await;
 
     // `nested.h5` carries no dimension scales, so its axes are the ones netCDF
     // invents. Beacon names each by its length, over every group of the file.
@@ -227,7 +188,7 @@ async fn read_hdf5_takes_a_dimensions_argument() {
 /// the nested-group columns the Rust reader adds.
 #[tokio::test(flavor = "multi_thread")]
 async fn read_hdf5_schema_lists_the_nested_columns() {
-    let rt = seeded_with_rust_hdf5("read-hdf5-schema").await;
+    let rt = seeded("read-hdf5-schema").await;
 
     let schema = rt
         .sql("SELECT column_name FROM read_hdf5_schema('nested.h5')")
@@ -256,7 +217,7 @@ async fn read_hdf5_schema_lists_the_nested_columns() {
 /// payload holds 24 cells and the largest metadata grid holds 3.
 #[tokio::test(flavor = "multi_thread")]
 async fn read_hdf5_defaults_to_the_payload_grid_of_an_instrument_file() {
-    let rt = seeded_with_rust_hdf5("read-hdf5-instrument").await;
+    let rt = seeded("read-hdf5-instrument").await;
 
     assert_eq!(
         scalar_i64(
@@ -278,7 +239,7 @@ async fn read_hdf5_defaults_to_the_payload_grid_of_an_instrument_file() {
 /// One query reads the payload of one group and the description of another.
 #[tokio::test(flavor = "multi_thread")]
 async fn read_hdf5_joins_two_groups_of_one_file() {
-    let rt = seeded_with_rust_hdf5("read-hdf5-groups").await;
+    let rt = seeded("read-hdf5-groups").await;
 
     let rows = rt
         .sql(
@@ -309,7 +270,7 @@ async fn read_hdf5_joins_two_groups_of_one_file() {
 /// The dimensions argument reaches a grid the default leaves out.
 #[tokio::test(flavor = "multi_thread")]
 async fn read_hdf5_reaches_the_metadata_grid_with_a_dimensions_argument() {
-    let rt = seeded_with_rust_hdf5("read-hdf5-metadata-grid").await;
+    let rt = seeded("read-hdf5-metadata-grid").await;
 
     let rows = rt
         .sql(r#"SELECT "instrument/gains" FROM read_hdf5(['instrument.h5'], ['phony_len_3'])"#)
@@ -321,7 +282,7 @@ async fn read_hdf5_reaches_the_metadata_grid_with_a_dimensions_argument() {
 /// container alone without it.
 #[tokio::test(flavor = "multi_thread")]
 async fn read_hdf5_takes_a_convention_argument() {
-    let rt = seeded_with_rust_hdf5("read-hdf5-convention").await;
+    let rt = seeded("read-hdf5-convention").await;
 
     // No convention: the file holds no `time` column, so naming one is an error.
     assert!(
@@ -360,7 +321,7 @@ async fn read_hdf5_takes_a_convention_argument() {
 /// An unknown convention is refused by name, at plan time.
 #[tokio::test(flavor = "multi_thread")]
 async fn read_hdf5_refuses_a_convention_it_does_not_know() {
-    let rt = seeded_with_rust_hdf5("read-hdf5-bad-convention").await;
+    let rt = seeded("read-hdf5-bad-convention").await;
 
     let error = rt
         .try_sql("SELECT * FROM read_hdf5('optodas.h5', NULL, 'nope')")

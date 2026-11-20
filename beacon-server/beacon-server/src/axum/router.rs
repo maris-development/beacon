@@ -85,10 +85,9 @@ pub fn setup_router(
     // drops the admin card from the home page below.
     let web_ui = web_ui_router(&config.server.web_ui_dir, base_path);
 
-    // MCP streamable-HTTP endpoint, gated by BEACON_MCP_ENABLED (default on). It
-    // rides the same `resolve_identity` middleware as the client API, so MCP tool
-    // calls execute under the caller's identity (or the anonymous principal when
-    // enabled) and per-user RBAC applies at query time.
+    // MCP streamable-HTTP endpoint, gated by BEACON_MCP_ENABLED (default on). The
+    // `resolve_read_only_caller` middleware gives each tool call the validator of the
+    // caller (or of the anonymous principal when enabled), with no super-user rights.
     let mcp_enabled = flag_on(std::env::var("BEACON_MCP_ENABLED").ok().as_deref());
     let mut router = client_router.merge(admin_router).merge(alias_router);
     if mcp_enabled {
@@ -102,7 +101,7 @@ pub fn setup_router(
             )
             .layer(::axum::middleware::from_fn_with_state(
                 beacon_runtime.clone(),
-                crate::axum::auth::resolve_identity,
+                crate::axum::auth::resolve_read_only_caller,
             ));
         router = router.merge(mcp_router);
     }

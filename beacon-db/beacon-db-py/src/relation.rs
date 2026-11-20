@@ -35,7 +35,6 @@ use std::path::PathBuf;
 use beacon_arrow_odv::writer::{ColumnInfo, OdvOptions};
 use beacon_core::embedded::Database;
 use beacon_core::query::output::OutputFormat;
-use beacon_core::AuthIdentity;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyList, PyTuple};
 
@@ -156,7 +155,6 @@ impl Select {
 #[pyclass(module = "beacondb", name = "Relation")]
 pub struct Relation {
     database: Arc<Database>,
-    identity: AuthIdentity,
     select: Select,
     /// The result of the first terminal call, reused by later ones so the fetch cursor is
     /// stable and columnar reads see the same rows.
@@ -166,10 +164,9 @@ pub struct Relation {
 impl Relation {
     /// A relation reading from `from` — a table name, a table-function call (`read_parquet(...)`),
     /// or a parenthesized subquery.
-    pub fn over(database: Arc<Database>, identity: AuthIdentity, from: String) -> Self {
+    pub fn over(database: Arc<Database>, from: String) -> Self {
         Self {
             database,
-            identity,
             select: Select::from_fragment(from),
             materialized: None,
         }
@@ -180,10 +177,9 @@ impl Relation {
     /// The statement is run verbatim until a relational method is chained onto it, so
     /// `con.sql("… ORDER BY …").fetchall()` keeps its ordering (wrapping it in a subquery up
     /// front would let the optimizer drop that inner `ORDER BY`).
-    pub fn from_query(database: Arc<Database>, identity: AuthIdentity, query: &str) -> Self {
+    pub fn from_query(database: Arc<Database>, query: &str) -> Self {
         Self {
             database,
-            identity,
             select: Select::from_query(query.to_string()),
             materialized: None,
         }
@@ -197,7 +193,7 @@ impl Relation {
     /// Runs the relation once and caches the result.
     fn materialize(&mut self, py: Python<'_>) -> PyResult<&mut ResultSet> {
         if self.materialized.is_none() {
-            let result = run_sql(py, &self.database, &self.identity, self.sql_text())?;
+            let result = run_sql(py, &self.database, self.sql_text())?;
             self.materialized = Some(result);
         }
         Ok(self.materialized.as_mut().expect("just materialized"))
@@ -287,13 +283,7 @@ impl Relation {
         py: Python<'py>,
         batch_size: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        crate::stream::record_batch_reader(
-            py,
-            &self.database,
-            &self.identity,
-            self.sql_text(),
-            batch_size,
-        )
+        crate::stream::record_batch_reader(py, &self.database, self.sql_text(), batch_size)
     }
 
     /// Alias of [`Self::record_batch`], under the conventional name `fetch_record_batch`.
@@ -410,7 +400,7 @@ impl Relation {
         key: Option<String>,
         qf_schema: Option<String>,
     ) -> PyResult<()> {
-        let schema = schema_of(py, &self.database, &self.identity, self.sql_text())?;
+        let schema = schema_of(py, &self.database, self.sql_text())?;
         let mut options = OdvOptions::try_from_arrow_schema(schema).map_err(map_engine_error)?;
 
         // Each override points a special column at the user's column *and* removes it from the
@@ -456,9 +446,13 @@ impl Relation {
     fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         let schema = match &self.materialized {
             Some(result) => result.schema(),
-            None => schema_of(py, &self.database, &self.identity, self.sql_text())?,
+            None => schema_of(py, &self.database, self.sql_text())?,
         };
-        Ok(schema.fields().iter().map(|f| f.name().to_string()).collect())
+        Ok(schema
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect())
     }
 
     /// Column type names, alongside [`Self::columns`].
@@ -466,7 +460,7 @@ impl Relation {
     fn types(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         let schema = match &self.materialized {
             Some(result) => result.schema(),
-            None => schema_of(py, &self.database, &self.identity, self.sql_text())?,
+            None => schema_of(py, &self.database, self.sql_text())?,
         };
         Ok(schema
             .fields()
@@ -493,13 +487,12 @@ impl Relation {
     /// — DataFusion's `EXPLAIN ANALYZE`.
     #[pyo3(signature = (analyze=false))]
     fn explain(&self, py: Python<'_>, analyze: bool) -> PyResult<String> {
-        let keyword = if analyze { "EXPLAIN ANALYZE" } else { "EXPLAIN" };
-        let result = run_sql(
-            py,
-            &self.database,
-            &self.identity,
-            format!("{keyword} {}", self.sql_text()),
-        )?;
+        let keyword = if analyze {
+            "EXPLAIN ANALYZE"
+        } else {
+            "EXPLAIN"
+        };
+        let result = run_sql(py, &self.database, format!("{keyword} {}", self.sql_text()))?;
         Ok(format_batches(&result))
     }
 
@@ -509,7 +502,6 @@ impl Relation {
         let result = run_sql(
             py,
             &self.database,
-            &self.identity,
             format!("SELECT * FROM ({}) AS _rel LIMIT {limit}", self.sql_text()),
         )?;
         let rendered = format_batches(&result);
@@ -519,20 +511,14 @@ impl Relation {
 
     // ---- DDL from a relation -----------------------------------------------------------
 
-    /// Creates a table from the relation and returns a relation over it. Needs DDL privileges
-    /// (a super-user, i.e. auth off or an admin session).
+    /// Creates a table from the relation and returns a relation over it.
     fn create(&self, py: Python<'_>, name: &str) -> PyResult<Self> {
         run_sql(
             py,
             &self.database,
-            &self.identity,
             format!("CREATE TABLE {} AS {}", quote_ident(name), self.sql_text()),
         )?;
-        Ok(Self::over(
-            self.database.clone(),
-            self.identity.clone(),
-            quote_ident(name),
-        ))
+        Ok(Self::over(self.database.clone(), quote_ident(name)))
     }
 
     /// Creates a view from the relation and returns a relation over it.
@@ -540,14 +526,9 @@ impl Relation {
         run_sql(
             py,
             &self.database,
-            &self.identity,
             format!("CREATE VIEW {} AS {}", quote_ident(name), self.sql_text()),
         )?;
-        Ok(Self::over(
-            self.database.clone(),
-            self.identity.clone(),
-            quote_ident(name),
-        ))
+        Ok(Self::over(self.database.clone(), quote_ident(name)))
     }
 
     fn __repr__(&self) -> String {
@@ -561,7 +542,6 @@ impl Relation {
         run_to_file(
             py,
             &self.database,
-            &self.identity,
             self.sql_text(),
             format,
             PathBuf::from(path),
@@ -576,7 +556,6 @@ impl Relation {
         let result = run_sql(
             py,
             &self.database,
-            &self.identity,
             format!("SELECT count(*) AS n FROM ({}) AS _rel", self.sql_text()),
         )?;
         Ok(count_scalar(&result))

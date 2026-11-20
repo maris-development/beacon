@@ -11,12 +11,15 @@ The package includes a `beacondb://` dialect. Install it with
 ```python
 from sqlalchemy import create_engine
 engine = create_engine("beacondb:///beacon.db")     # or "beacondb://" for in-memory
-# auth and options ride on the URL query:
-#   beacondb:///beacon.db?auth=true&username=u&password=p&datasets=/data
+# options ride on the URL query:
+#   beacondb:///beacon.db?read_only=true&datasets=/data
 
 import pandas as pd
 pd.read_sql("SELECT platform, avg(temperature) AS t FROM obs GROUP BY platform", engine)
 ```
+
+The embedded database has no users. A URL with a user name, password or token raises
+`sqlalchemy.exc.ArgumentError`. The Beacon server owns users and roles.
 
 Reflection uses the `information_schema` of Beacon. It covers
 `inspect(engine).get_table_names()`, `get_columns(...)` and `has_table(...)`. The engine commits

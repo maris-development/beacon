@@ -2,8 +2,8 @@
 //!
 //! This crate is the thin layer between CPython and [`beacon_core::embedded`]: it owns the
 //! Tokio runtime, maps engine errors onto the PEP 249 exception tree, and moves results across
-//! the Arrow C Data Interface. Engine policy (what a mode means, what an identity may do)
-//! lives in beacon-core, so it is shared with every other embedder.
+//! the Arrow C Data Interface. Engine policy (for example, what read-only means) lives in
+//! beacon-core, so it is shared with every other embedder.
 //!
 //! The compiled module is `beacondb._beacondb`; the user-facing surface is the `beacondb`
 //! Python package that wraps it.

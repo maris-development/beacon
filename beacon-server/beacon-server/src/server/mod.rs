@@ -3,15 +3,18 @@
 //! A [`Server`] owns the datasets object store and the files in it, and hosts a
 //! [`Runtime`] as the processing unit that queries them. The split is deliberate:
 //!
-//! - **beacon-core** is an embedded database. It authenticates a caller and runs
-//!   a query; it does not know where files come from or how they get there.
+//! - **beacon-core** is an embedded database. It runs a query that a validator
+//!   permits; it knows no users, and it does not know where files come from or how
+//!   they get there.
 //! - **beacon-server** is the application. It decides where the data lives,
 //!   moves files in and out of that store, and hands the same store to the runtime
 //!   as its default store — so a file uploaded here is immediately queryable
 //!   through the very same object store instance, with no second view of it.
+//!   It also owns the users and the roles, and it gives the runtime a validator
+//!   for each request.
 //!
-//! Everything the transports need hangs off this type: the config, the store, and
-//! the runtime.
+//! Everything the transports need hangs off this type: the config, the store, the
+//! auth context and the runtime.
 
 pub mod catalog;
 pub mod files;
@@ -23,6 +26,10 @@ pub mod uploads;
 use std::sync::Arc;
 
 use anyhow::Context;
+use beacon_auth::{AuthContext, AuthIdentity, Credential};
+use beacon_core::plan_validator::PlanValidator;
+use beacon_core::query::{InnerQuery, Query};
+use beacon_core::query_result::QueryResult;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
 use beacon_core::settings::{SqlSettings, SqlStreamCoalesceSettings};
@@ -44,6 +51,8 @@ pub struct Server {
     /// or listing to invalidate between them.
     store: Arc<dyn ObjectStore>,
     runtime: Arc<Runtime>,
+    /// The users, the roles and the rules. The engine knows none of them.
+    auth: Arc<AuthContext>,
     /// Chunked uploads in flight. In memory: a multipart write cannot outlive the
     /// process that opened it.
     uploads: uploads::UploadSessions,
@@ -68,13 +77,86 @@ impl Server {
         let runtime = build_runtime(&config, store_url, root, store.clone(), query_runtime)
             .await
             .context("failed to start the beacon runtime")?;
+        let auth = crate::auth::open(&config, &runtime)
+            .await
+            .context("failed to open the auth store")?;
 
         Ok(Self {
             config,
             store,
             runtime: Arc::new(runtime),
+            auth,
             uploads: uploads::UploadSessions::default(),
         })
+    }
+
+    /// The users, the roles and the rules of the server.
+    pub fn auth(&self) -> &Arc<AuthContext> {
+        &self.auth
+    }
+
+    /// Resolves a credential to an identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the credential is not valid.
+    pub async fn authenticate(&self, credential: &Credential) -> anyhow::Result<AuthIdentity> {
+        self.auth.authenticate(credential).await
+    }
+
+    /// Resolves the identity of a caller without credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when anonymous access is off.
+    pub async fn authenticate_anonymous(&self) -> anyhow::Result<AuthIdentity> {
+        self.auth.authenticate_anonymous().await
+    }
+
+    /// Whether the reads of `identity` are checked against its roles.
+    pub fn checks_reads_of(&self, identity: &AuthIdentity) -> bool {
+        crate::auth::RoleValidator::checks_reads_of(self.config.auth.enforce, identity)
+    }
+
+    /// Runs `query` for `identity`: the one path of each transport to the engine.
+    ///
+    /// The server applies a statement that manages users or roles itself, and only for the
+    /// super-user. The engine runs each other query, with the validator of `identity`.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The JSON or SQL query, with its output format
+    /// * `identity` - The caller
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller cannot run the statement, when the statement is not
+    /// valid, or when execution fails.
+    pub async fn run_query(
+        &self,
+        query: Query,
+        identity: AuthIdentity,
+    ) -> anyhow::Result<QueryResult> {
+        if let InnerQuery::Sql(sql) = &query.inner {
+            if let Some(statement) = crate::auth::AuthStatement::parse(sql)? {
+                if !identity.is_super_user {
+                    anyhow::bail!(
+                        "operation not permitted: this statement requires super-user privileges"
+                    );
+                }
+                if query.output.is_some() {
+                    anyhow::bail!(
+                        "an output format can only be applied to queries that return rows \
+                         (e.g. SELECT); this statement produces no result set to export"
+                    );
+                }
+                statement.apply(&self.auth).await?;
+                return Ok(QueryResult::empty());
+            }
+        }
+        self.runtime
+            .run_query(query, self.validator(identity))
+            .await
     }
 
     /// Host and build information for `GET /api/info`.
@@ -194,9 +276,21 @@ impl Server {
         self.uploads.abort(id).await
     }
 
-    /// The processing unit: authenticate a caller, then run queries.
+    /// The processing unit. It runs a query that a validator permits.
     pub fn runtime(&self) -> &Arc<Runtime> {
         &self.runtime
+    }
+
+    /// The access check of `identity`: the one place where the server builds a validator.
+    ///
+    /// Each transport gives this validator to the engine with a query.
+    pub fn validator(&self, identity: AuthIdentity) -> Arc<dyn PlanValidator> {
+        Arc::new(crate::auth::RoleValidator::new(
+            // `Arc::clone` shares the auth context with the validator.
+            Arc::clone(&self.auth),
+            identity,
+            self.config.auth.enforce,
+        ))
     }
 
     /// The application configuration.
@@ -274,8 +368,6 @@ async fn build_runtime(
         .with_default_store(store_url, root)
         .with_default_object_store(store)
         .with_tmp_dir_path(config.data.tmp.clone())
-        .with_admin_credentials(config.admin.username.clone(), config.admin.password.clone())
-        .with_auth_enforcement(config.auth.enforce)
         .with_batch_size(config.runtime.batch_size)
         // `BEACON_VM_MEMORY_SIZE` is megabytes (default 8192 = 8 GiB); the
         // builder takes bytes. Passing it through unconverted yields an 8 KB
@@ -297,17 +389,25 @@ async fn build_runtime(
             },
         });
 
-    // The single-file tables store: catalog, managed data, and the auth directory.
+    // Plugin tables get the bucket URL; the https root is for netCDF-c only.
+    if let Some(bucket) = config.s3.bucket.as_deref().filter(|_| config.s3.datasets_on_s3) {
+        let url = url::Url::parse(&format!("s3://{bucket}/"))
+            .with_context(|| format!("invalid S3 bucket name '{bucket}'"))?;
+        builder = builder.with_datasets_base_url(url);
+    }
+
+    // The single-file tables store: catalog and managed data.
     builder = builder.with_db_path(config.data.db_file.clone());
+
+    builder = builder
+        .with_plugins_dir(config.data.plugins.clone())
+        .with_startup_plugins(config.plugins.startup.clone());
 
     if config.sql.enable_nd_pipeline {
         builder = builder.with_nd_pipeline();
     }
     // The rule for every schema merge in this process.
     builder = builder.with_type_widening(config.runtime.type_widening.clone());
-    if config.auth.anonymous_enabled {
-        builder = builder.with_anonymous_user(ANONYMOUS_USERNAME);
-    }
     if let Some(key) = config.secrets.master_key() {
         builder = builder.with_secrets_encryption(*key);
     }

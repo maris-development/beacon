@@ -231,7 +231,7 @@ impl AtlasFormat {
     }
 }
 
-pub use beacon_datafusion_ext::nd::exec::nd_scan_plan;
+pub use beacon_nd_execution::exec::nd_scan_plan;
 
 #[async_trait::async_trait]
 impl FileFormat for AtlasFormat {

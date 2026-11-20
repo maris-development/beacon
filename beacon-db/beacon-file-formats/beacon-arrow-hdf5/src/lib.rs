@@ -1,25 +1,18 @@
 //! `beacon-arrow-hdf5` — HDF5 file support for Beacon.
 //!
 //! This crate owns the HDF5 *identity*: the `.h5`/`.hdf5` extensions,
-//! `STORED AS {H5,HDF5}` and the `read_hdf5` table function. It offers two
-//! readers behind that identity, and [`Hdf5Config::use_rust_reader`] picks
-//! between them.
+//! `STORED AS {H5,HDF5}` and the `read_hdf5` table function.
 //!
-//! # The pure-Rust reader, the default
+//! # The pure-Rust reader
 //!
 //! Reads go through [`reader`]. It holds no process-global lock, so scans of one
 //! file run in parallel; it reads byte ranges through [`object_store`], so an
 //! object in S3, GCS or Azure needs no local copy; and it covers two layouts the
 //! netCDF data model cannot express, a nested group and a compound dataset.
 //!
-//! # netcdf-c, the fallback
+//! # Writes
 //!
-//! A NetCDF-4 file *is* an HDF5 file, and the netCDF-c library's HDF5 dispatch
-//! also opens *plain* HDF5 files (their datasets read as variables/arrays). Turn
-//! the flag off and this crate re-implements no reader at all: it delegates to
-//! [`beacon_arrow_netcdf`], the way it did before the Rust reader existed.
-//!
-//! Writes always use netcdf-c, whatever the flag says. The Rust reader reads.
+//! Writes use the pure-Rust NetCDF writer of [`beacon_arrow_netcdf`].
 //!
 //! # The public surface
 //!
@@ -27,7 +20,7 @@
 //! - [`Hdf5FormatFactory`] — a `FileFormat` factory recognizing `.h5`/`.hdf5`
 //!   and answering to `STORED AS {h5,hdf5}`.
 //! - [`Hdf5Format`] — the `FileFormat` the factory builds on the Rust reader.
-//! - [`Hdf5Config`] — the runtime settings, including the reader flag.
+//! - [`Hdf5Config`] — the runtime settings.
 
 mod config;
 /// Layout conventions read on top of the HDF5 container.

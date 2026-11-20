@@ -14,20 +14,23 @@
 //! - `CREATE TABLE` / `CREATE EXTERNAL TABLE` — the node gets the full statement
 //!   text, which Beacon stores with the table.
 //! - `SHOW CREATE TABLE` / `SHOW CREATE VIEW` — reads only the named table.
+//! - `CREATE FUNCTION` / `DROP FUNCTION` / `SHOW CREATE FUNCTION` — SQL macro
+//!   functions, see [`super::functions`].
 //!
 //! Everything else passes through unchanged.
 
 use std::sync::Arc;
 
 use datafusion::{
+    common::DFSchema,
     logical_expr::{
-        dml::CopyTo, not, when, DdlStatement, DmlStatement, Expr, Extension, Filter, LogicalPlan,
-        LogicalPlanBuilder, WriteOp,
+        dml::CopyTo, not, when, DdlStatement, DmlStatement, DropFunction, Expr, Extension, Filter,
+        LogicalPlan, LogicalPlanBuilder, WriteOp,
     },
     prelude::{lit, SessionContext},
     sql::{
         parser::Statement as DFStatement,
-        planner::object_name_to_table_reference,
+        planner::{object_name_to_table_reference, IdentNormalizer},
         sqlparser::ast::{
             AlterTableOperation, CommentObject, ObjectName, ShowCreateObject,
             Statement as SqlAstStatement,
@@ -36,8 +39,9 @@ use datafusion::{
 };
 
 use super::logical::{
-    AlterTableNode, AlterTableSpec, CommentOnNode, CommentTarget, CreateManagedTableNode, Keyed,
-    Mutation, ReplaceTableContentsNode, ShowCreateTableNode,
+    AlterTableNode, AlterTableSpec, CommentOnNode, CommentTarget, CreateFunctionNode,
+    CreateManagedTableNode, Keyed, Mutation, ReplaceTableContentsNode, ShowCreateFunctionNode,
+    ShowCreateTableNode,
 };
 
 /// Render a DataFusion `Expr` back to a SQL string (best-effort). Used to derive
@@ -105,6 +109,29 @@ pub(crate) async fn lower_df_statement(
                 let table = object_name_to_table_reference(obj_name.clone(), normalize)?;
                 return Ok(extension(Arc::new(ShowCreateTableNode { table })));
             }
+            // DataFusion plans the body without the arguments, so the node keeps the text.
+            SqlAstStatement::CreateFunction(_) => {
+                return Ok(extension(Arc::new(CreateFunctionNode {
+                    definition: sql_stmt.to_string(),
+                })));
+            }
+            SqlAstStatement::DropFunction(drop) => {
+                let [desc] = drop.func_desc.as_slice() else {
+                    anyhow::bail!("DROP FUNCTION drops one function at a time");
+                };
+                return Ok(LogicalPlan::Ddl(DdlStatement::DropFunction(DropFunction {
+                    name: function_name(session_ctx, &desc.name)?,
+                    if_exists: drop.if_exists,
+                    schema: Arc::new(DFSchema::empty()),
+                })));
+            }
+            SqlAstStatement::ShowCreate {
+                obj_type: ShowCreateObject::Function,
+                obj_name,
+            } => {
+                let name = function_name(session_ctx, obj_name)?;
+                return Ok(extension(Arc::new(ShowCreateFunctionNode { name })));
+            }
             // DataFusion parses `COMMENT ON` but cannot plan it.
             SqlAstStatement::Comment {
                 object_type,
@@ -112,7 +139,7 @@ pub(crate) async fn lower_df_statement(
                 comment,
                 if_exists,
             } => {
-                let target = comment_target(object_type, object_name)?;
+                let target = comment_target(session_ctx, object_type, object_name)?;
                 return Ok(extension(Arc::new(CommentOnNode {
                     target,
                     comment: comment.clone(),
@@ -127,6 +154,23 @@ pub(crate) async fn lower_df_statement(
     let state = session_ctx.state();
     let plan = state.statement_to_plan(statement).await?;
     rewrite_logical_plan(attach_definition(plan, definition))
+}
+
+/// The name of a function, normalized as the planner normalizes function calls.
+fn function_name(session_ctx: &SessionContext, name: &ObjectName) -> anyhow::Result<String> {
+    let [part] = name.0.as_slice() else {
+        anyhow::bail!("function name '{name}' must not have a schema");
+    };
+    let ident = part
+        .as_ident()
+        .ok_or_else(|| anyhow::anyhow!("invalid function name '{name}'"))?;
+    let normalize = session_ctx
+        .state()
+        .config()
+        .options()
+        .sql_parser
+        .enable_ident_normalization;
+    Ok(IdentNormalizer::new(normalize).normalize(ident.clone()))
 }
 
 /// The statement text to store with a table that `statement` creates, or `None`.
@@ -184,9 +228,14 @@ fn extension(node: Arc<dyn datafusion::logical_expr::UserDefinedLogicalNode>) ->
     LogicalPlan::Extension(Extension { node })
 }
 
-/// The table or column that a `COMMENT ON` statement names. Names keep their case.
-fn comment_target(object_type: &CommentObject, name: &ObjectName) -> anyhow::Result<CommentTarget> {
+/// The table, column or function that a `COMMENT ON` statement names. Names keep their case.
+fn comment_target(
+    session_ctx: &SessionContext,
+    object_type: &CommentObject,
+    name: &ObjectName,
+) -> anyhow::Result<CommentTarget> {
     match object_type {
+        CommentObject::Function => Ok(CommentTarget::Function(function_name(session_ctx, name)?)),
         // Views take `COMMENT ON TABLE` too: the parser has no `COMMENT ON VIEW`.
         CommentObject::Table => Ok(CommentTarget::Table(
             crate::table_name::object_name_table_reference(name),
@@ -208,7 +257,7 @@ fn comment_target(object_type: &CommentObject, name: &ObjectName) -> anyhow::Res
             })
         }
         other => anyhow::bail!(
-            "COMMENT ON {other} is not supported; use COMMENT ON TABLE or COMMENT ON COLUMN"
+            "COMMENT ON {other} is not supported; use COMMENT ON TABLE, COLUMN or FUNCTION"
         ),
     }
 }

@@ -24,6 +24,7 @@ pub mod io;
 pub mod mutate;
 mod provider;
 pub mod sink;
+pub mod size;
 pub mod warehouse;
 
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub use index::{
 pub use io::WriteKind;
 pub use mutate::{delete_rows, update_rows};
 pub use provider::LanceTable;
+pub use size::{TableSize, table_size};
 pub use warehouse::{BEACON_NAMESPACE, LanceWarehouse, beacon_namespace};
 
 /// Create a new, empty Lance table at the warehouse location for
@@ -469,6 +471,51 @@ mod tests {
 
         let after = warehouse.store().list(Some(&prefix)).count().await;
         assert_eq!(after, 0, "drop must remove every object under the table prefix");
+    }
+
+    /// The URI encodes a space as `%20`, but the store keys hold the space.
+    #[tokio::test]
+    async fn drop_removes_a_table_with_a_space_in_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = test_warehouse(&dir);
+        let namespace = beacon_namespace();
+
+        let table = create_lance_table(warehouse.clone(), &namespace, "odd name", &sample_schema())
+            .await
+            .unwrap();
+        let location = table.definition().location.clone();
+        let ctx = SessionContext::new();
+        ctx.register_table("odd", Arc::new(table)).unwrap();
+        ctx.sql("INSERT INTO odd VALUES (1, 'a')")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        drop_lance_table(&warehouse, &location).await.unwrap();
+
+        let files = walkdir_files(dir.path());
+        assert!(files.is_empty(), "drop left files: {files:?}");
+        create_lance_table(warehouse.clone(), &namespace, "odd name", &sample_schema())
+            .await
+            .expect("a dropped name must be free again");
+    }
+
+    fn walkdir_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 
     /// Create table `mt` with two inserts, then add a BTREE index and compact

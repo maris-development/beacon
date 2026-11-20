@@ -1,7 +1,7 @@
 name: Publish beacondb
 
 # This workflow builds the `beacondb` wheels and publishes them to PyPI. A wheel holds the whole
-# engine. It links netCDF, HDF5, OpenSSL and PROJ statically, so a machine needs no library.
+# engine. It links OpenSSL and PROJ statically, so a machine needs no library.
 # The release tag `v*` starts the workflow. The tag `v2.0.0-rc.1` publishes as 2.0.0rc1.
 
 on:
@@ -56,10 +56,8 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive # beacon-binary-format is a submodule, and ships in the sdist
 
       - name: Build sdist
         run: |
@@ -107,14 +105,12 @@ jobs:
             }
     runs-on: ${{ matrix.platform.runner }}
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive # beacon-binary-format is a submodule
 
-      # The build needs protoc and cmake. It compiles netCDF, HDF5 and PROJ from source, so this
-      # step installs none of the three. The build of PROJ also runs the `sqlite3` program, which
-      # writes `proj.db`. macOS holds that program in /usr/bin. libsqlite3-sys gives the library.
+      # The build needs protoc and cmake. It compiles PROJ from source, so this step does not
+      # install PROJ. The build of PROJ also runs the `sqlite3` program, which writes `proj.db`.
+      # macOS holds that program in /usr/bin. libsqlite3-sys gives the library.
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         run: brew install protobuf cmake
@@ -144,18 +140,18 @@ jobs:
           # The version is exact. The two compression flags below are recent. maturin rejects an
           # unknown flag only after a compile of 30 to 100 minutes.
           maturin-version: v1.14.1
-          # The wheel is abi3, so one build covers CPython 3.10 and later. The three features put
-          # netCDF, HDF5, OpenSSL and PROJ inside the wheel. `vendored-openssl` acts on Linux
-          # alone. `release-wheel` is `release`, plus strip, thin LTO and one codegen unit.
+          # The wheel is abi3, so one build covers CPython 3.10 and later. The two features put
+          # OpenSSL and PROJ inside the wheel. `vendored-openssl` acts on Linux alone.
+          # `release-wheel` is `release`, plus strip, thin LTO and one codegen unit.
           args: >-
             --profile release-wheel --out dist
             --manifest-path beacon-db/beacon-db-py/Cargo.toml
-            --features static-netcdf,vendored-openssl,spatial-proj-bundled
+            --features vendored-openssl,spatial-proj-bundled
             --compression-method deflated --compression-level 9
           manylinux: ${{ matrix.platform.manylinux }}
           # The container installs what the static build needs. Lance needs protoc and the
-          # well-known types in `protobuf-devel`. netCDF, HDF5, OpenSSL and PROJ need cmake and a
-          # compiler. OpenSSL needs perl with IPC::Cmd. PROJ needs sqlite3.
+          # well-known types in `protobuf-devel`. OpenSSL and PROJ need cmake and a compiler.
+          # OpenSSL needs perl with IPC::Cmd. PROJ needs sqlite3.
           before-script-linux: |
             set -eu
             # Write POSIX sh, not bash. The apk branch runs on Alpine, which holds no bash.

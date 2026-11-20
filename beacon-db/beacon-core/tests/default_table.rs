@@ -9,7 +9,6 @@ mod common;
 
 use beacon_core::query::Query;
 use beacon_core::settings::SqlSettings;
-use beacon_core::AuthIdentity;
 use futures::TryStreamExt;
 
 /// A JSON (non-SQL) query with no `from`, which the compiler resolves against the
@@ -23,7 +22,7 @@ fn json_query_without_from() -> Query {
 async fn rows_without_from(rt: &common::TestRuntime) -> usize {
     let batches = rt
         .runtime
-        .run_query(json_query_without_from(), AuthIdentity::system())
+        .run_query(json_query_without_from(), beacon_core::plan_validator::allow_all())
         .await
         .expect("a from-less query should plan against the default table")
         .into_record_stream()

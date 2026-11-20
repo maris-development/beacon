@@ -365,15 +365,6 @@ fn node_to_pg_json(plan: &dyn ExecutionPlan) -> serde_json::Value {
     node
 }
 
-/// Extended:
-/// Extend the metrics tracker to expose the files as a tracer we can use for BBF
-impl MetricsTracker {
-    /// Get a tracer that can be passed to BBFSource to track files read
-    pub fn get_as_file_tracer(&self) -> Arc<Mutex<Vec<String>>> {
-        self.file_paths.clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,22 +457,5 @@ mod tests {
         assert_eq!(metrics.parsed_logical_plan, serde_json::Value::Null);
         assert_eq!(metrics.node_metrics.operator, "");
         assert!(metrics.node_metrics.children.is_empty());
-    }
-
-    /// The file tracer shares the tracker's path list rather than copying it, so
-    /// files a source records while streaming still land in the query's metrics.
-    #[test]
-    fn the_file_tracer_writes_through_to_the_tracker() {
-        // An empty username is nobody authenticating, i.e. the anonymous caller.
-        let tracker = MetricsTracker::new(serde_json::Value::Null, uuid::Uuid::new_v4(), "");
-        assert_eq!(tracker.username, "anonymous");
-        tracker
-            .get_as_file_tracer()
-            .lock()
-            .push("argo/b.parquet".to_string());
-        assert_eq!(
-            tracker.get_consolidated_metrics().file_paths,
-            vec!["argo/b.parquet".to_string()]
-        );
     }
 }

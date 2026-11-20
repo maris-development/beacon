@@ -1,5 +1,5 @@
 ---
-description: Install BeaconDB, open a database and run your first query. This page also explains the two auth modes.
+description: Install BeaconDB, open a database and run your first query. This page also explains the read-only mode.
 ---
 
 # Getting started with BeaconDB
@@ -56,31 +56,10 @@ cur.description; cur.rowcount
 Beacon **binds** the parameters. It never puts them into the string. Use a `?` or `$1` placeholder.
 This is safe against injection. `executemany(sql, rows)` runs the statement for each row.
 
-## Authentication
+## No users
 
-Auth is **off by default**. This follows the usual contract of an embedded database: the file gives
-full control.
-
-```python
-con = beacondb.connect("beacon.db")
-con.whoami()
-# {'username': 'local', 'roles': [], 'is_super_user': True, 'auth': False}
-```
-
-Pass `auth=True` to switch on the [RBAC](/docs/2.0.2/security/access-control) of Beacon. A
-session then starts as the anonymous, read-only principal. It stays that way until you give
-credentials:
-
-```python
-anon = beacondb.connect("beacon.db", auth=True,
-                        admin_username="admin", admin_password=...)
-anon.execute("CREATE TABLE t (a INT)")     # NotPermittedError
-analyst = anon.connect_as(username="analyst", password=...)
-```
-
-Credentials with `auth=False` give an error. Beacon does not ignore them. Beacon does **not** apply
-the RBAC of a database that you open with `auth=False`. RBAC is a boundary for *served* access
-through Beacon Data Lake. It does not protect a local file.
+The embedded database has no users. The process that opens the file has full access. The Beacon
+server owns users and roles. See [RBAC](/docs/2.0.2/security/access-control).
 
 ## Read-only
 

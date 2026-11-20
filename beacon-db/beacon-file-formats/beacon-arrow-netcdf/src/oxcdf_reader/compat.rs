@@ -1,8 +1,6 @@
 //! Conversion from [`oxcdf`] variables and attributes to ND arrays.
 //!
-//! This is the [`oxcdf`] twin of [`crate::compat`]. It applies the same CF
-//! rules, in the same order, so both readers give a variable the same logical
-//! type:
+//! It applies the CF rules in this order:
 //!
 //! 1. `scale_factor` / `add_offset` packing decodes to `f64`.
 //! 2. A CF `units` string decodes to a nanosecond timestamp.
@@ -17,12 +15,11 @@ use num_traits::AsPrimitive;
 use oxcdf::{AsyncNetcdfFile, AsyncVariable, AttributeValue, DType};
 
 use crate::{
-    backend::AttributeBackend,
-    decoders::cf_time::parse_time_units,
+    cf_time::parse_time_units,
     dimensions::PhonyDimensions,
     oxcdf_reader::backend::{
-        NumericBackend, ScaleOffsetBackend, StringBackend, StringSource, TimestampBackend,
-        VariableRef,
+        AttributeBackend, NumericBackend, ScaleOffsetBackend, StringBackend, StringSource,
+        TimestampBackend, VariableRef,
     },
 };
 

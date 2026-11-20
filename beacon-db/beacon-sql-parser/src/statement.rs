@@ -1,0 +1,317 @@
+use std::collections::HashMap;
+use std::fmt::Display;
+
+use datafusion::sql::{parser::Statement, sqlparser::ast::ObjectName};
+
+#[derive(Debug, Clone)]
+pub enum BeaconStatement {
+    DFStatement(Box<Statement>),
+    CreateMaterializedView(CreateMaterializedViewStatement),
+    Refresh(RefreshStatement),
+    CreateCrawler(CreateCrawlerStatement),
+    RunCrawler(RunCrawlerStatement),
+    DropCrawler(DropCrawlerStatement),
+    ShowCrawlers,
+    AnalyzeFiles(AnalyzeFilesStatement),
+    CreateIndex(CreateIndexStatement),
+    DropIndex(DropIndexStatement),
+    ShowIndexes(ShowIndexesStatement),
+    CompactTable(CompactTableStatement),
+    Attach(AttachStatement),
+    Detach(DetachStatement),
+    Install(InstallStatement),
+    Uninstall(UninstallStatement),
+    CreateSecret(CreateSecretStatement),
+    DropSecret(DropSecretStatement),
+    ShowSecrets,
+    Summarize(SummarizeStatement),
+}
+
+/// SUMMARIZE <table> | SUMMARIZE <query>
+#[derive(Debug, Clone)]
+pub struct SummarizeStatement {
+    /// The source to profile, as a SQL query string (a bare table name is wrapped as
+    /// `SELECT * FROM <name>`). The per-column statistics are generated from this.
+    pub source: String,
+}
+
+/// CREATE [PERSISTENT|TEMPORARY] SECRET <name> (TYPE <type>, <key> '<value>', …, SCOPE '<scope>')
+#[derive(Debug, Clone)]
+pub struct CreateSecretStatement {
+    /// Unique secret name.
+    pub name: String,
+    /// The `(...)` parameters verbatim (keys as typed). `TYPE` and `SCOPE` are extracted when the
+    /// plan is built; the rest become the credential options.
+    pub params: HashMap<String, String>,
+    /// `true` for `CREATE PERSISTENT SECRET` — encrypted into the database file. Default (and
+    /// `TEMPORARY`) is session-only.
+    pub persistent: bool,
+}
+
+/// DROP SECRET [IF EXISTS] <name>
+#[derive(Debug, Clone)]
+pub struct DropSecretStatement {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+/// ATTACH '<url>' AS <name> [WITH ('token' '<t>', 'tls' 'true')]
+#[derive(Debug, Clone)]
+pub struct AttachStatement {
+    /// Local catalog name the remote is mounted under.
+    pub name: String,
+    /// The remote's Flight SQL endpoint (`beacon://host:port`, `grpc://…`, `http(s)://…`, `host:port`).
+    pub url: String,
+    /// Options: `token` (bearer credential) and `tls` (`true`/`false`).
+    pub options: HashMap<String, String>,
+}
+
+/// DETACH <name>
+#[derive(Debug, Clone)]
+pub struct DetachStatement {
+    /// The attached catalog name to detach.
+    pub name: String,
+}
+
+/// INSTALL <name> FROM '<source>'
+#[derive(Debug, Clone)]
+pub struct InstallStatement {
+    /// The plugin name, in lowercase.
+    pub name: String,
+    /// `file://…`, `https://…` or `github:<owner>/<repo>@<tag>`.
+    pub source: String,
+}
+
+/// UNINSTALL <name>
+#[derive(Debug, Clone)]
+pub struct UninstallStatement {
+    /// The plugin name, in lowercase.
+    pub name: String,
+}
+
+/// Escape a value for embedding in a single-quoted SQL string literal so the
+/// `Display` form re-parses to the same value (the tokenizer turns `''` back into
+/// `'`).
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+/// CREATE INDEX [<name>] ON <table> (<column>) [USING <type>]
+#[derive(Debug, Clone)]
+pub struct CreateIndexStatement {
+    /// Optional index name; defaults to `<table>_<column>_idx` when omitted.
+    pub name: Option<ObjectName>,
+    pub table: ObjectName,
+    pub column: String,
+    /// Optional `USING <type>` (btree | bitmap | inverted); defaults to btree.
+    pub using: Option<String>,
+}
+
+impl Display for CreateIndexStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CREATE INDEX ")?;
+        if let Some(name) = &self.name {
+            write!(f, "{name} ")?;
+        }
+        write!(f, "ON {} ({})", self.table, self.column)?;
+        if let Some(using) = &self.using {
+            write!(f, " USING {using}")?;
+        }
+        Ok(())
+    }
+}
+
+/// DROP INDEX <name> ON <table>
+#[derive(Debug, Clone)]
+pub struct DropIndexStatement {
+    pub name: ObjectName,
+    pub table: ObjectName,
+}
+
+impl Display for DropIndexStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DROP INDEX {} ON {}", self.name, self.table)
+    }
+}
+
+/// SHOW INDEXES ON <table>
+#[derive(Debug, Clone)]
+pub struct ShowIndexesStatement {
+    pub table: ObjectName,
+}
+
+impl Display for ShowIndexesStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SHOW INDEXES ON {}", self.table)
+    }
+}
+
+/// COMPACT TABLE <table> [WITH ('target_rows_per_fragment' '...', 'cleanup_older_than' '...')]
+#[derive(Debug, Clone)]
+pub struct CompactTableStatement {
+    pub table: ObjectName,
+    /// The `WITH (...)` options, validated when the statement is executed (the
+    /// vocabulary lives with the implementation, in `beacon_lance::CompactOptions`).
+    pub options: HashMap<String, String>,
+}
+
+impl Display for CompactTableStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "COMPACT TABLE {}", self.table)?;
+        if !self.options.is_empty() {
+            let mut opts: Vec<_> = self.options.iter().collect();
+            opts.sort_by(|a, b| a.0.cmp(b.0));
+            let rendered = opts
+                .iter()
+                .map(|(k, v)| format!("'{k}' '{v}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(f, " WITH ({rendered})")?;
+        }
+        Ok(())
+    }
+}
+
+/// CREATE CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
+#[derive(Debug, Clone)]
+pub struct CreateCrawlerStatement {
+    pub name: ObjectName,
+    /// The `ON '<prefix>'` target prefix, if given.
+    pub target_prefix: Option<String>,
+    /// The `WITH (...)` options.
+    pub options: HashMap<String, String>,
+    /// `CREATE OR REPLACE CRAWLER`: replace a crawler of the same name.
+    pub or_replace: bool,
+}
+
+impl Display for CreateCrawlerStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let or_replace = if self.or_replace { " OR REPLACE" } else { "" };
+        write!(f, "CREATE{or_replace} CRAWLER {}", self.name)?;
+        if let Some(prefix) = &self.target_prefix {
+            write!(f, " ON '{prefix}'")?;
+        }
+        if !self.options.is_empty() {
+            let mut opts: Vec<_> = self.options.iter().collect();
+            opts.sort_by(|a, b| a.0.cmp(b.0));
+            let rendered = opts
+                .iter()
+                .map(|(k, v)| format!("'{k}' '{v}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(f, " WITH ({rendered})")?;
+        }
+        Ok(())
+    }
+}
+
+/// RUN CRAWLER <name>
+#[derive(Debug, Clone)]
+pub struct RunCrawlerStatement {
+    pub name: ObjectName,
+}
+
+impl Display for RunCrawlerStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RUN CRAWLER {}", self.name)
+    }
+}
+
+/// ANALYZE FILES [<table>]
+///
+/// Refreshes the file statistics of one external table, or of each table with
+/// statistics, now. The background refresh waits for the refresh interval of the table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyzeFilesStatement {
+    /// The table to refresh. `None` refreshes each table with statistics.
+    pub table: Option<ObjectName>,
+}
+
+impl Display for AnalyzeFilesStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ANALYZE FILES")?;
+        if let Some(table) = &self.table {
+            write!(f, " {table}")?;
+        }
+        Ok(())
+    }
+}
+
+/// DROP CRAWLER <name>
+#[derive(Debug, Clone)]
+pub struct DropCrawlerStatement {
+    pub name: ObjectName,
+}
+
+impl Display for DropCrawlerStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DROP CRAWLER {}", self.name)
+    }
+}
+
+/// CREATE MATERIALIZED VIEW <view_name> AS <query>
+#[derive(Debug, Clone)]
+pub struct CreateMaterializedViewStatement {
+    pub view_name: ObjectName,
+    /// The SQL text of the defining query (everything after `AS`).
+    pub query_sql: String,
+}
+
+impl Display for CreateMaterializedViewStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CREATE MATERIALIZED VIEW {} AS {}",
+            self.view_name, self.query_sql
+        )
+    }
+}
+
+/// REFRESH [TABLE] <name> — applies to external tables and materialized views.
+#[derive(Debug, Clone)]
+pub struct RefreshStatement {
+    pub name: ObjectName,
+}
+
+impl Display for RefreshStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "REFRESH {}", self.name)
+    }
+}
+
+impl Display for BeaconStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DFStatement(s) => write!(f, "{s}"),
+            Self::CreateMaterializedView(s) => write!(f, "{s}"),
+            Self::Refresh(s) => write!(f, "{s}"),
+            Self::CreateCrawler(s) => write!(f, "{s}"),
+            Self::RunCrawler(s) => write!(f, "{s}"),
+            Self::AnalyzeFiles(s) => write!(f, "{s}"),
+            Self::DropCrawler(s) => write!(f, "{s}"),
+            Self::ShowCrawlers => write!(f, "SHOW CRAWLERS"),
+            Self::CreateIndex(s) => write!(f, "{s}"),
+            Self::DropIndex(s) => write!(f, "{s}"),
+            Self::ShowIndexes(s) => write!(f, "{s}"),
+            Self::CompactTable(s) => write!(f, "{s}"),
+            // The token, if any, is a credential — never render it.
+            Self::Attach(s) => write!(f, "ATTACH '{}' AS {}", s.url, s.name),
+            Self::Detach(s) => write!(f, "DETACH {}", s.name),
+            Self::Install(s) => write!(
+                f,
+                "INSTALL {} FROM '{}'",
+                s.name,
+                escape_sql_literal(&s.source)
+            ),
+            Self::Uninstall(s) => write!(f, "UNINSTALL {}", s.name),
+            // Secret parameters are credentials — render only the name.
+            Self::CreateSecret(s) => write!(f, "CREATE SECRET {}", s.name),
+            Self::DropSecret(s) => {
+                let if_exists = if s.if_exists { "IF EXISTS " } else { "" };
+                write!(f, "DROP SECRET {if_exists}{}", s.name)
+            }
+            Self::ShowSecrets => write!(f, "SHOW SECRETS"),
+            Self::Summarize(s) => write!(f, "SUMMARIZE {}", s.source),
+        }
+    }
+}

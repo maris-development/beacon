@@ -13,7 +13,7 @@ use common::{scalar_i64, write_file, TestRuntime};
 
 /// `SELECT count(*)`; `None` when the table does not exist.
 async fn try_count(rt: &TestRuntime, table: &str) -> Option<i64> {
-    let identity = rt.admin().await;
+    let identity = rt.admin();
     let batches = rt
         .try_sql_as(&format!("SELECT count(*) FROM {table}"), identity)
         .await

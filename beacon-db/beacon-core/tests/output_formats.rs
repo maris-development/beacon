@@ -5,6 +5,7 @@
 mod common;
 
 use beacon_arrow_netcdf::attributes::CombineAttrs;
+use beacon_arrow_netcdf::oxcdf;
 use beacon_core::query::output::{NetcdfOutputOptions, Output, OutputFormat};
 use beacon_core::query::Query;
 use beacon_core::query_result::QueryOutput;
@@ -23,7 +24,7 @@ async fn output_bytes(tag: &str, output: serde_json::Value) -> Vec<u8> {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("query with an output format should run");
 
@@ -76,21 +77,24 @@ async fn nd_netcdf_output_writes_the_dimension_columns_as_dimensions() {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("an ND NetCDF query should run");
     let QueryOutput::File(file) = result.query_output else {
         panic!("an output format should yield a file, not a stream");
     };
 
-    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
-    let mut dims: Vec<(String, usize)> = nc.dimensions().map(|d| (d.name(), d.len())).collect();
+    let nc = oxcdf::open(file.path()).expect("a readable NetCDF file");
+    let mut dims: Vec<(String, u64)> = nc
+        .dimensions()
+        .iter()
+        .map(|d| (d.name.clone(), d.len))
+        .collect();
     dims.sort();
     assert_eq!(dims, vec![("lat".to_string(), 2), ("lon".to_string(), 3)]);
 
     let v = nc.variable("v").expect("the data column is a variable");
-    let v_dims: Vec<String> = v.dimensions().iter().map(|d| d.name()).collect();
-    assert_eq!(v_dims, vec!["lat", "lon"]);
+    assert_eq!(v.dimensions, vec!["lat", "lon"]);
 }
 
 /// Runs `sql` with `output` and returns the path of the NetCDF file it writes.
@@ -103,7 +107,7 @@ async fn netcdf_output(
     query.output = Some(serde_json::from_value(output).expect("valid output spec"));
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("the NetCDF query should run");
     let QueryOutput::File(file) = result.query_output else {
@@ -122,7 +126,7 @@ async fn netcdf_output_writes_large_strings_and_booleans() {
 
     let file = netcdf_output(&rt, sql, json!({ "format": "netcdf" })).await;
 
-    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    let nc = oxcdf::open(file.path()).expect("a readable NetCDF file");
     assert!(
         nc.variable("name").is_some(),
         "the string column is a variable"
@@ -135,18 +139,13 @@ async fn netcdf_output_writes_large_strings_and_booleans() {
 }
 
 /// The string value of attribute `name` on `variable`, or on the file when `variable` is `None`.
-fn str_attribute(
-    file: &beacon_arrow_netcdf::netcdf::File,
-    variable: Option<&str>,
-    name: &str,
-) -> Option<String> {
-    use beacon_arrow_netcdf::netcdf::AttributeValue;
-    let value = match variable {
-        Some(variable) => file.variable(variable)?.attribute(name)?.value().ok()?,
-        None => file.attribute(name)?.value().ok()?,
+fn str_attribute(file: &oxcdf::NetcdfFile, variable: Option<&str>, name: &str) -> Option<String> {
+    let attribute = match variable {
+        Some(variable) => file.variable(variable)?.attribute(name)?,
+        None => file.attribute(name)?,
     };
-    match value {
-        AttributeValue::Str(value) => Some(value),
+    match &attribute.value {
+        oxcdf::AttributeValue::Str(value) => Some(value.clone()),
         _ => None,
     }
 }
@@ -167,7 +166,7 @@ async fn netcdf_identical_writes_a_unique_column_as_an_attribute() {
     )
     .await;
 
-    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    let nc = oxcdf::open(file.path()).expect("a readable NetCDF file");
     assert_eq!(
         str_attribute(&nc, Some("temp"), "units").as_deref(),
         Some("degC")
@@ -187,7 +186,7 @@ async fn netcdf_identical_keeps_a_conflict_as_a_variable() {
     )
     .await;
 
-    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    let nc = oxcdf::open(file.path()).expect("a readable NetCDF file");
     assert_eq!(str_attribute(&nc, Some("temp"), "units"), None);
     assert_eq!(
         nc.variable("temp.units")
@@ -208,7 +207,7 @@ async fn netcdf_drop_conflicts_drops_a_conflict() {
     )
     .await;
 
-    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    let nc = oxcdf::open(file.path()).expect("a readable NetCDF file");
     assert_eq!(str_attribute(&nc, Some("temp"), "units"), None);
     assert!(nc.variable("temp.units").is_none());
 }
@@ -224,7 +223,7 @@ async fn netcdf_first_keeps_one_value() {
     )
     .await;
 
-    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    let nc = oxcdf::open(file.path()).expect("a readable NetCDF file");
     let units = str_attribute(&nc, Some("temp"), "units").expect("an attribute");
     assert!(units == "degC" || units == "K", "{units}");
     assert!(nc.variable("temp.units").is_none());
@@ -237,7 +236,7 @@ async fn netcdf_without_combine_attrs_keeps_the_column() {
     let sql = r#"SELECT temp, 'degC' AS "temp.units" FROM (VALUES (1.0), (2.0)) AS t(temp)"#;
     let file = netcdf_output(&rt, sql, json!({ "format": "netcdf" })).await;
 
-    let nc = beacon_arrow_netcdf::netcdf::open(file.path()).expect("a readable NetCDF file");
+    let nc = oxcdf::open(file.path()).expect("a readable NetCDF file");
     assert!(nc.variable("temp.units").is_some());
 }
 
@@ -253,7 +252,7 @@ async fn copy_to_nc_with_combine_attrs_writes_an_attribute() {
     .await;
 
     let path = rt.tmp_dir().join("combine.nc");
-    let nc = beacon_arrow_netcdf::netcdf::open(&path).expect("a readable NetCDF file");
+    let nc = oxcdf::open(&path).expect("a readable NetCDF file");
     assert_eq!(
         str_attribute(&nc, Some("temp"), "units").as_deref(),
         Some("degC")
@@ -287,10 +286,10 @@ async fn netcdf_compression_makes_a_smaller_file() {
         size(packed.path()),
         size(plain.path())
     );
-    let plain = beacon_arrow_netcdf::netcdf::open(plain.path()).expect("a readable NetCDF file");
-    let packed = beacon_arrow_netcdf::netcdf::open(packed.path()).expect("a readable NetCDF file");
+    let plain = oxcdf::open(plain.path()).expect("a readable NetCDF file");
+    let packed = oxcdf::open(packed.path()).expect("a readable NetCDF file");
     // The scan is parallel, so the row order can differ between the two queries.
-    let values = |file: &beacon_arrow_netcdf::netcdf::File| -> Vec<f64> {
+    let values = |file: &oxcdf::NetcdfFile| -> Vec<f64> {
         let mut values: Vec<f64> = file.variable("v").unwrap().get_values(..).unwrap();
         values.sort_by(f64::total_cmp);
         values
@@ -314,7 +313,7 @@ async fn copy_to_nc_with_compression_sets_the_chunks() {
     .await;
 
     let path = rt.tmp_dir().join("compressed.nc");
-    let nc = beacon_arrow_netcdf::netcdf::open(&path).expect("a readable NetCDF file");
+    let nc = oxcdf::open(&path).expect("a readable NetCDF file");
     let v = nc.variable("v").expect("the column is a variable");
     assert_eq!(v.chunking().unwrap(), Some(vec![5000]));
     assert_eq!(v.len(), 100_000);
@@ -469,7 +468,7 @@ async fn geoparquet_output_uses_the_named_coordinate_columns() {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("the named coordinate columns should build the geometry");
     assert!(matches!(result.query_output, QueryOutput::File(_)));
@@ -502,7 +501,7 @@ async fn geoparquet_output_does_not_panic_and_is_a_real_parquet_file() {
 
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("a GeoParquet COPY must not panic or error");
 
@@ -542,7 +541,7 @@ async fn zarr_output_is_a_zipped_flat_store_that_reads_back() {
     query.output = Some(serde_json::from_value(json!({ "format": "zarr" })).unwrap());
     let result = rt
         .runtime
-        .run_query(query, rt.admin().await)
+        .run_query(query, rt.admin())
         .await
         .expect("a zarr output query should run");
     let QueryOutput::File(file) = result.query_output else {

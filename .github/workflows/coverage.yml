@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A new push to a PR stops the old run. Runs on main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -17,8 +22,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      # The instrumented build and the release plugin fixture together fill the default disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Install system dependencies (Dockerfile parity)
         run: |
@@ -29,16 +38,15 @@ jobs:
             cmake \
             curl \
             libclang-dev \
-            libhdf5-dev \
-            libnetcdf-dev \
             libproj-dev \
             libsqlite3-dev \
-            netcdf-bin \
+            libssl-dev \
             pkg-config \
             protobuf-compiler \
             software-properties-common \
             sqlite3 \
-            wget
+            wget \
+            zlib1g-dev
 
       - name: Install Rust (1.95)
         uses: dtolnay/rust-toolchain@stable

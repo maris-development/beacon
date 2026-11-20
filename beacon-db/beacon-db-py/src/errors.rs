@@ -13,7 +13,7 @@
 //!     ├── IntegrityError      constraint violations
 //!     ├── InternalError       engine invariant broken / caught panic
 //!     ├── ProgrammingError    SQL parse/plan errors, unknown table/column, bad config
-//!     │   └── NotPermittedError   authorization denial
+//!     │   └── NotPermittedError   refused operation (read-only, remote server denial)
 //!     └── NotSupportedError   unimplemented parity feature
 //! ```
 //!
@@ -29,7 +29,12 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 
 create_exception!(_beacondb, Warning, PyException, "PEP 249 Warning.");
-create_exception!(_beacondb, Error, PyException, "Base of every beacondb error.");
+create_exception!(
+    _beacondb,
+    Error,
+    PyException,
+    "Base of every beacondb error."
+);
 create_exception!(
     _beacondb,
     InterfaceError,
@@ -86,7 +91,7 @@ create_exception!(
     _beacondb,
     NotPermittedError,
     ProgrammingError,
-    "The authenticated identity is not allowed to run this statement."
+    "The connection or a remote Beacon server does not permit this operation."
 );
 
 /// Registers the exception types on the extension module.
@@ -113,9 +118,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 pub fn map_engine_error(err: anyhow::Error) -> PyErr {
     let message = format!("{err:#}");
 
-    // Authorization first: these are bare `anyhow::bail!`s from beacon's statement-plan layer,
-    // so there is no type to downcast to. Both prefixes are owned by beacon-core
-    // (`validate_query_plan` and `authorize_logical_plan`) and pinned by its tests.
+    // An attached remote Beacon server refuses a statement with one of these texts.
     if message.contains("operation not permitted") || message.contains("permission denied") {
         return NotPermittedError::new_err(message);
     }
