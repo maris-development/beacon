@@ -1040,7 +1040,8 @@ impl ExecutionPlan for InsertExec {
 /// inserted-row count.
 ///
 /// The column mapping is made at plan time, so every mapping error comes
-/// before a change and `EXPLAIN` shows the mapping without a change.
+/// before a change and `EXPLAIN` shows the mapping without a change. The
+/// execution maps again against the schema after the widening.
 #[derive(Debug)]
 pub(crate) struct InsertByNameExec {
     table: TableReference,
@@ -1132,10 +1133,10 @@ impl ExecutionPlan for InsertByNameExec {
         let session = upgrade_session(&self.session)?;
         let table = self.table.clone();
         let child = self.child.clone();
-        let mapping = self.mapping.clone();
+        let new_columns = self.mapping.new_columns.clone();
         let lance = self.lance.clone();
         Ok(forward_stream(count_arrow_schema(), async move {
-            insert_by_name::insert_by_name(&session, &table, child, &mapping, lance.as_ref())
+            insert_by_name::insert_by_name(&session, &table, child, &new_columns, lance.as_ref())
                 .await
                 .map_err(to_df_err)
         }))

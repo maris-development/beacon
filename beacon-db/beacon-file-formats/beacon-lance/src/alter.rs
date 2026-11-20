@@ -90,8 +90,8 @@ pub async fn alter_table(
 /// nullable all-NULL columns in one dataset version. Returns the added names.
 ///
 /// The latest version is read under the write lock, so a field that another
-/// insert added is skipped. When another process adds a field at the same
-/// time, the dataset is read again once.
+/// insert added is skipped. When another process changes the dataset at the
+/// same time, the dataset is read again once.
 pub async fn add_missing_columns(
     warehouse: &LanceWarehouse,
     uri: &str,
@@ -115,10 +115,7 @@ pub async fn add_missing_columns(
                     .iter()
                     .any(|existing| &existing.name == field.name())
             })
-            .map(|field| {
-                Field::new(field.name(), lance_compatible_type(field.data_type()), true)
-                    .with_metadata(field.metadata().clone())
-            })
+            .map(|field| Field::new(field.name(), lance_compatible_type(field.data_type()), true))
             .collect();
         if missing.is_empty() {
             return Ok(Vec::new());
@@ -132,10 +129,24 @@ pub async fn add_missing_columns(
             .await
         {
             Ok(()) => return Ok(names),
-            Err(e) if !retried && e.to_string().contains("already exists") => retried = true,
+            Err(e) if !retried && is_concurrent_change(&e) => retried = true,
             Err(e) => {
                 anyhow::bail!("Failed to add the columns {names:?} to '{uri}': {e}")
             }
+        }
+    }
+}
+
+/// `true` when another writer changed the dataset during `add_columns`.
+fn is_concurrent_change(error: &lance::Error) -> bool {
+    match error {
+        lance::Error::CommitConflict { .. }
+        | lance::Error::RetryableCommitConflict { .. }
+        | lance::Error::IncompatibleTransaction { .. } => true,
+        // Lance gives a column that exists only as an invalid-input message.
+        other => {
+            let message = other.to_string();
+            message.contains("already exists") || message.contains("Type conflicts")
         }
     }
 }

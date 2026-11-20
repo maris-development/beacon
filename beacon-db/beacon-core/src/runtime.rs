@@ -1721,3 +1721,94 @@ impl Runtime {
     }
 }
 
+
+#[cfg(test)]
+mod insert_by_name_tests {
+    use super::test_support::{test_runtime, TestRt};
+    use super::Runtime;
+    use arrow::array::{Array, Int64Array};
+    use futures::TryStreamExt;
+
+    async fn run_sql(runtime: &Runtime, sql: &str) -> Vec<arrow::record_batch::RecordBatch> {
+        runtime
+            .run_query(
+                crate::query::Query::sql(sql.to_string()),
+                crate::plan_validator::allow_all(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+    }
+
+    /// Plan `sql` now; the caller executes the plan later.
+    async fn plan(
+        runtime: &Runtime,
+        sql: &str,
+    ) -> std::sync::Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        let logical = runtime.lower_sql(sql).await.expect("plans");
+        runtime
+            .session_ctx
+            .state()
+            .create_physical_plan(&logical)
+            .await
+            .expect("plans physically")
+    }
+
+    /// The values of the BIGINT column `name` of `w`, in the order of `a`.
+    async fn values(runtime: &Runtime, name: &str) -> Vec<Option<i64>> {
+        let batches = run_sql(runtime, &format!("SELECT {name} FROM w ORDER BY a")).await;
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let column = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("a BIGINT column");
+                (0..column.len())
+                    .map(|i| column.is_valid(i).then(|| column.value(i)))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// A schema change between plan and execution: the insert maps again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_widening_between_plan_and_execute_is_mapped_by_name() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        run_sql(runtime, "CREATE TABLE w (a BIGINT)").await;
+
+        let late = plan(runtime, "INSERT INTO w BY NAME SELECT 2 AS a, 20 AS y").await;
+        run_sql(runtime, "INSERT INTO w BY NAME SELECT 1 AS a, 10 AS x").await;
+        datafusion::physical_plan::collect(late, runtime.session_ctx.task_ctx())
+            .await
+            .expect("the late insert maps against the widened table");
+
+        assert_eq!(values(runtime, "a").await, vec![Some(1), Some(2)]);
+        assert_eq!(values(runtime, "x").await, vec![Some(10), None]);
+        assert_eq!(values(runtime, "y").await, vec![None, Some(20)]);
+    }
+
+    /// An `ALTER TABLE ADD COLUMN` between plan and execution gives a NULL column.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_added_column_between_plan_and_execute_is_null() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        run_sql(runtime, "CREATE TABLE w (a BIGINT, b BIGINT)").await;
+
+        let late = plan(runtime, "INSERT INTO w BY NAME SELECT 5 AS b, 1 AS a").await;
+        run_sql(runtime, "ALTER TABLE w ADD COLUMN c BIGINT").await;
+        datafusion::physical_plan::collect(late, runtime.session_ctx.task_ctx())
+            .await
+            .expect("the insert maps against the altered table");
+
+        assert_eq!(values(runtime, "a").await, vec![Some(1)]);
+        assert_eq!(values(runtime, "b").await, vec![Some(5)]);
+        assert_eq!(values(runtime, "c").await, vec![None]);
+    }
+}

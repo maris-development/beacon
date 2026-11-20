@@ -163,7 +163,13 @@ async fn load_dataset(
 
 /// Drop a Lance table by deleting all of its objects from the tables store,
 /// and its entries from the Lance session caches.
+///
+/// Only a managed `db://` table is deleted. Any other URI gives an error, so
+/// the files of an external dataset stay.
 pub async fn drop_lance_table(warehouse: &LanceWarehouse, uri: &str) -> anyhow::Result<()> {
+    if !uri.starts_with(&format!("{}://", warehouse::SCHEME)) {
+        anyhow::bail!("Lance table '{uri}' is not managed by Beacon; its files are not deleted");
+    }
     tracing::info!(uri = %uri, "dropping Lance table");
 
     let lock = warehouse.lock(uri);
@@ -551,6 +557,25 @@ mod tests {
 
         let after = warehouse.store().list(Some(&prefix)).count().await;
         assert_eq!(after, 0, "drop must remove every object under the table prefix");
+    }
+
+    #[tokio::test]
+    async fn drop_refuses_a_uri_that_is_not_managed() {
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = test_warehouse(&dir);
+        std::fs::write(dir.path().join("keep.txt"), "x").unwrap();
+
+        for uri in [
+            "datasets:///ext.lance",
+            "s3://bucket/ext.lance",
+            "file:///tmp/ext.lance",
+        ] {
+            let err = drop_lance_table(&warehouse, uri)
+                .await
+                .expect_err("an external URI must not be dropped");
+            assert!(err.to_string().contains("not managed"), "{err}");
+        }
+        assert!(dir.path().join("keep.txt").exists());
     }
 
     /// The URI encodes a space as `%20`, but the store keys hold the space.

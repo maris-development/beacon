@@ -65,6 +65,9 @@ pub fn lance_compatible_type(data_type: &DataType) -> DataType {
             DataType::Struct(fields.iter().map(lance_compatible_field).collect())
         }
         DataType::Map(entries, sorted) => DataType::Map(lance_compatible_field(entries), *sorted),
+        DataType::Dictionary(key, value) => {
+            DataType::Dictionary(key.clone(), Box::new(lance_compatible_type(value)))
+        }
         other => other.clone(),
     }
 }
@@ -390,6 +393,11 @@ mod tests {
         assert_eq!(
             lance_compatible_type(&DataType::List(item(inner(DataType::Utf8View)))),
             DataType::List(item(inner(DataType::Utf8)))
+        );
+        let dictionary = |value| DataType::Dictionary(Box::new(DataType::Int32), Box::new(value));
+        assert_eq!(
+            lance_compatible_type(&dictionary(DataType::Utf8View)),
+            dictionary(DataType::Utf8)
         );
     }
 

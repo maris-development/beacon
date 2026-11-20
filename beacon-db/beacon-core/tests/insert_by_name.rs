@@ -310,7 +310,18 @@ async fn netcdf_source_merges() {
     )
     .await;
 
-    // Not `SELECT *`: Lance refuses the dotted attribute columns such as `temp._FillValue`.
+    // `SELECT *` also gives the attribute columns, such as `temp._FillValue`.
+    let error = rt
+        .try_sql("INSERT INTO lance_t BY NAME SELECT * FROM nc")
+        .await
+        .expect_err("Lance refuses dotted column names");
+    assert!(
+        error
+            .to_string()
+            .contains("Lance does not accept the column names"),
+        "{error}"
+    );
+
     let result = rt
         .sql("INSERT INTO lance_t BY NAME SELECT temp, psal FROM nc")
         .await;
@@ -321,6 +332,51 @@ async fn netcdf_source_merges() {
         names.iter().any(|n| n == "temp") && names.iter().any(|n| n == "psal"),
         "{names:?}"
     );
+    // A row of a.nc has no `psal`, and a row of b.nc has no `temp`.
+    let only_temp = rt
+        .sql("SELECT count(*) FROM lance_t WHERE temp IS NOT NULL AND psal IS NULL")
+        .await;
+    let only_psal = rt
+        .sql("SELECT count(*) FROM lance_t WHERE psal IS NOT NULL AND temp IS NULL")
+        .await;
+    assert_eq!(scalar_i64(&only_temp), 2);
+    assert_eq!(scalar_i64(&only_psal), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dotted_new_column_is_refused_at_plan_time() {
+    let rt = restartable_runtime("by-name-dotted", |b| b).await;
+    rt.sql("CREATE TABLE t (a BIGINT)").await;
+
+    let expected = "Lance does not accept the column names 'x.y', 'p.q'; \
+                    a name must not contain '.'. Rename them with AS";
+    for sql in [
+        "INSERT INTO t BY NAME SELECT 1 AS a, 2 AS \"x.y\", 3 AS z, 4 AS \"p.q\"",
+        "EXPLAIN INSERT INTO t BY NAME SELECT 1 AS a, 2 AS \"x.y\", 3 AS z, 4 AS \"p.q\"",
+    ] {
+        let error = rt.try_sql(sql).await.expect_err("dotted names are refused");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+
+    let rt = rt.restart().await;
+    assert_eq!(columns(&rt, "t").await, vec!["a"]);
+    assert_eq!(count(&rt, "t").await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_append_keeps_the_new_columns() {
+    let rt = runtime("by-name-failed-append").await;
+    rt.sql("CREATE TABLE t (a BIGINT)").await;
+    rt.sql("INSERT INTO t VALUES (1)").await;
+
+    let result = rt
+        .try_sql("INSERT INTO t BY NAME SELECT 'abc' AS a, 2 AS z")
+        .await;
+    assert!(result.is_err(), "'abc' does not cast to BIGINT");
+
+    // The widening is its own version; the append writes no rows.
+    assert_eq!(columns(&rt, "t").await, vec!["a", "z"]);
+    assert_eq!(count(&rt, "t").await, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -397,6 +453,14 @@ async fn a_caller_that_is_not_a_super_user_is_refused() {
         )
         .await;
     let error = result.expect_err("only a super user writes");
+    assert!(error.to_string().contains("super-user"), "{error}");
+    let explained = rt
+        .try_sql_as(
+            "EXPLAIN INSERT INTO t BY NAME SELECT 1 AS a, 2 AS w",
+            unprivileged(),
+        )
+        .await;
+    let error = explained.expect_err("only a super user explains a write");
     assert!(error.to_string().contains("super-user"), "{error}");
     assert_eq!(columns(&rt, "t").await, vec!["a"]);
     assert_eq!(count(&rt, "t").await, 0);
