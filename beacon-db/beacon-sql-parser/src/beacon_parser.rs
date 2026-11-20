@@ -130,9 +130,11 @@ impl<'a> BeaconParser<'a> {
             return self.parse_analyze_files();
         }
 
-        match self.insert_by_name_shape() {
+        // Only a plain EXPLAIN; EXPLAIN ANALYZE and VERBOSE go to DataFusion.
+        let explain = self.is_unquoted_word(0, "EXPLAIN");
+        match self.insert_by_name_shape(usize::from(explain)) {
             InsertByNameShape::NotByName => {}
-            InsertByNameShape::ByName => return self.parse_insert_by_name(),
+            InsertByNameShape::ByName => return self.parse_insert_by_name(explain),
             InsertByNameShape::WithColumnList => {
                 return Err(DataFusionError::Plan(
                     "INSERT ... BY NAME does not take a column list".to_string(),
@@ -145,19 +147,24 @@ impl<'a> BeaconParser<'a> {
         Ok(BeaconStatement::DFStatement(df_statement))
     }
 
-    /// Look ahead for `INSERT INTO <name> [(...)] BY NAME` without consuming tokens.
-    fn insert_by_name_shape(&self) -> InsertByNameShape {
+    /// Whether token `n` is the unquoted word `value`, in any case.
+    fn is_unquoted_word(&self, n: usize, value: &str) -> bool {
+        matches!(&self.df_parser.parser.peek_nth_token(n).token,
+            Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(value))
+    }
+
+    /// Look ahead for `INSERT INTO <name> [(...)] BY NAME` from token `start`,
+    /// without consuming tokens.
+    fn insert_by_name_shape(&self, start: usize) -> InsertByNameShape {
         let parser = &self.df_parser.parser;
-        let is_word = |n: usize, value: &str| {
-            matches!(&parser.peek_nth_token(n).token, Token::Word(w) if w.value.eq_ignore_ascii_case(value))
-        };
-        if !(is_word(0, "INSERT") && is_word(1, "INTO")) {
+        let is_word = |n: usize, value: &str| self.is_unquoted_word(n, value);
+        if !(is_word(start, "INSERT") && is_word(start + 1, "INTO")) {
             return InsertByNameShape::NotByName;
         }
-        if !matches!(parser.peek_nth_token(2).token, Token::Word(_)) {
+        if !matches!(parser.peek_nth_token(start + 2).token, Token::Word(_)) {
             return InsertByNameShape::NotByName;
         }
-        let mut n = 3;
+        let mut n = start + 3;
         while parser.peek_nth_token(n).token == Token::Period
             && matches!(parser.peek_nth_token(n + 1).token, Token::Word(_))
         {
@@ -189,8 +196,11 @@ impl<'a> BeaconParser<'a> {
         }
     }
 
-    /// Parse: INSERT INTO <table> BY NAME <query>
-    fn parse_insert_by_name(&mut self) -> Result<BeaconStatement> {
+    /// Parse: [EXPLAIN] INSERT INTO <table> BY NAME <query>
+    fn parse_insert_by_name(&mut self, explain: bool) -> Result<BeaconStatement> {
+        if explain {
+            self.df_parser.parser.next_token(); // EXPLAIN
+        }
         self.df_parser.parser.next_token(); // INSERT
         self.df_parser.parser.next_token(); // INTO
         let table = self.parse_object_name()?;
@@ -204,6 +214,7 @@ impl<'a> BeaconParser<'a> {
         Ok(BeaconStatement::InsertByName(InsertByNameStatement {
             table,
             query,
+            explain,
         }))
     }
 
@@ -1282,6 +1293,65 @@ mod tests {
                 .unwrap();
             assert!(matches!(stmt, BeaconStatement::DFStatement(_)), "{sql}");
         }
+    }
+
+    #[test]
+    fn parses_explain_insert_by_name() {
+        let sql = "EXPLAIN INSERT INTO obs BY NAME SELECT * FROM nc";
+        let stmt = BeaconParser::new(sql)
+            .unwrap()
+            .parse_single_statement()
+            .unwrap();
+        match &stmt {
+            BeaconStatement::InsertByName(s) => {
+                assert!(s.explain);
+                assert_eq!(s.table.to_string(), "obs");
+            }
+            other => panic!("expected InsertByName, got {other:?}"),
+        }
+        assert_eq!(stmt.to_string(), sql);
+    }
+
+    #[test]
+    fn explain_plain_insert_is_unchanged() {
+        for sql in [
+            "EXPLAIN INSERT INTO obs SELECT * FROM t",
+            "EXPLAIN ANALYZE INSERT INTO obs SELECT * FROM t",
+        ] {
+            let stmt = BeaconParser::new(sql)
+                .unwrap()
+                .parse_single_statement()
+                .unwrap();
+            assert!(matches!(stmt, BeaconStatement::DFStatement(_)), "{sql}");
+        }
+    }
+
+    #[test]
+    fn insert_by_name_lowercase_keeps_quoted_table_case() {
+        let sql = r#"insert into "Obs" by name select a from t"#;
+        let stmt = BeaconParser::new(sql)
+            .unwrap()
+            .parse_single_statement()
+            .unwrap();
+        match &stmt {
+            BeaconStatement::InsertByName(s) => {
+                assert!(!s.explain);
+                let ident = s.table.0[0].as_ident().unwrap();
+                assert_eq!(ident.value, "Obs");
+                assert_eq!(ident.quote_style, Some('"'));
+            }
+            other => panic!("expected InsertByName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quoted_by_name_is_not_a_keyword() {
+        let sql = r#"INSERT INTO obs "BY" "NAME" SELECT a FROM t"#;
+        let result = BeaconParser::new(sql).unwrap().parse_single_statement();
+        assert!(
+            !matches!(result, Ok(BeaconStatement::InsertByName(_))),
+            "quoted BY NAME must not take the BY NAME path"
+        );
     }
 
     #[test]
