@@ -39,6 +39,7 @@ pub mod options;
 #[cfg(test)]
 mod partition_coverage_tests;
 pub mod reader;
+mod scan;
 pub mod sink;
 pub mod source;
 pub mod statistics;

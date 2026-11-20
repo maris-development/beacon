@@ -1077,6 +1077,7 @@ dependencies = [
  "beacon-nd-execution",
  "chrono",
  "datafusion 54.1.0",
+ "datafusion-datasource 54.1.0",
  "futures",
  "hifitime",
  "indexmap 2.14.0",
