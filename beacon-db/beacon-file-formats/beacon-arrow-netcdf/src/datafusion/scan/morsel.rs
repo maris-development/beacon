@@ -549,6 +549,71 @@ pub(in crate::datafusion) mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_prune_counts_of_the_slices_sum_to_one_scan() {
+        let (_dir, path) = file_of(4000);
+        let whole = ExecutionPlanMetricsSet::new();
+        drive(
+            &morselizer(500, Some(1999.5), SkipFiles::default(), &whole),
+            vec![entry(&path)],
+        )
+        .await
+        .unwrap();
+
+        let sliced = ExecutionPlanMetricsSet::new();
+        let morselizer = morselizer(500, Some(1999.5), SkipFiles::default(), &sliced);
+        for index in 0..3 {
+            let slice = entry(&path).with_extension(NetcdfSlice { index, count: 3 });
+            drive(&morselizer, vec![slice]).await.unwrap();
+        }
+
+        for name in ["chunks_read", "rows_read", "chunks_pruned", "rows_pruned"] {
+            assert_eq!(counter(&sliced, name), counter(&whole, name), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_first_slice_counts_a_skipped_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.nc");
+        std::fs::write(&path, b"this is not a netcdf file").unwrap();
+        let metrics = ExecutionPlanMetricsSet::new();
+        let skip = SkipFiles {
+            invalid: true,
+            ..SkipFiles::default()
+        };
+        let morselizer = morselizer(500, None, skip, &metrics);
+
+        for index in 0..4 {
+            let slice = entry(&path).with_extension(NetcdfSlice { index, count: 4 });
+            assert!(drive(&morselizer, vec![slice]).await.unwrap().is_empty());
+        }
+
+        assert_eq!(counter(&metrics, "files_skipped"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_file_with_none_of_the_columns_finishes_with_no_batch() {
+        let (_dir, path) = file_of(4000);
+        let metrics = ExecutionPlanMetricsSet::new();
+        let wanted = Field::new("no_such_column", DataType::Float64, true);
+        let morselizer = NetcdfMorselizer::new(ScanContext {
+            store: Arc::new(LocalFileSystem::new()),
+            projected_schema: Arc::new(Schema::new(vec![nd_encoded_field_of(&wanted)])),
+            partition_fields: vec![],
+            read_dimensions: None,
+            skip: SkipFiles::default(),
+            batch_size: 500,
+            predicate: None,
+            metrics: ReadMetrics::new(&metrics, 0),
+        });
+
+        let batches = drive(&morselizer, vec![entry(&path)]).await.unwrap();
+
+        assert!(batches.is_empty());
+        assert_eq!(counter(&metrics, "chunks_read"), 0);
+    }
+
     #[test]
     fn a_byte_range_is_refused() {
         let metrics = ExecutionPlanMetricsSet::new();

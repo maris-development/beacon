@@ -61,9 +61,7 @@ def test_read_netcdf_select_star(client, netcdf_file):
     # SELECT * auto-selects a broadcast-compatible dimension set; the SST grid
     # variables and their coordinates come back as columns.
     assert EXPECTED_VARS <= set(header), header
-    # The grid is large (time=1, lat=1208, lon=1920), so the flattened scan
-    # returns well over a thousand rows.
-    # A NetCDF scan needs a file column, so the count names one.
+    # A NetCDF scan needs a file column, so the count names one. `lat` has 1208 values.
     n = int(float(client.scalar(f"SELECT count(lat) AS n FROM read_netcdf(['{netcdf_file}'])")))
     assert n > 1000
 

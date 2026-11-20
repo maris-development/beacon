@@ -353,11 +353,18 @@ impl FileFormat for NetcdfFormat {
                 )
                 .await
                 .map_err(|e| {
-                    exec_datafusion_err!(
+                    let message = format!(
                         "Failed to infer the schema of NetCDF file '{}': {}",
                         objects[index].location,
                         e.message()
-                    )
+                    );
+                    // A ragged file stays NotImplemented, so a caller can tell it apart.
+                    match e {
+                        datafusion::error::DataFusionError::NotImplemented(_) => {
+                            datafusion::error::DataFusionError::NotImplemented(message)
+                        }
+                        _ => exec_datafusion_err!("{message}"),
+                    }
                 })
             })
             .buffered(width)
@@ -2321,6 +2328,15 @@ mod scan_tests {
             .map_or(0, |value| value.as_usize())
     }
 
+    /// The partition count of the leaf scan.
+    fn scan_partitions(plan: &Arc<dyn ExecutionPlan>) -> usize {
+        let mut node = Arc::clone(plan);
+        while let Some(child) = node.children().first() {
+            node = Arc::clone(child);
+        }
+        datafusion::physical_plan::ExecutionPlanProperties::output_partitioning(&node).partition_count()
+    }
+
     async fn error_of(ctx: &SessionContext, sql: &str) -> DataFusionError {
         match ctx.sql(sql).await {
             Err(e) => e,
@@ -2362,6 +2378,10 @@ mod scan_tests {
             .await
             .err()
             .expect("a ragged file has no schema");
+        assert!(
+            matches!(error.find_root(), DataFusionError::NotImplemented(_)),
+            "{error}"
+        );
         let text = error.to_string();
         assert!(text.contains("ragged") && text.contains(WOD_FILE), "{text}");
 
@@ -2416,9 +2436,17 @@ mod scan_tests {
             register(&four, "t", &path).await;
 
             let expected = one.sql(sql).await.unwrap().collect().await.unwrap();
-            let got = four.sql(sql).await.unwrap().collect().await.unwrap();
+            let plan = four
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            let got = collect(Arc::clone(&plan), four.task_ctx()).await.unwrap();
 
             assert_eq!(got, expected, "{sql}");
+            assert_eq!(scan_partitions(&plan), 4, "the file is cut into 4 slices: {sql}");
         }
     }
 
@@ -2447,16 +2475,22 @@ mod scan_tests {
         let ctx = session(1, 4096);
         register(&ctx, "gridded", &test_file(GRIDDED_FILE)).await;
 
-        let mut stream = ctx
+        let plan = ctx
             .sql("SELECT sea_ice_fraction FROM gridded")
             .await
             .unwrap()
-            .execute_stream()
+            .create_physical_plan()
             .await
             .unwrap();
+        let mut stream =
+            datafusion::physical_plan::execute_stream(Arc::clone(&plan), ctx.task_ctx()).unwrap();
         let first = stream.next().await.expect("the scan yields a batch").unwrap();
         assert!(first.num_rows() > 0);
         drop(stream);
+
+        // The array is contiguous: 2 rows of `lon` per chunk at 4096, so 604 chunks.
+        let read = scan_counter(&plan, "chunks_read");
+        assert!(read <= 3, "read {read} of 604 chunks after the drop");
 
         // The session still answers after the drop.
         let again = ctx

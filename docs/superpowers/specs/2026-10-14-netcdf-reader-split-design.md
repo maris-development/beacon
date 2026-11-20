@@ -106,7 +106,7 @@ impl FileScan {
 - **Small file.** The scan knows the grid after the open: the dimensions that the selected variables broadcast to. When that grid holds at most `batch_size` rows, the whole file is one chunk, also when the file has native chunks.
 - **Larger file, same as today.** The array of the highest rank sets the target dimensions. If its chunk shape differs from its shape, the native chunk shape is the chunk shape. Else the chunk fills from the last axis up to `batch_size` elements.
 - **Read.** For each projected array: map the chunk onto the axes of the array, call `NdArrayD::subset`, convert with `ndarray_to_arrow_array`, build an `NdArrowArray`. A coordinate is read one time per chunk, not one time per row.
-- **No full-rank array.** When no projected array lies on every dimension of the dataset, the dimensions of the dataset are the grid. This is today's rule.
+- **Grid dimensions.** The grid spans only the dimensions that the selected arrays use. When no selected array lies on all of them, those dimensions are the grid. The legacy engine spanned every dimension of the dataset, so a coordinate alone repeated its values once per chunk; `count(time)` on the gridded test file gave 2416, not 1.
 
 ### 4.3 Pruning (`scan/prune.rs`)
 
@@ -226,7 +226,7 @@ A partition column shadows a file variable with the same name.
 - The tests that use `wod_ctd_1964.nc` as an ordinary file move to `gridded-example.nc` or to a small regular file that the test writes. This also applies to the `beacon-core` tests that read the WOD fixture through NetCDF.
 
 **New unit tests in `scan/`:**
-- A grid of at most `batch_size` rows is one chunk, also with native chunks. A larger grid equals the legacy grid for a native-chunk file and for a contiguous file.
+- A grid of at most `batch_size` rows is one chunk, also with native chunks. A count of a coordinate equals its length at every batch size.
 - An array that does not fit the grid gives an error with its name.
 - No planner state gives an empty `MorselPlan`: a skipped file, a file with none of the columns and a fully pruned file all finish.
 - Slices cover each chunk one time. Only slice 0 counts `files_skipped`. The prune counts of K slices sum to the count of one scan.
@@ -280,4 +280,4 @@ A partition column shadows a file variable with the same name.
 3. **Slices.** Each slice opens the file and reads the filter coordinates again.
 4. **Ragged NetCDF fails**, while HDF5 still reads the same file.
 5. **`COUNT(*)` fails on NetCDF tables.** Clients and tools that send `COUNT(*)` (previews, row counters, BI tools) get the error. The same query on HDF5, Zarr and Parquet tables still works.
-6. **Two copies of the chunk grid rule** exist, here and in `beacon-nd-array`, until the other formats move or the legacy engine goes away. A parity test guards the grid.
+6. **Two copies of the chunk grid rule** exist, here and in `beacon-nd-array`, until the other formats move or the legacy engine goes away. They differ on purpose: this one spans only the used dimensions. The `chunks.rs` tests pin the native-chunk and contiguous grids with fixed numbers; no test compares the two rules.
