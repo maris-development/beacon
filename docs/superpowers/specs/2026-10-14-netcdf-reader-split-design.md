@@ -105,7 +105,7 @@ impl FileScan {
 
 - **Grid rule, same as today.** The array of the highest rank sets the target dimensions. If its chunk shape differs from its shape, the native chunk shape is the chunk shape. Else the chunk fills from the last axis up to `batch_size` elements.
 - **Read.** For each projected array: map the chunk onto the axes of the array, call `NdArrayD::subset`, convert with `ndarray_to_arrow_array`, build an `NdArrowArray`. A coordinate is read one time per chunk, not one time per row.
-- **Fit.** An array that is not a scalar must lie on the target dimensions, in order. If not, `try_new` returns an error that names the array.
+- **No full-rank array.** When no projected array lies on every dimension of the dataset, the dimensions of the dataset are the grid. This is today's rule.
 
 ### 4.3 Pruning (`scan/prune.rs`)
 
@@ -119,7 +119,7 @@ pub(super) fn is_pruned(masks: &[(String, Vec<bool>)], dims: &[String], chunk: &
 
 - The masks come from `PushdownFilter::ranges`, `is_pushdown_candidate` and `mask_pushdown`. A mask that cannot be built is left out, so its chunks are read.
 - `is_pruned` uses `compute_chunk_mask` and `mask_is_all_false`.
-- A filter column that the query does not project is still read for its mask, as today.
+- The masks come from the projected arrays. A filter column is always projected, because the `FilterExec` above the scan needs it.
 - Pruning only skips work. The `FilterExec` above the scan applies the predicate again.
 
 ### 4.4 Planner (`scan/morsel.rs`)
