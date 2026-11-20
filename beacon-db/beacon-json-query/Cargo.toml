@@ -1,0 +1,25 @@
+[package]
+name = "beacon-json-query"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+
+# The structured JSON query and its compiler to a DataFusion LogicalPlan.
+
+[dependencies]
+anyhow = { workspace = true }
+cast = { workspace = true }
+chrono = { workspace = true }
+datafusion = { workspace = true }
+geojson = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true }
+beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
+beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+
+[dev-dependencies]
+# The GeoJSON filter renders `ST_Within`; its test registers the spatial functions.
+datafusion-spatial = { workspace = true }
+tokio = { workspace = true }

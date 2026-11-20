@@ -1257,6 +1257,7 @@ dependencies = [
  "beacon-functions",
  "beacon-iceberg",
  "beacon-icechunk",
+ "beacon-json-query",
  "beacon-lance",
  "beacon-nd-execution",
  "beacon-plugin-formats",
@@ -1265,16 +1266,14 @@ dependencies = [
  "beacon-plugin-tables",
  "beacon-redb-store",
  "beacon-sql-databases",
+ "beacon-sql-parser",
  "bytes",
- "cast",
  "chrono",
  "datafusion 54.1.0",
  "datafusion-federation",
- "datafusion-spatial",
  "deltalake",
  "flate2",
  "futures",
- "geojson 0.24.2",
  "iceberg",
  "iceberg-datafusion",
  "libc",
@@ -1650,6 +1649,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-json-query"
+version = "2.1.0-rc.3"
+dependencies = [
+ "anyhow",
+ "beacon-arrow-csv",
+ "beacon-arrow-odv",
+ "beacon-datafusion-ext",
+ "cast",
+ "chrono",
+ "datafusion 54.1.0",
+ "datafusion-spatial",
+ "geojson 0.24.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "utoipa",
+]
+
+[[package]]
 name = "beacon-lance"
 version = "2.1.0-rc.3"
 dependencies = [
@@ -1897,6 +1915,7 @@ dependencies = [
  "beacon-datafusion-ext",
  "beacon-mcp",
  "beacon-server-config",
+ "beacon-sql-parser",
  "bytes",
  "datafusion 54.1.0",
  "futures",
@@ -1965,6 +1984,14 @@ dependencies = [
  "tempfile",
  "tokio",
  "typetag",
+]
+
+[[package]]
+name = "beacon-sql-parser"
+version = "2.1.0-rc.3"
+dependencies = [
+ "anyhow",
+ "datafusion 54.1.0",
 ]
 
 [[package]]

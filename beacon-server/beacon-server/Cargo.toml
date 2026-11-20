@@ -84,6 +84,7 @@ beacon-dap = { path = "../beacon-dap" }
 # needed.
 beacon-core = { path = "../../beacon-db/beacon-core", default-features = false }
 # The test harness roots each lake in a temp dir; the library itself never does.
+beacon-sql-parser = { path = "../../beacon-db/beacon-sql-parser" }
 tempfile = { workspace = true }
 # `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.
 tower = { version = "0.5", features = ["util"] }
