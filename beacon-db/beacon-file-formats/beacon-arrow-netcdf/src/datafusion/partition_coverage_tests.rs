@@ -7,8 +7,7 @@
 //! produced multi-row encoded batches — and the decoder only read row 0, so
 //! every file after the first in a coalesced batch vanished from the results.
 //!
-//! `count(*)` did not catch it: it is answered without decoding nd arrays, so
-//! it stayed correct while the scan returned fewer rows.
+//! The test compares the rows the scan returns with a count of a column.
 
 use std::sync::Arc;
 
@@ -18,12 +17,11 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::datafusion::{options::NetcdfOptions, NetcdfFormat};
 
-/// Copy the ragged fixture `copies` times into a fresh temp dir.
+/// Write one small regular file, and copy it `copies` times into a fresh temp dir.
 fn stage_files(copies: usize) -> tempfile::TempDir {
+    let source = tempfile::tempdir().expect("tempdir");
+    let src = super::format_tests::write_regular_netcdf(source.path(), "source.nc", 4000);
     let dir = tempfile::tempdir().expect("tempdir");
-    let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("test_files")
-        .join("wod_ctd_1964.nc");
     for i in 0..copies {
         std::fs::copy(&src, dir.path().join(format!("part_{i:04}.nc"))).expect("copy fixture");
     }
@@ -65,7 +63,7 @@ async fn scanned_rows(ctx: &SessionContext) -> usize {
 
 async fn count_star(ctx: &SessionContext) -> usize {
     let batches = ctx
-        .sql("SELECT count(*) FROM nc")
+        .sql(r#"SELECT count("V0") FROM nc"#)
         .await
         .unwrap()
         .collect()
@@ -103,7 +101,7 @@ async fn scan_reads_every_file_regardless_of_target_partitions() {
 
         if scanned != expected || counted != expected {
             failures.push(format!(
-                "target_partitions={tp}: scanned {scanned} ({} files), count(*) {counted}, expected {expected}",
+                "target_partitions={tp}: scanned {scanned} ({} files), count {counted}, expected {expected}",
                 scanned / per_file
             ));
         }

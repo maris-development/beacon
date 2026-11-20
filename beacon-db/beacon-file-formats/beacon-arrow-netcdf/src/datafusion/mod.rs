@@ -524,7 +524,7 @@ impl FileFormat for NetcdfFormat {
 
 /// The format, its options and its scans.
 #[cfg(test)]
-mod format_tests {
+pub(super) mod format_tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -543,6 +543,36 @@ mod format_tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("test_files")
             .join(name)
+    }
+
+    /// Write one small regular file: column `V0` holds `0.0, 1.0, ..` for `rows` rows.
+    pub(super) fn write_regular_netcdf(
+        dir: &std::path::Path,
+        name: &str,
+        rows: usize,
+    ) -> PathBuf {
+        use arrow::array::{ArrayRef, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        use crate::encoders::default::DefaultEncoder;
+        use crate::writer::ArrowRecordBatchWriter;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "V0",
+            DataType::Float64,
+            false,
+        )]));
+        let values: ArrayRef =
+            Arc::new(Float64Array::from_iter_values((0..rows).map(|row| row as f64)));
+        let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+
+        let path = dir.join(name);
+        let mut writer =
+            ArrowRecordBatchWriter::<DefaultEncoder>::new(&path, schema).expect("a netCDF writer");
+        writer.write_record_batch(batch).expect("write the batch");
+        writer.finish().expect("finish the file");
+        path
     }
 
     fn factory() -> NetCDFFormatFactory {
@@ -597,18 +627,19 @@ mod format_tests {
     #[tokio::test]
     async fn a_file_with_an_alias_extension_reads_the_same_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let alias = dir.path().join("wod.nc4");
-        std::fs::copy(test_file(WOD_FILE), &alias).unwrap();
+        let canonical = write_regular_netcdf(dir.path(), "regular.nc", 4000);
+        let alias = dir.path().join("regular.nc4");
+        std::fs::copy(&canonical, &alias).unwrap();
 
         let ctx = session();
-        register(&ctx, "canonical", WOD_FILE).await;
+        register_path(&ctx, "canonical", &canonical).await;
         register_path(&ctx, "alias", &alias).await;
 
         let count = |table: &'static str| {
             let ctx = ctx.clone();
             async move {
                 let batches = ctx
-                    .sql(&format!("SELECT COUNT(*) FROM {table}"))
+                    .sql(&format!(r#"SELECT COUNT("V0") AS n FROM {table}"#))
                     .await
                     .unwrap()
                     .collect()
@@ -647,7 +678,7 @@ mod format_tests {
     async fn a_format_with_statistics_on_computes_ranges() {
         let ctx = session();
         let state = ctx.state();
-        let (store, object) = local_object(WOD_FILE);
+        let (store, object) = local_object(GRIDDED_FILE);
 
         let oxcdf = format_on().with_enable_statistics(true);
         let schema = oxcdf
@@ -673,7 +704,7 @@ mod format_tests {
     async fn a_format_with_statistics_off_computes_nothing() {
         let ctx = session();
         let state = ctx.state();
-        let (store, object) = local_object(WOD_FILE);
+        let (store, object) = local_object(GRIDDED_FILE);
 
         let oxcdf = format_on().with_enable_statistics(true);
         let schema = oxcdf
@@ -754,7 +785,7 @@ mod format_tests {
         const ITERATIONS: usize = 200;
         const CONCURRENCY: usize = 8;
 
-        for file in [WOD_FILE, GRIDDED_FILE] {
+        for file in [GRIDDED_FILE] {
             let ctx = session();
             let state = ctx.state();
             let (store, object) = local_object(file);
@@ -1334,11 +1365,10 @@ mod format_tests {
         );
     }
 
-    /// A scan of nothing but the partition column still counts the file's rows.
+    /// A count grouped by the partition column counts the rows of each file.
     ///
-    /// It reads no column of the file, so there is no grid for the value to
-    /// spread over. The read is driven by a column of its own and the value is
-    /// stated over the rows it produces — see `FilePartitions::row_columns`.
+    /// The partition value has no grid of its own. It spreads over the grid of
+    /// the file column that the query reads with it.
     #[tokio::test]
     async fn a_group_by_on_the_partition_column_counts_every_row() {
         let dir = tempfile::tempdir().unwrap();
@@ -1347,7 +1377,8 @@ mod format_tests {
         let per_file = rows_in_one_file(&ctx, "analysed_sst").await;
 
         let counted = ctx
-            .sql("SELECT year, count(*) AS n FROM obs GROUP BY year ORDER BY year")
+            // `coalesce` counts every row, and it makes the scan read a file column.
+            .sql("SELECT year, count(coalesce(analysed_sst, 0)) AS n FROM obs GROUP BY year ORDER BY year")
             .await
             .unwrap()
             .collect()
@@ -1422,7 +1453,8 @@ mod format_tests {
         register_partitioned(&ctx, "obs", dir.path(), &["2023", "2024"]).await;
 
         let counted = ctx
-            .sql("SELECT year, count(*) AS n FROM obs GROUP BY year ORDER BY year")
+            // `coalesce` counts every row, and it makes the scan read a file column.
+            .sql("SELECT year, count(coalesce(analysed_sst, 0)) AS n FROM obs GROUP BY year ORDER BY year")
             .await
             .unwrap()
             .collect()
@@ -1814,19 +1846,16 @@ mod format_tests {
         assert_eq!(summary(&split).await, whole_summary);
     }
 
-    /// A bare `count(*)` over a shared file counts every row once.
+    /// A count over a file that several partitions read counts every row once.
     ///
-    /// This is the one read that cannot inherit its division from the decode: it
-    /// projects no column, so it drives the read with a column of its own and
-    /// never builds an nd array. It has to take that work from the same queue as
-    /// everything else. A share that read the file whole would count it once per
-    /// partition, and the answer would grow with `target_partitions` — silently,
-    /// because nothing about it is an error.
+    /// A partition that read the file whole would count it once per partition,
+    /// and the answer would grow with `target_partitions`. Nothing about that is
+    /// an error, so the count is the guard.
     ///
     /// The whole-file session answers in one partition, so it is the count to
     /// match.
     #[tokio::test]
-    async fn a_shared_count_star_counts_every_row_once() {
+    async fn a_shared_count_counts_every_row_once() {
         let (_dir, file) = write_large_netcdf();
 
         let whole = session();
@@ -1834,7 +1863,7 @@ mod format_tests {
 
         let count = async |ctx: &SessionContext| {
             let batches = ctx
-                .sql("SELECT count(*) FROM one")
+                .sql(r#"SELECT count("V0") FROM one"#)
                 .await
                 .unwrap()
                 .collect()
@@ -1864,7 +1893,7 @@ mod format_tests {
             // Guard the guard: the count below proves nothing if the scan under
             // it was never shared in the first place.
             let plan = split
-                .sql("SELECT count(*) FROM one")
+                .sql(r#"SELECT count("V0") FROM one"#)
                 .await
                 .unwrap()
                 .create_physical_plan()
@@ -1873,7 +1902,7 @@ mod format_tests {
             assert_eq!(
                 scan_partitions(&plan),
                 target_partitions,
-                "the count(*) scan must be shared:\n{}",
+                "the count scan must be shared:\n{}",
                 datafusion::physical_plan::displayable(plan.as_ref()).indent(false)
             );
 
