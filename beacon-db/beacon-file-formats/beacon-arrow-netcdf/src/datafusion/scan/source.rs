@@ -83,13 +83,7 @@ impl FileSource for NetcdfSource {
         partition: usize,
     ) -> Result<Box<dyn Morselizer>> {
         let projected_schema = base_config.projected_schema()?;
-        let partition_fields = base_config.table_partition_cols().clone();
-        let file_columns = projected_schema
-            .fields()
-            .iter()
-            .filter(|field| !partition_fields.iter().any(|p| p.name() == field.name()))
-            .count();
-        if file_columns == 0 {
+        if projected_schema.fields().is_empty() {
             return plan_err!(
                 "a NetCDF scan needs at least one file column; use COUNT(column) in place of COUNT(*)"
             );
@@ -98,7 +92,6 @@ impl FileSource for NetcdfSource {
         Ok(Box::new(NetcdfMorselizer::new(ScanContext {
             store: object_store,
             projected_schema,
-            partition_fields,
             read_dimensions: self.read_dimensions.clone(),
             skip: self.skip,
             batch_size: self.batch_size,

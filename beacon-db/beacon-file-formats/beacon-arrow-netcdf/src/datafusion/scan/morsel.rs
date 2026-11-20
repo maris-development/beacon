@@ -5,12 +5,11 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::{FieldRef, SchemaRef};
+use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use beacon_datafusion_ext::nd::NdRecordBatch;
 use beacon_nd_array::array::subset::ArraySubset;
 use beacon_nd_array::arrow::metrics::ReadMetrics;
-use beacon_nd_array::arrow::partition::FilePartitions;
 use beacon_nd_array::arrow::pushdown_filter::PushdownFilter;
 use beacon_nd_array::dataset::project_read_dimensions_or_skip;
 use datafusion::common::internal_err;
@@ -43,8 +42,6 @@ pub(super) struct ScanContext {
     pub store: Arc<dyn ObjectStore>,
     /// The encoded schema the scan emits.
     pub projected_schema: SchemaRef,
-    /// The encoded `PARTITIONED BY` columns of the table.
-    pub partition_fields: Vec<FieldRef>,
     pub read_dimensions: Option<Vec<String>>,
     pub skip: SkipFiles,
     pub batch_size: usize,
@@ -193,13 +190,7 @@ async fn plan_entry(
     };
     refuse_ragged(&dataset)?;
 
-    let partitions = FilePartitions::new(
-        context.partition_fields.clone(),
-        file.partition_values.clone(),
-    );
-    let Some((dataset, output)) =
-        FileOutput::resolve(dataset, &context.projected_schema, &partitions)?
-    else {
+    let Some((dataset, output)) = FileOutput::resolve(dataset, &context.projected_schema)? else {
         // The file has none of the wanted columns, so it gives no row.
         return Ok(Box::new(Planner::Done));
     };
@@ -358,7 +349,6 @@ pub(in crate::datafusion) mod tests {
             projected_schema: Arc::new(Schema::new(vec![nd_encoded_field_of(
                 &logical.field(0).clone(),
             )])),
-            partition_fields: vec![],
             read_dimensions: None,
             skip,
             batch_size,
@@ -600,7 +590,6 @@ pub(in crate::datafusion) mod tests {
         let morselizer = NetcdfMorselizer::new(ScanContext {
             store: Arc::new(LocalFileSystem::new()),
             projected_schema: Arc::new(Schema::new(vec![nd_encoded_field_of(&wanted)])),
-            partition_fields: vec![],
             read_dimensions: None,
             skip: SkipFiles::default(),
             batch_size: 500,

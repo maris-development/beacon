@@ -93,7 +93,7 @@ arrays that you select. This is much faster than a scan of the original NetCDF f
 ## Limits
 
 - A query must read at least one column of the file. `COUNT(*)` gives an error. Use `COUNT(column)` with a column on the full grid.
-- A query that selects only `PARTITIONED BY` columns gives an error. Add one file column to the query.
+- `PARTITIONED BY` is not supported. A query on a partitioned NetCDF table gives an error.
 - Ragged files, for example World Ocean Database files, are not supported. Read such a file with the [HDF5 format](/docs/2.1.0-rc3/formats/hdf5): `read_hdf5` or `STORED AS HDF5`.
 
 ## Write a NetCDF output

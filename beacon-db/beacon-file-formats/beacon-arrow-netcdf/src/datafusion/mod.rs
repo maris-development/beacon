@@ -415,22 +415,25 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let partition_columns: Vec<&str> = conf
+            .table_partition_cols()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        if !partition_columns.is_empty() {
+            return Err(datafusion::error::DataFusionError::NotImplemented(format!(
+                "NetCDF does not support partitioned tables (PARTITIONED BY {})",
+                partition_columns.join(", ")
+            )));
+        }
         // The scan carries nd data as `beacon.nd`-encoded struct columns, so
         // the file source's schema is the encoded form of the logical table
         // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
         // back to the logical schema above the scan.
-        //
-        // The `PARTITIONED BY` columns are encoded with it. Their values come
-        // from a file's path rather than its contents, and the reader appends
-        // them per file, but they reach the plan the same way every other column
-        // does — so that one decoder reads the whole batch.
-        let encoded_file_schema = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
-            conf.file_schema(),
-        ));
-        let table_schema = datafusion::datasource::table_schema::TableSchema::new(
-            encoded_file_schema,
-            beacon_nd_array::arrow::partition::encoded_partition_cols(conf.table_partition_cols()),
-        );
+        let table_schema =
+            datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+                beacon_datafusion_ext::nd::encoded_schema(conf.file_schema()),
+            ));
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
@@ -1109,43 +1112,6 @@ pub(super) mod format_tests {
             .is_none());
     }
 
-    /// A hive-partitioned table over copies of `GRIDDED_FILE`: one file per
-    /// `year=` directory, and `year` as a `PARTITIONED BY` column.
-    async fn register_partitioned(
-        ctx: &SessionContext,
-        table: &str,
-        dir: &std::path::Path,
-        years: &[&str],
-    ) {
-        use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
-
-        for year in years {
-            let part = dir.join(format!("year={year}"));
-            std::fs::create_dir_all(&part).unwrap();
-            std::fs::copy(test_file(GRIDDED_FILE), part.join("obs.nc")).unwrap();
-        }
-
-        let options = ListingOptions::new(Arc::new(format_on()))
-            // The format finds its own files, so a suffix here would have to
-            // match it. This is what `CREATE EXTERNAL TABLE` passes too.
-            .with_file_extension("")
-            .with_collect_stat(false)
-            .with_table_partition_cols(vec![(
-                "year".to_string(),
-                arrow::datatypes::DataType::Utf8,
-            )]);
-
-        let url = ListingTableUrl::parse(dir.to_string_lossy()).unwrap();
-        let config = ListingTableConfig::new(url)
-            .with_listing_options(options)
-            .infer_schema(&ctx.state())
-            .await
-            .unwrap_or_else(|e| panic!("the partitioned collection infers a schema: {e}"));
-
-        ctx.register_table(table, Arc::new(ListingTable::try_new(config).unwrap()))
-            .unwrap();
-    }
-
     /// A table on the Rust reader over `path`, built from `options`.
     async fn table_with_options(
         ctx: &SessionContext,
@@ -1308,161 +1274,49 @@ pub(super) mod format_tests {
         batches.iter().map(|batch| batch.num_rows()).sum()
     }
 
-    /// A partitioned table reads, and every row holds the value of its own
-    /// file's path.
-    ///
-    /// The value is in the *path*, and an nd scan reads a whole collection
-    /// behind one plan entry, so `FileStream` cannot append it: it does not know
-    /// which file a batch came from. The reader appends it itself instead —
-    /// per file, which is per morsel.
+    /// A partitioned table is refused, and the error names the partition column.
     #[tokio::test]
-    async fn a_partitioned_table_gives_every_row_the_value_of_its_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = session();
-        register_partitioned(&ctx, "obs", dir.path(), &["2023", "2024"]).await;
-        let per_file = rows_in_one_file(&ctx, "analysed_sst").await;
+    async fn a_partitioned_table_is_refused() {
+        use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
 
-        let rows = ctx
-            .sql("SELECT year FROM obs WHERE analysed_sst IS NOT NULL OR analysed_sst IS NULL")
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("year=2023");
+        std::fs::create_dir_all(&part).unwrap();
+        std::fs::copy(test_file(GRIDDED_FILE), part.join("obs.nc")).unwrap();
+
+        let options = ListingOptions::new(Arc::new(format_on()))
+            .with_file_extension("")
+            .with_collect_stat(false)
+            .with_table_partition_cols(vec![(
+                "year".to_string(),
+                arrow::datatypes::DataType::Utf8,
+            )]);
+        let ctx = session();
+        let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
+        let config = ListingTableConfig::new(url)
+            .with_listing_options(options)
+            .infer_schema(&ctx.state())
+            .await
+            .unwrap();
+        ctx.register_table("obs", Arc::new(ListingTable::try_new(config).unwrap()))
+            .unwrap();
+
+        let error = ctx
+            .sql("SELECT lat FROM obs")
             .await
             .unwrap()
             .collect()
             .await
-            .unwrap();
+            .expect_err("a partitioned table is refused");
 
-        let mut years: Vec<String> = Vec::new();
-        for batch in &rows {
-            let column = batch
-                .column_by_name("year")
-                .expect("the partition column is in the scan");
-            let values = arrow::array::AsArray::as_string::<i32>(column);
-            years.extend((0..batch.num_rows()).map(|row| values.value(row).to_string()));
-        }
-
-        assert_eq!(
-            years.len(),
-            2 * per_file,
-            "both files are read, whole: {} rows each",
-            per_file
-        );
-        assert_eq!(
-            years.iter().filter(|year| *year == "2023").count(),
-            per_file,
-            "and one file's worth of rows carries 2023"
-        );
-        assert_eq!(
-            years.iter().filter(|year| *year == "2024").count(),
-            per_file,
-            "and the other's carries 2024"
-        );
-    }
-
-    /// A count grouped by the partition column counts the rows of each file.
-    ///
-    /// The partition value has no grid of its own. It spreads over the grid of
-    /// the file column that the query reads with it.
-    #[tokio::test]
-    async fn a_group_by_on_the_partition_column_counts_every_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = session();
-        register_partitioned(&ctx, "obs", dir.path(), &["2023", "2024"]).await;
-        let per_file = rows_in_one_file(&ctx, "analysed_sst").await;
-
-        let counted = ctx
-            // `coalesce` counts every row, and it makes the scan read a file column.
-            .sql("SELECT year, count(coalesce(analysed_sst, 0)) AS n FROM obs GROUP BY year ORDER BY year")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-
-        let batch = &counted[0];
-        assert_eq!(batch.num_rows(), 2, "one row per partition directory");
-        let years = arrow::array::AsArray::as_string::<i32>(batch.column(0));
-        let counts =
-            arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(batch.column(1));
-        assert_eq!((years.value(0), years.value(1)), ("2023", "2024"));
-        assert_eq!(
-            (counts.value(0), counts.value(1)),
-            (per_file as i64, per_file as i64),
-            "each directory counts one file's rows"
-        );
-    }
-
-    /// A filter on the partition column leaves the other directory unlisted.
-    ///
-    /// Pruning happens where it does for every other format — in the listing,
-    /// before a scan exists — so the plan holds only the files that can match.
-    #[tokio::test]
-    async fn a_filter_on_the_partition_column_prunes_files() {
-        use datafusion::physical_plan::displayable;
-
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = session();
-        register_partitioned(&ctx, "obs", dir.path(), &["2023", "2024"]).await;
-
-        let plan = ctx
-            .sql("SELECT analysed_sst FROM obs WHERE year = '2024'")
-            .await
-            .unwrap()
-            .create_physical_plan()
-            .await
-            .unwrap();
-
-        let shown = displayable(plan.as_ref()).indent(false).to_string();
         assert!(
-            shown.contains("year=2024"),
-            "the matching directory is scanned: {shown}"
+            matches!(
+                error.find_root(),
+                datafusion::error::DataFusionError::NotImplemented(_)
+            ),
+            "{error}"
         );
-        assert!(
-            !shown.contains("year=2023"),
-            "and the other one is not listed at all: {shown}"
-        );
-    }
-
-    /// The same values come back when the scan divides over many partitions.
-    ///
-    /// The scan cuts each file into slices, and any partition can read any
-    /// slice. The partition values travel on every slice of a file.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_parallel_partitioned_scan_keeps_the_values_apart() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = SessionStateBuilder::new()
-            .with_config(
-                SessionConfig::new()
-                    .with_target_partitions(4)
-                    .with_extension(
-                        beacon_datafusion_ext::type_widening::ArrowTypeWidening::default_extension(
-                        ),
-                    ),
-            )
-            .with_default_features()
-            .build();
-        let ctx = SessionContext::new_with_state(state);
-        register_partitioned(&ctx, "obs", dir.path(), &["2023", "2024"]).await;
-
-        let counted = ctx
-            // `coalesce` counts every row, and it makes the scan read a file column.
-            .sql("SELECT year, count(coalesce(analysed_sst, 0)) AS n FROM obs GROUP BY year ORDER BY year")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-
-        let batch = &counted[0];
-        let years = arrow::array::AsArray::as_string::<i32>(batch.column(0));
-        let counts =
-            arrow::array::AsArray::as_primitive::<arrow::datatypes::Int64Type>(batch.column(1));
-        assert_eq!(batch.num_rows(), 2);
-        assert_eq!((years.value(0), years.value(1)), ("2023", "2024"));
-        assert_eq!(
-            counts.value(0),
-            counts.value(1),
-            "the two copies of one file hold the same number of rows"
-        );
-        assert!(counts.value(0) > 0, "and the scan read them");
+        assert!(error.to_string().contains("PARTITIONED BY year"), "{error}");
     }
 
     /// An ordered scan is left alone: a partition holding an arbitrary subset of

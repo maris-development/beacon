@@ -23,6 +23,7 @@ Earlier revisions planned a two-format split and a shared nd scan engine. Both a
 | Chunk pruning | Kept. A filter on a 1-D coordinate drops the chunks that no row can match. |
 | Large files | With fewer files than partitions, the scan cuts a file into slices. |
 | No file column | A scan that projects no file column is an error. This covers `COUNT(*)` and a query of only partition columns. A row count comes from a real column: `COUNT(column)`. |
+| Partitions | `PARTITIONED BY` is not supported. `create_physical_plan` refuses a table with partition columns (`NotImplemented`). The scan has no partition-column code. |
 | Ragged | Not supported. A clear error at schema inference and at scan. With `read_dimensions` and `skip_unbroadcastable`, a ragged file is skipped. HDF5 still reads ragged files. |
 | Unchanged | `NetcdfFormat`, the factory, the options (`read_dimensions`, `skip_unbroadcastable`, `skip_invalid_files`), the writer, the statistics, the schema fingerprint, SQL and config. |
 

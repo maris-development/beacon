@@ -98,7 +98,8 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 ### Removed
 
 - **`COUNT(*)` on NetCDF tables.** A NetCDF query must read at least one column of the file. Use
-  `COUNT(column)`. A query that selects only `PARTITIONED BY` columns gives the same error.
+  `COUNT(column)`.
+- **`PARTITIONED BY` on NetCDF tables.** A query on a partitioned NetCDF table gives an error.
 - **Ragged NetCDF files** through `STORED AS NC` and `read_netcdf`. Use the HDF5 format for these
   files, for example World Ocean Database files.
 
