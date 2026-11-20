@@ -368,7 +368,7 @@ side_effect_exec!(
 pub(crate) struct AttachExec {
     name: String,
     url: String,
-    credential: beacon_datafusion_ext::remote::RemoteCredential,
+    credential: beacon_remote::RemoteCredential,
     secret: Option<String>,
     tls: bool,
     session: SessionCell,
@@ -379,7 +379,7 @@ impl AttachExec {
     pub(crate) fn new(
         name: String,
         url: String,
-        credential: beacon_datafusion_ext::remote::RemoteCredential,
+        credential: beacon_remote::RemoteCredential,
         secret: Option<String>,
         tls: bool,
         session: SessionCell,

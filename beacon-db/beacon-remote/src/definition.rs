@@ -12,7 +12,7 @@ use datafusion_federation::sql::{
     LogicalOptimizer, RemoteTableRef, SQLFederationProvider, SQLTable, SQLTableSource,
 };
 
-use crate::table_ext::TableDefinition;
+use beacon_datafusion_ext::table_ext::TableDefinition;
 
 use super::connection::RemoteConnection;
 use super::executor::BeaconFlightSqlExecutor;

@@ -1,6 +1,6 @@
 //! Serializable definition for an external SQL-database table.
 //!
-//! Mirrors `beacon_datafusion_ext::remote::RemoteTableDefinition`: a
+//! Mirrors `beacon_remote::RemoteTableDefinition`: a
 //! typetag-serialized definition that builds a DataFusion provider and is
 //! persisted as `table.json`. The credential is stored encrypted (see
 //! [`crate::secret`]); everything else is plaintext connection metadata.

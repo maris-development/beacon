@@ -8,7 +8,7 @@ pub use beacon_plugin_registry::registry::{PluginEntry, PluginRegistry, PluginSt
 pub use beacon_plugin_registry::store::InstallRecord;
 pub use beacon_plugin_registry::{archive, manifest, native, registry, source, store};
 
-use beacon_datafusion_ext::remote::LocalFunctions;
+use beacon_remote::LocalFunctions;
 use beacon_plugin_registry::names::PluginFunctionNames;
 
 /// The loaded native plugin functions, which never go to a remote Beacon.

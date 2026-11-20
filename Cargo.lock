@@ -1265,6 +1265,7 @@ dependencies = [
  "beacon-plugin-sdk",
  "beacon-plugin-tables",
  "beacon-redb-store",
+ "beacon-remote",
  "beacon-sql-databases",
  "beacon-sql-parser",
  "bytes",
@@ -1322,21 +1323,15 @@ version = "2.1.0-rc.3"
 dependencies = [
  "anyhow",
  "arrow",
- "arrow-flight",
  "arrow-schema",
  "async-trait",
- "base64",
  "beacon-common",
  "beacon-nd-encoding",
  "beacon-object-store",
  "blake3",
  "chrono",
  "datafusion 54.1.0",
- "datafusion-federation",
- "datafusion-spatial",
  "futures",
- "geoarrow-array",
- "geoarrow-schema",
  "glob",
  "indexmap 2.14.0",
  "object_store 0.13.2",
@@ -1347,7 +1342,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
- "tonic",
  "tracing",
  "typetag",
  "url",
@@ -1896,6 +1890,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-remote"
+version = "2.1.0-rc.3"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-flight",
+ "async-trait",
+ "base64",
+ "beacon-datafusion-ext",
+ "beacon-object-store",
+ "datafusion 54.1.0",
+ "datafusion-federation",
+ "datafusion-spatial",
+ "futures",
+ "geoarrow-array",
+ "geoarrow-schema",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "typetag",
+]
+
+[[package]]
 name = "beacon-server"
 version = "2.1.0-rc.3"
 dependencies = [
@@ -1971,6 +1990,7 @@ dependencies = [
  "async-trait",
  "base64",
  "beacon-datafusion-ext",
+ "beacon-remote",
  "chacha20poly1305",
  "datafusion 54.1.0",
  "datafusion-federation",

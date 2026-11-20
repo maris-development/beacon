@@ -235,7 +235,7 @@ pub(crate) fn attach_plan(statement: AttachStatement) -> anyhow::Result<LogicalP
     );
     // Inline credential (used when no `secret` is named); a named secret is resolved at execution.
     let credential =
-        beacon_datafusion_ext::remote::RemoteCredential::from_parts(token, username, password)?;
+        beacon_remote::RemoteCredential::from_parts(token, username, password)?;
     let tls = statement
         .options
         .get("tls")

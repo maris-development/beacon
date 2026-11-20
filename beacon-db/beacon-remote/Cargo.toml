@@ -1,0 +1,35 @@
+[package]
+name = "beacon-remote"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+
+# Federated remote-Beacon tables over Arrow Flight SQL, and the shared
+# federation rule and SQL unparse helpers.
+
+[dependencies]
+anyhow = { workspace = true }
+arrow = { workspace = true }
+arrow-flight = { workspace = true, features = ["flight-sql"] }
+async-trait = { workspace = true }
+# Encodes remote-Beacon HTTP Basic credentials (`authorization: Basic <base64(user:pass)>`).
+base64 = { workspace = true }
+datafusion = { workspace = true }
+datafusion-federation = { workspace = true }
+# Rebuilding a folded geometry constant as an `ST_GeomFromText` call before a federated
+# sub-plan is unparsed. See `geometry_sql.rs`.
+datafusion-spatial = { workspace = true }
+futures = { workspace = true }
+geoarrow-array = { workspace = true }
+geoarrow-schema = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+tonic = { workspace = true }
+typetag = { workspace = true }
+
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-object-store = { path = "../beacon-object-store" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true }

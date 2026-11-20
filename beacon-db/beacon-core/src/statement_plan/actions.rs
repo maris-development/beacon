@@ -8,10 +8,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Context;
-use beacon_datafusion_ext::{
-    remote::{unresolved_schema, RemoteTableDefinition},
-    table_ext::{MaterializedView, TableDefinition},
-};
+use beacon_datafusion_ext::table_ext::{MaterializedView, TableDefinition};
+use beacon_remote::{unresolved_schema, RemoteTableDefinition};
 use beacon_sql_databases::{EncryptedSecret, SqlDatabaseTableDefinition, SqlEngine};
 use datafusion::{
     catalog::TableProviderFactory,
@@ -91,7 +89,7 @@ pub(crate) async fn attach_remote(
     session: &Arc<SessionContext>,
     name: &str,
     url: &str,
-    credential: beacon_datafusion_ext::remote::RemoteCredential,
+    credential: beacon_remote::RemoteCredential,
     secret: Option<String>,
     tls: bool,
 ) -> anyhow::Result<()> {
@@ -102,7 +100,7 @@ pub(crate) async fn attach_remote(
             let stored = secret_store(session)?.get(&secret_name).ok_or_else(|| {
                 anyhow::anyhow!("ATTACH references secret '{secret_name}', which does not exist")
             })?;
-            beacon_datafusion_ext::remote::RemoteCredential::from_secret(&stored)?
+            beacon_remote::RemoteCredential::from_secret(&stored)?
         }
         None => credential,
     };
