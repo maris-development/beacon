@@ -90,6 +90,12 @@ files into one array store with statistics. Beacon can then drop whole datasets 
 arrays that you select. This is much faster than a scan of the original NetCDF files.
 :::
 
+## Limits
+
+- A query must read at least one column of the file. `COUNT(*)` gives an error. Use `COUNT(column)` with a column on the full grid.
+- A query that selects only `PARTITIONED BY` columns gives an error. Add one file column to the query.
+- Ragged files, for example World Ocean Database files, are not supported. Read such a file with the [HDF5 format](/docs/2.1.0-rc3/formats/hdf5): `read_hdf5` or `STORED AS HDF5`.
+
 ## Write a NetCDF output
 
 Beacon writes NetCDF with a pure-Rust writer. Beacon writes the file to a temporary file in the

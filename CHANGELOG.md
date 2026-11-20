@@ -47,6 +47,10 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
 
 ### Changed
 
+- **NetCDF scans run on DataFusion morsels.** The NetCDF format has its own scan. One large file
+  still reads on several partitions, and a filter on a coordinate still skips chunks. A file whose
+  selected grid fits in one batch is read as a whole.
+
 - **The server owns users and roles.** The engine has no users, no roles and no identity. The server
   checks each request, and it gives the engine the access rules of the caller. The server keeps
   users, roles and rules in `beacon-auth.json`, next to `beacon.db`. On the first start, it copies
@@ -92,6 +96,11 @@ released from a single `v*` tag. Releases before 2.0.0 are recorded in the
   no new object at the target. ([#658](https://github.com/maris-development/beacon/issues/658))
 
 ### Removed
+
+- **`COUNT(*)` on NetCDF tables.** A NetCDF query must read at least one column of the file. Use
+  `COUNT(column)`. A query that selects only `PARTITIONED BY` columns gives the same error.
+- **Ragged NetCDF files** through `STORED AS NC` and `read_netcdf`. Use the HDF5 format for these
+  files, for example World Ocean Database files.
 
 - **Users in the embedded database.** `beacondb.connect()` has no `auth`, `username`, `password`,
   `token`, `admin_username`, `admin_password` and `anonymous` arguments. `Connection.connect_as()`,

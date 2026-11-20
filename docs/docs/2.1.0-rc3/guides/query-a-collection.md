@@ -107,7 +107,7 @@ engine skip data.
 Pass a list to combine different locations in one query:
 
 ```sql
-SELECT * FROM read_netcdf(['argo/**/*.nc', 'wod/**/*.nc']);
+SELECT * FROM read_netcdf(['argo/**/*.nc', 'ctd/**/*.nc']);
 ```
 
 ## 3. Handle schema differences
