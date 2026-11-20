@@ -8,7 +8,7 @@ pub use any::AnyDataset;
 pub use ragged::RaggedDataset;
 pub use variant::DatasetType;
 
-use crate::{NdArray, NdArrayD, array::subset::ArraySubset, datatypes::NdArrayDataType};
+use crate::{NdArrayD, datatypes::NdArrayDataType};
 use indexmap::IndexMap;
 use std::{collections::HashSet, sync::Arc};
 
@@ -432,6 +432,7 @@ pub fn project_read_dimensions_or_skip(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NdArray;
 
     /// Helper: build a Dataset from a vec of (name, array) pairs.
     async fn make_dataset(name: &str, arrays: Vec<(&str, Arc<dyn NdArrayD>)>) -> Dataset {

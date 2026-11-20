@@ -1,23 +1,17 @@
-use core::time;
 use std::{
-    collections::HashMap,
     fs::File,
     io::{Read, Seek, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 
 use arrow::{
-    array::{
-        Array, ArrayRef, ArrowPrimitiveType, AsArray, PrimitiveArray, RecordBatch, Scalar,
-        StringArray, StringBuilder,
-    },
+    array::{Array, ArrayRef, AsArray, RecordBatch, Scalar, StringArray, StringBuilder},
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
 use async_zip::{base::write::ZipFileWriter, ZipEntryBuilder};
 use futures::{AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
-use tempfile::TempDir;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use utoipa::ToSchema;
 use walkdir::WalkDir;

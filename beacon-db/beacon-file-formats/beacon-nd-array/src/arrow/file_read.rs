@@ -7,7 +7,7 @@ use crossbeam::queue::ArrayQueue;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_expr::PhysicalExpr;
 use beacon_datafusion_ext::expr_adapter::{BatchAdapter, scan_adapter_factory};
-use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
+use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
 use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use futures::stream::BoxStream;
@@ -348,9 +348,11 @@ pub fn nd_adapter_factory(config: &FileScanConfig) -> Arc<dyn PhysicalExprAdapte
     scan_adapter_factory(config, &DefaultArrowTypeWidening::new())
 }
 
-/// The expression adapter of the strict default rule, for a scan without a
+/// The expression adapter of the strict default rule, for a test without a
 /// config.
-pub fn default_adapter_factory() -> Arc<dyn PhysicalExprAdapterFactory> {
+#[cfg(test)]
+pub(crate) fn default_adapter_factory() -> Arc<dyn PhysicalExprAdapterFactory> {
+    use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
     DefaultArrowTypeWidening::new().physical_expr_adapter_factory()
 }
 

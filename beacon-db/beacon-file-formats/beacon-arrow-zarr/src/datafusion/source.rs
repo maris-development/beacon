@@ -20,7 +20,6 @@ use datafusion::{
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     error::DataFusionError,
@@ -57,7 +56,6 @@ pub(crate) const NOMINAL_GROUP_SIZE: u64 = 1 << 20;
 /// DataFusion [`FileSource`] for zarr groups.
 #[derive(Clone)]
 pub struct ZarrSource {
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     batch_size: usize,
@@ -79,7 +77,6 @@ pub struct ZarrSource {
 impl ZarrSource {
     pub fn new(table_schema: TableSchema) -> Self {
         Self {
-            schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             batch_size: usize::MAX,
@@ -237,20 +234,6 @@ impl FileSource for ZarrSource {
 
     fn file_type(&self) -> &str {
         "zarr"
-    }
-
-    fn with_schema_adapter_factory(
-        &self,
-        factory: Arc<dyn SchemaAdapterFactory>,
-    ) -> datafusion::error::Result<Arc<dyn FileSource>> {
-        Ok(Arc::new(Self {
-            schema_adapter_factory: Some(factory),
-            ..self.clone()
-        }))
-    }
-
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {

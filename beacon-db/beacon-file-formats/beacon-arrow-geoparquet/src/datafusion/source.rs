@@ -6,7 +6,6 @@ use datafusion::{
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     physical_expr::{conjunction, projection::ProjectionExprs},
@@ -30,7 +29,6 @@ use crate::datafusion::{
 /// A [`FileSource`] that produces [`GeoParquetOpener`]s for the scanned files.
 #[derive(Debug, Clone)]
 pub struct GeoParquetSource {
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     /// The table schema (file schema + partition columns).
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
@@ -57,7 +55,6 @@ pub struct GeoParquetSource {
 impl GeoParquetSource {
     pub fn new(table_schema: TableSchema) -> Self {
         Self {
-            schema_adapter_factory: None,
             projection: SplitProjection::unprojected(&table_schema),
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
@@ -126,20 +123,6 @@ impl FileSource for GeoParquetSource {
 
     fn file_type(&self) -> &str {
         "geoparquet"
-    }
-
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
-    }
-
-    fn with_schema_adapter_factory(
-        &self,
-        factory: Arc<dyn SchemaAdapterFactory>,
-    ) -> datafusion::error::Result<Arc<dyn FileSource>> {
-        Ok(Arc::new(Self {
-            schema_adapter_factory: Some(factory),
-            ..self.clone()
-        }))
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {

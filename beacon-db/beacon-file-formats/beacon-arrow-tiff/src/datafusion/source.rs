@@ -15,7 +15,6 @@ use datafusion::{
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     physical_expr::{conjunction, projection::ProjectionExprs, PhysicalExpr},
@@ -32,7 +31,6 @@ use super::reader;
 
 #[derive(Debug, Clone)]
 pub struct TiffSource {
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     batch_size: usize,
@@ -47,7 +45,6 @@ pub struct TiffSource {
 impl TiffSource {
     pub fn new(table_schema: TableSchema) -> Self {
         Self {
-            schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             batch_size: 128 * 1024,
@@ -145,10 +142,6 @@ impl FileSource for TiffSource {
 
     fn file_type(&self) -> &str {
         "tiff"
-    }
-
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {

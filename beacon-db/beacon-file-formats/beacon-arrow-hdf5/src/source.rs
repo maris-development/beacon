@@ -29,7 +29,6 @@ use datafusion::{
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     error::DataFusionError,
@@ -46,7 +45,6 @@ use object_store::{ObjectMeta, ObjectStore};
 /// DataFusion [`FileSource`] for HDF5 (`.h5`/`.hdf5`) files.
 #[derive(Debug, Clone)]
 pub struct Hdf5Source {
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     read_dimensions: Option<Vec<String>>,
@@ -71,7 +69,6 @@ impl Hdf5Source {
         table_schema: TableSchema,
     ) -> Self {
         Self {
-            schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             read_dimensions,
@@ -195,10 +192,6 @@ impl FileSource for Hdf5Source {
 
     fn file_type(&self) -> &str {
         "hdf5"
-    }
-
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {

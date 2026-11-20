@@ -12,7 +12,6 @@ use datafusion::{
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     physical_expr::{LexOrdering, projection::ProjectionExprs},
@@ -33,8 +32,6 @@ use super::OdvFormat;
 /// It supports schema overrides, column projection, statistics, and metrics.
 #[derive(Debug, Clone)]
 pub struct OdvSource {
-    /// Optional factory for schema adapters.
-    schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     /// The table schema (file schema + partition columns).
     table_schema: TableSchema,
     /// Execution plan metrics.
@@ -52,7 +49,6 @@ impl OdvSource {
     /// default merge rule.
     pub fn new(table_schema: TableSchema) -> Self {
         Self {
-            schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             projection: None,
@@ -120,25 +116,6 @@ impl FileSource for OdvSource {
     /// Returns the file type string ("txt").
     fn file_type(&self) -> &str {
         "txt"
-    }
-
-    /// Returns a new [`FileSource`] with the given schema adapter factory.
-    fn with_schema_adapter_factory(
-        &self,
-        factory: Arc<dyn SchemaAdapterFactory>,
-    ) -> datafusion::error::Result<Arc<dyn FileSource>> {
-        Ok(Arc::new(Self {
-            table_schema: self.table_schema.clone(),
-            execution_plan_metrics: self.execution_plan_metrics.clone(),
-            schema_adapter_factory: Some(factory),
-            projection: self.projection.clone(),
-            type_widening: Arc::clone(&self.type_widening),
-        }))
-    }
-
-    /// Returns the schema adapter factory, if any.
-    fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
-        self.schema_adapter_factory.clone()
     }
 
     fn projection(&self) -> Option<&ProjectionExprs> {
