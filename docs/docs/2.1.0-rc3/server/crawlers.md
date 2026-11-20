@@ -128,6 +128,10 @@ SELECT * FROM cruises WHERE year = '2024' AND month = '01';
 The crawler groups the files with the same format and the same base prefix into one table. It reads
 the partition columns from the `key=value` parts of the path.
 
+NetCDF tables do not support partitions. For a NetCDF collection, the crawler still makes one table
+for the base prefix, but it adds no partition columns. The table reads the files in all
+`key=value` directories.
+
 ## Table naming
 
 The crawler names a group after the **last part** of its base prefix. The files under
