@@ -18,6 +18,7 @@ odbc = ["datafusion-table-providers/odbc-federation", "dep:arrow-odbc", "dep:odb
 
 [dependencies]
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-remote = { path = "../beacon-remote" }
 
 datafusion = { workspace = true }
 datafusion-federation = { workspace = true }

@@ -17,7 +17,6 @@ pub mod listing_factory;
 pub mod located_table;
 pub mod listing_url_resolver;
 pub mod nd;
-pub mod remote;
 pub mod table_ext;
 pub mod type_widening;
 pub mod unique_values;

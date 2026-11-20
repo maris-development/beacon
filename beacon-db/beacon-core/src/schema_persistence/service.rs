@@ -230,7 +230,7 @@ pub fn definition_from_provider(
         Ok(Arc::new(table.definition()))
     } else if let Some(table) = table.downcast_ref::<MaterializedView>() {
         Ok(Arc::new(table.definition().clone()))
-    } else if let Some(definition) = beacon_datafusion_ext::remote::remote_table_definition(table) {
+    } else if let Some(definition) = beacon_remote::remote_table_definition(table) {
         Ok(Arc::new(definition))
     } else if let Some(table) = table.downcast_ref::<beacon_delta::BeaconDeltaTable>() {
         Ok(Arc::new(table.definition().clone()))
