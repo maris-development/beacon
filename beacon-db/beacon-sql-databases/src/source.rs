@@ -22,7 +22,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use beacon_datafusion_ext::remote::{geometry_literals_to_calls, project_aliased_subqueries};
+use beacon_remote::{geometry_literals_to_calls, project_aliased_subqueries};
 use datafusion::sql::TableReference;
 use datafusion_federation::sql::{AstAnalyzer, LogicalOptimizer, SQLTable, SqlQueryRewriter};
 

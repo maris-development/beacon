@@ -44,7 +44,7 @@ pub const DATASETS_STORE_URL: &str = "datasets://";
 pub use beacon_datafusion_ext::listing_factory::RootStore;
 // The credential for [`Database::attach_remote`], re-exported so an embedder names it through this
 // module rather than depending on beacon-datafusion-ext directly.
-pub use beacon_datafusion_ext::remote::RemoteCredential;
+pub use beacon_remote::RemoteCredential;
 pub use datafusion::execution::object_store::ObjectStoreUrl;
 
 /// Where a database's container lives: one file, or nothing at all.
@@ -328,7 +328,7 @@ impl Database {
         &self,
         name: &str,
         url: &str,
-        credential: beacon_datafusion_ext::remote::RemoteCredential,
+        credential: beacon_remote::RemoteCredential,
         tls: bool,
     ) -> anyhow::Result<()> {
         attach_remote_catalog(&self.runtime.session_ctx, name, url, credential, tls).await
@@ -350,7 +350,7 @@ impl Database {
     pub fn secret_credential(
         &self,
         name: &str,
-    ) -> anyhow::Result<beacon_datafusion_ext::remote::RemoteCredential> {
+    ) -> anyhow::Result<beacon_remote::RemoteCredential> {
         let store = self
             .runtime
             .session_ctx
@@ -361,7 +361,7 @@ impl Database {
         let secret = store
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("no secret named '{name}'"))?;
-        beacon_datafusion_ext::remote::RemoteCredential::from_secret(&secret)
+        beacon_remote::RemoteCredential::from_secret(&secret)
     }
 
     /// Whether this database was opened read-only (all writes refused).
@@ -553,20 +553,20 @@ fn secrets_key_from_env() -> Option<[u8; 32]> {
 /// Attach a remote Beacon as a catalog named `name` on `session_ctx`.
 ///
 /// Shared by [`Database::attach_remote`] (the embedded API) and the SQL `ATTACH` statement, so both
-/// register the identical [`RemoteCatalogProvider`](beacon_datafusion_ext::remote::RemoteCatalogProvider)
+/// register the identical [`RemoteCatalogProvider`](beacon_remote::RemoteCatalogProvider)
 /// and are observed the same way by [`attached_remote_catalogs`].
 pub(crate) async fn attach_remote_catalog(
     session_ctx: &datafusion::prelude::SessionContext,
     name: &str,
     url: &str,
-    credential: beacon_datafusion_ext::remote::RemoteCredential,
+    credential: beacon_remote::RemoteCredential,
     tls: bool,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(!name.trim().is_empty(), "attach name must not be empty");
     let endpoint = normalize_remote_endpoint(url, tls)?;
     let connection =
-        beacon_datafusion_ext::remote::RemoteConnection::with_credential(endpoint, credential);
-    let catalog = beacon_datafusion_ext::remote::RemoteCatalogProvider::connect(connection).await?;
+        beacon_remote::RemoteConnection::with_credential(endpoint, credential);
+    let catalog = beacon_remote::RemoteCatalogProvider::connect(connection).await?;
     session_ctx.register_catalog(name.to_string(), Arc::new(catalog));
     Ok(())
 }
@@ -609,7 +609,7 @@ fn is_remote_catalog(session_ctx: &datafusion::prelude::SessionContext, name: &s
         .catalog(name)
         .map(|catalog| {
             catalog
-                .downcast_ref::<beacon_datafusion_ext::remote::RemoteCatalogProvider>()
+                .downcast_ref::<beacon_remote::RemoteCatalogProvider>()
                 .is_some()
         })
         .unwrap_or(false)

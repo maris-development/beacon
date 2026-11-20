@@ -428,7 +428,7 @@ impl UserDefinedLogicalNodeCore for DropCrawlerNode {
 pub(crate) struct AttachNode {
     pub(crate) name: String,
     pub(crate) url: String,
-    pub(crate) credential: beacon_datafusion_ext::remote::RemoteCredential,
+    pub(crate) credential: beacon_remote::RemoteCredential,
     /// Name of a `TYPE BEACON` secret to authenticate with, resolved at execution. Mutually
     /// exclusive with an inline `credential`.
     pub(crate) secret: Option<String>,
@@ -439,7 +439,7 @@ impl AttachNode {
     pub(crate) fn new(
         name: String,
         url: String,
-        credential: beacon_datafusion_ext::remote::RemoteCredential,
+        credential: beacon_remote::RemoteCredential,
         secret: Option<String>,
         tls: bool,
     ) -> Self {
