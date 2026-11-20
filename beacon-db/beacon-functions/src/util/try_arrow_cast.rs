@@ -2,9 +2,8 @@ use arrow::datatypes::{DataType, Field, FieldRef};
 use arrow::error::ArrowError;
 use datafusion::common::utils::take_function_args;
 use datafusion::common::{
-    exec_datafusion_err, exec_err, internal_err, DataFusionError, ExprSchema,
+    exec_datafusion_err, exec_err, internal_err, ExprSchema,
 };
-use datafusion::functions::core::arrow_cast::ArrowCastFunc;
 use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyContext};
 use datafusion::logical_expr::{
     ColumnarValue, ExprSchemable, ReturnFieldArgs, ScalarUDF, Signature, Volatility,
@@ -100,7 +99,7 @@ impl ScalarUDFImpl for TryArrowCastFunc {
 
     fn invoke_with_args(
         &self,
-        args: datafusion::logical_expr::ScalarFunctionArgs,
+        _args: datafusion::logical_expr::ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         internal_err!("try_arrow_cast should have been simplified to cast")
     }

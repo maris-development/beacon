@@ -3,7 +3,7 @@ use datafusion::{
     arrow::datatypes::Schema,
     execution::SessionState,
     logical_expr::lit,
-    prelude::{lit_timestamp_nano, Expr},
+    prelude::Expr,
 };
 
 use crate::filter::try_coerce_number_to_schema;
@@ -51,7 +51,7 @@ impl Lt {
             }
             Lt::Timestamp { lt, column } => {
                 let column = parse_column_name(&column);
-                Ok(column.lt(lit_timestamp_nano(lt.timestamp_nanos())))
+                Ok(column.lt(super::timestamp_literal(lt)?))
             }
             Lt::String { lt, column } => {
                 let column = parse_column_name(&column);

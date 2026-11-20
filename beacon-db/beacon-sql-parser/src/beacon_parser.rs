@@ -712,7 +712,7 @@ impl<'a> BeaconParser<'a> {
         // Optional TABLE, or the PostgreSQL spelling MATERIALIZED VIEW
         let parser = &mut self.df_parser.parser;
         if !parser.parse_keywords(&[Keyword::MATERIALIZED, Keyword::VIEW]) {
-            parser.parse_keyword(Keyword::TABLE);
+            let _ = parser.parse_keyword(Keyword::TABLE);
         }
 
         let name = self

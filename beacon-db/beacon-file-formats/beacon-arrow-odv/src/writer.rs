@@ -654,7 +654,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
         time_column_name: &str,
         key_column: &str,
         profile_file_state: &mut Option<FileWriterState>,
-        time_series_file_state: &mut Option<FileWriterState>,
+        _time_series_file_state: &mut Option<FileWriterState>,
     ) -> anyhow::Result<Option<OdvBatchType>> {
         let feature_array = batch.column_by_name(feature_type_columns).ok_or_else(|| {
             anyhow::anyhow!(
@@ -708,7 +708,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
                 .ranges();
 
                 let mut trajectory_profiles = vec![];
-                for (i, range) in partitions.iter().enumerate() {
+                for range in partitions.iter() {
                     let profile = batch.slice(range.start, range.end - range.start);
 
                     // Map the key column of the profile record batch to the key_name[+i] format

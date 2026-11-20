@@ -9,7 +9,7 @@ use bytes::{Buf, Bytes};
 use csv::StringRecord;
 use futures::{Stream, StreamExt, TryStreamExt};
 use indexmap::IndexMap;
-use object_store::{ObjectStore, ObjectStoreExt};
+use object_store::ObjectStoreExt;
 use regex::Regex;
 use tokio_util::codec::FramedRead;
 

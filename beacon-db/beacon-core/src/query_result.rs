@@ -4,7 +4,7 @@ use arrow::datatypes::SchemaRef;
 use crate::metrics::MetricsTracker;
 use crate::query::temp_object::TempObject;
 use datafusion::execution::SendableRecordBatchStream;
-use futures::{future::BoxFuture, Future, Stream};
+use futures::{future::BoxFuture, Stream};
 
 pub struct QueryResult {
     pub query_output: QueryOutput,

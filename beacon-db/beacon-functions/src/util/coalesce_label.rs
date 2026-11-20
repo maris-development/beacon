@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, StringBuilder, UInt8Builder};
+use arrow::array::{ArrayRef, StringBuilder};
 use arrow::datatypes::DataType as ArrowDataType;
 use datafusion::arrow::array::Array;
 use datafusion::common::Result;

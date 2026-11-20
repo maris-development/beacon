@@ -94,8 +94,6 @@ impl CoalesceSqlStream {
                     Some(Err(error)) => {
                         if !buffered_batches.is_empty() {
                             let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
-                            buffered_rows = 0;
-                            flush_deadline = None;
                             yield combined_batch;
                         }
 
@@ -104,8 +102,6 @@ impl CoalesceSqlStream {
                     None => {
                         if !buffered_batches.is_empty() {
                             let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
-                            buffered_rows = 0;
-                            flush_deadline = None;
                             yield combined_batch;
                         }
 

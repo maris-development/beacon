@@ -96,7 +96,7 @@ fn map_call_sign_c17_impl(
                     .zip(timestamp_array.iter())
                     .map(|(call_sign, timestamp)| match (call_sign, timestamp) {
                         (Some(cs), Some(ts)) => {
-                            let naive_dt = NaiveDateTime::from_timestamp_nanos(ts)?;
+                            let naive_dt = DateTime::from_timestamp_nanos(ts).naive_utc();
                             find_c17(&CALL_SIGN_MAP, cs, naive_dt)
                         }
                         _ => None,
@@ -116,7 +116,7 @@ fn map_call_sign_c17_impl(
                     .iter()
                     .map(|timestamp| match (call_sign.as_ref(), timestamp) {
                         (Some(cs), Some(ts)) => {
-                            let naive_dt = NaiveDateTime::from_timestamp_nanos(ts)?;
+                            let naive_dt = DateTime::from_timestamp_nanos(ts).naive_utc();
                             find_c17(&CALL_SIGN_MAP, cs, naive_dt)
                         }
                         _ => None,
@@ -139,7 +139,7 @@ fn map_call_sign_c17_impl(
                 .iter()
                 .map(|call_sign| match (call_sign, timestamp) {
                     (Some(cs), Some(ts)) => {
-                        let naive_dt = NaiveDateTime::from_timestamp_nanos(*ts)?;
+                        let naive_dt = DateTime::from_timestamp_nanos(*ts).naive_utc();
                         find_c17(&CALL_SIGN_MAP, cs, naive_dt)
                     }
                     _ => None,
@@ -155,7 +155,7 @@ fn map_call_sign_c17_impl(
         ) => {
             let c17 = match (call_sign, timestamp) {
                 (Some(cs), Some(ts)) => {
-                    let naive_dt = NaiveDateTime::from_timestamp_nanos(*ts).unwrap();
+                    let naive_dt = DateTime::from_timestamp_nanos(*ts).naive_utc();
                     find_c17(&CALL_SIGN_MAP, cs, naive_dt)
                 }
                 _ => None,
