@@ -169,7 +169,6 @@ impl CrawlEngine {
                         skip_invalid_files_on_scan: false,
                         use_listing_cache: false,
                         use_statistics_pruning,
-                        use_statistics_cache: false,
                     })
                 }
                 None => {

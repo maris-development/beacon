@@ -321,7 +321,6 @@ mod tests {
             skip_invalid_files_on_scan: false,
             use_listing_cache: false,
             use_statistics_pruning: false,
-            use_statistics_cache: false,
         };
 
         let view_a = ViewTableDefinition {
