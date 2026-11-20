@@ -350,6 +350,17 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
+        if let Some(insert) = any.downcast_ref::<logical::InsertByNameNode>() {
+            let child = physical_inputs.first().cloned().ok_or_else(|| {
+                datafusion::error::DataFusionError::Internal(
+                    "INSERT ... BY NAME is missing its planned input".to_string(),
+                )
+            })?;
+            return Ok(Some(Arc::new(
+                physical::InsertByNameExec::try_new(insert.table.clone(), child, session).await?,
+            )));
+        }
+
         if let Some(comment) = any.downcast_ref::<logical::CommentOnNode>() {
             return Ok(Some(Arc::new(physical::CommentOnExec::new(
                 comment.target.clone(),

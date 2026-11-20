@@ -85,3 +85,101 @@ pub async fn alter_table(
 
     Ok(())
 }
+
+/// Add the `fields` that the Lance table at `uri` does not have yet, as
+/// nullable all-NULL columns in one dataset version. Returns the added names.
+///
+/// The latest version is read under the write lock, so a field that another
+/// insert added is skipped. When another process adds a field at the same
+/// time, the dataset is read again once.
+pub async fn add_missing_columns(
+    warehouse: &LanceWarehouse,
+    uri: &str,
+    fields: &[Field],
+) -> anyhow::Result<Vec<String>> {
+    let lock = warehouse.lock(uri);
+    let _guard = lock.lock().await;
+
+    let mut retried = false;
+    loop {
+        let mut dataset = crate::io::dataset_builder(uri, warehouse.session())
+            .load()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
+        let missing: Vec<Field> = fields
+            .iter()
+            .filter(|field| {
+                !dataset
+                    .schema()
+                    .fields
+                    .iter()
+                    .any(|existing| &existing.name == field.name())
+            })
+            .map(|field| {
+                Field::new(field.name(), lance_compatible_type(field.data_type()), true)
+                    .with_metadata(field.metadata().clone())
+            })
+            .collect();
+        if missing.is_empty() {
+            return Ok(Vec::new());
+        }
+        let names: Vec<String> = missing.iter().map(|f| f.name().clone()).collect();
+        tracing::info!(uri = %uri, columns = ?names, "adding Lance columns");
+
+        let schema = Arc::new(ArrowSchema::new(missing));
+        match dataset
+            .add_columns(NewColumnTransform::AllNulls(schema), None, None)
+            .await
+        {
+            Ok(()) => return Ok(names),
+            Err(e) if !retried && e.to_string().contains("already exists") => retried = true,
+            Err(e) => {
+                anyhow::bail!("Failed to add the columns {names:?} to '{uri}': {e}")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use object_store::memory::InMemory;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn add_missing_columns_skips_existing() {
+        let warehouse = LanceWarehouse::new(Arc::new(InMemory::new()));
+        let uri = warehouse.table_uri(&crate::beacon_namespace(), "t");
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "a",
+            DataType::Int64,
+            true,
+        )]));
+        crate::io::write_stream(
+            &uri,
+            warehouse.session(),
+            crate::io::empty_stream(schema),
+            crate::io::WriteKind::Create,
+        )
+        .await
+        .unwrap();
+
+        let x = [Field::new("x", DataType::Float64, true)];
+        let first = add_missing_columns(&warehouse, &uri, &x).await.unwrap();
+        let second = add_missing_columns(&warehouse, &uri, &x).await.unwrap();
+
+        assert_eq!(first, vec!["x".to_string()]);
+        assert!(second.is_empty());
+        let dataset = crate::io::dataset_builder(&uri, warehouse.session())
+            .load()
+            .await
+            .unwrap();
+        let names: Vec<&str> = dataset
+            .schema()
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a", "x"]);
+    }
+}

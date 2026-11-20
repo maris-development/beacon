@@ -2,7 +2,8 @@
 //!
 //! [`map_by_name`] matches the source columns to the target columns by exact,
 //! case-sensitive name. [`by_name_projection`] turns the mapping into a
-//! projection that gives rows with the target schema.
+//! projection that gives rows with the target schema. [`insert_by_name`] runs
+//! the insert.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -11,11 +12,16 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail};
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
+use beacon_datafusion_ext::table_ext::TableDefinition;
 use datafusion::common::ScalarValue;
-use datafusion::physical_expr::PhysicalExpr;
+use datafusion::execution::SendableRecordBatchStream;
+use datafusion::logical_expr::dml::InsertOp;
 use datafusion::physical_expr::expressions::{CastExpr, Column, Literal};
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::projection::{ProjectionExec, ProjectionExpr};
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::prelude::SessionContext;
+use datafusion::sql::TableReference;
 
 /// The value of one target column.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +210,33 @@ fn fit_to_field(
             None,
         ))
     }
+}
+
+/// Run a planned `BY NAME` insert into `table` and return its count stream.
+///
+/// With `lance`, the table first gets [`ByNameMapping::new_columns`]. The
+/// catalog then gets a new provider, because a provider keeps the schema that
+/// it had at creation.
+pub(crate) async fn insert_by_name(
+    session: &Arc<SessionContext>,
+    table: &TableReference,
+    child: Arc<dyn ExecutionPlan>,
+    mapping: &ByNameMapping,
+    lance: Option<&beacon_lance::LanceTable>,
+) -> anyhow::Result<SendableRecordBatchStream> {
+    if let Some(lance) = lance.filter(|_| !mapping.new_columns.is_empty()) {
+        let warehouse = session
+            .state()
+            .config()
+            .get_extension::<beacon_lance::LanceWarehouse>()
+            .ok_or_else(|| anyhow!("Lance warehouse is unavailable"))?;
+        beacon_lance::add_missing_columns(&warehouse, lance.uri(), &mapping.new_columns).await?;
+        let fresh = lance.definition().build_provider(session.clone()).await?;
+        session.register_table(table.clone(), fresh)?;
+    }
+    let provider = session.table_provider(table.clone()).await?;
+    let projected = by_name_projection(child, mapping, provider.schema())?;
+    super::actions::insert_into(session, table, InsertOp::Append, projected).await
 }
 
 impl fmt::Display for ByNameMapping {
