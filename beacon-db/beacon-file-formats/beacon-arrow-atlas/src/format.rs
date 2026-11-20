@@ -64,8 +64,8 @@ impl AtlasFormatFactory {
     }
 }
 
-/// How many opened collections the runtime keeps. Each holds its own block
-/// and I/O caches, so this bounds memory as well as handles.
+/// How many opened collections the runtime keeps for schema reads. A cached
+/// handle holds the collection footer only: scans open their own handles.
 const READER_CACHE_CAPACITY: u64 = 512;
 
 /// How many footers schema inference reads at once.
@@ -219,15 +219,11 @@ impl AtlasFormat {
         ))
     }
 
-    /// A source over `table_schema`, on this table's settings and reader cache.
+    /// A source over `table_schema`, on this table's settings.
     fn source(&self, table_schema: TableSchema) -> AtlasSource {
-        AtlasSource::new(
-            self.options.read_dimensions.clone(),
-            table_schema,
-            self.cache.clone(),
-        )
-        .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
-        .with_declared_columns(self.declared_columns)
+        AtlasSource::new(self.options.read_dimensions.clone(), table_schema)
+            .with_skip_unbroadcastable(self.options.skip_unbroadcastable)
+            .with_declared_columns(self.declared_columns)
     }
 }
 
