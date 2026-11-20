@@ -132,20 +132,33 @@ fn layout(dataset: &Dataset) -> Result<(Vec<String>, Vec<usize>, Vec<usize>)> {
         return Err(execution("the dataset has no arrays, so it has no grid"));
     }
 
-    // An array on every dimension drives the grid, and the others broadcast onto it.
-    let rank = dataset.dimensions.len();
+    // The grid spans only the dimensions the selected arrays use. An axis that
+    // no array has would repeat every value once per chunk along it.
+    let used: Vec<(&String, usize)> = dataset
+        .dimensions
+        .iter()
+        .filter(|(dim, _)| {
+            dataset
+                .arrays
+                .values()
+                .any(|array| array.dimensions().contains(dim))
+        })
+        .map(|(dim, &len)| (dim, len))
+        .collect();
+
+    // An array on every used dimension drives the grid, and the others broadcast onto it.
     if let Some((_, full)) = dataset
         .arrays
         .iter()
-        .filter(|(_, array)| array.dimensions().len() == rank)
+        .filter(|(_, array)| array.dimensions().len() == used.len())
         .max_by_key(|(_, array)| array.shape().iter().product::<usize>())
     {
         return Ok((full.dimensions(), full.shape(), full.chunk_shape()));
     }
 
-    // No array spans every dimension, so the dimensions themselves are the grid.
-    let dims: Vec<String> = dataset.dimensions.keys().cloned().collect();
-    let shape: Vec<usize> = dataset.dimensions.values().copied().collect();
+    // No array spans every used dimension, so those dimensions are the grid.
+    let dims: Vec<String> = used.iter().map(|(dim, _)| (*dim).clone()).collect();
+    let shape: Vec<usize> = used.iter().map(|(_, len)| *len).collect();
     Ok((dims, shape.clone(), shape))
 }
 

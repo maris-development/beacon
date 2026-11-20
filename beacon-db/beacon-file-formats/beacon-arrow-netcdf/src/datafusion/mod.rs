@@ -2019,26 +2019,26 @@ pub(super) mod format_tests {
             visitor.0.expect("the scan reports its output rows")
         };
 
-        let whole = chunks_read("SELECT lat FROM gridded").await;
+        let whole = chunks_read("SELECT analysed_sst, lat FROM gridded").await;
         assert!(whole > 1, "the fixture must hold several chunks");
 
         // `lat` runs from about 38.8 to 48.8, so nothing can satisfy this and
         // every chunk is skipped before it is fetched.
         assert_eq!(
-            chunks_read("SELECT lat FROM gridded WHERE lat > 1000").await,
+            chunks_read("SELECT analysed_sst, lat FROM gridded WHERE lat > 1000").await,
             0,
             "a predicate no row can meet must leave the scan nothing to read"
         );
 
         // A bound the whole file satisfies prunes nothing.
         assert_eq!(
-            chunks_read("SELECT lat FROM gridded WHERE lat > 0").await,
+            chunks_read("SELECT analysed_sst, lat FROM gridded WHERE lat > 0").await,
             whole,
             "a predicate every row meets must not skip a chunk"
         );
 
         // And one that cuts the file reads some of it.
-        let partial = chunks_read("SELECT lat FROM gridded WHERE lat > 44").await;
+        let partial = chunks_read("SELECT analysed_sst, lat FROM gridded WHERE lat > 44").await;
         assert!(
             partial > 0 && partial < whole,
             "lat > 44 should read some of the {whole} chunks, it read {partial}"
@@ -2106,7 +2106,7 @@ pub(super) mod format_tests {
 
         // No predicate: everything is read, nothing is skipped, and the rows are
         // the grid's own — not the one-row-per-chunk the scan emits.
-        let (chunks, rows, pruned, pruned_rows) = counters("SELECT lat FROM gridded").await;
+        let (chunks, rows, pruned, pruned_rows) = counters("SELECT analysed_sst, lat FROM gridded").await;
         assert!(chunks > 1, "the fixture must hold several chunks");
         assert!(
             rows > chunks,
@@ -2117,7 +2117,7 @@ pub(super) mod format_tests {
         // A predicate nothing can meet: every chunk is skipped before it is
         // read, and the rows it would have produced are accounted for.
         let (chunks, rows, pruned, pruned_rows) =
-            counters("SELECT lat FROM gridded WHERE lat > 1000").await;
+            counters("SELECT analysed_sst, lat FROM gridded WHERE lat > 1000").await;
         assert_eq!((chunks, rows), (0, 0), "nothing is read");
         assert!(pruned > 0 && pruned_rows > 0, "and the skip is reported");
     }
@@ -2467,6 +2467,29 @@ mod scan_tests {
             .await
             .unwrap();
         assert_eq!(again[0].column(0).as_primitive::<Int64Type>().value(0), 1208);
+    }
+
+    /// A count of a coordinate counts its own values, whatever the batch size.
+    #[tokio::test]
+    async fn a_coordinate_count_does_not_depend_on_the_batch_size() {
+        for batch_size in [1000, 8192, 1 << 22] {
+            let ctx = session(1, batch_size);
+            register(&ctx, "gridded", &test_file(GRIDDED_FILE)).await;
+            for (column, expected) in [("time", 1), ("lat", 1208), ("lon", 1920)] {
+                let batches = ctx
+                    .sql(&format!("SELECT count({column}) FROM gridded"))
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    batches[0].column(0).as_primitive::<Int64Type>().value(0),
+                    expected,
+                    "count({column}) at batch size {batch_size}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

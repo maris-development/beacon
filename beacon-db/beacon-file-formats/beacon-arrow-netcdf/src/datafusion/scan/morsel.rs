@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{FieldRef, SchemaRef};
 use arrow::record_batch::RecordBatch;
+use beacon_datafusion_ext::nd::NdRecordBatch;
 use beacon_nd_array::array::subset::ArraySubset;
 use beacon_nd_array::arrow::metrics::ReadMetrics;
 use beacon_nd_array::arrow::partition::FilePartitions;
@@ -84,7 +85,16 @@ struct OpenFile {
     label: String,
     scan: FileScan,
     output: FileOutput,
-    chunks: Vec<ArraySubset>,
+    /// The chunks to read, each with its number in the file.
+    chunks: Vec<(usize, ArraySubset)>,
+    /// How many chunks the file has.
+    total: usize,
+}
+
+impl OpenFile {
+    fn describe(&self, number: usize) -> String {
+        format!("{}, chunk {number} of {}", self.label, self.total)
+    }
 }
 
 #[derive(Debug)]
@@ -97,8 +107,8 @@ enum Planner {
         file: Arc<OpenFile>,
         /// The next chunk to read.
         next: usize,
-        /// A chunk that is read and not emitted yet.
-        ready: Option<RecordBatch>,
+        /// A chunk that is read and not emitted yet, with its number in the file.
+        ready: Option<(usize, NdRecordBatch)>,
     },
     Done,
 }
@@ -118,8 +128,12 @@ impl MorselPlanner for Planner {
                     // Nothing is left. An empty plan would panic in FileStream.
                     return Ok(None);
                 }
-                if let Some(batch) = ready {
-                    plan = plan.with_morsels(vec![Box::new(ChunkMorsel(batch))]);
+                if let Some((number, batch)) = ready {
+                    plan = plan.with_morsels(vec![Box::new(ChunkMorsel {
+                        file: file.clone(),
+                        number,
+                        batch,
+                    })]);
                 }
                 if more {
                     plan = plan.with_pending_planner(async move { read(file, next).await });
@@ -192,13 +206,22 @@ async fn plan_entry(
     let scan = FileScan::try_new(dataset, context.batch_size)?;
 
     // The slice cut comes first, on the full list. Every slice builds the same list.
-    let mut chunks = scan.chunks()[slice.range(scan.chunks().len())].to_vec();
+    let total = scan.chunks().len();
+    let range = slice.range(total);
+    let mut chunks: Vec<(usize, ArraySubset)> = range
+        .clone()
+        .zip(scan.chunks()[range].iter().cloned())
+        .collect();
+    if chunks.is_empty() {
+        // An empty slice reads no coordinate for a mask.
+        return Ok(Box::new(Planner::Done));
+    }
     if let Some(predicate) = &context.predicate {
         let masks = coordinate_masks(&scan, &PushdownFilter::new(predicate.clone())).await;
         let before = chunks.len();
-        let rows_before: usize = chunks.iter().map(ArraySubset::rows).sum();
-        chunks.retain(|chunk| !is_pruned(&masks, scan.dims(), chunk));
-        let rows_after: usize = chunks.iter().map(ArraySubset::rows).sum();
+        let rows_before: usize = chunks.iter().map(|(_, chunk)| chunk.rows()).sum();
+        chunks.retain(|(_, chunk)| !is_pruned(&masks, scan.dims(), chunk));
+        let rows_after: usize = chunks.iter().map(|(_, chunk)| chunk.rows()).sum();
         context.metrics.chunks_pruned.add(before - chunks.len());
         context.metrics.rows_pruned.add(rows_before - rows_after);
     }
@@ -213,44 +236,47 @@ async fn plan_entry(
             scan,
             output,
             chunks,
+            total,
         }),
         next: 0,
         ready: None,
     }))
 }
 
-/// Read chunk `index` of `file`, and hand it to the next planner state.
+/// Read entry `index` of the chunks of `file`, and hand it to the next planner state.
 async fn read(file: Arc<OpenFile>, index: usize) -> Result<Box<dyn MorselPlanner>> {
-    let chunk = &file.chunks[index];
-    let batch = async {
-        let nd = file.scan.read(chunk).await?;
-        file.output.finish(&nd)
-    }
-    .await
-    .map_err(|e| {
-        e.context(format!(
-            "{}, chunk {index} of {}",
-            file.label,
-            file.chunks.len()
-        ))
-    })?;
+    let (number, chunk) = &file.chunks[index];
+    let batch = file
+        .scan
+        .read(chunk)
+        .await
+        .map_err(|e| e.context(file.describe(*number)))?;
 
     file.context.metrics.chunks_read.add(1);
     file.context.metrics.rows_read.add(chunk.rows());
     Ok(Box::new(Planner::Read {
         file: file.clone(),
         next: index + 1,
-        ready: Some(batch),
+        ready: Some((*number, batch)),
     }))
 }
 
-/// One chunk, read and adapted. It does no I/O.
+/// One chunk that is read. The stream encodes and adapts it, and does no I/O.
 #[derive(Debug)]
-struct ChunkMorsel(RecordBatch);
+struct ChunkMorsel {
+    file: Arc<OpenFile>,
+    number: usize,
+    batch: NdRecordBatch,
+}
 
 impl Morsel for ChunkMorsel {
     fn into_stream(self: Box<Self>) -> BoxStream<'static, Result<RecordBatch>> {
-        futures::stream::once(futures::future::ready(Ok(self.0))).boxed()
+        let batch = self
+            .file
+            .output
+            .finish(&self.batch)
+            .map_err(|e| e.context(self.file.describe(self.number)));
+        futures::stream::once(futures::future::ready(batch)).boxed()
     }
 }
 

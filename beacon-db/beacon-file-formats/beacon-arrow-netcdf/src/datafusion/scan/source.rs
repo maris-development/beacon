@@ -140,9 +140,14 @@ impl FileSource for NetcdfSource {
             .flat_map(|group| group.files().iter().cloned())
             .collect();
 
+        // A scan with a row limit stops early, so slices would only add opens.
+        let entries = if config.limit.is_some() {
+            entries
+        } else {
+            slice_files(entries, target_partitions)
+        };
         let mut config = config.clone();
-        config.file_groups =
-            spread_files(slice_files(entries, target_partitions), target_partitions);
+        config.file_groups = spread_files(entries, target_partitions);
         Ok(Some(config))
     }
 
