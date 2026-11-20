@@ -17,13 +17,14 @@ use object_store::ObjectStore;
 
 use crate::nd::{NdCountOpener, NdPartitionOpener};
 use crate::opener::{ContextOpener, PluginFileOpener, filters_for};
-use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
+use beacon_datafusion_ext::expr_adapter::{ExprAdapterOpener, scan_adapter_factory};
 use beacon_datafusion_ext::type_widening::ArrowTypeWideningStrategy;
 
 /// Reads the files of a plugin format: one plugin `open` call per file.
 ///
-/// The batches of the plugin go through [`AdaptingOpener`] (cast, null fill, column
-/// order) and `ProjectionOpener` (projection, partition values).
+/// The batches of the plugin go through [`ExprAdapterOpener`] (cast, null fill,
+/// column order) with the expression adapter of the scan config, and then
+/// `ProjectionOpener` (projection, partition values).
 ///
 /// For an nd format, the table schema is `beacon.nd`-encoded. The plugin gets the
 /// element types, [`NdCountOpener`] reads the grid size for a scan of no file column,
@@ -122,7 +123,8 @@ impl FileSource for PluginFileSource {
                 schema: read_schema,
             })
         } else {
-            AdaptingOpener::wrap(plugin, read_schema, Arc::clone(&self.strategy))
+            let factory = scan_adapter_factory(base_config, self.strategy.as_ref());
+            ExprAdapterOpener::wrap(plugin, read_schema, factory)
         };
         let mut opener = ProjectionOpener::try_new(self.projection.clone(), adapted, file_schema)?;
         if nd {

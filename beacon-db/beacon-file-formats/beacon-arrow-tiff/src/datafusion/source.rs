@@ -8,7 +8,7 @@ use beacon_nd_array::arrow::{
     metrics::ReadMetrics,
     morsel::{morsel_scan, MorselSource, OpenFile},
     partition::FilePartitions,
-    file_read::FileRead,
+    file_read::{nd_adapter_factory, FileRead},
 };
 use datafusion::{
     config::ConfigOptions,
@@ -19,6 +19,7 @@ use datafusion::{
         table_schema::TableSchema,
     },
     physical_expr::{conjunction, projection::ProjectionExprs, PhysicalExpr},
+    physical_expr_adapter::PhysicalExprAdapterFactory,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
@@ -77,6 +78,7 @@ impl FileSource for TiffSource {
         Ok(Arc::new(TiffOpener::new(
             object_store,
             projected_schema,
+            nd_adapter_factory(base_config),
             self.batch_size,
             self.predicate.clone(),
             self.execution_plan_metrics.clone(),
@@ -194,6 +196,8 @@ impl FileSource for TiffSource {
 struct TiffOpener {
     object_store: Arc<dyn object_store::ObjectStore>,
     projected_schema: SchemaRef,
+    /// The expression adapter of the scan config. It maps each raster.
+    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     partition: usize,
@@ -214,6 +218,8 @@ struct TiffOpener {
 struct TiffRasters {
     object_store: Arc<dyn object_store::ObjectStore>,
     projected_schema: SchemaRef,
+    /// The expression adapter of the scan config. It maps each raster.
+    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     metrics: ReadMetrics,
@@ -243,6 +249,7 @@ impl OpenFile for TiffRasters {
         FileRead::plan(
             dataset,
             self.projected_schema.clone(),
+            Arc::clone(&self.adapter_factory),
             self.batch_size,
             self.predicate.clone(),
             FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
@@ -253,9 +260,11 @@ impl OpenFile for TiffRasters {
 }
 
 impl TiffOpener {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
+        adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ExecutionPlanMetricsSet,
@@ -269,6 +278,7 @@ impl TiffOpener {
         let rasters = Arc::new(TiffRasters {
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
+            adapter_factory: Arc::clone(&adapter_factory),
             batch_size,
             predicate: predicate.clone(),
             metrics: read_metrics.clone(),
@@ -278,6 +288,7 @@ impl TiffOpener {
         Self {
             object_store,
             projected_schema,
+            adapter_factory,
             batch_size,
             predicate,
             partition,
@@ -298,6 +309,7 @@ impl TiffOpener {
         object: ObjectMeta,
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
+        adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ReadMetrics,
@@ -315,6 +327,7 @@ impl TiffOpener {
         let dataset = FileRead::plan(
             dataset,
             projected_schema,
+            adapter_factory,
             batch_size,
             predicate,
             partitions,
@@ -346,6 +359,7 @@ impl FileOpener for TiffOpener {
             file.object_meta,
             self.object_store.clone(),
             self.projected_schema.clone(),
+            Arc::clone(&self.adapter_factory),
             self.batch_size,
             self.predicate.clone(),
             self.read_metrics.clone(),

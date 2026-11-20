@@ -18,7 +18,7 @@ use arrow::{
 };
 use beacon_nd_array::{
     arrow::{
-        file_read::FileRead,
+        file_read::{nd_adapter_factory, FileRead},
         metrics::ReadMetrics,
         morsel::{morsel_scan, MorselSource, OpenFile},
         partition::FilePartitions,
@@ -34,6 +34,7 @@ use datafusion::{
     },
     error::DataFusionError,
     physical_expr::{conjunction, projection::ProjectionExprs, PhysicalExpr},
+    physical_expr_adapter::PhysicalExprAdapterFactory,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
@@ -109,6 +110,7 @@ impl FileSource for Hdf5Source {
 
         Ok(Arc::new(Hdf5Opener::new(
             projected_schema,
+            nd_adapter_factory(base_config),
             self.read_dimensions.clone(),
             self.skip_unbroadcastable,
             self.read_options,
@@ -247,6 +249,8 @@ impl FileSource for Hdf5Source {
 /// [`RecordBatch`]es.
 struct Hdf5Opener {
     projected_schema: SchemaRef,
+    /// The expression adapter of the scan config. It maps each file.
+    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
     read_dimensions: Option<Vec<String>>,
     /// Skip a file that does not fit `read_dimensions`, instead of failing.
     skip_unbroadcastable: bool,
@@ -275,6 +279,8 @@ struct Hdf5Opener {
 struct Hdf5Files {
     object_store: Arc<dyn ObjectStore>,
     projected_schema: SchemaRef,
+    /// The expression adapter of the scan config. It maps each file.
+    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
     read_dimensions: Option<Vec<String>>,
     skip_unbroadcastable: bool,
     read_options: ReadOptions,
@@ -310,6 +316,7 @@ impl OpenFile for Hdf5Files {
         FileRead::plan(
             dataset,
             self.projected_schema.clone(),
+            Arc::clone(&self.adapter_factory),
             self.batch_size,
             self.predicate.clone(),
             FilePartitions::new(self.partition_fields.clone(), file.partition_values.clone()),
@@ -324,6 +331,7 @@ impl Hdf5Opener {
     #[allow(clippy::too_many_arguments)]
     fn new(
         projected_schema: SchemaRef,
+        adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
         read_dimensions: Option<Vec<String>>,
         skip_unbroadcastable: bool,
         read_options: ReadOptions,
@@ -339,6 +347,7 @@ impl Hdf5Opener {
         let files = Arc::new(Hdf5Files {
             object_store: object_store.clone(),
             projected_schema: projected_schema.clone(),
+            adapter_factory: Arc::clone(&adapter_factory),
             read_dimensions: read_dimensions.clone(),
             skip_unbroadcastable,
             read_options,
@@ -352,6 +361,7 @@ impl Hdf5Opener {
             morsel,
             files,
             projected_schema,
+            adapter_factory,
             read_dimensions,
             skip_unbroadcastable,
             read_options,
@@ -380,6 +390,7 @@ impl Hdf5Opener {
         store: Arc<dyn ObjectStore>,
         object: ObjectMeta,
         projected_schema: SchemaRef,
+        adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
         read_dimensions: Option<Vec<String>>,
         skip_unbroadcastable: bool,
         read_options: ReadOptions,
@@ -405,6 +416,7 @@ impl Hdf5Opener {
             FileRead::plan(
                 dataset,
                 projected_schema,
+                adapter_factory,
                 batch_size,
                 predicate,
                 partitions,
@@ -481,6 +493,7 @@ impl FileOpener for Hdf5Opener {
             self.object_store.clone(),
             file.object_meta,
             self.projected_schema.clone(),
+            Arc::clone(&self.adapter_factory),
             self.read_dimensions.clone(),
             self.skip_unbroadcastable,
             self.read_options,

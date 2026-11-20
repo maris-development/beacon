@@ -6,9 +6,10 @@ use arrow::record_batch::RecordBatch;
 use crossbeam::queue::ArrayQueue;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_expr::PhysicalExpr;
-use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
-use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
-use datafusion::physical_expr_adapter::BatchAdapter;
+use beacon_datafusion_ext::expr_adapter::{BatchAdapter, scan_adapter_factory};
+use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
+use datafusion::datasource::physical_plan::FileScanConfig;
+use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use indexmap::IndexMap;
@@ -338,6 +339,21 @@ pub async fn flat_stream(
     )
 }
 
+/// The expression adapter of an nd scan: the factory of `config`, or the strict
+/// default rule when the config holds none.
+///
+/// An nd column casts leniently under every merge rule, so the rule of the
+/// fallback never decides a cast of an nd column.
+pub fn nd_adapter_factory(config: &FileScanConfig) -> Arc<dyn PhysicalExprAdapterFactory> {
+    scan_adapter_factory(config, &DefaultArrowTypeWidening::new())
+}
+
+/// The expression adapter of the strict default rule, for a scan without a
+/// config.
+pub fn default_adapter_factory() -> Arc<dyn PhysicalExprAdapterFactory> {
+    DefaultArrowTypeWidening::new().physical_expr_adapter_factory()
+}
+
 /// One file, opened and planned once: the [`WorkQueue`] of what is left to read
 /// from it, and what a batch off that queue becomes.
 ///
@@ -392,9 +408,15 @@ impl FileRead {
     /// values for them. They are in the file's path rather than in the file, so
     /// they are appended to its batches here — see [`FilePartitions`]. Pass
     /// [`FilePartitions::none`] for an unpartitioned table.
+    ///
+    /// `adapter_factory` is the expression adapter of the scan config. It maps
+    /// the encoded columns of the file onto `projected_schema`. See
+    /// [`nd_adapter_factory`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn plan(
         dataset: AnyDataset,
         projected_schema: SchemaRef,
+        adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         partitions: FilePartitions,
@@ -480,12 +502,8 @@ impl FileRead {
             let source_schema: SchemaRef = Arc::new(Schema::new(source_fields));
 
             let partition_columns = partitions.scalar_columns(&projected_schema)?;
-            // Every column here is nd-encoded, and an nd column casts leniently
-            // under every merge rule. The strict rule stands in for the one the
-            // session holds, because the adapter never asks it.
             let adapter =
-                batch_adapter_factory(projected_schema, Arc::new(DefaultArrowTypeWidening::new()))
-                    .make_adapter(&source_schema)?;
+                BatchAdapter::try_new(projected_schema, &source_schema, adapter_factory.as_ref())?;
             (
                 Output::Columns {
                     adapter: Arc::new(adapter),
@@ -1220,6 +1238,7 @@ mod tests {
         let planned = FileRead::plan(
             dataset(64).await,
             wanted,
+            default_adapter_factory(),
             16,
             None,
             FilePartitions::none(),
@@ -1265,6 +1284,7 @@ mod tests {
         let planned = FileRead::plan(
             dataset(ROWS).await,
             no_columns(),
+            default_adapter_factory(),
             16,
             None,
             FilePartitions::none(),

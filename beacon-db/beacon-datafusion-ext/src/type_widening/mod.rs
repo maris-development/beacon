@@ -14,18 +14,17 @@ use std::sync::Arc;
 
 use arrow_schema::{ArrowError, DataType, Schema, SchemaRef};
 use datafusion::catalog::Session;
-use datafusion::datasource::physical_plan::FileOpener;
 use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
 use object_store::ObjectMeta;
 
 mod common;
 pub mod default;
+mod lenient;
 pub mod numpy;
 
 pub use default::DefaultArrowTypeWidening;
+pub use lenient::lenient_cast_adapter_factory;
 pub use numpy::NumpyArrowTypeWidening;
-
-use crate::scan_adapt::AdaptingOpener;
 
 /// Below this count, one fold costs less than a split.
 const SEQUENTIAL_MERGE_LIMIT: usize = 64;
@@ -118,20 +117,6 @@ impl ArrowTypeWidening {
             // field. One fold over the named schemas stops at the same pair.
             Err(error) => Err(strategy.merge_schemas(&distinct).err().unwrap_or(error)),
         }
-    }
-
-    /// `opener`, with every batch mapped onto `target`. See
-    /// [`scan_adapt`](crate::scan_adapt).
-    pub fn scan_adapter(
-        &self,
-        target: SchemaRef,
-        opener: Arc<dyn FileOpener>,
-    ) -> Arc<dyn FileOpener> {
-        Arc::new(AdaptingOpener::new(
-            opener,
-            target,
-            Arc::clone(&self.strategy),
-        ))
     }
 }
 

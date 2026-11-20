@@ -13,7 +13,7 @@ use beacon_nd_array::arrow::{
     metrics::ReadMetrics,
     morsel::{MorselSource, OpenFile, morsel_scan},
     partition::FilePartitions,
-    file_read::FileRead,
+    file_read::{FileRead, nd_adapter_factory},
 };
 use datafusion::{
     config::ConfigOptions,
@@ -25,6 +25,7 @@ use datafusion::{
     },
     error::DataFusionError,
     physical_expr::{conjunction, projection::ProjectionExprs},
+    physical_expr_adapter::PhysicalExprAdapterFactory,
     physical_plan::{
         PhysicalExpr,
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
@@ -140,11 +141,13 @@ impl FileSource for ZarrSource {
             .clone()
             .unwrap_or_else(|| ZarrStorage::from_object_store(object_store));
         let read_metrics = ReadMetrics::new(&self.execution_plan_metrics, partition);
+        let adapter_factory = nd_adapter_factory(base_config);
 
         Ok(Arc::new(ZarrOpener {
             groups: Arc::new(ZarrGroups {
                 storage: storage.clone(),
                 projected_schema: projected_schema.clone(),
+                adapter_factory: Arc::clone(&adapter_factory),
                 read_dimensions: self.read_dimensions.clone(),
                 skip_unbroadcastable: self.skip_unbroadcastable,
                 batch_size: self.batch_size,
@@ -154,6 +157,7 @@ impl FileSource for ZarrSource {
             morsel: self.morsel.clone(),
             storage,
             projected_schema,
+            adapter_factory,
             predicate: self.predicate.clone(),
             batch_size: self.batch_size,
             read_dimensions: self.read_dimensions.clone(),
@@ -296,6 +300,8 @@ impl FileSource for ZarrSource {
 struct ZarrOpener {
     storage: ZarrStorage,
     projected_schema: SchemaRef,
+    /// The expression adapter of the scan config. It maps each group.
+    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     batch_size: usize,
     read_dimensions: Option<Vec<String>>,
@@ -318,6 +324,8 @@ struct ZarrOpener {
 struct ZarrGroups {
     storage: ZarrStorage,
     projected_schema: SchemaRef,
+    /// The expression adapter of the scan config. It maps each group.
+    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
     read_dimensions: Option<Vec<String>>,
     skip_unbroadcastable: bool,
     batch_size: usize,
@@ -357,6 +365,7 @@ impl OpenFile for ZarrGroups {
         FileRead::plan(
             dataset,
             self.projected_schema.clone(),
+            Arc::clone(&self.adapter_factory),
             self.batch_size,
             self.predicate.clone(),
             FilePartitions::none(),
@@ -409,6 +418,7 @@ impl ZarrOpener {
         storage: ZarrStorage,
         zarr_path: ZarrPath,
         projected_schema: SchemaRef,
+        adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
         read_dimensions: Option<Vec<String>>,
         skip_unbroadcastable: bool,
         batch_size: usize,
@@ -427,6 +437,7 @@ impl ZarrOpener {
             FileRead::plan(
                 dataset,
                 projected_schema,
+                adapter_factory,
                 batch_size,
                 predicate,
                 FilePartitions::none(),
@@ -470,6 +481,7 @@ impl FileOpener for ZarrOpener {
             self.storage.clone(),
             zarr_path,
             self.projected_schema.clone(),
+            Arc::clone(&self.adapter_factory),
             self.read_dimensions.clone(),
             self.skip_unbroadcastable,
             self.batch_size,

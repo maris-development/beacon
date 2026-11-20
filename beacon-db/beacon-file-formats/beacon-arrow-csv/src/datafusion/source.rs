@@ -23,16 +23,16 @@
 //! `TypeConflict::KeepFirst` settled holds one family in one file and another
 //! family in the next, so no such type exists. A file states no types, so this
 //! source cannot tell which columns the setting settled. Under that setting it
-//! reads every column as text and leaves the types to `AdaptingOpener`, which
-//! casts the text and reads a value the type cannot hold as null. The cost is
-//! one string per cell, for a collection under that setting alone. See
-//! [`scan_adapt`](beacon_datafusion_ext::scan_adapt).
+//! reads every column as text and leaves the types to the expression adapter
+//! of the scan config, which casts the text and reads a value the type cannot
+//! hold as null. The cost is one string per cell, for a collection under that
+//! setting alone. See [`expr_adapter`](beacon_datafusion_ext::expr_adapter).
 
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
+use beacon_datafusion_ext::expr_adapter::{ExprAdapterOpener, scan_adapter_factory};
 use beacon_datafusion_ext::type_widening::{
     ArrowTypeWideningStrategy, DefaultArrowTypeWidening, TypeConflict,
 };
@@ -75,9 +75,10 @@ pub struct BeaconCsvSource {
     /// computed expressions, partition columns — to [`ProjectionOpener`].
     projection: SplitProjection,
     metrics: ExecutionPlanMetricsSet,
-    /// The rule that merged the table schema. It decides which casts read
-    /// null, and whether the parser reads every column as text. The format
-    /// sets it from the session when it plans. See the [module docs](self).
+    /// The rule that merged the table schema. It decides whether the parser
+    /// reads every column as text, and which casts read null when the scan
+    /// config holds no adapter. The format sets it from the session when it
+    /// plans. See the [module docs](self).
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
@@ -142,7 +143,8 @@ impl FileSource for BeaconCsvSource {
             type_widening: Arc::clone(&self.type_widening),
         }) as Arc<dyn FileOpener>;
 
-        let adapting = AdaptingOpener::wrap(raw, read_schema, Arc::clone(&self.type_widening));
+        let factory = scan_adapter_factory(base_config, self.type_widening.as_ref());
+        let adapting = ExprAdapterOpener::wrap(raw, read_schema, factory);
         ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
     }
 
@@ -205,7 +207,7 @@ impl FileSource for BeaconCsvSource {
 /// Reads one CSV file with the columns its own header names.
 ///
 /// The batches this opener produces carry the file's own schema, not the merged
-/// one. `AdaptingOpener` above it maps them onto the schema the scan reports.
+/// one. `ExprAdapterOpener` above it maps them onto the schema the scan reports.
 struct BeaconCsvOpener {
     object_store: Arc<dyn ObjectStore>,
     options: CsvOptions,

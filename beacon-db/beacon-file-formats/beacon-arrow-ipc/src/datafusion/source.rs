@@ -6,12 +6,13 @@
 //! schema and then produces a batch that does not carry it.
 //!
 //! This source keeps every other decision of `ArrowSource` and adds one step.
-//! It wraps the reader in [`AdaptingOpener`], which maps a file's columns onto
-//! the schema the scan reports.
+//! It wraps the reader in [`ExprAdapterOpener`], which maps a file's columns
+//! onto the schema the scan reports with the expression adapter of the scan
+//! config.
 
 use std::sync::Arc;
 
-use beacon_datafusion_ext::scan_adapt::AdaptingOpener;
+use beacon_datafusion_ext::expr_adapter::{ExprAdapterOpener, scan_adapter_factory};
 use beacon_datafusion_ext::type_widening::{ArrowTypeWideningStrategy, DefaultArrowTypeWidening};
 use datafusion::datasource::physical_plan::{
     ArrowOpener, FileGroupPartitioner, FileOpener, FileScanConfig, FileSource,
@@ -51,7 +52,8 @@ pub struct BeaconArrowSource {
     projection: SplitProjection,
     metrics: ExecutionPlanMetricsSet,
     /// The rule that merged the table schema. It decides which casts read
-    /// null. The format sets it from the session when it plans.
+    /// null when the scan config holds no adapter. The format sets it from the
+    /// session when it plans.
     type_widening: Arc<dyn ArrowTypeWideningStrategy>,
 }
 
@@ -97,7 +99,7 @@ impl FileSource for BeaconArrowSource {
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
-        _base_config: &FileScanConfig,
+        base_config: &FileScanConfig,
         _partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
         let file_schema = self.table_schema.file_schema();
@@ -121,7 +123,8 @@ impl FileSource for BeaconArrowSource {
             }
         };
 
-        let adapting = AdaptingOpener::wrap(inner, read_schema, Arc::clone(&self.type_widening));
+        let factory = scan_adapter_factory(base_config, self.type_widening.as_ref());
+        let adapting = ExprAdapterOpener::wrap(inner, read_schema, factory);
         ProjectionOpener::try_new(self.projection.clone(), adapting, file_schema)
     }
 
