@@ -2,6 +2,8 @@
 pytest==8.3.5
 requests==2.34.2
 pyarrow==21.0.0
+# Makes the bucket and uploads the fixture in test_iceberg_s3.py.
+boto3==1.44.7
 
 # The reference writers for formats/, one per format. Each file skips itself when its writer is
 # absent, so these are only needed for the formats you want to run. Pinned exactly: a writer
