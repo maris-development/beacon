@@ -12,8 +12,8 @@ demand. It does not copy them. Beacon stores the table definition automatically.
 survives a restart.
 
 :::tip External vs managed tables
-An **external table** points at existing files. Beacon reads them in place. Beacon never writes to
-them. Do you need a table that Beacon **owns** and can change with `INSERT`, `UPDATE` and `DELETE`?
+An **external table** points at existing files. Beacon reads them in place. Some formats also accept
+writes, for example [Delta Lake](#delta-lake) and [Lance](#lance). Do you need a table that Beacon **owns** and can change with `INSERT`, `UPDATE` and `DELETE`?
 Then use a [managed table](/docs/2.1.0-rc3/sql/managed-tables).
 :::
 
@@ -212,6 +212,104 @@ snapshot do not move. The table reads the same rows after a later commit.
 
 The table is read only. See [Icechunk](/docs/2.1.0-rc3/formats/icechunk) for the full reference.
 
+### Lance
+
+`STORED AS LANCE` registers a [Lance](https://lancedb.github.io/lance/) dataset at a location that
+you select. Beacon does not own the dataset. Other tools, for example pylance, can read and write it.
+
+```sql
+CREATE EXTERNAL TABLE [IF NOT EXISTS] <name> [(<columns>)]
+STORED AS LANCE
+LOCATION '<location>'
+[OPTIONS ('version' '<n>')]
+```
+
+A Lance external table is not read only. It supports the same statements as a
+[managed table](/docs/2.1.0-rc3/sql/managed-tables): `SELECT`, `INSERT`, `DELETE`, `UPDATE`,
+`ALTER TABLE`, `CREATE INDEX`, `DROP INDEX`, `SHOW INDEXES` and `COMPACT TABLE`.
+[`INSERT INTO ... BY NAME`](/docs/2.1.0-rc3/sql/managed-tables#insert-into-by-name) also works on it.
+
+#### Location
+
+`LOCATION` points at the **dataset directory**. Do not give a glob of files. The location rules are
+the same as for `STORED AS DELTA`:
+
+- A relative path is in the dataset storage of Beacon.
+- A path with a scheme, for example `file://` or `s3://`, uses the object store for that scheme.
+
+Beacon uses the object store configuration of the server. A Lance table needs no other credentials.
+
+#### Columns
+
+The column list depends on the dataset:
+
+| Dataset at `LOCATION` | Column list | Result |
+| --- | --- | --- |
+| Exists | No | Beacon reads the schema from the dataset. |
+| Exists | Yes | Error. The dataset gives the columns. |
+| Does not exist | Yes | Beacon creates an empty dataset with these columns. |
+| Does not exist | No | Error. Beacon has no schema for a new dataset. |
+
+Register a dataset that exists:
+
+```sql
+CREATE EXTERNAL TABLE argo_lance
+STORED AS LANCE
+LOCATION 's3://bucket/argo.lance'
+```
+
+Create a new empty dataset:
+
+```sql
+CREATE EXTERNAL TABLE argo_lance (platform VARCHAR, time TIMESTAMP, temp DOUBLE)
+STORED AS LANCE
+LOCATION 's3://bucket/argo.lance'
+```
+
+#### Pin a version
+
+`OPTIONS ('version' '<n>')` pins the table to version `n` of the dataset. A pinned table is **read
+only**. Each write to it gives an error.
+
+```sql
+CREATE EXTERNAL TABLE argo_v1
+STORED AS LANCE
+LOCATION 's3://bucket/argo.lance'
+OPTIONS ('version' '1')
+```
+
+`version` is the only key. An unknown key is an error. This rule is different from the file formats.
+
+#### Remove the table
+
+`DROP TABLE` removes only the registration. Beacon does **not** delete the dataset files. A new
+`CREATE EXTERNAL TABLE` on the same location reads the old rows again.
+
+::: warning Some statements change the dataset for all users
+`DROP INDEX` and `COMPACT TABLE` change the dataset itself. `COMPACT TABLE` also deletes old
+versions. Other tools that read the dataset see these changes. A table that another tool pins to an
+old version can lose that version.
+:::
+
+#### Write from more than one tool
+
+Beacon and other tools can write to the same dataset:
+
+- In one Beacon server, a lock lets one write at a time run on a dataset. Two Beacon tables on the
+  same location share that lock.
+- Other writers, for example pylance or a second Beacon server, use the optimistic commit of Lance.
+- Lance tries an append again after a commit conflict.
+- A `DELETE` or an `UPDATE` with a commit conflict fails. Beacon returns the Lance error. Send the
+  statement again.
+
+#### Errors
+
+| Case | Message |
+| --- | --- |
+| Column list on a dataset that exists | `Lance external tables take their columns from the dataset; remove the column list` |
+| No dataset and no column list | `No Lance dataset at '<location>'; add a column list to create one` |
+| Write to a pinned table | `Lance table '<name>' is pinned to version n and is read-only` |
+
 ## Partitioned data
 
 Your files can use Hive-style partition directories such as `year=2024/month=01/...`. Declare the
@@ -235,7 +333,8 @@ A view holds a persistent SQL query over any external table or table function. S
 
 ## Remove a table
 
-`DROP TABLE` removes an external table from the catalog. Beacon does **not** delete the files. See
+`DROP TABLE` removes an external table from the catalog. Beacon does **not** delete the files. This
+is also true for a Lance external table. See
 [`DROP TABLE`](/docs/2.1.0-rc3/sql/create-external-table#drop-table).
 
 ## List and inspect tables

@@ -68,6 +68,90 @@ INSERT INTO measurements
 SELECT id, name, value FROM staging;
 ```
 
+A plain `INSERT INTO` matches the columns by position.
+
+## `INSERT INTO ... BY NAME`
+
+`BY NAME` matches the columns of the query to the columns of the table by name. The order of the
+columns does not matter:
+
+```sql
+INSERT INTO <table> BY NAME <query>
+```
+
+```sql
+CREATE EXTERNAL TABLE argo_lance (platform VARCHAR, time TIMESTAMP, temp DOUBLE)
+STORED AS LANCE LOCATION 's3://bucket/argo.lance';
+
+INSERT INTO argo_lance BY NAME SELECT * FROM argo_netcdf;
+```
+
+`BY NAME` has all its functions on a Lance table: a managed Lance table or a
+[Lance external table](/docs/2.1.0-rc3/data-sources/external-tables#lance). On other table types it
+only matches by name. A column list together with `BY NAME` is an error. The statement returns the
+number of inserted rows, the same as `INSERT INTO`. Beacon streams the rows. It does not keep the
+whole query result in memory.
+
+### Match the columns
+
+- Beacon matches each name exactly. The match is case sensitive, so `Temp` and `temp` are two
+  different columns.
+- Two query columns with the same name are an error.
+- A table column that the query does not have gets `NULL`.
+- A table column that is not nullable must be in the query. If not, the statement fails before a write.
+
+### Add new columns
+
+A query column that is not in a Lance table becomes a new column of the table. Beacon adds all new
+columns in one step, before it writes the rows. A new column is nullable. The rows that the table
+holds before the insert read `NULL` in that column.
+
+Only a Lance table adds columns. On another table type, a query column that is not in the table is an
+error. The error names the columns.
+
+### Cast the values
+
+The type of the table column always wins. Beacon casts each query column with a different type to
+the type of the table column. Beacon never changes the type of a column that exists.
+
+- Beacon examines each type pair before the insert starts. A pair that cannot cast is an error. The
+  table does not change.
+- The cast is strict. A value that does not cast stops the statement with an error. Beacon never
+  changes a value to `NULL` without an error.
+- A cast to a smaller type can lose precision. A `DOUBLE` value in a `FLOAT` column is an example.
+
+### Two table versions
+
+The new columns and the new rows are two Lance versions. If the write of the rows fails, the new
+columns stay in the table. They hold only `NULL`. Remove them with `ALTER TABLE ... DROP COLUMN` if
+necessary.
+
+`EXPLAIN INSERT INTO ... BY NAME` shows how Beacon maps the columns. It does not add columns to the table.
+
+### NetCDF sources
+
+A NetCDF external table merges the schemas of its files. A variable that a file does not have reads
+`NULL`. This makes `BY NAME` a good way to collect many NetCDF files in one Lance table. Know these
+limits:
+
+- A query fails when its columns have disjoint dimensions. `SELECT *` can fail for this reason.
+  Select the columns that share dimensions. See [NetCDF](/docs/2.1.0-rc3/formats/netcdf#read-the-files).
+- [Attribute columns](/docs/2.1.0-rc3/formats/netcdf#variable-attributes) (`var.attr`) also become
+  Lance columns. Many different attributes make a very
+  wide table, and Lance is slow with many columns. Select only the columns that you need.
+
+### Errors
+
+| Case | Message |
+| --- | --- |
+| Type pair that cannot cast | `Column '<c>': cannot cast <source type> to <target type>` |
+| Column that is not nullable and is not in the query | `Column '<c>' is not nullable and the source does not have it` |
+| New columns on a table that is not Lance | `Table '<t>' does not have the columns <list>; only Lance tables add columns` |
+| Two query columns with the same name | `The source has the column '<c>' more than one time` |
+
+Only the super-user can run `INSERT INTO ... BY NAME`, the same as `INSERT INTO`. The
+[read rules](/docs/2.1.0-rc3/security/access-control) also apply to the tables of the query.
+
 ## `SELECT`
 
 Query a managed table like any other table:

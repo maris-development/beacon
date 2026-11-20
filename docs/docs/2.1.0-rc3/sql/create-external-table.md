@@ -53,6 +53,7 @@ CREATE EXTERNAL TABLE cruises STORED AS NC LOCATION 'cruises/**/*.nc'
 | `DELTA` | Delta Lake table directory (`_delta_log/`) | [Delta Lake](/docs/2.1.0-rc3/formats/delta-lake) |
 | `ICEBERG` | Apache Iceberg table directory (`metadata/`) | [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg) |
 | `ICECHUNK` | Icechunk repository directory | [Icechunk](/docs/2.1.0-rc3/formats/icechunk) |
+| `LANCE` | Lance dataset directory | [Lance](/docs/2.1.0-rc3/data-sources/external-tables#lance) |
 | `POSTGRES` | External PostgreSQL table (federated) | [SQL Databases](/docs/2.1.0-rc3/data-sources/sql-databases) |
 | `MYSQL` | External MySQL table (federated) | [SQL Databases](/docs/2.1.0-rc3/data-sources/sql-databases) |
 | `REMOTE` | A table on another Beacon server | [Remote Tables](/docs/2.1.0-rc3/data-sources/remote-tables) |
@@ -63,6 +64,9 @@ CREATE EXTERNAL TABLE cruises STORED AS NC LOCATION 'cruises/**/*.nc'
 supports time travel and `INSERT INTO`. `ICEBERG` points to an [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg) table
 directory that already exists. It supports time travel. It reads each new snapshot. It is
 read-only.
+`LANCE` points at a Lance dataset directory. It supports reads and writes. With a column list it
+creates a new empty dataset. A Lance table takes columns before `STORED AS`:
+`CREATE EXTERNAL TABLE t (id BIGINT) STORED AS LANCE LOCATION 't.lance'`.
 `REMOTE` federates a table on another Beacon server. See
 [Remote Tables](/docs/2.1.0-rc3/data-sources/remote-tables). `POSTGRES` and `MYSQL`
 federate a table in an external SQL database. See
@@ -147,7 +151,8 @@ The rules are the same for every format:
 
 - Quote the key and the value. Write `'true'`, not `true`.
 - A key is not case sensitive. Beacon lowercases it.
-- Beacon ignores a key that the file format does not know. It reports no error.
+- Beacon ignores a key that the file format does not know. It reports no error. `LANCE` is
+  different: an unknown key is an error.
 - A key must appear one time. A repeated key is an error.
 - A file-format key that takes a boolean accepts `true`, `1`, `yes` and `on`, or `false`, `0`, `no`
   and `off`. Another value is an error.
@@ -260,6 +265,7 @@ more cores. Set it for a table with many files. The merged schema does not chang
 | `DELTA` | `version`, `timestamp` | [Delta Lake](/docs/2.1.0-rc3/formats/delta-lake#options) |
 | `ICEBERG` | `snapshot_id` | [Apache Iceberg](/docs/2.1.0-rc3/formats/iceberg#options) |
 | `ICECHUNK` | `branch`, `tag`, `snapshot`, `read_dimensions` | [Icechunk](/docs/2.1.0-rc3/formats/icechunk#options) |
+| `LANCE` | `version` (an unknown key is an error) | [Lance](/docs/2.1.0-rc3/data-sources/external-tables#pin-a-version) |
 | `POSTGRES`, `MYSQL` | `host`, `port`, `user`, `password`, `database`, `sslmode` | [SQL Databases](/docs/2.1.0-rc3/data-sources/sql-databases#options) |
 | `REMOTE` | `tls` | [Remote Tables](/docs/2.1.0-rc3/data-sources/remote-tables#options) |
 | `ERDDAP` | `request_timeout_secs` | [ERDDAP](/docs/2.1.0-rc3/data-sources/erddap#options) |
@@ -282,7 +288,7 @@ The two statements do the same refresh. Only the admin can run `REFRESH`.
 ## `DROP TABLE`
 
 `DROP TABLE` removes a table from the catalog. Beacon does not delete the files. It deletes the file
-statistics of the table.
+statistics of the table. A `LANCE` table also keeps its dataset files.
 
 ```sql
 DROP TABLE cruises
