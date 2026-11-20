@@ -650,6 +650,12 @@ impl Runtime {
             BeaconStatement::Summarize(statement) => {
                 crate::statement_plan::summarize_plan(&self.session_ctx, statement).await
             }
+            BeaconStatement::InsertByName(_) => {
+                Err(datafusion::error::DataFusionError::NotImplemented(
+                    "INSERT ... BY NAME".to_string(),
+                )
+                .into())
+            }
             BeaconStatement::DFStatement(statement) => {
                 beacon_sql_parser::expression_depth::check_expression_depth(&statement)?;
                 crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
