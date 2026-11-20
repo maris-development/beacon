@@ -41,9 +41,9 @@ impl std::fmt::Debug for RemoteCredential {
 impl RemoteCredential {
     /// Build a credential from a stored `TYPE BEACON` secret's options (`token`, or
     /// `username`/`password`).
-    pub fn from_secret(secret: &crate::secrets::Secret) -> anyhow::Result<Self> {
+    pub fn from_secret(secret: &beacon_object_store::secrets::Secret) -> anyhow::Result<Self> {
         anyhow::ensure!(
-            secret.secret_type == crate::secrets::SecretType::Beacon,
+            secret.secret_type == beacon_object_store::secrets::SecretType::Beacon,
             "secret '{}' is a {} secret, not a beacon secret",
             secret.name,
             secret.secret_type.as_str()

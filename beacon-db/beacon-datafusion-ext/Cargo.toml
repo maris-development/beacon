@@ -9,12 +9,7 @@ rust-version.workspace = true
 # stored entry keeps its meaning across releases.
 blake3 = { workspace = true }
 datafusion = { workspace = true }
-datafusion-federation = { workspace = true }
 chrono = { workspace = true }
-arrow-flight = { workspace = true, features = ["flight-sql"] }
-tonic = { workspace = true }
-# Encodes remote-Beacon HTTP Basic credentials (`authorization: Basic <base64(user:pass)>`).
-base64 = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -36,12 +31,6 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = {workspace = true}
 glob = {workspace = true}
-
-# Rebuilding a folded geometry constant as an `ST_GeomFromText` call before a federated
-# sub-plan is unparsed. See `remote/geometry_sql.rs`.
-datafusion-spatial = { workspace = true }
-geoarrow-array = { workspace = true }
-geoarrow-schema = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
 beacon-object-store = { path = "../beacon-object-store" }

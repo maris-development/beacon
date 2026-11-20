@@ -740,7 +740,7 @@ fn build_session_state(
     session_config: SessionConfig,
     runtime_env: Arc<RuntimeEnv>,
     session_cell: SessionCell,
-    plugin_functions: Arc<dyn beacon_datafusion_ext::remote::LocalFunctions>,
+    plugin_functions: Arc<dyn beacon_remote::LocalFunctions>,
 ) -> anyhow::Result<datafusion::execution::context::SessionState> {
     // Narrow every scan to the columns the query reads before any other rule.
     // CSE copies every input column into an intermediate projection, one linear
@@ -752,7 +752,7 @@ fn build_session_state(
     // at remote tables get pushed down. The matching `FederatedPlanner` lives in
     // `BeaconQueryPlanner`'s extension planners. Native plugin calls stay local.
     optimizer_rules
-        .extend(beacon_datafusion_ext::remote::federation_optimizer_rules_with(plugin_functions));
+        .extend(beacon_remote::federation_optimizer_rules_with(plugin_functions));
 
     let mut state_builder = SessionStateBuilder::new()
         .with_config(session_config)

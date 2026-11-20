@@ -11,7 +11,7 @@ use std::sync::Arc;
 use arrow::array::{RecordBatch, RecordBatchOptions};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use beacon_datafusion_ext::remote::apply_pushed_filters;
+use beacon_remote::apply_pushed_filters;
 use datafusion::common::Statistics;
 use datafusion::error::Result;
 use datafusion::logical_expr::LogicalPlan;
@@ -259,7 +259,7 @@ mod tests {
     /// Beacon's own rule set keeps the result right, with or without a join.
     #[tokio::test]
     async fn filters_hold_with_the_beacon_federation_rules() {
-        let rules = beacon_datafusion_ext::remote::federation_optimizer_rules();
+        let rules = beacon_remote::federation_optimizer_rules();
         let context = local_context(rules, true);
         assert_eq!(count(&context, JOINED).await, 2);
         assert_eq!(
@@ -276,7 +276,7 @@ mod tests {
         let mut rules: Vec<Arc<dyn OptimizerRule + Send + Sync>> = vec![Arc::new(
             datafusion::optimizer::optimize_projections::OptimizeProjections::new(),
         )];
-        rules.extend(beacon_datafusion_ext::remote::federation_optimizer_rules());
+        rules.extend(beacon_remote::federation_optimizer_rules());
         let context = local_context(rules, true);
 
         // The count goes to the database, over a derived table that projects no column.

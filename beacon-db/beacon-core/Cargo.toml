@@ -66,6 +66,7 @@ beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
 beacon-sql-parser = { path = "../beacon-sql-parser" }
 beacon-json-query = { path = "../beacon-json-query" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-remote = { path = "../beacon-remote" }
 beacon-external-table = { path = "../beacon-external-table" }
 beacon-nd-execution = { path = "../beacon-nd-execution" }
 beacon-plugin-registry = { path = "../beacon-plugin/beacon-plugin-registry" }
