@@ -32,7 +32,6 @@ arrow = { workspace=true}
 tokio = { workspace = true }
 object_store = { workspace = true }
 bytes = { workspace = true }
-thiserror = { workspace = true }
 async-stream = {workspace = true}
 parking_lot = { workspace = true}
 sysinfo = {workspace = true}

@@ -85,24 +85,6 @@ fn string_literal(expr: &Expr) -> Option<String> {
     }
 }
 
-/// Extract a `List<Utf8>` literal of dimension names.
-fn string_list_literal(expr: &Expr) -> Option<Vec<String>> {
-    let Expr::Literal(ScalarValue::List(values), _) = expr else {
-        return None;
-    };
-    let strings = values
-        .as_ref()
-        .values()
-        .as_any()
-        .downcast_ref::<arrow::array::StringArray>()?;
-    Some(
-        strings
-            .iter()
-            .filter_map(|value| value.map(str::to_string))
-            .collect(),
-    )
-}
-
 /// Turn the positional arguments into the OPTIONS map an
 /// [`IcechunkTableDefinition`] carries, so the table function and
 /// `CREATE EXTERNAL TABLE` build the same provider.

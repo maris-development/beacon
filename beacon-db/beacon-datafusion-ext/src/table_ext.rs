@@ -15,7 +15,7 @@ use datafusion::datasource::{TableType, ViewTable};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{DdlStatement, LogicalPlan, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::prelude::{Expr, SQLOptions};
+use datafusion::prelude::Expr;
 use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::TableProvider,
@@ -141,20 +141,6 @@ impl ViewTableDefinition {
         });
 
         dependencies.sort();
-    }
-
-    pub async fn into_view_table(self, context: Arc<SessionContext>) -> anyhow::Result<ViewTable> {
-        let options = SQLOptions::new().with_allow_ddl(true);
-        let df = context.sql_with_options(&self.definition, options).await?;
-        // The stored definition is the view body (a `SELECT`), which DataFusion
-        // plans straight to the view's input plan. Older definitions stored the
-        // full `CREATE VIEW … AS …`, which wraps the input in a `CreateView` DDL;
-        // unwrap that case for backward compatibility.
-        let input = match df.logical_plan() {
-            LogicalPlan::Ddl(DdlStatement::CreateView(plan)) => plan.input.as_ref().clone(),
-            plan => plan.clone(),
-        };
-        Ok(ViewTable::new(input, Some(self.definition)))
     }
 }
 

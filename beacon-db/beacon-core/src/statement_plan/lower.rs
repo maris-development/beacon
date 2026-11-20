@@ -403,7 +403,7 @@ fn replace_contents_plan(
 
 /// `COPY ... TO` stays a standard DataFusion node (which it can plan + execute);
 /// only the output path is rewritten into the datasets object store.
-fn rewrite_copy(mut copy: CopyTo) -> LogicalPlan {
+fn rewrite_copy(copy: CopyTo) -> LogicalPlan {
     LogicalPlan::Copy(copy)
 }
 

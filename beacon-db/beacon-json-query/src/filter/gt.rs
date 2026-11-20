@@ -3,7 +3,7 @@ use datafusion::{
     arrow::datatypes::Schema,
     execution::SessionState,
     logical_expr::lit,
-    prelude::{lit_timestamp_nano, Expr},
+    prelude::Expr,
 };
 
 use crate::filter::try_coerce_number_to_schema;
@@ -51,7 +51,7 @@ impl Gt {
             }
             Gt::Timestamp { gt, column } => {
                 let column = parse_column_name(&column);
-                Ok(column.gt(lit_timestamp_nano(gt.timestamp_nanos())))
+                Ok(column.gt(super::timestamp_literal(gt)?))
             }
             Gt::String { gt, column } => {
                 let column = parse_column_name(&column);

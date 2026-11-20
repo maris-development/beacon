@@ -22,10 +22,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Once};
 
 use anyhow::Context;
-use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::execution::context::SessionState;
-use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use deltalake::logstore::{
     default_logstore, logstore_factories, LogStore, LogStoreFactory, LogStoreRef, ObjectStoreRef,

@@ -7,15 +7,11 @@ rust-version.workspace = true
 [dependencies]
 arrow = { workspace=true }
 datafusion = {workspace = true}
-indexmap = { workspace = true }
 thiserror = { workspace=true }
-async-trait = { workspace=true }
 regex = {workspace = true}
 glob = {workspace = true}
-url = {workspace = true}
 julian = {workspace = true}
 hifitime = {workspace = true}
 
-futures = { workspace=true}
 tracing = { workspace = true }
 rlimit = {workspace = true}

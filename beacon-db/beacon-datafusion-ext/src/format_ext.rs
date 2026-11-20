@@ -8,7 +8,6 @@ use datafusion::{
         listing::ListingTableUrl,
     },
     object_store::ObjectMeta,
-    prelude::SessionContext,
 };
 
 use crate::listing_factory::ListingFactory;
@@ -357,12 +356,6 @@ impl FileFormatRegistry {
     pub fn get(&self, key: &str) -> Option<&Arc<dyn FileFormatFactoryExt>> {
         self.by_key.get(&key.to_ascii_lowercase())
     }
-}
-
-pub fn file_format_by_ext(ext: &str, session_ctx: &SessionContext) -> Option<Arc<dyn FileFormat>> {
-    let state = session_ctx.state();
-    let factory = state.get_file_format_factory(ext)?;
-    Some(factory.default())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

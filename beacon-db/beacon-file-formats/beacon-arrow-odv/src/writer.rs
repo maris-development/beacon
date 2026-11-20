@@ -1,27 +1,14 @@
-use core::time;
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{Read, Seek, Write},
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{fs::File, io::Write, sync::Arc};
 
 use arrow::{
-    array::{
-        Array, ArrayRef, ArrowPrimitiveType, AsArray, PrimitiveArray, RecordBatch, Scalar,
-        StringArray, StringBuilder,
-    },
+    array::{Array, ArrayRef, AsArray, RecordBatch, Scalar, StringArray, StringBuilder},
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
 use async_zip::{base::write::ZipFileWriter, ZipEntryBuilder};
 use futures::{AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
-use tempfile::TempDir;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use utoipa::ToSchema;
-use walkdir::WalkDir;
-use zip::write::FileOptions;
 /// Information about a column in ODV format
 ///
 /// This struct contains metadata about how a data column should be formatted and written in ODV output,
@@ -86,56 +73,6 @@ pub enum ArchivingMethod {
     ZipStd,
     #[serde(rename = "zip_deflate")]
     ZipDeflate,
-}
-
-impl ArchivingMethod {
-    fn impl_archive_directory<T>(
-        src_dir: &Path,
-        writer: T,
-        method: zip::CompressionMethod,
-    ) -> zip::result::ZipResult<()>
-    where
-        T: Write + Seek,
-    {
-        let mut zip = zip::ZipWriter::new(writer);
-        let options: FileOptions<'_, ()> = FileOptions::default()
-            .compression_method(method)
-            .large_file(true);
-
-        let src_dir = src_dir.canonicalize()?;
-        let mut buffer = Vec::new();
-
-        for entry in WalkDir::new(&src_dir) {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let name = path.strip_prefix(&src_dir).unwrap();
-
-            if path.is_file() {
-                // Start a new file entry in the archive
-                zip.start_file(name.to_str().unwrap(), options)?;
-                let mut f = File::open(path)?;
-                f.read_to_end(&mut buffer)?;
-                zip.write_all(&buffer)?;
-                buffer.clear();
-            }
-        }
-        zip.finish()?;
-        Ok(())
-    }
-
-    pub fn archive_directory<T>(&self, src_dir: &Path, writer: T) -> zip::result::ZipResult<()>
-    where
-        T: Write + Seek,
-    {
-        match self {
-            Self::ZipStd => {
-                Self::impl_archive_directory(src_dir, writer, zip::CompressionMethod::Stored)
-            }
-            Self::ZipDeflate => {
-                Self::impl_archive_directory(src_dir, writer, zip::CompressionMethod::Deflated)
-            }
-        }
-    }
 }
 
 impl OdvOptions {
@@ -717,7 +654,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
         time_column_name: &str,
         key_column: &str,
         profile_file_state: &mut Option<FileWriterState>,
-        time_series_file_state: &mut Option<FileWriterState>,
+        _time_series_file_state: &mut Option<FileWriterState>,
     ) -> anyhow::Result<Option<OdvBatchType>> {
         let feature_array = batch.column_by_name(feature_type_columns).ok_or_else(|| {
             anyhow::anyhow!(
@@ -771,7 +708,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
                 .ranges();
 
                 let mut trajectory_profiles = vec![];
-                for (i, range) in partitions.iter().enumerate() {
+                for range in partitions.iter() {
                     let profile = batch.slice(range.start, range.end - range.start);
 
                     // Map the key column of the profile record batch to the key_name[+i] format

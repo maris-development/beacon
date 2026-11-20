@@ -258,7 +258,7 @@ impl TableProvider for LanceTable {
         // do) made the scan a serialization point: DataFusion put a
         // `RepartitionExec: RoundRobinBatch(N)` directly above it to fan the rows
         // back out, so every row crossed one channel and was then copied again.
-        Ok(Arc::new(UnionExec::new(plans)))
+        UnionExec::try_new(plans)
     }
 
     fn supports_filters_pushdown(

@@ -83,7 +83,7 @@ impl ScalarUDFImpl for MapUnits {
 
     fn return_type(
         &self,
-        arg_types: &[arrow::datatypes::DataType],
+        _arg_types: &[arrow::datatypes::DataType],
     ) -> datafusion::error::Result<arrow::datatypes::DataType> {
         Ok(arrow::datatypes::DataType::Float64)
     }
@@ -93,7 +93,7 @@ impl ScalarUDFImpl for MapUnits {
         args: datafusion::logical_expr::ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         let ScalarFunctionArgs {
-            mut args,
+            args,
             number_rows,
             ..
         } = args;
@@ -152,9 +152,6 @@ impl ScalarUDFImpl for MapUnits {
 
 #[cfg(test)]
 mod tests {
-    use datafusion::scalar::ScalarValue;
-
-    use super::*;
 
     // #[test]
     // fn test_unit_conversion_function_input_output() {

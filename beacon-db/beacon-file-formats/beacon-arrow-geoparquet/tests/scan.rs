@@ -74,7 +74,7 @@ fn write_fixture(path: &std::path::Path, groups: usize) {
     let mut encoder = GeoParquetRecordBatchEncoder::try_new(&schema, &options).unwrap();
 
     let properties = WriterProperties::builder()
-        .set_max_row_group_size(ROW_GROUP_ROWS)
+        .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
         .build();
     let file = std::fs::File::create(path).unwrap();
     let mut writer = ArrowWriter::try_new(file, encoder.target_schema(), Some(properties)).unwrap();

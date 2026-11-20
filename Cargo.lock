@@ -1075,12 +1075,10 @@ dependencies = [
  "beacon-datafusion-ext",
  "beacon-nd-array",
  "beacon-nd-execution",
- "chrono",
  "datafusion 54.1.0",
  "futures",
  "hifitime",
  "indexmap 2.14.0",
- "julian",
  "ndarray 0.17.2",
  "num-traits",
  "object_store 0.13.2",
@@ -1119,7 +1117,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "utoipa",
- "walkdir",
  "zip 2.4.2",
 ]
 
@@ -1205,7 +1202,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
@@ -1215,18 +1211,14 @@ name = "beacon-common"
 version = "2.1.0-rc.3"
 dependencies = [
  "arrow",
- "async-trait",
  "datafusion 54.1.0",
- "futures",
  "glob",
  "hifitime",
- "indexmap 2.14.0",
  "julian",
  "regex",
  "rlimit",
  "thiserror 2.0.20",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -1288,7 +1280,6 @@ dependencies = [
  "sysinfo",
  "tar",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1325,7 +1316,6 @@ dependencies = [
  "arrow",
  "arrow-schema",
  "async-trait",
- "beacon-common",
  "beacon-nd-encoding",
  "beacon-object-store",
  "blake3",
@@ -1576,7 +1566,6 @@ dependencies = [
  "beacon-common",
  "beacon-datafusion-ext",
  "beacon-delta",
- "beacon-external-table",
  "beacon-iceberg",
  "beacon-icechunk",
  "chrono",
@@ -1593,7 +1582,6 @@ dependencies = [
  "serde_json",
  "strsim",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1698,10 +1686,7 @@ dependencies = [
  "futures",
  "http",
  "rmcp",
- "serde",
  "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1722,7 +1707,6 @@ dependencies = [
  "indexmap 2.14.0",
  "ndarray 0.17.2",
  "num-traits",
- "object_store 0.13.2",
  "parking_lot",
  "rand 0.8.7",
  "rkyv 0.8.10",
@@ -1878,15 +1862,12 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
- "futures-util",
  "memmap2",
  "object_store 0.13.2",
  "redb",
  "serde",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1968,14 +1949,12 @@ name = "beacon-server-config"
 version = "2.1.0-rc.3"
 dependencies = [
  "base64",
- "beacon-arrow-atlas",
  "beacon-arrow-hdf5",
  "beacon-arrow-netcdf",
  "beacon-arrow-zarr",
  "beacon-common",
  "beacon-datafusion-ext",
  "envconfig",
- "object_store 0.13.2",
  "thiserror 2.0.20",
  "tracing",
 ]

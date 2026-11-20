@@ -458,7 +458,7 @@ mod tests {
         assert!(!ctx.user_exists("alice").await);
 
         // With anonymous access disabled, the user is droppable again.
-        let mut ctx = admin_context();
+        let ctx = admin_context();
         ctx.create_user("anonymous", "").await.unwrap();
         ctx.drop_user("anonymous").await.unwrap();
         assert!(!ctx.user_exists("anonymous").await);

@@ -9,14 +9,12 @@ use std::sync::Arc;
 
 use beacon_arrow_csv::datafusion::DEFAULT_CSV_EXTENSION;
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
-use beacon_arrow_ipc::datafusion::{ArrowFormatFactory, DEFAULT_ARROW_EXTENSION};
+use beacon_arrow_ipc::datafusion::DEFAULT_ARROW_EXTENSION;
 use beacon_arrow_netcdf::datafusion::NETCDF_EXTENSION;
-use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, NetcdfConfig};
+use beacon_arrow_netcdf::datafusion::NetCDFFormatFactory;
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
-use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_zarr::datafusion::{ZarrFormatFactory, ZARR_EXTENSION};
-use datafusion::catalog::Session;
 use datafusion::prelude::SessionContext;
 use datafusion::{
     common::file_options::file_type::FileType,

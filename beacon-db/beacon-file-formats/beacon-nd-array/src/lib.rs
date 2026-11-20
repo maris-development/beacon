@@ -204,23 +204,6 @@ impl<T: NdArrayType> NdArray<T> {
         self.0.fill_value().clone()
     }
 
-    pub async fn into_raw_vec(self) -> Vec<T> {
-        let shape = self.shape();
-        let array = self
-            .0
-            .read_subset(ArraySubset {
-                start: vec![0; shape.len()],
-                shape: shape.clone(),
-            })
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, ?shape, "failed to read full array into raw vec");
-                panic!("failed to read full array into raw vec: {e}");
-            });
-
-        array.into_raw_vec_and_offset().0
-    }
-
     pub async fn clone_into_raw_vec(&self) -> Vec<T> {
         let shape = self.shape();
         let array = self

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use beacon_nd_array::{dataset::AnyDataset, projection::DatasetProjection};
+use beacon_nd_array::dataset::AnyDataset;
 use object_store::{ObjectMeta, ObjectStore};
 
 /// Open a TIFF dataset for a given object metadata entry.
