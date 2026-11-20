@@ -5,7 +5,6 @@ pub use beacon_object_store::{big_page_list, secrets};
 #[cfg(test)]
 mod lazy_registry_tests;
 
-pub mod analyzer_rules;
 pub mod cancel;
 pub mod consts;
 pub mod container_counts;

@@ -25,14 +25,4 @@ impl DatasetProjection {
             index_projection: Some(index_projection),
         }
     }
-
-    pub fn with_index_projection(mut self, index_projection: Vec<usize>) -> Self {
-        self.index_projection = Some(index_projection);
-        self
-    }
-
-    pub fn with_dimension_projection(mut self, dimension_projection: Vec<String>) -> Self {
-        self.dimension_projection = Some(dimension_projection);
-        self
-    }
 }

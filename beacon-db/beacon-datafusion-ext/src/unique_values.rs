@@ -406,13 +406,6 @@ impl<T: Ord + Eq + Send + Sync + Debug + 'static> UniqueVec for UniqueColumnValu
 }
 
 impl<T: Ord + Eq + Send + Sync + 'static> UniqueColumnValues<T> {
-    pub fn needle_position(&self, needle: &T) -> Result<usize> {
-        match self.values.binary_search(needle) {
-            Ok(pos) => Ok(pos),
-            Err(pos) => Ok(pos),
-        }
-    }
-
     /// Inserts values that are not already present while maintaining sorted
     /// order. The implementation sorts the incoming values and performs a
     /// classic merge with the existing sorted set.

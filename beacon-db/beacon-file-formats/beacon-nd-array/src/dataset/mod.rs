@@ -8,7 +8,7 @@ pub use any::AnyDataset;
 pub use ragged::RaggedDataset;
 pub use variant::DatasetType;
 
-use crate::{NdArray, NdArrayD, array::subset::ArraySubset, datatypes::NdArrayDataType};
+use crate::NdArrayD;
 use indexmap::IndexMap;
 use std::{collections::HashSet, sync::Arc};
 
@@ -71,10 +71,6 @@ impl Dataset {
 
     pub fn get_array(&self, name: &str) -> Option<&Arc<dyn NdArrayD>> {
         self.arrays.get(name)
-    }
-
-    pub fn get_array_datatype(&self, name: &str) -> Option<NdArrayDataType> {
-        self.get_array(name).map(|array| array.datatype())
     }
 
     pub fn project_with_dimensions(&self, dimensions: &[String]) -> anyhow::Result<Dataset> {
@@ -432,6 +428,7 @@ pub fn project_read_dimensions_or_skip(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{NdArray, datatypes::NdArrayDataType};
 
     /// Helper: build a Dataset from a vec of (name, array) pairs.
     async fn make_dataset(name: &str, arrays: Vec<(&str, Arc<dyn NdArrayD>)>) -> Dataset {

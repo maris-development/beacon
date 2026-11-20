@@ -37,14 +37,6 @@ impl OdvFileFormatFactory {
     pub fn options(&self) -> &Option<OdvOptions> {
         &self.options
     }
-
-    pub fn set_options(&mut self, options: OdvOptions) {
-        self.options = Some(options);
-    }
-
-    pub fn clear_options(&mut self) {
-        self.options = None;
-    }
 }
 
 impl GetExt for OdvFileFormatFactory {

@@ -25,7 +25,6 @@ csv = {workspace = true}
 zip = {workspace = true}
 async_zip = {workspace = true}
 tokio-util = {workspace = true}
-walkdir = {workspace = true}
 regex = {workspace = true}
 thiserror = {workspace=true}
 bytes = { workspace = true}

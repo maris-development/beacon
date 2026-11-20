@@ -52,11 +52,6 @@ impl ContainerCounts {
         self.row_count.clone()
     }
 
-    /// The null counts of a column that is null in every container.
-    pub fn all_null(&self) -> ArrayRef {
-        self.row_count.clone()
-    }
-
     /// The null counts of one column, measured against the container row count.
     ///
     /// A container where the column has only nulls reports the container row

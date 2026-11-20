@@ -120,19 +120,6 @@ impl RemoteConnection {
         Ok(client)
     }
 
-    /// Run `sql` on the remote and collect every result batch.
-    ///
-    /// Used for the small metadata queries that drive catalog enumeration — not for scans, which
-    /// go through the federated executor's streaming path.
-    pub async fn collect_query(&self, sql: impl Into<String>) -> anyhow::Result<Vec<RecordBatch>> {
-        let mut client = self.connect().await?;
-        let info = client
-            .execute(sql.into(), None)
-            .await
-            .context("remote beacon rejected the metadata query")?;
-        drain(&mut client, info).await
-    }
-
     /// List the remote's tables through Flight SQL's `GetTables` metadata command.
     ///
     /// The supported way to enumerate a remote: the remote answers from its own catalog, filtered
