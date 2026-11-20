@@ -27,6 +27,7 @@ use futures::{StreamExt, TryStreamExt};
 
 use super::{
     actions, crawler, functions,
+    insert_by_name::{self, ByNameMapping},
     logical::{
         analyze_files_arrow_schema, compact_table_arrow_schema, count_arrow_schema,
         run_crawler_arrow_schema, show_crawlers_arrow_schema, show_create_function_arrow_schema,
@@ -1029,6 +1030,109 @@ impl ExecutionPlan for InsertExec {
         let child = self.child.clone();
         Ok(forward_stream(count_arrow_schema(), async move {
             actions::insert_into(&session, &table, op, child)
+                .await
+                .map_err(to_df_err)
+        }))
+    }
+}
+
+/// Physical node for `INSERT INTO <table> BY NAME <query>`. Produces the
+/// inserted-row count.
+///
+/// The column mapping is made at plan time, so every mapping error comes
+/// before a change and `EXPLAIN` shows the mapping without a change.
+#[derive(Debug)]
+pub(crate) struct InsertByNameExec {
+    table: TableReference,
+    child: Arc<dyn ExecutionPlan>,
+    mapping: ByNameMapping,
+    /// The target when it is a Lance table, which can get new columns.
+    lance: Option<beacon_lance::LanceTable>,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl InsertByNameExec {
+    pub(crate) async fn try_new(
+        table: TableReference,
+        child: Arc<dyn ExecutionPlan>,
+        session: SessionCell,
+    ) -> Result<Self> {
+        let plan_error = |error: anyhow::Error| DataFusionError::Plan(error.to_string());
+        let ctx = upgrade_session(&session)?;
+        let provider = ctx.table_provider(table.clone()).await?;
+        let lance = provider
+            .downcast_ref::<beacon_lance::LanceTable>()
+            .cloned();
+        let mapping = insert_by_name::map_by_name(
+            &child.schema(),
+            &provider.schema(),
+            lance.is_some(),
+            &table.to_string(),
+        )
+        .map_err(plan_error)?;
+        Ok(Self {
+            table,
+            child,
+            mapping,
+            lance,
+            session,
+            cache: Arc::new(plan_properties(count_arrow_schema())),
+        })
+    }
+}
+
+impl DisplayAs for InsertByNameExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "InsertByNameExec: table={}", self.table)?;
+                let mapping = self.mapping.to_string();
+                if !mapping.is_empty() {
+                    write!(f, ", {mapping}")?;
+                }
+                Ok(())
+            }
+            DisplayFormatType::TreeRender => write!(f, "InsertByNameExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for InsertByNameExec {
+    fn name(&self) -> &str {
+        "InsertByNameExec"
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.child]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(Self {
+            table: self.table.clone(),
+            child: children.swap_remove(0),
+            mapping: self.mapping.clone(),
+            lance: self.lance.clone(),
+            session: self.session.clone(),
+            cache: self.cache.clone(),
+        }))
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let table = self.table.clone();
+        let child = self.child.clone();
+        let mapping = self.mapping.clone();
+        let lance = self.lance.clone();
+        Ok(forward_stream(count_arrow_schema(), async move {
+            insert_by_name::insert_by_name(&session, &table, child, &mapping, lance.as_ref())
                 .await
                 .map_err(to_df_err)
         }))

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow::compute::cast;
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
 use datafusion::execution::SendableRecordBatchStream;
@@ -20,11 +20,35 @@ use lance_file::version::LanceFileVersion;
 /// Map an Arrow data type to one Lance can store. Lance 7.x does not support the
 /// Arrow "view" types (`Utf8View`/`BinaryView`) that DataFusion 53 produces for
 /// SQL string/binary columns, so they are widened to their non-view equivalents.
+/// The widening also applies to the fields of lists, structs and maps.
 pub fn lance_compatible_type(data_type: &DataType) -> DataType {
     match data_type {
         DataType::Utf8View => DataType::Utf8,
         DataType::BinaryView => DataType::Binary,
+        DataType::ListView(item) | DataType::List(item) => {
+            DataType::List(lance_compatible_field(item))
+        }
+        DataType::LargeListView(item) | DataType::LargeList(item) => {
+            DataType::LargeList(lance_compatible_field(item))
+        }
+        DataType::FixedSizeList(item, size) => {
+            DataType::FixedSizeList(lance_compatible_field(item), *size)
+        }
+        DataType::Struct(fields) => {
+            DataType::Struct(fields.iter().map(lance_compatible_field).collect())
+        }
+        DataType::Map(entries, sorted) => DataType::Map(lance_compatible_field(entries), *sorted),
         other => other.clone(),
+    }
+}
+
+/// `field` with a Lance-compatible type; name, nullability and metadata stay.
+fn lance_compatible_field(field: &FieldRef) -> FieldRef {
+    let data_type = lance_compatible_type(field.data_type());
+    if &data_type == field.data_type() {
+        Arc::clone(field)
+    } else {
+        Arc::new(field.as_ref().clone().with_data_type(data_type))
     }
 }
 
@@ -308,6 +332,36 @@ mod tests {
                 true
             )))),
             DataType::List(Arc::new(Field::new("item", DataType::Int32, true)))
+        );
+    }
+
+    #[test]
+    fn nested_view_types_are_widened() {
+        let item = |data_type| Arc::new(Field::new("item", data_type, true));
+        assert_eq!(
+            lance_compatible_type(&DataType::List(item(DataType::Utf8View))),
+            DataType::List(item(DataType::Utf8))
+        );
+        assert_eq!(
+            lance_compatible_type(&DataType::LargeList(item(DataType::BinaryView))),
+            DataType::LargeList(item(DataType::Binary))
+        );
+        assert_eq!(
+            lance_compatible_type(&DataType::FixedSizeList(item(DataType::Utf8View), 2)),
+            DataType::FixedSizeList(item(DataType::Utf8), 2)
+        );
+        let inner = |data_type| {
+            DataType::Struct(
+                vec![
+                    Field::new("s", data_type, false),
+                    Field::new("n", DataType::Int32, true),
+                ]
+                .into(),
+            )
+        };
+        assert_eq!(
+            lance_compatible_type(&DataType::List(item(inner(DataType::Utf8View)))),
+            DataType::List(item(inner(DataType::Utf8)))
         );
     }
 
