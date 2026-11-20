@@ -73,13 +73,30 @@ pub(crate) fn map_by_name(
         .iter()
         .filter(|f| !target_names.contains(f.name().as_str()))
         .collect();
-    if !extra.is_empty() && !can_widen {
-        let list = extra
+    let list = |fields: &[&FieldRef]| {
+        fields
             .iter()
             .map(|f| format!("'{}'", f.name()))
             .collect::<Vec<_>>()
-            .join(", ");
-        bail!("Table '{table}' does not have the columns {list}; only Lance tables add columns");
+            .join(", ")
+    };
+    if !extra.is_empty() && !can_widen {
+        bail!(
+            "Table '{table}' does not have the columns {}; only Lance tables add columns",
+            list(&extra)
+        );
+    }
+    let dotted: Vec<&FieldRef> = extra
+        .iter()
+        .copied()
+        .filter(|f| f.name().contains('.'))
+        .collect();
+    if !dotted.is_empty() {
+        bail!(
+            "Lance does not accept the column names {}; a name must not contain '.'. \
+             Rename them with AS",
+            list(&dotted)
+        );
     }
     let new_columns: Vec<Field> = extra
         .iter()
@@ -214,28 +231,45 @@ fn fit_to_field(
 
 /// Run a planned `BY NAME` insert into `table` and return its count stream.
 ///
-/// With `lance`, the table first gets [`ByNameMapping::new_columns`]. The
-/// catalog then gets a new provider, because a provider keeps the schema that
-/// it had at creation.
+/// With `lance`, the table first gets the `new_columns` of the plan-time
+/// mapping. The catalog then gets a new provider, because a provider keeps the
+/// schema that it had at creation.
+///
+/// The projection comes from a new mapping against the current table schema.
+/// Another statement can change the schema between plan and execution, and a
+/// column that it added then gets NULL.
 pub(crate) async fn insert_by_name(
     session: &Arc<SessionContext>,
     table: &TableReference,
     child: Arc<dyn ExecutionPlan>,
-    mapping: &ByNameMapping,
+    new_columns: &[Field],
     lance: Option<&beacon_lance::LanceTable>,
 ) -> anyhow::Result<SendableRecordBatchStream> {
-    if let Some(lance) = lance.filter(|_| !mapping.new_columns.is_empty()) {
+    if let Some(lance) = lance.filter(|_| !new_columns.is_empty()) {
         let warehouse = session
             .state()
             .config()
             .get_extension::<beacon_lance::LanceWarehouse>()
             .ok_or_else(|| anyhow!("Lance warehouse is unavailable"))?;
-        beacon_lance::add_missing_columns(&warehouse, &lance.definition().location, &mapping.new_columns).await?;
-        let fresh = lance.definition().build_provider(session.clone()).await?;
-        session.register_table(table.clone(), fresh)?;
+        beacon_lance::add_missing_columns(&warehouse, &lance.definition().location, new_columns).await?;
+        let fresh = lance
+            .definition()
+            .build_provider(session.clone())
+            .await
+            .and_then(|fresh| Ok(session.register_table(table.clone(), fresh)?));
+        if let Err(error) = fresh {
+            tracing::warn!(table = %table, error = %error, "reload after BY NAME widening failed");
+            bail!("The columns are added to '{table}', but the table did not reload: {error}");
+        }
     }
     let provider = session.table_provider(table.clone()).await?;
-    let projected = by_name_projection(child, mapping, provider.schema())?;
+    let mapping = map_by_name(
+        &child.schema(),
+        &provider.schema(),
+        false,
+        &table.to_string(),
+    )?;
+    let projected = by_name_projection(child, &mapping, provider.schema())?;
     super::actions::insert_into(session, table, InsertOp::Append, projected).await
 }
 
@@ -434,6 +468,22 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "Column 'b' is not nullable and the source does not have it"
+        );
+    }
+
+    #[test]
+    fn dotted_new_columns_fail() {
+        let source = schema(vec![
+            nullable("a.b", DataType::Int64),
+            nullable("temp", DataType::Float64),
+            nullable("temp._FillValue", DataType::Float64),
+        ]);
+        let target = schema(vec![nullable("a.b", DataType::Int64)]);
+        let error = map_by_name(&source, &target, true, "t").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Lance does not accept the column names 'temp._FillValue'; \
+             a name must not contain '.'. Rename them with AS"
         );
     }
 
