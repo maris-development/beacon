@@ -30,6 +30,7 @@ pub mod warehouse;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
+use datafusion::catalog::TableProvider as _;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt};
@@ -79,6 +80,74 @@ pub async fn create_lance_table(
 
     let definition = LanceTableDefinition::new(name, namespace.to_vec(), uri);
     Ok(LanceTable::new(definition, schema, warehouse))
+}
+
+/// Open or create the external Lance dataset at `uri` for `definition`.
+///
+/// An existing dataset gives its schema from the manifest. A missing dataset is
+/// created empty from `create_schema`, which is `Some` only when the statement
+/// had a column list.
+pub async fn open_external_lance_table(
+    warehouse: Arc<LanceWarehouse>,
+    definition: LanceTableDefinition,
+    uri: String,
+    create_schema: Option<&ArrowSchema>,
+) -> anyhow::Result<LanceTable> {
+    let version = definition.pinned_version()?;
+    if version.is_some() && create_schema.is_some() {
+        anyhow::bail!("A pinned Lance table cannot create a dataset");
+    }
+
+    let existing = load_dataset(&uri, version, &warehouse).await?;
+    let schema = match (existing, create_schema) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "Lance external tables take their columns from the dataset; remove the column list"
+        ),
+        (None, None) => anyhow::bail!(
+            "No Lance dataset at '{}'; add a column list to create one",
+            definition.location
+        ),
+        (Some(dataset), None) => {
+            lance::datafusion::LanceTableProvider::new(dataset, false, false).schema()
+        }
+        (None, Some(schema)) => {
+            tracing::info!(table = %definition.name, uri = %uri, "creating external Lance dataset");
+            let schema = io::lance_compatible_schema(schema);
+            let lock = warehouse.lock(&uri);
+            let _guard = lock.lock().await;
+            warehouse.forget(&uri).await;
+            io::write_stream(
+                &uri,
+                warehouse.session(),
+                io::empty_stream(schema.clone()),
+                WriteKind::Create,
+            )
+            .await?;
+            schema
+        }
+    };
+
+    Ok(LanceTable::new(definition, schema, warehouse)
+        .with_uri(uri)
+        .with_version(version))
+}
+
+/// Load `version` of the dataset at `uri`, or `None` when no dataset is there.
+async fn load_dataset(
+    uri: &str,
+    version: Option<u64>,
+    warehouse: &LanceWarehouse,
+) -> anyhow::Result<Option<Arc<lance::Dataset>>> {
+    let mut builder =
+        lance::dataset::builder::DatasetBuilder::from_uri(uri).with_session(warehouse.session());
+    if let Some(version) = version {
+        builder = builder.with_version(version);
+    }
+    match builder.load().await {
+        Ok(dataset) => Ok(Some(Arc::new(dataset))),
+        Err(lance::Error::DatasetNotFound { .. }) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}")),
+    }
 }
 
 /// Drop a Lance table by deleting all of its objects from the tables store,
