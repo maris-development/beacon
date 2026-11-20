@@ -405,7 +405,6 @@ fn external_definition() -> ExternalTableDefinition {
         skip_invalid_files_on_scan: false,
         use_listing_cache: false,
         use_statistics_pruning: true,
-        use_statistics_cache: false,
     }
 }
 

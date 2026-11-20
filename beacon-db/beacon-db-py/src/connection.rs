@@ -641,9 +641,6 @@ const TABLE_FUNCTIONS: &[(&str, &[&str])] = &[
     ("read_zarr_schema", &["glob_paths"]),
     ("read_atlas", &["glob_paths", "dimensions"]),
     ("read_atlas_schema", &["glob_paths", "dimensions"]),
-    ("view_dataset_statistics", &["path"]),
-    ("view_external_table_statistics", &["table_name"]),
-    ("view_statistics_cache", &[]),
 ];
 
 /// [`TABLE_FUNCTIONS`] as a map, built once for the process.

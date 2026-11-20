@@ -22,7 +22,6 @@ use beacon_datafusion_ext::{
     listing_factory::{DefaultStore, ListingFactory, RootStore},
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
-    stats_cache::BeaconFileStatisticsCache,
     type_widening::{
         ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening, TypeConflict,
     },
@@ -979,7 +978,6 @@ fn runtime_env_builder(
                 .unwrap_or_else(default_vm_memory_limit),
         )))
         .with_cache_manager(CacheManagerConfig {
-            file_statistics_cache: Some(Arc::new(BeaconFileStatisticsCache::default())),
             list_files_cache_limit: 0,
             ..Default::default()
         })

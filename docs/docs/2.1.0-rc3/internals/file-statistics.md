@@ -244,9 +244,10 @@ Queries then read every file. The second query above finds this condition.
 
 ::: warning The views of older versions are removed
 Beacon 2.1.0 removes `beacon.system.file_stats`, `beacon.system.file_stats_segments` and the
-function `file_statistics(path)`. A query on them fails with "not found". Change scripts and
-dashboards that read them to `table_statistics('<table>')`. The new function gives one table at a
-time, and has other columns.
+functions `file_statistics(path)`, `view_dataset_statistics(path)`,
+`view_external_table_statistics(table_name)` and `view_statistics_cache()`. A query on them fails
+with "not found". Change scripts and dashboards that read them to `table_statistics('<table>')`. The
+new function gives one table at a time, and has other columns.
 :::
 
 ## Formats that supply ranges

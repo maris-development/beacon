@@ -1334,7 +1334,6 @@ dependencies = [
  "futures",
  "glob",
  "indexmap 2.14.0",
- "moka",
  "object_store 0.13.2",
  "ordered-float 5.3.0",
  "parking_lot",

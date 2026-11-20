@@ -65,9 +65,6 @@ pub struct ExternalTableDefinition {
     /// Whether to use statistics pruning when scanning the table (pruning predicate pushdown).
     #[serde(default)]
     pub use_statistics_pruning: bool,
-    /// Whether to use the statistics cache when scanning the table (pruning predicate pushdown).
-    #[serde(default)]
-    pub use_statistics_cache: bool,
 }
 
 /// The `OPTIONS` key that names the type widening strategy of the table: `default` or `numpy`.
@@ -302,7 +299,6 @@ mod tests {
             skip_invalid_files_on_scan: false,
             use_listing_cache: false,
             use_statistics_pruning: false,
-            use_statistics_cache: false,
         }
     }
 
@@ -332,7 +328,8 @@ mod tests {
             "definition": "CREATE EXTERNAL TABLE argo STORED AS NETCDF LOCATION 'argo/*.nc'",
             "partition_cols": [],
             "options": { "__crawler__": "c1" },
-            "if_not_exists": true
+            "if_not_exists": true,
+            "use_statistics_cache": false
         });
 
         let restored: Box<dyn TableDefinition> = serde_json::from_value(stored.clone()).unwrap();
