@@ -31,15 +31,20 @@ pub enum BeaconStatement {
     InsertByName(InsertByNameStatement),
 }
 
-/// INSERT INTO <table> BY NAME <query>
+/// [EXPLAIN] INSERT INTO <table> BY NAME <query>
 #[derive(Debug, Clone)]
 pub struct InsertByNameStatement {
     pub table: ObjectName,
     pub query: Box<Query>,
+    /// `EXPLAIN INSERT ...`: show the plan, do not write or widen.
+    pub explain: bool,
 }
 
 impl Display for InsertByNameStatement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.explain {
+            write!(f, "EXPLAIN ")?;
+        }
         write!(f, "INSERT INTO {} BY NAME {}", self.table, self.query)
     }
 }
