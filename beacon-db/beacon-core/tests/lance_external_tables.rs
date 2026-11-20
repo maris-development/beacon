@@ -47,6 +47,11 @@ async fn create_with_columns(rt: &TestRuntime, table: &str) {
 
 /// Append two rows to the dataset at `dir` with a Lance writer that is not Beacon.
 async fn append_with_other_writer(dir: &Path) {
+    write_with_other_writer(dir, beacon_lance::WriteKind::Append).await;
+}
+
+/// Write two rows to the dataset at `dir` with a Lance writer that is not Beacon.
+async fn write_with_other_writer(dir: &Path, kind: beacon_lance::WriteKind) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, true),
         Field::new("name", DataType::Utf8, true),
@@ -65,9 +70,97 @@ async fn append_with_other_writer(dir: &Path) {
     ));
     let other = beacon_lance::LanceWarehouse::new(Arc::new(object_store::memory::InMemory::new()));
     let uri = url::Url::from_file_path(dir).unwrap().to_string();
-    beacon_lance::io::write_stream(&uri, other.session(), rows, beacon_lance::WriteKind::Append)
+    beacon_lance::io::write_stream(&uri, other.session(), rows, kind)
         .await
-        .expect("the other writer appends");
+        .expect("the other writer writes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn create_on_dataset_written_by_lance() {
+    let rt = common::runtime("lance-ext-existing").await;
+    write_with_other_writer(&dataset_dir(&rt), beacon_lance::WriteKind::Create).await;
+
+    rt.sql(&format!(
+        "CREATE EXTERNAL TABLE t STORED AS LANCE LOCATION '{LOCATION}'"
+    ))
+    .await;
+    assert_eq!(count(&rt, "t").await, 2);
+    assert_eq!(
+        scalar_string(&rt.sql("SELECT name FROM t WHERE id = 11").await),
+        "y"
+    );
+}
+
+/// A location with a scheme uses the store of that scheme, also when the
+/// runtime has a datasets store.
+#[tokio::test(flavor = "multi_thread")]
+async fn schemed_location_uses_its_own_store() {
+    let rt = common::restartable_runtime("lance-ext-schemed", |b| b).await;
+    let dir = rt.tmp_dir().join("abs.lance");
+    let location = url::Url::from_file_path(&dir).unwrap().to_string();
+    rt.sql(&format!(
+        "CREATE EXTERNAL TABLE t (id BIGINT) STORED AS LANCE LOCATION '{location}'"
+    ))
+    .await;
+    rt.sql("INSERT INTO t VALUES (1), (2)").await;
+    assert!(dir.join("_versions").is_dir(), "the dataset is at {dir:?}");
+    assert!(!rt.datasets_dir().join("abs.lance").exists());
+
+    let rt = rt.restart().await;
+    assert_eq!(count(&rt, "t").await, 2);
+    let shown = rt.sql("SHOW CREATE TABLE t").await;
+    let last = shown[0].num_columns() - 1;
+    let stored = common::column_strings(&shown, last);
+    assert!(stored[0].contains(&location), "{stored:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn location_without_a_store_fails() {
+    let rt = common::runtime("lance-ext-no-store").await;
+    let error = error_of(
+        &rt,
+        "CREATE EXTERNAL TABLE t (id BIGINT) STORED AS LANCE LOCATION 'nostore://bucket/x.lance'",
+    )
+    .await;
+    assert!(
+        error.starts_with(&visible(
+            "No object store is registered for 'nostore://bucket/x.lance'"
+        )),
+        "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn glob_location_fails_before_create() {
+    let rt = common::runtime("lance-ext-glob").await;
+    let error = error_of(
+        &rt,
+        "CREATE EXTERNAL TABLE t (id BIGINT) STORED AS LANCE LOCATION 'x/*.lance'",
+    )
+    .await;
+    assert_eq!(
+        error,
+        visible("A Lance location cannot contain a glob: 'x/*.lance'")
+    );
+    assert!(!rt.datasets_dir().join("x").exists(), "nothing is created");
+    assert!(!rt.datasets_dir().join("_versions").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn partitioned_by_fails() {
+    let rt = common::runtime("lance-ext-partitioned").await;
+    let error = error_of(
+        &rt,
+        &format!(
+            "CREATE EXTERNAL TABLE t (id BIGINT) STORED AS LANCE \
+             PARTITIONED BY (id) LOCATION '{LOCATION}'"
+        ),
+    )
+    .await;
+    assert_eq!(
+        error,
+        visible("STORED AS LANCE does not support PARTITIONED BY")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -106,6 +199,8 @@ async fn alter_index_compact_work() {
     );
     rt.sql("CREATE INDEX ON t (id)").await;
     assert_eq!(common::total_rows(&rt.sql("SHOW INDEXES ON t").await), 1);
+    rt.sql("DROP INDEX t_id_idx ON t").await;
+    assert_eq!(common::total_rows(&rt.sql("SHOW INDEXES ON t").await), 0);
     rt.sql("COMPACT TABLE t").await;
     assert_eq!(count(&rt, "t").await, 2);
 }
@@ -213,6 +308,7 @@ async fn pinned_version_is_read_only() {
         "UPDATE p SET name = 'z'",
         "ALTER TABLE p ADD COLUMN x DOUBLE",
         "CREATE INDEX ON p (id)",
+        "DROP INDEX p_id_idx ON p",
         "COMPACT TABLE p",
     ] {
         assert_eq!(error_of(&rt, statement).await, read_only, "{statement}");
@@ -221,6 +317,25 @@ async fn pinned_version_is_read_only() {
         count(&rt, "t").await,
         2,
         "the refused writes change nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_keeps_pinned_version() {
+    let rt = common::restartable_runtime("lance-ext-pinned-restart", |b| b).await;
+    create_with_columns(&rt, "t").await;
+    rt.sql("INSERT INTO t VALUES (1, 'a')").await;
+    rt.sql("INSERT INTO t VALUES (2, 'b')").await;
+    rt.sql(&format!(
+        "CREATE EXTERNAL TABLE p STORED AS LANCE LOCATION '{LOCATION}' OPTIONS ('version' '2')"
+    ))
+    .await;
+
+    let rt = rt.restart().await;
+    assert_eq!(count(&rt, "p").await, 1);
+    assert_eq!(
+        error_of(&rt, "INSERT INTO p VALUES (3, 'c')").await,
+        visible("Lance table 'p' is pinned to version 2 and is read-only")
     );
 }
 

@@ -1,11 +1,13 @@
-//! Persisted definition for a beacon-managed Lance table.
+//! Persisted definition for a Lance table (managed or external).
 //!
 //! Serialized to `table.json` (via the typetag `TableDefinition` trait). Unlike
-//! Iceberg there is no catalog: the dataset `location` (a `db://` URI
-//! into the redb object store) is the source of truth, so it is persisted
-//! directly. On startup, `build_provider` reopens the dataset at that URI through
-//! the runtime's warehouse; the Lance manifest — not the JSON — remains
-//! authoritative for the schema.
+//! Iceberg there is no catalog: the dataset `location` is the source of truth,
+//! so it is persisted directly. A managed table stores a `db://` URI into the
+//! redb object store. An external table stores its `LOCATION` as the user wrote
+//! it; `build_provider` resolves it with [`resolve_external_lance_uri`]. On
+//! startup, `build_provider` reopens the dataset through the runtime's
+//! warehouse; the Lance manifest — not the JSON — remains authoritative for the
+//! schema.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,20 +18,23 @@ use beacon_datafusion_ext::table_ext::TableDefinition;
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::TableType;
 use datafusion::prelude::SessionContext;
+use object_store::path::Path;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::open_external_lance_table;
 use crate::provider::LanceTable;
 use crate::warehouse::LanceWarehouse;
 
-/// Persisted configuration for a Lance-backed managed table.
+/// Persisted configuration for a Lance table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanceTableDefinition {
     /// Logical table name.
     pub name: String,
     /// Namespace the table lives under (e.g. `["beacon"]`).
     pub namespace: Vec<String>,
-    /// The `db://` URI of a managed dataset, or the `LOCATION` of an external one as the user wrote it.
+    /// The `db://` URI of a managed dataset, or the `LOCATION` of an external
+    /// dataset as the user wrote it.
     pub location: String,
     /// The `CREATE TABLE` statement that made the table, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,30 +98,63 @@ fn warehouse(context: &SessionContext) -> anyhow::Result<Arc<LanceWarehouse>> {
 
 /// Resolve the `LOCATION` of an external Lance table to the URI that Lance opens.
 ///
-/// The location follows the rules of the other external tables: a relative path
-/// is in the datasets store, and a path with a scheme uses the store of that
-/// scheme. The store is registered in the Lance warehouse, so Lance uses the same
-/// object store and credentials as DataFusion.
+/// A relative path is in the datasets store, the same as for the other external
+/// tables. A path with a scheme (`s3://bucket/a.lance`) uses the object store
+/// that the session has for its scheme and authority, also when the session has
+/// a datasets store. The store is registered in the Lance warehouse, so Lance
+/// uses the same object store and credentials as DataFusion.
 ///
 /// # Errors
 ///
-/// Returns an error when the location does not resolve to a registered object store.
+/// Returns an error for a location with a glob character, and when the location
+/// does not resolve to an object store.
 pub fn resolve_external_lance_uri(
     context: &SessionContext,
     location: &str,
 ) -> anyhow::Result<String> {
+    if location.contains(['*', '?', '[', ']']) {
+        anyhow::bail!("A Lance location cannot contain a glob: '{location}'");
+    }
     let state = context.state();
-    let factory = state
-        .config()
-        .get_extension::<ListingFactory>()
-        .ok_or_else(|| anyhow::anyhow!("Listing factory is unavailable in this session"))?;
-    let url = factory
-        .parse_listing_table_url(&state, location)
-        .map_err(|e| anyhow::anyhow!("Invalid Lance location '{location}': {e}"))?;
-    let store_url = url.object_store();
-    let store = state.runtime_env().object_store(&store_url)?;
-    warehouse(context)?.register_store(store_url.as_ref(), store);
-    Ok(LanceWarehouse::external_uri(store_url.as_ref(), url.prefix()))
+    let (store_url, path) = match schemed_url(location) {
+        Some(url) => {
+            let mut store_url = url.clone();
+            store_url.set_path("");
+            let path = Path::from_url_path(url.path())
+                .map_err(|e| anyhow::anyhow!("Invalid Lance location '{location}': {e}"))?;
+            anyhow::ensure!(
+                path.parts().next().is_some(),
+                "A Lance location must name a dataset: '{location}'"
+            );
+            (store_url, path)
+        }
+        None => {
+            let factory = state
+                .config()
+                .get_extension::<ListingFactory>()
+                .ok_or_else(|| anyhow::anyhow!("Listing factory is unavailable in this session"))?;
+            let url = factory
+                .parse_listing_table_url(&state, location)
+                .map_err(|e| anyhow::anyhow!("Invalid Lance location '{location}': {e}"))?;
+            let object_store = url.object_store();
+            let store_url: &Url = object_store.as_ref();
+            (store_url.clone(), url.prefix().clone())
+        }
+    };
+    let store = state
+        .runtime_env()
+        .object_store_registry
+        .get_store(&store_url)
+        .map_err(|e| anyhow::anyhow!("No object store is registered for '{location}': {e}"))?;
+    warehouse(context)?.register_store(&store_url, store);
+    Ok(LanceWarehouse::external_uri(&store_url, &path))
+}
+
+/// The URL of a location with a scheme, or `None` for a path.
+fn schemed_url(location: &str) -> Option<Url> {
+    let url = Url::parse(location).ok()?;
+    // A one-letter scheme is a Windows drive (`C:/data`), not a store.
+    (url.scheme().len() > 1 && location.contains("://")).then_some(url)
 }
 
 #[async_trait]

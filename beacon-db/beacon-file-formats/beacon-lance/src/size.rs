@@ -32,8 +32,14 @@ pub struct TableSize {
 ///
 /// # Errors
 ///
-/// Returns an error if the dataset does not open or if the store listing fails
+/// Returns an error if `uri` is not a `db://` URI, if the dataset does not open
+/// or if the store listing fails
 pub async fn table_size(warehouse: &LanceWarehouse, uri: &str) -> anyhow::Result<TableSize> {
+    // The bytes are listed in the tables store, which holds only managed tables.
+    anyhow::ensure!(
+        uri.starts_with("db:"),
+        "'{uri}' is not a managed Lance table"
+    );
     let dataset = open_dataset(uri, warehouse.session())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;

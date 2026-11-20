@@ -467,6 +467,14 @@ async fn create_lance_external_table(
     session: &Arc<SessionContext>,
     cmd: &CreateExternalTable,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        cmd.table_partition_cols.is_empty(),
+        "STORED AS LANCE does not support PARTITIONED BY"
+    );
+    anyhow::ensure!(
+        cmd.order_exprs.is_empty(),
+        "STORED AS LANCE does not support WITH ORDER"
+    );
     let mut definition = beacon_lance::LanceTableDefinition::new(
         cmd.name.to_string(),
         beacon_lance::beacon_namespace(),
