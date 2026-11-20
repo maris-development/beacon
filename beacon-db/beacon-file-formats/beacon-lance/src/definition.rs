@@ -11,12 +11,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::TableType;
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
+use crate::open_external_lance_table;
 use crate::provider::LanceTable;
 use crate::warehouse::LanceWarehouse;
 
@@ -27,7 +29,7 @@ pub struct LanceTableDefinition {
     pub name: String,
     /// Namespace the table lives under (e.g. `["beacon"]`).
     pub namespace: Vec<String>,
-    /// The dataset's `db://` URI into the redb object store.
+    /// The `db://` URI of a managed dataset, or the `LOCATION` of an external one as the user wrote it.
     pub location: String,
     /// The `CREATE TABLE` statement that made the table, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,6 +83,42 @@ impl LanceTableDefinition {
     }
 }
 
+fn warehouse(context: &SessionContext) -> anyhow::Result<Arc<LanceWarehouse>> {
+    context
+        .state()
+        .config()
+        .get_extension::<LanceWarehouse>()
+        .ok_or_else(|| anyhow::anyhow!("Lance warehouse is unavailable in this session"))
+}
+
+/// Resolve the `LOCATION` of an external Lance table to the URI that Lance opens.
+///
+/// The location follows the rules of the other external tables: a relative path
+/// is in the datasets store, and a path with a scheme uses the store of that
+/// scheme. The store is registered in the Lance warehouse, so Lance uses the same
+/// object store and credentials as DataFusion.
+///
+/// # Errors
+///
+/// Returns an error when the location does not resolve to a registered object store.
+pub fn resolve_external_lance_uri(
+    context: &SessionContext,
+    location: &str,
+) -> anyhow::Result<String> {
+    let state = context.state();
+    let factory = state
+        .config()
+        .get_extension::<ListingFactory>()
+        .ok_or_else(|| anyhow::anyhow!("Listing factory is unavailable in this session"))?;
+    let url = factory
+        .parse_listing_table_url(&state, location)
+        .map_err(|e| anyhow::anyhow!("Invalid Lance location '{location}': {e}"))?;
+    let store_url = url.object_store();
+    let store = state.runtime_env().object_store(&store_url)?;
+    warehouse(context)?.register_store(store_url.as_ref(), store);
+    Ok(LanceWarehouse::external_uri(store_url.as_ref(), url.prefix()))
+}
+
 #[async_trait]
 #[typetag::serde(name = "lance")]
 impl TableDefinition for LanceTableDefinition {
@@ -88,11 +126,12 @@ impl TableDefinition for LanceTableDefinition {
         &self,
         context: Arc<SessionContext>,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
-        let warehouse = context
-            .state()
-            .config()
-            .get_extension::<LanceWarehouse>()
-            .ok_or_else(|| anyhow::anyhow!("Lance warehouse is unavailable in this session"))?;
+        let warehouse = warehouse(&context)?;
+        if self.external {
+            let uri = resolve_external_lance_uri(&context, &self.location)?;
+            let table = open_external_lance_table(warehouse, self.clone(), uri, None).await?;
+            return Ok(Arc::new(table));
+        }
         let table = LanceTable::open(self.clone(), warehouse).await?;
         Ok(Arc::new(table))
     }

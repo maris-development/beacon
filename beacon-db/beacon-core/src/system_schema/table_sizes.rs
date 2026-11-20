@@ -36,8 +36,8 @@ fn table_sizes_schema() -> SchemaRef {
     ]))
 }
 
-/// The name and the `db://` location of each Lance table in the default schema,
-/// in name order.
+/// The name and the `db://` location of each managed Lance table in the default
+/// schema, in name order.
 async fn lance_tables(ctx: &SessionContext) -> anyhow::Result<Vec<(String, String)>> {
     let config = ctx.copied_config();
     let catalog_options = &config.options().catalog;
@@ -54,9 +54,11 @@ async fn lance_tables(ctx: &SessionContext) -> anyhow::Result<Vec<(String, Strin
     let mut tables = Vec::with_capacity(names.len());
     for name in names {
         // A table that a concurrent DROP removed is `None` here.
+        // An external dataset is not in the tables store, so it is not measured.
         let location = provider.table(&name).await?.and_then(|table| {
             table
                 .downcast_ref::<LanceTable>()
+                .filter(|lance| !lance.is_external())
                 .map(|lance| lance.uri().to_string())
         });
         if let Some(location) = location {

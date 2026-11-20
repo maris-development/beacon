@@ -48,10 +48,10 @@ pub(crate) async fn drop_table(
             .downcast_ref::<MaterializedView>()
             .map(|mv| mv.base_storage_prefix())
     });
-    let lance_location = provider.as_ref().and_then(|provider| {
+    let lance = provider.as_ref().and_then(|provider| {
         provider
             .downcast_ref::<beacon_lance::LanceTable>()
-            .map(|table| table.uri().to_string())
+            .map(|table| (table.uri().to_string(), table.is_external()))
     });
 
     session.deregister_table(name.clone())?;
@@ -74,9 +74,14 @@ pub(crate) async fn drop_table(
         delete_tables_prefix(session, &prefix).await;
     }
 
-    if let Some(location) = lance_location {
+    if let Some((uri, external)) = lance {
         let warehouse = lance_warehouse(session)?;
-        beacon_lance::drop_lance_table(&warehouse, &location).await?;
+        // The files of an external dataset are not Beacon's to delete.
+        if external {
+            warehouse.forget(&uri).await;
+        } else {
+            beacon_lance::drop_lance_table(&warehouse, &uri).await?;
+        }
     }
 
     Ok(())
@@ -299,6 +304,12 @@ async fn register_external_table(
         return create_delta_table(session, cmd).await;
     }
 
+    // `STORED AS LANCE` registers a Lance dataset that Beacon reads and writes,
+    // but does not own: `DROP TABLE` keeps its files.
+    if cmd.file_type.eq_ignore_ascii_case("LANCE") {
+        return create_lance_external_table(session, cmd).await;
+    }
+
     // `STORED AS ICEBERG` registers an Apache Iceberg table. Like Delta it is a
     // directory — a `metadata` directory plus data files — so it bypasses the
     // listing-table factory and uses its own provider. Beacon reads it; Iceberg
@@ -445,6 +456,41 @@ async fn create_delta_table(
     // persists `table.json` via the TableManager.
     let provider = definition.build_provider(session.clone()).await?;
     session.register_table(cmd.name.clone(), provider)?;
+    Ok(())
+}
+
+/// Build and register an external Lance table from
+/// `CREATE EXTERNAL TABLE … [(<columns>)] STORED AS LANCE LOCATION 'argo.lance'
+/// [OPTIONS ('version' '3')]`. A column list creates an empty dataset at a
+/// location that has none; without one, the schema comes from the dataset.
+async fn create_lance_external_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+) -> anyhow::Result<()> {
+    let mut definition = beacon_lance::LanceTableDefinition::new(
+        cmd.name.to_string(),
+        beacon_lance::beacon_namespace(),
+        cmd.location.clone(),
+    );
+    definition.definition = cmd.definition.clone();
+    definition.external = true;
+    // DataFusion prefixes `OPTIONS` keys without a `.` with `format.`.
+    definition.options = cmd
+        .options
+        .iter()
+        .map(|(key, value)| {
+            let key = key.strip_prefix("format.").unwrap_or(key);
+            (key.to_string(), value.clone())
+        })
+        .collect();
+    let create_schema = (!cmd.schema.fields().is_empty()).then(|| cmd.schema.as_arrow());
+
+    let uri = beacon_lance::definition::resolve_external_lance_uri(session, &cmd.location)?;
+    let warehouse = lance_warehouse(session)?;
+    let table =
+        beacon_lance::open_external_lance_table(warehouse, definition, uri, create_schema).await?;
+    // Registration persists `table.json` via the TableManager.
+    session.register_table(cmd.name.clone(), Arc::new(table))?;
     Ok(())
 }
 
@@ -740,6 +786,10 @@ pub(crate) async fn insert_into(
     child: Arc<dyn ExecutionPlan>,
 ) -> anyhow::Result<SendableRecordBatchStream> {
     let provider = session.table_provider(table.clone()).await?;
+    // Checked here too, so the error text is the same as for the other writes.
+    if let Some(lance) = provider.downcast_ref::<beacon_lance::LanceTable>() {
+        lance.ensure_writable()?;
+    }
     let state = session.state();
     let insert_plan = provider.insert_into(&state, child, op).await?;
     let stream = execute_stream(insert_plan, session.task_ctx())?;
