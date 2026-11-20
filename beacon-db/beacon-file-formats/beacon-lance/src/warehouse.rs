@@ -37,7 +37,7 @@ pub const BEACON_NAMESPACE: &str = "beacon";
 /// (`db://`) object store via the registered [`BeaconTablesProvider`]. Lance
 /// resolves this through its own session registry, separate from DataFusion's
 /// `db://` registration for the catalog — both name the same physical store.
-const SCHEME: &str = "db";
+pub(crate) const SCHEME: &str = "db";
 
 /// Sub-prefix within the tables store under which managed Lance datasets live.
 const PREFIX: &str = "lance";
@@ -128,7 +128,10 @@ impl ObjectStoreProvider for ExternalStoresProvider {
     ) -> LanceResult<ObjectStore> {
         let inner = self.store(&base_path)?;
         // A capacity of 1 deadlocks Lance (see `BeaconTablesProvider::new_store`).
-        let io_parallelism = if base_path.scheme() == "file" {
+        // A local `datasets` root has a custom scheme, so the store type also counts.
+        let local =
+            base_path.scheme() == "file" || inner.to_string().starts_with("LocalFileSystem");
+        let io_parallelism = if local {
             DEFAULT_LOCAL_IO_PARALLELISM
         } else {
             DEFAULT_CLOUD_IO_PARALLELISM
@@ -245,6 +248,9 @@ impl LanceWarehouse {
     /// Let Lance open datasets in `store`, under the scheme and authority of
     /// `store_url`. A second call for the same scheme and authority replaces
     /// the store.
+    ///
+    /// A `file` store must have no prefix: Lance reads large `file://` objects
+    /// directly from the local path, not through `store`.
     pub fn register_store(&self, store_url: &Url, store: Arc<DynObjectStore>) {
         let mut external = self.external.lock();
         let provider = external
@@ -258,14 +264,28 @@ impl LanceWarehouse {
     }
 
     /// The Lance URI of `path` in the store at `store_url`:
-    /// `<scheme>://<authority>/<path>`. It is also the write lock key.
+    /// `<scheme>://<authority>/<path>`, with each path segment percent-encoded.
+    /// It is also the write lock key.
     pub fn external_uri(store_url: &Url, path: &object_store::path::Path) -> String {
-        format!(
-            "{}://{}/{}",
-            store_url.scheme(),
-            store_url.authority(),
-            path.as_ref()
-        )
+        let mut url = store_url.clone();
+        url.set_query(None);
+        url.set_fragment(None);
+        match url.path_segments_mut() {
+            Ok(mut segments) => {
+                segments
+                    .clear()
+                    .extend(path.parts().map(|part| part.as_ref().to_string()));
+            }
+            Err(()) => {
+                return format!(
+                    "{}://{}/{}",
+                    store_url.scheme(),
+                    store_url.authority(),
+                    path
+                );
+            }
+        }
+        url.to_string()
     }
 
     /// The Lance session (carries the object-store registry) for open/write.
@@ -421,6 +441,7 @@ mod tests {
         use futures::StreamExt;
         use object_store::ObjectStore as _;
         use object_store::path::Path;
+        use tokio::sync::oneshot;
 
         fn bucket_url() -> Url {
             Url::parse("memory://bucket").unwrap()
@@ -454,21 +475,25 @@ mod tests {
             LanceWarehouse::external_uri(&bucket_url(), &Path::from(location))
         }
 
-        async fn append_two_rows(wh: &LanceWarehouse, uri: &str) {
+        fn two_rows() -> RecordBatch {
             let schema = Arc::new(ArrowSchema::new(vec![
                 Field::new("id", DataType::Int64, false),
                 Field::new("name", DataType::Utf8, true),
             ]));
-            let batch = RecordBatch::try_new(
-                schema.clone(),
+            RecordBatch::try_new(
+                schema,
                 vec![
                     Arc::new(Int64Array::from(vec![1, 2])),
                     Arc::new(StringArray::from(vec!["a", "b"])),
                 ],
             )
-            .unwrap();
+            .unwrap()
+        }
+
+        async fn append_two_rows(wh: &LanceWarehouse, uri: &str) {
+            let batch = two_rows();
             let rows = Box::pin(RecordBatchStreamAdapter::new(
-                schema,
+                batch.schema(),
                 futures::stream::iter(vec![Ok(batch)]),
             ));
             io::write_stream(uri, wh.session(), rows, WriteKind::Append)
@@ -679,6 +704,214 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(local.io_parallelism(), DEFAULT_LOCAL_IO_PARALLELISM);
+        }
+
+        /// A local disk under a custom scheme (the `datasets` root) is local.
+        #[tokio::test]
+        async fn local_disk_on_a_custom_scheme_gets_local_io_parallelism() {
+            let provider = ExternalStoresProvider::default();
+            provider.insert("", Arc::new(object_store::local::LocalFileSystem::new()));
+            let store = provider
+                .new_store(
+                    Url::parse("datasets:///a.lance").unwrap(),
+                    &ObjectStoreParams::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(store.io_parallelism(), DEFAULT_LOCAL_IO_PARALLELISM);
+        }
+
+        /// The URI escapes characters that a URL reads as syntax.
+        #[tokio::test]
+        async fn external_uri_escapes_url_syntax() {
+            let (wh, bucket) = external_warehouse();
+            let location = "data/odd name#1%2.lance";
+            let uri = uri(location);
+            // The store key is `odd name%231%252.lance`: `Path` escapes `#` and `%`.
+            assert_eq!(uri, "memory://bucket/data/odd%20name%25231%25252.lance");
+            open_external_lance_table(wh, definition(location, &[]), uri, Some(&schema()))
+                .await
+                .unwrap();
+            let files = bucket.list(Some(&Path::from(location))).count().await;
+            assert!(files > 0, "the dataset files use the decoded path");
+        }
+
+        #[tokio::test]
+        async fn missing_pinned_version_names_the_version() {
+            let (wh, _) = external_warehouse();
+            let location = "data/versions.lance";
+            open_external_lance_table(
+                wh.clone(),
+                definition(location, &[]),
+                uri(location),
+                Some(&schema()),
+            )
+            .await
+            .unwrap();
+            let err = open_external_lance_table(
+                wh,
+                definition(location, &[("version", "99")]),
+                uri(location),
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "Lance dataset 'data/versions.lance' has no version 99"
+            );
+        }
+
+        /// An InMemory store that holds the first manifest write after `arm`
+        /// until the test releases it.
+        #[derive(Debug, Default)]
+        struct GateStore {
+            inner: InMemory,
+            gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+        }
+
+        impl GateStore {
+            /// Return a receiver that fires when the write waits, and a sender
+            /// that releases it.
+            fn arm(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+                let (reached_tx, reached_rx) = oneshot::channel();
+                let (release_tx, release_rx) = oneshot::channel();
+                *self.gate.lock() = Some((reached_tx, release_rx));
+                (reached_rx, release_tx)
+            }
+
+            async fn wait_if_manifest(&self, location: &Path) {
+                let key = location.as_ref();
+                if !(key.contains("_versions/") && key.ends_with(".manifest")) {
+                    return;
+                }
+                let gate = self.gate.lock().take();
+                if let Some((reached, release)) = gate {
+                    let _ = reached.send(());
+                    let _ = release.await;
+                }
+            }
+        }
+
+        impl std::fmt::Display for GateStore {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "GateStore")
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl object_store::ObjectStore for GateStore {
+            async fn put_opts(
+                &self,
+                location: &Path,
+                payload: object_store::PutPayload,
+                opts: object_store::PutOptions,
+            ) -> object_store::Result<object_store::PutResult> {
+                self.wait_if_manifest(location).await;
+                self.inner.put_opts(location, payload, opts).await
+            }
+
+            async fn put_multipart_opts(
+                &self,
+                location: &Path,
+                opts: object_store::PutMultipartOptions,
+            ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+                self.wait_if_manifest(location).await;
+                self.inner.put_multipart_opts(location, opts).await
+            }
+
+            async fn get_opts(
+                &self,
+                location: &Path,
+                options: object_store::GetOptions,
+            ) -> object_store::Result<object_store::GetResult> {
+                self.inner.get_opts(location, options).await
+            }
+
+            fn delete_stream(
+                &self,
+                locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+            ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+                self.inner.delete_stream(locations)
+            }
+
+            fn list(
+                &self,
+                prefix: Option<&Path>,
+            ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+            {
+                self.inner.list(prefix)
+            }
+
+            async fn list_with_delimiter(
+                &self,
+                prefix: Option<&Path>,
+            ) -> object_store::Result<object_store::ListResult> {
+                self.inner.list_with_delimiter(prefix).await
+            }
+
+            async fn copy_opts(
+                &self,
+                from: &Path,
+                to: &Path,
+                options: object_store::CopyOptions,
+            ) -> object_store::Result<()> {
+                self.inner.copy_opts(from, to, options).await
+            }
+        }
+
+        fn append_stream() -> datafusion::execution::SendableRecordBatchStream {
+            let batch = two_rows();
+            Box::pin(RecordBatchStreamAdapter::new(
+                batch.schema(),
+                futures::stream::iter(vec![Ok(batch)]),
+            ))
+        }
+
+        /// Two Beacon instances append to one dataset on a scheme that Lance
+        /// does not know. Writer A passes the version check, then writer B
+        /// commits the same version. A must not overwrite the commit of B.
+        #[tokio::test]
+        async fn racing_writers_on_a_custom_scheme_keep_all_rows() {
+            let root = Url::parse("datasets:///").unwrap();
+            let store = Arc::new(GateStore::default());
+            let instance_a = Arc::new(warehouse());
+            let instance_b = Arc::new(warehouse());
+            instance_a.register_store(&root, store.clone());
+            instance_b.register_store(&root, store.clone());
+            let location = "data/race.lance";
+            let uri = LanceWarehouse::external_uri(&root, &Path::from(location));
+            open_external_lance_table(
+                instance_a.clone(),
+                definition(location, &[]),
+                uri.clone(),
+                Some(&schema()),
+            )
+            .await
+            .unwrap();
+
+            let (reached, release) = store.arm();
+            let (uri_a, session_a) = (uri.clone(), instance_a.session());
+            let writer_a = tokio::spawn(async move {
+                io::write_stream(&uri_a, session_a, append_stream(), WriteKind::Append).await
+            });
+            reached.await.unwrap();
+            io::write_stream(
+                &uri,
+                instance_b.session(),
+                append_stream(),
+                WriteKind::Append,
+            )
+            .await
+            .unwrap();
+            release.send(()).unwrap();
+            writer_a.await.unwrap().unwrap();
+
+            let latest =
+                open_external_lance_table(instance_b, definition(location, &[]), uri, None)
+                    .await
+                    .unwrap();
+            assert_eq!(count_rows(latest).await, 4, "no commit may be lost");
         }
     }
 }

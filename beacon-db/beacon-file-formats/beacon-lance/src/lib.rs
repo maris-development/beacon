@@ -99,10 +99,18 @@ pub async fn open_external_lance_table(
     }
 
     let existing = load_dataset(&uri, version, &warehouse).await?;
+    if let (None, Some(version)) = (&existing, version)
+        && load_dataset(&uri, None, &warehouse).await?.is_some()
+    {
+        anyhow::bail!(
+            "Lance dataset '{}' has no version {version}",
+            definition.location
+        );
+    }
+    const COLUMN_LIST_ERROR: &str =
+        "Lance external tables take their columns from the dataset; remove the column list";
     let schema = match (existing, create_schema) {
-        (Some(_), Some(_)) => anyhow::bail!(
-            "Lance external tables take their columns from the dataset; remove the column list"
-        ),
+        (Some(_), Some(_)) => anyhow::bail!(COLUMN_LIST_ERROR),
         (None, None) => anyhow::bail!(
             "No Lance dataset at '{}'; add a column list to create one",
             definition.location
@@ -116,6 +124,10 @@ pub async fn open_external_lance_table(
             let lock = warehouse.lock(&uri);
             let _guard = lock.lock().await;
             warehouse.forget(&uri).await;
+            // Another CREATE can make the dataset before this one gets the lock.
+            if load_dataset(&uri, None, &warehouse).await?.is_some() {
+                anyhow::bail!(COLUMN_LIST_ERROR);
+            }
             io::write_stream(
                 &uri,
                 warehouse.session(),
@@ -138,8 +150,7 @@ async fn load_dataset(
     version: Option<u64>,
     warehouse: &LanceWarehouse,
 ) -> anyhow::Result<Option<Arc<lance::Dataset>>> {
-    let mut builder =
-        lance::dataset::builder::DatasetBuilder::from_uri(uri).with_session(warehouse.session());
+    let mut builder = io::dataset_builder(uri, warehouse.session());
     if let Some(version) = version {
         builder = builder.with_version(version);
     }

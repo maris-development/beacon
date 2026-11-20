@@ -16,6 +16,33 @@ use lance::dataset::write::InsertBuilder;
 use lance::dataset::{WriteDestination, WriteMode, WriteParams};
 use lance::session::Session;
 use lance_file::version::LanceFileVersion;
+use lance_table::io::commit::{CommitHandler, ConditionalPutCommitHandler};
+use url::Url;
+
+use crate::warehouse::SCHEME as MANAGED_SCHEME;
+
+/// The commit handler for the dataset at `uri`, or `None` to let Lance choose.
+///
+/// Lance picks the handler by URI scheme and falls back to an unsafe one for a
+/// scheme it does not know, such as `datasets`. All stores of external
+/// datasets support conditional PUT, so they get that handler explicitly.
+/// Managed `db://` datasets keep the Lance choice.
+pub(crate) fn commit_handler(uri: &str) -> Option<Arc<dyn CommitHandler>> {
+    match Url::parse(uri) {
+        Ok(url) if url.scheme() == MANAGED_SCHEME => None,
+        _ => Some(Arc::new(ConditionalPutCommitHandler)),
+    }
+}
+
+/// A builder that opens the dataset at `uri` through `session`, with the
+/// commit handler of [`commit_handler`].
+pub(crate) fn dataset_builder(uri: &str, session: Arc<Session>) -> DatasetBuilder {
+    let builder = DatasetBuilder::from_uri(uri).with_session(session);
+    match commit_handler(uri) {
+        Some(handler) => builder.with_commit_handler(handler),
+        None => builder,
+    }
+}
 
 /// Map an Arrow data type to one Lance can store. Lance 7.x does not support the
 /// Arrow "view" types (`Utf8View`/`BinaryView`) that DataFusion 53 produces for
@@ -241,16 +268,16 @@ pub async fn write_stream(
     let dest = match kind {
         WriteKind::Create => WriteDestination::Uri(uri),
         WriteKind::Append | WriteKind::Overwrite => {
-            let dataset = DatasetBuilder::from_uri(uri)
-                .with_session(session.clone())
-                .load()
-                .await
-                .map_err(|e| match e {
-                    lance::Error::DatasetNotFound { .. } => {
-                        anyhow::anyhow!("Lance table '{uri}' does not exist")
-                    }
-                    e => anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"),
-                })?;
+            let dataset =
+                dataset_builder(uri, session.clone())
+                    .load()
+                    .await
+                    .map_err(|e| match e {
+                        lance::Error::DatasetNotFound { .. } => {
+                            anyhow::anyhow!("Lance table '{uri}' does not exist")
+                        }
+                        e => anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"),
+                    })?;
             WriteDestination::Dataset(Arc::new(dataset))
         }
     };
@@ -273,6 +300,7 @@ pub async fn write_stream(
         mode: kind.into(),
         session: Some(session),
         data_storage_version: lance_storage_version(),
+        commit_handler: commit_handler(uri),
         ..Default::default()
     };
     InsertBuilder::new(dest)

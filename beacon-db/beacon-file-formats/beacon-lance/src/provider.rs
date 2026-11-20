@@ -21,7 +21,6 @@ use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use lance::datafusion::LanceTableProvider;
 use lance::dataset::Dataset;
-use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::scanner::MaterializationStyle;
 use lance::session::Session as LanceSession;
 
@@ -131,7 +130,7 @@ async fn open_dataset_at(
     version: Option<u64>,
     session: Arc<LanceSession>,
 ) -> DataFusionResult<Arc<Dataset>> {
-    let mut builder = DatasetBuilder::from_uri(uri).with_session(session);
+    let mut builder = crate::io::dataset_builder(uri, session);
     if let Some(version) = version {
         builder = builder.with_version(version);
     }

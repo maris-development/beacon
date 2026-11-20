@@ -114,6 +114,7 @@ lance = { version = "=11.0.0", default-features = false }
 lance-index = "=11.0.0"
 lance-io = { version = "=11.0.0", default-features = false }
 lance-core = "=11.0.0"
+lance-table = "=11.0.0"
 
 lance-file = "=11.0.0"
 

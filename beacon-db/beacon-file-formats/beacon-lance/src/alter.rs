@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::{ColumnAlteration, NewColumnTransform};
 
 use crate::io::lance_compatible_type;
@@ -39,8 +38,7 @@ pub async fn alter_table(
     let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
 
-    let mut dataset = DatasetBuilder::from_uri(uri)
-        .with_session(warehouse.session())
+    let mut dataset = crate::io::dataset_builder(uri, warehouse.session())
         .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;

@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::write::update::UpdateBuilder;
 
 use crate::warehouse::LanceWarehouse;
@@ -24,8 +23,7 @@ pub async fn delete_rows(
     let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
 
-    let mut dataset = DatasetBuilder::from_uri(uri)
-        .with_session(warehouse.session())
+    let mut dataset = crate::io::dataset_builder(uri, warehouse.session())
         .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
@@ -53,8 +51,7 @@ pub async fn update_rows(
     let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
 
-    let dataset = DatasetBuilder::from_uri(uri)
-        .with_session(warehouse.session())
+    let dataset = crate::io::dataset_builder(uri, warehouse.session())
         .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;

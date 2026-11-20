@@ -14,7 +14,6 @@
 //! finds anything in pre-2.1 files. A zone map is the explicit equivalent, and
 //! without one a selective filter over a Lance table decodes every row.
 
-use lance::dataset::builder::DatasetBuilder;
 use lance::index::DatasetIndexExt;
 use lance_index::scalar::inverted::InvertedIndexParams;
 use lance_index::scalar::ScalarIndexParams;
@@ -101,8 +100,7 @@ pub async fn create_index(
     let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
 
-    let mut dataset = DatasetBuilder::from_uri(uri)
-        .with_session(warehouse.session())
+    let mut dataset = crate::io::dataset_builder(uri, warehouse.session())
         .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
@@ -155,8 +153,7 @@ pub async fn drop_index(
     let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
 
-    let mut dataset = DatasetBuilder::from_uri(uri)
-        .with_session(warehouse.session())
+    let mut dataset = crate::io::dataset_builder(uri, warehouse.session())
         .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
@@ -173,8 +170,7 @@ pub async fn list_indices(
     warehouse: &LanceWarehouse,
     uri: &str,
 ) -> anyhow::Result<Vec<IndexInfo>> {
-    let dataset = DatasetBuilder::from_uri(uri)
-        .with_session(warehouse.session())
+    let dataset = crate::io::dataset_builder(uri, warehouse.session())
         .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;

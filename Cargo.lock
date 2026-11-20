@@ -1676,6 +1676,7 @@ dependencies = [
  "lance-file",
  "lance-index",
  "lance-io",
+ "lance-table",
  "object_store 0.13.2",
  "parking_lot",
  "serde",
