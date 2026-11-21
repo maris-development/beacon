@@ -1793,6 +1793,34 @@ mod insert_by_name_tests {
         assert_eq!(values(runtime, "y").await, vec![None, Some(20)]);
     }
 
+    /// A column that another insert widened between plan and execution stays wide.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_type_widened_between_plan_and_execute_is_not_narrowed() {
+        let rt: TestRt = test_runtime().await;
+        let runtime = &rt.runtime;
+        run_sql(runtime, "CREATE TABLE w (a BIGINT, c SMALLINT)").await;
+
+        // The plan changes `c` from Int16 to Int32.
+        let late = plan(
+            runtime,
+            "INSERT INTO w BY NAME SELECT 2 AS a, CAST(7 AS INT) AS c",
+        )
+        .await;
+        run_sql(
+            runtime,
+            "INSERT INTO w BY NAME SELECT 1 AS a, CAST(3000000000 AS BIGINT) AS c",
+        )
+        .await;
+        datafusion::physical_plan::collect(late, runtime.session_ctx.task_ctx())
+            .await
+            .expect("the late insert keeps the wider type");
+
+        assert_eq!(
+            values(runtime, "c").await,
+            vec![Some(3_000_000_000), Some(7)]
+        );
+    }
+
     /// An `ALTER TABLE ADD COLUMN` between plan and execution gives a NULL column.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_added_column_between_plan_and_execute_is_null() {

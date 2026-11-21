@@ -126,6 +126,25 @@ async fn casts_to_lance_type() {
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_cast_writes_nothing() {
     let rt = runtime("by-name-failed-cast").await;
+    rt.sql("CREATE TABLE t (ts TIMESTAMP)").await;
+    rt.sql("INSERT INTO t VALUES (TIMESTAMP '2020-01-01 00:00:00')")
+        .await;
+
+    // The rule keeps nanoseconds, and the year 3000 does not fit in them.
+    let error = rt
+        .try_sql("INSERT INTO t BY NAME SELECT to_timestamp_seconds(32503680000) AS ts, 2 AS z")
+        .await
+        .expect_err("a strict cast fails on a value out of range");
+    assert!(
+        error.to_string().to_lowercase().contains("overflow"),
+        "{error}"
+    );
+    assert_eq!(count(&rt, "t").await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conflict_writes_nothing() {
+    let rt = runtime("by-name-conflict").await;
     rt.sql("CREATE TABLE t (a BIGINT)").await;
     rt.sql("INSERT INTO t VALUES (1)").await;
 
@@ -527,7 +546,7 @@ async fn explain_shows_type_changes() {
         .sql("EXPLAIN INSERT INTO t BY NAME SELECT CAST(1 AS BIGINT) AS c")
         .await;
     let plan = column_strings(&batches, 1).join("\n");
-    assert!(plan.contains("widen=[c: Int32 -> Int64]"), "{plan}");
+    assert!(plan.contains("planned widen=[c: Int32 -> Int64]"), "{plan}");
     assert_eq!(
         schema(&rt, "t").await.field(0).data_type(),
         &DataType::Int32

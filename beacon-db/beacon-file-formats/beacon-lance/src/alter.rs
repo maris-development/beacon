@@ -9,6 +9,10 @@ use std::sync::Arc;
 
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use arrow::error::ArrowError;
+use beacon_datafusion_ext::type_widening::{
+    ArrowTypeWideningStrategy, DefaultArrowTypeWidening, LabeledSchema,
+};
 use lance::dataset::{ColumnAlteration, NewColumnTransform};
 use lance::index::DatasetIndexExt;
 use lance_file::version::ConcreteFileVersion;
@@ -100,24 +104,27 @@ pub async fn add_missing_columns(
     uri: &str,
     fields: &[Field],
 ) -> anyhow::Result<Vec<String>> {
-    widen_table(warehouse, uri, fields, &[]).await
+    let widening = DefaultArrowTypeWidening::new();
+    widen_table(warehouse, uri, fields, &[], &widening).await
 }
 
 /// Add the `new_columns` that the Lance table at `uri` does not have yet, then
-/// change each column of `type_changes` to its new type. Returns the added
-/// names.
+/// widen the columns of `widen_sources` (column name and source type). Returns
+/// the added names.
 ///
 /// The latest version is read under the write lock. A column that another
-/// insert added or changed already is skipped. Every type change is checked
-/// before the first change: a column with an index, or a type change that
-/// Lance refuses, gives an error and the table stays as it is. When another
-/// process changes the dataset at the same time, the dataset is read again
-/// once.
+/// insert added already is skipped. The new type of a column is the `widening`
+/// merge of its current type and the source type, so a column that another
+/// insert widened is never narrowed. Every type change is checked before the
+/// first change: a column with an index, or a type change that Lance refuses,
+/// gives an error and the table stays as it is. When another process changes
+/// the dataset at the same time, the dataset is read again once.
 pub async fn widen_table(
     warehouse: &LanceWarehouse,
     uri: &str,
     new_columns: &[Field],
-    type_changes: &[(String, DataType)],
+    widen_sources: &[(String, DataType)],
+    widening: &dyn ArrowTypeWideningStrategy,
 ) -> anyhow::Result<Vec<String>> {
     let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
@@ -133,11 +140,12 @@ pub async fn widen_table(
             .filter(|field| dataset.schema().field(field.name()).is_none())
             .map(|field| Field::new(field.name(), lance_compatible_type(field.data_type()), true))
             .collect();
-        let casts = pending_type_changes(&dataset, type_changes).await?;
+        let casts = pending_type_changes(&dataset, widen_sources, widening).await?;
         if missing.is_empty() && casts.is_empty() {
             return Ok(Vec::new());
         }
         let names: Vec<String> = missing.iter().map(|f| f.name().clone()).collect();
+        let changed: Vec<String> = casts.iter().map(|c| c.path.clone()).collect();
 
         let result = async {
             if !missing.is_empty() {
@@ -146,16 +154,16 @@ pub async fn widen_table(
                 dataset
                     .add_columns(NewColumnTransform::AllNulls(schema), None, None)
                     .await
-                    .map_err(|e| ("add the columns", e))?;
+                    .map_err(|e| (format!("add the columns {names:?} to"), e))?;
             }
             if !casts.is_empty() {
-                tracing::info!(uri = %uri, columns = casts.len(), "changing Lance column types");
+                tracing::info!(uri = %uri, columns = ?changed, "changing Lance column types");
                 dataset
                     .alter_columns(&casts)
                     .await
-                    .map_err(|e| ("change the column types of", e))?;
+                    .map_err(|e| (format!("change the types of the columns {changed:?} of"), e))?;
             }
-            Ok::<_, (&str, lance::Error)>(())
+            Ok::<_, (String, lance::Error)>(())
         }
         .await;
         match result {
@@ -166,21 +174,35 @@ pub async fn widen_table(
     }
 }
 
-/// The alterations for the `type_changes` that `dataset` still needs. Errors
-/// when a changing column has an index or Lance refuses the new type.
+/// The alterations that `dataset` needs for `widen_sources`. Errors when a
+/// changing column has an index or Lance refuses the new type.
 async fn pending_type_changes(
     dataset: &lance::Dataset,
-    type_changes: &[(String, DataType)],
+    widen_sources: &[(String, DataType)],
+    widening: &dyn ArrowTypeWideningStrategy,
 ) -> anyhow::Result<Vec<ColumnAlteration>> {
     let version = dataset.manifest().data_storage_format.lance_file_format();
     let mut pending = Vec::new();
-    for (name, data_type) in type_changes {
-        let data_type = lance_compatible_type(data_type);
+    for (name, source_type) in widen_sources {
         let field = dataset
             .schema()
             .field(name)
             .ok_or_else(|| anyhow::anyhow!("The Lance table does not have the column '{name}'"))?;
         let current = field.data_type();
+        let one = |data_type: &DataType| {
+            LabeledSchema::unlabeled(Arc::new(ArrowSchema::new(vec![Field::new(
+                name,
+                data_type.clone(),
+                true,
+            )])))
+        };
+        let merged = widening
+            .merge_schemas(&[one(&current), one(source_type)])
+            .map_err(|error| match error {
+                ArrowError::SchemaError(message) => anyhow::anyhow!(message),
+                other => anyhow::anyhow!(other),
+            })?;
+        let data_type = lance_compatible_type(merged.field(0).data_type());
         if current.equals_datatype(&data_type) {
             continue;
         }
@@ -219,6 +241,7 @@ fn lance_accepts_cast(from: &DataType, to: &DataType, version: ConcreteFileVersi
 }
 
 /// The type pairs that Lance can rewrite: one family for each pair.
+/// Copy of `lance::dataset::versions::is_upcast_downcast` (Lance 11.0.0).
 fn is_upcast_downcast(from: &DataType, to: &DataType, dictionary_materialization: bool) -> bool {
     use DataType::*;
     match (from, to) {
@@ -309,6 +332,8 @@ mod tests {
         assert_eq!(names, vec!["a", "x"]);
     }
 
+    const DEFAULT: DefaultArrowTypeWidening = DefaultArrowTypeWidening::new();
+
     #[tokio::test]
     async fn widen_table_adds_then_changes_types() {
         let warehouse = LanceWarehouse::new(Arc::new(InMemory::new()));
@@ -340,6 +365,7 @@ mod tests {
                 ("a".to_string(), DataType::Int64),
                 ("b".to_string(), DataType::Float64),
             ],
+            &DEFAULT,
         )
         .await
         .unwrap_err();
@@ -354,6 +380,7 @@ mod tests {
             &uri,
             &[Field::new("x", DataType::Utf8, true)],
             &[("a".to_string(), DataType::Int64)],
+            &DEFAULT,
         )
         .await
         .unwrap();
@@ -364,5 +391,24 @@ mod tests {
             DataType::Int64
         );
         assert!(dataset.schema().field("x").is_some());
+
+        // A narrower source after another widening does not narrow the column.
+        let version = dataset.version().version;
+        let added = widen_table(
+            &warehouse,
+            &uri,
+            &[],
+            &[("a".to_string(), DataType::Int16)],
+            &DEFAULT,
+        )
+        .await
+        .unwrap();
+        assert!(added.is_empty());
+        let dataset = open().await;
+        assert_eq!(
+            dataset.schema().field("a").unwrap().data_type(),
+            DataType::Int64
+        );
+        assert_eq!(dataset.version().version, version, "no new version");
     }
 }
