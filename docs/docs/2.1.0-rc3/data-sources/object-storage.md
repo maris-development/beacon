@@ -10,7 +10,7 @@ A Beacon server reads its datasets from **exactly one store**. That store is eit
 - a **single S3-compatible bucket**.
 
 You choose which at startup. A server does not mix the two, does not switch per query, and does not
-reach a second bucket.
+reach a second bucket. A Lance external table with a scheme in `LOCATION` is the only exception.
 
 ## Queries do not name the store
 
@@ -25,11 +25,17 @@ On a local server, `obs/` is a directory. On a bucket, `obs/` is a key prefix. T
 not change. The client does not know which one it reads.
 
 ::: warning Do not put a scheme in the path
-`read_parquet('s3://my-bucket/obs/*.parquet')` does **not** reach `my-bucket`. On a server the
-scheme is ignored and the whole string is joined onto the datasets root, which gives a path that
-matches nothing.
+`read_parquet('s3://my-bucket/obs/*.parquet')` does **not** reach `my-bucket`. On a server with a
+datasets store, a path with a scheme is an error.
 
 Write relative paths. Always.
+:::
+
+::: info Exception: Lance external tables
+A [Lance external table](/docs/2.1.0-rc3/data-sources/external-tables#location) with a scheme in
+`LOCATION` uses the store of that URL, for example `s3://other-bucket/argo.lance`. The credentials
+come from the `AWS_*` environment or from an object-store
+[secret](/docs/2.1.0-rc3/sql/secrets) (`TYPE S3`, `GCS`, `AZURE` or `HTTP`).
 :::
 
 The same holds for [external tables](/docs/2.1.0-rc3/data-sources/external-tables):
@@ -79,14 +85,17 @@ also covers virtual-hosted addressing and plain HTTP endpoints for a local MinIO
 
 ::: info There is no SQL statement for storage credentials
 Credentials belong to the store. You choose the store at startup. The credentials therefore come
-from the environment. [`CREATE SECRET`](/docs/2.1.0-rc3/sql/secrets) covers one case only. It holds
-the credentials for **another Beacon server**, which you reach with
-[`ATTACH`](/docs/2.1.0-rc3/data-sources/attach).
+from the environment. [`CREATE SECRET`](/docs/2.1.0-rc3/sql/secrets) holds the credentials for
+**another Beacon server**, which you reach with [`ATTACH`](/docs/2.1.0-rc3/data-sources/attach).
+
+The exception is a [Lance external table](/docs/2.1.0-rc3/data-sources/external-tables#location)
+with a scheme in `LOCATION`. An object-store secret (`TYPE S3`, `GCS`, `AZURE` or `HTTP`) gives the
+credentials for that store.
 :::
 
 ## Data that a server does not own
 
-A server has one store. To read data elsewhere, query the **server** that owns it:
+A server has one datasets store. To read data elsewhere, query the **server** that owns it:
 
 ```sql
 ATTACH 'beacon://wod.example.org:50051' AS wod;

@@ -240,20 +240,28 @@ A Lance external table is not read-only. It supports the same statements as a
   server has for that URL.
 - A location with a glob character (`*`, `?`, `[` or `]`) is an error.
 
-The server builds the store of a URL with a scheme from the `AWS_*` environment or from a matching
-[secret](/docs/2.1.0-rc3/sql/secrets). It does not use the endpoint of `BEACON_S3_DATASETS`. For an
-S3 bucket that is not the datasets store, create a secret for the bucket first:
+The server builds the store of a URL with a scheme from the `AWS_*` environment or from a
+[secret](/docs/2.1.0-rc3/sql/secrets) for that URL. It does not use the endpoint of
+`BEACON_S3_DATASETS`. For an S3 bucket that is not the datasets store, create a secret for the
+bucket first:
 
 ```sql
-CREATE SECRET other_bucket (TYPE S3, KEY_ID '…', SECRET '…', REGION 'eu-west-1',
+CREATE PERSISTENT SECRET other_bucket (TYPE S3, KEY_ID '…', SECRET '…', REGION 'eu-west-1',
   SCOPE 's3://other-bucket');
 
 CREATE EXTERNAL TABLE argo_other
 STORED AS LANCE
-LOCATION 's3://other-bucket/argo.lance'
+LOCATION 's3://other-bucket/argo.lance';
 ```
 
-A Lance table does not accept `PARTITIONED BY`.
+Use `CREATE PERSISTENT SECRET`. A session secret is gone after a restart, and the table then
+cannot open its dataset.
+
+Create the secret before the first statement that uses the bucket. The server builds the store of
+a bucket one time and keeps it. A secret that you create later has no effect on that store.
+
+A Lance table does not accept `PARTITIONED BY`, `WITH ORDER`, `DEFAULT` values, `PRIMARY KEY` or
+`UNIQUE`. `NOT NULL` is accepted.
 
 #### Columns
 
@@ -312,8 +320,10 @@ old version can lose that version.
 
 Beacon and other tools can write to the same dataset:
 
-- In one Beacon server, a lock lets one write at a time run on a dataset. Two Beacon tables on the
-  same location share that lock.
+- In one Beacon server, a lock lets one write at a time run on a dataset. Two Beacon tables share
+  that lock only when their `LOCATION` text is the same. `x.lance` and
+  `s3://<datasets-bucket>/x.lance` are one dataset with two locks. The commit of Lance still keeps
+  each write safe.
 - Other writers, for example pylance or a second Beacon server, use the optimistic commit of Lance.
 - Lance tries an append again after a commit conflict.
 - A `DELETE` or an `UPDATE` with a commit conflict fails. Beacon returns the Lance error. Send the
@@ -330,6 +340,13 @@ Beacon and other tools can write to the same dataset:
 | No object store for the URL | `No object store is registered for '<location>': <reason>` |
 | Unknown key in `OPTIONS` | `Unknown option '<key>' for a Lance table` |
 | `PARTITIONED BY` on a Lance table | `STORED AS LANCE does not support PARTITIONED BY` |
+| `WITH ORDER` on a Lance table | `STORED AS LANCE does not support WITH ORDER` |
+| `DEFAULT` value in the column list | `STORED AS LANCE does not support DEFAULT values` |
+| `PRIMARY KEY` or `UNIQUE` in the column list | `STORED AS LANCE does not support PRIMARY KEY or UNIQUE` |
+| Column list together with a pinned version | `A pinned Lance table cannot create a dataset` |
+| Pinned version that the dataset does not have | `Lance dataset '<location>' has no version <n>` |
+| `version` that is not a non-negative integer | `Invalid 'version' option '<value>' for a Lance table: expected a non-negative integer` |
+| Dataset of a registered table is gone at startup (server log) | `Lance dataset '<location>' of table '<name>' is missing` |
 
 ## Partitioned data
 

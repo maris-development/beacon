@@ -164,6 +164,8 @@ limits:
 | Two query columns with the same name | `The source has the column '<c>' more than one time` |
 | New column names with a dot | `Lance does not accept the column names <list>; a name must not contain '.'. Rename them with AS` |
 | Write to a pinned Lance table | `Lance table '<name>' is pinned to version <n> and is read-only` |
+| Column list after the table name | `INSERT ... BY NAME does not take a column list` |
+| New columns added, but the table did not open again | `The columns are added to '<t>', but the table did not reload: <reason>` |
 
 Only the admin can run `INSERT INTO ... BY NAME`, the same as `INSERT INTO`. The
 [read rules](/docs/2.1.0-rc3/security/access-control) also apply to the tables of the query.

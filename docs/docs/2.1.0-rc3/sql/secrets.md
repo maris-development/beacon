@@ -15,8 +15,12 @@ bucket. That store is chosen at startup, by
 standard `AWS_*` environment chain. There is nothing to declare in SQL. See
 [Object Storage](/docs/2.1.0-rc3/data-sources/object-storage).
 
-A secret covers the one case that the configuration cannot. It holds the credentials for **another
+A secret covers the case that the configuration cannot. It holds the credentials for **another
 Beacon server**. You choose that server for each query, not at startup.
+
+The exception is a [Lance external table](/docs/2.1.0-rc3/data-sources/external-tables#location)
+with a scheme in `LOCATION`. It uses the store of that URL. The credentials come from the `AWS_*`
+environment or from an object-store secret (`TYPE S3`, `GCS`, `AZURE` or `HTTP`).
 :::
 
 ## Create a secret
