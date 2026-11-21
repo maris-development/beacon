@@ -260,6 +260,19 @@ cannot open its dataset.
 Create the secret before the first statement that uses the bucket. The server builds the store of
 a bucket one time and keeps it. A secret that you create later has no effect on that store.
 
+::: warning A scheme reaches past the datasets store
+A location with a scheme reaches each store that the server can build. This is also true when a
+datasets store is set. The table can read and write there:
+
+- `file://`: the file system of the server, with the rights of the server process user.
+- `s3://`, `gs://` and `az://`: each bucket that the server credentials or a secret can reach.
+- `http://` and `https://`: each host that the server can reach.
+
+Only the admin can create a Lance external table. Do you need to keep the server in one bucket?
+Then do not give admin rights to a user that you do not trust. See
+[Access Control](/docs/2.1.0-rc3/security/access-control).
+:::
+
 A Lance table does not accept `PARTITIONED BY`, `WITH ORDER`, `DEFAULT` values, `PRIMARY KEY` or
 `UNIQUE`. `NOT NULL` is accepted.
 

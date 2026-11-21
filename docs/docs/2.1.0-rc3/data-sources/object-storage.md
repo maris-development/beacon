@@ -36,6 +36,17 @@ A [Lance external table](/docs/2.1.0-rc3/data-sources/external-tables#location) 
 `LOCATION` uses the store of that URL, for example `s3://other-bucket/argo.lance`. The credentials
 come from the `AWS_*` environment or from an object-store
 [secret](/docs/2.1.0-rc3/sql/secrets) (`TYPE S3`, `GCS`, `AZURE` or `HTTP`).
+
+The table reaches each store that the server can build, also when a datasets store is set. It can
+read and write there:
+
+- `file://`: the file system of the server, with the rights of the server process user.
+- `s3://`, `gs://` and `az://`: each bucket that the server credentials or a secret can reach.
+- `http://` and `https://`: each host that the server can reach.
+
+Only the admin can create a Lance external table. Do you need to keep the server in one bucket?
+Then do not give admin rights to a user that you do not trust. See
+[Access Control](/docs/2.1.0-rc3/security/access-control).
 :::
 
 The same holds for [external tables](/docs/2.1.0-rc3/data-sources/external-tables):
