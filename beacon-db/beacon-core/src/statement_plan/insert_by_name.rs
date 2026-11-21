@@ -62,6 +62,25 @@ pub(crate) struct ByNameMapping {
     source_types: Vec<DataType>,
 }
 
+impl ByNameMapping {
+    /// The name and source type of each column in `type_changes`. The
+    /// widening merges the source type with the type the column has then.
+    pub(crate) fn widen_sources(&self) -> Vec<(String, DataType)> {
+        self.type_changes
+            .iter()
+            .filter_map(|(name, _)| {
+                let at = self.target_names.iter().position(|n| n == name)?;
+                match &self.columns[at] {
+                    ColumnSource::Source { index } | ColumnSource::Cast { index, .. } => {
+                        Some((name.clone(), self.source_types[*index].clone()))
+                    }
+                    ColumnSource::Null { .. } => None,
+                }
+            })
+            .collect()
+    }
+}
+
 /// The Lance column name for the source column `name`: each `.` becomes `_`.
 pub fn lance_column_name(name: &str) -> String {
     name.replace('.', "_")
@@ -341,11 +360,13 @@ pub(crate) async fn insert_by_name(
             .config()
             .get_extension::<beacon_lance::LanceWarehouse>()
             .ok_or_else(|| anyhow!("Lance warehouse is unavailable"))?;
+        let widening = session_widening(&session.state());
         beacon_lance::widen_table(
             &warehouse,
             &lance.definition().location,
             &mapping.new_columns,
-            &mapping.type_changes,
+            &mapping.widen_sources(),
+            widening.strategy.as_ref(),
         )
         .await?;
         let fresh = lance
@@ -409,7 +430,8 @@ impl fmt::Display for ByNameMapping {
         }
         let groups: Vec<String> = [
             ("add", add),
-            ("widen", widen),
+            // Execution checks and recomputes each change under the lock.
+            ("planned widen", widen),
             ("cast", cast),
             ("null", null),
         ]
@@ -650,7 +672,11 @@ mod tests {
             vec![("c".to_string(), DataType::Int64)]
         );
         assert_eq!(mapping.columns, vec![ColumnSource::Source { index: 0 }]);
-        assert_eq!(mapping.to_string(), "widen=[c: Int32 -> Int64]");
+        assert_eq!(mapping.to_string(), "planned widen=[c: Int32 -> Int64]");
+        assert_eq!(
+            mapping.widen_sources(),
+            vec![("c".to_string(), DataType::Int64)]
+        );
 
         // A table that does not widen keeps its type: a strict cast.
         let kept = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap();
