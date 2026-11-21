@@ -82,6 +82,22 @@ pub async fn create_lance_table(
     Ok(LanceTable::new(definition, schema, warehouse))
 }
 
+/// No Lance dataset is at the location of an external table that has no column list.
+#[derive(Debug)]
+pub struct MissingDataset(pub String);
+
+impl std::fmt::Display for MissingDataset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "No Lance dataset at '{}'; add a column list to create one",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for MissingDataset {}
+
 /// Open or create the external Lance dataset at `uri` for `definition`.
 ///
 /// An existing dataset gives its schema from the manifest. A missing dataset is
@@ -111,10 +127,7 @@ pub async fn open_external_lance_table(
         "Lance external tables take their columns from the dataset; remove the column list";
     let schema = match (existing, create_schema) {
         (Some(_), Some(_)) => anyhow::bail!(COLUMN_LIST_ERROR),
-        (None, None) => anyhow::bail!(
-            "No Lance dataset at '{}'; add a column list to create one",
-            definition.location
-        ),
+        (None, None) => return Err(MissingDataset(definition.location).into()),
         (Some(dataset), None) => {
             lance::datafusion::LanceTableProvider::new(dataset, false, false).schema()
         }

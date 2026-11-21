@@ -540,6 +540,9 @@ async fn register_schema_provider(
         .ok_or(anyhow::anyhow!("Failed to get catalog 'beacon'"))?
         .register_schema("public", schema_provider.clone())?;
 
+    // The object-store registry keeps the first store it builds, so the secrets load before any table.
+    load_persisted_secrets_into_store(session_ctx).await;
+
     // User functions can call plugin functions, so the plugins load first.
     let registry = session_ctx
         .state()
@@ -559,8 +562,6 @@ async fn register_schema_provider(
         &DEFAULT_DB_STORE_URL_OBJECT_URL,
     )
     .await?;
-
-    load_persisted_secrets_into_store(session_ctx).await;
 
     Ok(())
 }

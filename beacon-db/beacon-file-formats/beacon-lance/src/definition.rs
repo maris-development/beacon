@@ -22,9 +22,9 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::open_external_lance_table;
 use crate::provider::LanceTable;
 use crate::warehouse::LanceWarehouse;
+use crate::{MissingDataset, open_external_lance_table};
 
 /// Persisted configuration for a Lance table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,7 +167,16 @@ impl TableDefinition for LanceTableDefinition {
         let warehouse = warehouse(&context)?;
         if self.external {
             let uri = resolve_external_lance_uri(&context, &self.location)?;
-            let table = open_external_lance_table(warehouse, self.clone(), uri, None).await?;
+            let table = open_external_lance_table(warehouse, self.clone(), uri, None)
+                .await
+                .map_err(|error| match error.downcast_ref::<MissingDataset>() {
+                    Some(_) => anyhow::anyhow!(
+                        "Lance dataset '{}' of table '{}' is missing",
+                        self.location,
+                        self.name
+                    ),
+                    None => error,
+                })?;
             return Ok(Arc::new(table));
         }
         let table = LanceTable::open(self.clone(), warehouse).await?;
@@ -236,6 +245,35 @@ mod tests {
         let definition = LanceTableDefinition::new("t", vec!["beacon".into()], "db:///t.lance");
         let value = serde_json::to_value(&definition).unwrap();
         assert!(value.get("options").is_none());
+    }
+
+    /// A registered table whose dataset another tool deleted names the table.
+    #[tokio::test]
+    async fn missing_dataset_of_a_registered_table() {
+        use std::sync::Arc;
+
+        use datafusion::prelude::{SessionConfig, SessionContext};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+        let warehouse = Arc::new(crate::LanceWarehouse::new(store));
+        let context = Arc::new(SessionContext::new_with_config(
+            SessionConfig::new().with_extension(warehouse),
+        ));
+        let location = url::Url::from_directory_path(dir.path())
+            .unwrap()
+            .join("gone.lance")
+            .unwrap()
+            .to_string();
+        let mut definition = LanceTableDefinition::new("t", vec![], location.clone());
+        definition.external = true;
+
+        let error = definition.build_provider(context).await.err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            format!("Lance dataset '{location}' of table 't' is missing")
+        );
     }
 
     #[test]

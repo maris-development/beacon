@@ -1721,7 +1721,6 @@ impl Runtime {
     }
 }
 
-
 #[cfg(test)]
 mod insert_by_name_tests {
     use super::test_support::{test_runtime, TestRt};

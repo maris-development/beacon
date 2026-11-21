@@ -102,3 +102,5 @@ flate2 = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Unpacks the zipped Zarr stores that the zarr output format returns.
 zip = { workspace = true }
+# Serves the small S3 store of the Lance secret test.
+axum = { workspace = true }

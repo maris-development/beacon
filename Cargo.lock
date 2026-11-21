@@ -1237,6 +1237,7 @@ dependencies = [
  "arrow",
  "async-stream",
  "async-trait",
+ "axum",
  "base64",
  "beacon-arrow-atlas",
  "beacon-arrow-csv",

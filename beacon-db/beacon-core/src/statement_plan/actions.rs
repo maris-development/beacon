@@ -475,6 +475,14 @@ async fn create_lance_external_table(
         cmd.order_exprs.is_empty(),
         "STORED AS LANCE does not support WITH ORDER"
     );
+    anyhow::ensure!(
+        cmd.column_defaults.is_empty(),
+        "STORED AS LANCE does not support DEFAULT values"
+    );
+    anyhow::ensure!(
+        cmd.constraints.is_empty(),
+        "STORED AS LANCE does not support PRIMARY KEY or UNIQUE"
+    );
     let mut definition = beacon_lance::LanceTableDefinition::new(
         cmd.name.to_string(),
         beacon_lance::beacon_namespace(),

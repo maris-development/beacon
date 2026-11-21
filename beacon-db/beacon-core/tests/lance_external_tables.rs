@@ -164,6 +164,33 @@ async fn partitioned_by_fails() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn defaults_and_constraints_fail() {
+    let rt = common::runtime("lance-ext-defaults").await;
+    for (columns, message) in [
+        (
+            "id BIGINT DEFAULT 1",
+            "STORED AS LANCE does not support DEFAULT values",
+        ),
+        (
+            "id BIGINT PRIMARY KEY",
+            "STORED AS LANCE does not support PRIMARY KEY or UNIQUE",
+        ),
+        (
+            "id BIGINT, UNIQUE (id)",
+            "STORED AS LANCE does not support PRIMARY KEY or UNIQUE",
+        ),
+    ] {
+        let error = error_of(
+            &rt,
+            &format!("CREATE EXTERNAL TABLE t ({columns}) STORED AS LANCE LOCATION '{LOCATION}'"),
+        )
+        .await;
+        assert_eq!(error, visible(message), "{columns}");
+    }
+    assert!(!dataset_dir(&rt).exists(), "nothing is created");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn create_with_columns_then_read_write() {
     let rt = common::runtime("lance-ext-rw").await;
     create_with_columns(&rt, "t").await;
