@@ -169,7 +169,7 @@ again. This costs I/O and storage for the full column. A large table makes this 
 
 - Lance changes a type only inside one type family. `INT` to `BIGINT` and `FLOAT` to `DOUBLE` are
   examples. Other families are time to time, text to text, binary to binary and decimal to decimal.
-- A query column of a different family is an error before a change. A `DOUBLE` query column into a
+- A wider type of a different family is an error before a change. A `DOUBLE` query column into a
   `BIGINT` Lance column is an example. The error is `Lance cannot change column ...`.
 - To prevent this error, cast the query column to the table type with `CAST` in the select list.
 - A column with an index cannot change its type. The statement fails before a change. Drop the index
@@ -182,7 +182,9 @@ again. This costs I/O and storage for the full column. A large table makes this 
 Beacon adds the new columns first. Then it changes the types. Then it writes the rows. Each step is a
 different Lance version:
 
-- If the type change fails, the new columns stay. The types do not change.
+- Beacon examines the indexes and the type families before all changes. The index error and the
+  `Lance cannot change column` error leave the table without a change.
+- If Lance fails to change the types, the new columns stay. The types do not change.
 - If the write of the rows fails, the new columns and the new types stay in the table.
 
 The new columns hold only `NULL`. Remove them with `ALTER TABLE ... DROP COLUMN` if necessary.
