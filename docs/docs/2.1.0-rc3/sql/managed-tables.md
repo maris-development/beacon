@@ -94,9 +94,12 @@ keep the whole query result in memory.
 
 ### Match the columns
 
+- On a Lance table, Beacon first replaces each `.` in a query column name with `_`. See
+  [Dots in column names](#dots-in-column-names).
 - Beacon matches each name exactly. The match is case sensitive, so `Temp` and `temp` are two
   different columns.
-- Two query columns with the same name are an error.
+- Two query columns with the same name are an error. On a Lance table, this applies to the names
+  after the replacement.
 - A table column that the query does not have gets `NULL`.
 - A table column that is not nullable must be in the query. If not, the statement fails before a
   write.
@@ -110,31 +113,72 @@ columns in one step, before it writes the rows. A new column is nullable. The ro
 holds before the insert read `NULL` in that column. In the example above, `psal` becomes a new
 column.
 
-Lance does not accept a column name that contains a dot (`.`). Beacon refuses such a new column
-before it changes the table. Rename the column with `AS`, or remove it from the query.
-
 Only a Lance table adds columns. On another table type, a query column that is not in the table is an
 error. The error names the columns.
 
+### Dots in column names
+
+Lance does not accept a column name that contains a dot (`.`). On a Lance table, `BY NAME` replaces
+each `.` in a query column name with `_`. The query column `temp.units` becomes the Lance column
+`temp_units`. Beacon does not keep the old name.
+
+- The new name is the real column name in Lance. Use it in queries on the Lance table.
+- A later insert from the same source gives the same names. The columns match again.
+- Two query columns can get the same name, for example `a.b` and `a_b`. This is an error. Beacon
+  does not write a value to the wrong column.
+- On another table type, `BY NAME` does not change the names.
+
 ### Cast the values
 
-The type of the table column always wins. Beacon casts each query column with a different type to
-the type of the table column. Beacon never changes the type of a column that exists.
+The session type widening rule decides each cast. External file tables use the same rule to merge
+the schemas of their files. Two server variables set it:
+
+- `BEACON_TYPE_WIDENING_STRATEGY` is `default` or `numpy`.
+- `BEACON_TYPE_WIDENING_ON_CONFLICT` is `fail` or `keep_first`.
+
+See [Query engine](/docs/2.1.0-rc3/server/configuration#query-engine) for the full rule of each
+value. The `type_widening` keys of an external table do not change this rule.
+
+For each column, Beacon merges the type of the table column and the type of the query column with
+the rule. The result is the widening type:
+
+- The widening type is the table type. Beacon casts the query column to the table type.
+- The widening type is wider than the table type. On a Lance table, Beacon changes the table column
+  to the wider type before the insert. The rows that the table holds keep their values in the wider
+  type. On another table type, the column type does not change.
+- The two types are a conflict, and the rule is `fail`. The statement fails with the error of the
+  rule. The table does not change.
+- The two types are a conflict, and the rule is `keep_first`. The table type stays. A value that does
+  not cast becomes `NULL`.
+
+Know these rules:
 
 - Beacon examines each type pair before the insert starts. A pair that cannot cast is an error. The
   table does not change.
-- The cast is strict. A value that does not cast stops the statement with an error. Beacon never
-  changes a value to `NULL` without an error.
+- A cast is strict, except for a type pair that the rule casts leniently, as `keep_first` does. A
+  value that does not cast in a strict cast stops the statement with an error.
+- On a table that is not Lance, each cast is strict.
 - A cast to a smaller type can lose precision. A `DOUBLE` value in a `FLOAT` column is an example.
+
+### Change a column type
+
+A wider query type changes the type of the Lance column. Lance then writes all the data of that column
+again. This costs I/O and storage for the full column. A large table makes this cost high.
+
+- A column with an index cannot change its type. The statement fails before a change. Drop the index
+  with [`DROP INDEX`](#indexes) first. Create it again after the insert.
+- Lance must accept the type change. A change that Lance refuses is an error before a change.
+- To keep the column type, cast the query column to the table type with `CAST` in the query.
 
 ### Two table versions
 
-The new columns and the new rows are two Lance versions. If the write of the rows fails, the new
-columns stay in the table. They hold only `NULL`. Remove them with `ALTER TABLE ... DROP COLUMN` if
-necessary.
+The new columns and the type changes come before the rows. The rows are a different Lance version.
+If the write of the rows fails, the new columns and the new types stay in the table. The new columns
+hold only `NULL`. Remove them with `ALTER TABLE ... DROP COLUMN` if necessary.
 
-`EXPLAIN INSERT INTO ... BY NAME` shows how Beacon maps the columns. It does not add columns to the
-table. `EXPLAIN ANALYZE` does not accept `INSERT INTO ... BY NAME`.
+`EXPLAIN INSERT INTO ... BY NAME` shows how Beacon maps the columns. It shows the new columns and the
+type changes. It does not change the table. `EXPLAIN ANALYZE` does not accept
+`INSERT INTO ... BY NAME`.
 
 ### NetCDF sources
 
@@ -146,13 +190,17 @@ limits:
   Select the columns that share dimensions. Or set `read_dimensions` on the NetCDF table. See
   [NetCDF options](/docs/2.1.0-rc3/formats/netcdf#options).
 - [Attribute columns](/docs/2.1.0-rc3/formats/netcdf#variable-attributes) (`var.attr`) have a dot
-  in the name. Lance does not accept them as new columns, so `SELECT *` can fail for this reason
-  too. Leave them out of the select list, or rename them with `AS`:
+  in the name. `BY NAME` renames them in the Lance table: `temp.units` becomes `temp_units`. See
+  [Dots in column names](#dots-in-column-names). Select them as usual:
 
   ```sql
   INSERT INTO argo_lance BY NAME
-  SELECT platform, time, temp, "temp.units" AS temp_units FROM argo_netcdf;
+  SELECT platform, time, temp, "temp.units" FROM argo_netcdf;
   ```
+
+- Two files can give one variable two types. The NetCDF table merges them with its own
+  `type_widening` keys. A later insert can then bring a wider type. This changes the Lance column
+  type. See [Change a column type](#change-a-column-type).
 
 ### Errors
 
@@ -162,7 +210,9 @@ limits:
 | Column that is not nullable and is not in the query | `Column '<c>' is not nullable and the source does not have it` |
 | New columns on a table that is not Lance | `Table '<t>' does not have the columns <list>; only Lance tables add columns` |
 | Two query columns with the same name | `The source has the column '<c>' more than one time` |
-| New column names with a dot | `Lance does not accept the column names <list>; a name must not contain '.'. Rename them with AS` |
+| Type change of a column with an index | `Column '<c>' has the index '<i>'; drop it before BY NAME changes the type to <type>` |
+| Type change that Lance refuses | `Lance cannot change column '<c>' from <old type> to <new type>` |
+| Type conflict with the rule `fail` | The error text of the widening rule |
 | Write to a pinned Lance table | `Lance table '<name>' is pinned to version <n> and is read-only` |
 | Column list after the table name | `INSERT ... BY NAME does not take a column list` |
 | New columns added, but the table did not open again | `The columns are added to '<t>', but the table did not reload: <reason>` |
