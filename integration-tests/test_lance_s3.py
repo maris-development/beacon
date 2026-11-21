@@ -243,7 +243,8 @@ def test_insert_by_name_from_netcdf(lance_s3_client, seaweedfs_container):
         str(NETCDF_FIXTURE), BUCKET, f"nc_src/{NETCDF_FIXTURE.name}"
     )
     source, target = "s3_nc_src", "s3_nc_lance"
-    columns = "TEMP, PSAL, LATITUDE"
+    # Variables on the N_PROF dimension; the reader does not expose the N_LEVELS ones of this file.
+    columns = "LATITUDE, LONGITUDE, CYCLE_NUMBER"
     for name in (source, target):
         _drop(lance_s3_client, name)
     try:
@@ -255,14 +256,23 @@ def test_insert_by_name_from_netcdf(lance_s3_client, seaweedfs_container):
             "LOCATION 'nc_target.lance'",
             admin=True,
         )
-        expected = lance_s3_client.count(f"SELECT {columns} FROM {source}")
+        # Read the rows: count(*) prunes the projection, and the nd scan then builds another grid.
+        source_rows = sorted(lance_s3_client.sql_rows(f"SELECT {columns} FROM {source}")[1:])
+        expected = len(source_rows)
         assert expected > 0
+
+        # SELECT * brings attribute columns such as TEMP.units, which Lance refuses.
+        with pytest.raises(QueryError) as refused:
+            lance_s3_client.execute(f"INSERT INTO {target} BY NAME SELECT * FROM {source}", admin=True)
+        assert "a name must not contain '.'" in refused.value.body, refused.value.body
+        assert lance_s3_client.count(f"SELECT * FROM {target}") == 0
 
         lance_s3_client.execute(
             f"INSERT INTO {target} BY NAME SELECT {columns} FROM {source}", admin=True
         )
 
         assert lance_s3_client.count(f"SELECT * FROM {target}") == expected
+        assert sorted(lance_s3_client.sql_rows(f"SELECT {columns} FROM {target}")[1:]) == source_rows
         # The NetCDF variables became Lance columns; the source has no id.
         assert lance_s3_client.count(f"SELECT {columns} FROM {target} WHERE id IS NULL") == expected
     finally:
