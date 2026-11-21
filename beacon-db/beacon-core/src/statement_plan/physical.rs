@@ -1065,11 +1065,13 @@ impl InsertByNameExec {
         let lance = provider
             .downcast_ref::<beacon_lance::LanceTable>()
             .cloned();
+        let widening = beacon_datafusion_ext::type_widening::session_widening(&ctx.state());
         let mapping = insert_by_name::map_by_name(
             &child.schema(),
             &provider.schema(),
             lance.is_some(),
             &table.to_string(),
+            widening.strategy.as_ref(),
         )
         .map_err(plan_error)?;
         Ok(Self {
@@ -1130,10 +1132,10 @@ impl ExecutionPlan for InsertByNameExec {
         let session = upgrade_session(&self.session)?;
         let table = self.table.clone();
         let child = self.child.clone();
-        let new_columns = self.mapping.new_columns.clone();
+        let mapping = self.mapping.clone();
         let lance = self.lance.clone();
         Ok(forward_stream(count_arrow_schema(), async move {
-            insert_by_name::insert_by_name(&session, &table, child, &new_columns, lance.as_ref())
+            insert_by_name::insert_by_name(&session, &table, child, &mapping, lance.as_ref())
                 .await
                 .map_err(to_df_err)
         }))

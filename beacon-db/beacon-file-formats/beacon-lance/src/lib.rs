@@ -34,7 +34,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt};
 
-pub use alter::{SchemaChange, add_missing_columns, alter_table};
+pub use alter::{SchemaChange, add_missing_columns, alter_table, widen_table};
 pub use compact::{CompactOptions, CompactionReport, compact_table};
 pub use definition::LanceTableDefinition;
 pub use index::{

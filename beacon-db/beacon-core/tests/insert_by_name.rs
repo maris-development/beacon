@@ -129,8 +129,16 @@ async fn failed_cast_writes_nothing() {
     rt.sql("CREATE TABLE t (a BIGINT)").await;
     rt.sql("INSERT INTO t VALUES (1)").await;
 
-    let result = rt.try_sql("INSERT INTO t BY NAME SELECT 'abc' AS a").await;
-    assert!(result.is_err(), "a value that does not cast must fail");
+    let error = rt
+        .try_sql("INSERT INTO t BY NAME SELECT 'abc' AS a")
+        .await
+        .expect_err("a string does not go into a BIGINT column");
+    assert!(
+        error
+            .to_string()
+            .contains("Incompatible types for field 'a'"),
+        "{error}"
+    );
     assert_eq!(count(&rt, "t").await, 1);
 }
 
@@ -283,9 +291,9 @@ async fn non_lance_target_rejects_extra_columns() {
     assert_eq!(count(&rt, "dt").await, 3);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn netcdf_source_merges() {
-    let rt = runtime("by-name-netcdf").await;
+/// Write `nc/a.nc` (`temp`) and `nc/b.nc` (`psal`), and create the external
+/// table `nc` over them and the managed Lance table `lance_t (id BIGINT)`.
+async fn netcdf_fixture(rt: &TestRuntime) {
     rt.sql(
         "COPY (SELECT CAST(column1 AS DOUBLE) AS temp FROM (VALUES (1), (2))) \
          TO 'tmp:///a.nc' STORED AS NC",
@@ -305,18 +313,34 @@ async fn netcdf_source_merges() {
     rt.sql("CREATE EXTERNAL TABLE nc STORED AS NC LOCATION 'nc/*.nc'")
         .await;
     rt.sql("CREATE TABLE lance_t (id BIGINT)").await;
+}
 
-    // `SELECT *` also gives the attribute columns, such as `temp._FillValue`.
-    let error = rt
-        .try_sql("INSERT INTO lance_t BY NAME SELECT * FROM nc")
-        .await
-        .expect_err("Lance refuses dotted column names");
-    assert!(
-        error
-            .to_string()
-            .contains("Lance does not accept the column names"),
-        "{error}"
-    );
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_attribute_columns_are_renamed() {
+    let rt = runtime("by-name-netcdf-attributes").await;
+    netcdf_fixture(&rt).await;
+    let source = columns(&rt, "nc").await;
+    assert!(source.iter().any(|n| n.contains('.')), "{source:?}");
+
+    let result = rt.sql("INSERT INTO lance_t BY NAME SELECT * FROM nc").await;
+    assert_eq!(inserted(&result), 5);
+    let names = columns(&rt, "lance_t").await;
+    for name in &source {
+        let renamed = name.replace('.', "_");
+        assert!(names.contains(&renamed), "{renamed} in {names:?}");
+    }
+    assert!(names.iter().all(|n| !n.contains('.')), "{names:?}");
+
+    // The next insert gets the same names, so no column is added.
+    rt.sql("INSERT INTO lance_t BY NAME SELECT * FROM nc").await;
+    assert_eq!(columns(&rt, "lance_t").await, names);
+    assert_eq!(count(&rt, "lance_t").await, 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn netcdf_source_merges() {
+    let rt = runtime("by-name-netcdf").await;
+    netcdf_fixture(&rt).await;
 
     let result = rt
         .sql("INSERT INTO lance_t BY NAME SELECT temp, psal FROM nc")
@@ -340,35 +364,183 @@ async fn netcdf_source_merges() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn dotted_new_column_is_refused_at_plan_time() {
-    let rt = restartable_runtime("by-name-dotted", |b| b).await;
+async fn dotted_names_are_renamed() {
+    let rt = runtime("by-name-dotted").await;
     rt.sql("CREATE TABLE t (a BIGINT)").await;
 
-    let expected = "Lance does not accept the column names 'x.y', 'p.q'; \
-                    a name must not contain '.'. Rename them with AS";
-    for sql in [
-        "INSERT INTO t BY NAME SELECT 1 AS a, 2 AS \"x.y\", 3 AS z, 4 AS \"p.q\"",
-        "EXPLAIN INSERT INTO t BY NAME SELECT 1 AS a, 2 AS \"x.y\", 3 AS z, 4 AS \"p.q\"",
-    ] {
-        let error = rt.try_sql(sql).await.expect_err("dotted names are refused");
-        assert!(error.to_string().contains(expected), "{error}");
-    }
+    rt.sql("INSERT INTO t BY NAME SELECT 1 AS a, 2 AS \"x.y\"")
+        .await;
+    assert_eq!(columns(&rt, "t").await, vec!["a", "x_y"]);
+    rt.sql("INSERT INTO t BY NAME SELECT 3 AS \"x.y\"").await;
+    let batches = rt.sql("SELECT x_y FROM t ORDER BY x_y").await;
+    let x_y = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!((x_y.value(0), x_y.value(1)), (2, 3));
+
+    let error = rt
+        .try_sql("INSERT INTO t BY NAME SELECT 4 AS \"x.y\", 5 AS x_y")
+        .await
+        .expect_err("two source columns get one name");
+    assert!(
+        error
+            .to_string()
+            .contains("The source has the column 'x_y' more than one time"),
+        "{error}"
+    );
+    assert_eq!(count(&rt, "t").await, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn int32_column_widens_to_int64() {
+    let rt = restartable_runtime("by-name-widen-int", |b| b).await;
+    rt.sql("CREATE TABLE t (c INT)").await;
+    rt.sql("INSERT INTO t VALUES (1)").await;
+
+    rt.sql("INSERT INTO t BY NAME SELECT CAST(3000000000 AS BIGINT) AS c")
+        .await;
 
     let rt = rt.restart().await;
-    assert_eq!(columns(&rt, "t").await, vec!["a"]);
+    assert_eq!(
+        schema(&rt, "t").await.field(0).data_type(),
+        &DataType::Int64
+    );
+    let batches = rt.sql("SELECT c FROM t ORDER BY c").await;
+    let c = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!((c.value(0), c.value(1)), (1, 3_000_000_000));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn float32_widens_to_float64() {
+    let rt = runtime("by-name-widen-float").await;
+    rt.sql("CREATE TABLE t (c REAL)").await;
+    rt.sql("INSERT INTO t VALUES (1.5)").await;
+
+    rt.sql("INSERT INTO t BY NAME SELECT CAST(0.1 AS DOUBLE) AS c")
+        .await;
+
+    assert_eq!(
+        schema(&rt, "t").await.field(0).data_type(),
+        &DataType::Float64
+    );
+    let batches = rt.sql("SELECT c FROM t ORDER BY c").await;
+    let c = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!((c.value(0), c.value(1)), (0.1, 1.5));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn type_change_with_index_fails_before_change() {
+    let rt = runtime("by-name-widen-index").await;
+    rt.sql("CREATE TABLE t (c INT, d BIGINT)").await;
+    rt.sql("INSERT INTO t VALUES (1, 1)").await;
+    rt.sql("CREATE INDEX ON t (c)").await;
+
+    let error = rt
+        .try_sql("INSERT INTO t BY NAME SELECT CAST(3000000000 AS BIGINT) AS c, 2 AS z")
+        .await
+        .expect_err("an index blocks the type change");
+    assert!(
+        error.to_string().contains(
+            "Column 'c' has the index 't_c_idx'; drop it before BY NAME changes the type to Int64"
+        ),
+        "{error}"
+    );
+    assert_eq!(columns(&rt, "t").await, vec!["c", "d"]);
+    assert_eq!(
+        schema(&rt, "t").await.field(0).data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(count(&rt, "t").await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn type_change_that_lance_refuses_fails_before_change() {
+    let rt = runtime("by-name-widen-refused").await;
+    rt.sql("CREATE TABLE t (c BIGINT)").await;
+    rt.sql("INSERT INTO t VALUES (1)").await;
+
+    let error = rt
+        .try_sql("INSERT INTO t BY NAME SELECT 1.5 AS c, 2 AS z")
+        .await
+        .expect_err("Lance does not change an integer to a float");
+    assert!(
+        error
+            .to_string()
+            .contains("Lance cannot change column 'c' from Int64 to Float64"),
+        "{error}"
+    );
+    assert_eq!(columns(&rt, "t").await, vec!["c"]);
+    assert_eq!(count(&rt, "t").await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_lance_target_keeps_type() {
+    let rt = runtime("by-name-delta-type").await;
+    let location = write_delta(rt.datasets_dir(), "delta_keeps_type").await;
+    rt.sql(&format!(
+        "CREATE EXTERNAL TABLE dt STORED AS DELTA LOCATION '{location}'"
+    ))
+    .await;
+
+    rt.sql("INSERT INTO dt BY NAME SELECT CAST(7 AS BIGINT) AS id")
+        .await;
+    assert_eq!(count(&rt, "dt").await, 3);
+    assert_eq!(
+        schema(&rt, "dt").await.field(0).data_type(),
+        &DataType::Int32
+    );
+
+    let result = rt
+        .try_sql("INSERT INTO dt BY NAME SELECT CAST(3000000000 AS BIGINT) AS id")
+        .await;
+    assert!(
+        result.is_err(),
+        "a strict cast fails on a value out of range"
+    );
+    assert_eq!(count(&rt, "dt").await, 3);
+    assert_eq!(
+        schema(&rt, "dt").await.field(0).data_type(),
+        &DataType::Int32
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_shows_type_changes() {
+    let rt = runtime("by-name-explain-widen").await;
+    rt.sql("CREATE TABLE t (c INT)").await;
+
+    let batches = rt
+        .sql("EXPLAIN INSERT INTO t BY NAME SELECT CAST(1 AS BIGINT) AS c")
+        .await;
+    let plan = column_strings(&batches, 1).join("\n");
+    assert!(plan.contains("widen=[c: Int32 -> Int64]"), "{plan}");
+    assert_eq!(
+        schema(&rt, "t").await.field(0).data_type(),
+        &DataType::Int32
+    );
     assert_eq!(count(&rt, "t").await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_append_keeps_the_new_columns() {
     let rt = runtime("by-name-failed-append").await;
-    rt.sql("CREATE TABLE t (a BIGINT)").await;
+    rt.sql("CREATE TABLE t (a BIGINT NOT NULL)").await;
     rt.sql("INSERT INTO t VALUES (1)").await;
 
     let result = rt
-        .try_sql("INSERT INTO t BY NAME SELECT 'abc' AS a, 2 AS z")
+        .try_sql("INSERT INTO t BY NAME SELECT CAST(NULL AS BIGINT) AS a, 2 AS z")
         .await;
-    assert!(result.is_err(), "'abc' does not cast to BIGINT");
+    assert!(result.is_err(), "a NULL does not go into a NOT NULL column");
 
     // The widening is its own version; the append writes no rows.
     assert_eq!(columns(&rt, "t").await, vec!["a", "z"]);

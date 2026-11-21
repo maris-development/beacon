@@ -7,9 +7,12 @@
 
 use std::sync::Arc;
 
+use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::{ColumnAlteration, NewColumnTransform};
+use lance::index::DatasetIndexExt;
+use lance_file::version::ConcreteFileVersion;
 
 use crate::io::lance_compatible_type;
 use crate::warehouse::LanceWarehouse;
@@ -99,6 +102,25 @@ pub async fn add_missing_columns(
     uri: &str,
     fields: &[Field],
 ) -> anyhow::Result<Vec<String>> {
+    widen_table(warehouse, uri, fields, &[]).await
+}
+
+/// Add the `new_columns` that the Lance table at `uri` does not have yet, then
+/// change each column of `type_changes` to its new type. Returns the added
+/// names.
+///
+/// The latest version is read under the write lock. A column that another
+/// insert added or changed already is skipped. Every type change is checked
+/// before the first change: a column with an index, or a type change that
+/// Lance refuses, gives an error and the table stays as it is. When another
+/// process changes the dataset at the same time, the dataset is read again
+/// once.
+pub async fn widen_table(
+    warehouse: &LanceWarehouse,
+    uri: &str,
+    new_columns: &[Field],
+    type_changes: &[(String, DataType)],
+) -> anyhow::Result<Vec<String>> {
     let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
 
@@ -109,34 +131,127 @@ pub async fn add_missing_columns(
             .load()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
-        let missing: Vec<Field> = fields
+        let missing: Vec<Field> = new_columns
             .iter()
-            .filter(|field| {
-                !dataset
-                    .schema()
-                    .fields
-                    .iter()
-                    .any(|existing| &existing.name == field.name())
-            })
+            .filter(|field| dataset.schema().field(field.name()).is_none())
             .map(|field| Field::new(field.name(), lance_compatible_type(field.data_type()), true))
             .collect();
-        if missing.is_empty() {
+        let casts = pending_type_changes(&dataset, type_changes).await?;
+        if missing.is_empty() && casts.is_empty() {
             return Ok(Vec::new());
         }
         let names: Vec<String> = missing.iter().map(|f| f.name().clone()).collect();
-        tracing::info!(uri = %uri, columns = ?names, "adding Lance columns");
 
-        let schema = Arc::new(ArrowSchema::new(missing));
-        match dataset
-            .add_columns(NewColumnTransform::AllNulls(schema), None, None)
-            .await
-        {
-            Ok(()) => return Ok(names),
-            Err(e) if !retried && is_concurrent_change(&e) => retried = true,
-            Err(e) => {
-                anyhow::bail!("Failed to add the columns {names:?} to '{uri}': {e}")
+        let result = async {
+            if !missing.is_empty() {
+                tracing::info!(uri = %uri, columns = ?names, "adding Lance columns");
+                let schema = Arc::new(ArrowSchema::new(missing));
+                dataset
+                    .add_columns(NewColumnTransform::AllNulls(schema), None, None)
+                    .await
+                    .map_err(|e| ("add the columns", e))?;
             }
+            if !casts.is_empty() {
+                tracing::info!(uri = %uri, columns = casts.len(), "changing Lance column types");
+                dataset
+                    .alter_columns(&casts)
+                    .await
+                    .map_err(|e| ("change the column types of", e))?;
+            }
+            Ok::<_, (&str, lance::Error)>(())
         }
+        .await;
+        match result {
+            Ok(()) => return Ok(names),
+            Err((_, e)) if !retried && is_concurrent_change(&e) => retried = true,
+            Err((action, e)) => anyhow::bail!("Failed to {action} '{uri}': {e}"),
+        }
+    }
+}
+
+/// The alterations for the `type_changes` that `dataset` still needs. Errors
+/// when a changing column has an index or Lance refuses the new type.
+async fn pending_type_changes(
+    dataset: &lance::Dataset,
+    type_changes: &[(String, DataType)],
+) -> anyhow::Result<Vec<ColumnAlteration>> {
+    let version = dataset.manifest().data_storage_format.lance_file_format();
+    let mut pending = Vec::new();
+    for (name, data_type) in type_changes {
+        let data_type = lance_compatible_type(data_type);
+        let field = dataset
+            .schema()
+            .field(name)
+            .ok_or_else(|| anyhow::anyhow!("The Lance table does not have the column '{name}'"))?;
+        let current = field.data_type();
+        if current.equals_datatype(&data_type) {
+            continue;
+        }
+        if !lance_accepts_cast(&current, &data_type, version) {
+            anyhow::bail!("Lance cannot change column '{name}' from {current} to {data_type}");
+        }
+        pending.push((field.id, name, data_type));
+    }
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let indices = dataset
+        .load_indices()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to load the indexes: {e}"))?;
+    for (id, name, data_type) in &pending {
+        if let Some(index) = indices.iter().find(|index| index.fields.contains(id)) {
+            anyhow::bail!(
+                "Column '{name}' has the index '{}'; drop it before BY NAME changes the type to {data_type}",
+                index.name
+            );
+        }
+    }
+    Ok(pending
+        .into_iter()
+        .map(|(_, name, data_type)| ColumnAlteration::new(name.clone()).cast_to(data_type))
+        .collect())
+}
+
+/// `true` when Lance `alter_columns` accepts a cast from `from` to `to` on a
+/// dataset with the data file `version`. The same rule as in Lance.
+fn lance_accepts_cast(from: &DataType, to: &DataType, version: ConcreteFileVersion) -> bool {
+    can_cast_types(from, to)
+        && is_upcast_downcast(from, to, !matches!(version, ConcreteFileVersion::V1))
+}
+
+/// The type pairs that Lance can rewrite: one family for each pair.
+fn is_upcast_downcast(from: &DataType, to: &DataType, dictionary_materialization: bool) -> bool {
+    use DataType::*;
+    match (from, to) {
+        (_, Dictionary(_, _)) if !dictionary_materialization => false,
+        (Dictionary(_, from_value), _) => {
+            is_upcast_downcast(from_value, to, dictionary_materialization)
+        }
+        (_, Dictionary(_, to_value)) => {
+            is_upcast_downcast(from, to_value, dictionary_materialization)
+        }
+        (from, to) if from.is_integer() => to.is_integer(),
+        (from, to) if from.is_floating() => to.is_floating(),
+        (from, to) if from.is_temporal() => to.is_temporal(),
+        (Boolean, to) => matches!(to, Boolean),
+        (Utf8 | LargeUtf8, to) => matches!(to, Utf8 | LargeUtf8),
+        (Binary | LargeBinary, to) => matches!(to, Binary | LargeBinary),
+        (Decimal128(_, _) | Decimal256(_, _), to) => {
+            matches!(to, Decimal128(_, _) | Decimal256(_, _))
+        }
+        (List(from_field) | LargeList(from_field) | FixedSizeList(from_field, _), to) => match to {
+            List(to_field) | LargeList(to_field) | FixedSizeList(to_field, _) => {
+                is_upcast_downcast(
+                    from_field.data_type(),
+                    to_field.data_type(),
+                    dictionary_materialization,
+                )
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -196,5 +311,63 @@ mod tests {
             .map(|f| f.name.as_str())
             .collect();
         assert_eq!(names, vec!["a", "x"]);
+    }
+
+    #[tokio::test]
+    async fn widen_table_adds_then_changes_types() {
+        let warehouse = LanceWarehouse::new(Arc::new(InMemory::new()));
+        let uri = warehouse.table_uri(&crate::beacon_namespace(), "t");
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int64, true),
+        ]));
+        crate::io::write_stream(
+            &uri,
+            warehouse.session(),
+            crate::io::empty_stream(schema),
+            crate::io::WriteKind::Create,
+        )
+        .await
+        .unwrap();
+        let open = || async {
+            DatasetBuilder::from_uri(&uri)
+                .with_session(warehouse.session())
+                .load()
+                .await
+                .unwrap()
+        };
+
+        let refused = widen_table(
+            &warehouse,
+            &uri,
+            &[Field::new("x", DataType::Utf8, true)],
+            &[
+                ("a".to_string(), DataType::Int64),
+                ("b".to_string(), DataType::Float64),
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "Lance cannot change column 'b' from Int64 to Float64"
+        );
+        assert_eq!(open().await.schema().fields.len(), 2, "nothing changed");
+
+        let added = widen_table(
+            &warehouse,
+            &uri,
+            &[Field::new("x", DataType::Utf8, true)],
+            &[("a".to_string(), DataType::Int64)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(added, vec!["x".to_string()]);
+        let dataset = open().await;
+        assert_eq!(
+            dataset.schema().field("a").unwrap().data_type(),
+            DataType::Int64
+        );
+        assert!(dataset.schema().field("x").is_some());
     }
 }
