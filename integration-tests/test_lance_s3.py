@@ -265,19 +265,6 @@ def test_insert_by_name_from_netcdf(lance_s3_client, seaweedfs_container):
         expected = len(source_rows)
         assert expected > 0
 
-        # SELECT * brings attribute columns such as TEMP.units, which Lance refuses.
-        with pytest.raises(QueryError) as refused:
-            lance_s3_client.execute(f"INSERT INTO {target} BY NAME SELECT * FROM {source}", admin=True)
-        body = refused.value.body
-        for part in (
-            "Lance does not accept the column names",
-            "TEMP.units",
-            "a name must not contain '.'",
-            "Rename them with AS",
-        ):
-            assert part in body, body
-        assert lance_s3_client.count(f"SELECT * FROM {target}") == 0
-
         lance_s3_client.execute(
             f"INSERT INTO {target} BY NAME SELECT {columns} FROM {source}", admin=True
         )
@@ -286,6 +273,24 @@ def test_insert_by_name_from_netcdf(lance_s3_client, seaweedfs_container):
         assert sorted(lance_s3_client.sql_rows(f"SELECT {columns} FROM {target}")[1:]) == source_rows
         # The NetCDF variables became Lance columns; the source has no id.
         assert lance_s3_client.count(f"SELECT {columns} FROM {target} WHERE id IS NULL") == expected
+
+        # SELECT * also brings attribute columns such as TEMP.units; Lance stores them as TEMP_units.
+        star_rows = len(lance_s3_client.sql_rows(f"SELECT * FROM {source}")) - 1
+        assert star_rows > 0
+        uri = _dataset_uri(seaweedfs_container, "nc_target.lance")
+        options = _storage_options(seaweedfs_container)
+        lance_s3_client.execute(f"INSERT INTO {target} BY NAME SELECT * FROM {source}", admin=True)
+
+        names = lance.dataset(uri, storage_options=options).schema.names
+        assert {"TEMP_units", "LATITUDE_units", "CYCLE_NUMBER_long_name"} <= set(names), names
+        assert not [n for n in names if "." in n], names
+        assert lance_s3_client.count(f"SELECT * FROM {target}") == expected + star_rows
+        assert lance_s3_client.count(f'SELECT "TEMP_units" FROM {target}') == expected + star_rows
+
+        # A second SELECT * matches the renamed columns and adds none.
+        lance_s3_client.execute(f"INSERT INTO {target} BY NAME SELECT * FROM {source}", admin=True)
+        assert lance.dataset(uri, storage_options=options).schema.names == names
+        assert lance_s3_client.count(f"SELECT * FROM {target}") == expected + 2 * star_rows
     finally:
         for name in (target, source):
             _drop(lance_s3_client, name)
