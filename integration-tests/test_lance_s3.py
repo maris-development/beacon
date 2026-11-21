@@ -77,7 +77,11 @@ def _boto_client(endpoint: str):
 
 def _check_conditional_put(client) -> None:
     """Fail the module when a second ``If-None-Match: *`` PUT on one key succeeds."""
-    client.put_object(Bucket=BUCKET, Key=PROBE_KEY, Body=b"first", IfNoneMatch="*")
+    try:
+        client.put_object(Bucket=BUCKET, Key=PROBE_KEY, Body=b"first", IfNoneMatch="*")
+    except ClientError as exc:
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        pytest.fail(f"{CONDITIONAL_PUT_MESSAGE} (first PUT gave HTTP {status}: {exc})")
     try:
         client.put_object(Bucket=BUCKET, Key=PROBE_KEY, Body=b"second", IfNoneMatch="*")
     except ClientError as exc:
@@ -114,31 +118,31 @@ def seaweedfs_container(docker_network):
 
     def _fail(message: str):
         logs = _run(["docker", "logs", S3_CONTAINER])
-        _run(["docker", "rm", "-f", S3_CONTAINER])
         pytest.fail(f"{message}\n{logs.stdout}\n{logs.stderr}")
 
-    host_endpoint = f"http://127.0.0.1:{_resolve_host_port(S3_CONTAINER, S3_PORT)}"
-    client = _boto_client(host_endpoint)
+    # Any failure before the yield removes the container; teardown does not run then.
+    try:
+        host_endpoint = f"http://127.0.0.1:{_resolve_host_port(S3_CONTAINER, S3_PORT)}"
+        client = _boto_client(host_endpoint)
 
-    # Ready when the gateway answers an authenticated request.
-    deadline = time.time() + 120
-    while time.time() < deadline:
+        # Ready when the gateway answers an authenticated request.
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                client.list_buckets()
+                break
+            except (BotoCoreError, ClientError):
+                time.sleep(2)
+        else:
+            _fail("seaweedfs did not become ready:")
+
         try:
-            client.list_buckets()
-            break
-        except (BotoCoreError, ClientError):
-            time.sleep(2)
-    else:
-        _fail("seaweedfs did not become ready:")
+            client.create_bucket(Bucket=BUCKET)
+        except (BotoCoreError, ClientError) as exc:
+            _fail(f"making the bucket failed: {exc}")
 
-    try:
-        client.create_bucket(Bucket=BUCKET)
-    except (BotoCoreError, ClientError) as exc:
-        _fail(f"making the bucket failed: {exc}")
-
-    try:
         _check_conditional_put(client)
-    except pytest.fail.Exception:
+    except BaseException:
         _run(["docker", "rm", "-f", S3_CONTAINER])
         raise
 
@@ -243,7 +247,7 @@ def test_insert_by_name_from_netcdf(lance_s3_client, seaweedfs_container):
         str(NETCDF_FIXTURE), BUCKET, f"nc_src/{NETCDF_FIXTURE.name}"
     )
     source, target = "s3_nc_src", "s3_nc_lance"
-    # Variables on the N_PROF dimension; the reader does not expose the N_LEVELS ones of this file.
+    # The reader drops the 2-D N_LEVELS variables and counts the DATE_TIME string dimension.
     columns = "LATITUDE, LONGITUDE, CYCLE_NUMBER"
     for name in (source, target):
         _drop(lance_s3_client, name)
@@ -264,7 +268,14 @@ def test_insert_by_name_from_netcdf(lance_s3_client, seaweedfs_container):
         # SELECT * brings attribute columns such as TEMP.units, which Lance refuses.
         with pytest.raises(QueryError) as refused:
             lance_s3_client.execute(f"INSERT INTO {target} BY NAME SELECT * FROM {source}", admin=True)
-        assert "a name must not contain '.'" in refused.value.body, refused.value.body
+        body = refused.value.body
+        for part in (
+            "Lance does not accept the column names",
+            "TEMP.units",
+            "a name must not contain '.'",
+            "Rename them with AS",
+        ):
+            assert part in body, body
         assert lance_s3_client.count(f"SELECT * FROM {target}") == 0
 
         lance_s3_client.execute(
@@ -307,18 +318,23 @@ def test_delete_update_on_s3(lance_s3_client, seaweedfs_container):
 def test_drop_keeps_objects(lance_s3_client, seaweedfs_container):
     name = "s3_drop"
     _drop(lance_s3_client, name)
-    lance_s3_client.execute(
-        f"CREATE EXTERNAL TABLE {name} (id BIGINT) STORED AS LANCE LOCATION 'drop.lance'",
-        admin=True,
-    )
-    lance_s3_client.execute(f"INSERT INTO {name} VALUES (1), (2)", admin=True)
-    before = set(_keys(seaweedfs_container, "drop.lance/"))
-    assert before
+    try:
+        lance_s3_client.execute(
+            f"CREATE EXTERNAL TABLE {name} (id BIGINT) STORED AS LANCE LOCATION 'drop.lance'",
+            admin=True,
+        )
+        lance_s3_client.execute(f"INSERT INTO {name} VALUES (1), (2)", admin=True)
+        before = set(_keys(seaweedfs_container, "drop.lance/"))
+        assert before
 
-    lance_s3_client.execute(f"DROP TABLE {name}", admin=True)
+        lance_s3_client.execute(f"DROP TABLE {name}", admin=True)
 
-    after = set(_keys(seaweedfs_container, "drop.lance/"))
-    assert before <= after, f"DROP TABLE removed objects: {sorted(before - after)}"
+        with pytest.raises(QueryError):
+            lance_s3_client.sql_rows(f"SELECT * FROM {name}")
+        after = set(_keys(seaweedfs_container, "drop.lance/"))
+        assert before <= after, f"DROP TABLE removed objects: {sorted(before - after)}"
+    finally:
+        _drop(lance_s3_client, name)
 
 
 def test_pylance_round_trip(lance_s3_client, seaweedfs_container):
@@ -366,7 +382,7 @@ def test_two_beacons_append(
     other.execute(f"CREATE EXTERNAL TABLE {name} STORED AS LANCE LOCATION '{location}'", admin=True)
 
     errors: list[BaseException] = []
-    start = threading.Barrier(2)
+    start = threading.Barrier(2, timeout=60)
 
     def _append(client, first_id: int):
         try:
@@ -386,7 +402,8 @@ def test_two_beacons_append(
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            thread.join(timeout=300)
+        assert not any(thread.is_alive() for thread in threads), "an insert thread hung"
         assert not errors, errors
 
         uri = _dataset_uri(seaweedfs_container, location)
