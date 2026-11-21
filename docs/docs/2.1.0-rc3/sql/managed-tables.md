@@ -130,8 +130,7 @@ each `.` in a query column name with `_`. The query column `temp.units` becomes 
 
 ### Cast the values
 
-The session type widening rule decides each cast. External file tables use the same rule to merge
-the schemas of their files. Two server variables set it:
+The session type widening rule decides each cast. Two server variables set it:
 
 - `BEACON_TYPE_WIDENING_STRATEGY` is `default` or `numpy`.
 - `BEACON_TYPE_WIDENING_ON_CONFLICT` is `fail` or `keep_first`.
@@ -147,9 +146,10 @@ the rule. The result is the widening type:
   to the wider type before the insert. The rows that the table holds keep their values in the wider
   type. On another table type, the column type does not change.
 - The two types are a conflict, and the rule is `fail`. The statement fails with the error of the
-  rule. The table does not change.
+  rule. The table does not change. To insert the values, cast the query column to the table type
+  with `CAST`.
 - The two types are a conflict, and the rule is `keep_first`. The table type stays. A value that does
-  not cast becomes `NULL`.
+  not cast becomes `NULL`. This applies to all table types.
 
 Know these rules:
 
@@ -157,28 +157,40 @@ Know these rules:
   table does not change.
 - A cast is strict, except for a type pair that the rule casts leniently, as `keep_first` does. A
   value that does not cast in a strict cast stops the statement with an error.
-- On a table that is not Lance, each cast is strict.
+- On a table that is not Lance, a wider query type casts strictly to the table type.
 - A cast to a smaller type can lose precision. A `DOUBLE` value in a `FLOAT` column is an example.
+- A literal has its own type. `SELECT 1 AS c` gives a `BIGINT`. Under the `default` rule, it widens
+  an `INT` Lance column to `BIGINT`. Cast the literal to the column type to keep that type.
 
 ### Change a column type
 
 A wider query type changes the type of the Lance column. Lance then writes all the data of that column
 again. This costs I/O and storage for the full column. A large table makes this cost high.
 
+- Lance changes a type only inside one type family. `INT` to `BIGINT` and `FLOAT` to `DOUBLE` are
+  examples. Other families are time to time, text to text, binary to binary and decimal to decimal.
+- A query column of a different family is an error before a change. A `DOUBLE` query column into a
+  `BIGINT` Lance column is an example. The error is `Lance cannot change column ...`.
+- To prevent this error, cast the query column to the table type with `CAST` in the select list.
 - A column with an index cannot change its type. The statement fails before a change. Drop the index
   with [`DROP INDEX`](#indexes) first. Create it again after the insert.
-- Lance must accept the type change. A change that Lance refuses is an error before a change.
-- To keep the column type, cast the query column to the table type with `CAST` in the query.
+- Two inserts at the same time never make a column narrower. Beacon merges the types again under the
+  write lock. A column that the other insert made wider keeps its wider type.
 
 ### Two table versions
 
-The new columns and the type changes come before the rows. The rows are a different Lance version.
-If the write of the rows fails, the new columns and the new types stay in the table. The new columns
-hold only `NULL`. Remove them with `ALTER TABLE ... DROP COLUMN` if necessary.
+Beacon adds the new columns first. Then it changes the types. Then it writes the rows. Each step is a
+different Lance version:
+
+- If the type change fails, the new columns stay. The types do not change.
+- If the write of the rows fails, the new columns and the new types stay in the table.
+
+The new columns hold only `NULL`. Remove them with `ALTER TABLE ... DROP COLUMN` if necessary.
 
 `EXPLAIN INSERT INTO ... BY NAME` shows how Beacon maps the columns. It shows the new columns and the
-type changes. It does not change the table. `EXPLAIN ANALYZE` does not accept
-`INSERT INTO ... BY NAME`.
+planned type changes as `planned widen=[...]`. It does not change the table. EXPLAIN does not check
+if Lance accepts a type change or if the column has an index. The statement can still refuse the
+change. `EXPLAIN ANALYZE` does not accept `INSERT INTO ... BY NAME`.
 
 ### NetCDF sources
 
@@ -212,10 +224,16 @@ limits:
 | Two query columns with the same name | `The source has the column '<c>' more than one time` |
 | Type change of a column with an index | `Column '<c>' has the index '<i>'; drop it before BY NAME changes the type to <type>` |
 | Type change that Lance refuses | `Lance cannot change column '<c>' from <old type> to <new type>` |
-| Type conflict with the rule `fail` | The error text of the widening rule |
+| Type conflict with the rule `fail` | `Incompatible types for field '<c>': <table type> in '<t>' vs <source type> in 'source query'` |
+| Lance refuses to add the columns | `Failed to add the columns ["<c>", ...] to '<uri>': <reason>` |
+| Lance refuses to change the types | `Failed to change the types of the columns ["<c>", ...] of '<uri>': <reason>` |
 | Write to a pinned Lance table | `Lance table '<name>' is pinned to version <n> and is read-only` |
 | Column list after the table name | `INSERT ... BY NAME does not take a column list` |
-| New columns added, but the table did not open again | `The columns are added to '<t>', but the table did not reload: <reason>` |
+| Columns added or types changed, but the table did not open again | `The table '<t>' is widened, but it did not reload: <reason>` |
+
+The types in the conflict message use the Arrow names, for example `Int64` and `Utf8`. Under the
+write lock, Beacon merges the types again. A conflict at that step gives the same message without
+the table name and `'source query'`.
 
 Only the admin can run `INSERT INTO ... BY NAME`, the same as `INSERT INTO`. The
 [read rules](/docs/2.1.0-rc3/security/access-control) also apply to the tables of the query.
