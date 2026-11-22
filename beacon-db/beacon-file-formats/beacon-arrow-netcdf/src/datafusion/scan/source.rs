@@ -16,8 +16,9 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_datasource::morsel::Morselizer;
 use object_store::ObjectStore;
 
-use super::morsel::{NetcdfMorselizer, ScanContext, SkipFiles};
+use super::morsel::{NetcdfMorselizer, ScanContext};
 use super::slices::{slice_files, spread_files};
+use crate::datafusion::open::SkipFiles;
 
 /// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
 ///
@@ -47,15 +48,9 @@ impl NetcdfSource {
         }
     }
 
-    /// The same source, skipping the files that do not fit `read_dimensions` when `skip`.
-    pub fn with_skip_unbroadcastable(mut self, skip: bool) -> Self {
-        self.skip.unbroadcastable = skip;
-        self
-    }
-
-    /// The same source, skipping the files the reader cannot open when `skip`.
-    pub fn with_skip_invalid_files(mut self, skip: bool) -> Self {
-        self.skip.invalid = skip;
+    /// The same source, passing over the files that `skip` names.
+    pub(crate) fn with_skip(mut self, skip: SkipFiles) -> Self {
+        self.skip = skip;
         self
     }
 
@@ -189,5 +184,99 @@ impl FileSource for NetcdfSource {
             filters.len()
         ])
         .with_updated_node(Arc::new(source)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scan gets one group per partition. A lone file is cut into slices, and
+    /// no entry is a byte range.
+    #[test]
+    fn a_scan_spreads_whole_files_and_slices_a_lone_file() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder};
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let table_schema =
+            TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::new(vec![
+                arrow::datatypes::Field::new("V0", arrow::datatypes::DataType::Float64, true),
+            ])));
+        let source = NetcdfSource::new(None, table_schema);
+        let config_of = |files: usize| {
+            let groups = (0..files)
+                .map(|i| FileGroup::new(vec![PartitionedFile::new(format!("f{i}.nc"), 1000)]))
+                .collect();
+            FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), Arc::new(source.clone()))
+                .with_file_groups(groups)
+                .build()
+        };
+
+        // Twelve files on four partitions: whole files, three in each group.
+        let many = source
+            .repartitioned(4, 0, None, &config_of(12))
+            .unwrap()
+            .expect("the scan repartitions");
+        assert_eq!(many.file_groups.len(), 4);
+        assert!(many
+            .file_groups
+            .iter()
+            .all(|group| group.files().len() == 3));
+
+        // One file on four partitions: four slices of it.
+        let one = source
+            .repartitioned(4, 0, None, &config_of(1))
+            .unwrap()
+            .expect("the scan repartitions");
+        assert_eq!(one.file_groups.len(), 4);
+        for group in &one.file_groups {
+            assert_eq!(group.files().len(), 1);
+            assert!(group.files()[0].range.is_none());
+            assert_eq!(group.files()[0].object_meta.location.as_ref(), "f0.nc");
+        }
+
+        // One partition: the scan stays as it is planned.
+        assert!(source
+            .repartitioned(1, 0, None, &config_of(3))
+            .unwrap()
+            .is_none());
+    }
+
+    /// An ordered scan is left alone: a partition holding an arbitrary subset of
+    /// a file cannot emit its rows in file order.
+    #[test]
+    fn an_ordered_scan_is_not_shared() {
+        use datafusion::datasource::listing::PartitionedFile;
+        use datafusion::datasource::physical_plan::FileScanConfigBuilder;
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("time", arrow::datatypes::DataType::Int64, true),
+        ]));
+        let table_schema = TableSchema::from_file_schema(schema.clone());
+        let source = NetcdfSource::new(None, table_schema);
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file(PartitionedFile::new("large.nc", 64 * 1024 * 1024))
+        .build();
+
+        let ordering = LexOrdering::new(vec![PhysicalSortExpr::new_default(
+            datafusion::physical_expr::expressions::col("time", &schema).unwrap(),
+        )])
+        .unwrap();
+
+        assert!(
+            source
+                .repartitioned(4, 0, Some(ordering), &config)
+                .unwrap()
+                .is_none(),
+            "an ordered scan must keep its single group"
+        );
     }
 }

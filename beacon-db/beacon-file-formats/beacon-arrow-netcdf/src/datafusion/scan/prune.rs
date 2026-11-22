@@ -49,31 +49,15 @@ pub(super) fn is_pruned(masks: &Masks, dims: &[String], chunk: &ArraySubset) -> 
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
     use arrow::datatypes::{DataType, Field, Schema};
-    use beacon_nd_array::dataset::{AnyDataset, Dataset};
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{binary, col, lit};
-    use object_store::{local::LocalFileSystem, path::Path, ObjectStore, ObjectStoreExt};
 
     use super::*;
+    use crate::datafusion::test_util::{open_test_file, GRIDDED_FILE};
 
     async fn gridded(names: &[&str]) -> FileScan {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_files/gridded-example.nc");
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new());
-        let object = store
-            .head(&Path::from_absolute_path(&path).unwrap())
-            .await
-            .unwrap();
-        let mut dataset: Dataset = match crate::oxcdf_reader::open_object(store, &object)
-            .await
-            .unwrap()
-        {
-            AnyDataset::Regular(dataset) => dataset,
-            AnyDataset::Ragged { .. } => panic!("the gridded file is regular"),
-        };
+        let mut dataset = open_test_file(GRIDDED_FILE).await;
         dataset
             .arrays
             .retain(|name, _| names.contains(&name.as_str()));

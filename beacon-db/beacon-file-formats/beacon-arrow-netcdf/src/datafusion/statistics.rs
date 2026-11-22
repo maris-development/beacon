@@ -8,6 +8,8 @@
 //! and partition pruning.  Arrays for which a range cannot be determined
 //! (multi-dimensional, String, Binary) get [`ColumnStatistics::new_unknown`].
 
+use std::sync::Arc;
+
 use beacon_nd_array::{
     arrow::compute::value_range,
     dataset::{ragged::RaggedArray, AnyDataset, Dataset, RaggedDataset},
@@ -18,28 +20,22 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-use crate::datafusion::reader::NetcdfInput;
+use object_store::{ObjectMeta, ObjectStore};
 
 // ─── Public entry point ─────────────────────────────────────────────────────
 
-/// Open the NetCDF object `input` names and return DataFusion [`Statistics`]
-/// for the columns in `table_schema`.
-///
-/// `input` says where the bytes of the file are. The caller builds it, so
-/// statistics and scans go through one mechanism (see [`NetcdfInput`]).
+/// Open the NetCDF `object` and return DataFusion [`Statistics`] for the
+/// columns in `table_schema`. A ragged file is an error, as in the scan.
 pub async fn generate_statistics(
-    input: NetcdfInput,
+    store: &Arc<dyn ObjectStore>,
+    object: &ObjectMeta,
     table_schema: &arrow::datatypes::Schema,
 ) -> anyhow::Result<Statistics> {
-    let location = input.location();
-    let dataset = input
-        .open()
+    let dataset = crate::datafusion::open::open_whole(store, object)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to open NetCDF dataset {location}: {e}"))?;
-    // The scan refuses a ragged file, so its statistics would prune nothing real.
-    crate::datafusion::scan::refuse_ragged(&dataset).map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| anyhow::anyhow!("NetCDF dataset {}: {e}", object.location))?;
 
-    statistics_for_dataset(&dataset, table_schema).await
+    statistics_for_dataset(&AnyDataset::Regular(dataset), table_schema).await
 }
 
 /// Return DataFusion [`Statistics`] for an already-opened dataset.

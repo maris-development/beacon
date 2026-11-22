@@ -11,10 +11,9 @@ use beacon_datafusion_ext::nd::NdRecordBatch;
 use beacon_nd_array::array::subset::ArraySubset;
 use beacon_nd_array::arrow::metrics::ReadMetrics;
 use beacon_nd_array::arrow::pushdown_filter::PushdownFilter;
-use beacon_nd_array::dataset::project_read_dimensions_or_skip;
 use datafusion::common::internal_err;
 use datafusion::datasource::listing::PartitionedFile;
-use datafusion::error::{DataFusionError, Result};
+use datafusion::error::Result;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion_datasource::morsel::{Morsel, MorselPlan, MorselPlanner, Morselizer};
 use futures::stream::BoxStream;
@@ -22,19 +21,10 @@ use futures::StreamExt;
 use object_store::ObjectStore;
 
 use super::chunks::FileScan;
-use super::output::{refuse_ragged, FileOutput};
+use super::output::FileOutput;
 use super::prune::{coordinate_masks, is_pruned};
 use super::slices::NetcdfSlice;
-use crate::datafusion::reader::NetcdfInput;
-
-/// Which files a scan reads past in place of an error.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct SkipFiles {
-    /// Skip a file that does not fit `read_dimensions`.
-    pub unbroadcastable: bool,
-    /// Skip a file the reader cannot open.
-    pub invalid: bool,
-}
+use crate::datafusion::open::{open_for_read, SkipFiles};
 
 /// What every file of one partition's scan shares.
 #[derive(Debug)]
@@ -160,62 +150,27 @@ async fn plan_entry(
     slice: NetcdfSlice,
     label: &str,
 ) -> Result<Box<dyn MorselPlanner>> {
-    let skipped = |context: &ScanContext| -> Box<dyn MorselPlanner> {
+    let opened = open_for_read(
+        &context.store,
+        &file.object_meta,
+        context.read_dimensions.clone(),
+        context.skip,
+    )
+    .await?;
+    let Some(dataset) = opened else {
         // The slices of a file all skip it. One of them counts it.
         if slice.index == 0 {
             context.metrics.files_skipped.add(1);
         }
-        Box::new(Planner::Done)
+        return Ok(Box::new(Planner::Done));
     };
-
-    let input = NetcdfInput::new(&context.store, &file.object_meta);
-    let dataset = match input.open().await {
-        Ok(dataset) => dataset,
-        Err(e) if context.skip.invalid => {
-            tracing::warn!(file = %file.object_meta.location, error = %e, "skipping an unreadable NetCDF file");
-            return Ok(skipped(context));
-        }
-        Err(e) => return Err(DataFusionError::Execution(format!("failed to open: {e}"))),
-    };
-
-    let Some(dataset) = project_read_dimensions_or_skip(
-        dataset,
-        context.read_dimensions.clone(),
-        context.skip.unbroadcastable,
-        None,
-    )
-    .map_err(|e| DataFusionError::Execution(e.to_string()))?
-    else {
-        return Ok(skipped(context));
-    };
-    refuse_ragged(&dataset)?;
-
     let Some((dataset, output)) = FileOutput::resolve(dataset, &context.projected_schema)? else {
         // The file has none of the wanted columns, so it gives no row.
         return Ok(Box::new(Planner::Done));
     };
     let scan = FileScan::try_new(dataset, context.batch_size)?;
-
-    // The slice cut comes first, on the full list. Every slice builds the same list.
     let total = scan.chunks().len();
-    let range = slice.range(total);
-    let mut chunks: Vec<(usize, ArraySubset)> = range
-        .clone()
-        .zip(scan.chunks()[range].iter().cloned())
-        .collect();
-    if chunks.is_empty() {
-        // An empty slice reads no coordinate for a mask.
-        return Ok(Box::new(Planner::Done));
-    }
-    if let Some(predicate) = &context.predicate {
-        let masks = coordinate_masks(&scan, &PushdownFilter::new(predicate.clone())).await;
-        let before = chunks.len();
-        let rows_before: usize = chunks.iter().map(|(_, chunk)| chunk.rows()).sum();
-        chunks.retain(|(_, chunk)| !is_pruned(&masks, scan.dims(), chunk));
-        let rows_after: usize = chunks.iter().map(|(_, chunk)| chunk.rows()).sum();
-        context.metrics.chunks_pruned.add(before - chunks.len());
-        context.metrics.rows_pruned.add(rows_before - rows_after);
-    }
+    let chunks = select_chunks(context, &scan, slice).await;
     if chunks.is_empty() {
         return Ok(Box::new(Planner::Done));
     }
@@ -232,6 +187,33 @@ async fn plan_entry(
         next: 0,
         ready: None,
     }))
+}
+
+/// The chunks of `slice` that the predicate does not prune, each with its number in the file.
+async fn select_chunks(
+    context: &ScanContext,
+    scan: &FileScan,
+    slice: NetcdfSlice,
+) -> Vec<(usize, ArraySubset)> {
+    // The slice cut comes first, on the full list. Every slice builds the same list.
+    let range = slice.range(scan.chunks().len());
+    let mut chunks: Vec<(usize, ArraySubset)> = range
+        .clone()
+        .zip(scan.chunks()[range].iter().cloned())
+        .collect();
+    // An empty slice reads no coordinate for a mask.
+    let Some(predicate) = context.predicate.as_ref().filter(|_| !chunks.is_empty()) else {
+        return chunks;
+    };
+
+    let masks = coordinate_masks(scan, &PushdownFilter::new(predicate.clone())).await;
+    let before = chunks.len();
+    let rows_before: usize = chunks.iter().map(|(_, chunk)| chunk.rows()).sum();
+    chunks.retain(|(_, chunk)| !is_pruned(&masks, scan.dims(), chunk));
+    let rows_after: usize = chunks.iter().map(|(_, chunk)| chunk.rows()).sum();
+    context.metrics.chunks_pruned.add(before - chunks.len());
+    context.metrics.rows_pruned.add(rows_before - rows_after);
+    chunks
 }
 
 /// Read entry `index` of the chunks of `file`, and hand it to the next planner state.
@@ -285,7 +267,8 @@ pub(in crate::datafusion) mod tests {
     use object_store::local::LocalFileSystem;
 
     use super::*;
-    use crate::datafusion::format_tests::write_regular_netcdf;
+    use crate::datafusion::test_util::write_regular_netcdf;
+    use datafusion::error::DataFusionError;
 
     /// Run every planner of `files` to the end, as FileStream does, and collect the batches.
     pub(in crate::datafusion) async fn drive(

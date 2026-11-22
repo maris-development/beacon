@@ -9,6 +9,7 @@ mod output;
 mod prune;
 mod slices;
 mod source;
+#[cfg(test)]
+mod tests;
 
-pub(in crate::datafusion) use output::refuse_ragged;
 pub use source::NetcdfSource;

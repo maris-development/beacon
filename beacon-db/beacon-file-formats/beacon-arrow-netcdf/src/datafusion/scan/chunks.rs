@@ -244,30 +244,8 @@ fn array_subset(chunk: &ArraySubset, dims: &[String], array: &dyn NdArrayD) -> A
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    use beacon_nd_array::dataset::AnyDataset;
-    use object_store::{local::LocalFileSystem, path::Path, ObjectStore, ObjectStoreExt};
-
     use super::*;
-
-    /// Open a bundled test file as a regular dataset.
-    async fn open(name: &str) -> Dataset {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test_files")
-            .join(name);
-        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new());
-        let location = Path::from_absolute_path(&path).unwrap();
-        let object = store.head(&location).await.unwrap();
-        match crate::oxcdf_reader::open_object(store, &object)
-            .await
-            .unwrap()
-        {
-            AnyDataset::Regular(dataset) => dataset,
-            AnyDataset::Ragged { .. } => panic!("{name} is ragged"),
-        }
-    }
+    use crate::datafusion::test_util::{open_test_file as open, GRIDDED_FILE};
 
     /// Keep only the arrays in `names`.
     fn only(mut dataset: Dataset, names: &[&str]) -> Dataset {
@@ -279,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_native_chunk_layout_sets_the_grid() {
-        let dataset = only(open("gridded-example.nc").await, &["analysed_sst", "lat"]);
+        let dataset = only(open(GRIDDED_FILE).await, &["analysed_sst", "lat"]);
 
         let scan = FileScan::try_new(dataset, 8192).unwrap();
 
@@ -295,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_small_grid_is_one_chunk_whatever_its_native_chunks() {
-        let dataset = only(open("gridded-example.nc").await, &["analysed_sst", "lat"]);
+        let dataset = only(open(GRIDDED_FILE).await, &["analysed_sst", "lat"]);
 
         // The grid holds 1208 * 1920 rows, and the batch size covers all of them.
         let scan = FileScan::try_new(dataset, 1208 * 1920).unwrap();
@@ -307,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_contiguous_array_is_cut_at_the_batch_size() {
-        let dataset = only(open("gridded-example.nc").await, &["sea_ice_fraction"]);
+        let dataset = only(open(GRIDDED_FILE).await, &["sea_ice_fraction"]);
 
         let scan = FileScan::try_new(dataset, 4096).unwrap();
 
@@ -318,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_chunk_reads_each_array_on_its_own_axes() {
-        let dataset = only(open("gridded-example.nc").await, &["analysed_sst", "lat"]);
+        let dataset = only(open(GRIDDED_FILE).await, &["analysed_sst", "lat"]);
         let scan = FileScan::try_new(dataset, 8192).unwrap();
 
         let batch = scan.read(&scan.chunks()[0]).await.unwrap();
@@ -333,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dataset_with_no_arrays_is_an_error() {
-        let dataset = only(open("gridded-example.nc").await, &[]);
+        let dataset = only(open(GRIDDED_FILE).await, &[]);
 
         let error = FileScan::try_new(dataset, 8192).unwrap_err();
 
