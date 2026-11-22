@@ -313,22 +313,22 @@ mod tests {
         let state = ctx.state();
         let (store, object) = local_object(&test_file(GRIDDED_FILE)).await;
 
-        let oxcdf = format().with_enable_statistics(true);
-        let schema = oxcdf
+        let format = format().with_enable_statistics(true);
+        let schema = format
             .infer_schema(&state, &store, std::slice::from_ref(&object))
             .await
-            .expect("oxcdf infers a schema");
+            .expect("a schema");
 
-        let with_rust_reader = oxcdf
-            .infer_stats(&state, &store, schema.clone(), &object)
+        let statistics = format
+            .infer_stats(&state, &store, schema, &object)
             .await
             .expect("statistics are never an error");
         assert!(
-            with_rust_reader
+            statistics
                 .column_statistics
                 .iter()
                 .any(|column| column.min_value.get_value().is_some()),
-            "the Rust reader must produce real ranges for the coordinate variables"
+            "the coordinate variables get real ranges"
         );
     }
 

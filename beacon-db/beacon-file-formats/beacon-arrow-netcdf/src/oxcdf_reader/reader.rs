@@ -20,8 +20,7 @@
 //!
 //! # Groups
 //!
-//! Only the root group is read, which is what netcdf-c's `File::variables`
-//! returns. Both readers therefore report the same variables.
+//! Only the root group is read.
 //!
 //! # Dimensions
 //!
@@ -130,7 +129,7 @@ async fn dataset_from_file(name: String, file: Arc<AsyncNetcdfFile>) -> anyhow::
 /// # Errors
 ///
 /// Returns an error when an attribute of the file cannot be read. A variable
-/// this reader cannot model is skipped, as it is on the netcdf-c path.
+/// this reader cannot model is skipped.
 pub fn read_arrays(
     file: &Arc<AsyncNetcdfFile>,
 ) -> anyhow::Result<IndexMap<String, Arc<dyn NdArrayD>>> {

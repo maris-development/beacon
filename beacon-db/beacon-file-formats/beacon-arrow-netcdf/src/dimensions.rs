@@ -50,13 +50,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use oxcdf::{netcdf::NcGroup, AsyncNetcdfFile};
 
-/// The prefix netCDF puts on a dimension it invents.
-///
-/// netcdf-c writes the same names, so the netcdf-c reader recognises its own
-/// invented dimensions by this prefix. The [`oxcdf`] reader does not need it:
-/// that reader reports `is_phony` for each dimension.
-pub const INVENTED_PREFIX: &str = "phony_dim_";
-
 /// One axis, as the rules above see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Axis {
@@ -68,24 +61,6 @@ pub struct Axis {
     pub is_unlimited: bool,
     /// Whether the reader invented the dimension because the file names none.
     pub is_phony: bool,
-}
-
-impl Axis {
-    /// One axis of the netcdf-c reader, which reports no `is_phony` flag.
-    ///
-    /// netcdf-c invents the same `phony_dim_N` names, so the prefix identifies
-    /// them. A file that names a dimension `phony_dim_0` itself is treated as
-    /// invented, which costs nothing: the name carries no meaning either way.
-    pub fn from_name(name: impl Into<String>, len: u64, is_unlimited: bool) -> Self {
-        let name = name.into();
-        let is_phony = name.starts_with(INVENTED_PREFIX);
-        Self {
-            name,
-            len,
-            is_unlimited,
-            is_phony,
-        }
-    }
 }
 
 /// The name every invented dimension of `len` elements shares.
@@ -438,19 +413,6 @@ mod tests {
         assert_eq!(
             apply(axes, &["phony_dim_0"]),
             vec!["phony_dim_0".to_string()]
-        );
-    }
-
-    /// The netcdf-c reader reports no flag, so the prefix identifies an
-    /// invented dimension.
-    #[test]
-    fn the_netcdf_c_reader_recognises_its_own_names() {
-        assert!(Axis::from_name("phony_dim_3", 8, false).is_phony);
-        assert!(!Axis::from_name("time", 8, false).is_phony);
-        assert_eq!(
-            PhonyDimensions::of_axes(vec![Axis::from_name("phony_dim_3", 8, false)])
-                .apply(&["phony_dim_3".to_string()]),
-            vec!["phony_len_8".to_string()]
         );
     }
 
