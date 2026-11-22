@@ -31,18 +31,32 @@ Earlier revisions planned a two-format split and a shared nd scan engine. Both a
 
 ```
 beacon-arrow-netcdf/src/datafusion/
-  mod.rs            NetcdfFormat builds NetcdfSource (two call sites change)
-  reader.rs         fetch_schema refuses a ragged dataset
-  source.rs         removed
+  mod.rs            module list, extensions, re-exports
+  factory.rs        NetCDFFormatFactory, NetcdfConfig: table options to a format
+  format.rs         NetcdfFormat: schema, statistics, read plan, write plan
+  open.rs           open one file for a read: skips, read dimensions, ragged error
+  options.rs        NetcdfOptions (read and write), NetcdfWriterOptions
+  statistics.rs     file statistics (HDF5 shares statistics_for_dataset)
+  table_function.rs read_netcdf(...)
+  test_util.rs      helpers that the tests share
   scan/
     mod.rs          module docs, re-export of NetcdfSource
     source.rs       NetcdfSource: the FileSource
-    chunks.rs       FileScan: projection, chunk list, read of one chunk
+    chunks.rs       FileScan: chunk list, read of one chunk
     prune.rs        coordinate masks and the chunk test
     morsel.rs       NetcdfMorselizer, planner states, ChunkMorsel
     slices.rs       NetcdfSlice, slice_files, spread_files
-    output.rs       projected columns, partition columns, the batch adapter
+    output.rs       projected arrays, the batch adapter
+    tests.rs        end-to-end scan tests
+  sink/
+    mod.rs          re-exports of the sinks
+    scratch.rs      the local scratch file, and its upload
+    flat.rs         NetCDFSink: one `obs` dimension
+    grid.rs         NetCDFNdSink: the dimension columns become dimensions
+    tests.rs        both sinks against an object store
 ```
+
+The schema inference, the scan and the statistics open a file only through `open.rs`.
 
 - `beacon-arrow-netcdf/Cargo.toml` adds `datafusion-datasource = { workspace = true }`. The `datafusion` crate does not re-export `morsel`.
 - Only `scan/morsel.rs` and `scan/source.rs` name DataFusion morsel types. The API is experimental.
@@ -190,19 +204,17 @@ pub(super) struct NetcdfSlice { pub index: u32, pub count: u32 }
 
 ### 4.6 Output (`scan/output.rs`)
 
-- Each batch is nd-encoded, gets the partition columns as rank-0 arrays, and goes through the batch adapter onto the projected schema. A column that the file does not have becomes null.
+- Each batch is nd-encoded and goes through the batch adapter onto the projected schema. A column that the file does not have becomes null.
 - A file that has none of the wanted columns gives no batch.
 - **No file column in the projection is an error.** `create_morselizer` returns: "a NetCDF scan needs at least one file column; use COUNT(column) in place of COUNT(*)". The scan has no rows-only mode and no count morsel.
-
-A partition column shadows a file variable with the same name.
 
 ## 5. Changes outside `scan/`
 
 | Site | Change |
 |---|---|
-| `datafusion/mod.rs` `create_physical_plan`, `file_source` | Build `NetcdfSource` in place of `NetCDFSource`. The plan shape stays `DataSourceExec -> NdSourceExec -> NdBroadcastExec`. |
-| `datafusion/reader.rs` `fetch_schema` | After `project_read_dimensions_or_skip`, a ragged dataset gives the `NotImplemented` error. |
-| `datafusion/mod.rs` `infer_stats` | A ragged file gives unknown statistics and a warning. |
+| `datafusion/format.rs` `create_physical_plan`, `file_source` | Build `NetcdfSource` in place of `NetCDFSource`. The plan shape stays `DataSourceExec -> NdSourceExec -> NdBroadcastExec`. |
+| `datafusion/open.rs` | One open path for the schema, the scan and the statistics. A ragged dataset gives the `NotImplemented` error. |
+| `datafusion/format.rs` `infer_stats` | A ragged file gives unknown statistics and a warning. |
 | `datafusion/source.rs` | Removed. |
 | `examples/scan_profile.rs` | Fix it if it names `NetCDFSource`. |
 | `beacon-core/src/metrics.rs` `collect_scan_totals` | Count each distinct `object_meta.location` one time. Slices repeat a location. |
