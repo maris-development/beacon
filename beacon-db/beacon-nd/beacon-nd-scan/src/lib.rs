@@ -7,6 +7,9 @@
 
 pub(crate) mod error;
 pub mod metrics;
+// Later tasks use the slices.
+#[allow(dead_code)]
+mod slices;
 #[cfg(test)]
 pub(crate) mod testing;
 
