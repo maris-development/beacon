@@ -19,7 +19,7 @@ use datafusion::error::{DataFusionError, Result};
 /// How the chunks of one file become batches of the scan.
 #[derive(Debug)]
 pub(crate) struct FileOutput {
-    /// Reorders, casts and null-fills the file columns. `None` when no column is projected.
+    /// Reorders, casts and null-fills the columns. `None` when no column is projected.
     adapter: Option<BatchAdapter>,
     /// The encoded schema that the scan emits.
     projected_schema: SchemaRef,

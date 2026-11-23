@@ -27,7 +27,7 @@ pub trait NdFileOpener: Send + Sync + std::fmt::Debug + 'static {
 pub struct NdScanOptions {
     /// The grid of each file.
     pub grid: GridSelection,
-    /// Skip a file that does not fit a given grid.
+    /// Skip a file that does not fit the grid. With a given grid, also skip an unsupported file.
     pub skip_unbroadcastable: bool,
     /// Skip a file that the format cannot open.
     pub skip_invalid_files: bool,

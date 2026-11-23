@@ -20,7 +20,8 @@ use object_store::ObjectStore;
 
 use crate::metrics::ScanMetrics;
 use crate::opener::{NdFileOpener, NdScanOptions};
-use crate::planner::{NdMorselizer, RowBudget, ScanContext};
+use crate::planner::{NdMorselizer, ReadPlan, RowBudget, ScanContext};
+use crate::schema::logical_projection;
 use crate::slices::{slice_files, spread_files};
 
 /// The table schema of an ND scan: the `beacon.nd` encoded form of the logical `file_schema`.
@@ -105,18 +106,21 @@ impl FileSource for NdSource {
                 field.name()
             );
         }
+        let output_schema = base_config.projected_schema()?;
+        let table_columns = self
+            .table_schema
+            .file_schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
         Ok(Box::new(NdMorselizer::new(ScanContext {
             opener: Arc::clone(&self.opener),
             options: self.options.clone(),
             store: object_store,
-            projected_schema: base_config.projected_schema()?,
-            table_file_columns: self
-                .table_schema
-                .file_schema()
-                .fields()
-                .iter()
-                .map(|field| field.name().clone())
-                .collect(),
+            filter_schema: logical_projection(&output_schema)?,
+            read: ReadPlan::new(&output_schema, table_columns),
+            output_schema,
             batch_size: self.batch_size,
             predicate: self.predicate.clone(),
             budget: Arc::new(RowBudget::new(base_config.limit)),
@@ -394,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn the_encoded_table_schema_encodes_the_file_columns() {
+    fn the_encoded_table_schema_encodes_each_column() {
         let file = Schema::new(vec![Field::new("temp", DataType::Float64, true)]);
 
         let table = encoded_table_schema(&file);

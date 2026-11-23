@@ -61,12 +61,12 @@ enum ConjunctMask {
     Dimension(String, BooleanArray),
 }
 
-/// The 1-D coordinates that the prune read, by name.
+/// The values of the variables that the prune read, by name.
 type Coordinates = HashMap<String, ArrayRef>;
 
 /// Evaluate the conjuncts of `predicate` on the 1-D coordinates of `dataset`.
 ///
-/// `table_schema` holds the logical type of each file column of the scan.
+/// `table_schema` holds the logical type of each column of the scan.
 /// A conjunct gives a mask when each of its columns is in `table_schema`, and
 /// each column that the file has is a rank-0 variable, or a rank-1 variable
 /// on one and the same dimension. A conjunct with no rank-1 variable has one
@@ -145,7 +145,7 @@ async fn conjunct_mask(
         let name = column.name();
         // The type of a column that the scan does not project is not known here.
         let Ok(table_field) = table_schema.field_with_name(name) else {
-            return Err(format!("'{name}' is not a file column of the scan"));
+            return Err(format!("'{name}' is not a column of the scan"));
         };
         // The scan gives nulls for a column that the file does not have. The adapter does the same.
         let Some(variable) = dataset.variable(name) else {
@@ -472,7 +472,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_column_that_is_not_a_file_column_of_the_scan_gets_no_mask() {
+    async fn a_column_that_is_not_a_column_of_the_scan_gets_no_mask() {
         let dataset = coordinate("x", Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])));
         let table_schema = schema_of(&[("x", DataType::Float64)]);
         let predicate = physical(col("x").gt(lit(1.5)), &table_schema);

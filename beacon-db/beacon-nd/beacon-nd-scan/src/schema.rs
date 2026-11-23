@@ -5,6 +5,8 @@ use std::sync::Arc;
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use beacon_nd_dataset::NdDataset;
 use beacon_nd_encoding::encoding::nd_value_type;
+use datafusion::common::plan_datafusion_err;
+use datafusion::error::Result;
 
 /// The Arrow schema of one file: one nullable field per variable, sorted by name.
 ///
@@ -20,56 +22,74 @@ pub fn file_schema(dataset: &dyn NdDataset) -> Schema {
     Schema::new(fields)
 }
 
-/// The names of the projected columns, in projected order.
-pub(crate) fn file_columns(projected_schema: &Schema) -> Vec<String> {
-    projected_schema
-        .fields()
-        .iter()
-        .map(|field| field.name().clone())
-        .collect()
-}
-
-/// The logical schema of the projected columns: each `beacon.nd` field with its value type.
+/// The logical form of an encoded schema: each `beacon.nd` field with its value type.
 ///
-/// The filter of the scan sees these types.
-pub(crate) fn table_schema(projected_schema: &Schema) -> SchemaRef {
-    let fields: Vec<Field> = projected_schema
+/// The filter of the scan sees these types. A field that is not encoded gives a plan error.
+pub(crate) fn logical_projection(encoded: &Schema) -> Result<SchemaRef> {
+    let fields = encoded
         .fields()
         .iter()
-        .filter_map(|field| {
-            let value_type = nd_value_type(field.data_type()).ok()?;
-            Some(Field::new(field.name(), value_type, true))
+        .map(|field| {
+            let value_type = nd_value_type(field.data_type()).map_err(|error| {
+                plan_datafusion_err!(
+                    "the column '{}' of the ND scan is not beacon.nd encoded: {error}",
+                    field.name()
+                )
+            })?;
+            Ok(Field::new(field.name(), value_type, true))
         })
-        .collect();
-    Arc::new(Schema::new(fields))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Arc::new(Schema::new(fields)))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use arrow::datatypes::{DataType, Field, Schema};
     use beacon_nd_encoding::encoding::encoded_schema;
+    use datafusion::error::DataFusionError;
 
-    use super::{file_columns, file_schema};
+    use super::{file_schema, logical_projection};
     use crate::tests::fixtures::grid_dataset;
 
-    /// The encoded schema of the Float64 columns `columns`.
-    fn projected(columns: &[&str]) -> SchemaRef {
-        let logical = Schema::new(
-            columns
-                .iter()
-                .map(|name| Field::new(*name, DataType::Float64, true))
-                .collect::<Vec<_>>(),
+    #[test]
+    fn the_logical_projection_has_the_value_type_of_each_encoded_field() {
+        let logical = Schema::new(vec![
+            Field::new("lat", DataType::Float64, false),
+            Field::new("n", DataType::Int32, true),
+        ]);
+
+        let projection = logical_projection(&encoded_schema(&logical)).unwrap();
+
+        let fields: Vec<(&str, &DataType, bool)> = projection
+            .fields()
+            .iter()
+            .map(|field| {
+                (
+                    field.name().as_str(),
+                    field.data_type(),
+                    field.is_nullable(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("lat", &DataType::Float64, true),
+                ("n", &DataType::Int32, true)
+            ]
         );
-        Arc::new(encoded_schema(&logical))
     }
 
     #[test]
-    fn a_file_is_projected_to_the_wanted_columns() {
-        let schema = projected(&["lat", "temp"]);
+    fn a_field_that_is_not_encoded_is_a_plan_error() {
+        let plain = Schema::new(vec![Field::new("lat", DataType::Float64, true)]);
 
-        assert_eq!(file_columns(&schema), ["lat", "temp"]);
+        let error = logical_projection(&plain).unwrap_err();
+
+        assert!(
+            matches!(error, DataFusionError::Plan(ref text) if text.contains("'lat'")),
+            "{error}"
+        );
     }
 
     #[test]

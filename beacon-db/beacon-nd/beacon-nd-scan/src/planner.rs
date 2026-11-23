@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use beacon_nd_dataset::{ChunkGrid, ChunkReader, NdDataset, NdRecordBatch, select_columns};
 use datafusion::common::internal_err;
@@ -23,7 +23,6 @@ use crate::metrics::ScanMetrics;
 use crate::opener::{NdFileOpener, NdScanOptions, open_for_read};
 use crate::output::FileOutput;
 use crate::prune::{chunk_masks, is_pruned};
-use crate::schema::{file_columns, table_schema};
 use crate::slices::NdSlice;
 
 /// What each file of the scan of one partition shares.
@@ -35,10 +34,12 @@ pub(crate) struct ScanContext {
     pub options: NdScanOptions,
     /// The store that holds the files.
     pub store: Arc<dyn ObjectStore>,
-    /// The encoded schema that the scan emits.
-    pub projected_schema: SchemaRef,
-    /// The names of the columns of the table. They set the grid of a scan with no column.
-    pub table_file_columns: Vec<String>,
+    /// The `beacon.nd` encoded schema that the scan emits.
+    pub output_schema: SchemaRef,
+    /// The logical type of each projected column. The prune reads it.
+    pub filter_schema: SchemaRef,
+    /// The variables that the scan reads from each file.
+    pub read: ReadPlan,
     /// The approximate row count of one chunk.
     pub batch_size: usize,
     /// The filter of the scan, for the chunk prune.
@@ -47,6 +48,36 @@ pub(crate) struct ScanContext {
     pub budget: Arc<RowBudget>,
     /// The counters of this partition.
     pub metrics: ScanMetrics,
+}
+
+/// The variables that a scan reads from each file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadPlan {
+    /// Read these variables. Their dimensions span the grid.
+    Columns(Vec<String>),
+    /// A count: read no variable. These columns of the table span the grid.
+    Count {
+        /// The names of all columns of the table.
+        grid_columns: Vec<String>,
+    },
+}
+
+impl ReadPlan {
+    /// The plan of a scan that emits `output_schema` from a table with `table_columns`.
+    pub(crate) fn new(output_schema: &Schema, table_columns: Vec<String>) -> Self {
+        if output_schema.fields().is_empty() {
+            return Self::Count {
+                grid_columns: table_columns,
+            };
+        }
+        Self::Columns(
+            output_schema
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect(),
+        )
+    }
 }
 
 /// The row limit of one partition and the rows whose read is planned.
@@ -236,21 +267,20 @@ async fn plan_entry(
         return Ok(Box::new(Planner::Done));
     };
 
-    let names = file_columns(&context.projected_schema);
-    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    // The grid spans only the dimensions of the selected variables.
-    let (dataset, grid_source) = if names.is_empty() {
-        // A scan with no file column has the grid of `SELECT *` and reads no variable.
-        let table: Vec<&str> = context
-            .table_file_columns
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let grid_source = select_columns(Arc::clone(&dataset), &table);
-        (select_columns(dataset, &[]), grid_source)
-    } else {
-        let dataset = select_columns(dataset, &names);
-        (Arc::clone(&dataset), dataset)
+    fn names(columns: &[String]) -> Vec<&str> {
+        columns.iter().map(String::as_str).collect()
+    }
+    // The grid spans only the dimensions of the variables of `grid_source`.
+    let (dataset, grid_source) = match &context.read {
+        ReadPlan::Columns(columns) => {
+            let dataset = select_columns(dataset, &names(columns));
+            (Arc::clone(&dataset), dataset)
+        }
+        // A count has the grid of `SELECT *` and reads no variable.
+        ReadPlan::Count { grid_columns } => {
+            let grid_source = select_columns(Arc::clone(&dataset), &names(grid_columns));
+            (select_columns(dataset, &[]), grid_source)
+        }
     };
     if grid_source.variable_names().is_empty() {
         // The file has none of the wanted columns, so it gives no row.
@@ -263,7 +293,7 @@ async fn plan_entry(
         return Ok(Box::new(Planner::Done));
     }
     let reader = ChunkReader::try_new(dataset.as_ref(), grid).map_err(to_datafusion)?;
-    let output = FileOutput::try_new(reader.schema(), &context.projected_schema)?;
+    let output = FileOutput::try_new(reader.schema(), &context.output_schema)?;
 
     Ok(Box::new(Planner::Read {
         file: Arc::new(OpenFile {
@@ -296,9 +326,7 @@ async fn select_chunks(
         return range.collect();
     };
 
-    // The scan casts each file column to its logical table type.
-    let table_schema = table_schema(&context.projected_schema);
-    let masks = chunk_masks(dataset, predicate, &table_schema).await;
+    let masks = chunk_masks(dataset, predicate, &context.filter_schema).await;
     let mut chunks = Vec::new();
     for number in range {
         let chunk = grid.chunk(number);
@@ -370,9 +398,10 @@ mod tests {
     use futures::StreamExt;
     use object_store::memory::InMemory;
 
-    use super::{NdMorselizer, RowBudget, ScanContext};
+    use super::{NdMorselizer, ReadPlan, RowBudget, ScanContext};
     use crate::metrics::ScanMetrics;
     use crate::opener::NdScanOptions;
+    use crate::schema::logical_projection;
     use crate::slices::NdSlice;
     use crate::tests::fixtures::{Entry, MemoryOpener, entry, grid_dataset, ramp};
 
@@ -441,12 +470,15 @@ mod tests {
             )
             .unwrap()
         });
+        let output_schema = projected(columns);
+        let table_columns = ["lat", "lon", "temp"].map(String::from).to_vec();
         ScanContext {
             opener,
             options,
             store: Arc::new(InMemory::new()),
-            projected_schema: projected(columns),
-            table_file_columns: ["lat", "lon", "temp"].map(String::from).to_vec(),
+            filter_schema: logical_projection(&output_schema).unwrap(),
+            read: ReadPlan::new(&output_schema, table_columns),
+            output_schema,
             batch_size,
             predicate,
             budget: Arc::new(RowBudget::new(limit)),
@@ -902,7 +934,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The batches of a count scan of `dataset` on a table with the file columns `table`.
+    /// The batches of a count scan of `dataset` on a table with the columns `table`.
     async fn count_scan(dataset: MemoryDataset, table: &[&str]) -> Vec<RecordBatch> {
         let opener = Arc::new(MemoryOpener::default().with("a.nd", Entry::Dataset(dataset)));
         let metrics = ExecutionPlanMetricsSet::new();
@@ -915,7 +947,9 @@ mod tests {
             None,
             &metrics,
         );
-        context.table_file_columns = table.iter().map(|name| name.to_string()).collect();
+        context.read = ReadPlan::Count {
+            grid_columns: table.iter().map(|name| name.to_string()).collect(),
+        };
         drive(&NdMorselizer::new(context), vec![entry("a.nd")])
             .await
             .unwrap()

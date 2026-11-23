@@ -645,8 +645,16 @@ and compares them by hand.
 - `is_pruned(masks, grid, chunk)`: true when, on one axis, the mask has no
   `true` in the range of the chunk, or when a conjunct rejects the file.
 
-`table_schema` holds the logical type of each projected column (`schema.rs`
-`table_schema`). A conjunct with a column that is not in it gives no mask.
+`table_schema` holds the logical type of each projected column. The source
+computes it one time for each scan (`schema.rs` `logical_projection`), and
+the planner keeps it as `ScanContext::filter_schema`. The encoded schema that
+the scan emits is `ScanContext::output_schema`. A conjunct with a column that
+is not in `table_schema` gives no mask. A projected field that is not
+`beacon.nd` encoded gives a plan error when the scan starts.
+
+The source also decides one time what each file reads:
+`ReadPlan::Columns(names)` for a scan with columns, and
+`ReadPlan::Count { grid_columns }` for a scan with no column.
 
 Pruning only skips work. The `FilterExec` above the scan applies the
 predicate again.
