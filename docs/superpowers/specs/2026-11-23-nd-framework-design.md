@@ -1,7 +1,10 @@
 # A shared ND framework: the dataset contract and the scan
 
-Date: 2026-11-23. Status: draft, for review.
+Date: 2026-11-23. Status: draft, for review (revision 2).
 Branch: `feature/nd-framework`, from `origin/features/netcdf-reader-refactor`.
+
+Revision 2: the variable is a trait that also reads. No format moves in this
+design, and no bridge to `beacon-nd-array` exists (user, 2026-11-23).
 
 This design replaces one decision of `2026-10-14-netcdf-reader-split-design.md`:
 "no shared trait and no generic engine". The user now wants one shared
@@ -28,32 +31,36 @@ The framework has two new crates, in a new folder `beacon-db/beacon-nd/`:
    `nd-arrow-array`. It does not depend on DataFusion.
 2. `beacon-nd-scan`: the DataFusion scan on that contract.
 
+This design builds the framework only. No format uses it yet. Each format
+moves in its own later design.
+
 ## 2. Goals
 
-- One trait, `NdDataset`, that a format implements on its file handle.
+- Two traits for a format: `NdDataset` lists what a file has, and
+  `NdVariable` describes one variable and reads it.
 - One trait, `NdFileOpener`, that a format implements to open a file.
 - One `FileSource`, one morsel planner, one chunk grid, one prune, one output
   step and one statistics function for all ND formats.
-- Each concern has one module. Each module has tests that need no file
-  format.
-- NetCDF moves to the framework. Its query results do not change.
-- The other formats can move later, one format per change.
+- Each concern has one module. Each module has tests.
+- The framework has full tests with no file format. A dataset in memory
+  stands in for a file.
+- The scan gives the same rows as the NetCDF scan of today for the same
+  data, so NetCDF can move later with no change of results.
 
 ## 3. Non-goals
 
-- Ragged datasets. The contract does not model them in this version. HDF5,
-  Zarr and Icechunk keep the legacy engine for ragged files until a later
-  design.
-- The CF decode. `missing_value`, the default fill, packed time, `int64` time,
-  `_Unsigned` and char arrays stay as they are. NetCDF keeps the decode of
-  `oxcdf_reader/compat.rs`. The switch to `nd_arrow_array::compute::decode_cf`
-  is a later change, because it changes column types (section 9).
-- The move of HDF5, Zarr, Icechunk, GeoTIFF, Atlas and the plugin formats.
+- The move of any format: NetCDF, HDF5, Zarr, Icechunk, GeoTIFF, Atlas, the
+  plugin formats. No format crate changes.
+- A bridge from `beacon_nd_array::Dataset` to `NdDataset`.
+- Ragged datasets. The contract does not model them in this version.
+- The CF decode. The framework decodes nothing. A format returns decoded
+  values from `read`. Section 9 describes the relation to the kernels of
+  `nd-arrow-array`.
 - A move of `beacon-nd-encoding`, `beacon-nd-execution` and `beacon-nd-array`
   into `beacon-nd/`. One later commit moves these folders (user decision,
   2026-11-23).
 - A change of `NdSourceExec` and `NdBroadcastExec`, except the limit hand-off
-  of section 6.8.
+  of section 7.3.
 - The `beacon.nd` encoding on the wire and in the plugin ABI.
 - The writers.
 - The rename of `read_dimensions` to `dimensions` in the SQL options. That is
@@ -61,12 +68,13 @@ The framework has two new crates, in a new folder `beacon-db/beacon-nd/`:
 
 ## 4. Anti-goals
 
-- A NetCDF query result must not change, except that `COUNT(*)` works again
-  (section 7.3).
-- The scan must not get slower. The timing check of section 8.4 measures this.
-- The new crates must not depend on a format crate.
+- The new crates must not depend on a format crate or on `beacon-nd-array`.
 - `beacon-nd-dataset` must not depend on DataFusion or on `object_store`.
 - The framework must not hold a table rule that only one format needs.
+- The ported rules must not differ from their source. A difference changes
+  query results when a format moves.
+- No existing crate changes its behavior. This design adds code. It removes
+  none.
 
 ## 5. Constraints
 
@@ -92,12 +100,17 @@ The framework has two new crates, in a new folder `beacon-db/beacon-nd/`:
 
 | Approach | Trade-off |
 |---|---|
-| A. A dataset trait and a variable trait. | The format implements both. Each format repeats the lookup. NetCDF has five backend types for this pattern today. |
-| B. A dataset struct and a variable trait. | One checked container. It is the model of `beacon-nd-array` today, cleaned up. A wide file must build all metadata at each open. |
-| **C. One dataset trait. Metadata and the read are its methods.** | The format implements one trait on its file handle. A wide format answers metadata from its own header. The crate cannot check the metadata in a constructor, so a shared `validate` function does it. |
+| **A. A dataset trait and a variable trait. The variable reads.** | Each object has one concern. The scan holds a variable and reads it, with no lookup by name. The views pass variables on and forward no read. A format implements two traits. |
+| B. A dataset struct and a variable trait. | One checked container. A wide file must build all metadata at each open. |
+| C. One dataset trait. The variable metadata is a plain struct. | One trait for a format. Each read finds the variable by name. A format cannot give its own variable type. |
 
-Decision: C (user, 2026-11-23). The user also chose metadata as trait methods,
-so that a format can implement them. `VariableMeta` stays a plain struct.
+Decision: A (user, 2026-11-23). The user first chose C, then asked for the
+dataset metadata as trait methods, then for the variable as a trait. With
+the variable as a trait, the read belongs on the variable.
+
+The old objection to A was the five backend types of NetCDF. They exist
+because `ArrayBackend<T>` is generic over the value type. With Arrow output,
+a format needs one variable type.
 
 ### 6.2 The base of the array model
 
@@ -118,12 +131,22 @@ Decision: `nd-arrow-array` (user, 2026-11-23).
 
 Decision: two crates in `beacon-nd/` (user, 2026-11-23).
 
+### 6.4 The source of the scan code
+
+| Approach | Trade-off |
+|---|---|
+| Write the scan new. | Free design. The rules of the NetCDF scan have tests and timing checks, and a new scan loses them. |
+| Move the NetCDF `scan/` folder. | No copy. NetCDF must move in the same change. |
+| **Port the NetCDF `scan/` folder. Leave NetCDF as it is.** | The framework gets rules with tests. Two copies exist until NetCDF moves. |
+
+Decision: port (user, 2026-11-23: "focus on building the framework").
+
 ## 7. Design
 
 ### 7.1 `beacon-nd-dataset`
 
 Dependencies: `nd-arrow-array`, `arrow`, `async-trait`, `thiserror`,
-`futures`. Dev: `tokio`.
+`indexmap`, `log`. Dev: `tokio`.
 
 `nd-arrow-array` is a git dependency with a fixed rev, in the workspace
 `Cargo.toml`, as `datafusion-spatial` is today:
@@ -140,10 +163,11 @@ beacon-nd-dataset/src/
   lib.rs          module list, re-exports
   error.rs        Error, Result
   region.rs       Region
-  dataset.rs      NdDataset, VariableMeta, validate
-  schema.rs       DatasetSchema
-  memory.rs       MemoryDataset
-  view.rs         GridSelection, select_grid, select_columns
+  dataset.rs      NdDataset, NdVariable, validate
+  schema.rs       DatasetSchema, VariableInfo
+  memory.rs       MemoryDataset, MemoryVariable
+  view.rs         GridSelection, select_grid, select_columns, default_grid,
+                  attribute_columns
   grid.rs         ChunkGrid, read_chunk
   statistics.rs   value_range
 ```
@@ -165,20 +189,22 @@ impl Region {
     pub fn len(&self) -> usize;
 }
 
-/// What the scan must know about one variable before a read.
-#[derive(Debug, Clone, PartialEq)]
-pub struct VariableMeta {
+/// One variable of an opened file.
+#[async_trait]
+pub trait NdVariable: Send + Sync + std::fmt::Debug {
+    fn name(&self) -> &str;
     /// The Arrow type that `read` returns.
-    pub data_type: DataType,
+    fn data_type(&self) -> &DataType;
     /// The dimensions, in C order, with their sizes.
-    pub dimensions: Dimensions,
+    fn dimensions(&self) -> &Dimensions;
     /// The native chunk shape. `None` for a variable without chunks.
-    pub chunk_shape: Option<Vec<usize>>,
-    pub attributes: Attributes,
+    fn chunk_shape(&self) -> Option<&[usize]>;
+    fn attributes(&self) -> &Attributes;
+    /// Read one region of this variable.
+    async fn read(&self, region: &Region) -> Result<NdArrowArray>;
 }
 
 /// One opened file of an ND format.
-#[async_trait]
 pub trait NdDataset: Send + Sync + std::fmt::Debug {
     /// The name for errors and logs. Usually the file path.
     fn name(&self) -> &str;
@@ -189,9 +215,9 @@ pub trait NdDataset: Send + Sync + std::fmt::Debug {
     /// The variable names. The order is the same in each call.
     fn variable_names(&self) -> Vec<Arc<str>>;
     /// One variable. `None` when the file does not have it.
-    fn variable(&self, name: &str) -> Option<VariableMeta>;
-    /// Read one region of one variable.
-    async fn read(&self, variable: &str, region: &Region) -> Result<NdArrowArray>;
+    fn variable(&self, name: &str) -> Option<Arc<dyn NdVariable>>;
+    /// The dimensions that the reader gave a name. Default: none.
+    fn invented_dimensions(&self) -> &[Arc<str>] { &[] }
 }
 ```
 
@@ -200,20 +226,21 @@ pub trait NdDataset: Send + Sync + std::fmt::Debug {
 
 Rules of the contract:
 
-1. `read` returns an array with the type of `VariableMeta::data_type`, and
-   with the dimension names of the variable and the sizes of `region.shape`.
+1. `read` returns an array with the type of `data_type`, with the dimension
+   names of the variable and the sizes of `region.shape`.
 2. `read` returns missing data as Arrow nulls. The format applies its fill
-   value. The framework knows no fill value.
-3. The metadata methods do no I/O. `open` reads what they need.
+   value and its decode. The framework knows no fill value.
+3. The methods of `NdDataset` and the metadata methods of `NdVariable` do no
+   I/O. `open` reads what they need. Only `read` does I/O.
 4. A dimension has one size in the whole dataset. A variable that uses a
    dimension has that size on that axis.
-5. A variable name is unique.
+5. A variable name is unique. `variable(name)` returns a variable with that
+   name.
 6. The framework finds a variable by name. The order of `variable_names`
    decides only two ties: the tie of `default_grid` (the first candidate
    wins) and the tie of the grid driver (the last variable wins). So the
    order must be the same at each open of the same file.
-7. `read` on an unknown variable gives `Error::UnknownVariable`. A region
-   outside the variable gives `Error::InvalidRegion`.
+7. A region outside the variable gives `Error::InvalidRegion`.
 8. `open` gives `Error::Unsupported` for a valid file that this contract
    cannot model, for example a ragged file.
 
@@ -228,10 +255,8 @@ The scan calls it at open in debug builds only.
 pub enum Error {
     #[error("{dataset}: the file is not on the grid {grid:?}: {reason}")]
     OffGrid { dataset: String, grid: Vec<String>, reason: String },
-    #[error("{dataset}: no variable '{variable}'")]
-    UnknownVariable { dataset: String, variable: String },
-    #[error("{dataset}: variable '{variable}': invalid region: {reason}")]
-    InvalidRegion { dataset: String, variable: String, reason: String },
+    #[error("variable '{variable}': invalid region: {reason}")]
+    InvalidRegion { variable: String, reason: String },
     #[error("{dataset}: invalid dataset: {reason}")]
     Invalid { dataset: String, reason: String },
     /// The file is valid, but the contract cannot model it.
@@ -252,22 +277,31 @@ pub enum Error {
 
 #### Ready metadata (`schema.rs`)
 
-`DatasetSchema` holds all metadata in memory: name, dimensions, global
-attributes and an `IndexMap<Arc<str>, VariableMeta>`. Its constructor runs the
-checks of `validate`. It has the same metadata methods as the trait. A simple
-format keeps one `DatasetSchema` and forwards the trait methods to it. A wide
-format implements the methods itself.
+These types save a simple format the metadata code.
+
+- `VariableInfo`: a plain struct with the name, the Arrow type, the
+  dimensions, the chunk shape and the attributes. A format variable holds
+  one and forwards the five metadata methods to it.
+- `DatasetSchema`: the name, the dimensions, the global attributes, the
+  invented dimensions, and an `IndexMap<Arc<str>, Arc<dyn NdVariable>>`. Its
+  constructor runs the checks of `validate`. It has the methods of
+  `NdDataset`. A format dataset holds one and forwards to it.
+
+A wide format implements the trait methods itself and builds a variable only
+when a caller asks for it.
 
 #### A dataset in memory (`memory.rs`)
 
-`MemoryDataset` holds a `DatasetSchema` and one `NdArrowArray` per variable.
-`read` slices the array. It can report a chunk shape per variable, and it
-counts its reads. The tests of both crates use it.
+`MemoryVariable` holds a `VariableInfo` and one `NdArrowArray`. `read`
+slices the array. It counts its reads. `MemoryDataset` holds a
+`DatasetSchema` of such variables. The tests of both crates use them. They
+are public, so a format crate can use them in its tests.
 
 #### Views (`view.rs`)
 
 A view is a struct that wraps an `Arc<dyn NdDataset>` and implements
-`NdDataset`. It hides variables and dimensions. It forwards `read`.
+`NdDataset`. It hides variables and dimensions. It returns the variables of
+the wrapped dataset as they are, so it forwards no read.
 
 ```rust
 /// The grid a table reads.
@@ -289,6 +323,10 @@ pub fn select_columns(dataset: Arc<dyn NdDataset>, names: &[&str])
 
 /// The default grid of a file. `None` when all variables broadcast already.
 pub fn default_grid(dataset: &dyn NdDataset) -> Option<Vec<String>>;
+
+/// Show each attribute as a rank-0 variable: `var.attr`, and `.attr` for a
+/// global attribute.
+pub fn attribute_columns(dataset: Arc<dyn NdDataset>) -> Arc<dyn NdDataset>;
 ```
 
 `GridSelection` is the `Dimensions` enum of the 2026-11-22 design. It has a
@@ -307,23 +345,26 @@ new name, because `nd_arrow_array::Dimensions` is a different type.
 
 `default_grid` is a port of `Dataset::default_broadcast_dimensions`
 (`beacon-nd-array/src/dataset/mod.rs:164`). The port keeps the rule exactly,
-also the tie rule and the invented-dimension rule. To support that rule,
-`DatasetSchema` and the trait carry the set of invented dimension names:
-
-```rust
-/// The dimensions that the reader gave a name. Default: none.
-fn invented_dimensions(&self) -> &[Arc<str>] { &[] }
-```
-
-Port the unit tests of `default_broadcast_dimensions` and
-`project_with_dimensions` with the code.
+also the tie rule and the invented-dimension rule. Port the unit tests of
+`default_broadcast_dimensions` and `project_with_dimensions` with the code.
 
 The skip option is not in this crate. The caller sees `OffGrid` and decides.
+
+`attribute_columns` keeps the Beacon table rule that an attribute is a
+column. The old readers put attributes in the dataset as fake arrays. In the
+contract an attribute lies on its variable, and this view makes the columns.
+
+- It adds a variable for each attribute whose value has length 1. Its type
+  is the type of the attribute value. Its `read` returns that value.
+- It skips an attribute with more values, and an attribute whose column name
+  is the name of a real variable.
+- A format calls it in its `open` when its tables show attributes. The scan
+  does not call it.
 
 #### The chunk grid (`grid.rs`)
 
 ```rust
-/// The chunks of the selected variables of one dataset.
+/// The chunks of the variables of one dataset.
 pub struct ChunkGrid { /* grid dimensions, chunk list */ }
 
 impl ChunkGrid {
@@ -334,7 +375,7 @@ impl ChunkGrid {
     /// The chunks, in C order. Each chunk is a region of the grid.
     pub fn chunks(&self) -> &[Region];
     /// The region of `variable` that lies in `chunk`.
-    pub fn variable_region(&self, variable: &VariableMeta, chunk: &Region) -> Region;
+    pub fn variable_region(&self, variable: &dyn NdVariable, chunk: &Region) -> Region;
 }
 
 /// Read each variable of `dataset` in `chunk` into one un-broadcast batch.
@@ -347,8 +388,9 @@ tests:
 
 - The grid spans the dimensions that the variables of `dataset` use.
 - A variable on all grid dimensions drives the grid. With more than one, the
-  variable with the most elements drives it. With none, the grid is the
-  cross-product of the used dimensions.
+  variable with the most elements drives it. On a tie, the last one in the
+  order of `variable_names` wins, as `max_by_key` does today. With none, the
+  grid is the cross-product of the used dimensions.
 - A grid of at most `batch_size` rows is one chunk, also with native chunks.
 - Else the native chunk shape of the driver is the chunk shape. Else the
   chunk fills from the last axis up to `batch_size` rows.
@@ -361,15 +403,12 @@ tests:
 does today. A coordinate is read one time per chunk. Reads at the same time
 on one file handle are a later change, with its own timing check.
 
-The grid driver tie uses the order of `variable_names`: the last variable
-with the most elements wins, as `max_by_key` does in `scan/chunks.rs` today.
-
 #### Statistics (`statistics.rs`)
 
 ```rust
 /// The minimum and maximum of a rank-0 or rank-1 variable. `None` for
 /// other ranks, for an empty variable and for a type with no order.
-pub async fn value_range(dataset: &dyn NdDataset, variable: &str)
+pub async fn value_range(variable: &dyn NdVariable)
     -> Result<Option<(ArrayRef, ArrayRef)>>;
 ```
 
@@ -380,9 +419,8 @@ the Arrow `min` and `max` kernels.
 
 Dependencies: `beacon-nd-dataset`, `nd-arrow-array`, `beacon-nd-encoding`,
 `beacon-datafusion-ext` (`scan_adapt`, type widening), `datafusion`,
-`datafusion-datasource`, `object_store`, `async-trait`, `futures`.
-
-It does not depend on `beacon-nd-array`.
+`datafusion-datasource`, `object_store`, `async-trait`, `futures`, `log`.
+Dev: `beacon-nd-execution`, `tokio`.
 
 ```
 beacon-nd-scan/src/
@@ -400,6 +438,10 @@ beacon-nd-scan/src/
 ```
 
 Only `planner.rs` and `source.rs` name DataFusion morsel types.
+
+`planner.rs`, `slices.rs`, `prune.rs`, `output.rs` and `source.rs` are ports
+of the files in `beacon-arrow-netcdf/src/datafusion/scan/`. The NetCDF crate
+does not change.
 
 #### The opener (`opener.rs`)
 
@@ -435,16 +477,11 @@ It runs:
    - `Error::Unsupported`: with a `Given` grid and `skip_unbroadcastable`,
      log a warning and return `None`. Else return a DataFusion
      `NotImplemented` error. `skip_invalid_files` never skips this error.
-     This is the order of `open.rs` today for a ragged file.
+     This is the order of the NetCDF `open.rs` today for a ragged file.
    - Any other error with `skip_invalid_files`: log a warning, return `None`.
 2. `select_grid`. On `OffGrid` with `skip_unbroadcastable`: log a warning,
    return `None`.
 3. `validate`, in debug builds.
-
-The statistics do not use `open_for_read`. They call `opener.open` with no
-grid and no skip, as `open_whole` does today. So a column that the grid
-removes keeps its statistics, and no query answer changes. An open error
-gives unknown statistics and a warning.
 
 A format that needs its own store ignores the `store` argument. Icechunk
 needs this later.
@@ -479,14 +516,14 @@ columns, as today.
 
 #### Slices (`slices.rs`)
 
-A move of `scan/slices.rs`, with `NetcdfSlice` renamed to `NdSlice`. The
-rules do not change: return `None` with an ordering or `target <= 1`; no
-slices with a row limit; `K = ceil(target / files)` slices per file; never a
-slice of a slice; exactly `target` groups; never a byte range.
+A port of `scan/slices.rs`, with the name `NdSlice`. The rules do not
+change: return `None` with an ordering or `target <= 1`; no slices with a
+row limit; `K = ceil(target / files)` slices per file; never a slice of a
+slice; exactly `target` groups; never a byte range.
 
 #### The planner (`planner.rs`)
 
-A move of `scan/morsel.rs`. The states do not change:
+A port of `scan/morsel.rs`. The states do not change:
 
 ```text
 NdMorselizer::plan_file(file)                  CPU only
@@ -498,8 +535,8 @@ Unopened.plan() -> a plan with the open future
 open future  [I/O]
    open_for_read                     None -> Skipped
    select_columns(projected file columns)
-   no file column in the query       -> the count scan (section 7.3)
-   the file has none of the columns  -> Done
+   the query has file columns and
+   the file has none of them         -> Done
    ChunkGrid::try_new
    chunks = the slice range of the full chunk list
    masks  = coordinate_masks(..)     only with a predicate
@@ -570,7 +607,7 @@ encoding has a carrier for this case already, and the scan uses it:
   one row.
 
 Port `FilePartitions::scalar_columns` and `row_columns`
-(`beacon-nd-array/src/arrow/partition.rs`) for steps 3 and the carrier.
+(`beacon-nd-array/src/arrow/partition.rs`) for step 3 and the carrier.
 
 This crate converts to `beacon.nd` at this one place. When `NdSourceExec`
 moves to `nd_arrow.array`, only this file changes.
@@ -581,7 +618,11 @@ moves to `nd_arrow.array`, only this file changes.
   The sort is here, not in the readers.
 - `file_statistics(dataset, table_schema) -> Statistics`: `value_range` for
   each rank-0 and rank-1 variable; unknown for the others; no row count. This
-  is `statistics_for_dataset` of the NetCDF crate today.
+  is the rule of `statistics_for_dataset` of the NetCDF crate today.
+
+A format calls `file_statistics` on a dataset from `opener.open`, with no
+grid and no skip, as `open_whole` does today. So a column that the grid
+removes keeps its statistics.
 
 #### Metrics (`metrics.rs`)
 
@@ -607,13 +648,12 @@ columns and the row count of the chunk. `output.rs` puts that count in the
 carrier of section 7.2. So `COUNT(*)` is the row count of `SELECT *`, and it
 reads no data. The planner has no count state and no second path.
 
+A format that does not want a count, as NetCDF today, refuses the query in
+its own `FileFormat`, before it builds the source.
+
 **Limit.** Today no ND node hands a limit to the scan. The scan stops when
 the consumer drops the stream. Keep that. In addition:
 
-- `NdSourceExec` and `NdBroadcastExec` hand a `fetch` to their child when
-  DataFusion offers it (`with_fetch`, `supports_limit_pushdown`). The builder
-  checks the DataFusion 54.1 API first. If the hand-off needs more than these
-  two methods on each node, leave it out and record that in the plan.
 - With `FileScanConfig::limit` set, the planner counts the rows of the chunks
   it emits, per partition. It plans no more reads after the count reaches the
   limit.
@@ -621,83 +661,44 @@ the consumer drops the stream. Keep that. In addition:
   has at least one row (section 7.1), so that limit never cuts rows that the
   query needs. For the zero-column carrier it counts real rows, which is
   exact.
+- `NdSourceExec` and `NdBroadcastExec` hand a `fetch` to their child when
+  DataFusion offers it (`with_fetch`, `supports_limit_pushdown`). This is
+  the one change outside the new crates. The builder checks the
+  DataFusion 54.1 API first. If the hand-off needs more than these two
+  methods on each node, leave it out and record that in the plan.
 
 A limit reaches the scan only with no filter between, so chunk rows are
 exact.
 
-### 7.4 NetCDF on the framework
-
-The NetCDF crate keeps: `factory.rs`, `format.rs`, `options.rs`,
-`table_function.rs`, the sinks and `oxcdf_reader/`. It loses the `scan/`
-folder, `open.rs` and the scan half of `statistics.rs`.
-
-- **The bridge.** `beacon-nd-array` gets one new file, `src/bridge.rs`:
-  `DatasetBridge` wraps a regular `beacon_nd_array::Dataset` and implements
-  `NdDataset`.
-  - Each array of the old dataset is one variable. The attribute arrays
-    (`var.attr`, `.global`) stay rank-0 variables, so the table schema does
-    not change. `VariableMeta::attributes` is empty.
-  - `read` calls `NdArrayD::subset` and `ndarray_to_arrow_array`. These are
-    the calls of `FileScan::read` today, so the values and the nulls do not
-    change.
-  - `chunk_shape` is `None` when the chunk shape equals the shape.
-  - `invented_dimensions` forwards the set of the old dataset.
-  - The bridge is deleted with `beacon-nd-array`.
-- **The opener.** `NetcdfOpener` in the NetCDF crate implements
-  `NdFileOpener`. `open` calls `oxcdf_reader::open_object`. A ragged dataset
-  gives `Error::Unsupported` with the text of today. A regular dataset goes
-  in a `DatasetBridge`, which keeps the array order of the old dataset.
-- **The format.** `NetcdfFormat` builds an `NdSource` with a `NetcdfOpener`.
-  `infer_schema` uses `open_for_read` and `file_schema`. `infer_stats` uses
-  `opener.open` and `file_statistics`.
-- **`beacon-core`.** The test at `beacon-core/src/metrics.rs:384` names
-  `NetcdfSource`. Change it to `NdSource`. `NetcdfOptions` builds the
-  `NdScanOptions`: `read_dimensions: None` is `GridSelection::PerFile`,
-  `Some(list)` is `GridSelection::Given(list)`.
-- **HDF5.** It uses `statistics_for_dataset` and `oxcdf_reader` of the NetCDF
-  crate. Keep `statistics_for_dataset` in the NetCDF crate until HDF5 moves.
-
-Behavior changes for NetCDF:
-
-1. `COUNT(*)` and a query of only partition columns no longer fail. The
-   count is the row count of `SELECT *`.
-2. `PARTITIONED BY` stays refused in `NetcdfFormat::create_physical_plan`.
-   That refusal is a decision of the format, not of the scan.
-3. A file off the grid fails with the `OffGrid` text.
-
-Nothing else changes: the plan shape, the chunk grid, the prune, the slices,
-the metrics names, the options and the SQL.
-
-### 7.5 How the later formats fit
+### 7.4 How the formats fit later
 
 This section is a check of the contract, not a work item.
 
-| Format | First step | Later |
-|---|---|---|
-| HDF5, GeoTIFF | An opener that returns a `DatasetBridge`. Partition columns work through `output.rs`. | A native `NdDataset`. Ragged HDF5 needs its own design. |
-| Zarr, Icechunk | The same. One leaf group is one file, as today. The Icechunk opener holds its version storage. | A native `NdDataset` that fetches array metadata on demand. |
-| Atlas | Needs more than one dataset per container, and a prune on footer statistics. Extend `NdFileOpener` then: `open` returns a list, and a dataset can report statistics per variable. | |
-| Plugins | Stay on the stream path. `NdDataset` has six methods and plain data, so a later ABI version can carry it. | |
-
-`AttributeColumns`, a view that shows `VariableMeta::attributes` as rank-0
-variables `var.attr`, comes with the first native `NdDataset`. The bridge
-does not need it.
+| Format | What it writes |
+|---|---|
+| NetCDF | `NetcdfOpener`, a dataset and one variable type on `oxcdf`. Its `open` calls `attribute_columns`. It removes its `scan/` folder and `open.rs`. |
+| HDF5, GeoTIFF | The same shape. Partition columns work through `output.rs`. Ragged HDF5 needs its own design. |
+| Zarr, Icechunk | One leaf group is one file, as today. The dataset builds a variable on demand. The Icechunk opener holds its version storage. |
+| Atlas | Needs more than one dataset per container, and a prune on footer statistics. Extend `NdFileOpener` then: `open` returns a list, and a variable can report its statistics. |
+| Plugins | Stay on the stream path. A later ABI version can carry the two traits. |
 
 ## 8. Tests
 
 ### 8.1 `beacon-nd-dataset`
 
 - `Region`: `full`, `len`, rank 0.
-- `DatasetSchema` and `validate`: a size conflict, a duplicate name, a chunk
-  shape of the wrong rank.
-- `MemoryDataset`: a region read, a rank-0 read, an unknown variable, a
-  region outside the variable.
+- `DatasetSchema` and `validate`: a size conflict, a duplicate name, a
+  variable whose name differs from its key, a chunk shape of the wrong rank.
+- `MemoryVariable`: a region read, a rank-0 read, a region outside the
+  variable, the read count.
 - `select_grid`: `Given` on and off the grid; an empty `Given` list;
   `PerFile` with a narrower grid and with a broadcast-safe file; the debug
   log. The ported tests of `default_broadcast_dimensions`.
 - `select_columns`: known names, an unknown name, no names.
+- `attribute_columns`: a variable attribute, a global attribute, an
+  attribute with more values, a name clash with a real variable.
 - `ChunkGrid`: the ported tests of `scan/chunks.rs`; the cross-product grid;
-  a dataset with no variable; a dimension of size 0.
+  the driver tie; a dataset with no variable; a dimension of size 0.
 - `read_chunk`: each variable is read one time, on its own axes.
 - `value_range`: rank 0, rank 1, rank 2, all nulls, a string type.
 
@@ -709,32 +710,24 @@ All tests use `MemoryDataset` behind a test opener.
   `output.rs` and `source.rs`.
 - No planner state gives an empty `MorselPlan`: a skipped file, a file with
   none of the columns, a fully pruned file, a count scan.
-- Count: `COUNT(*)` equals the row count of `SELECT *`, and the dataset
-  counts zero reads. With slices, each row is counted one time.
+- Count: `COUNT(*)` equals the row count of `SELECT *`, and the variables
+  count zero reads. With slices, each row is counted one time.
 - Partition columns: a value per file; a query of only partition columns.
 - Limit: with a limit, the planner reads only the first chunks.
 - End to end through `NdSourceExec` and `NdBroadcastExec`: one file on 1 and
   on 4 partitions, with and without a filter; a dropped stream stops the
-  reads; a plan that runs again after `reset_plan_states`.
-- The skips: an invalid file and a file off the grid, with and without the
-  options.
+  reads; a plan that runs again after `reset_plan_states`; a read after a
+  `RepartitionExec(RoundRobinBatch)`.
+- The skips: an invalid file, a file off the grid and an `Unsupported` file,
+  with and without the options.
+- `file_schema` and `file_statistics`.
 
-### 8.3 NetCDF
+### 8.3 Equal rules
 
-- `DatasetBridge`: for each NetCDF test file, the variables, types,
-  dimensions and one full read equal the old dataset.
-- A schema pin: `file_schema` of each test file equals the schema on the base
-  branch. Write the expected schema down before the change.
-- The 25 end-to-end tests of `scan/tests.rs` move to the NetCDF crate and
-  keep passing. The tests that expect the `COUNT(*)` error change to expect
-  the count.
-- The `beacon-core` NetCDF tests keep passing.
-
-### 8.4 Timing check
-
-Before and after, in the PR of the NetCDF step: the 40-file collection, and
-one large file on 1 and 8 partitions, with and without a filter. Use
-`examples/scan_profile.rs`.
+The ports must give the results of their sources. For `default_grid`, the
+chunk grid and the prune, each ported test keeps the inputs and the expected
+numbers of the source test. Do not change an expected number to make a
+ported test pass.
 
 ## 9. The relation to nd-arrow-array
 
@@ -746,8 +739,9 @@ one large file on 1 and 8 partitions, with and without a filter. Use
   a different field order and an optional `attrs` field. A later change can
   move the execution nodes to `nd_arrow.array`. Then `output.rs` is the only
   file of the scan that changes.
-- **The CF decode.** `decode_cf` and `decode_cf_time` differ from
-  `compat.rs`:
+- **The CF decode.** A format decodes in `read`. It can use `decode_cf` and
+  `decode_cf_time` of `nd-arrow-array`. These differ from the NetCDF
+  `compat.rs` of today:
 
   | Rule | `compat.rs` today | nd-arrow-array |
   |---|---|---|
@@ -755,38 +749,37 @@ one large file on 1 and 8 partitions, with and without a filter. Use
   | Packed values | Always `Float64` | The type of `scale_factor`, else `Float64` |
   | `missing_value`, valid range | Not applied | Applied |
 
-  So that change gives new column types and new nulls. It is a later design.
-  It replaces the bridge with a native `NetcdfDataset` that reads raw values
-  and decodes with these kernels.
+  So a format that moves to these kernels gets new column types and new
+  nulls. The design of the NetCDF move decides that.
 
 ## 10. Order of work
 
 Each step is one PR.
 
 1. `beacon-nd-dataset`, with its tests. The workspace gets the
-   `nd-arrow-array` dependency and the two members.
+   `nd-arrow-array` dependency and the member.
 2. `beacon-nd-scan`, with its tests on `MemoryDataset`.
-3. NetCDF: the bridge, `NetcdfOpener`, the format switch, the removal of
-   `scan/` and `open.rs`, the docs and the changelog.
 
-The first implementation plan covers step 1.
-
-Docs for step 3, in `docs/docs/2.1.0-rc3/formats/netcdf.md`: `COUNT(*)` is
-supported again. `CHANGELOG.md` `[Unreleased]`: the same, under **Changed**.
+The first implementation plan covers step 1. Neither step changes user
+behavior, so the docs and the changelog do not change.
 
 ## 11. Risks
 
-1. **Two models for a time.** `beacon-nd-array` and `beacon-nd-dataset` both
-   exist until the last format moves. The bridge keeps them in step.
-2. **The ported rules.** `default_grid`, the chunk grid and the prune are
-   ports. A difference changes query results. The ported tests and the schema
-   pin guard this.
-3. **One read per variable.** A chunk of N variables is N `read` calls. They
+1. **No format proves the contract.** The framework has tests on a dataset
+   in memory only. A real format can show a gap. Section 7.4 is the check
+   against that, and the NetCDF move is the first proof.
+2. **Two copies of the scan.** The NetCDF `scan/` folder and
+   `beacon-nd-scan` hold the same rules until NetCDF moves. A fix in one must
+   go in the other.
+3. **The ported rules.** `default_grid`, the chunk grid and the prune are
+   ports. A difference changes query results at the move of a format.
+   Section 8.3 guards this.
+4. **One read per variable.** A chunk of N variables is N `read` calls. They
    run one after the other, as today.
-4. **The experimental morsel API.** Two files name it.
-5. **An external crate in the core path.** `nd-arrow-array` has a fixed rev.
+5. **The experimental morsel API.** Two files name it.
+6. **An external crate in the core path.** `nd-arrow-array` has a fixed rev.
    The user owns the crate.
-6. **`COUNT(*)` semantics.** The legacy engine counts the rows of the largest
+7. **`COUNT(*)` semantics.** The legacy engine counts the rows of the largest
    variable. The framework counts the rows of `SELECT *`. They can differ for
    a file whose default grid is not the largest variable.
 
@@ -794,6 +787,5 @@ supported again. `CHANGELOG.md` `[Unreleased]`: the same, under **Changed**.
 
 - Private names, and the split of a module that grows too large.
 - The exact form of the limit hand-off in the execution nodes (section 7.3).
-- Whether `validate` runs at open in release builds, if the timing check
-  shows no cost.
+- Whether `validate` runs at open in release builds.
 - The commit order inside each step.
