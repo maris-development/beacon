@@ -3,12 +3,14 @@
 //! A format crate implements this contract for one opened file.
 #![warn(missing_docs)]
 
+pub mod attributes;
 pub mod dataset;
 pub mod error;
 pub mod memory;
 pub mod region;
 pub mod schema;
 
+pub use attributes::attribute_columns;
 pub use dataset::{NdDataset, NdVariable, validate};
 pub use error::{Error, Result};
 pub use memory::{MemoryDataset, MemoryVariable};
