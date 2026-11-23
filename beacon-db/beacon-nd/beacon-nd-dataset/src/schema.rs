@@ -136,47 +136,11 @@ impl NdDataset for DatasetSchema {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-    use nd_arrow_array::{Dimension, NdArrowArray};
-
     use super::*;
-    use crate::Region;
-
-    #[derive(Debug)]
-    struct Meta(VariableInfo);
-
-    #[async_trait]
-    impl NdVariable for Meta {
-        fn name(&self) -> &str {
-            &self.0.name
-        }
-        fn data_type(&self) -> &DataType {
-            &self.0.data_type
-        }
-        fn dimensions(&self) -> &Dimensions {
-            &self.0.dimensions
-        }
-        fn chunk_shape(&self) -> Option<&[usize]> {
-            self.0.chunk_shape.as_deref()
-        }
-        fn attributes(&self) -> &Attributes {
-            &self.0.attributes
-        }
-        async fn read(&self, _: &Region) -> Result<NdArrowArray> {
-            unimplemented!()
-        }
-    }
-
-    fn dims(sizes: &[(&str, usize)]) -> Dimensions {
-        Dimensions::try_new(sizes.iter().map(|(n, s)| Dimension::new(*n, *s))).unwrap()
-    }
-
-    fn info(name: &str, sizes: &[(&str, usize)]) -> VariableInfo {
-        VariableInfo::new(name, DataType::Float64, dims(sizes))
-    }
+    use crate::memory::testing::{Meta, dims, meta};
 
     fn var(name: &str, sizes: &[(&str, usize)]) -> Arc<dyn NdVariable> {
-        Arc::new(Meta(info(name, sizes)))
+        Arc::new(meta(name, DataType::Float64, sizes))
     }
 
     fn assert_invalid(result: Result<DatasetSchema>) {
@@ -231,7 +195,9 @@ mod tests {
 
     #[test]
     fn a_chunk_shape_of_the_wrong_rank_is_invalid() {
-        let temp = info("temp", &[("time", 2), ("lat", 3)]).with_chunk_shape(vec![2]);
+        let temp = meta("temp", DataType::Float64, &[("time", 2), ("lat", 3)])
+            .0
+            .with_chunk_shape(vec![2]);
         assert_invalid(DatasetSchema::try_new(
             "ds",
             dims(&[("time", 2), ("lat", 3)]),

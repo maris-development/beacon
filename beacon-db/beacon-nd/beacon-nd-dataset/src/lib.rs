@@ -5,10 +5,12 @@
 
 pub mod dataset;
 pub mod error;
+pub mod memory;
 pub mod region;
 pub mod schema;
 
 pub use dataset::{NdDataset, NdVariable, validate};
 pub use error::{Error, Result};
+pub use memory::{MemoryDataset, MemoryVariable};
 pub use region::Region;
 pub use schema::{DatasetSchema, VariableInfo};
