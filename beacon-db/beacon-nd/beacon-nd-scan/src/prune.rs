@@ -33,6 +33,13 @@ pub(crate) enum Masks {
     Keep(Vec<DimensionMask>),
 }
 
+impl Masks {
+    /// True when no conjunct gave a mask, so each chunk stays.
+    pub(crate) fn prune_nothing(&self) -> bool {
+        matches!(self, Self::Keep(masks) if masks.is_empty())
+    }
+}
+
 /// The keep mask of a part of one dimension.
 #[derive(Debug)]
 pub(crate) struct DimensionMask {
@@ -42,6 +49,13 @@ pub(crate) struct DimensionMask {
     offset: usize,
     /// One bit for each index from `offset`. It has no null.
     keep: BooleanBuffer,
+}
+
+impl DimensionMask {
+    /// True when `other` has the same first index and the same bit count.
+    fn covers_the_part_of(&self, other: &Self) -> bool {
+        self.offset == other.offset && self.keep.len() == other.keep.len()
+    }
 }
 
 /// The keep mask of one conjunct.
@@ -61,8 +75,8 @@ type Coordinates = HashMap<String, ArrayRef>;
 /// reads each coordinate only on that part, so the slices of one file do not
 /// each read the whole coordinate. A mask covers only that part.
 ///
-/// `table_schema` holds the logical type of each column of the scan.
-/// A conjunct gives a mask when each of its columns is in `table_schema`, and
+/// `filter_schema` holds the logical type of each column of the scan.
+/// A conjunct gives a mask when each of its columns is in `filter_schema`, and
 /// each column that the file has is a rank-0 variable, or a rank-1 variable
 /// on one and the same dimension. A conjunct with no rank-1 variable has one
 /// value for the file, so it can reject the whole file.
@@ -73,7 +87,7 @@ type Coordinates = HashMap<String, ArrayRef>;
 pub(crate) async fn chunk_masks(
     dataset: &dyn NdDataset,
     predicate: &Arc<dyn PhysicalExpr>,
-    table_schema: &SchemaRef,
+    filter_schema: &SchemaRef,
     grid: &ChunkGrid,
     span: &Region,
 ) -> Masks {
@@ -82,7 +96,7 @@ pub(crate) async fn chunk_masks(
         snapshot_physical_expr(Arc::clone(predicate)).unwrap_or_else(|_| Arc::clone(predicate));
     let mut scope = Scope {
         dataset,
-        table_schema,
+        filter_schema,
         grid,
         span,
         coordinates: Coordinates::new(),
@@ -97,8 +111,15 @@ pub(crate) async fn chunk_masks(
                     .iter_mut()
                     .find(|known| known.dimension == mask.dimension)
                 {
-                    // A row must meet each conjunct. The two masks cover the same part.
-                    Some(known) => known.keep = &known.keep & &mask.keep,
+                    // A row must meet each conjunct.
+                    Some(known) if known.covers_the_part_of(&mask) => {
+                        known.keep = &known.keep & &mask.keep;
+                    }
+                    // Two masks of one dimension cover the same part. If not, keep the first one.
+                    Some(_) => tracing::debug!(
+                        "no prune mask for '{conjunct}': its part of '{}' differs",
+                        mask.dimension
+                    ),
                     None => keep.push(mask),
                 }
             }
@@ -144,7 +165,7 @@ pub(crate) fn is_pruned(masks: &Masks, grid: &ChunkGrid, chunk: &Region) -> bool
 /// What one prune works on.
 struct Scope<'a> {
     dataset: &'a dyn NdDataset,
-    table_schema: &'a SchemaRef,
+    filter_schema: &'a SchemaRef,
     grid: &'a ChunkGrid,
     /// The part of the grid that holds the chunks to prune.
     span: &'a Region,
@@ -170,7 +191,7 @@ impl Scope<'_> {
         for column in collect_columns(conjunct) {
             let name = column.name();
             // The type of a column that the scan does not project is not known here.
-            let Ok(table_field) = self.table_schema.field_with_name(name) else {
+            let Ok(table_field) = self.filter_schema.field_with_name(name) else {
                 return Err(format!("'{name}' is not a column of the scan"));
             };
             // The scan gives nulls for a column that the file does not have. The adapter does the same.
@@ -232,7 +253,7 @@ impl Scope<'_> {
 
         // The adapter puts the cast of the scan around each column, and a null for a missing column.
         let adapted = DefaultPhysicalExprAdapterFactory
-            .create(Arc::clone(self.table_schema), file_schema)
+            .create(Arc::clone(self.filter_schema), file_schema)
             .and_then(|adapter| adapter.rewrite(Arc::clone(conjunct)))
             .map_err(|e| e.to_string())?;
         let result = adapted

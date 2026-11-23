@@ -1,8 +1,8 @@
 //! File slices: how one file is read by several partitions.
 //!
-//! A slice is the same file with a part of its chunk list. Every slice builds
-//! the same list and takes its own range of it, so the slices of a file read
-//! each chunk once.
+//! A slice is the same file with a part of its chunks. Every slice builds the
+//! same grid and takes its own range of the chunk numbers, so the slices of a
+//! file read each chunk one time.
 
 use std::num::NonZeroU32;
 use std::ops::Range;

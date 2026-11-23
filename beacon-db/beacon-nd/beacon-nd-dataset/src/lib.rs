@@ -26,16 +26,16 @@
 //! ```
 #![warn(missing_docs)]
 
-pub mod attributes;
-pub mod dataset;
-pub mod error;
-pub mod grid;
-pub mod memory;
-pub mod read;
-pub mod region;
-pub mod schema;
-pub mod statistics;
-pub mod view;
+mod attributes;
+mod dataset;
+mod error;
+mod grid;
+mod memory;
+mod read;
+mod region;
+mod schema;
+mod statistics;
+mod view;
 
 pub use attributes::attribute_columns;
 pub use dataset::{NdDataset, NdVariable, validate};

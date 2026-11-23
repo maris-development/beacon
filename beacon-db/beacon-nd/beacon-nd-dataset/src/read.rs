@@ -87,8 +87,18 @@ impl ChunkReader {
     /// The reader reads each variable on its own axes, so it reads a
     /// coordinate one time for each chunk and not one time for each row.
     /// `Read` when a variable cannot be read. `Invalid` when a variable
-    /// returns an array that does not have the shape of its region.
+    /// returns an array that does not have the shape of its region, or when
+    /// `chunk` does not have the rank of the grid.
     pub async fn read(&self, chunk: &Region) -> Result<NdRecordBatch> {
+        if chunk.rank() != self.grid.dimensions().rank() {
+            return Err(Error::Invalid {
+                dataset: self.dataset.clone(),
+                reason: format!(
+                    "the chunk {chunk:?} does not have the rank {} of the grid",
+                    self.grid.dimensions().rank()
+                ),
+            });
+        }
         let target = Dimensions::try_new(
             self.grid
                 .dimensions()
@@ -329,7 +339,21 @@ mod tests {
     async fn a_rank_0_variable_goes_in_each_chunk() {
         let ds = dataset(vec![ramp("v", &[("n", 6)]), ramp("title", &[])]);
         let reader = reader(&ds, 4);
-        let batch = reader.read(&reader.grid().chunk(0)).await.unwrap();
-        assert_eq!(batch.column(1).len(), 1);
+        assert_eq!(reader.grid().len(), 2);
+        for chunk in reader.grid().chunks() {
+            let batch = reader.read(&chunk).await.unwrap();
+            assert_eq!(batch.column(1).len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_chunk_of_another_rank_is_invalid() {
+        let ds = dataset(vec![ramp("v", &[("n", 6)])]);
+        let reader = reader(&ds, 4);
+        let error = reader
+            .read(&Region::new(vec![0, 0], vec![1, 1]))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Invalid { .. }), "{error:?}");
     }
 }

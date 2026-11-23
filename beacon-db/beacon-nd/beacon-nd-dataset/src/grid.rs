@@ -163,7 +163,7 @@ fn layout(dataset: &dyn NdDataset) -> Result<(Dimensions, Vec<usize>)> {
     let used = used_dimensions(dataset, &variables)?;
 
     // A variable on every used dimension drives the grid, and the others broadcast onto it.
-    // Each such variable has the same dimensions, and the last one wins.
+    // Each such variable has the same set of dimensions. The last one wins, with its axis order.
     if let Some(driver) = variables
         .iter()
         .rev()

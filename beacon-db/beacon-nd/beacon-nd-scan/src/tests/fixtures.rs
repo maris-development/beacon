@@ -18,7 +18,7 @@ use object_store::{ObjectMeta, ObjectStore};
 use crate::opener::NdFileOpener;
 
 /// What the test opener gives for one path.
-// Later tasks write `Entry::Dataset(grid_dataset(..))`, so the variant holds the dataset unboxed.
+// The tests write `Entry::Dataset(grid_dataset(..))`, so the variant holds the dataset unboxed.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum Entry {

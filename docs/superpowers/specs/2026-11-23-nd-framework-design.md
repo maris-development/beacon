@@ -187,12 +187,13 @@ beacon-nd-dataset/src/
 ```rust
 /// A box inside one variable: a start and a length for each axis.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Region {
-    pub start: Vec<usize>,
-    pub shape: Vec<usize>,
-}
+pub struct Region { /* start and shape, with the same rank */ }
 
 impl Region {
+    /// Panics when `start` and `shape` do not have the same length.
+    pub fn new(start: Vec<usize>, shape: Vec<usize>) -> Self;
+    pub fn start(&self) -> &[usize];
+    pub fn shape(&self) -> &[usize];
     /// The whole variable.
     pub fn full(dimensions: &Dimensions) -> Self;
     /// The element count: the product of `shape`. 1 for rank 0.
@@ -278,9 +279,12 @@ pub enum Error {
     Nd(#[from] nd_arrow_array::NdError),
     #[error(transparent)]
     Arrow(#[from] arrow::error::ArrowError),
+    /// The read of one variable failed. It keeps the error of the read.
+    #[error("variable '{variable}': {error}")]
+    Read { variable: String, error: Box<Error> },
     /// An error of the format: I/O, decode.
-    #[error("{0}")]
-    Format(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    Format(Box<dyn std::error::Error + Send + Sync>),
 }
 ```
 
@@ -371,10 +375,11 @@ The skip option is not in this crate. The caller sees `OffGrid` and decides.
 column. The old readers put attributes in the dataset as fake arrays. In the
 contract an attribute lies on its variable, and this view makes the columns.
 
-- It adds a variable for each attribute whose value has length 1. Its type
-  is the type of the attribute value. Its `read` returns that value.
-- It skips an attribute with more values, and an attribute whose column name
-  is the name of a real variable.
+- It adds a variable for each attribute. Its type is the type of the
+  attribute value. Its `read` returns that value. An attribute of
+  `nd-arrow-array` always has one value.
+- It skips an attribute with a list value, and an attribute whose column
+  name is the name of a real variable.
 - A format calls it in its `open` when its tables show attributes. The scan
   does not call it.
 
@@ -424,7 +429,8 @@ tests:
 - The grid spans the dimensions that the variables of `dataset` use.
 - A variable on all grid dimensions drives the grid. With more than one, the
   last one in the order of `variable_names` wins. Each such variable has the
-  same dimensions, so only its native chunk shape can differ. With none, the
+  same set of dimensions, so only its axis order and its native chunk shape
+  can differ. The grid takes both from the winner. With none, the
   grid is the cross-product of the used dimensions.
 - The grid holds no chunk list. It holds the chunk shape and the chunk count
   of each axis, and `chunk(index)` computes one chunk. So a grid with many
@@ -597,7 +603,8 @@ open future  [I/O]
    the query has file columns and
    the file has none of them         -> Done
    ChunkGrid::try_new                for a count scan: section 7.3
-   chunks = the slice range of the full chunk list
+   ChunkReader::try_new, FileOutput::try_new
+   chunks = the slice range of the chunk numbers of the grid
    masks  = chunk_masks(..)          only with a predicate and a variable
    drop the chunks that is_pruned accepts; count them
    no chunk left                     -> Done
@@ -621,8 +628,7 @@ Invariants, as today:
 1. `plan_file` and `plan()` do no I/O. A morsel does no I/O.
 2. No empty `MorselPlan`.
 3. One I/O per partition, with a read-ahead of one chunk.
-4. The chunk list before the prune is the same in each slice. The slice cut
-   comes before the prune.
+4. The grid is the same in each slice. The slice cut comes before the prune.
 5. Only slice 0 counts a skipped file.
 
 Each error gets the context `"{format_name} file {path}"`, plus the slice and
@@ -634,7 +640,7 @@ The prune is not a port. It evaluates the predicate on the coordinate values
 (user decision, 2026-11-23). The source collects bounds from the predicate
 and compares them by hand.
 
-- `chunk_masks(dataset, predicate, table_schema) -> Masks`:
+- `chunk_masks(dataset, predicate, table_schema, grid, span) -> Masks`:
   1. Take the snapshot of the predicate, for a dynamic filter.
   2. Split the predicate into its conjuncts.
   3. Keep a conjunct when each of its columns is in `table_schema`, and each
@@ -644,8 +650,10 @@ and compares them by hand.
      nested type, or with a dimension of size 0.
   4. Read each variable of the conjunct in its file type, on the span of the
      slice. The span is the smallest region of the grid that holds each chunk
-     of the slice (`ChunkGrid::span`). So the slices of a file with one
-     dimension read a variable one time in total, not one time each. A read
+     of the slice (`ChunkGrid::span`). Each slice reads its own part. So the
+     slices of a file with one dimension read each value of a variable one
+     time in total. On a grid with more dimensions, a span holds each inner
+     axis in full, so each slice reads the inner coordinates in full. A read
      with a wrong length gives no mask.
   5. Rewrite the conjunct with the DataFusion `DefaultPhysicalExprAdapter`,
      from `table_schema` to the file types of the coordinates.
@@ -661,7 +669,7 @@ and compares them by hand.
   `true` in the range of the chunk, or when a conjunct rejects the file.
 
 `table_schema` holds the logical type of each projected column. The source
-computes it one time for each scan (`schema.rs` `logical_projection`), and
+computes it one time for each partition (`schema.rs` `logical_projection`), and
 the planner keeps it as `ScanContext::filter_schema`. The encoded schema that
 the scan emits is `ScanContext::output_schema`. A conjunct with a column that
 is not in `table_schema` gives no mask. A projected field that is not
@@ -702,13 +710,16 @@ Why the evaluation keeps the rule:
   gives no mask.
 - **A nested type gives no mask.** The adapter casts a struct by field name,
   and the scan output does not. So the two casts can differ.
+- **A null** gives `false`. **A NaN** follows the Arrow total order, as the
+  `FilterExec` does.
 
 One cost: a rank-1 variable is not always a small coordinate. In a file with
 one dimension, each data variable has rank 1. A filter on such a variable
 reads it one time for the prune, and the scan then reads the kept chunks
 again.
-- **A null** gives `false`. **A NaN** follows the Arrow total order, as the
-  `FilterExec` does.
+
+The planner keeps the numbers of the kept chunks in a list. So a slice with
+very many chunks still costs memory in the scan, 8 bytes for each chunk.
 
 `beacon-nd-array/src/arrow/pushdown_filter.rs` on `main` has the cast defect.
 The HDF5, Zarr and GeoTIFF scans use it today.
@@ -836,7 +847,7 @@ What the `FileFormat` of a format writes:
   log. The ported tests of `default_broadcast_dimensions`.
 - `select_columns`: known names, an unknown name, no names.
 - `attribute_columns`: a variable attribute, a global attribute, an
-  attribute with more values, a name clash with a real variable.
+  attribute with a list value, a name clash with a real variable.
 - `ChunkGrid`: the ported tests of `scan/chunks.rs`; the cross-product grid;
   the driver tie; a dataset with no variable; a dimension of size 0.
 - `ChunkReader`: each variable is read one time, on its own axes.

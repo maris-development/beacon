@@ -255,12 +255,13 @@ async fn open_entry(
     }
     let grid =
         ChunkGrid::try_new(grid_source.as_ref(), context.batch_size).map_err(to_datafusion)?;
-    let chunks = select_chunks(context, dataset.as_ref(), &grid, slice).await;
+    // The reader checks that each variable lies on the grid, so it comes before the prune.
+    let reader = ChunkReader::try_new(dataset.as_ref(), grid).map_err(to_datafusion)?;
+    let output = FileOutput::try_new(reader.schema(), &context.output_schema)?;
+    let chunks = select_chunks(context, dataset.as_ref(), reader.grid(), slice).await;
     if chunks.is_empty() {
         return Ok(None);
     }
-    let reader = ChunkReader::try_new(dataset.as_ref(), grid).map_err(to_datafusion)?;
-    let output = FileOutput::try_new(reader.schema(), &context.output_schema)?;
 
     Ok(Some(OpenFile {
         context: Arc::clone(context),
@@ -294,6 +295,9 @@ async fn select_chunks(
     };
 
     let masks = chunk_masks(dataset, predicate, &context.filter_schema, grid, &span).await;
+    if masks.prune_nothing() {
+        return range.collect();
+    }
     let mut chunks = Vec::new();
     for number in range {
         let chunk = grid.chunk(number);
@@ -791,6 +795,50 @@ mod tests {
         }
         assert_eq!(counter(&sliced, "chunks_pruned"), 2);
         assert_eq!(counter(&sliced, "rows_pruned"), 24);
+    }
+
+    #[tokio::test]
+    async fn slices_with_more_than_one_chunk_keep_the_chunks_of_one_scan() {
+        // With 2 or 3 slices of 4 chunks, a slice holds 2 chunks: its span crosses the lat axis.
+        for threshold in [-1.0, 1.5, 3.5, 5.5, 100.0] {
+            let scan = |metrics: &ExecutionPlanMetricsSet| {
+                morselizer(
+                    grid_opener(),
+                    &["temp", "lat"],
+                    12,
+                    Some(threshold),
+                    NdScanOptions::default(),
+                    None,
+                    metrics,
+                )
+            };
+            let whole_metrics = ExecutionPlanMetricsSet::new();
+            let whole = drive(&scan(&whole_metrics), vec![entry("a.nd")])
+                .await
+                .unwrap();
+
+            for count in [2, 3] {
+                let metrics = ExecutionPlanMetricsSet::new();
+                let scan = scan(&metrics);
+                let mut sliced = Vec::new();
+                for index in 0..count {
+                    sliced.extend(drive(&scan, vec![slice(index, count)]).await.unwrap());
+                }
+                // The slices are in the order of the grid, so the values are in the same order.
+                assert_eq!(
+                    temps(&sliced),
+                    temps(&whole),
+                    "lat > {threshold} in {count} slices"
+                );
+                for name in ["chunks_read", "rows_read", "chunks_pruned", "rows_pruned"] {
+                    assert_eq!(
+                        counter(&metrics, name),
+                        counter(&whole_metrics, name),
+                        "{name} for lat > {threshold} in {count} slices"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

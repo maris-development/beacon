@@ -22,29 +22,29 @@ pub(crate) struct FileOutput {
     /// Reorders, casts and null-fills the columns. `None` when no column is projected.
     adapter: Option<BatchAdapter>,
     /// The encoded schema that the scan emits.
-    projected_schema: SchemaRef,
+    output_schema: SchemaRef,
 }
 
 impl FileOutput {
     /// Make the output of one file.
     ///
     /// `chunk_schema` is the schema of the chunks of the file, from `ChunkReader::schema`.
-    /// `projected_schema` is the encoded schema that the scan emits.
+    /// `output_schema` is the encoded schema that the scan emits.
     /// The chunks can hold more variables than the projection names. The output drops them.
-    pub(crate) fn try_new(chunk_schema: &Schema, projected_schema: &SchemaRef) -> Result<Self> {
-        let adapter = if projected_schema.fields().is_empty() {
+    pub(crate) fn try_new(chunk_schema: &Schema, output_schema: &SchemaRef) -> Result<Self> {
+        let adapter = if output_schema.fields().is_empty() {
             None
         } else {
             // Every column is nd-encoded and casts leniently, so the strict rule is never asked.
             Some(BatchAdapter::try_new(
-                Arc::clone(projected_schema),
+                Arc::clone(output_schema),
                 &encoded_schema(chunk_schema),
                 &DefaultArrowTypeWidening::new(),
             )?)
         };
         Ok(Self {
             adapter,
-            projected_schema: Arc::clone(projected_schema),
+            output_schema: Arc::clone(output_schema),
         })
     }
 
@@ -53,7 +53,7 @@ impl FileOutput {
         let Some(adapter) = &self.adapter else {
             // A row carrier: the batch states the rows of the chunk and has no column.
             return RecordBatch::try_new_with_options(
-                Arc::clone(&self.projected_schema),
+                Arc::clone(&self.output_schema),
                 Vec::new(),
                 &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
             )

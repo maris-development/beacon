@@ -371,6 +371,31 @@ async fn a_filter_on_a_column_that_one_file_does_not_have_prunes_that_file() {
 }
 
 #[tokio::test]
+async fn a_filter_on_four_partitions_keeps_the_matching_rows() {
+    for (threshold, expected) in [(-1.0, 48), (1.5, 36), (3.5, 24), (5.5, 12), (100.0, 0)] {
+        let scan = plan(
+            grid_opener(&["a.nd"]),
+            grid_schema(),
+            vec![entry("a.nd")],
+            None,
+            4,
+        );
+        assert_eq!(scan.properties().partitioning.partition_count(), 4);
+        let plan = filtered(scan, "lat", Operator::Gt, threshold);
+
+        let batches = collect(plan).await;
+
+        assert_eq!(rows(&batches), expected, "lat > {threshold}");
+        assert!(
+            values(&batches, "lat")
+                .iter()
+                .all(|lat| lat.is_some_and(|lat| lat > threshold)),
+            "lat > {threshold}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_filter_on_a_rank_0_variable_skips_the_files_that_fail_it() {
     let opener = Arc::new(
         MemoryOpener::default()
