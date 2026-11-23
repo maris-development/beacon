@@ -14,7 +14,8 @@ use crate::error::to_datafusion;
 ///
 /// A variable of rank 0 or 1 gets its exact minimum and maximum in the type of its field.
 /// Each other column is unknown, also a column that the file does not have.
-/// A column is also unknown when the cast to the field type can change a value.
+/// A column is also unknown when the cast to the field type can change a value,
+/// or when its minimum or maximum does not fit in the field type.
 /// The row count is not set. A larger variable is not read, because a full read costs too much.
 pub async fn file_statistics(dataset: &dyn NdDataset, schema: &Schema) -> Result<Statistics> {
     let mut statistics = Statistics::default();
@@ -42,8 +43,15 @@ async fn column_statistics(
         return Ok(ColumnStatistics::new_unknown());
     };
     // DataFusion merges the statistics of the files in the type of the table.
-    let min = ScalarValue::try_from_array(&min, 0)?.cast_to(field_type)?;
-    let max = ScalarValue::try_from_array(&max, 0)?.cast_to(field_type)?;
+    let min = ScalarValue::try_from_array(&min, 0)?.cast_to(field_type);
+    let max = ScalarValue::try_from_array(&max, 0)?.cast_to(field_type);
+    // A value that does not fit in the field type gives no statistics.
+    let (Ok(min), Ok(max)) = (min, max) else {
+        return Ok(ColumnStatistics::new_unknown());
+    };
+    if min.is_null() || max.is_null() {
+        return Ok(ColumnStatistics::new_unknown());
+    }
     Ok(ColumnStatistics::new_unknown()
         .with_min_value(Precision::Exact(min))
         .with_max_value(Precision::Exact(max)))
@@ -53,8 +61,8 @@ async fn column_statistics(
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, Float64Array, Int32Array};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::array::{ArrayRef, Float64Array, Int32Array, TimestampSecondArray};
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
     use datafusion::common::ColumnStatistics;
     use datafusion::common::stats::Precision;
@@ -122,6 +130,40 @@ mod tests {
         assert_eq!(
             n.max_value,
             Precision::Exact(ScalarValue::Float64(Some(5.0)))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timestamp_that_overflows_the_field_unit_has_no_statistics() {
+        // The year 9999 in seconds does not fit in nanoseconds.
+        let values = Arc::new(TimestampSecondArray::from(vec![0, 253_402_300_799]));
+        let field_type = DataType::Timestamp(TimeUnit::Nanosecond, None);
+        let (dataset, schema) = one_variable(values, field_type);
+
+        let statistics = file_statistics(&dataset, &schema).await.unwrap();
+
+        assert_eq!(
+            statistics.column_statistics[0],
+            ColumnStatistics::new_unknown()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timestamp_that_fits_the_field_unit_has_statistics() {
+        let values = Arc::new(TimestampSecondArray::from(vec![1, 5, 3]));
+        let field_type = DataType::Timestamp(TimeUnit::Nanosecond, None);
+        let (dataset, schema) = one_variable(values, field_type);
+
+        let statistics = file_statistics(&dataset, &schema).await.unwrap();
+
+        let n = &statistics.column_statistics[0];
+        assert_eq!(
+            n.min_value,
+            Precision::Exact(ScalarValue::TimestampNanosecond(Some(1_000_000_000), None))
+        );
+        assert_eq!(
+            n.max_value,
+            Precision::Exact(ScalarValue::TimestampNanosecond(Some(5_000_000_000), None))
         );
     }
 
