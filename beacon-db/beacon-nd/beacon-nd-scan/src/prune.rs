@@ -26,14 +26,20 @@ pub(crate) struct ValueRange {
     pub min: Option<(ScalarValue, bool)>,
     /// The upper bound and whether it is inclusive.
     pub max: Option<(ScalarValue, bool)>,
+    /// The target types of the casts around the column, from the column out.
+    pub column_casts: Vec<DataType>,
+    /// True when two compares of the column have different casts around it.
+    pub mixed_casts: bool,
 }
 
 impl ValueRange {
-    /// A range with no bound.
-    fn empty() -> Self {
+    /// A range with no bound, for a column with `column_casts` around it.
+    fn empty(column_casts: Vec<DataType>) -> Self {
         Self {
             min: None,
             max: None,
+            column_casts,
+            mixed_casts: false,
         }
     }
 
@@ -74,6 +80,8 @@ impl ValueRange {
 /// Each range holds for every row that meets the predicate. Only a comparison
 /// with a literal and an `AND` give a bound. An `OR`, a `NOT`, an `IN` and a
 /// `CASE` give nothing, so a missing rule prunes less and never more.
+/// A range records the casts around its column; [`coordinate_masks`] decides
+/// if they keep values. A cast around the literal is evaluated.
 pub(crate) fn value_ranges(predicate: &Arc<dyn PhysicalExpr>) -> HashMap<String, ValueRange> {
     let mut ranges = HashMap::new();
     walk_expr(predicate, &mut ranges);
@@ -94,35 +102,35 @@ fn walk_expr(node: &Arc<dyn PhysicalExpr>, ranges: &mut HashMap<String, ValueRan
         return;
     }
 
-    if let (Some(column), Some(value)) = (
-        as_column_name(binary.left()),
-        as_pushdown_scalar(binary.right()),
-    ) {
-        apply_op(ranges, &column, op, value);
+    if let (Some((column, casts)), Some(value)) =
+        (as_column(binary.left()), as_pushdown_scalar(binary.right()))
+    {
+        apply_op(ranges, &column, casts, op, value);
         return;
     }
 
     // `literal op column` is `column flip(op) literal`.
-    if let (Some(value), Some(column)) = (
-        as_pushdown_scalar(binary.left()),
-        as_column_name(binary.right()),
-    ) {
-        apply_op(ranges, &column, flip_op(op), value);
+    if let (Some(value), Some((column, casts))) =
+        (as_pushdown_scalar(binary.left()), as_column(binary.right()))
+    {
+        apply_op(ranges, &column, casts, flip_op(op), value);
     }
 
     // An `OR`, an arithmetic tree or a compare of two columns implies no bound.
 }
 
-/// Tighten the range of `column` with `column op value`.
+/// Tighten the range of `column` with `CAST(column AS casts..) op value`.
 fn apply_op(
     ranges: &mut HashMap<String, ValueRange>,
     column: &str,
+    casts: Vec<DataType>,
     op: Operator,
     value: ScalarValue,
 ) {
     let range = ranges
         .entry(column.to_string())
-        .or_insert_with(ValueRange::empty);
+        .or_insert_with(|| ValueRange::empty(casts.clone()));
+    range.mixed_casts |= range.column_casts != casts;
     match op {
         Operator::Gt => range.with_lower(value, false),
         Operator::GtEq => range.with_lower(value, true),
@@ -147,16 +155,34 @@ fn flip_op(op: Operator) -> Operator {
     }
 }
 
-/// The column name of `expr`, through its casts.
-fn as_column_name(expr: &Arc<dyn PhysicalExpr>) -> Option<String> {
-    let column = peel_casts(expr).downcast_ref::<Column>()?;
-    Some(column.name().to_string())
+/// The column name of `expr`, and the target types of the casts around it from the column out.
+fn as_column(expr: &Arc<dyn PhysicalExpr>) -> Option<(String, Vec<DataType>)> {
+    let mut casts = Vec::new();
+    let mut current = expr;
+    while let Some(cast) = current.downcast_ref::<CastExpr>() {
+        casts.push(cast.cast_type().clone());
+        current = cast.expr();
+    }
+    let column = current.downcast_ref::<Column>()?;
+    casts.reverse();
+    Some((column.name().to_string(), casts))
 }
 
-/// The value of a numeric or timestamp literal, through its casts.
+/// The value of a numeric or timestamp literal, with its casts evaluated.
 fn as_pushdown_scalar(expr: &Arc<dyn PhysicalExpr>) -> Option<ScalarValue> {
-    let value = peel_casts(expr).downcast_ref::<Literal>()?.value();
-    is_pushdown_scalar(value).then(|| value.clone())
+    let value = literal_value(expr)?;
+    is_pushdown_scalar(&value).then_some(value)
+}
+
+/// The value of a literal with the casts around it. `None` when a cast fails.
+fn literal_value(expr: &Arc<dyn PhysicalExpr>) -> Option<ScalarValue> {
+    if let Some(cast) = expr.downcast_ref::<CastExpr>() {
+        let value = literal_value(cast.expr())?;
+        return value
+            .cast_to_with_options(cast.cast_type(), cast.cast_options())
+            .ok();
+    }
+    Some(expr.downcast_ref::<Literal>()?.value().clone())
 }
 
 /// True for a numeric or timestamp value that is not null.
@@ -180,13 +206,91 @@ fn is_pushdown_scalar(value: &ScalarValue) -> bool {
     )
 }
 
-/// `expr` without the casts around it.
-fn peel_casts(expr: &Arc<dyn PhysicalExpr>) -> &Arc<dyn PhysicalExpr> {
-    let mut current = expr;
-    while let Some(cast) = current.downcast_ref::<CastExpr>() {
-        current = cast.expr();
+/// True when a cast from `from` to `to` keeps the order and each value.
+///
+/// The steps that keep each value:
+/// - the same type;
+/// - a signed integer to a wider signed integer;
+/// - an unsigned integer to a wider unsigned integer or to a wider signed integer;
+/// - Int8, Int16, Int32, UInt8, UInt16 and UInt32 to Float64;
+/// - Int8, Int16, UInt8 and UInt16 to Float32;
+/// - Float32 to Float64;
+/// - a timestamp to a finer unit with the same time zone.
+///
+/// Each other step can change which rows meet a compare, so it gives `false`.
+fn keeps_values(from: &DataType, to: &DataType) -> bool {
+    if from == to {
+        return true;
     }
-    current
+    match (integer_bits(from), integer_bits(to)) {
+        // A signed integer to an unsigned one loses the negative values.
+        (Some((from_signed, from_bits)), Some((to_signed, to_bits))) => {
+            (to_signed || !from_signed) && to_bits > from_bits
+        }
+        (Some((_, bits)), None) => match to {
+            DataType::Float64 => bits <= 32,
+            DataType::Float32 => bits <= 16,
+            _ => false,
+        },
+        (None, Some(_)) => false,
+        (None, None) => match (from, to) {
+            (DataType::Float32, DataType::Float64) => true,
+            (DataType::Timestamp(from_unit, from_zone), DataType::Timestamp(to_unit, to_zone)) => {
+                from_zone == to_zone && unit_nanos(*to_unit) < unit_nanos(*from_unit)
+            }
+            _ => false,
+        },
+    }
+}
+
+/// Whether an integer type is signed, and its width in bits. `None` for another type.
+fn integer_bits(data_type: &DataType) -> Option<(bool, u32)> {
+    Some(match data_type {
+        DataType::Int8 => (true, 8),
+        DataType::Int16 => (true, 16),
+        DataType::Int32 => (true, 32),
+        DataType::Int64 => (true, 64),
+        DataType::UInt8 => (false, 8),
+        DataType::UInt16 => (false, 16),
+        DataType::UInt32 => (false, 32),
+        DataType::UInt64 => (false, 64),
+        _ => return None,
+    })
+}
+
+/// The length of one step of `unit`, in nanoseconds.
+fn unit_nanos(unit: TimeUnit) -> i64 {
+    match unit {
+        TimeUnit::Nanosecond => 1,
+        TimeUnit::Microsecond => 1_000,
+        TimeUnit::Millisecond => 1_000_000,
+        TimeUnit::Second => 1_000_000_000,
+    }
+}
+
+/// Why the casts from the file values to the compare of `range` can change which rows match.
+///
+/// The chain runs from the variable type to the table type, then through the
+/// casts around the column. `None` when each step keeps values.
+fn cast_problem(
+    variable_type: &DataType,
+    table_type: Option<&DataType>,
+    range: &ValueRange,
+) -> Option<String> {
+    let Some(table_type) = table_type else {
+        return Some("the scan schema does not hold it".to_string());
+    };
+    if range.mixed_casts {
+        return Some("its compares have different casts around it".to_string());
+    }
+    let mut from = variable_type;
+    for to in std::iter::once(table_type).chain(&range.column_casts) {
+        if !keeps_values(from, to) {
+            return Some(format!("a cast from {from} to {to} can change values"));
+        }
+        from = to;
+    }
+    None
 }
 
 /// The keep mask of each bounded 1-D coordinate, with the name of its dimension.
@@ -195,11 +299,14 @@ pub(crate) type Masks = Vec<(String, BooleanArray)>;
 /// Read the 1-D coordinates that `ranges` bounds, and build their keep masks.
 ///
 /// A variable gets a mask when it has rank 1, at least one element, a numeric
-/// or timestamp type, and a range with a bound. A mask that cannot be built is
-/// left out, so the scan reads each chunk of its dimension.
+/// or timestamp type, and a range with a bound. Each cast from the variable
+/// type to its type in `table_types`, and then through the casts of the range,
+/// must keep values. A mask that cannot be built is left out, so the scan
+/// reads each chunk of its dimension.
 pub(crate) async fn coordinate_masks(
     dataset: &dyn NdDataset,
     ranges: &HashMap<String, ValueRange>,
+    table_types: &HashMap<String, DataType>,
 ) -> Masks {
     let mut masks = Masks::new();
     for name in dataset.variable_names() {
@@ -214,6 +321,10 @@ pub(crate) async fn coordinate_masks(
         };
         // An empty coordinate or an open range prunes nothing, so it is not read.
         if dimension.size() == 0 || range.is_unbounded() {
+            continue;
+        }
+        if let Some(problem) = cast_problem(variable.data_type(), table_types.get(&*name), range) {
+            tracing::debug!("no prune mask for '{name}': {problem}");
             continue;
         }
         let Some(compare) = Compare::try_new(variable.data_type(), range) else {
@@ -427,12 +538,7 @@ fn scalar_to_unit(
         ScalarValue::Int64(Some(v)) => return Some(*v),
         _ => return None,
     };
-    let unit_nanos: i64 = match unit {
-        TimeUnit::Nanosecond => 1,
-        TimeUnit::Microsecond => 1_000,
-        TimeUnit::Millisecond => 1_000_000,
-        TimeUnit::Second => 1_000_000_000,
-    };
+    let unit_nanos = unit_nanos(unit);
     if literal_nanos >= unit_nanos {
         return value.checked_mul(literal_nanos / unit_nanos);
     }
@@ -445,10 +551,12 @@ fn scalar_to_unit(
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Int32Array, StringArray, TimestampSecondArray};
+    use arrow::array::{
+        Float32Array, Int32Array, StringArray, TimestampNanosecondArray, TimestampSecondArray,
+    };
     use arrow::datatypes::{Field, Schema};
     use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
-    use datafusion::physical_expr::expressions::{NotExpr, binary, col, lit};
+    use datafusion::physical_expr::expressions::{NotExpr, binary, cast as cast_expr, col, lit};
 
     use super::*;
     use crate::testing::grid_dataset;
@@ -492,9 +600,41 @@ mod tests {
         MemoryDataset::try_new("test.nd", vec![variable]).unwrap()
     }
 
-    /// The masks of `predicate` on `dataset`.
+    /// The masks of `predicate` on `dataset`, with the file type of each variable as its table type.
     async fn masks_of(dataset: &MemoryDataset, predicate: &Arc<dyn PhysicalExpr>) -> Masks {
-        coordinate_masks(dataset, &value_ranges(predicate)).await
+        let table_types = dataset
+            .variable_names()
+            .iter()
+            .filter_map(|name| {
+                let variable = dataset.variable(name)?;
+                Some((name.to_string(), variable.data_type().clone()))
+            })
+            .collect();
+        coordinate_masks(dataset, &value_ranges(predicate), &table_types).await
+    }
+
+    /// The masks of `predicate` on `dataset`, with the table type `table_type` for `column`.
+    async fn masks_in(
+        dataset: &MemoryDataset,
+        predicate: &Arc<dyn PhysicalExpr>,
+        column: &str,
+        table_type: DataType,
+    ) -> Masks {
+        let table_types = HashMap::from([(column.to_string(), table_type)]);
+        coordinate_masks(dataset, &value_ranges(predicate), &table_types).await
+    }
+
+    /// `CAST(column AS cast_type) op value`, over a schema that holds `column` with `data_type`.
+    fn cast_compare(
+        column: &str,
+        data_type: DataType,
+        cast_type: DataType,
+        op: Operator,
+        value: ScalarValue,
+    ) -> Arc<dyn PhysicalExpr> {
+        let schema = Schema::new(vec![Field::new(column, data_type, true)]);
+        let casted = cast_expr(col(column, &schema).unwrap(), &schema, cast_type).unwrap();
+        binary(casted, op, lit(value), &schema).unwrap()
     }
 
     /// The one mask of `masks`, as booleans.
@@ -691,7 +831,177 @@ mod tests {
         let masks = masks_of(&dataset, &predicate).await;
         let mask = only_mask(&masks, "n");
         assert!(!mask[0]);
+        // The strict bound becomes inclusive, so the row at the bound stays too.
+        assert!(mask[1], "the row at the bound is kept: {mask:?}");
         assert!(mask[2], "the row above the bound is kept: {mask:?}");
+    }
+
+    #[tokio::test]
+    async fn a_cast_that_truncates_gives_no_mask() {
+        let dataset = coordinate("x", Arc::new(Float64Array::from(vec![5.0, 5.5, 6.0])));
+        let predicate = cast_compare(
+            "x",
+            DataType::Float64,
+            DataType::Int32,
+            Operator::Eq,
+            ScalarValue::Int32(Some(5)),
+        );
+        assert!(masks_of(&dataset, &predicate).await.is_empty());
+        assert_eq!(dataset.reads("x"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_cast_to_a_wider_type_is_looked_through() {
+        let dataset = coordinate("x", Arc::new(Float32Array::from(vec![1.0, 2.0, 3.0])));
+        let predicate = cast_compare(
+            "x",
+            DataType::Float32,
+            DataType::Float64,
+            Operator::Gt,
+            ScalarValue::from(1.5),
+        );
+        let masks = masks_of(&dataset, &predicate).await;
+        assert_eq!(only_mask(&masks, "x"), [F, T, T]);
+    }
+
+    #[tokio::test]
+    async fn an_integer_column_cast_to_float32_gives_no_mask() {
+        let dataset = coordinate("n", Arc::new(Int32Array::from(vec![16_777_219])));
+        let predicate = cast_compare(
+            "n",
+            DataType::Int32,
+            DataType::Float32,
+            Operator::GtEq,
+            ScalarValue::Float32(Some(16_777_220.0)),
+        );
+        assert!(masks_of(&dataset, &predicate).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_timestamp_cast_to_a_coarser_unit_gives_no_mask() {
+        let values = TimestampNanosecondArray::from(vec![0, 1_500_000_000]);
+        let dataset = coordinate("t", Arc::new(values));
+        let predicate = cast_compare(
+            "t",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            DataType::Timestamp(TimeUnit::Second, None),
+            Operator::LtEq,
+            ScalarValue::TimestampSecond(Some(1), None),
+        );
+        assert!(masks_of(&dataset, &predicate).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cast_on_the_literal_is_evaluated() {
+        let dataset = coordinate("x", Arc::new(Float64Array::from(vec![5.0, 5.5, 6.0])));
+        let literal: Arc<dyn PhysicalExpr> = Arc::new(CastExpr::new(
+            lit(ScalarValue::from(5.7)),
+            DataType::Int32,
+            None,
+        ));
+        let predicate = compare(column("x"), Operator::GtEq, literal);
+        let ranges = value_ranges(&predicate);
+        assert_eq!(ranges["x"].min, Some((ScalarValue::Int32(Some(5)), true)));
+        let masks = masks_of(&dataset, &predicate).await;
+        assert_eq!(only_mask(&masks, "x"), [T, T, T]);
+    }
+
+    #[tokio::test]
+    async fn two_compares_with_different_casts_give_no_mask() {
+        let dataset = coordinate("x", Arc::new(Float32Array::from(vec![1.0, 2.0, 3.0])));
+        let wide = cast_compare(
+            "x",
+            DataType::Float32,
+            DataType::Float64,
+            Operator::Gt,
+            ScalarValue::from(1.5),
+        );
+        let bare = above("x", DataType::Float32, ScalarValue::Float32(Some(0.5)));
+        let predicate = compare(wide, Operator::And, bare);
+        assert!(value_ranges(&predicate)["x"].mixed_casts);
+        assert!(masks_of(&dataset, &predicate).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_table_type_narrower_than_the_file_type_gives_no_mask() {
+        let dataset = coordinate("x", Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])));
+        let predicate = above("x", DataType::Float32, ScalarValue::Float32(Some(1.5)));
+        let masks = masks_in(&dataset, &predicate, "x", DataType::Float32).await;
+        assert!(masks.is_empty());
+        assert_eq!(dataset.reads("x"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_table_type_wider_than_the_file_type_keeps_the_mask() {
+        let dataset = coordinate("x", Arc::new(Float32Array::from(vec![1.0, 2.0, 3.0])));
+        let predicate = above("x", DataType::Float64, ScalarValue::from(1.5));
+        let masks = masks_in(&dataset, &predicate, "x", DataType::Float64).await;
+        assert_eq!(only_mask(&masks, "x"), [F, T, T]);
+    }
+
+    #[tokio::test]
+    async fn a_column_the_table_types_do_not_hold_gets_no_mask() {
+        let dataset = coordinate("x", Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])));
+        let predicate = above("x", DataType::Float64, ScalarValue::from(1.5));
+        let masks = masks_in(&dataset, &predicate, "y", DataType::Float64).await;
+        assert!(masks.is_empty());
+        assert_eq!(dataset.reads("x"), 0);
+    }
+
+    #[test]
+    fn the_value_keeping_steps_are_the_listed_ones() {
+        use DataType::*;
+        let seconds = Timestamp(TimeUnit::Second, None);
+        let nanos = Timestamp(TimeUnit::Nanosecond, None);
+        let utc_millis = Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
+        let utc_micros = Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
+        let utc_seconds = Timestamp(TimeUnit::Second, Some("UTC".into()));
+        let kept = [
+            (Int32, Int32),
+            (Float64, Float64),
+            (Int8, Int16),
+            (Int16, Int64),
+            (Int32, Int64),
+            (UInt8, UInt16),
+            (UInt32, UInt64),
+            (UInt8, Int16),
+            (UInt32, Int64),
+            (Int8, Float64),
+            (Int32, Float64),
+            (UInt32, Float64),
+            (Int8, Float32),
+            (Int16, Float32),
+            (UInt8, Float32),
+            (UInt16, Float32),
+            (Float32, Float64),
+            (seconds.clone(), nanos.clone()),
+            (utc_millis.clone(), utc_micros),
+        ];
+        for (from, to) in kept {
+            assert!(keeps_values(&from, &to), "{from} to {to} keeps values");
+        }
+        let changed = [
+            (Float64, Float32),
+            (Int64, Float64),
+            (UInt64, Float64),
+            (Int32, Float32),
+            (UInt32, Float32),
+            (Int64, Int32),
+            (Int8, UInt16),
+            (UInt16, Int16),
+            (Float32, Int64),
+            (Int64, nanos.clone()),
+            (nanos.clone(), seconds.clone()),
+            (utc_millis, utc_seconds.clone()),
+            (seconds.clone(), utc_seconds.clone()),
+            (utc_seconds, seconds),
+        ];
+        for (from, to) in changed {
+            assert!(
+                !keeps_values(&from, &to),
+                "{from} to {to} can change values"
+            );
+        }
     }
 
     // The tests of the predicate walk.
@@ -812,8 +1122,33 @@ mod tests {
         let casted_lit: Arc<dyn PhysicalExpr> =
             Arc::new(CastExpr::new(lit_i64(5), DataType::Int64, None));
 
+        // The column cast is recorded, and the literal cast is evaluated.
         let ranges = ranges_of(compare(casted_col, Operator::Gt, casted_lit));
         assert_eq!(bound(&ranges["time"].min), Some((5, false)));
+        assert_eq!(ranges["time"].column_casts, [DataType::Int64]);
+        assert!(!ranges["time"].mixed_casts);
+    }
+
+    #[test]
+    fn test_nested_column_casts_are_recorded_from_the_column_out() {
+        let inner: Arc<dyn PhysicalExpr> =
+            Arc::new(CastExpr::new(column("time"), DataType::Int32, None));
+        let outer: Arc<dyn PhysicalExpr> = Arc::new(CastExpr::new(inner, DataType::Int64, None));
+        let ranges = ranges_of(compare(outer, Operator::Gt, lit_i64(5)));
+        assert_eq!(
+            ranges["time"].column_casts,
+            [DataType::Int32, DataType::Int64]
+        );
+    }
+
+    #[test]
+    fn test_a_literal_cast_that_fails_gives_no_bound() {
+        let text: Arc<dyn PhysicalExpr> =
+            Arc::new(Literal::new(ScalarValue::Utf8(Some("abc".into()))));
+        let casted_lit: Arc<dyn PhysicalExpr> =
+            Arc::new(CastExpr::new(text, DataType::Int64, None));
+        let ranges = ranges_of(compare(column("time"), Operator::Gt, casted_lit));
+        assert!(ranges.is_empty(), "unexpected ranges: {ranges:?}");
     }
 
     #[test]

@@ -3,12 +3,14 @@
 //! One planner reads one scan entry: a file, or a slice of one. Every I/O sits
 //! in a planner future, and a morsel holds a chunk that is read already.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use arrow::datatypes::{FieldRef, SchemaRef};
+use arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use beacon_nd_dataset::{ChunkGrid, NdDataset, NdRecordBatch, Region, read_chunk, select_columns};
+use beacon_nd_encoding::encoding::nd_value_type;
 use datafusion::common::internal_err;
 use datafusion::error::Result;
 use datafusion::physical_expr::PhysicalExpr;
@@ -291,7 +293,17 @@ async fn select_chunks(
         return chunks;
     };
 
-    let masks = coordinate_masks(dataset, &value_ranges(predicate)).await;
+    // The scan casts each file column to its logical table type.
+    let table_types: HashMap<String, DataType> = context
+        .projected_schema
+        .fields()
+        .iter()
+        .filter_map(|field| {
+            let value_type = nd_value_type(field.data_type()).ok()?;
+            Some((field.name().clone(), value_type))
+        })
+        .collect();
+    let masks = coordinate_masks(dataset, &value_ranges(predicate), &table_types).await;
     let before = chunks.len();
     let rows_before: usize = chunks.iter().map(|(_, chunk)| chunk.len()).sum();
     chunks.retain(|(_, chunk)| !is_pruned(&masks, grid, chunk));
