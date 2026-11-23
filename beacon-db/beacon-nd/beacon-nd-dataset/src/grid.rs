@@ -1,5 +1,7 @@
 //! The chunk grid of one dataset. This module does no I/O.
 
+use std::ops::Range;
+
 use nd_arrow_array::Dimensions;
 
 use crate::dataset::{used_dimensions, variables, wrong_chunk_rank};
@@ -111,6 +113,34 @@ impl ChunkGrid {
     /// Each chunk, in C order.
     pub fn chunks(&self) -> impl ExactSizeIterator<Item = Region> + '_ {
         (0..self.len).map(|index| self.chunk(index))
+    }
+
+    /// The smallest region that holds each chunk of `range`. `None` for an empty range.
+    ///
+    /// # Panics
+    ///
+    /// When `range` is not empty and does not lie in `0..len()`.
+    pub fn span(&self, range: Range<usize>) -> Option<Region> {
+        if range.is_empty() {
+            return None;
+        }
+        let first = self.chunk(range.start);
+        let last = self.chunk(range.end - 1);
+        let mut start = first.start().to_vec();
+        let mut shape = self.dimensions.shape();
+        // While the first and the last chunk have the same place on each outer axis,
+        // each chunk of the range has that place too.
+        let mut same_outer = true;
+        for axis in 0..shape.len() {
+            if same_outer {
+                shape[axis] = last.start()[axis] + last.shape()[axis] - first.start()[axis];
+                same_outer = first.start()[axis] == last.start()[axis];
+            } else {
+                // The chunks between the first and the last cover this axis in full.
+                start[axis] = 0;
+            }
+        }
+        Some(Region::new(start, shape))
     }
 
     /// The dimensions the chunks index, outermost first.
@@ -275,6 +305,47 @@ mod tests {
             grid.chunk((1 << 47) - 1),
             Region::new(vec![(1 << 40) - 1, (1 << 20) - 8192], vec![1, 8192])
         );
+    }
+
+    #[test]
+    fn a_span_is_the_smallest_region_with_each_chunk_of_a_range() {
+        // A grid of 3 x 5 in chunks of [2, 2]: 2 rows of 3 chunks.
+        let ds = dataset(vec![
+            ramp("v", &[("a", 3), ("b", 5)]).with_chunk_shape(vec![2, 2]),
+        ]);
+        let grid = ChunkGrid::try_new(&ds, 2).unwrap();
+        assert_eq!(grid.span(0..0), None);
+        assert_eq!(grid.span(3..3), None);
+        // One chunk is its own span.
+        assert_eq!(grid.span(4..5), Some(grid.chunk(4)));
+        // Two chunks of one row.
+        assert_eq!(grid.span(1..3), Some(Region::new(vec![0, 2], vec![2, 3])));
+        // A range over two rows covers the inner axis in full.
+        assert_eq!(grid.span(2..4), Some(Region::new(vec![0, 0], vec![3, 5])));
+        assert_eq!(grid.span(0..6), Some(Region::new(vec![0, 0], vec![3, 5])));
+    }
+
+    #[test]
+    fn a_span_holds_each_chunk_of_each_range() {
+        let ds = dataset(vec![
+            ramp("v", &[("a", 3), ("b", 5), ("c", 4)]).with_chunk_shape(vec![1, 2, 3]),
+        ]);
+        let grid = ChunkGrid::try_new(&ds, 2).unwrap();
+        for from in 0..grid.len() {
+            for to in from + 1..=grid.len() {
+                let span = grid.span(from..to).unwrap();
+                for chunk in (from..to).map(|index| grid.chunk(index)) {
+                    for axis in 0..3 {
+                        let end = chunk.start()[axis] + chunk.shape()[axis];
+                        assert!(span.start()[axis] <= chunk.start()[axis], "{from}..{to}");
+                        assert!(
+                            end <= span.start()[axis] + span.shape()[axis],
+                            "{from}..{to}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

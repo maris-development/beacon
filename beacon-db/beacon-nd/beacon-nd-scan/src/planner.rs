@@ -280,16 +280,20 @@ async fn select_chunks(
 ) -> Vec<usize> {
     // The slice cut comes first, on the whole grid. Every slice cuts the same grid.
     let range = slice.range(grid.len());
-    // An empty slice or a count scan reads no coordinate for a mask.
+    // A scan with no filter and a count scan read no coordinate for a mask.
     let Some(predicate) = context
         .predicate
         .as_ref()
-        .filter(|_| !range.is_empty() && !dataset.variable_names().is_empty())
+        .filter(|_| !dataset.variable_names().is_empty())
     else {
         return range.collect();
     };
+    // An empty slice has no span and no chunk.
+    let Some(span) = grid.span(range.clone()) else {
+        return Vec::new();
+    };
 
-    let masks = chunk_masks(dataset, predicate, &context.filter_schema).await;
+    let masks = chunk_masks(dataset, predicate, &context.filter_schema, grid, &span).await;
     let mut chunks = Vec::new();
     for number in range {
         let chunk = grid.chunk(number);

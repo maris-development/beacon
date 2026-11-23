@@ -395,6 +395,8 @@ impl ChunkGrid {
     pub fn chunk(&self, index: usize) -> Region;
     /// Each chunk, in C order.
     pub fn chunks(&self) -> impl ExactSizeIterator<Item = Region> + '_;
+    /// The smallest region that holds each chunk of `range`.
+    pub fn span(&self, range: Range<usize>) -> Option<Region>;
 }
 
 /// The variables of one dataset, bound to one chunk grid.
@@ -635,9 +637,11 @@ and compares them by hand.
      one and the same dimension. A rank-0 value is repeated on each index of
      that dimension. Skip a conjunct with a volatile function, with a column of a
      nested type, or with a dimension of size 0.
-  4. Read each variable of the conjunct in full, in its file type. Each slice
-     of a file reads it one time. A read with a length that is not the size
-     of the dimension gives no mask.
+  4. Read each variable of the conjunct in its file type, on the span of the
+     slice. The span is the smallest region of the grid that holds each chunk
+     of the slice (`ChunkGrid::span`). So the slices of a file with one
+     dimension read a variable one time in total, not one time each. A read
+     with a wrong length gives no mask.
   5. Rewrite the conjunct with the DataFusion `DefaultPhysicalExprAdapter`,
      from `table_schema` to the file types of the coordinates.
   6. Evaluate the conjunct on a record batch of the coordinates. A null
@@ -696,7 +700,8 @@ Why the evaluation keeps the rule:
 
 One cost: a rank-1 variable is not always a small coordinate. In a file with
 one dimension, each data variable has rank 1. A filter on such a variable
-reads it in full for the prune, one time for each slice of the file.
+reads it one time for the prune, and the scan then reads the kept chunks
+again.
 - **A null** gives `false`. **A NaN** follows the Arrow total order, as the
   `FilterExec` does.
 

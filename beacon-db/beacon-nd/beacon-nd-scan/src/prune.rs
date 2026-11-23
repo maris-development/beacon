@@ -29,24 +29,37 @@ use datafusion::physical_expr_common::physical_expr::{is_volatile, snapshot_phys
 pub(crate) enum Masks {
     /// A conjunct rejects each row of the file.
     NoRow,
-    /// The keep mask of each dimension that a conjunct bounds, with the name of the dimension.
-    ///
-    /// A mask has one bit for each index of its dimension. It has no null.
-    Keep(Vec<(String, BooleanBuffer)>),
+    /// The keep mask of each dimension that a conjunct bounds.
+    Keep(Vec<DimensionMask>),
+}
+
+/// The keep mask of a part of one dimension.
+#[derive(Debug)]
+pub(crate) struct DimensionMask {
+    /// The name of the dimension.
+    dimension: String,
+    /// The index of the dimension that the first bit stands for.
+    offset: usize,
+    /// One bit for each index from `offset`. It has no null.
+    keep: BooleanBuffer,
 }
 
 /// The keep mask of one conjunct.
 enum ConjunctMask {
     /// The conjunct names no rank-1 variable. False when it rejects each row of the file.
     File(bool),
-    /// The conjunct names coordinates of this dimension. One bit for each index.
-    Dimension(String, BooleanBuffer),
+    /// The conjunct names coordinates of one dimension.
+    Dimension(DimensionMask),
 }
 
 /// The values of the variables that the prune read, by name.
 type Coordinates = HashMap<String, ArrayRef>;
 
 /// Evaluate the conjuncts of `predicate` on the 1-D coordinates of `dataset`.
+///
+/// `span` is the part of `grid` that holds the chunks to prune. The prune
+/// reads each coordinate only on that part, so the slices of one file do not
+/// each read the whole coordinate. A mask covers only that part.
 ///
 /// `table_schema` holds the logical type of each column of the scan.
 /// A conjunct gives a mask when each of its columns is in `table_schema`, and
@@ -61,21 +74,32 @@ pub(crate) async fn chunk_masks(
     dataset: &dyn NdDataset,
     predicate: &Arc<dyn PhysicalExpr>,
     table_schema: &SchemaRef,
+    grid: &ChunkGrid,
+    span: &Region,
 ) -> Masks {
     // A dynamic filter is evaluated in its state of this moment.
     let predicate =
         snapshot_physical_expr(Arc::clone(predicate)).unwrap_or_else(|_| Arc::clone(predicate));
-    let mut keep: Vec<(String, BooleanBuffer)> = Vec::new();
-    let mut coordinates = Coordinates::new();
+    let mut scope = Scope {
+        dataset,
+        table_schema,
+        grid,
+        span,
+        coordinates: Coordinates::new(),
+    };
+    let mut keep: Vec<DimensionMask> = Vec::new();
     for conjunct in split_conjunction(&predicate) {
-        match conjunct_mask(dataset, conjunct, table_schema, &mut coordinates).await {
+        match scope.conjunct_mask(conjunct).await {
             Ok(ConjunctMask::File(false)) => return Masks::NoRow,
             Ok(ConjunctMask::File(true)) => {}
-            Ok(ConjunctMask::Dimension(name, mask)) => {
-                match keep.iter_mut().find(|(known, _)| *known == name) {
-                    // A row must meet each conjunct. The two masks have the size of the dimension.
-                    Some((_, known)) => *known = &*known & &mask,
-                    None => keep.push((name, mask)),
+            Ok(ConjunctMask::Dimension(mask)) => {
+                match keep
+                    .iter_mut()
+                    .find(|known| known.dimension == mask.dimension)
+                {
+                    // A row must meet each conjunct. The two masks cover the same part.
+                    Some(known) => known.keep = &known.keep & &mask.keep,
+                    None => keep.push(mask),
                 }
             }
             Err(reason) => tracing::debug!("no prune mask for '{conjunct}': {reason}"),
@@ -97,139 +121,173 @@ pub(crate) fn is_pruned(masks: &Masks, grid: &ChunkGrid, chunk: &Region) -> bool
         .iter()
         .enumerate()
         .any(|(axis, dimension)| {
-            let Some((_, mask)) = masks.iter().find(|(name, _)| name == dimension.name()) else {
+            let Some(mask) = masks.iter().find(|mask| mask.dimension == dimension.name()) else {
                 return false;
             };
             let (Some(&start), Some(&length)) = (chunk.start().get(axis), chunk.shape().get(axis))
             else {
                 return false;
             };
-            // A chunk outside the mask is not pruned.
+            // A chunk that is not inside the mask is not pruned.
+            let Some(start) = start.checked_sub(mask.offset) else {
+                return false;
+            };
             match start.checked_add(length) {
-                Some(end) if end <= mask.len() => mask.slice(start, length).count_set_bits() == 0,
+                Some(end) if end <= mask.keep.len() => {
+                    mask.keep.slice(start, length).count_set_bits() == 0
+                }
                 _ => false,
             }
         })
 }
 
-/// The keep mask of `conjunct`, or the reason why it has none.
-async fn conjunct_mask(
-    dataset: &dyn NdDataset,
-    conjunct: &Arc<dyn PhysicalExpr>,
-    table_schema: &SchemaRef,
-    coordinates: &mut Coordinates,
-) -> Result<ConjunctMask, String> {
-    // A volatile function gives another value in the filter above the scan.
-    if is_volatile(conjunct) {
-        return Err("it has a volatile function".to_string());
-    }
+/// What one prune works on.
+struct Scope<'a> {
+    dataset: &'a dyn NdDataset,
+    table_schema: &'a SchemaRef,
+    grid: &'a ChunkGrid,
+    /// The part of the grid that holds the chunks to prune.
+    span: &'a Region,
+    /// The values that the prune read. Each variable is read one time.
+    coordinates: Coordinates,
+}
 
-    let mut dimension: Option<(String, usize)> = None;
-    let mut fields = Vec::new();
-    let mut arrays = Vec::new();
-    for column in collect_columns(conjunct) {
-        let name = column.name();
-        // The type of a column that the scan does not project is not known here.
-        let Ok(table_field) = table_schema.field_with_name(name) else {
-            return Err(format!("'{name}' is not a column of the scan"));
-        };
-        // The scan gives nulls for a column that the file does not have. The adapter does the same.
-        let Some(variable) = dataset.variable(name) else {
-            continue;
-        };
-        // The adapter casts a nested type by field name, and the scan does not.
-        if table_field.data_type().is_nested() || variable.data_type().is_nested() {
-            return Err(format!("'{name}' has a nested type"));
+impl Scope<'_> {
+    /// The keep mask of `conjunct`, or the reason why it has none.
+    async fn conjunct_mask(
+        &mut self,
+        conjunct: &Arc<dyn PhysicalExpr>,
+    ) -> Result<ConjunctMask, String> {
+        // A volatile function gives another value in the filter above the scan.
+        if is_volatile(conjunct) {
+            return Err("it has a volatile function".to_string());
         }
-        // A rank-0 variable has one value for each row of the file.
-        let size = match variable.dimensions().as_slice() {
-            [] => 1,
-            [axis] => {
-                match &dimension {
+
+        // The dimension of the rank-1 columns, and the part of it that the span holds.
+        let mut dimension: Option<(String, Region)> = None;
+        let mut fields = Vec::new();
+        let mut arrays = Vec::new();
+        for column in collect_columns(conjunct) {
+            let name = column.name();
+            // The type of a column that the scan does not project is not known here.
+            let Ok(table_field) = self.table_schema.field_with_name(name) else {
+                return Err(format!("'{name}' is not a column of the scan"));
+            };
+            // The scan gives nulls for a column that the file does not have. The adapter does the same.
+            let Some(variable) = self.dataset.variable(name) else {
+                continue;
+            };
+            // The adapter casts a nested type by field name, and the scan does not.
+            if table_field.data_type().is_nested() || variable.data_type().is_nested() {
+                return Err(format!("'{name}' has a nested type"));
+            }
+            let region = match variable.dimensions().as_slice() {
+                // A rank-0 variable has one value for each row of the file.
+                [] => Region::full(variable.dimensions()),
+                [axis] => match &dimension {
                     Some((known, _)) if known != axis.name() => {
                         return Err(format!(
                             "it has the two dimensions '{known}' and '{}'",
                             axis.name()
                         ));
                     }
-                    Some(_) => {}
-                    None => dimension = Some((axis.name().to_string(), axis.size())),
-                }
-                axis.size()
+                    Some((_, region)) => region.clone(),
+                    None => {
+                        let region = self.part_of(axis.name(), axis.size());
+                        dimension = Some((axis.name().to_string(), region.clone()));
+                        region
+                    }
+                },
+                _ => return Err(format!("'{name}' has a rank above 1")),
+            };
+            if region.is_empty() {
+                return Err(format!("'{name}' is empty"));
             }
-            _ => return Err(format!("'{name}' has a rank above 1")),
+            let values = self.read(variable.as_ref(), &region).await?;
+            if values.len() != region.len() {
+                return Err(format!(
+                    "'{name}' has {} values in place of {}",
+                    values.len(),
+                    region.len()
+                ));
+            }
+            fields.push(Field::new(name, variable.data_type().clone(), true));
+            arrays.push(values);
+        }
+
+        // A conjunct with no rank-1 column has one value for the whole file.
+        let rows = dimension.as_ref().map_or(1, |(_, region)| region.len());
+        // Repeat each rank-0 value on each row of the dimension.
+        for (values, field) in arrays.iter_mut().zip(&fields) {
+            if values.len() != rows {
+                *values = datafusion::scalar::ScalarValue::try_from_array(values, 0)
+                    .and_then(|value| value.to_array_of_size(rows))
+                    .map_err(|e| format!("'{}': {e}", field.name()))?;
+            }
+        }
+        let file_schema = Arc::new(Schema::new(fields));
+        let options = RecordBatchOptions::new().with_row_count(Some(rows));
+        let batch = RecordBatch::try_new_with_options(Arc::clone(&file_schema), arrays, &options)
+            .map_err(|e| e.to_string())?;
+
+        // The adapter puts the cast of the scan around each column, and a null for a missing column.
+        let adapted = DefaultPhysicalExprAdapterFactory
+            .create(Arc::clone(self.table_schema), file_schema)
+            .and_then(|adapter| adapter.rewrite(Arc::clone(conjunct)))
+            .map_err(|e| e.to_string())?;
+        let result = adapted
+            .evaluate(&batch)
+            .and_then(|value| value.into_array(rows))
+            .map_err(|e| e.to_string())?;
+        if result.len() != rows {
+            return Err(format!("it gives {} values for {rows} rows", result.len()));
+        }
+        let mask = result
+            .as_boolean_opt()
+            .ok_or_else(|| format!("its type is {}, not Boolean", result.data_type()))?;
+        // The filter rejects a row whose conjunct is null, so a null bit is false.
+        let keep = match mask.nulls() {
+            Some(valid) => mask.values() & valid.inner(),
+            None => mask.values().clone(),
         };
-        if size == 0 {
-            return Err(format!("'{name}' is empty"));
+
+        Ok(match dimension {
+            Some((dimension, region)) => ConjunctMask::Dimension(DimensionMask {
+                dimension,
+                offset: region.start()[0],
+                keep,
+            }),
+            None => ConjunctMask::File(keep.value(0)),
+        })
+    }
+
+    /// The part of the dimension `name` of `size` that the span holds, as a rank-1 region.
+    ///
+    /// The whole dimension when it is not a dimension of the grid.
+    fn part_of(&self, name: &str, size: usize) -> Region {
+        let part =
+            self.grid.dimensions().position(name).and_then(|axis| {
+                Some((*self.span.start().get(axis)?, *self.span.shape().get(axis)?))
+            });
+        let (start, length) = part.unwrap_or((0, size));
+        Region::new(vec![start], vec![length])
+    }
+
+    /// The values of `variable` in `region`. Each variable is read one time.
+    async fn read(
+        &mut self,
+        variable: &dyn NdVariable,
+        region: &Region,
+    ) -> Result<ArrayRef, String> {
+        if let Some(values) = self.coordinates.get(variable.name()) {
+            return Ok(Arc::clone(values));
         }
-        let values = read_coordinate(variable.as_ref(), coordinates).await?;
-        if values.len() != size {
-            return Err(format!(
-                "'{name}' has {} values in place of {size}",
-                values.len()
-            ));
-        }
-        fields.push(Field::new(name, variable.data_type().clone(), true));
-        arrays.push(values);
+        let array = variable.read(region).await.map_err(|e| e.to_string())?;
+        let values = Arc::clone(array.values());
+        self.coordinates
+            .insert(variable.name().to_string(), Arc::clone(&values));
+        Ok(values)
     }
-
-    // A conjunct with no rank-1 column has one value for the whole file.
-    let rows = dimension.as_ref().map_or(1, |(_, size)| *size);
-    // Repeat each rank-0 value on each row of the dimension.
-    for (values, field) in arrays.iter_mut().zip(&fields) {
-        if values.len() != rows {
-            *values = datafusion::scalar::ScalarValue::try_from_array(values, 0)
-                .and_then(|value| value.to_array_of_size(rows))
-                .map_err(|e| format!("'{}': {e}", field.name()))?;
-        }
-    }
-    let file_schema = Arc::new(Schema::new(fields));
-    let options = RecordBatchOptions::new().with_row_count(Some(rows));
-    let batch = RecordBatch::try_new_with_options(Arc::clone(&file_schema), arrays, &options)
-        .map_err(|e| e.to_string())?;
-
-    // The adapter puts the cast of the scan around each column, and a null for a missing column.
-    let adapted = DefaultPhysicalExprAdapterFactory
-        .create(Arc::clone(table_schema), file_schema)
-        .and_then(|adapter| adapter.rewrite(Arc::clone(conjunct)))
-        .map_err(|e| e.to_string())?;
-    let result = adapted
-        .evaluate(&batch)
-        .and_then(|value| value.into_array(rows))
-        .map_err(|e| e.to_string())?;
-    if result.len() != rows {
-        return Err(format!("it gives {} values for {rows} rows", result.len()));
-    }
-    let mask = result
-        .as_boolean_opt()
-        .ok_or_else(|| format!("its type is {}, not Boolean", result.data_type()))?;
-    // The filter rejects a row whose conjunct is null, so a null bit is false.
-    let mask = match mask.nulls() {
-        Some(valid) => mask.values() & valid.inner(),
-        None => mask.values().clone(),
-    };
-
-    Ok(match dimension {
-        Some((name, _)) => ConjunctMask::Dimension(name, mask),
-        None => ConjunctMask::File(mask.value(0)),
-    })
-}
-
-/// The values of the whole of `variable`. Each coordinate is read one time.
-async fn read_coordinate(
-    variable: &dyn NdVariable,
-    coordinates: &mut Coordinates,
-) -> Result<ArrayRef, String> {
-    if let Some(values) = coordinates.get(variable.name()) {
-        return Ok(Arc::clone(values));
-    }
-    let array = variable
-        .read(&Region::full(variable.dimensions()))
-        .await
-        .map_err(|e| e.to_string())?;
-    let values = Arc::clone(array.values());
-    coordinates.insert(variable.name().to_string(), Arc::clone(&values));
-    Ok(values)
 }
 
 #[cfg(test)]
@@ -284,17 +342,28 @@ mod tests {
             .map(|variable| Field::new(variable.name(), variable.data_type().clone(), true))
             .collect();
         let table_schema = Arc::new(Schema::new(fields));
-        chunk_masks(dataset, &physical(expr, &table_schema), &table_schema).await
+        whole_masks(dataset, &physical(expr, &table_schema), &table_schema).await
     }
 
     /// The masks of `expr` on `dataset`, with the table schema `table`.
     async fn masks_in(dataset: &MemoryDataset, expr: Expr, table: &[(&str, DataType)]) -> Masks {
         let table_schema = schema_of(table);
-        chunk_masks(dataset, &physical(expr, &table_schema), &table_schema).await
+        whole_masks(dataset, &physical(expr, &table_schema), &table_schema).await
+    }
+
+    /// The masks of `predicate` on the whole grid of `dataset` at batch size 12.
+    async fn whole_masks(
+        dataset: &MemoryDataset,
+        predicate: &Arc<dyn PhysicalExpr>,
+        table_schema: &SchemaRef,
+    ) -> Masks {
+        let grid = ChunkGrid::try_new(dataset, 12).unwrap();
+        let span = grid.span(0..grid.len()).unwrap();
+        chunk_masks(dataset, predicate, table_schema, &grid, &span).await
     }
 
     /// The dimension masks of `masks`. Panics when a conjunct rejects the file.
-    fn kept(masks: &Masks) -> &[(String, BooleanBuffer)] {
+    fn kept(masks: &Masks) -> &[DimensionMask] {
         match masks {
             Masks::Keep(kept) => kept,
             Masks::NoRow => panic!("a conjunct rejects the file"),
@@ -305,8 +374,8 @@ mod tests {
     fn only_mask(masks: &Masks, dimension: &str) -> Vec<bool> {
         let kept = kept(masks);
         assert_eq!(kept.len(), 1, "{masks:?}");
-        assert_eq!(kept[0].0, dimension);
-        kept[0].1.iter().collect()
+        assert_eq!(kept[0].dimension, dimension);
+        kept[0].keep.iter().collect()
     }
 
     /// True when `masks` prunes nothing.
@@ -321,7 +390,11 @@ mod tests {
 
     /// The masks with one mask for `dimension`.
     fn masks_with(dimension: &str, mask: Vec<bool>) -> Masks {
-        Masks::Keep(vec![(dimension.to_string(), BooleanBuffer::from(mask))])
+        Masks::Keep(vec![DimensionMask {
+            dimension: dimension.to_string(),
+            offset: 0,
+            keep: BooleanBuffer::from(mask),
+        }])
     }
 
     /// The starts of the chunks of `grid_dataset` at batch size 12 that `masks` prunes.
@@ -474,7 +547,7 @@ mod tests {
         let predicate = physical(col("x").gt(lit(1.5)), &table_schema);
         // The scan schema holds only `y`.
         let scan_schema = schema_of(&[("y", DataType::Float64)]);
-        let masks = chunk_masks(&dataset, &predicate, &scan_schema).await;
+        let masks = whole_masks(&dataset, &predicate, &scan_schema).await;
         assert!(is_empty(&masks));
         assert_eq!(dataset.reads("x"), 0);
     }
@@ -525,9 +598,34 @@ mod tests {
             Operator::And,
             physical(col("lat").gt(lit(1.0)), &table_schema),
         ));
-        let masks = chunk_masks(&dataset, &predicate, &table_schema).await;
+        let masks = whole_masks(&dataset, &predicate, &table_schema).await;
         assert!(no_row(&masks));
         assert_eq!(dataset.reads("lat"), 0);
+    }
+
+    #[tokio::test]
+    async fn the_prune_reads_a_coordinate_only_on_the_span_of_its_chunks() {
+        // 24 values in 4 chunks of 6. The span holds the chunks 1 and 2: the values 6 to 17.
+        let values: ArrayRef = Arc::new(Float64Array::from_iter_values((0..24).map(f64::from)));
+        let dataset = coordinate("n", values);
+        let table_schema = schema_of(&[("n", DataType::Float64)]);
+        let grid = ChunkGrid::try_new(&dataset, 6).unwrap();
+        assert_eq!(grid.len(), 4);
+        let span = grid.span(1..3).unwrap();
+        let predicate = physical(col("n").gt(lit(12.5)), &table_schema);
+
+        let masks = chunk_masks(&dataset, &predicate, &table_schema, &grid, &span).await;
+
+        let mask = &kept(&masks)[0];
+        assert_eq!(mask.offset, 6);
+        assert_eq!(mask.keep.len(), 12, "one bit for each value of the span");
+        assert_eq!(mask.keep.count_set_bits(), 5);
+        // Chunk 1 has the values 6 to 11, and chunk 2 has the values 12 to 17.
+        assert!(is_pruned(&masks, &grid, &grid.chunk(1)));
+        assert!(!is_pruned(&masks, &grid, &grid.chunk(2)));
+        // A chunk outside the span is not pruned, because the mask does not cover it.
+        assert!(!is_pruned(&masks, &grid, &grid.chunk(0)));
+        assert!(!is_pruned(&masks, &grid, &grid.chunk(3)));
     }
 
     #[tokio::test]
