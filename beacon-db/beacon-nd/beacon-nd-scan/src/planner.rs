@@ -29,8 +29,6 @@ use crate::slices::NdSlice;
 
 /// What each file of the scan of one partition shares.
 #[derive(Debug)]
-// The scan source builds the context; until it lands, only the tests build it.
-#[allow(dead_code)]
 pub(crate) struct ScanContext {
     /// Opens each file of the format.
     pub opener: Arc<dyn NdFileOpener>,
@@ -83,8 +81,6 @@ pub(crate) struct NdMorselizer {
 
 impl NdMorselizer {
     /// The morselizer of the partition that `context` describes.
-    // The scan source calls this; until it lands, only the tests call it.
-    #[allow(dead_code)]
     pub(crate) fn new(context: ScanContext) -> Self {
         Self {
             context: Arc::new(context),

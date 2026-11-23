@@ -11,9 +11,15 @@ pub mod opener;
 mod output;
 mod planner;
 mod prune;
+pub mod schema;
 mod slices;
+pub mod source;
+pub mod statistics;
 #[cfg(test)]
 pub(crate) mod testing;
 
 pub use metrics::ScanMetrics;
 pub use opener::{NdFileOpener, NdScanOptions, open_for_read};
+pub use schema::file_schema;
+pub use source::NdSource;
+pub use statistics::file_statistics;

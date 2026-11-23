@@ -31,8 +31,6 @@ impl NdSlice {
 }
 
 /// Cut the unsliced entries into slices, when there are fewer of them than `target`.
-// The scan source calls this; until it lands, only the tests call it.
-#[allow(dead_code)]
 pub(crate) fn slice_files(entries: Vec<PartitionedFile>, target: usize) -> Vec<PartitionedFile> {
     let files = entries
         .iter()
@@ -60,8 +58,6 @@ pub(crate) fn slice_files(entries: Vec<PartitionedFile>, target: usize) -> Vec<P
 }
 
 /// Spread `entries` over exactly `target` groups, the largest entry first.
-// The scan source calls this; until it lands, only the tests call it.
-#[allow(dead_code)]
 pub(crate) fn spread_files(mut entries: Vec<PartitionedFile>, target: usize) -> Vec<FileGroup> {
     entries.sort_by_key(|entry| std::cmp::Reverse(weight(entry)));
 
