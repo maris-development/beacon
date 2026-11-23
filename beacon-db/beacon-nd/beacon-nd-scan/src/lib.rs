@@ -7,6 +7,9 @@
 
 pub(crate) mod error;
 pub mod metrics;
+// The scan tasks use the output step; until they land, only the tests call it.
+#[allow(dead_code)]
+mod output;
 // Later tasks use the slices.
 #[allow(dead_code)]
 mod slices;
