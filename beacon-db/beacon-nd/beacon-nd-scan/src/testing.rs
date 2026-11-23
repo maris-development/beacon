@@ -1,6 +1,4 @@
 //! The test fixtures of the scan.
-// Later tasks use the opener and `entry`; until they land, some items have no caller.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::Arc;

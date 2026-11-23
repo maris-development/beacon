@@ -8,14 +8,9 @@
 pub(crate) mod error;
 pub mod metrics;
 pub mod opener;
-// The scan tasks use the output step; until they land, only the tests call it.
-#[allow(dead_code)]
 mod output;
-// Later tasks call the prune; until then its items have no caller.
-#[allow(dead_code)]
+mod planner;
 mod prune;
-// Later tasks use the slices.
-#[allow(dead_code)]
 mod slices;
 #[cfg(test)]
 pub(crate) mod testing;
