@@ -1,9 +1,6 @@
-//! The chunk grid of one dataset.
+//! The chunk grid of one dataset. This module does no I/O.
 
-use std::sync::Arc;
-
-use arrow::datatypes::{Field, Schema};
-use nd_arrow_array::{Dimension, Dimensions, NdRecordBatch};
+use nd_arrow_array::Dimensions;
 
 use crate::dataset::{used_dimensions, variables, wrong_chunk_rank};
 use crate::{Error, NdDataset, NdVariable, Region, Result};
@@ -120,87 +117,6 @@ impl ChunkGrid {
     pub fn dimensions(&self) -> &Dimensions {
         &self.dimensions
     }
-
-    /// The part of `chunk` that `variable` holds, on the axes of `variable`.
-    pub fn variable_region(&self, variable: &dyn NdVariable, chunk: &Region) -> Region {
-        let mut start = Vec::new();
-        let mut shape = Vec::new();
-        for dimension in variable.dimensions() {
-            if let Some(axis) = self.dimensions.position(dimension.name()) {
-                start.push(chunk.start[axis]);
-                shape.push(chunk.shape[axis]);
-            }
-        }
-        Region::new(start, shape)
-    }
-}
-
-/// Read each variable of `dataset` in `chunk` into one un-broadcast batch.
-///
-/// The target has the dimensions of `grid` and the shape of `chunk`. The
-/// function reads each variable on its own axes, so it reads a coordinate
-/// once per chunk and not once per row. The columns follow `variable_names()`.
-pub async fn read_chunk(
-    dataset: &dyn NdDataset,
-    grid: &ChunkGrid,
-    chunk: &Region,
-) -> Result<NdRecordBatch> {
-    let target = Dimensions::try_new(
-        grid.dimensions()
-            .iter()
-            .zip(&chunk.shape)
-            .map(|(dimension, &size)| Dimension::new(dimension.name(), size)),
-    )?;
-
-    let variables = variables(dataset)?;
-    let mut fields = Vec::with_capacity(variables.len());
-    let mut columns = Vec::with_capacity(variables.len());
-    for variable in variables {
-        let region = grid.variable_region(variable.as_ref(), chunk);
-        let column = variable
-            .read(&region)
-            .await
-            .map_err(|error| read_error(variable.name(), error))?;
-        columns.push(column);
-        fields.push(Field::new(
-            variable.name(),
-            variable.data_type().clone(),
-            true,
-        ));
-    }
-
-    Ok(NdRecordBatch::try_new(
-        Arc::new(Schema::new(fields)),
-        columns,
-        target,
-    )?)
-}
-
-/// The read error of `variable`, with the variable name in the message.
-fn read_error(variable: &str, error: Error) -> Error {
-    let named = |reason: String| format!("variable '{variable}': {reason}");
-    match error {
-        Error::Format(source) => Error::format(named(source.to_string())),
-        Error::Invalid { dataset, reason } => Error::Invalid {
-            dataset,
-            reason: named(reason),
-        },
-        Error::Unsupported { dataset, reason } => Error::Unsupported {
-            dataset,
-            reason: named(reason),
-        },
-        Error::OffGrid {
-            dataset,
-            grid,
-            reason,
-        } => Error::OffGrid {
-            dataset,
-            grid,
-            reason: named(reason),
-        },
-        // `InvalidRegion` names the variable. `Nd` and `Arrow` keep their source error.
-        other => other,
-    }
 }
 
 /// The dimensions and the chunk shape that drive the grid.
@@ -274,14 +190,12 @@ fn c_order_chunk_shape(shape: &[usize], batch_size: usize) -> Vec<usize> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::AsArray;
-    use arrow::datatypes::{DataType, Float64Type};
-    use async_trait::async_trait;
-    use nd_arrow_array::{Attributes, NdArrowArray};
+    use arrow::datatypes::DataType;
+    use nd_arrow_array::Attributes;
 
     use super::*;
     use crate::memory::testing::{Meta, dataset, dims, meta, ramp};
-    use crate::{DatasetSchema, MemoryDataset, VariableInfo, select_columns};
+    use crate::{DatasetSchema, MemoryDataset};
 
     fn sst() -> MemoryDataset {
         dataset(vec![
@@ -378,17 +292,6 @@ mod tests {
         let grid = ChunkGrid::try_new(&ds, 4096).unwrap();
         assert_eq!(grid.chunk(0).shape, vec![1, 2, 1920]);
         assert_eq!(grid.len(), 604);
-    }
-
-    #[test]
-    fn a_variable_region_lies_on_the_axes_of_the_variable() {
-        let ds = sst();
-        let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
-        let lat = ds.variable("lat").unwrap();
-        assert_eq!(
-            grid.variable_region(lat.as_ref(), &grid.chunk(3)),
-            Region::new(vec![604], vec![604])
-        );
     }
 
     #[test]
@@ -519,95 +422,5 @@ mod tests {
         };
         let result = ChunkGrid::try_new(&ds, 2);
         assert!(matches!(result, Err(Error::Invalid { .. })), "{result:?}");
-    }
-
-    /// A variable whose read fails with a format error.
-    #[derive(Debug)]
-    struct Broken(VariableInfo);
-
-    #[async_trait]
-    impl NdVariable for Broken {
-        fn name(&self) -> &str {
-            &self.0.name
-        }
-        fn data_type(&self) -> &DataType {
-            &self.0.data_type
-        }
-        fn dimensions(&self) -> &Dimensions {
-            &self.0.dimensions
-        }
-        fn chunk_shape(&self) -> Option<&[usize]> {
-            None
-        }
-        fn attributes(&self) -> &Attributes {
-            &self.0.attributes
-        }
-        async fn read(&self, _: &Region) -> Result<NdArrowArray> {
-            Err(Error::format("disk gone"))
-        }
-    }
-
-    #[tokio::test]
-    async fn a_read_error_names_the_variable() {
-        let v = Broken(VariableInfo::new("v", DataType::Float64, dims(&[("n", 3)])));
-        let ds = DatasetSchema::try_new("test.nd", dims(&[("n", 3)]), vec![Arc::new(v)]).unwrap();
-        let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
-        let error = read_chunk(&ds, &grid, &grid.chunk(0)).await.unwrap_err();
-        assert!(matches!(error, Error::Format(_)));
-        assert_eq!(error.to_string(), "variable 'v': disk gone");
-    }
-
-    #[tokio::test]
-    async fn a_chunk_reads_each_variable_on_its_own_axes() {
-        let ds = sst();
-        let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
-        let batch = read_chunk(&ds, &grid, &grid.chunk(0)).await.unwrap();
-        let names: Vec<&str> = batch
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().as_str())
-            .collect();
-        assert_eq!(names, ["analysed_sst", "lat"]);
-        assert_eq!(batch.column(0).len(), 604 * 960);
-        assert_eq!(batch.column(1).len(), 604);
-        assert_eq!(batch.target().shape(), vec![1, 604, 960]);
-        assert_eq!(ds.reads("analysed_sst"), 1);
-        assert_eq!(ds.reads("lat"), 1);
-    }
-
-    #[tokio::test]
-    async fn a_chunk_holds_the_values_of_its_region() {
-        let ds = dataset(vec![ramp("v", &[("n", 6)])]);
-        let grid = ChunkGrid::try_new(&ds, 4).unwrap();
-        let batch = read_chunk(&ds, &grid, &grid.chunk(1)).await.unwrap();
-        let values = batch
-            .column(0)
-            .values()
-            .as_primitive::<Float64Type>()
-            .values()
-            .to_vec();
-        assert_eq!(values, vec![4.0, 5.0]);
-    }
-
-    #[tokio::test]
-    async fn a_chunk_of_no_variable_has_rows_and_no_read() {
-        let ds = sst();
-        let view = select_columns(Arc::new(ds.clone()), &[]);
-        let grid = ChunkGrid::try_new(view.as_ref(), 8192).unwrap();
-        let batch = read_chunk(view.as_ref(), &grid, &grid.chunk(0))
-            .await
-            .unwrap();
-        assert_eq!(batch.num_columns(), 0);
-        assert_eq!(batch.num_rows(), grid.chunk(0).len());
-        assert_eq!(ds.reads("analysed_sst") + ds.reads("lat"), 0);
-    }
-
-    #[tokio::test]
-    async fn a_rank_0_variable_goes_in_each_chunk() {
-        let ds = dataset(vec![ramp("v", &[("n", 6)]), ramp("title", &[])]);
-        let grid = ChunkGrid::try_new(&ds, 4).unwrap();
-        let batch = read_chunk(&ds, &grid, &grid.chunk(0)).await.unwrap();
-        assert_eq!(batch.column(1).len(), 1);
     }
 }

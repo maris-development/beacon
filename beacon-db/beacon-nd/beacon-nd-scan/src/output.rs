@@ -2,11 +2,10 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::{Field, Schema, SchemaRef};
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use beacon_datafusion_ext::scan_adapt::BatchAdapter;
 use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
-use beacon_nd_dataset::NdDataset;
 use beacon_nd_dataset::{
     Dimensions as DatasetDimensions, NdArrowArray as DatasetArray, NdRecordBatch as DatasetBatch,
 };
@@ -29,31 +28,17 @@ pub(crate) struct FileOutput {
 impl FileOutput {
     /// Make the output of one file.
     ///
+    /// `chunk_schema` is the schema of the chunks of the file, from `ChunkReader::schema`.
     /// `projected_schema` is the encoded schema that the scan emits.
-    /// The dataset can hold more variables than the projection names. The output drops them.
-    pub(crate) fn try_new(dataset: &dyn NdDataset, projected_schema: &SchemaRef) -> Result<Self> {
+    /// The chunks can hold more variables than the projection names. The output drops them.
+    pub(crate) fn try_new(chunk_schema: &Schema, projected_schema: &SchemaRef) -> Result<Self> {
         let adapter = if projected_schema.fields().is_empty() {
             None
         } else {
-            let file_schema = Schema::new(
-                dataset
-                    .variable_names()
-                    .iter()
-                    .map(|name| {
-                        let variable = dataset.variable(name).ok_or_else(|| {
-                            DataFusionError::Internal(format!(
-                                "the dataset '{}' has no variable '{name}'",
-                                dataset.name()
-                            ))
-                        })?;
-                        Ok(Field::new(&**name, variable.data_type().clone(), true))
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            );
             // Every column is nd-encoded and casts leniently, so the strict rule is never asked.
             Some(BatchAdapter::try_new(
                 Arc::clone(projected_schema),
-                &encoded_schema(&file_schema),
+                &encoded_schema(chunk_schema),
                 &DefaultArrowTypeWidening::new(),
             )?)
         };
@@ -114,8 +99,8 @@ mod tests {
     use arrow::array::{Array, AsArray, Float32Array};
     use arrow::datatypes::{DataType, Field, Float64Type, Schema, SchemaRef};
     use beacon_nd_dataset::{
-        ChunkGrid, Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray, NdDataset,
-        read_chunk, select_columns,
+        ChunkGrid, ChunkReader, Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray,
+        NdDataset, select_columns,
     };
     use beacon_nd_encoding::encoding::{decode_nd_array, decode_nd_record_batch, encoded_schema};
 
@@ -133,10 +118,21 @@ mod tests {
         Arc::new(encoded_schema(&logical))
     }
 
+    /// A reader of `dataset` at a batch size of 12.
+    fn reader(dataset: &dyn NdDataset) -> ChunkReader {
+        let grid = ChunkGrid::try_new(dataset, 12).unwrap();
+        ChunkReader::try_new(dataset, grid).unwrap()
+    }
+
     /// Chunk `k` of `dataset` at a batch size of 12.
     async fn chunk(dataset: &dyn NdDataset, k: usize) -> beacon_nd_dataset::NdRecordBatch {
-        let grid = ChunkGrid::try_new(dataset, 12).unwrap();
-        read_chunk(dataset, &grid, &grid.chunk(k)).await.unwrap()
+        let reader = reader(dataset);
+        reader.read(&reader.grid().chunk(k)).await.unwrap()
+    }
+
+    /// The output of `dataset` for the projected `schema`.
+    fn output_of(dataset: &dyn NdDataset, schema: &SchemaRef) -> FileOutput {
+        FileOutput::try_new(reader(dataset).schema(), schema).unwrap()
     }
 
     /// The grid fixture with no variable: each chunk has 12 rows and no column.
@@ -153,7 +149,7 @@ mod tests {
         ]);
         let dataset = select_columns(Arc::new(grid_dataset("a.nd")), &["lat", "temp"]);
 
-        let output = FileOutput::try_new(dataset.as_ref(), &schema).unwrap();
+        let output = output_of(dataset.as_ref(), &schema);
         let batch = output.finish(&chunk(dataset.as_ref(), 0).await).unwrap();
 
         assert_eq!(batch.num_rows(), 1);
@@ -170,7 +166,7 @@ mod tests {
         let schema = projected(&[("temp", DataType::Float64)]);
         let dataset = select_columns(Arc::new(grid_dataset("a.nd")), &["temp"]);
 
-        let output = FileOutput::try_new(dataset.as_ref(), &schema).unwrap();
+        let output = output_of(dataset.as_ref(), &schema);
         let batch = output.finish(&chunk(dataset.as_ref(), 3).await).unwrap();
 
         let decoded = decode_nd_record_batch(&batch).unwrap();
@@ -191,7 +187,7 @@ mod tests {
         let schema = projected(&[("temp", DataType::Float64)]);
         let dataset = grid_dataset("a.nd");
 
-        let output = FileOutput::try_new(&dataset, &schema).unwrap();
+        let output = output_of(&dataset, &schema);
         let batch = output.finish(&chunk(&dataset, 0).await).unwrap();
 
         assert_eq!(batch.schema(), schema);
@@ -205,7 +201,7 @@ mod tests {
         let schema = projected(&[("lon", DataType::Float64)]);
         let dataset = grid_dataset("a.nd");
 
-        let output = FileOutput::try_new(&dataset, &schema).unwrap();
+        let output = output_of(&dataset, &schema);
         let batch = output.finish(&chunk(&dataset, 0).await).unwrap();
 
         assert_eq!(batch.schema(), schema);
@@ -221,7 +217,7 @@ mod tests {
         let schema = Arc::new(Schema::empty());
         let dataset = count_dataset();
 
-        let output = FileOutput::try_new(dataset.as_ref(), &schema).unwrap();
+        let output = output_of(dataset.as_ref(), &schema);
         let batch = output.finish(&chunk(dataset.as_ref(), 0).await).unwrap();
 
         assert_eq!(batch.num_columns(), 0);
@@ -236,7 +232,7 @@ mod tests {
         let dataset = MemoryDataset::try_new("a.nd", vec![temp]).unwrap();
         let schema = projected(&[("temp", DataType::Float64)]);
 
-        let output = FileOutput::try_new(&dataset, &schema).unwrap();
+        let output = output_of(&dataset, &schema);
         let batch = output.finish(&chunk(&dataset, 0).await).unwrap();
 
         let temp = decode_nd_array(batch.column(0), 0).unwrap();

@@ -177,7 +177,8 @@ beacon-nd-dataset/src/
   memory.rs       MemoryDataset, MemoryVariable
   view.rs         GridSelection, select_grid, select_columns, default_grid
   attributes.rs   attribute_columns
-  grid.rs         ChunkGrid, read_chunk
+  grid.rs         ChunkGrid
+  read.rs         ChunkReader
   statistics.rs   value_range
 ```
 
@@ -377,27 +378,43 @@ contract an attribute lies on its variable, and this view makes the columns.
 - A format calls it in its `open` when its tables show attributes. The scan
   does not call it.
 
-#### The chunk grid (`grid.rs`)
+#### The chunk grid (`grid.rs`) and the chunk reader (`read.rs`)
 
 ```rust
-/// The chunks of the variables of one dataset.
-pub struct ChunkGrid { /* grid dimensions, chunk list */ }
+/// The chunks of the variables of one dataset. It does no I/O.
+pub struct ChunkGrid { /* grid dimensions, chunk shape, chunk counts */ }
 
 impl ChunkGrid {
     /// Cut the grid of `dataset` into chunks of about `batch_size` rows.
     pub fn try_new(dataset: &dyn NdDataset, batch_size: usize) -> Result<Self>;
     /// The dimensions of the grid.
     pub fn dimensions(&self) -> &Dimensions;
-    /// The chunks, in C order. Each chunk is a region of the grid.
-    pub fn chunks(&self) -> &[Region];
-    /// The region of `variable` that lies in `chunk`.
-    pub fn variable_region(&self, variable: &dyn NdVariable, chunk: &Region) -> Region;
+    /// The chunk count.
+    pub fn len(&self) -> usize;
+    /// Chunk `index` in C order. Each chunk is a region of the grid.
+    pub fn chunk(&self, index: usize) -> Region;
+    /// Each chunk, in C order.
+    pub fn chunks(&self) -> impl ExactSizeIterator<Item = Region> + '_;
 }
 
-/// Read each variable of `dataset` in `chunk` into one un-broadcast batch.
-pub async fn read_chunk(dataset: &dyn NdDataset, grid: &ChunkGrid, chunk: &Region)
-    -> Result<NdRecordBatch>;
+/// The variables of one dataset, bound to one chunk grid.
+pub struct ChunkReader { /* grid, schema, each variable with its grid axes */ }
+
+impl ChunkReader {
+    /// `Invalid` when a variable has a dimension that is not on the grid.
+    pub fn try_new(dataset: &dyn NdDataset, grid: ChunkGrid) -> Result<Self>;
+    pub fn grid(&self) -> &ChunkGrid;
+    /// One nullable field for each variable, in `variable_names()` order.
+    pub fn schema(&self) -> &SchemaRef;
+    /// Read each variable in `chunk` into one un-broadcast batch.
+    pub async fn read(&self, chunk: &Region) -> Result<NdRecordBatch>;
+}
 ```
+
+The reader finds each variable one time for each file. It checks rule 1 of
+the contract after each read: the array must have the shape of its region.
+A read error becomes `Error::Read`, which names the variable and keeps the
+source error.
 
 The rules are the rules of `scan/chunks.rs` today. Port them with their
 tests:
@@ -418,7 +435,7 @@ tests:
 - `ChunkGrid::try_new` never returns a chunk of zero rows. A grid with a
   dimension of size 0 has no chunks.
 
-`read_chunk` reads the variables one after the other, as `FileScan::read`
+`ChunkReader::read` reads the variables one after the other, as `FileScan::read`
 does today. A coordinate is read one time per chunk. Reads at the same time
 on one file handle are a later change, with its own timing check.
 
@@ -585,7 +602,7 @@ Read{file, next, ready}.plan()                 CPU only
    neither -> Ok(None)
 
 read future(k)  [I/O]
-   read_chunk(chunk k)
+   reader.read(chunk k)
    -> Read{file, next: k+1, ready: Some(batch)}
 
 ChunkMorsel::into_stream     CPU: output.rs
@@ -735,7 +752,7 @@ removes keeps its statistics.
 of the table: `ChunkGrid::try_new(select_columns(dataset, table file
 columns))`. That is the grid of `SELECT *`, also when the file has
 variables that the table does not have. The read uses
-`select_columns(dataset, &[])`, so `read_chunk` reads nothing and returns a
+`select_columns(dataset, &[])`, so the reader reads nothing and returns a
 batch with no columns and the row count of the chunk. `output.rs` puts that
 count in the carrier of section 7.2. So `COUNT(*)` is the row count of
 `SELECT *`, and it reads no data. A file with none of the file columns of
@@ -798,7 +815,7 @@ What the `FileFormat` of a format writes:
   attribute with more values, a name clash with a real variable.
 - `ChunkGrid`: the ported tests of `scan/chunks.rs`; the cross-product grid;
   the driver tie; a dataset with no variable; a dimension of size 0.
-- `read_chunk`: each variable is read one time, on its own axes.
+- `ChunkReader`: each variable is read one time, on its own axes.
 - `value_range`: rank 0, rank 1, rank 2, all nulls, a string type.
 
 ### 8.2 `beacon-nd-scan`

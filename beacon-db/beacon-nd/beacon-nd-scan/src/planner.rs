@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use beacon_nd_dataset::{ChunkGrid, NdDataset, NdRecordBatch, read_chunk, select_columns};
+use beacon_nd_dataset::{ChunkGrid, ChunkReader, NdDataset, NdRecordBatch, select_columns};
 use datafusion::common::internal_err;
 use datafusion::error::Result;
 use datafusion::physical_expr::PhysicalExpr;
@@ -120,8 +120,8 @@ struct OpenFile {
     context: Arc<ScanContext>,
     /// The format, the path and the slice, for error text.
     label: String,
-    dataset: Arc<dyn NdDataset>,
-    grid: ChunkGrid,
+    /// Reads a chunk of the projected variables.
+    reader: ChunkReader,
     output: FileOutput,
     /// The numbers of the chunks to read, in the order of the grid.
     chunks: Vec<usize>,
@@ -129,7 +129,11 @@ struct OpenFile {
 
 impl OpenFile {
     fn describe(&self, number: usize) -> String {
-        format!("{}, chunk {number} of {}", self.label, self.grid.len())
+        format!(
+            "{}, chunk {number} of {}",
+            self.label,
+            self.reader.grid().len()
+        )
     }
 }
 
@@ -167,7 +171,10 @@ impl MorselPlanner for Planner {
             Planner::Read { file, next, ready } => {
                 // The limit counts the rows of a read when the read is planned.
                 let more = match file.chunks.get(next) {
-                    Some(&number) => file.context.budget.take(file.grid.chunk(number).len()),
+                    Some(&number) => {
+                        let rows = file.reader.grid().chunk(number).len();
+                        file.context.budget.take(rows)
+                    }
                     None => false,
                 };
                 if ready.is_none() && !more {
@@ -249,20 +256,20 @@ async fn plan_entry(
         // The file has none of the wanted columns, so it gives no row.
         return Ok(Box::new(Planner::Done));
     }
-    let output = FileOutput::try_new(dataset.as_ref(), &context.projected_schema)?;
     let grid =
         ChunkGrid::try_new(grid_source.as_ref(), context.batch_size).map_err(to_datafusion)?;
     let chunks = select_chunks(context, dataset.as_ref(), &grid, slice).await;
     if chunks.is_empty() {
         return Ok(Box::new(Planner::Done));
     }
+    let reader = ChunkReader::try_new(dataset.as_ref(), grid).map_err(to_datafusion)?;
+    let output = FileOutput::try_new(reader.schema(), &context.projected_schema)?;
 
     Ok(Box::new(Planner::Read {
         file: Arc::new(OpenFile {
             context: Arc::clone(context),
             label: label.to_string(),
-            dataset,
-            grid,
+            reader,
             output,
             chunks,
         }),
@@ -308,8 +315,10 @@ async fn select_chunks(
 /// Read entry `index` of the chunks of `file`, and hand it to the next planner state.
 async fn read(file: Arc<OpenFile>, index: usize) -> Result<Box<dyn MorselPlanner>> {
     let number = file.chunks[index];
-    let chunk = file.grid.chunk(number);
-    let batch = read_chunk(file.dataset.as_ref(), &file.grid, &chunk)
+    let chunk = file.reader.grid().chunk(number);
+    let batch = file
+        .reader
+        .read(&chunk)
         .await
         .map_err(|e| to_datafusion(e).context(file.describe(number)))?;
 

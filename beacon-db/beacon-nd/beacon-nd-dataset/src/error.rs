@@ -46,9 +46,17 @@ pub enum Error {
     /// An error of Arrow.
     #[error(transparent)]
     Arrow(#[from] arrow::error::ArrowError),
+    /// The read of one variable failed.
+    #[error("variable '{variable}': {error}")]
+    Read {
+        /// The name of the variable.
+        variable: String,
+        /// The error of the read.
+        error: Box<Error>,
+    },
     /// An error of the format: I/O, decode.
-    #[error("{0}")]
-    Format(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    Format(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl Error {
