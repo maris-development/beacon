@@ -52,7 +52,7 @@ mod tests {
     use beacon_nd_encoding::encoding::encoded_schema;
 
     use super::{file_columns, file_schema};
-    use crate::testing::grid_dataset;
+    use crate::tests::fixtures::grid_dataset;
 
     /// The encoded schema of the Float64 columns `columns`.
     fn projected(columns: &[&str]) -> SchemaRef {

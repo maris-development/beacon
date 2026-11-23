@@ -369,7 +369,7 @@ mod tests {
     use crate::metrics::ScanMetrics;
     use crate::opener::NdScanOptions;
     use crate::slices::NdSlice;
-    use crate::testing::{Entry, MemoryOpener, entry, grid_dataset, ramp};
+    use crate::tests::fixtures::{Entry, MemoryOpener, entry, grid_dataset, ramp};
 
     /// Run every planner of `files` to the end, as FileStream does, and collect the batches.
     async fn drive(

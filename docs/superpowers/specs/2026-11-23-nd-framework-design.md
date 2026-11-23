@@ -452,8 +452,9 @@ beacon-nd-scan/src/
   schema.rs       file_schema: the Arrow schema of one file
   statistics.rs   file_statistics: DataFusion statistics of one file; keeps_values
   metrics.rs      ScanMetrics
-  testing.rs      MemoryOpener and fixtures, for tests only
-  tests.rs        end-to-end tests on MemoryDataset
+  tests/
+    fixtures.rs   MemoryOpener and fixtures, for tests only
+    scan.rs       end-to-end tests on MemoryDataset
 ```
 
 Only `planner.rs` and `source.rs` name DataFusion morsel types.

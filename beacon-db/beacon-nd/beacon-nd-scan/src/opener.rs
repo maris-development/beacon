@@ -94,7 +94,7 @@ mod tests {
     use object_store::{ObjectMeta, ObjectStore};
 
     use super::{NdScanOptions, open_for_read};
-    use crate::testing::{Entry, MemoryOpener, grid_dataset};
+    use crate::tests::fixtures::{Entry, MemoryOpener, grid_dataset};
 
     fn meta() -> ObjectMeta {
         ObjectMeta {

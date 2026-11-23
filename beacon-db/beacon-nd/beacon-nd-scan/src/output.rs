@@ -120,7 +120,7 @@ mod tests {
     use beacon_nd_encoding::encoding::{decode_nd_array, decode_nd_record_batch, encoded_schema};
 
     use super::FileOutput;
-    use crate::testing::grid_dataset;
+    use crate::tests::fixtures::grid_dataset;
 
     /// The encoded schema of logical `fields`.
     fn projected(fields: &[(&str, DataType)]) -> SchemaRef {

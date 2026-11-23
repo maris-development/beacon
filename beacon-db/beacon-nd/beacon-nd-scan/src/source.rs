@@ -254,7 +254,7 @@ mod tests {
     use super::{NdSource, encoded_table_schema};
     use crate::opener::NdScanOptions;
     use crate::slices::NdSlice;
-    use crate::testing::MemoryOpener;
+    use crate::tests::fixtures::MemoryOpener;
 
     /// A source of the test opener on a table with the Float64 column `name`.
     fn source(name: &str) -> NdSource {

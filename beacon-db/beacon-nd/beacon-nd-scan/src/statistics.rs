@@ -130,7 +130,7 @@ mod tests {
     use datafusion::scalar::ScalarValue;
 
     use super::{file_statistics, keeps_values};
-    use crate::testing::grid_dataset;
+    use crate::tests::fixtures::grid_dataset;
 
     #[test]
     fn the_value_keeping_steps_are_the_listed_ones() {

@@ -30,8 +30,6 @@ mod slices;
 pub mod source;
 pub mod statistics;
 #[cfg(test)]
-pub(crate) mod testing;
-#[cfg(test)]
 mod tests;
 
 pub use error::to_datafusion;

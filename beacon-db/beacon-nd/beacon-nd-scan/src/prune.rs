@@ -259,7 +259,7 @@ mod tests {
     use datafusion::scalar::ScalarValue;
 
     use super::*;
-    use crate::testing::{grid_dataset, leveled_dataset};
+    use crate::tests::fixtures::{grid_dataset, leveled_dataset};
 
     /// A table schema with a nullable field for each of `fields`.
     fn schema_of(fields: &[(&str, DataType)]) -> SchemaRef {

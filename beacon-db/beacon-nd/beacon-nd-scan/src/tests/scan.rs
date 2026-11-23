@@ -28,7 +28,7 @@ use object_store::memory::InMemory;
 use crate::opener::NdScanOptions;
 use crate::schema::file_schema;
 use crate::source::{NdSource, encoded_table_schema};
-use crate::testing::{Entry, MemoryOpener, entry, grid_dataset, leveled_dataset, ramp};
+use crate::tests::fixtures::{Entry, MemoryOpener, entry, grid_dataset, leveled_dataset, ramp};
 
 /// The store URL of each test scan.
 const STORE: &str = "memory://";
