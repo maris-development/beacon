@@ -21,6 +21,8 @@ use beacon_nd_encoding::{
 use datafusion::error::{DataFusionError, Result};
 use datafusion::scalar::ScalarValue;
 
+use crate::schema::{file_fields, is_partition};
+
 /// The axis of a partition column in a chunk with no file column.
 const ROW_AXIS: &str = "row";
 
@@ -51,10 +53,7 @@ impl FileOutput {
         partition_fields: &[FieldRef],
         partition_values: &[ScalarValue],
     ) -> Result<Self> {
-        let target_fields: Vec<FieldRef> = projected_schema
-            .fields()
-            .iter()
-            .filter(|field| !is_partition(partition_fields, field.name()))
+        let target_fields: Vec<FieldRef> = file_fields(projected_schema, partition_fields)
             .cloned()
             .collect();
         let adapter = if target_fields.is_empty() {
@@ -100,19 +99,6 @@ impl FileOutput {
             .map(|field| output.partition_column(field, None))
             .collect::<Result<_>>()?;
         Ok(output)
-    }
-
-    /// The names of the projected columns that are file columns, in projected order.
-    pub(crate) fn file_columns(
-        projected_schema: &Schema,
-        partition_fields: &[FieldRef],
-    ) -> Vec<String> {
-        projected_schema
-            .fields()
-            .iter()
-            .filter(|field| !is_partition(partition_fields, field.name()))
-            .map(|field| field.name().clone())
-            .collect()
     }
 
     /// Encode one chunk, and adapt it to the projected schema.
@@ -216,7 +202,7 @@ impl FileOutput {
 
         let values = value.to_array_of_size(rows.unwrap_or(1)).map_err(|e| {
             DataFusionError::Execution(format!(
-                "Failed to build the partition column '{}': {e}",
+                "failed to build the partition column '{}': {e}",
                 field.name()
             ))
         })?;
@@ -234,10 +220,6 @@ impl FileOutput {
         };
         Ok(encode_nd_array(&EncodedArray::try_new(values, dims)?))
     }
-}
-
-fn is_partition(partition_fields: &[FieldRef], name: &str) -> bool {
-    partition_fields.iter().any(|field| field.name() == name)
 }
 
 /// The same column as an encoding array. The values are shared, not copied.
@@ -300,13 +282,6 @@ mod tests {
     /// The grid fixture with no variable: each chunk has 12 rows and no column.
     fn count_dataset() -> Arc<dyn NdDataset> {
         select_columns(Arc::new(grid_dataset("a.nd")), &[])
-    }
-
-    #[test]
-    fn a_file_is_projected_to_the_wanted_columns() {
-        let schema = projected(&[("lat", DataType::Float64), ("temp", DataType::Float64)]);
-
-        assert_eq!(FileOutput::file_columns(&schema, &[]), ["lat", "temp"]);
     }
 
     #[tokio::test]

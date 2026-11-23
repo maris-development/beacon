@@ -17,10 +17,9 @@
 //!   NdSourceExec           decodes the encoded batches
 //!     DataSourceExec       the NdSource: one morsel for each chunk
 //! ```
-//!
-//! The plan shape is `DataSourceExec -> NdSourceExec -> NdBroadcastExec`.
 #![warn(missing_docs)]
 
+mod cast_rule;
 pub(crate) mod error;
 pub mod metrics;
 pub mod opener;
@@ -36,8 +35,9 @@ pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
 
+pub use error::to_datafusion;
 pub use metrics::ScanMetrics;
 pub use opener::{NdFileOpener, NdScanOptions, open_for_read};
 pub use schema::file_schema;
-pub use source::NdSource;
+pub use source::{NdSource, encoded_table_schema};
 pub use statistics::file_statistics;

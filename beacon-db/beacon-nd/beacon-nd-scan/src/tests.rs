@@ -3,16 +3,14 @@
 use std::sync::Arc;
 
 use arrow::array::AsArray;
-use arrow::datatypes::{DataType, Field, Float64Type, Int32Type, Schema};
+use arrow::datatypes::{DataType, Field, FieldRef, Float64Type, Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use beacon_nd_dataset::MemoryDataset;
-use beacon_nd_encoding::encoding::encoded_schema;
 use beacon_nd_execution::exec::{NdBroadcastExec, NdSourceExec, nd_scan_plan};
 use datafusion::config::ConfigOptions;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{FileGroup, FileScanConfig, FileScanConfigBuilder};
 use datafusion::datasource::source::DataSourceExec;
-use datafusion::datasource::table_schema::TableSchema;
 use datafusion::error::Result;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::logical_expr::Operator;
@@ -30,7 +28,7 @@ use object_store::memory::InMemory;
 
 use crate::opener::NdScanOptions;
 use crate::schema::file_schema;
-use crate::source::NdSource;
+use crate::source::{NdSource, encoded_table_schema};
 use crate::testing::{Entry, MemoryOpener, entry, grid_dataset, ramp};
 
 /// The store URL of each test scan.
@@ -86,11 +84,9 @@ impl Scan {
 
     /// The scan config: one group with all files, repartitioned when there are more partitions.
     fn config(self) -> FileScanConfig {
-        let partition_fields = encoded_schema(&Schema::new(self.partition_fields))
-            .fields()
-            .to_vec();
-        let table_schema =
-            TableSchema::new(Arc::new(encoded_schema(&self.schema)), partition_fields);
+        let partition_fields: Vec<FieldRef> =
+            self.partition_fields.into_iter().map(Arc::new).collect();
+        let table_schema = encoded_table_schema(&self.schema, &partition_fields);
         let names: Vec<String> = table_schema
             .table_schema()
             .fields()
@@ -118,7 +114,7 @@ impl Scan {
             .file_source()
             .repartitioned(self.target_partitions, 0, None, &config)
             .unwrap()
-            .unwrap_or(config)
+            .expect("the scan repartitions")
     }
 
     fn plan(self) -> Arc<dyn ExecutionPlan> {
@@ -335,7 +331,17 @@ async fn a_column_that_one_file_does_not_have_is_null_there() {
     assert_eq!(temp.len(), 56);
     assert_eq!(temp.iter().filter(|value| value.is_some()).count(), 48);
     assert_eq!(temp.iter().filter(|value| value.is_none()).count(), 8);
-    assert_eq!(values(&batches, "lat").iter().flatten().count(), 56);
+    let lat = values(&batches, "lat");
+    assert_eq!(lat.iter().flatten().count(), 56);
+    let mut lat_of_null: Vec<f64> = temp
+        .iter()
+        .zip(&lat)
+        .filter(|(temp, _)| temp.is_none())
+        .filter_map(|(_, lat)| *lat)
+        .collect();
+    lat_of_null.sort_by(f64::total_cmp);
+    let expected: Vec<f64> = (0..8).map(|value| value as f64).collect();
+    assert_eq!(lat_of_null, expected);
 }
 
 #[tokio::test]
@@ -404,15 +410,30 @@ fn years(batches: &[RecordBatch]) -> Vec<Option<i32>> {
 
 #[tokio::test]
 async fn a_partition_column_has_the_value_of_its_file() {
-    let scan = years_scan(&["a.nd", "b.nd"], &[2023, 2024]);
+    // The second file has 5 rows of lat, so each year has its own row count.
+    let five_lats = MemoryDataset::try_new(
+        "b.nd",
+        vec![
+            ramp("temp", &[("time", 1), ("lat", 5), ("lon", 6)]),
+            ramp("lat", &[("lat", 5)]),
+            ramp("lon", &[("lon", 6)]),
+        ],
+    )
+    .unwrap();
+    let mut scan = years_scan(&["a.nd", "b.nd"], &[2023, 2024]);
+    scan.opener = Arc::new(
+        MemoryOpener::default()
+            .with("a.nd", Entry::Dataset(grid_dataset("a.nd")))
+            .with("b.nd", Entry::Dataset(five_lats)),
+    );
 
     let batches = collect(scan.columns(&["lat", "year"]).plan()).await;
 
     let years = years(&batches);
-    assert_eq!(years.len(), 16);
-    for year in [2023, 2024] {
+    assert_eq!(years.len(), 13);
+    for (year, rows) in [(2023, 8), (2024, 5)] {
         let count = years.iter().filter(|value| **value == Some(year)).count();
-        assert_eq!(count, 8, "{year}");
+        assert_eq!(count, rows, "{year}");
     }
 }
 
@@ -435,7 +456,7 @@ async fn a_limit_reads_only_the_first_chunks() {
 
     let batches = collect(Arc::clone(&plan)).await;
 
-    assert!(rows(&batches) <= 12, "{} rows", rows(&batches));
+    assert_eq!(rows(&batches), 12);
     assert_eq!(scan_counter(&plan, "chunks_read"), 1);
 }
 
@@ -457,6 +478,8 @@ async fn a_dropped_stream_stops_the_reads() {
         .unwrap();
     assert!(first.num_rows() > 0);
     drop(stream);
+    // Each waiting task gets one turn, so a late read shows in the counter.
+    tokio::task::yield_now().await;
 
     let read = scan_counter(&plan, "chunks_read");
     assert!(read <= 2, "read {read} of 4 chunks after the drop");

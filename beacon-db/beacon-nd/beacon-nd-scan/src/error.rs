@@ -6,7 +6,7 @@ use datafusion::error::DataFusionError;
 /// Map a dataset error to a DataFusion error. `Unsupported` becomes `NotImplemented`.
 ///
 /// `Arrow` becomes `ArrowError`. Each other variant becomes `Execution` with its text.
-pub(crate) fn to_datafusion(error: Error) -> DataFusionError {
+pub fn to_datafusion(error: Error) -> DataFusionError {
     match error {
         Error::Unsupported { .. } => DataFusionError::NotImplemented(error.to_string()),
         Error::Arrow(error) => DataFusionError::from(error),
@@ -16,6 +16,7 @@ pub(crate) fn to_datafusion(error: Error) -> DataFusionError {
 
 #[cfg(test)]
 mod tests {
+    use arrow::error::ArrowError;
     use beacon_nd_dataset::Error;
     use datafusion::error::DataFusionError;
 
@@ -40,5 +41,15 @@ mod tests {
             reason: "x".into(),
         });
         assert!(matches!(error, DataFusionError::Execution(ref text) if text.contains("depth")));
+    }
+
+    #[test]
+    fn an_arrow_error_stays_an_arrow_error() {
+        let error = to_datafusion(Error::Arrow(ArrowError::ComputeError("overflow".into())));
+        assert!(
+            matches!(error, DataFusionError::ArrowError(ref inner, _)
+                if matches!(**inner, ArrowError::ComputeError(ref text) if text == "overflow")),
+            "{error}"
+        );
     }
 }

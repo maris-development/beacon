@@ -3,14 +3,12 @@
 //! One planner reads one scan entry: a file, or a slice of one. Every I/O sits
 //! in a planner future, and a morsel holds a chunk that is read already.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use arrow::datatypes::{DataType, FieldRef, SchemaRef};
+use arrow::datatypes::{FieldRef, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use beacon_nd_dataset::{ChunkGrid, NdDataset, NdRecordBatch, Region, read_chunk, select_columns};
-use beacon_nd_encoding::encoding::nd_value_type;
 use datafusion::common::internal_err;
 use datafusion::error::Result;
 use datafusion::physical_expr::PhysicalExpr;
@@ -25,6 +23,7 @@ use crate::metrics::ScanMetrics;
 use crate::opener::{NdFileOpener, NdScanOptions, open_for_read};
 use crate::output::FileOutput;
 use crate::prune::{coordinate_masks, is_pruned, value_ranges};
+use crate::schema::{file_columns, table_types};
 use crate::slices::NdSlice;
 
 /// What each file of the scan of one partition shares.
@@ -40,30 +39,49 @@ pub(crate) struct ScanContext {
     pub projected_schema: SchemaRef,
     /// The encoded partition fields of the table.
     pub partition_fields: Vec<FieldRef>,
+    /// The names of the file columns of the table. They set the grid of a scan with no file column.
+    pub table_file_columns: Vec<String>,
     /// The approximate row count of one chunk.
     pub batch_size: usize,
     /// The filter of the scan, for the chunk prune.
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
-    /// The row limit of the scan.
-    pub limit: Option<usize>,
+    /// The row limit of the scan and the rows that the planners of this partition planned.
+    pub budget: Arc<RowBudget>,
     /// The counters of this partition.
     pub metrics: ScanMetrics,
 }
 
-impl ScanContext {
-    /// True when the planned reads hold the rows of the limit.
-    fn limit_reached(&self, planned: &AtomicUsize) -> bool {
-        self.limit
-            .is_some_and(|limit| planned.load(Ordering::Relaxed) >= limit)
+/// The row limit of one partition and the rows whose read is planned.
+#[derive(Debug)]
+pub(crate) struct RowBudget {
+    /// The row limit. `None` for no limit.
+    limit: Option<usize>,
+    /// The rows of the planned reads.
+    planned: AtomicUsize,
+}
+
+impl RowBudget {
+    /// A budget of `limit` rows with no planned read.
+    pub(crate) fn new(limit: Option<usize>) -> Self {
+        Self {
+            limit,
+            planned: AtomicUsize::new(0),
+        }
     }
 
-    /// Add the `rows` of the next read to `planned`. False when the limit is reached.
-    fn plan_rows(&self, planned: &AtomicUsize, rows: usize) -> bool {
+    /// True when the planned reads hold the rows of the limit.
+    fn reached(&self) -> bool {
+        self.limit
+            .is_some_and(|limit| self.planned.load(Ordering::Relaxed) >= limit)
+    }
+
+    /// Add the `rows` of the next read to the planned rows. False when the limit is reached.
+    fn take(&self, rows: usize) -> bool {
         let Some(limit) = self.limit else {
             return true;
         };
         // The check and the add are one step, so two planners cannot both pass the limit.
-        planned
+        self.planned
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < limit).then(|| count.saturating_add(rows))
             })
@@ -75,8 +93,6 @@ impl ScanContext {
 #[derive(Debug)]
 pub(crate) struct NdMorselizer {
     context: Arc<ScanContext>,
-    /// The rows whose read the planners of this partition planned.
-    planned: Arc<AtomicUsize>,
 }
 
 impl NdMorselizer {
@@ -84,7 +100,6 @@ impl NdMorselizer {
     pub(crate) fn new(context: ScanContext) -> Self {
         Self {
             context: Arc::new(context),
-            planned: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -96,7 +111,6 @@ impl Morselizer for NdMorselizer {
         }
         Ok(Box::new(Planner::Unopened {
             context: Arc::clone(&self.context),
-            planned: Arc::clone(&self.planned),
             file,
         }))
     }
@@ -106,7 +120,6 @@ impl Morselizer for NdMorselizer {
 #[derive(Debug)]
 struct OpenFile {
     context: Arc<ScanContext>,
-    planned: Arc<AtomicUsize>,
     /// The format, the path and the slice, for error text.
     label: String,
     dataset: Arc<dyn NdDataset>,
@@ -131,7 +144,6 @@ impl OpenFile {
 enum Planner {
     Unopened {
         context: Arc<ScanContext>,
-        planned: Arc<AtomicUsize>,
         file: PartitionedFile,
     },
     Read {
@@ -147,23 +159,19 @@ enum Planner {
 impl MorselPlanner for Planner {
     fn plan(self: Box<Self>) -> Result<Option<MorselPlan>> {
         match *self {
-            Planner::Unopened {
-                context,
-                planned,
-                file,
-            } => {
+            Planner::Unopened { context, file } => {
                 // The scan does not open a file after it has the rows of its limit.
-                if context.limit_reached(&planned) {
+                if context.budget.reached() {
                     return Ok(None);
                 }
                 Ok(Some(MorselPlan::new().with_pending_planner(async move {
-                    open(context, planned, file).await
+                    open(context, file).await
                 })))
             }
             Planner::Read { file, next, ready } => {
                 // The limit counts the rows of a read when the read is planned.
                 let more = match file.chunks.get(next) {
-                    Some((_, chunk)) => file.context.plan_rows(&file.planned, chunk.len()),
+                    Some((_, chunk)) => file.context.budget.take(chunk.len()),
                     None => false,
                 };
                 if ready.is_none() && !more {
@@ -189,11 +197,7 @@ impl MorselPlanner for Planner {
 }
 
 /// Open one entry, and plan its chunks.
-async fn open(
-    context: Arc<ScanContext>,
-    planned: Arc<AtomicUsize>,
-    file: PartitionedFile,
-) -> Result<Box<dyn MorselPlanner>> {
+async fn open(context: Arc<ScanContext>, file: PartitionedFile) -> Result<Box<dyn MorselPlanner>> {
     let slice = NdSlice::of(&file);
     let mut label = format!(
         "{} file {}",
@@ -203,14 +207,13 @@ async fn open(
     if slice.count > 1 {
         label.push_str(&format!(" slice {} of {}", slice.index, slice.count));
     }
-    plan_entry(&context, &planned, &file, slice, &label)
+    plan_entry(&context, &file, slice, &label)
         .await
         .map_err(|e| e.context(label.clone()))
 }
 
 async fn plan_entry(
     context: &Arc<ScanContext>,
-    planned: &Arc<AtomicUsize>,
     file: &PartitionedFile,
     slice: NdSlice,
     label: &str,
@@ -230,11 +233,23 @@ async fn plan_entry(
         return Ok(Box::new(Planner::Done));
     };
 
-    let names = FileOutput::file_columns(&context.projected_schema, &context.partition_fields);
+    let names = file_columns(&context.projected_schema, &context.partition_fields);
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     // The grid spans only the dimensions of the selected variables.
-    let dataset = select_columns(dataset, &names);
-    if !names.is_empty() && dataset.variable_names().is_empty() {
+    let (dataset, grid_source) = if names.is_empty() {
+        // A scan with no file column has the grid of `SELECT *` and reads no variable.
+        let table: Vec<&str> = context
+            .table_file_columns
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let grid_source = select_columns(Arc::clone(&dataset), &table);
+        (select_columns(dataset, &[]), grid_source)
+    } else {
+        let dataset = select_columns(dataset, &names);
+        (Arc::clone(&dataset), dataset)
+    };
+    if grid_source.variable_names().is_empty() {
         // The file has none of the wanted columns, so it gives no row.
         return Ok(Box::new(Planner::Done));
     }
@@ -244,7 +259,8 @@ async fn plan_entry(
         &context.partition_fields,
         &file.partition_values,
     )?;
-    let grid = ChunkGrid::try_new(dataset.as_ref(), context.batch_size).map_err(to_datafusion)?;
+    let grid =
+        ChunkGrid::try_new(grid_source.as_ref(), context.batch_size).map_err(to_datafusion)?;
     let total = grid.chunks().len();
     let chunks = select_chunks(context, dataset.as_ref(), &grid, slice).await;
     if chunks.is_empty() {
@@ -254,7 +270,6 @@ async fn plan_entry(
     Ok(Box::new(Planner::Read {
         file: Arc::new(OpenFile {
             context: Arc::clone(context),
-            planned: Arc::clone(planned),
             label: label.to_string(),
             dataset,
             grid,
@@ -290,15 +305,7 @@ async fn select_chunks(
     };
 
     // The scan casts each file column to its logical table type.
-    let table_types: HashMap<String, DataType> = context
-        .projected_schema
-        .fields()
-        .iter()
-        .filter_map(|field| {
-            let value_type = nd_value_type(field.data_type()).ok()?;
-            Some((field.name().clone(), value_type))
-        })
-        .collect();
+    let table_types = table_types(&context.projected_schema);
     let masks = coordinate_masks(dataset, &value_ranges(predicate), &table_types).await;
     let before = chunks.len();
     let rows_before: usize = chunks.iter().map(|(_, chunk)| chunk.len()).sum();
@@ -353,7 +360,7 @@ mod tests {
     use arrow::array::AsArray;
     use arrow::datatypes::{DataType, Field, FieldRef, Float64Type, Int32Type, Schema, SchemaRef};
     use arrow::record_batch::RecordBatch;
-    use beacon_nd_dataset::GridSelection;
+    use beacon_nd_dataset::{GridSelection, MemoryDataset};
     use beacon_nd_encoding::encoding::{decode_nd_record_batch, encoded_schema};
     use beacon_nd_execution::NdRecordBatchExt;
     use datafusion::error::{DataFusionError, Result};
@@ -366,11 +373,11 @@ mod tests {
     use futures::StreamExt;
     use object_store::memory::InMemory;
 
-    use super::{NdMorselizer, ScanContext};
+    use super::{NdMorselizer, RowBudget, ScanContext};
     use crate::metrics::ScanMetrics;
     use crate::opener::NdScanOptions;
     use crate::slices::NdSlice;
-    use crate::testing::{Entry, MemoryOpener, entry, grid_dataset};
+    use crate::testing::{Entry, MemoryOpener, entry, grid_dataset, ramp};
 
     /// Run every planner of `files` to the end, as FileStream does, and collect the batches.
     async fn drive(
@@ -443,9 +450,10 @@ mod tests {
             store: Arc::new(InMemory::new()),
             projected_schema: projected(columns),
             partition_fields: Vec::new(),
+            table_file_columns: ["lat", "lon", "temp"].map(String::from).to_vec(),
             batch_size,
             predicate,
-            limit,
+            budget: Arc::new(RowBudget::new(limit)),
             metrics: ScanMetrics::new(metrics, 0),
         }
     }
@@ -880,7 +888,62 @@ mod tests {
         let batches = drive(&scan, vec![entry("a.nd")]).await.unwrap();
 
         assert_eq!(batches.len(), 2);
+        assert_eq!(rows(&batches), 24);
         assert_eq!(counter(&metrics, "chunks_read"), 2);
+    }
+
+    /// temp(time=1, lat=8, lon=6), lat, lon and flag(time=1, lat=8, lon=6, band=3).
+    fn banded_dataset() -> MemoryDataset {
+        MemoryDataset::try_new(
+            "a.nd",
+            vec![
+                ramp("temp", &[("time", 1), ("lat", 8), ("lon", 6)]),
+                ramp("lat", &[("lat", 8)]),
+                ramp("lon", &[("lon", 6)]),
+                ramp("flag", &[("time", 1), ("lat", 8), ("lon", 6), ("band", 3)]),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The batches of a count scan of `dataset` on a table with the file columns `table`.
+    async fn count_scan(dataset: MemoryDataset, table: &[&str]) -> Vec<RecordBatch> {
+        let opener = Arc::new(MemoryOpener::default().with("a.nd", Entry::Dataset(dataset)));
+        let metrics = ExecutionPlanMetricsSet::new();
+        let mut context = context(
+            opener,
+            &[],
+            12,
+            None,
+            NdScanOptions::default(),
+            None,
+            &metrics,
+        );
+        context.table_file_columns = table.iter().map(|name| name.to_string()).collect();
+        drive(&NdMorselizer::new(context), vec![entry("a.nd")])
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_count_scan_uses_the_grid_of_the_table_columns() {
+        let dataset = banded_dataset();
+
+        let batches = count_scan(dataset.clone(), &["temp", "lat", "lon"]).await;
+
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 48);
+        let reads: usize = ["temp", "lat", "lon", "flag"]
+            .iter()
+            .map(|name| dataset.reads(name))
+            .sum();
+        assert_eq!(reads, 0);
+    }
+
+    #[tokio::test]
+    async fn a_count_scan_of_a_file_with_no_table_column_gives_no_row() {
+        let batches = count_scan(banded_dataset(), &["salt"]).await;
+
+        assert!(batches.is_empty());
     }
 
     #[tokio::test]

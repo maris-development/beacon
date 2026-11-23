@@ -217,7 +217,8 @@ mod tests {
             skip_invalid(given(&["depth"])),
         )
         .await;
-        assert!(result.is_err(), "{result:?}");
+        let error = result.expect_err("the file off the grid fails");
+        assert!(error.to_string().contains("depth"), "{error}");
     }
 
     #[tokio::test]

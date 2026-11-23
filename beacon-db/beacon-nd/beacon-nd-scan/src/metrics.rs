@@ -4,8 +4,8 @@ use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricB
 
 /// What one partition of the scan did with the files it read.
 ///
-/// Each name is its own. `FileStream` registers `output_rows` and `output_batches` for the
-/// same partition, and DataFusion adds the values of metrics with the same name.
+/// The names differ from the names of FileStream, because DataFusion adds metrics with the same name.
+/// `FileStream` registers `output_rows` and `output_batches` for the same partition.
 #[derive(Debug, Clone)]
 pub struct ScanMetrics {
     /// The chunks this partition read.

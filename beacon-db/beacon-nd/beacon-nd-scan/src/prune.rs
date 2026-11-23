@@ -19,6 +19,8 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::{BinaryExpr, CastExpr, Column, Literal};
 use datafusion::scalar::ScalarValue;
 
+use crate::cast_rule::{keeps_values, unit_nanos};
+
 /// The bounds that a predicate implies for one column.
 #[derive(Debug, Clone)]
 pub(crate) struct ValueRange {
@@ -80,7 +82,7 @@ impl ValueRange {
 /// Each range holds for every row that meets the predicate. Only a comparison
 /// with a literal and an `AND` give a bound. An `OR`, a `NOT`, an `IN` and a
 /// `CASE` give nothing, so a missing rule prunes less and never more.
-/// A range records the casts around its column; [`coordinate_masks`] decides
+/// A range records the casts around its column. [`coordinate_masks`] decides
 /// if they keep values. A cast around the literal is evaluated.
 pub(crate) fn value_ranges(predicate: &Arc<dyn PhysicalExpr>) -> HashMap<String, ValueRange> {
     let mut ranges = HashMap::new();
@@ -206,68 +208,6 @@ fn is_pushdown_scalar(value: &ScalarValue) -> bool {
     )
 }
 
-/// True when a cast from `from` to `to` keeps the order and each value.
-///
-/// The steps that keep each value:
-/// - the same type;
-/// - a signed integer to a wider signed integer;
-/// - an unsigned integer to a wider unsigned integer or to a wider signed integer;
-/// - Int8, Int16, Int32, UInt8, UInt16 and UInt32 to Float64;
-/// - Int8, Int16, UInt8 and UInt16 to Float32;
-/// - Float32 to Float64;
-/// - a timestamp to a finer unit with the same time zone.
-///
-/// Each other step can change which rows meet a compare, so it gives `false`.
-fn keeps_values(from: &DataType, to: &DataType) -> bool {
-    if from == to {
-        return true;
-    }
-    match (integer_bits(from), integer_bits(to)) {
-        // A signed integer to an unsigned one loses the negative values.
-        (Some((from_signed, from_bits)), Some((to_signed, to_bits))) => {
-            (to_signed || !from_signed) && to_bits > from_bits
-        }
-        (Some((_, bits)), None) => match to {
-            DataType::Float64 => bits <= 32,
-            DataType::Float32 => bits <= 16,
-            _ => false,
-        },
-        (None, Some(_)) => false,
-        (None, None) => match (from, to) {
-            (DataType::Float32, DataType::Float64) => true,
-            (DataType::Timestamp(from_unit, from_zone), DataType::Timestamp(to_unit, to_zone)) => {
-                from_zone == to_zone && unit_nanos(*to_unit) < unit_nanos(*from_unit)
-            }
-            _ => false,
-        },
-    }
-}
-
-/// Whether an integer type is signed, and its width in bits. `None` for another type.
-fn integer_bits(data_type: &DataType) -> Option<(bool, u32)> {
-    Some(match data_type {
-        DataType::Int8 => (true, 8),
-        DataType::Int16 => (true, 16),
-        DataType::Int32 => (true, 32),
-        DataType::Int64 => (true, 64),
-        DataType::UInt8 => (false, 8),
-        DataType::UInt16 => (false, 16),
-        DataType::UInt32 => (false, 32),
-        DataType::UInt64 => (false, 64),
-        _ => return None,
-    })
-}
-
-/// The length of one step of `unit`, in nanoseconds.
-fn unit_nanos(unit: TimeUnit) -> i64 {
-    match unit {
-        TimeUnit::Nanosecond => 1,
-        TimeUnit::Microsecond => 1_000,
-        TimeUnit::Millisecond => 1_000_000,
-        TimeUnit::Second => 1_000_000_000,
-    }
-}
-
 /// Why the casts from the file values to the compare of `range` can change which rows match.
 ///
 /// The chain runs from the variable type to the table type, then through the
@@ -327,7 +267,10 @@ pub(crate) async fn coordinate_masks(
             tracing::debug!("no prune mask for '{name}': {problem}");
             continue;
         }
-        let Some(compare) = Compare::try_new(variable.data_type(), range) else {
+        // The compare sees the type of the outer column cast, else the table type.
+        let compare_type = range.column_casts.last().or(table_types.get(&*name));
+        let raw_int64 = compare_type == Some(variable.data_type());
+        let Some(compare) = Compare::try_new(variable.data_type(), range, raw_int64) else {
             tracing::debug!(
                 "no prune mask for '{name}': its type {} does not fit the bounds {range:?}",
                 variable.data_type()
@@ -398,8 +341,10 @@ struct Compare {
 impl Compare {
     /// The compare of a coordinate of `data_type` with `range`.
     ///
+    /// `raw_int64` is true when the compare sees `data_type` itself.
+    /// Only then is an Int64 bound a raw value in the unit of a timestamp coordinate.
     /// `None` when a bound does not fit the type, or when no bound is left.
-    fn try_new(data_type: &DataType, range: &ValueRange) -> Option<Self> {
+    fn try_new(data_type: &DataType, range: &ValueRange, raw_int64: bool) -> Option<Self> {
         let compare = match data_type {
             DataType::Int8
             | DataType::Int16
@@ -421,8 +366,8 @@ impl Compare {
             }
             DataType::Timestamp(unit, _) => Self {
                 target: DataType::Int64,
-                min: time_bound(range.min.as_ref(), *unit, true)?,
-                max: time_bound(range.max.as_ref(), *unit, false)?,
+                min: time_bound(range.min.as_ref(), *unit, true, raw_int64)?,
+                max: time_bound(range.max.as_ref(), *unit, false, raw_int64)?,
             },
             _ => return None,
         };
@@ -508,11 +453,12 @@ fn time_bound(
     bound: Option<&(ScalarValue, bool)>,
     unit: TimeUnit,
     lower: bool,
+    raw_int64: bool,
 ) -> Option<Option<Bound>> {
     let Some((value, inclusive)) = bound else {
         return Some(None);
     };
-    let value = scalar_to_unit(value, unit, lower, *inclusive)?;
+    let value = scalar_to_unit(value, unit, lower, *inclusive, raw_int64)?;
     let value: ArrayRef = Arc::new(Int64Array::from(vec![value]));
     Some(Some(Bound {
         value: Scalar::new(value),
@@ -522,20 +468,26 @@ fn time_bound(
 
 /// A timestamp literal as a value in `unit`, with the same rows on its side of the bound.
 ///
-/// An Int64 literal is a raw value in `unit`. A literal in a finer unit
-/// rounds so that the bound keeps each whole value that meets it.
+/// - An Int64 literal is a raw value in `unit`, only when `raw_int64` is true. Else it gives `None`.
+/// - A literal in the same unit or a coarser unit is multiplied to `unit`.
+/// - A literal in a finer unit rounds, so that the bound keeps each whole value that meets it.
+/// - `v > L` is `v > floor(L)`.
+/// - `v >= L` is `v >= ceil(L)`.
+/// - `v < L` is `v < ceil(L)`.
+/// - `v <= L` is `v <= floor(L)`.
 fn scalar_to_unit(
     value: &ScalarValue,
     unit: TimeUnit,
     lower: bool,
     inclusive: bool,
+    raw_int64: bool,
 ) -> Option<i64> {
     let (value, literal_nanos) = match value {
         ScalarValue::TimestampNanosecond(Some(v), _) => (*v, 1),
         ScalarValue::TimestampMicrosecond(Some(v), _) => (*v, 1_000),
         ScalarValue::TimestampMillisecond(Some(v), _) => (*v, 1_000_000),
         ScalarValue::TimestampSecond(Some(v), _) => (*v, 1_000_000_000),
-        ScalarValue::Int64(Some(v)) => return Some(*v),
+        ScalarValue::Int64(Some(v)) if raw_int64 => return Some(*v),
         _ => return None,
     };
     let unit_nanos = unit_nanos(unit);
@@ -545,7 +497,6 @@ fn scalar_to_unit(
     let factor = unit_nanos / literal_nanos;
     let floor = value.div_euclid(factor);
     let ceil = floor + i64::from(value.rem_euclid(factor) != 0);
-    // `v > L` is `v > floor`, `v >= L` is `v >= ceil`, `v < L` is `v < ceil`, `v <= L` is `v <= floor`.
     Some(if lower == inclusive { ceil } else { floor })
 }
 
@@ -553,6 +504,7 @@ fn scalar_to_unit(
 mod tests {
     use arrow::array::{
         Float32Array, Int32Array, StringArray, TimestampNanosecondArray, TimestampSecondArray,
+        UInt64Array,
     };
     use arrow::datatypes::{Field, Schema};
     use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
@@ -815,6 +767,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_int64_literal_on_a_timestamp_with_a_unit_change_gives_no_mask() {
+        let dataset = coordinate("t", Arc::new(TimestampSecondArray::from(vec![0, 1, 2, 3])));
+        let table_type = DataType::Timestamp(TimeUnit::Millisecond, None);
+        // In the table unit, 1 is one millisecond, so the rows 1 to 3 meet the filter.
+        let predicate = above("t", table_type.clone(), ScalarValue::Int64(Some(1)));
+        let masks = masks_in(&dataset, &predicate, "t", table_type).await;
+        assert!(masks.is_empty(), "{masks:?}");
+        assert_eq!(dataset.reads("t"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_uint64_coordinate_above_two_to_the_63_keeps_each_matching_row() {
+        let big = 1u64 << 63;
+        let values = UInt64Array::from(vec![0, big + 10, u64::MAX]);
+        let dataset = coordinate("n", Arc::new(values));
+        let predicate = above("n", DataType::UInt64, ScalarValue::UInt64(Some(big)));
+        let masks = masks_of(&dataset, &predicate).await;
+        let mask = only_mask(&masks, "n");
+        assert!(
+            mask[1] && mask[2],
+            "each row above the bound is kept: {mask:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timestamp_with_a_time_zone_compares_as_one_with_no_zone() {
+        let values = TimestampSecondArray::from(vec![0, 1, 2, 3]).with_timezone("UTC");
+        let dataset = coordinate("t", Arc::new(values));
+        let data_type = DataType::Timestamp(TimeUnit::Second, Some("UTC".into()));
+        let threshold = ScalarValue::TimestampMillisecond(Some(1500), Some("UTC".into()));
+        let predicate = above("t", data_type, threshold);
+        let masks = masks_of(&dataset, &predicate).await;
+        assert_eq!(only_mask(&masks, "t"), [F, F, T, T]);
+    }
+
+    #[test]
+    fn a_chunk_at_the_edge_is_checked_and_a_chunk_past_the_mask_is_kept() {
+        let grid = ChunkGrid::try_new(&grid_dataset("a.nd"), 12).unwrap();
+        let masks: Masks = vec![(
+            "lat".to_string(),
+            BooleanArray::from(vec![T, T, T, T, F, F, F, F]),
+        )];
+        // The chunk ends at lat 8, the edge of the dimension.
+        assert!(is_pruned(
+            &masks,
+            &grid,
+            &Region::new(vec![0, 4, 0], vec![1, 4, 3])
+        ));
+        assert!(!is_pruned(
+            &masks,
+            &grid,
+            &Region::new(vec![0, 6, 0], vec![1, 4, 3])
+        ));
+        assert!(!is_pruned(
+            &masks,
+            &grid,
+            &Region::new(vec![0, 9, 0], vec![1, 1, 3])
+        ));
+        assert!(!is_pruned(
+            &masks,
+            &grid,
+            &Region::new(vec![0, usize::MAX, 0], vec![1, 2, 3])
+        ));
+    }
+
+    #[tokio::test]
     async fn a_timestamp_literal_on_a_numeric_coordinate_gets_no_mask() {
         let dataset = coordinate("x", Arc::new(Float64Array::from(vec![1.0, 2.0])));
         let threshold = ScalarValue::TimestampSecond(Some(1), None);
@@ -948,62 +966,6 @@ mod tests {
         assert_eq!(dataset.reads("x"), 0);
     }
 
-    #[test]
-    fn the_value_keeping_steps_are_the_listed_ones() {
-        use DataType::*;
-        let seconds = Timestamp(TimeUnit::Second, None);
-        let nanos = Timestamp(TimeUnit::Nanosecond, None);
-        let utc_millis = Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
-        let utc_micros = Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
-        let utc_seconds = Timestamp(TimeUnit::Second, Some("UTC".into()));
-        let kept = [
-            (Int32, Int32),
-            (Float64, Float64),
-            (Int8, Int16),
-            (Int16, Int64),
-            (Int32, Int64),
-            (UInt8, UInt16),
-            (UInt32, UInt64),
-            (UInt8, Int16),
-            (UInt32, Int64),
-            (Int8, Float64),
-            (Int32, Float64),
-            (UInt32, Float64),
-            (Int8, Float32),
-            (Int16, Float32),
-            (UInt8, Float32),
-            (UInt16, Float32),
-            (Float32, Float64),
-            (seconds.clone(), nanos.clone()),
-            (utc_millis.clone(), utc_micros),
-        ];
-        for (from, to) in kept {
-            assert!(keeps_values(&from, &to), "{from} to {to} keeps values");
-        }
-        let changed = [
-            (Float64, Float32),
-            (Int64, Float64),
-            (UInt64, Float64),
-            (Int32, Float32),
-            (UInt32, Float32),
-            (Int64, Int32),
-            (Int8, UInt16),
-            (UInt16, Int16),
-            (Float32, Int64),
-            (Int64, nanos.clone()),
-            (nanos.clone(), seconds.clone()),
-            (utc_millis, utc_seconds.clone()),
-            (seconds.clone(), utc_seconds.clone()),
-            (utc_seconds, seconds),
-        ];
-        for (from, to) in changed {
-            assert!(
-                !keeps_values(&from, &to),
-                "{from} to {to} can change values"
-            );
-        }
-    }
-
     // The tests of the predicate walk.
 
     fn column(name: &str) -> Arc<dyn PhysicalExpr> {
@@ -1116,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn test_casts_are_peeled_from_both_sides() {
+    fn test_a_column_cast_is_recorded_and_a_literal_cast_is_evaluated() {
         let casted_col: Arc<dyn PhysicalExpr> =
             Arc::new(CastExpr::new(column("time"), DataType::Int64, None));
         let casted_lit: Arc<dyn PhysicalExpr> =

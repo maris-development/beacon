@@ -2,12 +2,15 @@
 
 use std::sync::Arc;
 
-use datafusion::common::not_impl_err;
+use arrow::datatypes::{FieldRef, Schema};
+use beacon_nd_encoding::encoding::{encoded_schema, is_nd_encoded, nd_encoded_field};
+use datafusion::common::{not_impl_err, plan_err};
 use datafusion::config::ConfigOptions;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileSource};
 use datafusion::datasource::table_schema::TableSchema;
 use datafusion::error::Result;
+use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::projection::ProjectionExprs;
 use datafusion::physical_expr::{LexOrdering, PhysicalExpr, conjunction};
 use datafusion::physical_plan::filter_pushdown::{FilterPushdownPropagation, PushedDown};
@@ -17,8 +20,24 @@ use object_store::ObjectStore;
 
 use crate::metrics::ScanMetrics;
 use crate::opener::{NdFileOpener, NdScanOptions};
-use crate::planner::{NdMorselizer, ScanContext};
+use crate::planner::{NdMorselizer, RowBudget, ScanContext};
 use crate::slices::{slice_files, spread_files};
+
+/// The table schema of an ND scan: the `beacon.nd` encoded file schema and partition columns.
+///
+/// `file_schema` and `partition_cols` are logical. A partition column keeps its nullability.
+pub fn encoded_table_schema(file_schema: &Schema, partition_cols: &[FieldRef]) -> TableSchema {
+    let partition_cols = partition_cols
+        .iter()
+        .map(|field| {
+            Arc::new(
+                nd_encoded_field(field.name(), field.data_type())
+                    .with_nullable(field.is_nullable()),
+            )
+        })
+        .collect();
+    TableSchema::new(Arc::new(encoded_schema(file_schema)), partition_cols)
+}
 
 /// The DataFusion [`FileSource`] of each ND format.
 ///
@@ -48,6 +67,7 @@ impl NdSource {
     /// A source that opens each file with `opener`.
     ///
     /// `table_schema` holds the encoded file schema and the encoded partition columns.
+    /// [`encoded_table_schema`] builds it.
     pub fn new(
         opener: Arc<dyn NdFileOpener>,
         options: NdScanOptions,
@@ -87,15 +107,34 @@ impl FileSource for NdSource {
         base_config: &FileScanConfig,
         partition: usize,
     ) -> Result<Box<dyn Morselizer>> {
+        if let Some(field) = self
+            .table_schema
+            .table_partition_cols()
+            .iter()
+            .find(|field| !is_nd_encoded(field))
+        {
+            return plan_err!(
+                "the partition column '{}' of the {} scan is not beacon.nd encoded. Build the table schema with encoded_table_schema",
+                field.name(),
+                self.opener.format_name()
+            );
+        }
         Ok(Box::new(NdMorselizer::new(ScanContext {
             opener: Arc::clone(&self.opener),
             options: self.options.clone(),
             store: object_store,
             projected_schema: base_config.projected_schema()?,
             partition_fields: self.table_schema.table_partition_cols().clone(),
+            table_file_columns: self
+                .table_schema
+                .file_schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect(),
             batch_size: self.batch_size,
             predicate: self.predicate.clone(),
-            limit: base_config.limit,
+            budget: Arc::new(RowBudget::new(base_config.limit)),
             metrics: ScanMetrics::new(&self.metrics, partition),
         })))
     }
@@ -160,6 +199,15 @@ impl FileSource for NdSource {
         &self,
         projection: &ProjectionExprs,
     ) -> Result<Option<Arc<dyn FileSource>>> {
+        // The scan reads columns by name, so it takes only columns that keep their name.
+        let plain = projection.iter().all(|item| {
+            item.expr
+                .downcast_ref::<Column>()
+                .is_some_and(|column| column.name() == item.alias)
+        });
+        if !plain {
+            return Ok(None);
+        }
         let merged = match &self.projection {
             Some(existing) => existing.try_merge(projection)?,
             None => projection.clone(),
@@ -175,6 +223,12 @@ impl FileSource for NdSource {
         filters: Vec<Arc<dyn PhysicalExpr>>,
         _config: &ConfigOptions,
     ) -> Result<FilterPushdownPropagation<Arc<dyn FileSource>>> {
+        // An empty conjunction is `true`, so no filter keeps the source as it is.
+        if filters.is_empty() {
+            return Ok(FilterPushdownPropagation::with_parent_pushdown_result(
+                Vec::new(),
+            ));
+        }
         let predicate = match self.predicate.clone() {
             Some(existing) => conjunction(std::iter::once(existing).chain(filters.clone())),
             None => conjunction(filters.clone()),
@@ -197,7 +251,8 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::datatypes::{DataType, Field, FieldRef, Schema};
+    use beacon_nd_encoding::encoding::{encoded_schema, is_nd_encoded, nd_value_type};
     use datafusion::config::ConfigOptions;
     use datafusion::datasource::listing::PartitionedFile;
     use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder, FileSource};
@@ -206,11 +261,12 @@ mod tests {
     use datafusion::execution::object_store::ObjectStoreUrl;
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{binary, col, lit};
+    use datafusion::physical_expr::projection::{ProjectionExpr, ProjectionExprs};
     use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
     use datafusion::physical_plan::filter_pushdown::PushedDown;
     use object_store::memory::InMemory;
 
-    use super::NdSource;
+    use super::{NdSource, encoded_table_schema};
     use crate::opener::NdScanOptions;
     use crate::slices::NdSlice;
     use crate::testing::MemoryOpener;
@@ -350,6 +406,87 @@ mod tests {
         let node: Arc<dyn Any + Send + Sync> = result.updated_node.expect("a new source");
         let updated = node.downcast::<NdSource>().expect("an ND source");
         assert!(updated.predicate.is_some());
+    }
+
+    #[test]
+    fn the_encoded_table_schema_encodes_file_and_partition_columns() {
+        let file = Schema::new(vec![Field::new("temp", DataType::Float64, true)]);
+        let year: FieldRef = Arc::new(Field::new("year", DataType::Int32, false));
+
+        let table = encoded_table_schema(&file, &[year]);
+
+        let temp = table.file_schema().field(0);
+        assert_eq!(temp.name(), "temp");
+        assert!(is_nd_encoded(temp));
+        assert_eq!(nd_value_type(temp.data_type()).unwrap(), DataType::Float64);
+        let year = &table.table_partition_cols()[0];
+        assert_eq!(year.name(), "year");
+        assert!(is_nd_encoded(year));
+        assert_eq!(nd_value_type(year.data_type()).unwrap(), DataType::Int32);
+        assert!(
+            !year.is_nullable(),
+            "the partition column keeps its nullability"
+        );
+    }
+
+    #[test]
+    fn a_partition_field_that_is_not_encoded_is_a_plan_error() {
+        let file = Schema::new(vec![Field::new("temp", DataType::Float64, true)]);
+        let year: FieldRef = Arc::new(Field::new("year", DataType::Int32, true));
+        let table = TableSchema::new(Arc::new(encoded_schema(&file)), vec![year]);
+        let source = NdSource::new(
+            Arc::new(MemoryOpener::default()),
+            NdScanOptions::default(),
+            table,
+        );
+        let config = config_of(&source, 1).build();
+
+        let error = source
+            .create_morselizer(Arc::new(InMemory::new()), &config, 0)
+            .expect_err("the scan refuses the table schema");
+
+        assert!(
+            matches!(error, DataFusionError::Plan(ref text) if text.contains("year")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn no_filter_sets_no_predicate() {
+        let result = source("lat")
+            .try_pushdown_filters(Vec::new(), &ConfigOptions::default())
+            .unwrap();
+
+        assert!(result.filters.is_empty());
+        if let Some(node) = result.updated_node {
+            let node: Arc<dyn Any + Send + Sync> = node;
+            let updated = node.downcast::<NdSource>().expect("an ND source");
+            assert!(updated.predicate.is_none());
+        }
+    }
+
+    #[test]
+    fn a_projection_with_an_expression_is_not_pushed() {
+        let schema = Schema::new(vec![Field::new("lat", DataType::Float64, true)]);
+        let doubled = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Multiply,
+            lit(2.0),
+            &schema,
+        )
+        .unwrap();
+        let projection = ProjectionExprs::new([ProjectionExpr::new(doubled, "lat")]);
+
+        let pushed = source("lat").try_pushdown_projection(&projection).unwrap();
+
+        assert!(pushed.is_none());
+        let plain = ProjectionExprs::from_indices(&[0], &schema);
+        assert!(
+            source("lat")
+                .try_pushdown_projection(&plain)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
