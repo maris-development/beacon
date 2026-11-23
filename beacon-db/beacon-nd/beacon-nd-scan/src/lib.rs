@@ -1,0 +1,13 @@
+//! The DataFusion scan of the Beacon ND framework.
+//!
+//! One scan reads each n-dimensional file format of Beacon.
+//! A format crate opens a file as an [`beacon_nd_dataset::NdDataset`].
+//! This crate cuts the dataset into chunks and reads them into record batches.
+#![warn(missing_docs)]
+
+pub(crate) mod error;
+pub mod metrics;
+#[cfg(test)]
+pub(crate) mod testing;
+
+pub use metrics::ScanMetrics;
