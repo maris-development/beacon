@@ -10,6 +10,7 @@ pub mod grid;
 pub mod memory;
 pub mod region;
 pub mod schema;
+pub mod view;
 
 pub use attributes::attribute_columns;
 pub use dataset::{NdDataset, NdVariable, validate};
@@ -18,3 +19,4 @@ pub use grid::ChunkGrid;
 pub use memory::{MemoryDataset, MemoryVariable};
 pub use region::Region;
 pub use schema::{DatasetSchema, VariableInfo};
+pub use view::{GridSelection, default_grid, select_columns, select_grid};
