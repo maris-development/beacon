@@ -1755,6 +1755,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-nd-dataset"
+version = "2.1.0-rc.3"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "indexmap 2.14.0",
+ "nd-arrow-array",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-test",
+]
+
+[[package]]
 name = "beacon-nd-encoding"
 version = "2.1.0-rc.3"
 dependencies = [
@@ -7938,6 +7952,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nd-arrow-array"
+version = "0.5.0"
+source = "git+https://github.com/robinskil/nd-arrow-array.git?rev=e1208d59b57e62043ee80aaebae9f9aa721b0491#e1208d59b57e62043ee80aaebae9f9aa721b0491"
+dependencies = [
+ "arrow",
+ "arrow-schema",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "ndarray"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11792,6 +11818,27 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tracing-test"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19a4c448db514d4f24c5ddb9f73f2ee71bfb24c526cf0c570ba142d1119e0051"
+dependencies = [
+ "tracing-core",
+ "tracing-subscriber",
+ "tracing-test-macro",
+]
+
+[[package]]
+name = "tracing-test-macro"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad06847b7afb65c7866a36664b75c40b895e318cea4f71299f013fb22965329d"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
