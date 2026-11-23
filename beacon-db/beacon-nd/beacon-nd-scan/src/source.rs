@@ -18,9 +18,10 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_datasource::morsel::Morselizer;
 use object_store::ObjectStore;
 
+use crate::limit::RowBudget;
 use crate::metrics::ScanMetrics;
 use crate::opener::{NdFileOpener, NdScanOptions};
-use crate::planner::{NdMorselizer, ReadPlan, RowBudget, ScanContext};
+use crate::planner::{NdMorselizer, ReadPlan, ScanContext};
 use crate::schema::logical_projection;
 use crate::slices::{slice_files, spread_files};
 
@@ -123,7 +124,7 @@ impl FileSource for NdSource {
             output_schema,
             batch_size: self.batch_size,
             predicate: self.predicate.clone(),
-            budget: Arc::new(RowBudget::new(base_config.limit)),
+            budget: RowBudget::new(base_config.limit),
             metrics: ScanMetrics::new(&self.metrics, partition),
         })))
     }

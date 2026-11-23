@@ -20,6 +20,7 @@
 #![warn(missing_docs)]
 
 pub(crate) mod error;
+mod limit;
 pub mod metrics;
 pub mod opener;
 mod output;

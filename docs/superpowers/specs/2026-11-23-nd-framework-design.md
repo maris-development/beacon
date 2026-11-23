@@ -466,6 +466,7 @@ beacon-nd-scan/src/
   opener.rs       NdFileOpener, NdScanOptions, open_for_read
   source.rs       NdSource: the FileSource; encoded_table_schema
   slices.rs       NdSlice, slice_files, spread_files
+  limit.rs        RowBudget: the row limit of one partition
   planner.rs      NdMorselizer, planner states, ChunkMorsel
   prune.rs        the predicate on the coordinate values, the chunk test
   output.rs       encode, adapt to the projected schema

@@ -4,7 +4,6 @@
 //! in a planner future, and a morsel holds a chunk that is read already.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
@@ -19,6 +18,7 @@ use futures::stream::BoxStream;
 use object_store::ObjectStore;
 
 use crate::error::to_datafusion;
+use crate::limit::RowBudget;
 use crate::metrics::ScanMetrics;
 use crate::opener::{NdFileOpener, NdScanOptions, open_for_read};
 use crate::output::FileOutput;
@@ -45,7 +45,7 @@ pub(crate) struct ScanContext {
     /// The filter of the scan, for the chunk prune.
     pub predicate: Option<Arc<dyn PhysicalExpr>>,
     /// The row limit of the scan and the rows that the planners of this partition planned.
-    pub budget: Arc<RowBudget>,
+    pub budget: RowBudget,
     /// The counters of this partition.
     pub metrics: ScanMetrics,
 }
@@ -77,44 +77,6 @@ impl ReadPlan {
                 .map(|field| field.name().clone())
                 .collect(),
         )
-    }
-}
-
-/// The row limit of one partition and the rows whose read is planned.
-#[derive(Debug)]
-pub(crate) struct RowBudget {
-    /// The row limit. `None` for no limit.
-    limit: Option<usize>,
-    /// The rows of the planned reads.
-    planned: AtomicUsize,
-}
-
-impl RowBudget {
-    /// A budget of `limit` rows with no planned read.
-    pub(crate) fn new(limit: Option<usize>) -> Self {
-        Self {
-            limit,
-            planned: AtomicUsize::new(0),
-        }
-    }
-
-    /// True when the planned reads hold the rows of the limit.
-    fn reached(&self) -> bool {
-        self.limit
-            .is_some_and(|limit| self.planned.load(Ordering::Relaxed) >= limit)
-    }
-
-    /// Add the `rows` of the next read to the planned rows. False when the limit is reached.
-    fn take(&self, rows: usize) -> bool {
-        let Some(limit) = self.limit else {
-            return true;
-        };
-        // The check and the add are one step, so two planners cannot both pass the limit.
-        self.planned
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                (count < limit).then(|| count.saturating_add(rows))
-            })
-            .is_ok()
     }
 }
 
@@ -181,8 +143,8 @@ enum Planner {
         file: Arc<OpenFile>,
         /// The next chunk to read.
         next: usize,
-        /// A chunk that is read and not emitted yet, with its number in the file.
-        ready: Option<(usize, NdRecordBatch)>,
+        /// A chunk that is read and not emitted yet.
+        ready: Option<ChunkMorsel>,
     },
     Done,
 }
@@ -213,12 +175,8 @@ impl MorselPlanner for Planner {
                     return Ok(None);
                 }
                 let mut plan = MorselPlan::new();
-                if let Some((number, batch)) = ready {
-                    plan = plan.with_morsels(vec![Box::new(ChunkMorsel {
-                        file: Arc::clone(&file),
-                        number,
-                        batch,
-                    })]);
+                if let Some(morsel) = ready {
+                    plan = plan.with_morsels(vec![Box::new(morsel)]);
                 }
                 if more {
                     plan = plan.with_pending_planner(async move { read(file, next).await });
@@ -230,7 +188,7 @@ impl MorselPlanner for Planner {
     }
 }
 
-/// Open one entry, and plan its chunks.
+/// Open one entry, and give the planner state that reads its chunks.
 async fn open(context: Arc<ScanContext>, file: PartitionedFile) -> Result<Box<dyn MorselPlanner>> {
     let slice = NdSlice::of(&file);
     let mut label = format!(
@@ -238,20 +196,29 @@ async fn open(context: Arc<ScanContext>, file: PartitionedFile) -> Result<Box<dy
         context.opener.format_name(),
         file.object_meta.location
     );
-    if slice.count > 1 {
-        label.push_str(&format!(" slice {} of {}", slice.index, slice.count));
+    if slice.count() > 1 {
+        label.push_str(&format!(" slice {} of {}", slice.index(), slice.count()));
     }
-    plan_entry(&context, &file, slice, &label)
+    let opened = open_entry(&context, &file, slice, &label)
         .await
-        .map_err(|e| e.context(label.clone()))
+        .map_err(|e| e.context(label.clone()))?;
+    Ok(Box::new(match opened {
+        Some(file) => Planner::Read {
+            file: Arc::new(file),
+            next: 0,
+            ready: None,
+        },
+        None => Planner::Done,
+    }))
 }
 
-async fn plan_entry(
+/// Open one entry and select its chunks. `None` when the entry gives no row.
+async fn open_entry(
     context: &Arc<ScanContext>,
     file: &PartitionedFile,
     slice: NdSlice,
     label: &str,
-) -> Result<Box<dyn MorselPlanner>> {
+) -> Result<Option<OpenFile>> {
     let opened = open_for_read(
         context.opener.as_ref(),
         Arc::clone(&context.store),
@@ -261,10 +228,10 @@ async fn plan_entry(
     .await?;
     let Some(dataset) = opened else {
         // The slices of a file all skip it. One of them counts it.
-        if slice.index == 0 {
+        if slice.index() == 0 {
             context.metrics.files_skipped.add(1);
         }
-        return Ok(Box::new(Planner::Done));
+        return Ok(None);
     };
 
     fn names(columns: &[String]) -> Vec<&str> {
@@ -284,27 +251,23 @@ async fn plan_entry(
     };
     if grid_source.variable_names().is_empty() {
         // The file has none of the wanted columns, so it gives no row.
-        return Ok(Box::new(Planner::Done));
+        return Ok(None);
     }
     let grid =
         ChunkGrid::try_new(grid_source.as_ref(), context.batch_size).map_err(to_datafusion)?;
     let chunks = select_chunks(context, dataset.as_ref(), &grid, slice).await;
     if chunks.is_empty() {
-        return Ok(Box::new(Planner::Done));
+        return Ok(None);
     }
     let reader = ChunkReader::try_new(dataset.as_ref(), grid).map_err(to_datafusion)?;
     let output = FileOutput::try_new(reader.schema(), &context.output_schema)?;
 
-    Ok(Box::new(Planner::Read {
-        file: Arc::new(OpenFile {
-            context: Arc::clone(context),
-            label: label.to_string(),
-            reader,
-            output,
-            chunks,
-        }),
-        next: 0,
-        ready: None,
+    Ok(Some(OpenFile {
+        context: Arc::clone(context),
+        label: label.to_string(),
+        reader,
+        output,
+        chunks,
     }))
 }
 
@@ -352,10 +315,15 @@ async fn read(file: Arc<OpenFile>, index: usize) -> Result<Box<dyn MorselPlanner
 
     file.context.metrics.chunks_read.add(1);
     file.context.metrics.rows_read.add(chunk.len());
+    let ready = ChunkMorsel {
+        file: Arc::clone(&file),
+        number,
+        batch,
+    };
     Ok(Box::new(Planner::Read {
         file,
         next: index + 1,
-        ready: Some((number, batch)),
+        ready: Some(ready),
     }))
 }
 
@@ -398,7 +366,8 @@ mod tests {
     use futures::StreamExt;
     use object_store::memory::InMemory;
 
-    use super::{NdMorselizer, ReadPlan, RowBudget, ScanContext};
+    use super::{NdMorselizer, ReadPlan, ScanContext};
+    use crate::limit::RowBudget;
     use crate::metrics::ScanMetrics;
     use crate::opener::NdScanOptions;
     use crate::schema::logical_projection;
@@ -481,7 +450,7 @@ mod tests {
             output_schema,
             batch_size,
             predicate,
-            budget: Arc::new(RowBudget::new(limit)),
+            budget: RowBudget::new(limit),
             metrics: ScanMetrics::new(metrics, 0),
         }
     }
@@ -544,7 +513,7 @@ mod tests {
 
     /// Slice `index` of `count` of `a.nd`.
     fn slice(index: u32, count: u32) -> PartitionedFile {
-        entry("a.nd").with_extension(NdSlice { index, count })
+        entry("a.nd").with_extension(NdSlice::new(index, count).unwrap())
     }
 
     fn skip_invalid() -> NdScanOptions {

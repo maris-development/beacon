@@ -4,28 +4,51 @@
 //! the same list and takes its own range of it, so the slices of a file read
 //! each chunk once.
 
+use std::num::NonZeroU32;
 use std::ops::Range;
 
 use datafusion::datasource::{listing::PartitionedFile, physical_plan::FileGroup};
 
 /// Slice `index` of `count` of one file. It travels in the extensions of the entry.
+///
+/// The count is at least 1, and the index is below the count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NdSlice {
-    pub index: u32,
-    pub count: u32,
+    index: u32,
+    count: NonZeroU32,
 }
 
 impl NdSlice {
+    /// The whole file: slice 0 of 1.
+    const WHOLE: Self = Self {
+        index: 0,
+        count: NonZeroU32::MIN,
+    };
+
+    /// Slice `index` of `count`. `None` when `count` is 0 or `index` is not below `count`.
+    pub(crate) fn new(index: u32, count: u32) -> Option<Self> {
+        let count = NonZeroU32::new(count)?;
+        (index < count.get()).then_some(Self { index, count })
+    }
+
     /// The slice of `file`. An entry with no slice is the whole file.
     pub(crate) fn of(file: &PartitionedFile) -> Self {
-        file.extension::<Self>()
-            .copied()
-            .unwrap_or(Self { index: 0, count: 1 })
+        file.extension::<Self>().copied().unwrap_or(Self::WHOLE)
+    }
+
+    /// The number of this slice, from 0.
+    pub(crate) fn index(self) -> u32 {
+        self.index
+    }
+
+    /// How many slices the file has.
+    pub(crate) fn count(self) -> u32 {
+        self.count.get()
     }
 
     /// The chunks of this slice, out of `chunks` in the file.
     pub(crate) fn range(self, chunks: usize) -> Range<usize> {
-        let (index, count) = (self.index as usize, self.count.max(1) as usize);
+        let (index, count) = (self.index as usize, self.count() as usize);
         (index * chunks / count)..((index + 1) * chunks / count)
     }
 }
@@ -47,8 +70,9 @@ pub(crate) fn slice_files(entries: Vec<PartitionedFile>, target: usize) -> Vec<P
             sliced.push(entry);
             continue;
         }
-        for index in 0..count {
-            let mut slice = entry.clone().with_extension(NdSlice { index, count });
+        // Each index is below the count, so each slice is valid.
+        for slice in (0..count).filter_map(|index| NdSlice::new(index, count)) {
+            let mut slice = entry.clone().with_extension(slice);
             // The statistics describe the whole file, not one slice of it.
             slice.statistics = None;
             sliced.push(slice);
@@ -78,7 +102,7 @@ pub(crate) fn spread_files(mut entries: Vec<PartitionedFile>, target: usize) -> 
 
 /// The share of its file that one entry reads.
 fn weight(entry: &PartitionedFile) -> u64 {
-    entry.object_meta.size / u64::from(NdSlice::of(entry).count.max(1))
+    entry.object_meta.size / u64::from(NdSlice::of(entry).count())
 }
 
 #[cfg(test)]
@@ -96,7 +120,7 @@ mod tests {
         for (chunks, count) in [(10usize, 4u32), (3, 8), (0, 2), (7, 1)] {
             let mut seen = Vec::new();
             for index in 0..count {
-                seen.extend(NdSlice { index, count }.range(chunks));
+                seen.extend(NdSlice::new(index, count).unwrap().range(chunks));
             }
             assert_eq!(
                 seen,
@@ -109,8 +133,15 @@ mod tests {
     #[test]
     fn a_file_with_no_slice_is_the_whole_file() {
         let slice = NdSlice::of(&file("a.nc", 10));
-        assert_eq!(slice, NdSlice { index: 0, count: 1 });
+        assert_eq!(slice, NdSlice::new(0, 1).unwrap());
         assert_eq!(slice.range(5), 0..5);
+    }
+
+    #[test]
+    fn a_slice_with_no_count_or_an_index_past_the_count_is_not_made() {
+        assert_eq!(NdSlice::new(0, 0), None);
+        assert_eq!(NdSlice::new(4, 4), None);
+        assert!(NdSlice::new(3, 4).is_some());
     }
 
     #[test]
@@ -120,14 +151,14 @@ mod tests {
         // K = ceil(8 / 2) = 4 slices for each file.
         assert_eq!(sliced.len(), 8);
         for entry in &sliced {
-            assert_eq!(NdSlice::of(entry).count, 4);
+            assert_eq!(NdSlice::of(entry).count(), 4);
             assert!(entry.statistics.is_none());
             assert!(entry.range.is_none());
         }
         let of_a: Vec<u32> = sliced
             .iter()
             .filter(|entry| entry.object_meta.location.as_ref() == "a.nc")
-            .map(|entry| NdSlice::of(entry).index)
+            .map(|entry| NdSlice::of(entry).index())
             .collect();
         assert_eq!(of_a, vec![0, 1, 2, 3]);
     }
