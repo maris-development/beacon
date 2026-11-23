@@ -93,8 +93,8 @@ pub(crate) async fn chunk_masks(
 
 /// True when no row of `chunk` can meet the predicate.
 ///
-/// The chunk is pruned when the mask of one of its axes has no `true` in the
-/// range of the chunk on that axis.
+/// The chunk is pruned when a conjunct rejects each row of the file, or when
+/// the mask of one of its axes has no `true` in the range of the chunk on that axis.
 pub(crate) fn is_pruned(masks: &Masks, grid: &ChunkGrid, chunk: &Region) -> bool {
     masks.no_row
         || grid
@@ -141,13 +141,17 @@ async fn conjunct_mask(
     for column in collect_columns(conjunct) {
         let name = column.name();
         // The type of a partition column or an unknown column is not known here.
-        if table_schema.field_with_name(name).is_err() {
+        let Ok(table_field) = table_schema.field_with_name(name) else {
             return Err(format!("'{name}' is not a file column of the scan"));
-        }
+        };
         // The scan gives nulls for a column that the file does not have. The adapter does the same.
         let Some(variable) = dataset.variable(name) else {
             continue;
         };
+        // The adapter casts a nested type by field name, and the scan does not.
+        if table_field.data_type().is_nested() || variable.data_type().is_nested() {
+            return Err(format!("'{name}' has a nested type"));
+        }
         let [axis] = variable.dimensions().as_slice() else {
             return Err(format!("'{name}' does not have rank 1"));
         };
@@ -192,6 +196,9 @@ async fn conjunct_mask(
         .evaluate(&batch)
         .and_then(|value| value.into_array(rows))
         .map_err(|e| e.to_string())?;
+    if result.len() != rows {
+        return Err(format!("it gives {} values for {rows} rows", result.len()));
+    }
     let mask = result
         .as_boolean_opt()
         .ok_or_else(|| format!("its type is {}, not Boolean", result.data_type()))?;
@@ -227,8 +234,8 @@ async fn read_coordinate(
 #[cfg(test)]
 mod tests {
     use arrow::array::{
-        Float32Array, Float64Array, Int32Array, Int64Array, StringArray, TimestampSecondArray,
-        UInt64Array,
+        Float32Array, Float64Array, Int32Array, Int64Array, StringArray, StructArray,
+        TimestampSecondArray, UInt64Array,
     };
     use arrow::datatypes::{DataType, TimeUnit};
     use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
@@ -490,6 +497,17 @@ mod tests {
         let masks = masks_of(&dataset, col("lat").gt(random() + lit(100.0))).await;
         assert!(is_empty(&masks));
         assert_eq!(dataset.reads("lat"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_coordinate_with_a_nested_type_gets_no_mask() {
+        let field = Arc::new(Field::new("b", DataType::Int32, true));
+        let child: ArrayRef = Arc::new(Int32Array::from(vec![1, 2]));
+        let values = StructArray::from(vec![(field, child)]);
+        let dataset = coordinate("s", Arc::new(values));
+        let masks = masks_of(&dataset, col("s").is_null()).await;
+        assert!(is_empty(&masks));
+        assert_eq!(dataset.reads("s"), 0);
     }
 
     // The casts. Each mask must keep every row that the filter above the scan accepts.

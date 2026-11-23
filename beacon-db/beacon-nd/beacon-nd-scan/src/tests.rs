@@ -510,6 +510,45 @@ async fn a_partition_column_has_the_value_of_its_file() {
 }
 
 #[tokio::test]
+async fn a_filter_on_a_partition_column_prunes_no_chunk() {
+    for with_file_column in [false, true] {
+        let scan = years_scan(&["a.nd"], &[2024]).plan();
+        let schema = scan.schema();
+        let year = binary(
+            col("year", &schema).unwrap(),
+            Operator::Eq,
+            lit(2024),
+            &schema,
+        )
+        .unwrap();
+        // The second form has the partition column beside a file column in one conjunct.
+        let predicate = if with_file_column {
+            let lat = binary(
+                col("lat", &schema).unwrap(),
+                Operator::Gt,
+                lit(100.0),
+                &schema,
+            )
+            .unwrap();
+            binary(year, Operator::Or, lat, &schema).unwrap()
+        } else {
+            year
+        };
+        let filter: Arc<dyn ExecutionPlan> =
+            Arc::new(FilterExec::try_new(predicate, scan).unwrap());
+        let plan = FilterPushdown::new()
+            .optimize(filter, &ConfigOptions::default())
+            .unwrap();
+
+        let batches = collect(Arc::clone(&plan)).await;
+
+        // The file has no variable `year`. The prune must not read the partition column as null.
+        assert_eq!(rows(&batches), 48, "with a file column: {with_file_column}");
+        assert_eq!(scan_counter(&plan, "chunks_pruned"), 0);
+    }
+}
+
+#[tokio::test]
 async fn a_query_of_only_partition_columns_has_the_rows_of_the_grid() {
     let scan = years_scan(&["a.nd"], &[2024]);
 

@@ -612,8 +612,11 @@ and compares them by hand.
   2. Split the predicate into its conjuncts.
   3. Keep a conjunct when each of its columns is in `table_schema`, and each
      column that the file has is a rank-1 variable on one and the same
-     dimension. Skip a conjunct with a volatile function.
-  4. Read each coordinate one time, in full, in its file type.
+     dimension. Skip a conjunct with a volatile function, with a column of a
+     nested type, or with a dimension of size 0.
+  4. Read each variable of the conjunct in full, in its file type. Each slice
+     of a file reads it one time. A read with a length that is not the size
+     of the dimension gives no mask.
   5. Rewrite the conjunct with the DataFusion `DefaultPhysicalExprAdapter`,
      from `table_schema` to the file types of the coordinates.
   6. Evaluate the conjunct on a record batch of the coordinates. A null
@@ -649,8 +652,15 @@ Why the evaluation keeps the rule:
   prune and a null in the scan. The error gives no mask, which is the safe
   side. Each other error of the rewrite or the evaluation also gives no
   mask.
-- **Each operator.** An `OR`, an `IN`, a `NOT`, a function and each type are
-  evaluated. A conjunct with columns on two dimensions gives no mask.
+- **Each operator.** An `OR`, an `IN`, a `NOT`, a function and each type that
+  is not nested are evaluated. A conjunct with columns on two dimensions
+  gives no mask.
+- **A nested type gives no mask.** The adapter casts a struct by field name,
+  and the scan output does not. So the two casts can differ.
+
+One cost: a rank-1 variable is not always a small coordinate. In a file with
+one dimension, each data variable has rank 1. A filter on such a variable
+reads it in full for the prune, one time for each slice of the file.
 - **A null** gives `false`. **A NaN** follows the Arrow total order, as the
   `FilterExec` does.
 
