@@ -609,8 +609,9 @@ and compares them by hand.
   1. Take the snapshot of the predicate, for a dynamic filter.
   2. Split the predicate into its conjuncts.
   3. Keep a conjunct when each of its columns is in `table_schema`, and each
-     column that the file has is a rank-1 variable on one and the same
-     dimension. Skip a conjunct with a volatile function, with a column of a
+     column that the file has is a rank-0 variable, or a rank-1 variable on
+     one and the same dimension. A rank-0 value is repeated on each index of
+     that dimension. Skip a conjunct with a volatile function, with a column of a
      nested type, or with a dimension of size 0.
   4. Read each variable of the conjunct in full, in its file type. Each slice
      of a file reads it one time. A read with a length that is not the size
@@ -641,9 +642,12 @@ Why the evaluation keeps the rule:
   about casts is necessary: `CAST(lat AS INT) = 5` is evaluated on
   `lat = 5.5`.
 - **A column that the file does not have.** The scan gives nulls for it, and
-  the adapter gives a null literal. A conjunct with no column of the file
-  has one value for the file. When that value is not `true`, the scan reads
-  no chunk of the file.
+  the adapter gives a null literal.
+- **A whole file.** A conjunct with no rank-1 variable has one value for the
+  file. Its columns are rank-0 variables, such as attribute columns, and
+  columns that the file does not have. When that value is not `true`, the
+  scan reads no chunk of the file. So a filter on a global attribute skips
+  each file that fails it.
 - **An error gives no mask.** The adapter casts strictly, and the scan
   output casts leniently. A value that does not fit gives an error in the
   prune and a null in the scan. The error gives no mask, which is the safe

@@ -93,6 +93,16 @@ pub(crate) fn grid_dataset(name: &str) -> MemoryDataset {
     MemoryDataset::try_new(name, vec![temp, lat, lon]).unwrap()
 }
 
+/// The grid fixture with the rank-0 Float64 variable `level`.
+pub(crate) fn leveled_dataset(name: &str, level: Option<f64>) -> MemoryDataset {
+    let temp = ramp("temp", &[("time", 1), ("lat", 8), ("lon", 6)]).with_chunk_shape(vec![1, 4, 3]);
+    let lat = ramp("lat", &[("lat", 8)]);
+    let lon = ramp("lon", &[("lon", 6)]);
+    let value = Arc::new(Float64Array::from(vec![level]));
+    let level = MemoryVariable::new("level", NdArrowArray::try_new_scalar(value).unwrap());
+    MemoryDataset::try_new(name, vec![temp, lat, lon, level]).unwrap()
+}
+
 /// `PartitionedFile::new(path, 1000)`.
 pub(crate) fn entry(path: &str) -> PartitionedFile {
     PartitionedFile::new(path, 1000)

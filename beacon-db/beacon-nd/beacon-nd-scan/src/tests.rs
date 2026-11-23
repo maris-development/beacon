@@ -28,7 +28,7 @@ use object_store::memory::InMemory;
 use crate::opener::NdScanOptions;
 use crate::schema::file_schema;
 use crate::source::{NdSource, encoded_table_schema};
-use crate::testing::{Entry, MemoryOpener, entry, grid_dataset, ramp};
+use crate::testing::{Entry, MemoryOpener, entry, grid_dataset, leveled_dataset, ramp};
 
 /// The store URL of each test scan.
 const STORE: &str = "memory://";
@@ -368,6 +368,36 @@ async fn a_filter_on_a_column_that_one_file_does_not_have_prunes_that_file() {
     // File 2 has only null `temp` values, so the scan reads no chunk of it.
     assert_eq!(rows(&batches), 48);
     assert_eq!(scan_counter(&plan, "chunks_pruned"), 1);
+}
+
+#[tokio::test]
+async fn a_filter_on_a_rank_0_variable_skips_the_files_that_fail_it() {
+    let opener = Arc::new(
+        MemoryOpener::default()
+            .with("a.nd", Entry::Dataset(leveled_dataset("a.nd", Some(1.0))))
+            .with("b.nd", Entry::Dataset(leveled_dataset("b.nd", Some(2.0)))),
+    );
+    let schema = file_schema(&leveled_dataset("a.nd", Some(1.0)));
+    let scan = plan(
+        opener,
+        schema,
+        vec![entry("a.nd"), entry("b.nd")],
+        Some(&["temp", "level"]),
+        1,
+    );
+    let plan = filtered(scan, "level", Operator::Eq, 2.0);
+
+    let batches = collect(Arc::clone(&plan)).await;
+
+    // Only file 2 has the level 2, so the scan reads no chunk of file 1.
+    assert_eq!(rows(&batches), 48);
+    assert!(
+        values(&batches, "level")
+            .iter()
+            .all(|level| *level == Some(2.0))
+    );
+    assert_eq!(scan_counter(&plan, "chunks_pruned"), 4);
+    assert_eq!(scan_counter(&plan, "chunks_read"), 4);
 }
 
 #[tokio::test]
