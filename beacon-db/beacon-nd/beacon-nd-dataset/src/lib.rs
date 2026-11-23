@@ -16,7 +16,7 @@ pub mod view;
 pub use attributes::attribute_columns;
 pub use dataset::{NdDataset, NdVariable, validate};
 pub use error::{Error, Result};
-pub use grid::ChunkGrid;
+pub use grid::{ChunkGrid, read_chunk};
 pub use memory::{MemoryDataset, MemoryVariable};
 pub use region::Region;
 pub use schema::{DatasetSchema, VariableInfo};
