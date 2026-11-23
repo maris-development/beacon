@@ -27,7 +27,7 @@ use beacon_datafusion_ext::{
     },
 };
 use beacon_functions::register_functions;
-use beacon_nd_execution::{NdFilterPushdown, NdProjectionPushdown};
+use beacon_nd_execution::{NdFilterPushdown, NdProjectionPushdown, NdStructuralPushdown};
 use beacon_redb_store::RedbStore;
 use datafusion::{
     execution::{
@@ -770,11 +770,13 @@ fn build_session_state(
     // above `NdBroadcastExec`, and dropping the defaults would remove
     // `EnforceDistribution` — without which a Final aggregate never merges its
     // partitions and `count(*)` returns one row per file group. Filter runs
-    // before projection so the selection is established first.
+    // before projection so the selection is established first. The structural
+    // rule runs last, so a limit above a sunk filter or projection sinks too.
     if builder.nd_pipeline {
         state_builder = state_builder
             .with_physical_optimizer_rule(Arc::new(NdFilterPushdown::new()))
-            .with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()));
+            .with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()))
+            .with_physical_optimizer_rule(Arc::new(NdStructuralPushdown::new()));
     }
 
     Ok(state_builder.build())

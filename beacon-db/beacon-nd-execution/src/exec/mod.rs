@@ -8,10 +8,13 @@
 //! also a correct plan on its own.
 
 mod broadcast_exec;
+mod coalesce_exec;
 mod expr_column;
 mod filter_exec;
+mod limit_exec;
 mod projection_exec;
 mod source_exec;
+mod union_exec;
 
 use std::sync::Arc;
 
@@ -33,9 +36,12 @@ use beacon_nd_encoding::batch::NdRecordBatch;
 use crate::materialize::NdRecordBatchExt;
 
 pub use broadcast_exec::NdBroadcastExec;
+pub use coalesce_exec::NdCoalescePartitionsExec;
 pub use filter_exec::NdFilterExec;
+pub use limit_exec::NdLimitExec;
 pub use projection_exec::NdProjectionExec;
 pub use source_exec::NdSourceExec;
+pub use union_exec::NdUnionExec;
 
 /// Stream of nd batches exchanged between nd-aware operators.
 pub type SendableNdBatchStream = BoxStream<'static, Result<NdRecordBatch>>;
@@ -95,6 +101,15 @@ pub fn as_nd_plan(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn NdExecutionPl
     }
     if let Some(filter) = plan.downcast_ref::<NdFilterExec>() {
         return Some(Arc::new(filter.clone()));
+    }
+    if let Some(limit) = plan.downcast_ref::<NdLimitExec>() {
+        return Some(Arc::new(limit.clone()));
+    }
+    if let Some(union) = plan.downcast_ref::<NdUnionExec>() {
+        return Some(Arc::new(union.clone()));
+    }
+    if let Some(coalesce) = plan.downcast_ref::<NdCoalescePartitionsExec>() {
+        return Some(Arc::new(coalesce.clone()));
     }
     None
 }

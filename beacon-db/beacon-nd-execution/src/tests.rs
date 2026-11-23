@@ -30,6 +30,24 @@ fn dims(spec: &[(&str, usize)]) -> Dimensions {
 /// `time`) and served from an in-memory `DataSourceExec` — the shape a file
 /// opener produces.
 fn test_source() -> Arc<NdSourceExec> {
+    let encoded = encoded_chunks();
+    let encoded_schema = encoded[0].schema();
+    // One partition, each nd chunk its own single-row encoded batch.
+    let source = MemorySourceConfig::try_new_exec(&[encoded], encoded_schema, None).unwrap();
+    Arc::new(NdSourceExec::try_new(source).unwrap())
+}
+
+/// The grid of [`test_source`] with each chunk in its own partition.
+fn split_source() -> Arc<NdSourceExec> {
+    let encoded = encoded_chunks();
+    let encoded_schema = encoded[0].schema();
+    let partitions: Vec<_> = encoded.into_iter().map(|chunk| vec![chunk]).collect();
+    let source = MemorySourceConfig::try_new_exec(&partitions, encoded_schema, None).unwrap();
+    Arc::new(NdSourceExec::try_new(source).unwrap())
+}
+
+/// The two encoded chunks of the test grid, split along `time`.
+fn encoded_chunks() -> Vec<RecordBatch> {
     let logical = Arc::new(Schema::new(vec![
         arrow::datatypes::Field::new("time", arrow::datatypes::DataType::Int32, true),
         arrow::datatypes::Field::new("lat", arrow::datatypes::DataType::Int32, true),
@@ -71,16 +89,7 @@ fn test_source() -> Arc<NdSourceExec> {
         .unwrap();
         encoded.push(encode_nd_record_batch(&nd).unwrap());
     }
-
-    let encoded_schema = encoded[0].schema();
-    // One partition, each nd chunk its own single-row encoded batch.
-    let source = MemorySourceConfig::try_new_exec(
-        &[encoded.into_iter().map(|b| vec![b]).flatten().collect()],
-        encoded_schema,
-        None,
-    )
-    .unwrap();
-    Arc::new(NdSourceExec::try_new(source).unwrap())
+    encoded
 }
 
 async fn run(plan: Arc<dyn ExecutionPlan>) -> Result<RecordBatch> {
@@ -808,4 +817,310 @@ async fn pushdown_rule_splits_mixed_predicate() {
         residual.is_some() && residual < broadcast && broadcast < nd_filter,
         "expected FilterExec → NdBroadcastExec → NdFilterExec:\n{rendered}"
     );
+}
+
+/// Apply the structural rule and render the plan.
+fn sink_structural(plan: Arc<dyn ExecutionPlan>) -> (Arc<dyn ExecutionPlan>, String) {
+    use datafusion::common::config::ConfigOptions;
+    use datafusion::physical_optimizer::PhysicalOptimizerRule;
+    use datafusion::physical_plan::displayable;
+
+    let schema = plan.schema();
+    let optimized = NdStructuralPushdown::new()
+        .optimize(plan, &ConfigOptions::default())
+        .unwrap();
+    assert_eq!(optimized.schema(), schema);
+    let rendered = displayable(optimized.as_ref()).indent(true).to_string();
+    (optimized, rendered)
+}
+
+/// All rows of all partitions, as sorted `(time, lat, lon, sst)` tuples.
+async fn sorted_rows(plan: Arc<dyn ExecutionPlan>) -> Vec<(i32, i32, i32, i64)> {
+    use datafusion::physical_plan::ExecutionPlanProperties;
+
+    let mut rows = Vec::new();
+    for partition in 0..plan.output_partitioning().partition_count() {
+        let batches: Vec<RecordBatch> = plan
+            .execute(partition, Arc::new(TaskContext::default()))
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        for batch in batches {
+            let time = batch.column(0).as_primitive::<Int32Type>();
+            let lat = batch.column(1).as_primitive::<Int32Type>();
+            let lon = batch.column(2).as_primitive::<Int32Type>();
+            let sst = batch.column(3).as_primitive::<Float64Type>();
+            for row in 0..batch.num_rows() {
+                rows.push((
+                    time.value(row),
+                    lat.value(row),
+                    lon.value(row),
+                    sst.value(row) as i64,
+                ));
+            }
+        }
+    }
+    rows.sort();
+    rows
+}
+
+fn broadcast(source: Arc<NdSourceExec>) -> Arc<dyn ExecutionPlan> {
+    Arc::new(NdBroadcastExec::try_new(source).unwrap())
+}
+
+#[tokio::test]
+async fn structural_rule_sinks_local_limit() {
+    use datafusion::physical_plan::limit::LocalLimitExec;
+
+    let original: Arc<dyn ExecutionPlan> =
+        Arc::new(LocalLimitExec::new(broadcast(test_source()), 5));
+    let expected = run(original.clone()).await.unwrap();
+
+    let (optimized, rendered) = sink_structural(original);
+    assert!(!rendered.contains("LocalLimitExec"), "{rendered}");
+    assert!(
+        rendered.find("NdBroadcastExec") < rendered.find("NdLimitExec: skip=0, fetch=5"),
+        "{rendered}"
+    );
+    assert_eq!(run(optimized).await.unwrap(), expected);
+}
+
+/// The cut crosses the border between the two chunks.
+#[tokio::test]
+async fn structural_rule_sinks_global_limit_with_skip() {
+    use datafusion::physical_plan::limit::GlobalLimitExec;
+
+    let original: Arc<dyn ExecutionPlan> =
+        Arc::new(GlobalLimitExec::new(broadcast(test_source()), 7, Some(8)));
+    let expected = run(original.clone()).await.unwrap();
+    assert_eq!(expected.num_rows(), 8);
+
+    let (optimized, rendered) = sink_structural(original);
+    assert!(!rendered.contains("GlobalLimitExec"), "{rendered}");
+    assert!(rendered.contains("NdLimitExec: skip=7, fetch=8"), "{rendered}");
+    assert_eq!(run(optimized).await.unwrap(), expected);
+}
+
+/// A global limit counts over all rows, so it stays over two partitions.
+#[tokio::test]
+async fn structural_rule_keeps_global_limit_over_partitions() {
+    use datafusion::physical_plan::limit::GlobalLimitExec;
+
+    let original: Arc<dyn ExecutionPlan> =
+        Arc::new(GlobalLimitExec::new(broadcast(split_source()), 0, Some(3)));
+    let (_, rendered) = sink_structural(original);
+    assert!(rendered.contains("GlobalLimitExec"), "{rendered}");
+    assert!(!rendered.contains("NdLimitExec"), "{rendered}");
+}
+
+/// A merge without a fetch stays flat, so each partition keeps its own
+/// broadcast task.
+#[tokio::test]
+async fn structural_rule_keeps_coalesce_without_fetch() {
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+
+    let original: Arc<dyn ExecutionPlan> =
+        Arc::new(CoalescePartitionsExec::new(broadcast(split_source())));
+    let (_, rendered) = sink_structural(original);
+    assert!(rendered.starts_with("CoalescePartitionsExec"), "{rendered}");
+    assert!(!rendered.contains("NdCoalescePartitionsExec"), "{rendered}");
+}
+
+/// The nd merge gives the rows of all partitions.
+#[tokio::test]
+async fn nd_coalesce_matches_flat_coalesce() {
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+
+    use crate::exec::NdCoalescePartitionsExec;
+
+    let flat: Arc<dyn ExecutionPlan> =
+        Arc::new(CoalescePartitionsExec::new(broadcast(split_source())));
+    let expected = sorted_rows(flat).await;
+    assert_eq!(expected.len(), 24);
+
+    let merged = Arc::new(NdCoalescePartitionsExec::try_new(split_source()).unwrap());
+    let nd: Arc<dyn ExecutionPlan> = Arc::new(NdBroadcastExec::try_new(merged).unwrap());
+    assert_eq!(sorted_rows(nd).await, expected);
+}
+
+/// The fetch of the merge becomes a limit above the nd merge.
+#[tokio::test]
+async fn structural_rule_sinks_coalesce_fetch_as_limit() {
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+
+    let original: Arc<dyn ExecutionPlan> = Arc::new(
+        CoalescePartitionsExec::new(broadcast(split_source())).with_fetch(Some(5)),
+    );
+
+    let (optimized, rendered) = sink_structural(original);
+    let limit = rendered.find("NdLimitExec: skip=0, fetch=5");
+    let merge = rendered.find("NdCoalescePartitionsExec");
+    assert!(limit.is_some() && limit < merge, "{rendered}");
+    assert_eq!(run(optimized).await.unwrap().num_rows(), 5);
+}
+
+#[tokio::test]
+async fn structural_rule_sinks_union() {
+    use datafusion::physical_plan::ExecutionPlanProperties;
+    use datafusion::physical_plan::union::UnionExec;
+
+    let original =
+        UnionExec::try_new(vec![broadcast(test_source()), broadcast(split_source())]).unwrap();
+    let expected = sorted_rows(original.clone()).await;
+    assert_eq!(expected.len(), 48);
+
+    let (optimized, rendered) = sink_structural(original);
+    assert!(
+        rendered.find("NdBroadcastExec") < rendered.find("NdUnionExec"),
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches("NdBroadcastExec").count(), 1, "{rendered}");
+    assert_eq!(optimized.output_partitioning().partition_count(), 3);
+    assert_eq!(sorted_rows(optimized).await, expected);
+}
+
+/// One flat input keeps the union above the broadcasts.
+#[tokio::test]
+async fn structural_rule_keeps_union_with_flat_input() {
+    use datafusion::physical_plan::limit::GlobalLimitExec;
+    use datafusion::physical_plan::union::UnionExec;
+
+    // A limit over two partitions does not sink, so this input stays flat.
+    let flat: Arc<dyn ExecutionPlan> =
+        Arc::new(GlobalLimitExec::new(broadcast(split_source()), 0, Some(3)));
+    let original = UnionExec::try_new(vec![broadcast(test_source()), flat]).unwrap();
+    let (_, rendered) = sink_structural(original);
+    assert!(rendered.contains("UnionExec"), "{rendered}");
+    assert!(!rendered.contains("NdUnionExec"), "{rendered}");
+}
+
+/// A limit above a filter follows the filter below the broadcast.
+#[tokio::test]
+async fn structural_rule_sinks_limit_above_sunk_filter() {
+    use datafusion::common::config::ConfigOptions;
+    use datafusion::physical_optimizer::PhysicalOptimizerRule;
+    use datafusion::physical_plan::limit::GlobalLimitExec;
+
+    let schema = test_source().schema();
+    let predicate =
+        binary(col("lat", &schema).unwrap(), Operator::Gt, lit(-1i32), &schema).unwrap();
+    let filter = Arc::new(FilterExec::try_new(predicate, broadcast(test_source())).unwrap());
+    let original: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(filter, 3, Some(9)));
+    let expected = run(original.clone()).await.unwrap();
+    assert_eq!(expected.num_rows(), 9);
+
+    let filtered = NdFilterPushdown::new()
+        .optimize(original, &ConfigOptions::default())
+        .unwrap();
+    let (optimized, rendered) = sink_structural(filtered);
+    let limit = rendered.find("NdLimitExec");
+    let nd_filter = rendered.find("NdFilterExec");
+    assert!(
+        rendered.starts_with("NdBroadcastExec") && limit.is_some() && limit < nd_filter,
+        "{rendered}"
+    );
+    assert_eq!(run(optimized).await.unwrap(), expected);
+}
+
+/// The plan shapes that the SQL planner gives, with all nd rules in a session.
+mod sql {
+    use arrow::datatypes::SchemaRef;
+    use datafusion::catalog::{Session, TableProvider};
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::logical_expr::{Expr, TableType};
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    use super::*;
+
+    /// A table over the two-partition test grid, planned as an nd scan.
+    #[derive(Debug)]
+    struct GridTable;
+
+    #[async_trait::async_trait]
+    impl TableProvider for GridTable {
+        fn schema(&self) -> SchemaRef {
+            split_source().schema()
+        }
+
+        fn table_type(&self) -> TableType {
+            TableType::Base
+        }
+
+        async fn scan(
+            &self,
+            _state: &dyn Session,
+            projection: Option<&Vec<usize>>,
+            _filters: &[Expr],
+            _limit: Option<usize>,
+        ) -> Result<Arc<dyn ExecutionPlan>> {
+            let scan = broadcast(split_source());
+            match projection {
+                Some(indices) => Ok(Arc::new(ProjectionExec::try_new(
+                    indices.iter().map(|&index| {
+                        let name = scan.schema().field(index).name().clone();
+                        ProjectionExpr {
+                            expr: Arc::new(datafusion::physical_expr::expressions::Column::new(
+                                &name, index,
+                            )),
+                            alias: name,
+                        }
+                    }),
+                    scan.clone(),
+                )?)),
+                None => Ok(scan),
+            }
+        }
+    }
+
+    fn context() -> SessionContext {
+        let state = SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_target_partitions(2))
+            .with_default_features()
+            .with_physical_optimizer_rule(Arc::new(NdFilterPushdown::new()))
+            .with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()))
+            .with_physical_optimizer_rule(Arc::new(NdStructuralPushdown::new()))
+            .build();
+        let ctx = SessionContext::new_with_state(state);
+        ctx.register_table("t", Arc::new(GridTable)).unwrap();
+        ctx
+    }
+
+    /// The physical plan of `sql` as text, and its row count.
+    async fn plan_and_count(sql: &str) -> (String, usize) {
+        use datafusion::physical_plan::displayable;
+
+        let frame = context().sql(sql).await.unwrap();
+        let plan = frame.clone().create_physical_plan().await.unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+        let rows = frame.collect().await.unwrap().iter().map(|b| b.num_rows()).sum();
+        (rendered, rows)
+    }
+
+    #[tokio::test]
+    async fn sql_limit_runs_below_the_broadcast() {
+        let (plan, rows) = plan_and_count("SELECT time, lat, lon, sst FROM t LIMIT 5").await;
+        assert_eq!(rows, 5);
+        assert!(plan.contains("NdLimitExec"), "{plan}");
+        assert!(!plan.contains("LocalLimitExec"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn sql_limit_above_a_filter_runs_below_the_broadcast() {
+        let (plan, rows) =
+            plan_and_count("SELECT time, lat, lon, sst FROM t WHERE lat > -1 LIMIT 5").await;
+        assert_eq!(rows, 5);
+        let limit = plan.find("NdLimitExec");
+        assert!(limit.is_some() && limit < plan.find("NdFilterExec"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn sql_union_all_runs_below_the_broadcast() {
+        let (plan, rows) = plan_and_count(
+            "SELECT time, lat, lon, sst FROM t UNION ALL SELECT time, lat, lon, sst FROM t",
+        )
+        .await;
+        assert_eq!(rows, 48);
+        assert!(plan.contains("NdUnionExec"), "{plan}");
+    }
 }
