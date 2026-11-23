@@ -34,13 +34,13 @@ use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt};
 
-pub use alter::{SchemaChange, add_missing_columns, alter_table, widen_table};
+pub use alter::{SchemaChange, alter_table};
 pub use compact::{CompactOptions, CompactionReport, compact_table};
 pub use definition::LanceTableDefinition;
 pub use index::{
     IndexInfo, ScalarIndexKind, create_default_indexes, create_index, drop_index, list_indices,
 };
-pub use io::{WriteKind, lance_compatible_type};
+pub use io::WriteKind;
 pub use mutate::{delete_rows, update_rows};
 pub use provider::LanceTable;
 pub use size::{TableSize, table_size};

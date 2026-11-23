@@ -13,7 +13,6 @@ use anyhow::{anyhow, bail};
 use arrow::compute::{can_cast_types, CastOptions};
 use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use arrow::error::ArrowError;
-use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_datafusion_ext::type_widening::{
     session_widening, ArrowTypeWideningStrategy, LabeledSchema,
 };
@@ -49,83 +48,24 @@ pub(crate) enum ColumnSource {
 /// How the source columns of a `BY NAME` insert fill the target columns.
 #[derive(Debug, Clone)]
 pub(crate) struct ByNameMapping {
-    /// Source columns that the target does not have, in source order.
-    /// The caller adds them at the end of the target.
-    pub new_columns: Vec<Field>,
-    /// Target columns that get a wider type: the column name and the new type.
-    /// The caller changes them after it adds `new_columns`.
-    pub type_changes: Vec<(String, DataType)>,
-    /// One entry for each column of the widened target, in target order.
+    /// One entry for each target column, in target order.
     pub columns: Vec<ColumnSource>,
     target_names: Vec<String>,
-    target_types: Vec<DataType>,
     source_types: Vec<DataType>,
-}
-
-impl ByNameMapping {
-    /// The name and source type of each column in `type_changes`. The
-    /// widening merges the source type with the type the column has then.
-    pub(crate) fn widen_sources(&self) -> Vec<(String, DataType)> {
-        self.type_changes
-            .iter()
-            .filter_map(|(name, _)| {
-                let at = self.target_names.iter().position(|n| n == name)?;
-                match &self.columns[at] {
-                    ColumnSource::Source { index } | ColumnSource::Cast { index, .. } => {
-                        Some((name.clone(), self.source_types[*index].clone()))
-                    }
-                    ColumnSource::Null { .. } => None,
-                }
-            })
-            .collect()
-    }
-}
-
-/// The Lance column name for the source column `name`: each `.` becomes `_`.
-pub fn lance_column_name(name: &str) -> String {
-    name.replace('.', "_")
-}
-
-/// `schema` as a Lance table sees it: each name changed by
-/// [`lance_column_name`] and each type by `lance_compatible_type`.
-pub(crate) fn lance_source_schema(schema: &Schema) -> Schema {
-    let fields: Vec<FieldRef> = schema
-        .fields()
-        .iter()
-        .map(|f| {
-            Arc::new(
-                f.as_ref()
-                    .clone()
-                    .with_name(lance_column_name(f.name()))
-                    .with_data_type(beacon_lance::lance_compatible_type(f.data_type())),
-            )
-        })
-        .collect();
-    Schema::new_with_metadata(fields, schema.metadata().clone())
 }
 
 /// Map the `source` columns to the `target` columns by name.
 ///
-/// With `can_widen` (a Lance target), the source first becomes its
-/// [`lance_source_schema`]. Source columns that `target` does not have then go
-/// into [`ByNameMapping::new_columns`], and a matched column whose `widening`
-/// type is wider than the target type goes into
-/// [`ByNameMapping::type_changes`]. Without `can_widen`, extra source columns
-/// give an error that names `table`, and every cast goes to the target type.
+/// The target schema does not change. A source column that `target` does not
+/// have gives an error that names `table`. The `widening` rule decides each
+/// cast: a conflict under `fail` is an error, a conflict under `keep_first`
+/// casts leniently, and every other pair casts strictly to the target type.
 pub(crate) fn map_by_name(
     source: &Schema,
     target: &Schema,
-    can_widen: bool,
     table: &str,
     widening: &dyn ArrowTypeWideningStrategy,
 ) -> anyhow::Result<ByNameMapping> {
-    let renamed;
-    let source = if can_widen {
-        renamed = lance_source_schema(source);
-        &renamed
-    } else {
-        source
-    };
     let mut source_index = HashMap::with_capacity(source.fields().len());
     for (index, field) in source.fields().iter().enumerate() {
         if source_index.insert(field.name().as_str(), index).is_some() {
@@ -137,31 +77,18 @@ pub(crate) fn map_by_name(
     }
 
     let target_names: HashSet<&str> = target.fields().iter().map(|f| f.name().as_str()).collect();
-    let extra: Vec<&FieldRef> = source
+    let extra: Vec<String> = source
         .fields()
         .iter()
         .filter(|f| !target_names.contains(f.name().as_str()))
+        .map(|f| format!("'{}'", f.name()))
         .collect();
-    if !extra.is_empty() && !can_widen {
+    if !extra.is_empty() {
         bail!(
-            "Table '{table}' does not have the columns {}; only Lance tables add columns",
-            extra
-                .iter()
-                .map(|f| format!("'{}'", f.name()))
-                .collect::<Vec<_>>()
-                .join(", ")
+            "Table '{table}' does not have the columns {}",
+            extra.join(", ")
         );
     }
-    let new_columns: Vec<Field> = extra
-        .iter()
-        .map(|f| {
-            Field::new(
-                f.name(),
-                beacon_lance::lance_compatible_type(f.data_type()),
-                true,
-            )
-        })
-        .collect();
 
     // A type pair that cannot cast stops the statement before the widening rule.
     let mut matched_target = Vec::new();
@@ -177,6 +104,7 @@ pub(crate) fn map_by_name(
             matched_source.push(Arc::new(Field::new(field.name(), from.clone(), true)));
         }
     }
+    // The merge only applies the rule; the table type always stays.
     let merged = widening
         .merge_schemas(&[
             LabeledSchema::new(Arc::new(Schema::new(matched_target)), table),
@@ -187,72 +115,43 @@ pub(crate) fn map_by_name(
             other => anyhow!(other),
         })?;
 
-    let widened: Vec<&Field> = target
-        .fields()
-        .iter()
-        .map(|f| f.as_ref())
-        .chain(new_columns.iter())
-        .collect();
-
-    let mut type_changes = Vec::new();
-    let mut columns = Vec::with_capacity(widened.len());
-    for field in &widened {
-        let target_type = field.data_type();
+    let mut columns = Vec::with_capacity(target.fields().len());
+    for field in target.fields() {
+        let to = field.data_type();
         let column = match source_index.get(field.name().as_str()) {
-            None => ColumnSource::Null {
-                to: target_type.clone(),
-            },
+            None => {
+                if !field.is_nullable() {
+                    bail!(
+                        "Column '{}' is not nullable and the source does not have it",
+                        field.name()
+                    );
+                }
+                ColumnSource::Null { to: to.clone() }
+            }
             Some(&index) => {
                 let from = source.field(index).data_type();
-                let widened_type = match merged.field_with_name(field.name()) {
-                    Ok(merged) if can_widen => {
-                        Some(beacon_lance::lance_compatible_type(merged.data_type()))
-                    }
-                    Ok(merged) => Some(merged.data_type().clone()),
-                    // A new column: the merge did not see it.
-                    Err(_) => None,
-                };
-                let (to, lenient) = match widened_type {
-                    None => (target_type.clone(), false),
-                    Some(widened) if widened.equals_datatype(target_type) => (
-                        target_type.clone(),
-                        widening.casts_leniently(from, target_type),
-                    ),
-                    Some(widened) if can_widen => {
-                        type_changes.push((field.name().clone(), widened.clone()));
-                        (widened, false)
-                    }
-                    Some(_) => (target_type.clone(), false),
-                };
-                if from == &to {
+                // Only a merge that keeps the table type can cast leniently.
+                let lenient = merged
+                    .field_with_name(field.name())
+                    .is_ok_and(|merged| merged.data_type().equals_datatype(to))
+                    && widening.casts_leniently(from, to);
+                if from == to {
                     ColumnSource::Source { index }
-                } else if can_cast_types(from, &to) {
-                    ColumnSource::Cast { index, to, lenient }
                 } else {
-                    bail!("Column '{}': cannot cast {from} to {to}", field.name());
+                    ColumnSource::Cast {
+                        index,
+                        to: to.clone(),
+                        lenient,
+                    }
                 }
             }
         };
         columns.push(column);
     }
 
-    for (field, column) in widened.iter().zip(&columns) {
-        if !field.is_nullable() && matches!(column, ColumnSource::Null { .. }) {
-            bail!(
-                "Column '{}' is not nullable and the source does not have it",
-                field.name()
-            );
-        }
-    }
-
-    let target_names = widened.iter().map(|f| f.name().clone()).collect();
-    let target_types = widened.iter().map(|f| f.data_type().clone()).collect();
     Ok(ByNameMapping {
-        new_columns,
-        type_changes,
         columns,
-        target_names,
-        target_types,
+        target_names: target.fields().iter().map(|f| f.name().clone()).collect(),
         source_types: source
             .fields()
             .iter()
@@ -263,8 +162,8 @@ pub(crate) fn map_by_name(
 
 /// Project `child` to `target` with `mapping`.
 ///
-/// `target` is the widened target schema. The output has its field names,
-/// types and metadata. A value that does not cast gives an error.
+/// `target` is the target schema. The output has its field names, types and
+/// metadata. A value that does not cast gives an error.
 ///
 /// An output field is nullable when the source column or the target field is
 /// nullable. A nullable source column on a non-nullable target column keeps
@@ -339,10 +238,6 @@ fn fit_to_field(
 
 /// Run a planned `BY NAME` insert into `table` and return its count stream.
 ///
-/// With `lance`, the table first gets the `new_columns` and `type_changes` of
-/// the plan-time mapping. The catalog then gets a new provider, because a
-/// provider keeps the schema that it had at creation.
-///
 /// The projection comes from a new mapping against the current table schema.
 /// Another statement can change the schema between plan and execution, and a
 /// column that it added then gets NULL.
@@ -350,45 +245,12 @@ pub(crate) async fn insert_by_name(
     session: &Arc<SessionContext>,
     table: &TableReference,
     child: Arc<dyn ExecutionPlan>,
-    mapping: &ByNameMapping,
-    lance: Option<&beacon_lance::LanceTable>,
 ) -> anyhow::Result<SendableRecordBatchStream> {
-    let widens = !mapping.new_columns.is_empty() || !mapping.type_changes.is_empty();
-    if let Some(lance) = lance.filter(|_| widens) {
-        let warehouse = session
-            .state()
-            .config()
-            .get_extension::<beacon_lance::LanceWarehouse>()
-            .ok_or_else(|| anyhow!("Lance warehouse is unavailable"))?;
-        let widening = session_widening(&session.state());
-        beacon_lance::widen_table(
-            &warehouse,
-            &lance.definition().location,
-            &mapping.new_columns,
-            &mapping.widen_sources(),
-            widening.strategy.as_ref(),
-        )
-        .await?;
-        let fresh = lance
-            .definition()
-            .build_provider(session.clone())
-            .await
-            .and_then(|fresh| Ok(session.register_table(table.clone(), fresh)?));
-        if let Err(error) = fresh {
-            tracing::warn!(table = %table, error = %error, "reload after BY NAME widening failed");
-            bail!("The table '{table}' is widened, but it did not reload: {error}");
-        }
-    }
     let provider = session.table_provider(table.clone()).await?;
-    let source = match lance {
-        Some(_) => Arc::new(lance_source_schema(&child.schema())),
-        None => child.schema(),
-    };
     let widening = session_widening(&session.state());
     let mapping = map_by_name(
-        &source,
+        &child.schema(),
         &provider.schema(),
-        false,
         &table.to_string(),
         widening.strategy.as_ref(),
     )?;
@@ -398,24 +260,6 @@ pub(crate) async fn insert_by_name(
 
 impl fmt::Display for ByNameMapping {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let add: Vec<String> = self
-            .new_columns
-            .iter()
-            .map(|c| format!("{}: {}", c.name(), c.data_type()))
-            .collect();
-        let widen: Vec<String> = self
-            .type_changes
-            .iter()
-            .map(|(name, to)| {
-                let from = self
-                    .target_names
-                    .iter()
-                    .position(|n| n == name)
-                    .map(|at| self.target_types[at].to_string())
-                    .unwrap_or_default();
-                format!("{name}: {from} -> {to}")
-            })
-            .collect();
         let mut cast = Vec::new();
         let mut null = Vec::new();
         for (name, column) in self.target_names.iter().zip(&self.columns) {
@@ -428,17 +272,11 @@ impl fmt::Display for ByNameMapping {
                 ColumnSource::Null { .. } => null.push(name.clone()),
             }
         }
-        let groups: Vec<String> = [
-            ("add", add),
-            // Execution checks and recomputes each change under the lock.
-            ("planned widen", widen),
-            ("cast", cast),
-            ("null", null),
-        ]
-        .into_iter()
-        .filter(|(_, items)| !items.is_empty())
-        .map(|(label, items)| format!("{label}=[{}]", items.join(", ")))
-        .collect();
+        let groups: Vec<String> = [("cast", cast), ("null", null)]
+            .into_iter()
+            .filter(|(_, items)| !items.is_empty())
+            .map(|(label, items)| format!("{label}=[{}]", items.join(", ")))
+            .collect();
         write!(f, "{}", groups.join(", "))
     }
 }
@@ -479,8 +317,7 @@ mod tests {
             nullable("a", DataType::Int64),
             nullable("b", DataType::Utf8),
         ]);
-        let mapping = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap();
-        assert!(mapping.new_columns.is_empty());
+        let mapping = map_by_name(&source, &target, "t", &DEFAULT).unwrap();
         assert_eq!(
             mapping.columns,
             vec![
@@ -497,7 +334,7 @@ mod tests {
             nullable("a", DataType::Int64),
             nullable("b", DataType::Float64),
         ]);
-        let mapping = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap();
+        let mapping = map_by_name(&source, &target, "t", &DEFAULT).unwrap();
         assert_eq!(
             mapping.columns,
             vec![
@@ -510,38 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn new_column_widens() {
-        let source = schema(vec![
-            nullable("a", DataType::Int64),
-            nullable("x", DataType::Float32),
-        ]);
-        let target = schema(vec![nullable("a", DataType::Int64)]);
-        let mapping = map_by_name(&source, &target, true, "t", &DEFAULT).unwrap();
-        assert_eq!(mapping.new_columns, vec![nullable("x", DataType::Float32)]);
-        assert_eq!(
-            mapping.columns,
-            vec![
-                ColumnSource::Source { index: 0 },
-                ColumnSource::Source { index: 1 }
-            ]
-        );
-    }
-
-    #[test]
-    fn utf8view_new_column_is_lance_compatible() {
-        let source = schema(vec![Field::new("s", DataType::Utf8View, false)]);
-        let target = schema(vec![]);
-        let mapping = map_by_name(&source, &target, true, "t", &DEFAULT).unwrap();
-        assert_eq!(mapping.new_columns, vec![nullable("s", DataType::Utf8)]);
-        // The projection casts the Utf8View column to the Utf8 target field.
-        assert_eq!(mapping.columns, vec![ColumnSource::Source { index: 0 }]);
-    }
-
-    #[test]
     fn type_difference_casts() {
         let source = schema(vec![nullable("a", DataType::Int32)]);
         let target = schema(vec![nullable("a", DataType::Float64)]);
-        let mapping = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap();
+        let mapping = map_by_name(&source, &target, "t", &DEFAULT).unwrap();
         assert_eq!(
             mapping.columns,
             vec![ColumnSource::Cast {
@@ -554,38 +363,28 @@ mod tests {
     }
 
     #[test]
-    fn case_differs_is_a_new_column() {
+    fn case_differs_is_an_extra_column() {
         let source = schema(vec![nullable("Temp", DataType::Float64)]);
         let target = schema(vec![nullable("temp", DataType::Float64)]);
-        let mapping = map_by_name(&source, &target, true, "t", &DEFAULT).unwrap();
+        let error = map_by_name(&source, &target, "t", &DEFAULT).unwrap_err();
         assert_eq!(
-            mapping.new_columns,
-            vec![nullable("Temp", DataType::Float64)]
+            error.to_string(),
+            "Table 't' does not have the columns 'Temp'"
         );
-        assert_eq!(
-            mapping.columns,
-            vec![
-                ColumnSource::Null {
-                    to: DataType::Float64
-                },
-                ColumnSource::Source { index: 0 }
-            ]
-        );
-        assert_eq!(mapping.to_string(), "add=[Temp: Float64], null=[temp]");
     }
 
     #[test]
-    fn no_widen_lists_extra_columns() {
+    fn extra_columns_are_listed() {
         let source = schema(vec![
             nullable("a", DataType::Int64),
             nullable("x", DataType::Int64),
             nullable("y", DataType::Int64),
         ]);
         let target = schema(vec![nullable("a", DataType::Int64)]);
-        let error = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap_err();
+        let error = map_by_name(&source, &target, "t", &DEFAULT).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Table 't' does not have the columns 'x', 'y'; only Lance tables add columns"
+            "Table 't' does not have the columns 'x', 'y'"
         );
     }
 
@@ -594,7 +393,7 @@ mod tests {
         let fields = Fields::from(vec![nullable("f", DataType::Int64)]);
         let source = schema(vec![nullable("a", DataType::Struct(fields))]);
         let target = schema(vec![nullable("a", DataType::Int64)]);
-        let error = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap_err();
+        let error = map_by_name(&source, &target, "t", &DEFAULT).unwrap_err();
         assert_eq!(
             error.to_string(),
             "Column 'a': cannot cast Struct(\"f\": Int64) to Int64"
@@ -608,7 +407,7 @@ mod tests {
             nullable("a", DataType::Int64),
             Field::new("b", DataType::Int64, false),
         ]);
-        let error = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap_err();
+        let error = map_by_name(&source, &target, "t", &DEFAULT).unwrap_err();
         assert_eq!(
             error.to_string(),
             "Column 'b' is not nullable and the source does not have it"
@@ -616,87 +415,41 @@ mod tests {
     }
 
     #[test]
-    fn dotted_names_are_renamed() {
-        assert_eq!(lance_column_name("temp._FillValue"), "temp__FillValue");
-        let source = schema(vec![
-            nullable("temp", DataType::Float64),
-            nullable("temp.units", DataType::Utf8),
-        ]);
-        let target = schema(vec![
-            nullable("temp", DataType::Float64),
-            nullable("temp_units", DataType::Utf8),
-        ]);
-        let mapping = map_by_name(&source, &target, true, "t", &DEFAULT).unwrap();
-        assert!(mapping.new_columns.is_empty());
-        assert_eq!(
-            mapping.columns,
-            vec![
-                ColumnSource::Source { index: 0 },
-                ColumnSource::Source { index: 1 }
-            ]
-        );
+    fn dotted_names_are_kept() {
+        let source = schema(vec![nullable("temp.units", DataType::Utf8)]);
+        let target = schema(vec![nullable("temp.units", DataType::Utf8)]);
+        let mapping = map_by_name(&source, &target, "t", &DEFAULT).unwrap();
+        assert_eq!(mapping.columns, vec![ColumnSource::Source { index: 0 }]);
 
-        let added = map_by_name(&source, &schema(vec![]), true, "t", &DEFAULT).unwrap();
-        assert_eq!(
-            added.new_columns,
-            vec![
-                nullable("temp", DataType::Float64),
-                nullable("temp_units", DataType::Utf8)
-            ]
-        );
-
-        let clash = schema(vec![
-            nullable("a.b", DataType::Int64),
-            nullable("a_b", DataType::Int64),
-        ]);
-        let error = map_by_name(&clash, &target, true, "t", &DEFAULT).unwrap_err();
+        let renamed = schema(vec![nullable("temp_units", DataType::Utf8)]);
+        let error = map_by_name(&source, &renamed, "t", &DEFAULT).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "The source has the column 'a_b' more than one time"
-        );
-
-        let error = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "Table 't' does not have the columns 'temp.units'; only Lance tables add columns"
+            "Table 't' does not have the columns 'temp.units'"
         );
     }
 
     #[test]
-    fn wider_source_changes_the_type() {
+    fn wider_source_keeps_the_table_type() {
         let source = schema(vec![nullable("c", DataType::Int64)]);
         let target = schema(vec![nullable("c", DataType::Int32)]);
-        let mapping = map_by_name(&source, &target, true, "t", &DEFAULT).unwrap();
+        let mapping = map_by_name(&source, &target, "t", &DEFAULT).unwrap();
         assert_eq!(
-            mapping.type_changes,
-            vec![("c".to_string(), DataType::Int64)]
-        );
-        assert_eq!(mapping.columns, vec![ColumnSource::Source { index: 0 }]);
-        assert_eq!(mapping.to_string(), "planned widen=[c: Int32 -> Int64]");
-        assert_eq!(
-            mapping.widen_sources(),
-            vec![("c".to_string(), DataType::Int64)]
-        );
-
-        // A table that does not widen keeps its type: a strict cast.
-        let kept = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap();
-        assert!(kept.type_changes.is_empty());
-        assert_eq!(
-            kept.columns,
+            mapping.columns,
             vec![ColumnSource::Cast {
                 index: 0,
                 to: DataType::Int32,
                 lenient: false
             }]
         );
+        assert_eq!(mapping.to_string(), "cast=[c: Int64->Int32]");
     }
 
     #[test]
     fn narrower_source_casts() {
         let source = schema(vec![nullable("c", DataType::Int32)]);
         let target = schema(vec![nullable("c", DataType::Int64)]);
-        let mapping = map_by_name(&source, &target, true, "t", &DEFAULT).unwrap();
-        assert!(mapping.type_changes.is_empty());
+        let mapping = map_by_name(&source, &target, "t", &DEFAULT).unwrap();
         assert_eq!(
             mapping.columns,
             vec![ColumnSource::Cast {
@@ -711,7 +464,7 @@ mod tests {
     fn conflict_fail_errors() {
         let source = schema(vec![nullable("c", DataType::Utf8)]);
         let target = schema(vec![nullable("c", DataType::Int64)]);
-        let error = map_by_name(&source, &target, true, "t", &DEFAULT).unwrap_err();
+        let error = map_by_name(&source, &target, "t", &DEFAULT).unwrap_err();
         assert_eq!(
             error.to_string(),
             "Incompatible types for field 'c': Int64 in 't' vs Utf8 in 'source query'"
@@ -723,8 +476,7 @@ mod tests {
         let keep_first = DefaultArrowTypeWidening::keeping_first_type();
         let source = schema(vec![nullable("c", DataType::Utf8)]);
         let target = schema(vec![nullable("c", DataType::Int64)]);
-        let mapping = map_by_name(&source, &target, true, "t", &keep_first).unwrap();
-        assert!(mapping.type_changes.is_empty());
+        let mapping = map_by_name(&source, &target, "t", &keep_first).unwrap();
         assert_eq!(
             mapping.columns,
             vec![ColumnSource::Cast {
@@ -740,18 +492,15 @@ mod tests {
         let numpy = NumpyArrowTypeWidening {
             on_conflict: TypeConflict::Fail,
         };
+        // The numpy merge gives Float64; the table type stays: a strict cast.
         let source = schema(vec![nullable("c", DataType::Float32)]);
         let target = schema(vec![nullable("c", DataType::Int64)]);
-        let mapping = map_by_name(&source, &target, true, "t", &numpy).unwrap();
-        assert_eq!(
-            mapping.type_changes,
-            vec![("c".to_string(), DataType::Float64)]
-        );
+        let mapping = map_by_name(&source, &target, "t", &numpy).unwrap();
         assert_eq!(
             mapping.columns,
             vec![ColumnSource::Cast {
                 index: 0,
-                to: DataType::Float64,
+                to: DataType::Int64,
                 lenient: false
             }]
         );
@@ -768,7 +517,7 @@ mod tests {
         .unwrap();
         let child = MemorySourceConfig::try_new_exec(&[vec![batch]], source.clone(), None).unwrap();
         let target = Arc::new(schema(vec![nullable("a", DataType::Int64)]));
-        let mapping = map_by_name(&source, &target, false, "t", &keep_first).unwrap();
+        let mapping = map_by_name(&source, &target, "t", &keep_first).unwrap();
         let plan = by_name_projection(child, &mapping, target).unwrap();
         let batches = collect(plan, Arc::new(TaskContext::default()))
             .await
@@ -789,7 +538,7 @@ mod tests {
             nullable("a", DataType::Utf8),
         ]);
         let target = schema(vec![nullable("a", DataType::Int64)]);
-        let error = map_by_name(&source, &target, true, "t", &DEFAULT).unwrap_err();
+        let error = map_by_name(&source, &target, "t", &DEFAULT).unwrap_err();
         assert_eq!(
             error.to_string(),
             "The source has the column 'a' more than one time"
@@ -816,7 +565,7 @@ mod tests {
             nullable("b", DataType::Utf8),
             nullable("c", DataType::Int64),
         ]));
-        let mapping = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap();
+        let mapping = map_by_name(&source, &target, "t", &DEFAULT).unwrap();
         assert_eq!(mapping.to_string(), "cast=[a: Int32->Float64], null=[c]");
         let plan = by_name_projection(child, &mapping, target.clone()).unwrap();
         assert_eq!(plan.schema(), target);
@@ -854,7 +603,7 @@ mod tests {
         .unwrap();
         let child = MemorySourceConfig::try_new_exec(&[vec![batch]], source.clone(), None).unwrap();
         let target = Arc::new(schema(vec![nullable("a", DataType::Int32)]));
-        let mapping = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap();
+        let mapping = map_by_name(&source, &target, "t", &DEFAULT).unwrap();
         let plan = by_name_projection(child, &mapping, target).unwrap();
         let result = collect(plan, Arc::new(TaskContext::default())).await;
         assert!(result.is_err(), "a failed cast must not become NULL");
@@ -870,7 +619,7 @@ mod tests {
         .unwrap();
         let child = MemorySourceConfig::try_new_exec(&[vec![batch]], source.clone(), None).unwrap();
         let target = Arc::new(schema(vec![Field::new("a", DataType::Int64, false)]));
-        let mapping = map_by_name(&source, &target, false, "t", &DEFAULT).unwrap();
+        let mapping = map_by_name(&source, &target, "t", &DEFAULT).unwrap();
         assert_eq!(mapping.columns, vec![ColumnSource::Source { index: 0 }]);
         let plan = by_name_projection(child, &mapping, target).unwrap();
         assert!(plan.schema().field(0).is_nullable());

@@ -1040,15 +1040,13 @@ impl ExecutionPlan for InsertExec {
 /// inserted-row count.
 ///
 /// The column mapping is made at plan time, so every mapping error comes
-/// before a change and `EXPLAIN` shows the mapping without a change. The
-/// execution maps again against the schema after the widening.
+/// before a write and `EXPLAIN` shows the mapping. The execution maps again
+/// against the schema of that moment.
 #[derive(Debug)]
 pub(crate) struct InsertByNameExec {
     table: TableReference,
     child: Arc<dyn ExecutionPlan>,
     mapping: ByNameMapping,
-    /// The target when it is a Lance table, which can get new columns.
-    lance: Option<beacon_lance::LanceTable>,
     session: SessionCell,
     cache: Arc<PlanProperties>,
 }
@@ -1062,14 +1060,10 @@ impl InsertByNameExec {
         let plan_error = |error: anyhow::Error| DataFusionError::Plan(error.to_string());
         let ctx = upgrade_session(&session)?;
         let provider = ctx.table_provider(table.clone()).await?;
-        let lance = provider
-            .downcast_ref::<beacon_lance::LanceTable>()
-            .cloned();
         let widening = beacon_datafusion_ext::type_widening::session_widening(&ctx.state());
         let mapping = insert_by_name::map_by_name(
             &child.schema(),
             &provider.schema(),
-            lance.is_some(),
             &table.to_string(),
             widening.strategy.as_ref(),
         )
@@ -1078,7 +1072,6 @@ impl InsertByNameExec {
             table,
             child,
             mapping,
-            lance,
             session,
             cache: Arc::new(plan_properties(count_arrow_schema())),
         })
@@ -1119,7 +1112,6 @@ impl ExecutionPlan for InsertByNameExec {
             table: self.table.clone(),
             child: children.swap_remove(0),
             mapping: self.mapping.clone(),
-            lance: self.lance.clone(),
             session: self.session.clone(),
             cache: self.cache.clone(),
         }))
@@ -1132,10 +1124,8 @@ impl ExecutionPlan for InsertByNameExec {
         let session = upgrade_session(&self.session)?;
         let table = self.table.clone();
         let child = self.child.clone();
-        let mapping = self.mapping.clone();
-        let lance = self.lance.clone();
         Ok(forward_stream(count_arrow_schema(), async move {
-            insert_by_name::insert_by_name(&session, &table, child, &mapping, lance.as_ref())
+            insert_by_name::insert_by_name(&session, &table, child)
                 .await
                 .map_err(to_df_err)
         }))
