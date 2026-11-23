@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::{Field, FieldRef, Schema, SchemaRef};
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use beacon_nd_dataset::NdDataset;
 use beacon_nd_encoding::encoding::nd_value_type;
 
@@ -20,37 +20,22 @@ pub fn file_schema(dataset: &dyn NdDataset) -> Schema {
     Schema::new(fields)
 }
 
-/// True when `name` is one of `partition_fields`.
-pub(crate) fn is_partition(partition_fields: &[FieldRef], name: &str) -> bool {
-    partition_fields.iter().any(|field| field.name() == name)
-}
-
-/// The projected fields that are file columns, in projected order.
-pub(crate) fn file_fields<'a>(
-    projected_schema: &'a Schema,
-    partition_fields: &'a [FieldRef],
-) -> impl Iterator<Item = &'a FieldRef> {
+/// The names of the projected columns, in projected order.
+pub(crate) fn file_columns(projected_schema: &Schema) -> Vec<String> {
     projected_schema
         .fields()
         .iter()
-        .filter(|field| !is_partition(partition_fields, field.name()))
-}
-
-/// The names of the projected columns that are file columns, in projected order.
-pub(crate) fn file_columns(
-    projected_schema: &Schema,
-    partition_fields: &[FieldRef],
-) -> Vec<String> {
-    file_fields(projected_schema, partition_fields)
         .map(|field| field.name().clone())
         .collect()
 }
 
-/// The logical schema of the projected file columns: each `beacon.nd` field with its value type.
+/// The logical schema of the projected columns: each `beacon.nd` field with its value type.
 ///
-/// The filter of the scan sees these types. A partition column is not a part of it.
-pub(crate) fn table_schema(projected_schema: &Schema, partition_fields: &[FieldRef]) -> SchemaRef {
-    let fields: Vec<Field> = file_fields(projected_schema, partition_fields)
+/// The filter of the scan sees these types.
+pub(crate) fn table_schema(projected_schema: &Schema) -> SchemaRef {
+    let fields: Vec<Field> = projected_schema
+        .fields()
+        .iter()
         .filter_map(|field| {
             let value_type = nd_value_type(field.data_type()).ok()?;
             Some(Field::new(field.name(), value_type, true))
@@ -84,7 +69,7 @@ mod tests {
     fn a_file_is_projected_to_the_wanted_columns() {
         let schema = projected(&["lat", "temp"]);
 
-        assert_eq!(file_columns(&schema, &[]), ["lat", "temp"]);
+        assert_eq!(file_columns(&schema), ["lat", "temp"]);
     }
 
     #[test]

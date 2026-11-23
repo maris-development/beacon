@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use arrow::datatypes::{FieldRef, SchemaRef};
+use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use beacon_nd_dataset::{ChunkGrid, NdDataset, NdRecordBatch, Region, read_chunk, select_columns};
 use datafusion::common::internal_err;
@@ -37,9 +37,7 @@ pub(crate) struct ScanContext {
     pub store: Arc<dyn ObjectStore>,
     /// The encoded schema that the scan emits.
     pub projected_schema: SchemaRef,
-    /// The encoded partition fields of the table.
-    pub partition_fields: Vec<FieldRef>,
-    /// The names of the file columns of the table. They set the grid of a scan with no file column.
+    /// The names of the columns of the table. They set the grid of a scan with no column.
     pub table_file_columns: Vec<String>,
     /// The approximate row count of one chunk.
     pub batch_size: usize,
@@ -233,7 +231,7 @@ async fn plan_entry(
         return Ok(Box::new(Planner::Done));
     };
 
-    let names = file_columns(&context.projected_schema, &context.partition_fields);
+    let names = file_columns(&context.projected_schema);
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     // The grid spans only the dimensions of the selected variables.
     let (dataset, grid_source) = if names.is_empty() {
@@ -253,12 +251,7 @@ async fn plan_entry(
         // The file has none of the wanted columns, so it gives no row.
         return Ok(Box::new(Planner::Done));
     }
-    let output = FileOutput::try_new(
-        dataset.as_ref(),
-        &context.projected_schema,
-        &context.partition_fields,
-        &file.partition_values,
-    )?;
+    let output = FileOutput::try_new(dataset.as_ref(), &context.projected_schema)?;
     let grid =
         ChunkGrid::try_new(grid_source.as_ref(), context.batch_size).map_err(to_datafusion)?;
     let total = grid.chunks().len();
@@ -305,7 +298,7 @@ async fn select_chunks(
     };
 
     // The scan casts each file column to its logical table type.
-    let table_schema = table_schema(&context.projected_schema, &context.partition_fields);
+    let table_schema = table_schema(&context.projected_schema);
     let masks = chunk_masks(dataset, predicate, &table_schema).await;
     let before = chunks.len();
     let rows_before: usize = chunks.iter().map(|(_, chunk)| chunk.len()).sum();
@@ -358,7 +351,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::AsArray;
-    use arrow::datatypes::{DataType, Field, FieldRef, Float64Type, Int32Type, Schema, SchemaRef};
+    use arrow::datatypes::{DataType, Field, Float64Type, Schema, SchemaRef};
     use arrow::record_batch::RecordBatch;
     use beacon_nd_dataset::{GridSelection, MemoryDataset};
     use beacon_nd_encoding::encoding::{decode_nd_record_batch, encoded_schema};
@@ -367,7 +360,6 @@ mod tests {
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{binary, col, lit};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-    use datafusion::scalar::ScalarValue;
     use datafusion_datasource::PartitionedFile;
     use datafusion_datasource::morsel::Morselizer;
     use futures::StreamExt;
@@ -449,7 +441,6 @@ mod tests {
             options,
             store: Arc::new(InMemory::new()),
             projected_schema: projected(columns),
-            partition_fields: Vec::new(),
             table_file_columns: ["lat", "lon", "temp"].map(String::from).to_vec(),
             batch_size,
             predicate,
@@ -993,46 +984,6 @@ mod tests {
         assert!(second.is_empty());
         assert_eq!(counter(&metrics, "chunks_read"), 2);
         assert_eq!(opener.opens(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_partition_value_goes_in_each_batch() {
-        let logical = Schema::new(vec![
-            Field::new("temp", DataType::Float64, true),
-            Field::new("year", DataType::Int32, true),
-        ]);
-        let schema = Arc::new(encoded_schema(&logical));
-        let year: FieldRef = Arc::new(schema.field(1).clone());
-        let metrics = ExecutionPlanMetricsSet::new();
-        let mut context = context(
-            grid_opener(),
-            &["temp"],
-            12,
-            None,
-            NdScanOptions::default(),
-            None,
-            &metrics,
-        );
-        context.projected_schema = schema;
-        context.partition_fields = vec![year];
-        let scan = NdMorselizer::new(context);
-        let mut file = entry("a.nd");
-        file.partition_values = vec![ScalarValue::Int32(Some(2024))];
-
-        let batches = drive(&scan, vec![file]).await.unwrap();
-
-        assert_eq!(batches.len(), 4);
-        for batch in &batches {
-            let decoded = decode_nd_record_batch(batch).unwrap();
-            assert_eq!(
-                decoded
-                    .column(1)
-                    .values()
-                    .as_primitive::<Int32Type>()
-                    .values(),
-                &[2024]
-            );
-        }
     }
 
     #[tokio::test]

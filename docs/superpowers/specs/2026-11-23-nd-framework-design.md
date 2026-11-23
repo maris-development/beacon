@@ -448,7 +448,7 @@ beacon-nd-scan/src/
   slices.rs       NdSlice, slice_files, spread_files
   planner.rs      NdMorselizer, planner states, ChunkMorsel
   prune.rs        the predicate on the coordinate values, the chunk test
-  output.rs       encode, partition columns, adapt to the projected schema
+  output.rs       encode, adapt to the projected schema
   schema.rs       file_schema: the Arrow schema of one file
   statistics.rs   file_statistics: DataFusion statistics of one file; keeps_values
   metrics.rs      ScanMetrics
@@ -530,10 +530,9 @@ pub struct NdSource {
 | `supports_repartitioning` | `true`. |
 | `repartitioned` | Section "Slices". |
 
-The table schema holds the `beacon.nd` encoded file schema and the encoded
-partition columns, as today. `encoded_table_schema(file_schema,
-partition_cols)` builds it. `create_morselizer` refuses a partition field
-that is not encoded.
+The table schema holds the `beacon.nd` encoded file schema.
+`encoded_table_schema(file_schema)` builds it. `create_morselizer` refuses a
+table schema with a partition column.
 
 `try_pushdown_projection` accepts a projection only when each expression is
 a plain column.
@@ -624,9 +623,8 @@ and compares them by hand.
 - `is_pruned(masks, grid, chunk)`: true when, on one axis, the mask has no
   `true` in the range of the chunk, or when a conjunct rejects the file.
 
-`table_schema` holds the logical type of each projected file column
-(`schema.rs` `table_schema`). A partition column is not in it, so a conjunct
-with a partition column gives no mask.
+`table_schema` holds the logical type of each projected column (`schema.rs`
+`table_schema`). A conjunct with a column that is not in it gives no mask.
 
 Pruning only skips work. The `FilterExec` above the scan applies the
 predicate again.
@@ -674,26 +672,21 @@ For each chunk:
    `beacon_nd_encoding::NdRecordBatch`. Each column keeps its values buffer;
    only the wrapper types change.
 2. `encode_nd_record_batch`: one `beacon.nd` row.
-3. Append each partition column as a rank-0 `beacon.nd` column, from
-   `PartitionedFile::partition_values`.
-4. Adapt to the projected schema with
+3. Adapt to the projected schema with
    `beacon_datafusion_ext::scan_adapt::BatchAdapter`. A column that the file
    does not have becomes null. Do not use the DataFusion
    `BatchAdapterFactory`: it fails on a source that is wider than the target
    (#675).
 
-A chunk of a count scan has no file column, so steps 1 to 3 do not fit. The
-encoding has a carrier for this case already, and the scan uses it:
+A chunk of a count scan (`COUNT(*)`) has no column, so these steps do not
+fit. The encoding has a carrier for this case already, and the scan uses it:
+a batch with zero columns and `row_count = chunk rows`.
+`decode_nd_record_batch_row` turns it into a `row` axis of that size.
 
-- No column at all (`COUNT(*)`): a batch with zero columns and
-  `row_count = chunk rows`. `decode_nd_record_batch_row` turns it into a
-  `row` axis of that size.
-- Only partition columns: one encoded row. Each partition column lies on a
-  `row` axis of the chunk row count. Rank-0 columns alone would decode to
-  one row.
-
-Port `FilePartitions::scalar_columns` and `row_columns`
-(`beacon-nd-array/src/arrow/partition.rs`) for step 3 and the carrier.
+**No partition columns** (user decision, 2026-11-23). An ND scan does not
+support partition columns for now. This keeps the output, the prune and the
+count scan simple. `create_morselizer` gives a "not implemented" error for a
+table schema with a partition column.
 
 This crate converts to `beacon.nd` at this one place. When `NdSourceExec`
 moves to `nd_arrow.array`, only this file changes.
@@ -730,8 +723,7 @@ removes keeps its statistics.
 | Limit | `planner.rs` | Section "Limit". |
 | Count | `planner.rs`, `grid.rs` | Section "Count". |
 
-**Count.** A query with no file column (`COUNT(*)`, or only partition
-columns) runs the same planner. The chunk grid comes from the file columns
+**Count.** A query with no column (`COUNT(*)`) runs the same planner. The chunk grid comes from the file columns
 of the table: `ChunkGrid::try_new(select_columns(dataset, table file
 columns))`. That is the grid of `SELECT *`, also when the file has
 variables that the table does not have. The read uses
@@ -768,7 +760,7 @@ This section is a check of the contract, not a work item.
 | Format | What it writes |
 |---|---|
 | NetCDF | `NetcdfOpener`, a dataset and one variable type on `oxcdf`. Its `open` calls `attribute_columns`. It removes its `scan/` folder and `open.rs`. |
-| HDF5, GeoTIFF | The same shape. Partition columns work through `output.rs`. Ragged HDF5 needs its own design. |
+| HDF5, GeoTIFF | The same shape. The scan has no partition columns, so a format that has them today must add them to the scan first, or lose them at its move. Ragged HDF5 needs its own design. |
 | Zarr, Icechunk | One leaf group is one file, as today. The dataset builds a variable on demand. The Icechunk opener holds its version storage. |
 | Atlas | Needs more than one dataset per container, and a prune on footer statistics. Extend `NdFileOpener` then: `open` returns a list, and a variable can report its statistics. |
 | Plugins | Stay on the stream path. A later ABI version can carry the two traits. |
@@ -811,7 +803,7 @@ All tests use `MemoryDataset` behind a test opener.
   none of the columns, a fully pruned file, a count scan.
 - Count: `COUNT(*)` equals the row count of `SELECT *`, and the variables
   count zero reads. With slices, each row is counted one time.
-- Partition columns: a value per file; a query of only partition columns.
+- Partition columns: a table schema with a partition column gives an error.
 - Limit: with a limit, the planner reads only the first chunks.
 - End to end through `NdSourceExec` and `NdBroadcastExec`: one file on 1 and
   on 4 partitions, with and without a filter; a dropped stream stops the

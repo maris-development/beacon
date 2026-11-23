@@ -140,7 +140,7 @@ async fn conjunct_mask(
     let mut arrays = Vec::new();
     for column in collect_columns(conjunct) {
         let name = column.name();
-        // The type of a partition column or an unknown column is not known here.
+        // The type of a column that the scan does not project is not known here.
         let Ok(table_field) = table_schema.field_with_name(name) else {
             return Err(format!("'{name}' is not a file column of the scan"));
         };
@@ -462,7 +462,7 @@ mod tests {
         let dataset = coordinate("x", Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])));
         let table_schema = schema_of(&[("x", DataType::Float64)]);
         let predicate = physical(col("x").gt(lit(1.5)), &table_schema);
-        // The scan schema holds only `y`, as for a partition column `x`.
+        // The scan schema holds only `y`.
         let scan_schema = schema_of(&[("y", DataType::Float64)]);
         let masks = chunk_masks(&dataset, &predicate, &scan_schema).await;
         assert!(is_empty(&masks));

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use arrow::array::{AsArray, Int32Array};
-use arrow::datatypes::{DataType, Field, FieldRef, Float64Type, Int32Type, Schema};
+use arrow::datatypes::{DataType, Field, Float64Type, Schema};
 use arrow::record_batch::RecordBatch;
 use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
 use beacon_nd_execution::exec::{NdBroadcastExec, NdSourceExec, nd_scan_plan};
@@ -22,7 +22,6 @@ use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::{ExecutionPlan, Partitioning, execute_stream};
 use datafusion::prelude::{SessionConfig, SessionContext};
-use datafusion::scalar::ScalarValue;
 use futures::{StreamExt, TryStreamExt};
 use object_store::memory::InMemory;
 
@@ -47,8 +46,6 @@ struct Scan {
     opener: Arc<MemoryOpener>,
     /// The logical file schema.
     schema: Schema,
-    /// The logical partition columns.
-    partition_fields: Vec<Field>,
     files: Vec<PartitionedFile>,
     /// The projected columns. `None` projects all columns.
     columns: Option<Vec<String>>,
@@ -63,7 +60,6 @@ impl Scan {
         Self {
             opener,
             schema,
-            partition_fields: Vec::new(),
             files,
             columns: None,
             target_partitions: 1,
@@ -84,9 +80,7 @@ impl Scan {
 
     /// The scan config: one group with all files, repartitioned when there are more partitions.
     fn config(self) -> FileScanConfig {
-        let partition_fields: Vec<FieldRef> =
-            self.partition_fields.into_iter().map(Arc::new).collect();
-        let table_schema = encoded_table_schema(&self.schema, &partition_fields);
+        let table_schema = encoded_table_schema(&self.schema);
         let names: Vec<String> = table_schema
             .table_schema()
             .fields()
@@ -446,117 +440,6 @@ async fn a_count_on_four_partitions_counts_each_row_once() {
     let batches = collect(plan).await;
 
     assert_eq!(rows(&batches), 48);
-}
-
-/// A scan of the grid fixture at each of `paths` with the partition column `year`.
-/// Each file has its year of `years`.
-fn years_scan(paths: &[&str], years: &[i32]) -> Scan {
-    let files = paths
-        .iter()
-        .zip(years)
-        .map(|(path, year)| {
-            let mut file = entry(path);
-            file.partition_values = vec![ScalarValue::Int32(Some(*year))];
-            file
-        })
-        .collect();
-    let mut scan = Scan::new(grid_opener(paths), grid_schema(), files);
-    scan.partition_fields = vec![Field::new("year", DataType::Int32, true)];
-    scan
-}
-
-/// The `year` values of `batches`.
-fn years(batches: &[RecordBatch]) -> Vec<Option<i32>> {
-    batches
-        .iter()
-        .flat_map(|batch| {
-            batch
-                .column_by_name("year")
-                .unwrap()
-                .as_primitive::<Int32Type>()
-                .iter()
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-#[tokio::test]
-async fn a_partition_column_has_the_value_of_its_file() {
-    // The second file has 5 rows of lat, so each year has its own row count.
-    let five_lats = MemoryDataset::try_new(
-        "b.nd",
-        vec![
-            ramp("temp", &[("time", 1), ("lat", 5), ("lon", 6)]),
-            ramp("lat", &[("lat", 5)]),
-            ramp("lon", &[("lon", 6)]),
-        ],
-    )
-    .unwrap();
-    let mut scan = years_scan(&["a.nd", "b.nd"], &[2023, 2024]);
-    scan.opener = Arc::new(
-        MemoryOpener::default()
-            .with("a.nd", Entry::Dataset(grid_dataset("a.nd")))
-            .with("b.nd", Entry::Dataset(five_lats)),
-    );
-
-    let batches = collect(scan.columns(&["lat", "year"]).plan()).await;
-
-    let years = years(&batches);
-    assert_eq!(years.len(), 13);
-    for (year, rows) in [(2023, 8), (2024, 5)] {
-        let count = years.iter().filter(|value| **value == Some(year)).count();
-        assert_eq!(count, rows, "{year}");
-    }
-}
-
-#[tokio::test]
-async fn a_filter_on_a_partition_column_prunes_no_chunk() {
-    for with_file_column in [false, true] {
-        let scan = years_scan(&["a.nd"], &[2024]).plan();
-        let schema = scan.schema();
-        let year = binary(
-            col("year", &schema).unwrap(),
-            Operator::Eq,
-            lit(2024),
-            &schema,
-        )
-        .unwrap();
-        // The second form has the partition column beside a file column in one conjunct.
-        let predicate = if with_file_column {
-            let lat = binary(
-                col("lat", &schema).unwrap(),
-                Operator::Gt,
-                lit(100.0),
-                &schema,
-            )
-            .unwrap();
-            binary(year, Operator::Or, lat, &schema).unwrap()
-        } else {
-            year
-        };
-        let filter: Arc<dyn ExecutionPlan> =
-            Arc::new(FilterExec::try_new(predicate, scan).unwrap());
-        let plan = FilterPushdown::new()
-            .optimize(filter, &ConfigOptions::default())
-            .unwrap();
-
-        let batches = collect(Arc::clone(&plan)).await;
-
-        // The file has no variable `year`. The prune must not read the partition column as null.
-        assert_eq!(rows(&batches), 48, "with a file column: {with_file_column}");
-        assert_eq!(scan_counter(&plan, "chunks_pruned"), 0);
-    }
-}
-
-#[tokio::test]
-async fn a_query_of_only_partition_columns_has_the_rows_of_the_grid() {
-    let scan = years_scan(&["a.nd"], &[2024]);
-
-    let batches = collect(scan.columns(&["year"]).plan()).await;
-
-    let years = years(&batches);
-    assert_eq!(years.len(), 48);
-    assert!(years.iter().all(|year| *year == Some(2024)));
 }
 
 #[tokio::test]

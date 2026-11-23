@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::{FieldRef, Schema};
-use beacon_nd_encoding::encoding::{encoded_schema, is_nd_encoded, nd_encoded_field};
-use datafusion::common::{not_impl_err, plan_err};
+use arrow::datatypes::Schema;
+use beacon_nd_encoding::encoding::encoded_schema;
+use datafusion::common::not_impl_err;
 use datafusion::config::ConfigOptions;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileSource};
@@ -23,20 +23,11 @@ use crate::opener::{NdFileOpener, NdScanOptions};
 use crate::planner::{NdMorselizer, RowBudget, ScanContext};
 use crate::slices::{slice_files, spread_files};
 
-/// The table schema of an ND scan: the `beacon.nd` encoded file schema and partition columns.
+/// The table schema of an ND scan: the `beacon.nd` encoded form of the logical `file_schema`.
 ///
-/// `file_schema` and `partition_cols` are logical. A partition column keeps its nullability.
-pub fn encoded_table_schema(file_schema: &Schema, partition_cols: &[FieldRef]) -> TableSchema {
-    let partition_cols = partition_cols
-        .iter()
-        .map(|field| {
-            Arc::new(
-                nd_encoded_field(field.name(), field.data_type())
-                    .with_nullable(field.is_nullable()),
-            )
-        })
-        .collect();
-    TableSchema::new(Arc::new(encoded_schema(file_schema)), partition_cols)
+/// An ND scan has no partition columns.
+pub fn encoded_table_schema(file_schema: &Schema) -> TableSchema {
+    TableSchema::from_file_schema(Arc::new(encoded_schema(file_schema)))
 }
 
 /// The DataFusion [`FileSource`] of each ND format.
@@ -66,8 +57,8 @@ pub struct NdSource {
 impl NdSource {
     /// A source that opens each file with `opener`.
     ///
-    /// `table_schema` holds the encoded file schema and the encoded partition columns.
-    /// [`encoded_table_schema`] builds it.
+    /// `table_schema` holds the encoded file schema. [`encoded_table_schema`] builds it.
+    /// A table schema with a partition column gives an error when the scan starts.
     pub fn new(
         opener: Arc<dyn NdFileOpener>,
         options: NdScanOptions,
@@ -107,16 +98,11 @@ impl FileSource for NdSource {
         base_config: &FileScanConfig,
         partition: usize,
     ) -> Result<Box<dyn Morselizer>> {
-        if let Some(field) = self
-            .table_schema
-            .table_partition_cols()
-            .iter()
-            .find(|field| !is_nd_encoded(field))
-        {
-            return plan_err!(
-                "the partition column '{}' of the {} scan is not beacon.nd encoded. Build the table schema with encoded_table_schema",
-                field.name(),
-                self.opener.format_name()
+        if let Some(field) = self.table_schema.table_partition_cols().first() {
+            return not_impl_err!(
+                "the {} scan does not support the partition column '{}'",
+                self.opener.format_name(),
+                field.name()
             );
         }
         Ok(Box::new(NdMorselizer::new(ScanContext {
@@ -124,7 +110,6 @@ impl FileSource for NdSource {
             options: self.options.clone(),
             store: object_store,
             projected_schema: base_config.projected_schema()?,
-            partition_fields: self.table_schema.table_partition_cols().clone(),
             table_file_columns: self
                 .table_schema
                 .file_schema()
@@ -409,28 +394,20 @@ mod tests {
     }
 
     #[test]
-    fn the_encoded_table_schema_encodes_file_and_partition_columns() {
+    fn the_encoded_table_schema_encodes_the_file_columns() {
         let file = Schema::new(vec![Field::new("temp", DataType::Float64, true)]);
-        let year: FieldRef = Arc::new(Field::new("year", DataType::Int32, false));
 
-        let table = encoded_table_schema(&file, &[year]);
+        let table = encoded_table_schema(&file);
 
         let temp = table.file_schema().field(0);
         assert_eq!(temp.name(), "temp");
         assert!(is_nd_encoded(temp));
         assert_eq!(nd_value_type(temp.data_type()).unwrap(), DataType::Float64);
-        let year = &table.table_partition_cols()[0];
-        assert_eq!(year.name(), "year");
-        assert!(is_nd_encoded(year));
-        assert_eq!(nd_value_type(year.data_type()).unwrap(), DataType::Int32);
-        assert!(
-            !year.is_nullable(),
-            "the partition column keeps its nullability"
-        );
+        assert!(table.table_partition_cols().is_empty());
     }
 
     #[test]
-    fn a_partition_field_that_is_not_encoded_is_a_plan_error() {
+    fn a_table_with_a_partition_column_is_not_implemented() {
         let file = Schema::new(vec![Field::new("temp", DataType::Float64, true)]);
         let year: FieldRef = Arc::new(Field::new("year", DataType::Int32, true));
         let table = TableSchema::new(Arc::new(encoded_schema(&file)), vec![year]);
@@ -446,7 +423,7 @@ mod tests {
             .expect_err("the scan refuses the table schema");
 
         assert!(
-            matches!(error, DataFusionError::Plan(ref text) if text.contains("year")),
+            matches!(error, DataFusionError::NotImplemented(ref text) if text.contains("year")),
             "{error}"
         );
     }
