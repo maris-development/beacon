@@ -7,7 +7,7 @@ use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricB
 /// The names differ from the names of FileStream, because DataFusion adds metrics with the same name.
 /// `FileStream` registers `output_rows` and `output_batches` for the same partition.
 #[derive(Debug, Clone)]
-pub struct ScanMetrics {
+pub(crate) struct ScanMetrics {
     /// The chunks this partition read.
     pub chunks_read: Count,
     /// The rows of the chunks this partition read.
@@ -26,7 +26,7 @@ impl ScanMetrics {
     /// Call this once for each partition, not once for each file.
     /// Each call locks `metrics` five times and adds five entries that stay.
     /// A file gets a [`Clone`] of the counters of its partition.
-    pub fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
+    pub(crate) fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
         Self {
             chunks_read: MetricBuilder::new(metrics).counter("chunks_read", partition),
             rows_read: MetricBuilder::new(metrics).counter("rows_read", partition),

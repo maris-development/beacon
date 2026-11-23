@@ -124,13 +124,13 @@ mod tests {
 
     use arrow::array::{ArrayRef, Float64Array, Int32Array, TimestampSecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-    use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
+    use beacon_nd_dataset::MemoryDataset;
     use datafusion::common::ColumnStatistics;
     use datafusion::common::stats::Precision;
     use datafusion::scalar::ScalarValue;
 
     use super::{file_statistics, keeps_values};
-    use crate::tests::fixtures::grid_dataset;
+    use crate::tests::fixtures::{coordinate, grid_dataset};
 
     #[test]
     fn the_value_keeping_steps_are_the_listed_ones() {
@@ -223,11 +223,8 @@ mod tests {
 
     /// A dataset with the 1-D variable `n` of `values`, and a table schema with `n` in `field_type`.
     fn one_variable(values: ArrayRef, field_type: DataType) -> (MemoryDataset, Schema) {
-        let x = Dimensions::try_new([Dimension::new("x", values.len())]).unwrap();
-        let n = MemoryVariable::new("n", NdArrowArray::try_new(values, x).unwrap());
-        let dataset = MemoryDataset::try_new("a.nd", vec![n]).unwrap();
         (
-            dataset,
+            coordinate("n", values),
             Schema::new(vec![Field::new("n", field_type, true)]),
         )
     }

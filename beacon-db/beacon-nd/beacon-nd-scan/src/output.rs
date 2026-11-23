@@ -97,26 +97,15 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{Array, AsArray, Float32Array};
-    use arrow::datatypes::{DataType, Field, Float64Type, Schema, SchemaRef};
+    use arrow::datatypes::{DataType, Float64Type, Schema, SchemaRef};
     use beacon_nd_dataset::{
         ChunkGrid, ChunkReader, Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray,
         NdDataset, select_columns,
     };
-    use beacon_nd_encoding::encoding::{decode_nd_array, decode_nd_record_batch, encoded_schema};
+    use beacon_nd_encoding::encoding::{decode_nd_array, decode_nd_record_batch};
 
     use super::FileOutput;
-    use crate::tests::fixtures::grid_dataset;
-
-    /// The encoded schema of logical `fields`.
-    fn projected(fields: &[(&str, DataType)]) -> SchemaRef {
-        let logical = Schema::new(
-            fields
-                .iter()
-                .map(|(name, data_type)| Field::new(*name, data_type.clone(), true))
-                .collect::<Vec<_>>(),
-        );
-        Arc::new(encoded_schema(&logical))
-    }
+    use crate::tests::fixtures::{encoded, grid_dataset};
 
     /// A reader of `dataset` at a batch size of 12.
     fn reader(dataset: &dyn NdDataset) -> ChunkReader {
@@ -142,7 +131,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_batch_gets_the_projected_order_and_nulls_for_a_missing_column() {
-        let schema = projected(&[
+        let schema = encoded(&[
             ("lat", DataType::Float64),
             ("salt", DataType::Float64),
             ("temp", DataType::Float64),
@@ -163,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_batch_decodes_to_the_values_of_the_chunk() {
-        let schema = projected(&[("temp", DataType::Float64)]);
+        let schema = encoded(&[("temp", DataType::Float64)]);
         let dataset = select_columns(Arc::new(grid_dataset("a.nd")), &["temp"]);
 
         let output = output_of(dataset.as_ref(), &schema);
@@ -184,7 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dataset_with_more_variables_than_the_projection_is_adapted() {
-        let schema = projected(&[("temp", DataType::Float64)]);
+        let schema = encoded(&[("temp", DataType::Float64)]);
         let dataset = grid_dataset("a.nd");
 
         let output = output_of(&dataset, &schema);
@@ -198,7 +187,7 @@ mod tests {
     #[tokio::test]
     async fn a_variable_after_unprojected_variables_is_adapted() {
         // `lon` is the third variable of the dataset and the only projected column.
-        let schema = projected(&[("lon", DataType::Float64)]);
+        let schema = encoded(&[("lon", DataType::Float64)]);
         let dataset = grid_dataset("a.nd");
 
         let output = output_of(&dataset, &schema);
@@ -230,7 +219,7 @@ mod tests {
         let values = Arc::new(Float32Array::from(vec![1.0, 2.0, 3.0]));
         let temp = MemoryVariable::new("temp", NdArrowArray::try_new(values, x).unwrap());
         let dataset = MemoryDataset::try_new("a.nd", vec![temp]).unwrap();
-        let schema = projected(&[("temp", DataType::Float64)]);
+        let schema = encoded(&[("temp", DataType::Float64)]);
 
         let output = output_of(&dataset, &schema);
         let batch = output.finish(&chunk(&dataset, 0).await).unwrap();

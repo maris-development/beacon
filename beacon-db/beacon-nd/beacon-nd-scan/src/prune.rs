@@ -297,25 +297,15 @@ mod tests {
         TimestampSecondArray, UInt64Array,
     };
     use arrow::datatypes::{DataType, TimeUnit};
-    use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
+    use beacon_nd_dataset::{MemoryDataset, MemoryVariable, NdArrowArray};
     use datafusion::common::DFSchema;
     use datafusion::logical_expr::{Expr, Operator, cast, col, lit, not};
-    use datafusion::physical_expr::expressions::BinaryExpr;
+    use datafusion::physical_expr::expressions::{BinaryExpr, DynamicFilterPhysicalExpr};
     use datafusion::prelude::{SessionContext, random};
     use datafusion::scalar::ScalarValue;
 
     use super::*;
-    use crate::tests::fixtures::{grid_dataset, leveled_dataset};
-
-    /// A table schema with a nullable field for each of `fields`.
-    fn schema_of(fields: &[(&str, DataType)]) -> SchemaRef {
-        Arc::new(Schema::new(
-            fields
-                .iter()
-                .map(|(name, data_type)| Field::new(*name, data_type.clone(), true))
-                .collect::<Vec<_>>(),
-        ))
-    }
+    use crate::tests::fixtures::{coordinate, grid_dataset, leveled_dataset, logical};
 
     /// The physical form of `expr` over `table_schema`, with the type coercion of a query.
     fn physical(expr: Expr, table_schema: &SchemaRef) -> Arc<dyn PhysicalExpr> {
@@ -323,14 +313,6 @@ mod tests {
         SessionContext::new()
             .create_physical_expr(expr, &schema)
             .unwrap()
-    }
-
-    /// A dataset with one 1-D variable `name` on the dimension `name`.
-    fn coordinate(name: &str, values: ArrayRef) -> MemoryDataset {
-        let dimensions = Dimensions::try_new([Dimension::new(name, values.len())]).unwrap();
-        let variable =
-            MemoryVariable::new(name, NdArrowArray::try_new(values, dimensions).unwrap());
-        MemoryDataset::try_new("test.nd", vec![variable]).unwrap()
     }
 
     /// The masks of `expr` on `dataset`, with the file type of each variable as its table type.
@@ -347,7 +329,7 @@ mod tests {
 
     /// The masks of `expr` on `dataset`, with the table schema `table`.
     async fn masks_in(dataset: &MemoryDataset, expr: Expr, table: &[(&str, DataType)]) -> Masks {
-        let table_schema = schema_of(table);
+        let table_schema = logical(table);
         whole_masks(dataset, &physical(expr, &table_schema), &table_schema).await
     }
 
@@ -543,10 +525,10 @@ mod tests {
     #[tokio::test]
     async fn a_column_that_is_not_a_column_of_the_scan_gets_no_mask() {
         let dataset = coordinate("x", Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])));
-        let table_schema = schema_of(&[("x", DataType::Float64)]);
+        let table_schema = logical(&[("x", DataType::Float64)]);
         let predicate = physical(col("x").gt(lit(1.5)), &table_schema);
         // The scan schema holds only `y`.
-        let scan_schema = schema_of(&[("y", DataType::Float64)]);
+        let scan_schema = logical(&[("y", DataType::Float64)]);
         let masks = whole_masks(&dataset, &predicate, &scan_schema).await;
         assert!(is_empty(&masks));
         assert_eq!(dataset.reads("x"), 0);
@@ -574,14 +556,9 @@ mod tests {
         assert_eq!(only_mask(&masks, "lat"), [F, F, F, F, F, F, T, T]);
     }
 
-    /// The grid fixture with the rank-0 Float64 variable `level`.
-    fn grid_with_level(level: Option<f64>) -> MemoryDataset {
-        leveled_dataset("a.nd", level)
-    }
-
     #[tokio::test]
     async fn a_rank_0_variable_that_fails_the_filter_prunes_the_file() {
-        let dataset = grid_with_level(Some(2.0));
+        let dataset = leveled_dataset("a.nd", Some(2.0));
         let masks = masks_of(&dataset, col("level").eq(lit(5.0))).await;
         assert!(no_row(&masks));
         assert_eq!(pruned_starts(&masks).len(), 4);
@@ -590,8 +567,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_first_conjunct_that_rejects_the_file_ends_the_prune() {
-        let dataset = grid_with_level(Some(2.0));
-        let table_schema = schema_of(&[("level", DataType::Float64), ("lat", DataType::Float64)]);
+        let dataset = leveled_dataset("a.nd", Some(2.0));
+        let table_schema = logical(&[("level", DataType::Float64), ("lat", DataType::Float64)]);
         // The conjuncts stay in this order: `level` first, then `lat`.
         let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
             physical(col("level").eq(lit(5.0)), &table_schema),
@@ -604,11 +581,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dynamic_filter_is_evaluated_in_its_state_of_the_moment() {
+        let dataset = grid_dataset("a.nd");
+        let table_schema = logical(&[("lat", DataType::Float64)]);
+        let filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![physical(col("lat"), &table_schema)],
+            physical(lit(true), &table_schema),
+        ));
+        let predicate: Arc<dyn PhysicalExpr> = filter.clone();
+
+        // The filter starts as `true`, so it prunes nothing.
+        let masks = whole_masks(&dataset, &predicate, &table_schema).await;
+        assert!(pruned_starts(&masks).is_empty());
+
+        // The operator above the scan makes the filter tighter while the scan runs.
+        filter
+            .update(physical(col("lat").gt(lit(3.5)), &table_schema))
+            .unwrap();
+        let masks = whole_masks(&dataset, &predicate, &table_schema).await;
+        assert_eq!(pruned_starts(&masks), vec![vec![0, 0, 0], vec![0, 0, 3]]);
+    }
+
+    #[tokio::test]
     async fn the_prune_reads_a_coordinate_only_on_the_span_of_its_chunks() {
         // 24 values in 4 chunks of 6. The span holds the chunks 1 and 2: the values 6 to 17.
         let values: ArrayRef = Arc::new(Float64Array::from_iter_values((0..24).map(f64::from)));
         let dataset = coordinate("n", values);
-        let table_schema = schema_of(&[("n", DataType::Float64)]);
+        let table_schema = logical(&[("n", DataType::Float64)]);
         let grid = ChunkGrid::try_new(&dataset, 6).unwrap();
         assert_eq!(grid.len(), 4);
         let span = grid.span(1..3).unwrap();
@@ -630,14 +629,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_rank_0_variable_that_meets_the_filter_prunes_nothing() {
-        let dataset = grid_with_level(Some(2.0));
+        let dataset = leveled_dataset("a.nd", Some(2.0));
         let masks = masks_of(&dataset, col("level").eq(lit(2.0))).await;
         assert!(is_empty(&masks));
     }
 
     #[tokio::test]
     async fn a_null_rank_0_variable_prunes_the_file_but_meets_is_null() {
-        let dataset = grid_with_level(None);
+        let dataset = leveled_dataset("a.nd", None);
         let masks = masks_of(&dataset, col("level").eq(lit(2.0))).await;
         assert!(no_row(&masks));
         let masks = masks_of(&dataset, col("level").is_null()).await;
@@ -646,7 +645,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_rank_0_variable_beside_a_coordinate_is_repeated_on_the_dimension() {
-        let dataset = grid_with_level(Some(2.0));
+        let dataset = leveled_dataset("a.nd", Some(2.0));
         // The level side is false, so only the lat side keeps rows.
         let expr = col("level").eq(lit(5.0)).or(col("lat").gt(lit(5.5)));
         let masks = masks_of(&dataset, expr).await;

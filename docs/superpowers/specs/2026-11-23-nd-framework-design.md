@@ -482,6 +482,11 @@ beacon-nd-scan/src/
 
 Only `planner.rs` and `source.rs` name DataFusion morsel types.
 
+Each module is private. The crate root exports the public items, so each
+item has one public path: `NdFileOpener`, `NdScanOptions`, `open_for_read`,
+`NdSource`, `encoded_table_schema`, `file_schema`, `file_statistics` and
+`to_datafusion`.
+
 `planner.rs`, `slices.rs`, `output.rs` and `source.rs` are ports of the files
 in `beacon-arrow-netcdf/src/datafusion/scan/`. `prune.rs` is new. The NetCDF
 crate does not change.

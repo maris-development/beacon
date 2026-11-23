@@ -19,22 +19,21 @@
 //! ```
 #![warn(missing_docs)]
 
-pub(crate) mod error;
+mod error;
 mod limit;
-pub mod metrics;
-pub mod opener;
+mod metrics;
+mod opener;
 mod output;
 mod planner;
 mod prune;
-pub mod schema;
+mod schema;
 mod slices;
-pub mod source;
-pub mod statistics;
+mod source;
+mod statistics;
 #[cfg(test)]
 mod tests;
 
 pub use error::to_datafusion;
-pub use metrics::ScanMetrics;
 pub use opener::{NdFileOpener, NdScanOptions, open_for_read};
 pub use schema::file_schema;
 pub use source::{NdSource, encoded_table_schema};

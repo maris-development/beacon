@@ -359,7 +359,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Float64Type, Schema, SchemaRef};
     use arrow::record_batch::RecordBatch;
     use beacon_nd_dataset::{GridSelection, MemoryDataset};
-    use beacon_nd_encoding::encoding::{decode_nd_record_batch, encoded_schema};
+    use beacon_nd_encoding::encoding::decode_nd_record_batch;
     use beacon_nd_execution::NdRecordBatchExt;
     use datafusion::error::{DataFusionError, Result};
     use datafusion::logical_expr::Operator;
@@ -376,7 +376,7 @@ mod tests {
     use crate::opener::NdScanOptions;
     use crate::schema::logical_projection;
     use crate::slices::NdSlice;
-    use crate::tests::fixtures::{Entry, MemoryOpener, entry, grid_dataset, ramp};
+    use crate::tests::fixtures::{Entry, MemoryOpener, encoded, entry, grid_dataset, ramp};
 
     /// Run every planner of `files` to the end, as FileStream does, and collect the batches.
     async fn drive(
@@ -414,13 +414,11 @@ mod tests {
 
     /// The encoded schema of the Float64 columns `columns`.
     fn projected(columns: &[&str]) -> SchemaRef {
-        let logical = Schema::new(
-            columns
-                .iter()
-                .map(|name| Field::new(*name, DataType::Float64, true))
-                .collect::<Vec<_>>(),
-        );
-        Arc::new(encoded_schema(&logical))
+        let fields: Vec<(&str, DataType)> = columns
+            .iter()
+            .map(|name| (*name, DataType::Float64))
+            .collect();
+        encoded(&fields)
     }
 
     /// The context of a scan that reads `columns` of the test opener, with an optional `lat > threshold`.
@@ -550,6 +548,34 @@ mod tests {
         assert_eq!(counter(&metrics, "chunks_read"), 4);
         assert_eq!(counter(&metrics, "rows_read"), 48);
         assert_eq!(opener.opens(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_names_the_file_the_chunk_and_the_variable() {
+        let opener = Arc::new(MemoryOpener::default().with("a.nd", Entry::Broken));
+        let metrics = ExecutionPlanMetricsSet::new();
+        let scan = morselizer(
+            opener,
+            &["temp"],
+            12,
+            None,
+            NdScanOptions::default(),
+            None,
+            &metrics,
+        );
+
+        let error = drive(&scan, vec![entry("a.nd")]).await.unwrap_err();
+
+        let text = error.to_string();
+        for part in [
+            "memory file a.nd",
+            "chunk 0 of 1",
+            "variable 'temp'",
+            "disk gone",
+        ] {
+            assert!(text.contains(part), "'{part}' is not in: {text}");
+        }
+        assert_eq!(counter(&metrics, "chunks_read"), 0);
     }
 
     #[tokio::test]

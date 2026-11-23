@@ -440,11 +440,8 @@ mod tests {
             .unwrap();
 
         assert!(result.filters.is_empty());
-        if let Some(node) = result.updated_node {
-            let node: Arc<dyn Any + Send + Sync> = node;
-            let updated = node.downcast::<NdSource>().expect("an ND source");
-            assert!(updated.predicate.is_none());
-        }
+        // With no filter, the source stays as it is.
+        assert!(result.updated_node.is_none());
     }
 
     #[test]
