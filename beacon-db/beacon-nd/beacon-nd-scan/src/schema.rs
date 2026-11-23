@@ -1,8 +1,8 @@
 //! The Arrow schema of one file, and the column rules of the scan schema.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Field, FieldRef, Schema};
+use arrow::datatypes::{Field, FieldRef, Schema, SchemaRef};
 use beacon_nd_dataset::NdDataset;
 use beacon_nd_encoding::encoding::nd_value_type;
 
@@ -46,16 +46,17 @@ pub(crate) fn file_columns(
         .collect()
 }
 
-/// The logical table type of each `beacon.nd` encoded field of `encoded`.
-pub(crate) fn table_types(encoded: &Schema) -> HashMap<String, DataType> {
-    encoded
-        .fields()
-        .iter()
+/// The logical schema of the projected file columns: each `beacon.nd` field with its value type.
+///
+/// The filter of the scan sees these types. A partition column is not a part of it.
+pub(crate) fn table_schema(projected_schema: &Schema, partition_fields: &[FieldRef]) -> SchemaRef {
+    let fields: Vec<Field> = file_fields(projected_schema, partition_fields)
         .filter_map(|field| {
             let value_type = nd_value_type(field.data_type()).ok()?;
-            Some((field.name().clone(), value_type))
+            Some(Field::new(field.name(), value_type, true))
         })
-        .collect()
+        .collect();
+    Arc::new(Schema::new(fields))
 }
 
 #[cfg(test)]

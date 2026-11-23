@@ -53,7 +53,7 @@ moves in its own later design.
 - The scan gives the same rows as the NetCDF scan of today for the same
   data, so NetCDF can move later with no change of results. One exception:
   the prune of today can lose rows behind a cast (section 7.2 "Prune"). The
-  new scan keeps those rows.
+  new scan keeps those rows, and it prunes for more predicates.
 
 ## 3. Non-goals
 
@@ -79,9 +79,9 @@ moves in its own later design.
 - `beacon-nd-dataset` must not depend on DataFusion or on `object_store`.
 - The framework must not hold a table rule that only one format needs.
 - The ported rules must not differ from their source. A difference changes
-  query results when a format moves. The prune is the one exception: its
-  type rules are stricter than the source, because the source can lose rows
-  (section 7.2 "Prune").
+  query results when a format moves. The prune is the one exception: it is
+  not a port, because the source can lose rows (section 7.2 "Prune"). It
+  changes only which chunks the scan reads, not the rows of a query.
 - No existing crate changes its behavior. This design adds code. It removes
   none.
 
@@ -447,8 +447,8 @@ beacon-nd-scan/src/
   source.rs       NdSource: the FileSource; encoded_table_schema
   slices.rs       NdSlice, slice_files, spread_files
   planner.rs      NdMorselizer, planner states, ChunkMorsel
-  prune.rs        value ranges of a predicate, coordinate masks, the chunk test
-  cast_rule.rs    keeps_values: the casts that keep the order and each value
+  prune.rs        the predicate on the coordinate values, the chunk test
+  cast_rule.rs    keeps_values: the casts that keep each value, for the statistics
   output.rs       encode, partition columns, adapt to the projected schema
   schema.rs       file_schema: the Arrow schema of one file
   statistics.rs   file_statistics: DataFusion statistics of one file
@@ -459,9 +459,9 @@ beacon-nd-scan/src/
 
 Only `planner.rs` and `source.rs` name DataFusion morsel types.
 
-`planner.rs`, `slices.rs`, `prune.rs`, `output.rs` and `source.rs` are ports
-of the files in `beacon-arrow-netcdf/src/datafusion/scan/`. The NetCDF crate
-does not change.
+`planner.rs`, `slices.rs`, `output.rs` and `source.rs` are ports of the files
+in `beacon-arrow-netcdf/src/datafusion/scan/`. `prune.rs` is new. The NetCDF
+crate does not change.
 
 #### The opener (`opener.rs`)
 
@@ -571,7 +571,7 @@ open future  [I/O]
    the file has none of them         -> Done
    ChunkGrid::try_new                for a count scan: section 7.3
    chunks = the slice range of the full chunk list
-   masks  = coordinate_masks(..)     only with a predicate and a variable
+   masks  = chunk_masks(..)          only with a predicate and a variable
    drop the chunks that is_pruned accepts; count them
    no chunk left                     -> Done
    otherwise                         -> Read{file, next: 0, ready: None}
@@ -603,44 +603,54 @@ the chunk, as today.
 
 #### Prune (`prune.rs`)
 
-- `value_ranges(predicate) -> HashMap<column, ValueRange>`: the bounds from
-  the `column op literal` conjuncts. The walk is a port of
-  `PushdownFilter::ranges` (`beacon-nd-array/src/arrow/pushdown_filter.rs`).
-  A range also holds the casts around its column.
-- `coordinate_masks(dataset, ranges, table_types)`: for each bounded variable
-  that is rank 1 and has an ordered type, read it and compare it to the
-  bounds with the Arrow `cmp` kernels. A mask that cannot be built is left
-  out.
+The prune is not a port. It evaluates the predicate on the coordinate values
+(user decision, 2026-11-23). The source collects bounds from the predicate
+and compares them by hand.
+
+- `chunk_masks(dataset, predicate, table_schema) -> Masks`:
+  1. Take the snapshot of the predicate, for a dynamic filter.
+  2. Split the predicate into its conjuncts.
+  3. Keep a conjunct when each of its columns is in `table_schema`, and each
+     column that the file has is a rank-1 variable on one and the same
+     dimension. Skip a conjunct with a volatile function.
+  4. Read each coordinate one time, in full, in its file type.
+  5. Rewrite the conjunct with the DataFusion `DefaultPhysicalExprAdapter`,
+     from `table_schema` to the file types of the coordinates.
+  6. Evaluate the conjunct on a record batch of the coordinates. A null
+     result becomes `false`.
+  7. Combine the masks of one dimension with `AND`.
 - `is_pruned(masks, grid, chunk)`: true when, on one axis, the mask has no
-  `true` in the range of the chunk.
+  `true` in the range of the chunk, or when a conjunct rejects the file.
+
+`table_schema` holds the logical type of each projected file column
+(`schema.rs` `table_schema`). A partition column is not in it, so a conjunct
+with a partition column gives no mask.
 
 Pruning only skips work. The `FilterExec` above the scan applies the
-predicate again. Port the tests of `scan/prune.rs` and of `pushdown.rs`.
+predicate again.
 
 **The safety rule.** A mask must never be `false` for a row that the
 predicate accepts. A pruned chunk loses rows with no error. With a doubt,
 the prune builds no mask.
 
-The type rules are stricter than the source:
+Why the evaluation keeps the rule:
 
-- **Casts around the column.** The source looks through each cast. Then
-  `CAST(lat AS INT) = 5` prunes a chunk with `lat = 5.5`, which the filter
-  accepts. The scan looks through a cast only when it keeps the order and
-  each value (`cast_rule.rs` `keeps_values`): a wider integer of the same
-  sign, a small integer to a float that holds it exactly, Float32 to
-  Float64, a timestamp to a finer unit with the same zone. Each other cast
-  gives no mask.
-- **The table type.** The scan casts a file column to the table type after
-  the read, and the filter compares the cast value. So the step from the
-  variable type to the table type must also keep values. A column with no
-  table type gets no mask.
-- **A cast around the literal** is evaluated with the cast options of the
-  expression, as DataFusion does at run time. A cast that fails gives no
-  bound.
-- **Numbers of different types** compare in Float64. A strict bound becomes
-  inclusive when Float64 cannot hold the value exactly.
-- **Timestamps** compare in the unit of the coordinate, with exact floor and
-  ceiling for a finer literal.
+- **The same expression.** The adapter puts the cast from the file type to
+  the table type around each column. That is the cast of the scan. So the
+  prune computes what the filter computes, on the same values. No rule
+  about casts is necessary: `CAST(lat AS INT) = 5` is evaluated on
+  `lat = 5.5`.
+- **A column that the file does not have.** The scan gives nulls for it, and
+  the adapter gives a null literal. A conjunct with no column of the file
+  has one value for the file. When that value is not `true`, the scan reads
+  no chunk of the file.
+- **An error gives no mask.** The adapter casts strictly, and the scan
+  output casts leniently. A value that does not fit gives an error in the
+  prune and a null in the scan. The error gives no mask, which is the safe
+  side. Each other error of the rewrite or the evaluation also gives no
+  mask.
+- **Each operator.** An `OR`, an `IN`, a `NOT`, a function and each type are
+  evaluated. A conjunct with columns on two dimensions gives no mask.
 - **A null** gives `false`. **A NaN** follows the Arrow total order, as the
   `FilterExec` does.
 
@@ -786,8 +796,8 @@ What the `FileFormat` of a format writes:
 
 All tests use `MemoryDataset` behind a test opener.
 
-- Unit: the ported tests of `scan/morsel.rs`, `slices.rs`, `prune.rs`,
-  `output.rs` and `source.rs`.
+- Unit: the ported tests of `scan/morsel.rs`, `slices.rs`, `output.rs` and
+  `source.rs`, and the tests of the prune.
 - No planner state gives an empty `MorselPlan`: a skipped file, a file with
   none of the columns, a fully pruned file, a count scan.
 - Count: `COUNT(*)` equals the row count of `SELECT *`, and the variables
@@ -804,14 +814,15 @@ All tests use `MemoryDataset` behind a test opener.
 
 ### 8.3 Equal rules
 
-The ports must give the results of their sources. For `default_grid`, the
-chunk grid and the prune, each ported test keeps the inputs and the expected
-numbers of the source test. Do not change an expected number to make a
-ported test pass.
+The ports must give the results of their sources. For `default_grid` and the
+chunk grid, each ported test keeps the inputs and the expected numbers of the
+source test. Do not change an expected number to make a ported test pass.
 
-The prune has more tests than its source, for the type rules of section 7.2:
-a cast that truncates, a table type narrower than the file type, a literal
-of another type, a null and a NaN.
+The prune has its own tests for the safety rule of section 7.2: a cast that
+truncates, a table type narrower and wider than the file type, a literal of
+another type, a null, a NaN, a cast that fails, a column that the file does
+not have, an `OR`, an `IN` and a volatile function. Each test plans its
+predicate with the type coercion of a query.
 
 ## 9. The relation to nd-arrow-array
 
@@ -855,8 +866,7 @@ behavior, so the docs and the changelog do not change.
 2. **Two copies of the scan.** The NetCDF `scan/` folder and
    `beacon-nd-scan` hold the same rules until NetCDF moves. A fix in one must
    go in the other.
-3. **The ported rules.** `default_grid`, the chunk grid and the prune are
-   ports. A difference changes query results at the move of a format.
+3. **The ported rules.** `default_grid` and the chunk grid are ports. A difference changes query results at the move of a format.
    Section 8.3 guards this.
 4. **One read per variable.** A chunk of N variables is N `read` calls. They
    run one after the other, as today.

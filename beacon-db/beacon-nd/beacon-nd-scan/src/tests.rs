@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use arrow::array::AsArray;
+use arrow::array::{AsArray, Int32Array};
 use arrow::datatypes::{DataType, Field, FieldRef, Float64Type, Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
-use beacon_nd_dataset::MemoryDataset;
+use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
 use beacon_nd_execution::exec::{NdBroadcastExec, NdSourceExec, nd_scan_plan};
 use datafusion::config::ConfigOptions;
 use datafusion::datasource::listing::PartitionedFile;
@@ -302,6 +302,78 @@ async fn a_filter_above_the_scan_keeps_the_matching_rows() {
             .all(|lat| lat.is_some_and(|lat| lat > 3.5))
     );
     assert_eq!(scan_counter(&plan, "chunks_pruned"), 2);
+}
+
+/// `scan` under the filter `column op value`, after the filter pushdown rule.
+fn filtered(
+    scan: Arc<dyn ExecutionPlan>,
+    column: &str,
+    op: Operator,
+    value: f64,
+) -> Arc<dyn ExecutionPlan> {
+    let schema = scan.schema();
+    let predicate = binary(col(column, &schema).unwrap(), op, lit(value), &schema).unwrap();
+    let filter: Arc<dyn ExecutionPlan> = Arc::new(FilterExec::try_new(predicate, scan).unwrap());
+    FilterPushdown::new()
+        .optimize(filter, &ConfigOptions::default())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_filter_on_a_column_with_a_wider_table_type_prunes_in_the_table_type() {
+    // The file has `lat` in Int32, and the table has it in Float64.
+    let lat = Int32Array::from_iter_values(0..24);
+    let dimensions = Dimensions::try_new([Dimension::new("lat", 24)]).unwrap();
+    let lat = MemoryVariable::new(
+        "lat",
+        NdArrowArray::try_new(Arc::new(lat), dimensions).unwrap(),
+    );
+    let dataset = MemoryDataset::try_new("a.nd", vec![lat, ramp("temp", &[("lat", 24)])]).unwrap();
+    let opener = Arc::new(MemoryOpener::default().with("a.nd", Entry::Dataset(dataset)));
+    let schema = Schema::new(vec![
+        Field::new("lat", DataType::Float64, true),
+        Field::new("temp", DataType::Float64, true),
+    ]);
+    let scan = plan(opener, schema, vec![entry("a.nd")], None, 1);
+    let plan = filtered(scan, "lat", Operator::Gt, 11.5);
+
+    let batches = collect(Arc::clone(&plan)).await;
+
+    assert_eq!(rows(&batches), 12);
+    assert!(
+        values(&batches, "lat")
+            .iter()
+            .all(|lat| lat.is_some_and(|lat| lat > 11.5))
+    );
+    assert_eq!(scan_counter(&plan, "chunks_pruned"), 1);
+}
+
+#[tokio::test]
+async fn a_filter_on_a_column_that_one_file_does_not_have_prunes_that_file() {
+    let without_temp = MemoryDataset::try_new(
+        "b.nd",
+        vec![ramp("lat", &[("lat", 8)]), ramp("lon", &[("lon", 6)])],
+    )
+    .unwrap();
+    let opener = Arc::new(
+        MemoryOpener::default()
+            .with("a.nd", Entry::Dataset(grid_dataset("a.nd")))
+            .with("b.nd", Entry::Dataset(without_temp)),
+    );
+    let scan = plan(
+        opener,
+        grid_schema(),
+        vec![entry("a.nd"), entry("b.nd")],
+        Some(&["temp", "lat"]),
+        1,
+    );
+    let plan = filtered(scan, "temp", Operator::GtEq, 0.0);
+
+    let batches = collect(Arc::clone(&plan)).await;
+
+    // File 2 has only null `temp` values, so the scan reads no chunk of it.
+    assert_eq!(rows(&batches), 48);
+    assert_eq!(scan_counter(&plan, "chunks_pruned"), 1);
 }
 
 #[tokio::test]

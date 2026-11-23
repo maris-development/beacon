@@ -22,8 +22,8 @@ use crate::error::to_datafusion;
 use crate::metrics::ScanMetrics;
 use crate::opener::{NdFileOpener, NdScanOptions, open_for_read};
 use crate::output::FileOutput;
-use crate::prune::{coordinate_masks, is_pruned, value_ranges};
-use crate::schema::{file_columns, table_types};
+use crate::prune::{chunk_masks, is_pruned};
+use crate::schema::{file_columns, table_schema};
 use crate::slices::NdSlice;
 
 /// What each file of the scan of one partition shares.
@@ -305,8 +305,8 @@ async fn select_chunks(
     };
 
     // The scan casts each file column to its logical table type.
-    let table_types = table_types(&context.projected_schema);
-    let masks = coordinate_masks(dataset, &value_ranges(predicate), &table_types).await;
+    let table_schema = table_schema(&context.projected_schema, &context.partition_fields);
+    let masks = chunk_masks(dataset, predicate, &table_schema).await;
     let before = chunks.len();
     let rows_before: usize = chunks.iter().map(|(_, chunk)| chunk.len()).sum();
     chunks.retain(|(_, chunk)| !is_pruned(&masks, grid, chunk));
