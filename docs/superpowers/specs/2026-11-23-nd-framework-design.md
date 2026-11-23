@@ -448,10 +448,9 @@ beacon-nd-scan/src/
   slices.rs       NdSlice, slice_files, spread_files
   planner.rs      NdMorselizer, planner states, ChunkMorsel
   prune.rs        the predicate on the coordinate values, the chunk test
-  cast_rule.rs    keeps_values: the casts that keep each value, for the statistics
   output.rs       encode, partition columns, adapt to the projected schema
   schema.rs       file_schema: the Arrow schema of one file
-  statistics.rs   file_statistics: DataFusion statistics of one file
+  statistics.rs   file_statistics: DataFusion statistics of one file; keeps_values
   metrics.rs      ScanMetrics
   testing.rs      MemoryOpener and fixtures, for tests only
   tests.rs        end-to-end tests on MemoryDataset

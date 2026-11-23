@@ -19,7 +19,6 @@
 //! ```
 #![warn(missing_docs)]
 
-mod cast_rule;
 pub(crate) mod error;
 pub mod metrics;
 pub mod opener;
