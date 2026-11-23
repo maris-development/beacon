@@ -1025,7 +1025,7 @@ async fn structural_rule_sinks_limit_above_sunk_filter() {
 
 /// The plan shapes that the SQL planner gives, with all nd rules in a session.
 mod sql {
-    use arrow::datatypes::SchemaRef;
+    use arrow::datatypes::{DataType, SchemaRef};
     use datafusion::catalog::{Session, TableProvider};
     use datafusion::execution::SessionStateBuilder;
     use datafusion::logical_expr::{Expr, TableType};
@@ -1122,5 +1122,90 @@ mod sql {
         .await;
         assert_eq!(rows, 48);
         assert!(plan.contains("NdUnionExec"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn sql_union_all_by_name_runs_below_the_broadcast() {
+        let (plan, rows) = plan_and_count(
+            "SELECT time, lat, lon, sst FROM t UNION ALL BY NAME SELECT sst, lon, lat, time FROM t",
+        )
+        .await;
+        assert_eq!(rows, 48);
+        assert!(plan.contains("NdUnionExec"), "{plan}");
+    }
+
+    /// A session over the same table with no nd rule, so each node runs on flat rows.
+    fn flat_context() -> SessionContext {
+        let state = SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_target_partitions(2))
+            .with_default_features()
+            .build();
+        let ctx = SessionContext::new_with_state(state);
+        ctx.register_table("t", Arc::new(GridTable)).unwrap();
+        ctx
+    }
+
+    /// All rows of `sql` as one batch, in the order of `time` and `lat`.
+    async fn sorted_result(ctx: &SessionContext, sql: &str) -> RecordBatch {
+        let ordered = format!("SELECT * FROM ({sql}) ORDER BY time, lat");
+        let frame = ctx.sql(&ordered).await.unwrap();
+        let batches = frame.collect().await.unwrap();
+        arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap()
+    }
+
+    /// Assert that `sql` sinks its union and gives the flat result with `lat` as `lat_type`.
+    async fn assert_union_cast(sql: &str, lat_type: DataType) {
+        let (plan, rows) = plan_and_count(sql).await;
+        assert_eq!(rows, 48);
+        assert!(plan.contains("NdUnionExec"), "{plan}");
+
+        let nd = sorted_result(&context(), sql).await;
+        let flat = sorted_result(&flat_context(), sql).await;
+        assert_eq!(nd.schema(), flat.schema());
+        assert_eq!(nd, flat);
+        let lat = nd.schema().field_with_name("lat").unwrap().data_type().clone();
+        assert_eq!(lat, lat_type);
+    }
+
+    #[tokio::test]
+    async fn sql_union_all_by_name_casts_to_the_wider_integer() {
+        assert_union_cast(
+            "SELECT time, lat FROM t \
+             UNION ALL BY NAME SELECT CAST(lat AS BIGINT) AS lat, time FROM t",
+            DataType::Int64,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sql_union_all_by_name_casts_an_integer_to_a_float() {
+        assert_union_cast(
+            "SELECT time, lat FROM t \
+             UNION ALL BY NAME SELECT CAST(lat AS DOUBLE) AS lat, time FROM t",
+            DataType::Float64,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sql_union_all_by_name_casts_an_integer_to_a_string() {
+        assert_union_cast(
+            "SELECT time, lat FROM t \
+             UNION ALL BY NAME SELECT CAST(lat AS VARCHAR) AS lat, time FROM t",
+            DataType::Utf8View,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sql_union_all_by_name_fills_a_missing_column_with_nulls() {
+        let union = "SELECT time, lat, sst FROM t UNION ALL BY NAME SELECT lon, sst FROM t";
+        let (plan, rows) = plan_and_count(union).await;
+        assert_eq!(rows, 48);
+        assert!(plan.contains("NdUnionExec"), "{plan}");
+
+        // The first input has no `lon`, so its 24 rows hold a null there.
+        let (_, nulls) = plan_and_count(&format!("SELECT * FROM ({union}) WHERE lon IS NULL")).await;
+        assert_eq!(nulls, 24);
     }
 }
