@@ -1,7 +1,13 @@
 # A shared ND framework: the dataset contract and the scan
 
 Date: 2026-11-23. Status: draft, for review (revision 2).
-Branch: `feature/nd-framework`, from `origin/features/netcdf-reader-refactor`.
+Branch: `feature/nd-framework`, from `origin/main`.
+
+The branch is on `main`, because the framework does not need the NetCDF
+refactor (user, 2026-11-23). The sources that this design ports are on
+`origin/features/netcdf-reader-refactor`: the folder
+`beacon-arrow-netcdf/src/datafusion/scan/` and the designs of 2026-10-14 and
+2026-11-22. Read them from that branch.
 
 Revision 2: the variable is a trait that also reads. No format moves in this
 design, and no bridge to `beacon-nd-array` exists (user, 2026-11-23).
@@ -166,8 +172,8 @@ beacon-nd-dataset/src/
   dataset.rs      NdDataset, NdVariable, validate
   schema.rs       DatasetSchema, VariableInfo
   memory.rs       MemoryDataset, MemoryVariable
-  view.rs         GridSelection, select_grid, select_columns, default_grid,
-                  attribute_columns
+  view.rs         GridSelection, select_grid, select_columns, default_grid
+  attributes.rs   attribute_columns
   grid.rs         ChunkGrid, read_chunk
   statistics.rs   value_range
 ```
@@ -335,13 +341,18 @@ new name, because `nd_arrow_array::Dimensions` is a different type.
 `select_grid` runs these steps:
 
 1. Resolve the grid. `Given` gives the list. `PerFile` gives `default_grid`.
-   When that is `None`, return the dataset as it is.
+   When that is `None`, keep all variables and go to step 4. When step 4
+   then removes no dimension, return the dataset as it is.
 2. Check that the file has each dimension of the grid. If not, `OffGrid`.
 3. Keep the variables whose dimensions are all on the grid. A rank-0 variable
    always stays.
 4. Remove the dimensions that no kept variable uses. Keep the file order.
 5. Log the removed variables at debug level, one time per file, with the
    dataset name.
+
+Step 4 runs on each path. A count scan has no variable, so its grid is the
+dimensions of the dataset after `select_grid`. A dimension that no variable
+uses would make `COUNT(*)` larger than the row count of `SELECT *`.
 
 `default_grid` is a port of `Dataset::default_broadcast_dimensions`
 (`beacon-nd-array/src/dataset/mod.rs:164`). The port keeps the rule exactly,
