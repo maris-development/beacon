@@ -146,7 +146,7 @@ Decision: port (user, 2026-11-23: "focus on building the framework").
 ### 7.1 `beacon-nd-dataset`
 
 Dependencies: `nd-arrow-array`, `arrow`, `async-trait`, `thiserror`,
-`indexmap`, `log`. Dev: `tokio`.
+`indexmap`, `tracing`. Dev: `tokio`, `tracing-test`.
 
 `nd-arrow-array` is a git dependency with a fixed rev, in the workspace
 `Cargo.toml`, as `datafusion-spatial` is today:
@@ -419,7 +419,7 @@ the Arrow `min` and `max` kernels.
 
 Dependencies: `beacon-nd-dataset`, `nd-arrow-array`, `beacon-nd-encoding`,
 `beacon-datafusion-ext` (`scan_adapt`, type widening), `datafusion`,
-`datafusion-datasource`, `object_store`, `async-trait`, `futures`, `log`.
+`datafusion-datasource`, `object_store`, `async-trait`, `futures`, `tracing`.
 Dev: `beacon-nd-execution`, `tokio`.
 
 ```
