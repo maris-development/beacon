@@ -25,8 +25,12 @@ impl Region {
     }
 
     /// The element count: the product of `shape`. 1 for rank 0.
+    ///
+    /// `usize::MAX` when the product does not fit in `usize`.
     pub fn len(&self) -> usize {
-        self.shape.iter().product()
+        self.shape
+            .iter()
+            .fold(1usize, |count, &length| count.saturating_mul(length))
     }
 
     /// True when the region holds no element.
@@ -93,6 +97,12 @@ mod tests {
         let region = Region::full(&Dimensions::scalar());
         assert_eq!(region.rank(), 0);
         assert_eq!(region.len(), 1);
+    }
+
+    #[test]
+    fn the_len_of_a_huge_region_saturates() {
+        let region = Region::new(vec![0, 0], vec![1 << 40, 1 << 40]);
+        assert_eq!(region.len(), usize::MAX);
     }
 
     #[test]

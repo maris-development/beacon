@@ -1,5 +1,6 @@
 //! A view that shows each attribute as a rank-0 variable.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow::array::ArrayRef;
@@ -17,14 +18,16 @@ use crate::{NdDataset, NdVariable, Region, Result, VariableInfo};
 /// A variable of `dataset` keeps its name when an attribute column has the same name.
 pub fn attribute_columns(dataset: Arc<dyn NdDataset>) -> Arc<dyn NdDataset> {
     let variable_names = dataset.variable_names();
+    let taken: HashSet<&str> = variable_names.iter().map(|name| &**name).collect();
     let mut columns: IndexMap<Arc<str>, Arc<dyn NdVariable>> = IndexMap::new();
     let mut add = |prefix: &str, attributes: &Attributes| {
         for (attribute, value) in attributes.iter() {
+            // An nd-arrow-array attribute has length 1, so the length check only guards.
             if value.len() != 1 || is_list(value.data_type()) {
                 continue;
             }
             let name: Arc<str> = Arc::from(format!("{prefix}.{attribute}"));
-            if variable_names.contains(&name) {
+            if taken.contains(&*name) {
                 continue;
             }
             // The first attribute keeps a repeated column name.
@@ -219,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn an_attribute_with_more_values_is_not_a_column() {
+    fn a_list_attribute_is_not_a_column() {
         let view = attribute_columns(Arc::new(with_attrs()));
         assert!(view.variable("temp.valid_range").is_none());
     }

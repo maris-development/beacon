@@ -5,6 +5,7 @@ use std::sync::Arc;
 use arrow::datatypes::{Field, Schema};
 use nd_arrow_array::{Dimension, Dimensions, NdRecordBatch};
 
+use crate::dataset::{used_dimensions, variables, wrong_chunk_rank};
 use crate::{Error, NdDataset, NdVariable, Region, Result};
 
 /// One dataset, cut into chunks in C order.
@@ -88,22 +89,22 @@ pub async fn read_chunk(
     chunk: &Region,
 ) -> Result<NdRecordBatch> {
     let target = Dimensions::try_new(
-        grid.dimensions
+        grid.dimensions()
             .iter()
             .zip(&chunk.shape)
             .map(|(dimension, &size)| Dimension::new(dimension.name(), size)),
     )?;
 
-    let names = dataset.variable_names();
-    let mut fields = Vec::with_capacity(names.len());
-    let mut columns = Vec::with_capacity(names.len());
-    for name in names {
-        let variable = dataset.variable(&name).ok_or_else(|| Error::Invalid {
-            dataset: dataset.name().to_string(),
-            reason: format!("the variable '{name}' is not available"),
-        })?;
+    let variables = variables(dataset)?;
+    let mut fields = Vec::with_capacity(variables.len());
+    let mut columns = Vec::with_capacity(variables.len());
+    for variable in variables {
         let region = grid.variable_region(variable.as_ref(), chunk);
-        columns.push(variable.read(&region).await?);
+        let column = variable
+            .read(&region)
+            .await
+            .map_err(|error| read_error(variable.name(), error))?;
+        columns.push(column);
         fields.push(Field::new(
             variable.name(),
             variable.data_type().clone(),
@@ -118,16 +119,36 @@ pub async fn read_chunk(
     )?)
 }
 
+/// The read error of `variable`, with the variable name in the message.
+fn read_error(variable: &str, error: Error) -> Error {
+    let named = |reason: String| format!("variable '{variable}': {reason}");
+    match error {
+        Error::Format(source) => Error::format(named(source.to_string())),
+        Error::Invalid { dataset, reason } => Error::Invalid {
+            dataset,
+            reason: named(reason),
+        },
+        Error::Unsupported { dataset, reason } => Error::Unsupported {
+            dataset,
+            reason: named(reason),
+        },
+        Error::OffGrid {
+            dataset,
+            grid,
+            reason,
+        } => Error::OffGrid {
+            dataset,
+            grid,
+            reason: named(reason),
+        },
+        // `InvalidRegion` names the variable. `Nd` and `Arrow` keep their source error.
+        other => other,
+    }
+}
+
 /// The dimensions and the chunk shape that drive the grid.
 fn layout(dataset: &dyn NdDataset) -> Result<(Dimensions, Vec<usize>)> {
-    let mut variables = Vec::new();
-    for name in dataset.variable_names() {
-        let variable = dataset.variable(&name).ok_or_else(|| Error::Invalid {
-            dataset: dataset.name().to_string(),
-            reason: format!("the variable '{name}' is not available"),
-        })?;
-        variables.push(variable);
-    }
+    let variables = variables(dataset)?;
     // A dataset with no variable still has rows, for a count.
     if variables.is_empty() {
         let dimensions = dataset.dimensions().clone();
@@ -136,34 +157,31 @@ fn layout(dataset: &dyn NdDataset) -> Result<(Dimensions, Vec<usize>)> {
     }
 
     // An axis that no variable uses would repeat each value once per chunk.
-    let used: Vec<Dimension> = dataset
-        .dimensions()
-        .iter()
-        .filter(|dimension| {
-            variables
-                .iter()
-                .any(|variable| variable.dimensions().contains(dimension.name()))
-        })
-        .cloned()
-        .collect();
+    let used = used_dimensions(dataset, &variables)?;
 
     // A variable on every used dimension drives the grid, and the others broadcast onto it.
     if let Some(driver) = variables
         .iter()
-        .filter(|variable| variable.dimensions().rank() == used.len())
+        .filter(|variable| variable.dimensions().rank() == used.rank())
         .max_by_key(|variable| element_count(variable.dimensions()))
     {
         let dimensions = driver.dimensions().clone();
-        let chunk_shape = driver
-            .chunk_shape()
-            .map_or_else(|| dimensions.shape(), <[usize]>::to_vec);
+        let chunk_shape = match driver.chunk_shape() {
+            None => dimensions.shape(),
+            Some(shape) if shape.len() == dimensions.rank() => shape.to_vec(),
+            Some(shape) => {
+                return Err(Error::Invalid {
+                    dataset: dataset.name().to_string(),
+                    reason: wrong_chunk_rank(driver.as_ref(), shape.len()),
+                });
+            }
+        };
         return Ok((dimensions, chunk_shape));
     }
 
     // No variable spans every used dimension, so those dimensions are the grid.
-    let dimensions = Dimensions::try_new(used)?;
-    let shape = dimensions.shape();
-    Ok((dimensions, shape))
+    let shape = used.shape();
+    Ok((used, shape))
 }
 
 /// The element count, or `usize::MAX` when it does not fit.
@@ -250,10 +268,12 @@ mod tests {
 
     use arrow::array::AsArray;
     use arrow::datatypes::{DataType, Float64Type};
+    use async_trait::async_trait;
+    use nd_arrow_array::{Attributes, NdArrowArray};
 
     use super::*;
     use crate::memory::testing::{Meta, dataset, dims, meta, ramp};
-    use crate::{DatasetSchema, MemoryDataset, select_columns};
+    use crate::{DatasetSchema, MemoryDataset, VariableInfo, select_columns};
 
     fn sst() -> MemoryDataset {
         dataset(vec![
@@ -385,6 +405,94 @@ mod tests {
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
         assert_eq!(grid.chunks().len(), 2);
         assert_eq!(grid.chunks()[1].start, vec![1 << 39, 0]);
+    }
+
+    #[test]
+    fn a_chunk_count_that_overflows_is_unsupported() {
+        let sizes = [("a", 1 << 40), ("b", 1 << 40)];
+        let v: Arc<dyn NdVariable> = Arc::new(meta("v", DataType::Float64, &sizes));
+        let ds = DatasetSchema::try_new("test.nd", dims(&sizes), vec![v]).unwrap();
+        let result = ChunkGrid::try_new(&ds, 8192);
+        assert!(
+            matches!(result, Err(Error::Unsupported { .. })),
+            "{result:?}"
+        );
+    }
+
+    /// A dataset with the one variable `v(a=4, b=4)` and the chunk shape `[2]`.
+    #[derive(Debug)]
+    struct WrongChunkRank {
+        dimensions: Dimensions,
+        attributes: Attributes,
+    }
+
+    impl NdDataset for WrongChunkRank {
+        fn name(&self) -> &str {
+            "test.nd"
+        }
+        fn dimensions(&self) -> &Dimensions {
+            &self.dimensions
+        }
+        fn attributes(&self) -> &Attributes {
+            &self.attributes
+        }
+        fn variable_names(&self) -> Vec<Arc<str>> {
+            vec![Arc::from("v")]
+        }
+        fn variable(&self, name: &str) -> Option<Arc<dyn NdVariable>> {
+            (name == "v").then(|| {
+                let v = meta("v", DataType::Float64, &[("a", 4), ("b", 4)])
+                    .0
+                    .with_chunk_shape(vec![2]);
+                Arc::new(Meta(v)) as Arc<dyn NdVariable>
+            })
+        }
+    }
+
+    #[test]
+    fn a_chunk_shape_of_the_wrong_rank_is_invalid() {
+        let ds = WrongChunkRank {
+            dimensions: dims(&[("a", 4), ("b", 4)]),
+            attributes: Attributes::new(),
+        };
+        let result = ChunkGrid::try_new(&ds, 2);
+        assert!(matches!(result, Err(Error::Invalid { .. })), "{result:?}");
+    }
+
+    /// A variable whose read fails with a format error.
+    #[derive(Debug)]
+    struct Broken(VariableInfo);
+
+    #[async_trait]
+    impl NdVariable for Broken {
+        fn name(&self) -> &str {
+            &self.0.name
+        }
+        fn data_type(&self) -> &DataType {
+            &self.0.data_type
+        }
+        fn dimensions(&self) -> &Dimensions {
+            &self.0.dimensions
+        }
+        fn chunk_shape(&self) -> Option<&[usize]> {
+            None
+        }
+        fn attributes(&self) -> &Attributes {
+            &self.0.attributes
+        }
+        async fn read(&self, _: &Region) -> Result<NdArrowArray> {
+            Err(Error::format("disk gone"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_error_names_the_variable() {
+        let v = Broken(VariableInfo::new("v", DataType::Float64, dims(&[("n", 3)])));
+        let ds = DatasetSchema::try_new("test.nd", dims(&[("n", 3)]), vec![Arc::new(v)]).unwrap();
+        let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
+        let error = read_chunk(&ds, &grid, &grid.chunks()[0]).await.unwrap_err();
+        assert!(matches!(error, Error::Format(_)));
+        assert_eq!(error.to_string(), "variable 'v': disk gone");
     }
 
     #[tokio::test]

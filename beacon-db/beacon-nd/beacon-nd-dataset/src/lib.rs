@@ -10,8 +10,8 @@
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::sync::Arc;
 //! use arrow::array::Float64Array;
-//! use beacon_nd_dataset::{ChunkGrid, GridSelection, MemoryDataset, MemoryVariable, read_chunk, select_grid};
-//! use nd_arrow_array::{Dimension, Dimensions, NdArrowArray};
+//! use beacon_nd_dataset::{ChunkGrid, GridSelection, MemoryDataset, MemoryVariable};
+//! use beacon_nd_dataset::{Dimension, Dimensions, NdArrowArray, read_chunk, select_grid};
 //! let time = Dimensions::try_new([Dimension::new("time", 3)])?;
 //! let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]));
 //! let temp = MemoryVariable::new("temp", NdArrowArray::try_new(values.clone(), time.clone())?);
@@ -40,6 +40,7 @@ pub use dataset::{NdDataset, NdVariable, validate};
 pub use error::{Error, Result};
 pub use grid::{ChunkGrid, read_chunk};
 pub use memory::{MemoryDataset, MemoryVariable};
+pub use nd_arrow_array::{Attributes, Dimension, Dimensions, NdArrowArray, NdRecordBatch};
 pub use region::Region;
 pub use schema::{DatasetSchema, VariableInfo};
 pub use statistics::value_range;

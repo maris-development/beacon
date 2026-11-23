@@ -1,9 +1,12 @@
 //! The grid and column views of a dataset.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use indexmap::IndexSet;
 use nd_arrow_array::{Attributes, Dimensions};
 
+use crate::dataset::{used_dimensions, variables};
 use crate::{Error, NdDataset, NdVariable, Result};
 
 /// The grid that a scan reads from each file.
@@ -12,6 +15,8 @@ pub enum GridSelection {
     /// The grid of `default_grid`, for each file.
     PerFile,
     /// These dimension names, for each file.
+    ///
+    /// An empty list keeps only the rank-0 variables.
     Given(Vec<String>),
 }
 
@@ -20,7 +25,7 @@ pub enum GridSelection {
 struct View {
     inner: Arc<dyn NdDataset>,
     dimensions: Dimensions,
-    names: Vec<Arc<str>>,
+    names: IndexSet<Arc<str>>,
 }
 
 impl NdDataset for View {
@@ -37,11 +42,11 @@ impl NdDataset for View {
     }
 
     fn variable_names(&self) -> Vec<Arc<str>> {
-        self.names.clone()
+        self.names.iter().cloned().collect()
     }
 
     fn variable(&self, name: &str) -> Option<Arc<dyn NdVariable>> {
-        if self.names.iter().any(|kept| &**kept == name) {
+        if self.names.contains(name) {
             self.inner.variable(name)
         } else {
             None
@@ -55,19 +60,33 @@ impl NdDataset for View {
 
 /// The variables whose dimensions are all in the grid, and the dimensions they use.
 ///
-/// `PerFile` returns the same `Arc` when `default_grid` gives `None`.
-/// The kept dimensions follow the order of the dataset, not the order of the grid.
+/// The result has only the dimensions that a kept variable uses, in the
+/// order of the dataset, not the order of the grid. `PerFile` keeps each
+/// variable when `default_grid` gives `None`. It then returns the same `Arc`
+/// when a variable uses each dimension of the dataset.
 /// A dimension of the grid that the dataset does not have gives `Error::OffGrid`.
+/// A name that is not unique or gives no variable gives `Error::Invalid`.
 pub fn select_grid(
     dataset: Arc<dyn NdDataset>,
     grid: &GridSelection,
 ) -> Result<Arc<dyn NdDataset>> {
+    let variables = variables(dataset.as_ref())?;
     let grid = match grid {
-        GridSelection::PerFile => match default_grid(dataset.as_ref()) {
-            Some(grid) => grid,
-            None => return Ok(dataset),
-        },
-        GridSelection::Given(names) => names.clone(),
+        GridSelection::PerFile => default_grid(dataset.as_ref()),
+        GridSelection::Given(names) => Some(names.clone()),
+    };
+    let Some(grid) = grid else {
+        // Each variable fits, so only an unused dimension can go.
+        let dimensions = used_dimensions(dataset.as_ref(), &variables)?;
+        if dimensions.rank() == dataset.dimensions().rank() {
+            return Ok(dataset);
+        }
+        let names = dataset.variable_names().into_iter().collect();
+        return Ok(Arc::new(View {
+            inner: dataset,
+            dimensions,
+            names,
+        }));
     };
     if let Some(unknown) = grid.iter().find(|n| !dataset.dimensions().contains(n)) {
         return Err(Error::OffGrid {
@@ -76,30 +95,16 @@ pub fn select_grid(
             grid,
         });
     }
-    let mut kept: Vec<Arc<dyn NdVariable>> = Vec::new();
-    let mut removed: Vec<Arc<str>> = Vec::new();
-    for name in dataset.variable_names() {
-        match dataset.variable(&name) {
-            Some(variable)
-                if variable
-                    .dimensions()
-                    .iter()
-                    .all(|d| grid.iter().any(|g| g == d.name())) =>
-            {
-                kept.push(variable);
-            }
-            _ => removed.push(name),
-        }
-    }
-    // Keep only the dimensions of a kept variable, so that no orphan inflates the grid.
-    let dimensions = Dimensions::try_new(
-        dataset
+    let (kept, removed): (Vec<_>, Vec<_>) = variables.into_iter().partition(|variable| {
+        variable
             .dimensions()
             .iter()
-            .filter(|d| kept.iter().any(|v| v.dimensions().contains(d.name())))
-            .cloned(),
-    )?;
+            .all(|d| grid.iter().any(|g| g == d.name()))
+    });
+    // Keep only the dimensions of a kept variable, so that no orphan inflates the grid.
+    let dimensions = used_dimensions(dataset.as_ref(), &kept)?;
     if !removed.is_empty() {
+        let removed: Vec<&str> = removed.iter().map(|v| v.name()).collect();
         tracing::debug!(
             "{}: the grid {grid:?} removes the variables {removed:?}",
             dataset.name()
@@ -117,10 +122,11 @@ pub fn select_grid(
 ///
 /// The view keeps all dimensions. An unknown name has no effect.
 pub fn select_columns(dataset: Arc<dyn NdDataset>, names: &[&str]) -> Arc<dyn NdDataset> {
+    let wanted: HashSet<&str> = names.iter().copied().collect();
     let kept = dataset
         .variable_names()
         .into_iter()
-        .filter(|name| names.contains(&&**name))
+        .filter(|name| wanted.contains(&**name))
         .collect();
     Arc::new(View {
         dimensions: dataset.dimensions().clone(),
@@ -132,10 +138,10 @@ pub fn select_columns(dataset: Arc<dyn NdDataset>, names: &[&str]) -> Arc<dyn Nd
 /// The key of a candidate grid. Tuples compare in order, and a larger key wins.
 type GridKey = (bool, u128, u128, u128);
 
-/// The grid for a scan with no given grid. `None` when the file needs no narrowing.
+/// The grid for a scan with no given grid.
 ///
-/// The file needs no narrowing when each variable broadcasts onto the variable
-/// of the highest rank. Else the grid is the dimension list of one variable.
+/// `None` when each variable broadcasts onto the variable of the highest
+/// rank. Else the grid is the dimension list of one variable.
 /// Each candidate gets a key, and a later candidate wins only with a strictly
 /// larger key: (1) more than 0 rows, (2) the count of variables of rank 1 or
 /// more that the grid keeps, (3) the count of variables with exactly this
@@ -221,9 +227,11 @@ pub fn default_grid(dataset: &dyn NdDataset) -> Option<Vec<String>> {
 mod tests {
     use std::sync::Arc;
 
+    use arrow::datatypes::DataType;
+
     use super::*;
-    use crate::memory::testing::{dataset, ramp};
-    use crate::{Error, MemoryDataset, NdDataset, validate};
+    use crate::memory::testing::{dataset, dims, meta, ramp};
+    use crate::{ChunkGrid, DatasetSchema, Error, MemoryDataset, NdDataset, Region, validate};
 
     fn grid(names: &[&str]) -> Option<Vec<String>> {
         Some(names.iter().map(|n| n.to_string()).collect())
@@ -449,6 +457,18 @@ mod tests {
         ]));
         let view = select_grid(ds.clone(), &GridSelection::PerFile).unwrap();
         assert!(Arc::ptr_eq(&ds, &view));
+    }
+
+    #[test]
+    fn per_file_drops_a_dimension_that_no_variable_uses() {
+        let time: Arc<dyn NdVariable> = Arc::new(meta("time", DataType::Float64, &[("time", 5)]));
+        let ds =
+            DatasetSchema::try_new("test.nd", dims(&[("time", 5), ("nv", 2)]), vec![time]).unwrap();
+        let view = select_grid(Arc::new(ds), &GridSelection::PerFile).unwrap();
+        assert_eq!(view.dimensions().names(), vec!["time"]);
+        let count = select_columns(view, &[]);
+        let grid = ChunkGrid::try_new(count.as_ref(), 8192).unwrap();
+        assert_eq!(grid.chunks().iter().map(Region::len).sum::<usize>(), 5);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use indexmap::map::Entry;
 use nd_arrow_array::{Attributes, Dimensions};
 
+use crate::dataset::not_unique;
 use crate::{Error, NdDataset, NdVariable, Result, validate};
 
 /// The metadata of one variable. A format variable forwards to it.
@@ -76,7 +77,7 @@ impl DatasetSchema {
                 Entry::Occupied(entry) => {
                     return Err(Error::Invalid {
                         dataset: name,
-                        reason: format!("the variable name '{}' is not unique", entry.key()),
+                        reason: not_unique(entry.key()),
                     });
                 }
                 Entry::Vacant(entry) => {
