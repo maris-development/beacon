@@ -7,8 +7,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::array::Float64Array;
-use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
+use async_trait::async_trait;
+use beacon_nd_dataset::{
+    Dimension, Dimensions, Error, MemoryDataset, MemoryVariable, NdArrowArray, NdDataset,
+};
 use datafusion_datasource::PartitionedFile;
+use object_store::{ObjectMeta, ObjectStore};
+
+use crate::opener::NdFileOpener;
 
 /// What the test opener gives for one path.
 // Later tasks write `Entry::Dataset(grid_dataset(..))`, so the variant holds the dataset unboxed.
@@ -42,6 +48,31 @@ impl MemoryOpener {
     /// The count of opens.
     pub(crate) fn opens(&self) -> usize {
         self.opens.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl NdFileOpener for MemoryOpener {
+    fn format_name(&self) -> &'static str {
+        "memory"
+    }
+
+    async fn open(
+        &self,
+        _store: Arc<dyn ObjectStore>,
+        file: &ObjectMeta,
+    ) -> beacon_nd_dataset::Result<Arc<dyn NdDataset>> {
+        self.opens.fetch_add(1, Ordering::Relaxed);
+        let path = file.location.as_ref();
+        match self.entries.get(path) {
+            Some(Entry::Dataset(dataset)) => Ok(Arc::new(dataset.clone())),
+            Some(Entry::Invalid(reason)) => Err(Error::format(*reason)),
+            Some(Entry::Unsupported(reason)) => Err(Error::Unsupported {
+                dataset: path.to_string(),
+                reason: reason.to_string(),
+            }),
+            None => Err(Error::format("no such file")),
+        }
     }
 }
 

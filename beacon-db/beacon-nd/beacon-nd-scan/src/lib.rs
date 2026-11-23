@@ -7,6 +7,7 @@
 
 pub(crate) mod error;
 pub mod metrics;
+pub mod opener;
 // The scan tasks use the output step; until they land, only the tests call it.
 #[allow(dead_code)]
 mod output;
@@ -20,3 +21,4 @@ mod slices;
 pub(crate) mod testing;
 
 pub use metrics::ScanMetrics;
+pub use opener::{NdFileOpener, NdScanOptions, open_for_read};

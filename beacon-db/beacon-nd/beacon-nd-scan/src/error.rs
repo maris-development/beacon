@@ -6,8 +6,6 @@ use datafusion::error::DataFusionError;
 /// Map a dataset error to a DataFusion error. `Unsupported` becomes `NotImplemented`.
 ///
 /// `Arrow` becomes `ArrowError`. Each other variant becomes `Execution` with its text.
-// The scan tasks use this map; until they land, only the tests call it.
-#[allow(dead_code)]
 pub(crate) fn to_datafusion(error: Error) -> DataFusionError {
     match error {
         Error::Unsupported { .. } => DataFusionError::NotImplemented(error.to_string()),
