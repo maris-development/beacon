@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use arrow::datatypes::{Field, FieldRef, Schema, SchemaRef};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use beacon_datafusion_ext::scan_adapt::batch_adapter_factory;
+use beacon_datafusion_ext::scan_adapt::BatchAdapter;
 use beacon_datafusion_ext::type_widening::DefaultArrowTypeWidening;
 use beacon_nd_dataset::NdDataset;
 use beacon_nd_dataset::{
@@ -19,7 +19,6 @@ use beacon_nd_encoding::{
     NdRecordBatch as EncodedBatch,
 };
 use datafusion::error::{DataFusionError, Result};
-use datafusion::physical_expr_adapter::BatchAdapter;
 use datafusion::scalar::ScalarValue;
 
 /// The axis of a partition column in a chunk with no file column.
@@ -41,25 +40,28 @@ pub(crate) struct FileOutput {
 }
 
 impl FileOutput {
+    /// Make the output of one file.
+    ///
     /// `projected_schema` is the encoded schema that the scan emits.
     /// `partition_fields` are the encoded partition fields of the table, with the values of this file.
+    /// The dataset can hold more variables than the projection names. The output drops them.
     pub(crate) fn try_new(
         dataset: &dyn NdDataset,
         projected_schema: &SchemaRef,
         partition_fields: &[FieldRef],
         partition_values: &[ScalarValue],
     ) -> Result<Self> {
-        let file_columns = Self::file_columns(projected_schema, partition_fields);
-        let adapter = if file_columns.is_empty() {
+        let target_fields: Vec<FieldRef> = projected_schema
+            .fields()
+            .iter()
+            .filter(|field| !is_partition(partition_fields, field.name()))
+            .cloned()
+            .collect();
+        let adapter = if target_fields.is_empty() {
             None
         } else {
             let target = Arc::new(Schema::new_with_metadata(
-                projected_schema
-                    .fields()
-                    .iter()
-                    .filter(|field| file_columns.contains(field.name()))
-                    .cloned()
-                    .collect::<Vec<_>>(),
+                target_fields,
                 projected_schema.metadata().clone(),
             ));
             let file_schema = Schema::new(
@@ -78,12 +80,11 @@ impl FileOutput {
                     .collect::<Result<Vec<_>>>()?,
             );
             // Every column is nd-encoded and casts leniently, so the strict rule is never asked.
-            let adapter = batch_adapter_factory(
-                Arc::clone(&target),
-                Arc::new(DefaultArrowTypeWidening::new()),
-            )
-            .make_adapter(&Arc::new(encoded_schema(&file_schema)))?;
-            Some(adapter)
+            Some(BatchAdapter::try_new(
+                target,
+                &encoded_schema(&file_schema),
+                &DefaultArrowTypeWidening::new(),
+            )?)
         };
 
         let mut output = Self {
@@ -130,13 +131,9 @@ impl FileOutput {
             columns,
             to_encoded_dimensions(batch.target())?,
         )?;
-        let adapted = adapter
-            .adapt_batch(&encode_nd_record_batch(&nd)?)
-            .map_err(|e| {
-                DataFusionError::Execution(format!(
-                    "failed to adapt the batch to the scan schema: {e}"
-                ))
-            })?;
+        let adapted = adapter.adapt(&encode_nd_record_batch(&nd)?).map_err(|e| {
+            DataFusionError::Execution(format!("failed to adapt the batch to the scan schema: {e}"))
+        })?;
 
         // Put each partition column back at its projected place.
         let mut file_columns = adapted.columns().iter();
@@ -352,6 +349,70 @@ mod tests {
                 27.0, 28.0, 29.0, 33.0, 34.0, 35.0, 39.0, 40.0, 41.0, 45.0, 46.0, 47.0
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_dataset_with_more_variables_than_the_projection_is_adapted() {
+        let schema = projected(&[("temp", DataType::Float64)]);
+        let dataset = grid_dataset("a.nd");
+
+        let output = FileOutput::try_new(&dataset, &schema, &[], &[]).unwrap();
+        let batch = output.finish(&chunk(&dataset, 0).await).unwrap();
+
+        assert_eq!(batch.schema(), schema);
+        let temp = decode_nd_array(batch.column(0), 0).unwrap();
+        assert_eq!(temp.values().len(), 12);
+    }
+
+    #[tokio::test]
+    async fn a_variable_after_unprojected_variables_is_adapted() {
+        // `lon` is the third variable of the dataset and the only projected column.
+        let schema = projected(&[("lon", DataType::Float64)]);
+        let dataset = grid_dataset("a.nd");
+
+        let output = FileOutput::try_new(&dataset, &schema, &[], &[]).unwrap();
+        let batch = output.finish(&chunk(&dataset, 0).await).unwrap();
+
+        assert_eq!(batch.schema(), schema);
+        let lon = decode_nd_array(batch.column(0), 0).unwrap();
+        assert_eq!(
+            lon.values().as_primitive::<Float64Type>().values(),
+            &[0.0, 1.0, 2.0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partition_column_before_a_file_column_keeps_its_place() {
+        let schema = projected(&[("year", DataType::Int32), ("temp", DataType::Float64)]);
+        let dataset = select_columns(Arc::new(grid_dataset("a.nd")), &["temp"]);
+
+        let output = FileOutput::try_new(
+            dataset.as_ref(),
+            &schema,
+            &[year()],
+            &[ScalarValue::Int32(Some(2024))],
+        )
+        .unwrap();
+        let batch = output.finish(&chunk(dataset.as_ref(), 0).await).unwrap();
+
+        assert_eq!(batch.schema(), schema);
+        let year = decode_nd_array(batch.column(0), 0).unwrap();
+        assert_eq!(year.values().as_primitive::<Int32Type>().values(), &[2024]);
+        let temp = decode_nd_array(batch.column(1), 0).unwrap();
+        assert_eq!(temp.values().len(), 12);
+    }
+
+    #[tokio::test]
+    async fn a_missing_partition_value_is_null() {
+        let schema = projected(&[("temp", DataType::Float64), ("year", DataType::Int32)]);
+        let dataset = select_columns(Arc::new(grid_dataset("a.nd")), &["temp"]);
+
+        let output = FileOutput::try_new(dataset.as_ref(), &schema, &[year()], &[]).unwrap();
+        let batch = output.finish(&chunk(dataset.as_ref(), 0).await).unwrap();
+
+        let year = decode_nd_array(batch.column(1), 0).unwrap();
+        assert_eq!(year.data_type(), &DataType::Int32);
+        assert!(year.values().is_null(0), "the value is null");
     }
 
     #[tokio::test]
