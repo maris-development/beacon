@@ -51,7 +51,9 @@ moves in its own later design.
 - The framework has full tests with no file format. A dataset in memory
   stands in for a file.
 - The scan gives the same rows as the NetCDF scan of today for the same
-  data, so NetCDF can move later with no change of results.
+  data, so NetCDF can move later with no change of results. One exception:
+  the prune of today can lose rows behind a cast (section 7.2 "Prune"). The
+  new scan keeps those rows.
 
 ## 3. Non-goals
 
@@ -77,7 +79,9 @@ moves in its own later design.
 - `beacon-nd-dataset` must not depend on DataFusion or on `object_store`.
 - The framework must not hold a table rule that only one format needs.
 - The ported rules must not differ from their source. A difference changes
-  query results when a format moves.
+  query results when a format moves. The prune is the one exception: its
+  type rules are stricter than the source, because the source can lose rows
+  (section 7.2 "Prune").
 - No existing crate changes its behavior. This design adds code. It removes
   none.
 
@@ -427,23 +431,27 @@ the Arrow `min` and `max` kernels.
 
 ### 7.2 `beacon-nd-scan`
 
-Dependencies: `beacon-nd-dataset`, `nd-arrow-array`, `beacon-nd-encoding`,
-`beacon-datafusion-ext` (`scan_adapt`, type widening), `datafusion`,
+Dependencies: `beacon-nd-dataset`, `beacon-nd-encoding`,
+`beacon-datafusion-ext` (`scan_adapt`, type widening), `arrow`, `datafusion`,
 `datafusion-datasource`, `object_store`, `async-trait`, `futures`, `tracing`.
-Dev: `beacon-nd-execution`, `tokio`.
+Dev: `beacon-nd-execution`, `tokio`. The types of `nd-arrow-array` come
+through `beacon-nd-dataset`.
 
 ```
 beacon-nd-scan/src/
   lib.rs          module list, re-exports
+  error.rs        to_datafusion: the map from a dataset error
   opener.rs       NdFileOpener, NdScanOptions, open_for_read
-  source.rs       NdSource: the FileSource
+  source.rs       NdSource: the FileSource; encoded_table_schema
   slices.rs       NdSlice, slice_files, spread_files
   planner.rs      NdMorselizer, planner states, ChunkMorsel
   prune.rs        value ranges of a predicate, coordinate masks, the chunk test
+  cast_rule.rs    keeps_values: the casts that keep the order and each value
   output.rs       encode, partition columns, adapt to the projected schema
   schema.rs       file_schema: the Arrow schema of one file
   statistics.rs   file_statistics: DataFusion statistics of one file
   metrics.rs      ScanMetrics
+  testing.rs      MemoryOpener and fixtures, for tests only
   tests.rs        end-to-end tests on MemoryDataset
 ```
 
@@ -521,8 +529,18 @@ pub struct NdSource {
 | `supports_repartitioning` | `true`. |
 | `repartitioned` | Section "Slices". |
 
-The table schema holds the `beacon.nd` encoded file schema and the partition
-columns, as today.
+The table schema holds the `beacon.nd` encoded file schema and the encoded
+partition columns, as today. `encoded_table_schema(file_schema,
+partition_cols)` builds it. `create_morselizer` refuses a partition field
+that is not encoded.
+
+`try_pushdown_projection` accepts a projection only when each expression is
+a plain column.
+
+The limit of the planner comes from `FileScanConfig::limit`. DataFusion sets
+it only when no filter stays above the scan, and the scan answers
+`PushedDown::No`, so a `FilterExec` stops a limit. A caller that sets the
+limit by hand must make sure of the same.
 
 #### Slices (`slices.rs`)
 
@@ -540,16 +558,18 @@ NdMorselizer::plan_file(file)                  CPU only
    file.range.is_some()  -> internal error
    otherwise             -> Unopened{file}
 
-Unopened.plan() -> a plan with the open future
+Unopened.plan()
+   the limit is reached  -> Ok(None)
+   otherwise             -> a plan with the open future
 
 open future  [I/O]
    open_for_read                     None -> Skipped
    select_columns(projected file columns)
    the query has file columns and
    the file has none of them         -> Done
-   ChunkGrid::try_new
+   ChunkGrid::try_new                for a count scan: section 7.3
    chunks = the slice range of the full chunk list
-   masks  = coordinate_masks(..)     only with a predicate
+   masks  = coordinate_masks(..)     only with a predicate and a variable
    drop the chunks that is_pruned accepts; count them
    no chunk left                     -> Done
    otherwise                         -> Read{file, next: 0, ready: None}
@@ -581,17 +601,49 @@ the chunk, as today.
 
 #### Prune (`prune.rs`)
 
-- `value_ranges(predicate) -> Vec<(column, ValueRange)>`: the bounds from the
-  `column op literal` conjuncts. A port of `PushdownFilter::ranges`
-  (`beacon-nd-array/src/arrow/pushdown_filter.rs`).
-- `coordinate_masks(dataset, ranges)`: for each bounded variable that is
-  rank 1 and has an ordered type, read it and compare it to the bounds with
-  the Arrow `cmp` kernels. A mask that cannot be built is left out.
-- `is_pruned(masks, grid, chunk)`: true when one mask is all false inside the
-  chunk.
+- `value_ranges(predicate) -> HashMap<column, ValueRange>`: the bounds from
+  the `column op literal` conjuncts. The walk is a port of
+  `PushdownFilter::ranges` (`beacon-nd-array/src/arrow/pushdown_filter.rs`).
+  A range also holds the casts around its column.
+- `coordinate_masks(dataset, ranges, table_types)`: for each bounded variable
+  that is rank 1 and has an ordered type, read it and compare it to the
+  bounds with the Arrow `cmp` kernels. A mask that cannot be built is left
+  out.
+- `is_pruned(masks, grid, chunk)`: true when, on one axis, the mask has no
+  `true` in the range of the chunk.
 
 Pruning only skips work. The `FilterExec` above the scan applies the
 predicate again. Port the tests of `scan/prune.rs` and of `pushdown.rs`.
+
+**The safety rule.** A mask must never be `false` for a row that the
+predicate accepts. A pruned chunk loses rows with no error. With a doubt,
+the prune builds no mask.
+
+The type rules are stricter than the source:
+
+- **Casts around the column.** The source looks through each cast. Then
+  `CAST(lat AS INT) = 5` prunes a chunk with `lat = 5.5`, which the filter
+  accepts. The scan looks through a cast only when it keeps the order and
+  each value (`cast_rule.rs` `keeps_values`): a wider integer of the same
+  sign, a small integer to a float that holds it exactly, Float32 to
+  Float64, a timestamp to a finer unit with the same zone. Each other cast
+  gives no mask.
+- **The table type.** The scan casts a file column to the table type after
+  the read, and the filter compares the cast value. So the step from the
+  variable type to the table type must also keep values. A column with no
+  table type gets no mask.
+- **A cast around the literal** is evaluated with the cast options of the
+  expression, as DataFusion does at run time. A cast that fails gives no
+  bound.
+- **Numbers of different types** compare in Float64. A strict bound becomes
+  inclusive when Float64 cannot hold the value exactly.
+- **Timestamps** compare in the unit of the coordinate, with exact floor and
+  ceiling for a finer literal.
+- **A null** gives `false`. **A NaN** follows the Arrow total order, as the
+  `FilterExec` does.
+
+`beacon-nd-array/src/arrow/pushdown_filter.rs` on `main` has the cast defect.
+The HDF5, Zarr and GeoTIFF scans use it today.
 
 #### Output (`output.rs`)
 
@@ -603,8 +655,11 @@ For each chunk:
 2. `encode_nd_record_batch`: one `beacon.nd` row.
 3. Append each partition column as a rank-0 `beacon.nd` column, from
    `PartitionedFile::partition_values`.
-4. Adapt to the projected schema with `scan_adapt::batch_adapter_factory`. A
-   column that the file does not have becomes null.
+4. Adapt to the projected schema with
+   `beacon_datafusion_ext::scan_adapt::BatchAdapter`. A column that the file
+   does not have becomes null. Do not use the DataFusion
+   `BatchAdapterFactory`: it fails on a source that is wider than the target
+   (#675).
 
 A chunk of a count scan has no file column, so steps 1 to 3 do not fit. The
 encoding has a carrier for this case already, and the scan uses it:
@@ -626,9 +681,13 @@ moves to `nd_arrow.array`, only this file changes.
 
 - `file_schema(dataset) -> Schema`: one field per variable, sorted by name.
   The sort is here, not in the readers.
-- `file_statistics(dataset, table_schema) -> Statistics`: `value_range` for
-  each rank-0 and rank-1 variable; unknown for the others; no row count. This
-  is the rule of `statistics_for_dataset` of the NetCDF crate today.
+- `file_statistics(dataset, schema) -> Statistics`: `schema` is the logical
+  table schema. `value_range` for each rank-0 and rank-1 variable; unknown
+  for the others; no row count. This is the rule of
+  `statistics_for_dataset` of the NetCDF crate today, with one addition: the
+  minimum and the maximum have the type of the table field. When the step
+  from the variable type to the field type does not keep values
+  (`keeps_values`), the column has unknown statistics.
 
 A format calls `file_statistics` on a dataset from `opener.open`, with no
 grid and no skip, as `open_whole` does today. So a column that the grid
@@ -651,12 +710,15 @@ removes keeps its statistics.
 | Count | `planner.rs`, `grid.rs` | Section "Count". |
 
 **Count.** A query with no file column (`COUNT(*)`, or only partition
-columns) runs the same planner. After `select_columns` the dataset has no
-variable. `ChunkGrid` then spans the dimensions of the dataset after
-`select_grid`. `read_chunk` reads nothing and returns a batch with no
-columns and the row count of the chunk. `output.rs` puts that count in the
-carrier of section 7.2. So `COUNT(*)` is the row count of `SELECT *`, and it
-reads no data. The planner has no count state and no second path.
+columns) runs the same planner. The chunk grid comes from the file columns
+of the table: `ChunkGrid::try_new(select_columns(dataset, table file
+columns))`. That is the grid of `SELECT *`, also when the file has
+variables that the table does not have. The read uses
+`select_columns(dataset, &[])`, so `read_chunk` reads nothing and returns a
+batch with no columns and the row count of the chunk. `output.rs` puts that
+count in the carrier of section 7.2. So `COUNT(*)` is the row count of
+`SELECT *`, and it reads no data. A file with none of the file columns of
+the table gives no row. The planner has no count state.
 
 A format that does not want a count, as NetCDF today, refuses the query in
 its own `FileFormat`, before it builds the source.
@@ -664,9 +726,9 @@ its own `FileFormat`, before it builds the source.
 **Limit.** Today no ND node hands a limit to the scan. The scan stops when
 the consumer drops the stream. Keep that. In addition:
 
-- With `FileScanConfig::limit` set, the planner counts the rows of the chunks
-  it emits, per partition. It plans no more reads after the count reaches the
-  limit.
+- With `FileScanConfig::limit` set, the planner counts the rows of the reads
+  it plans, per partition. It plans no more reads after the count reaches the
+  limit, and it opens no more files.
 - The `FileStream` limit counts encoded rows, so it counts chunks. Each chunk
   has at least one row (section 7.1), so that limit never cuts rows that the
   query needs. For the zero-column carrier it counts real rows, which is
@@ -689,6 +751,14 @@ This section is a check of the contract, not a work item.
 | Zarr, Icechunk | One leaf group is one file, as today. The dataset builds a variable on demand. The Icechunk opener holds its version storage. |
 | Atlas | Needs more than one dataset per container, and a prune on footer statistics. Extend `NdFileOpener` then: `open` returns a list, and a variable can report its statistics. |
 | Plugins | Stay on the stream path. A later ABI version can carry the two traits. |
+
+What the `FileFormat` of a format writes:
+
+| Method | Calls |
+|---|---|
+| `infer_schema` | `open_for_read`, then `file_schema` for each file, then a merge with the type-widening rule of the session. |
+| `infer_stats` | `opener.open` with no grid and no skip, then `file_statistics`. `to_datafusion` maps a dataset error. |
+| `create_physical_plan` | `encoded_table_schema`, then `NdSource::new(..).with_projection(..)`, then `nd_scan_plan`. |
 
 ## 8. Tests
 
@@ -736,6 +806,10 @@ The ports must give the results of their sources. For `default_grid`, the
 chunk grid and the prune, each ported test keeps the inputs and the expected
 numbers of the source test. Do not change an expected number to make a
 ported test pass.
+
+The prune has more tests than its source, for the type rules of section 7.2:
+a cast that truncates, a table type narrower than the file type, a literal
+of another type, a null and a NaN.
 
 ## 9. The relation to nd-arrow-array
 
