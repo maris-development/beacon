@@ -6,6 +6,7 @@
 pub mod attributes;
 pub mod dataset;
 pub mod error;
+pub mod grid;
 pub mod memory;
 pub mod region;
 pub mod schema;
@@ -13,6 +14,7 @@ pub mod schema;
 pub use attributes::attribute_columns;
 pub use dataset::{NdDataset, NdVariable, validate};
 pub use error::{Error, Result};
+pub use grid::ChunkGrid;
 pub use memory::{MemoryDataset, MemoryVariable};
 pub use region::Region;
 pub use schema::{DatasetSchema, VariableInfo};
