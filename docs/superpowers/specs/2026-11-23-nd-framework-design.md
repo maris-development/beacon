@@ -65,8 +65,7 @@ moves in its own later design.
 - A move of `beacon-nd-encoding`, `beacon-nd-execution` and `beacon-nd-array`
   into `beacon-nd/`. One later commit moves these folders (user decision,
   2026-11-23).
-- A change of `NdSourceExec` and `NdBroadcastExec`, except the limit hand-off
-  of section 7.3.
+- A change of `NdSourceExec` and `NdBroadcastExec`.
 - The `beacon.nd` encoding on the wire and in the plugin ABI.
 - The writers.
 - The rename of `read_dimensions` to `dimensions` in the SQL options. That is
@@ -672,11 +671,9 @@ the consumer drops the stream. Keep that. In addition:
   has at least one row (section 7.1), so that limit never cuts rows that the
   query needs. For the zero-column carrier it counts real rows, which is
   exact.
-- `NdSourceExec` and `NdBroadcastExec` hand a `fetch` to their child when
-  DataFusion offers it (`with_fetch`, `supports_limit_pushdown`). This is
-  the one change outside the new crates. The builder checks the
-  DataFusion 54.1 API first. If the hand-off needs more than these two
-  methods on each node, leave it out and record that in the plan.
+- No ND node hands a `fetch` to the scan in this version. A caller that
+  knows the limit sets `FileScanConfig::limit`. The hand-off through
+  `NdSourceExec` and `NdBroadcastExec` is a later change.
 
 A limit reaches the scan only with no filter between, so chunk rows are
 exact.
@@ -797,6 +794,5 @@ behavior, so the docs and the changelog do not change.
 ## 12. Left to the builder
 
 - Private names, and the split of a module that grows too large.
-- The exact form of the limit hand-off in the execution nodes (section 7.3).
 - Whether `validate` runs at open in release builds.
 - The commit order inside each step.

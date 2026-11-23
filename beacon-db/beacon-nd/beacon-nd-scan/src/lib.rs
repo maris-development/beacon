@@ -1,8 +1,24 @@
 //! The DataFusion scan of the Beacon ND framework.
 //!
 //! One scan reads each n-dimensional file format of Beacon.
-//! A format crate opens a file as an [`beacon_nd_dataset::NdDataset`].
-//! This crate cuts the dataset into chunks and reads them into record batches.
+//! This crate cuts each file into chunks, prunes the chunks with the filter
+//! of the query, and reads the chunks into `beacon.nd`-encoded record batches.
+//!
+//! A format crate writes two parts:
+//! - An [`NdFileOpener`]. It opens one file and reads only its metadata.
+//! - A [`beacon_nd_dataset::NdDataset`]. The opener gives it, and it reads the chunks.
+//!
+//! The format puts an [`NdSource`] in a `FileScanConfig`. [`file_schema`] and
+//! [`file_statistics`] give the schema and the statistics of one file.
+//! `beacon_nd_execution::exec::nd_scan_plan` then makes this plan:
+//!
+//! ```text
+//! NdBroadcastExec          flat record batches of the logical schema
+//!   NdSourceExec           decodes the encoded batches
+//!     DataSourceExec       the NdSource: one morsel for each chunk
+//! ```
+//!
+//! The plan shape is `DataSourceExec -> NdSourceExec -> NdBroadcastExec`.
 #![warn(missing_docs)]
 
 pub(crate) mod error;
@@ -17,6 +33,8 @@ pub mod source;
 pub mod statistics;
 #[cfg(test)]
 pub(crate) mod testing;
+#[cfg(test)]
+mod tests;
 
 pub use metrics::ScanMetrics;
 pub use opener::{NdFileOpener, NdScanOptions, open_for_read};
