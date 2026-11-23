@@ -48,6 +48,9 @@ pub trait NdDataset: Send + Sync + Debug {
     fn attributes(&self) -> &Attributes;
     /// The variable names. The order is the same in each call.
     ///
+    /// Each name is unique. The format makes sure of this. The framework
+    /// expects it, and a name that is not unique is a defect of the format.
+    ///
     /// The order is the same at each open of the same file. It decides the tie
     /// of `default_grid` and the tie of the grid driver.
     fn variable_names(&self) -> Vec<Arc<str>>;

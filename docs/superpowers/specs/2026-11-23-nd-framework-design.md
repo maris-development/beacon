@@ -244,7 +244,9 @@ Rules of the contract:
 4. A dimension has one size in the whole dataset. A variable that uses a
    dimension has that size on that axis.
 5. A variable name is unique. `variable(name)` returns a variable with that
-   name.
+   name. The format makes sure of this, and the framework expects it. A name
+   that is not unique is a defect of the format, not a bad file. It gives
+   `Error::Invalid`, and `skip_invalid_files` does not skip it.
 6. The framework finds a variable by name. The order of `variable_names`
    decides only two ties: the tie of `default_grid` (the first candidate
    wins) and the tie of the grid driver (the last variable wins). So the
