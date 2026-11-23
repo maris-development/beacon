@@ -13,8 +13,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, AsArray, BooleanArray, RecordBatch, RecordBatchOptions};
-use arrow::compute::{and, prep_null_mask_filter};
+use arrow::array::{Array, ArrayRef, AsArray, RecordBatch, RecordBatchOptions};
+use arrow::buffer::BooleanBuffer;
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use beacon_nd_dataset::{ChunkGrid, NdDataset, NdVariable, Region};
 use datafusion::physical_expr::utils::collect_columns;
@@ -25,40 +25,22 @@ use datafusion::physical_expr_adapter::{
 use datafusion::physical_expr_common::physical_expr::{is_volatile, snapshot_physical_expr};
 
 /// What the predicate rejects in one file.
-#[derive(Debug, Default)]
-pub(crate) struct Masks {
-    /// True when a conjunct rejects each row of the file.
-    no_row: bool,
+#[derive(Debug)]
+pub(crate) enum Masks {
+    /// A conjunct rejects each row of the file.
+    NoRow,
     /// The keep mask of each dimension that a conjunct bounds, with the name of the dimension.
-    dimensions: Vec<(String, BooleanArray)>,
-}
-
-impl Masks {
-    /// Add the keep mask of one conjunct.
-    fn add(&mut self, mask: ConjunctMask) {
-        match mask {
-            ConjunctMask::File(keep) => self.no_row |= !keep,
-            ConjunctMask::Dimension(name, mask) => {
-                match self.dimensions.iter_mut().find(|(known, _)| *known == name) {
-                    // A row must meet each conjunct. The two masks have the size of the dimension.
-                    Some((_, known)) => {
-                        if let Ok(both) = and(known, &mask) {
-                            *known = both;
-                        }
-                    }
-                    None => self.dimensions.push((name, mask)),
-                }
-            }
-        }
-    }
+    ///
+    /// A mask has one bit for each index of its dimension. It has no null.
+    Keep(Vec<(String, BooleanBuffer)>),
 }
 
 /// The keep mask of one conjunct.
 enum ConjunctMask {
     /// The conjunct names no rank-1 variable. False when it rejects each row of the file.
     File(bool),
-    /// The conjunct names coordinates of this dimension. One value for each index.
-    Dimension(String, BooleanArray),
+    /// The conjunct names coordinates of this dimension. One bit for each index.
+    Dimension(String, BooleanBuffer),
 }
 
 /// The values of the variables that the prune read, by name.
@@ -73,7 +55,8 @@ type Coordinates = HashMap<String, ArrayRef>;
 /// value for the file, so it can reject the whole file.
 /// A column that the file does not have is null, as in the scan.
 /// A conjunct that cannot be evaluated is left out, so the scan reads each
-/// chunk that it bounds.
+/// chunk that it bounds. The first conjunct that rejects the file ends the
+/// work: the conjuncts after it are not evaluated.
 pub(crate) async fn chunk_masks(
     dataset: &dyn NdDataset,
     predicate: &Arc<dyn PhysicalExpr>,
@@ -82,15 +65,23 @@ pub(crate) async fn chunk_masks(
     // A dynamic filter is evaluated in its state of this moment.
     let predicate =
         snapshot_physical_expr(Arc::clone(predicate)).unwrap_or_else(|_| Arc::clone(predicate));
-    let mut masks = Masks::default();
+    let mut keep: Vec<(String, BooleanBuffer)> = Vec::new();
     let mut coordinates = Coordinates::new();
     for conjunct in split_conjunction(&predicate) {
         match conjunct_mask(dataset, conjunct, table_schema, &mut coordinates).await {
-            Ok(mask) => masks.add(mask),
+            Ok(ConjunctMask::File(false)) => return Masks::NoRow,
+            Ok(ConjunctMask::File(true)) => {}
+            Ok(ConjunctMask::Dimension(name, mask)) => {
+                match keep.iter_mut().find(|(known, _)| *known == name) {
+                    // A row must meet each conjunct. The two masks have the size of the dimension.
+                    Some((_, known)) => *known = &*known & &mask,
+                    None => keep.push((name, mask)),
+                }
+            }
             Err(reason) => tracing::debug!("no prune mask for '{conjunct}': {reason}"),
         }
     }
-    masks
+    Masks::Keep(keep)
 }
 
 /// True when no row of `chunk` can meet the predicate.
@@ -98,32 +89,27 @@ pub(crate) async fn chunk_masks(
 /// The chunk is pruned when a conjunct rejects each row of the file, or when
 /// the mask of one of its axes has no `true` in the range of the chunk on that axis.
 pub(crate) fn is_pruned(masks: &Masks, grid: &ChunkGrid, chunk: &Region) -> bool {
-    masks.no_row
-        || grid
-            .dimensions()
-            .iter()
-            .enumerate()
-            .any(|(axis, dimension)| {
-                let Some((_, mask)) = masks
-                    .dimensions
-                    .iter()
-                    .find(|(name, _)| name == dimension.name())
-                else {
-                    return false;
-                };
-                let (Some(&start), Some(&length)) =
-                    (chunk.start().get(axis), chunk.shape().get(axis))
-                else {
-                    return false;
-                };
-                // A chunk outside the mask is not pruned.
-                match start.checked_add(length) {
-                    Some(end) if end <= mask.len() => {
-                        mask.values().slice(start, length).count_set_bits() == 0
-                    }
-                    _ => false,
-                }
-            })
+    let masks = match masks {
+        Masks::NoRow => return true,
+        Masks::Keep(masks) => masks,
+    };
+    grid.dimensions()
+        .iter()
+        .enumerate()
+        .any(|(axis, dimension)| {
+            let Some((_, mask)) = masks.iter().find(|(name, _)| name == dimension.name()) else {
+                return false;
+            };
+            let (Some(&start), Some(&length)) = (chunk.start().get(axis), chunk.shape().get(axis))
+            else {
+                return false;
+            };
+            // A chunk outside the mask is not pruned.
+            match start.checked_add(length) {
+                Some(end) if end <= mask.len() => mask.slice(start, length).count_set_bits() == 0,
+                _ => false,
+            }
+        })
 }
 
 /// The keep mask of `conjunct`, or the reason why it has none.
@@ -217,10 +203,10 @@ async fn conjunct_mask(
     let mask = result
         .as_boolean_opt()
         .ok_or_else(|| format!("its type is {}, not Boolean", result.data_type()))?;
-    // The filter rejects a row whose conjunct is null.
+    // The filter rejects a row whose conjunct is null, so a null bit is false.
     let mask = match mask.nulls() {
-        Some(_) => prep_null_mask_filter(mask),
-        None => mask.clone(),
+        Some(valid) => mask.values() & valid.inner(),
+        None => mask.values().clone(),
     };
 
     Ok(match dimension {
@@ -255,7 +241,8 @@ mod tests {
     use arrow::datatypes::{DataType, TimeUnit};
     use beacon_nd_dataset::{Dimension, Dimensions, MemoryDataset, MemoryVariable, NdArrowArray};
     use datafusion::common::DFSchema;
-    use datafusion::logical_expr::{Expr, cast, col, lit, not};
+    use datafusion::logical_expr::{Expr, Operator, cast, col, lit, not};
+    use datafusion::physical_expr::expressions::BinaryExpr;
     use datafusion::prelude::{SessionContext, random};
     use datafusion::scalar::ScalarValue;
 
@@ -306,26 +293,35 @@ mod tests {
         chunk_masks(dataset, &physical(expr, &table_schema), &table_schema).await
     }
 
+    /// The dimension masks of `masks`. Panics when a conjunct rejects the file.
+    fn kept(masks: &Masks) -> &[(String, BooleanBuffer)] {
+        match masks {
+            Masks::Keep(kept) => kept,
+            Masks::NoRow => panic!("a conjunct rejects the file"),
+        }
+    }
+
     /// The one mask of `masks`, as booleans.
     fn only_mask(masks: &Masks, dimension: &str) -> Vec<bool> {
-        assert!(!masks.no_row, "{masks:?}");
-        assert_eq!(masks.dimensions.len(), 1, "{masks:?}");
-        assert_eq!(masks.dimensions[0].0, dimension);
-        assert_eq!(masks.dimensions[0].1.null_count(), 0);
-        masks.dimensions[0].1.iter().map(Option::unwrap).collect()
+        let kept = kept(masks);
+        assert_eq!(kept.len(), 1, "{masks:?}");
+        assert_eq!(kept[0].0, dimension);
+        kept[0].1.iter().collect()
     }
 
     /// True when `masks` prunes nothing.
     fn is_empty(masks: &Masks) -> bool {
-        !masks.no_row && masks.dimensions.is_empty()
+        matches!(masks, Masks::Keep(kept) if kept.is_empty())
+    }
+
+    /// True when a conjunct rejects each row of the file.
+    fn no_row(masks: &Masks) -> bool {
+        matches!(masks, Masks::NoRow)
     }
 
     /// The masks with one mask for `dimension`.
     fn masks_with(dimension: &str, mask: Vec<bool>) -> Masks {
-        Masks {
-            no_row: false,
-            dimensions: vec![(dimension.to_string(), BooleanArray::from(mask))],
-        }
+        Masks::Keep(vec![(dimension.to_string(), BooleanBuffer::from(mask))])
     }
 
     /// The starts of the chunks of `grid_dataset` at batch size 12 that `masks` prunes.
@@ -389,7 +385,7 @@ mod tests {
         let dataset = grid_dataset("a.nd");
         let expr = col("lat").gt(lit(3.5)).and(col("lon").gt(lit(-1.0)));
         let masks = masks_of(&dataset, expr).await;
-        assert_eq!(masks.dimensions.len(), 2, "{masks:?}");
+        assert_eq!(kept(&masks).len(), 2, "{masks:?}");
         assert_eq!(pruned_starts(&masks), vec![vec![0, 0, 0], vec![0, 0, 3]]);
     }
 
@@ -488,7 +484,7 @@ mod tests {
         let dataset = grid_dataset("a.nd");
         let table = [("lat", DataType::Float64), ("depth", DataType::Float64)];
         let masks = masks_in(&dataset, col("depth").gt(lit(5.0)), &table).await;
-        assert!(masks.no_row);
+        assert!(no_row(&masks));
         assert_eq!(pruned_starts(&masks).len(), 4);
         assert_eq!(dataset.reads("lat") + dataset.reads("temp"), 0);
     }
@@ -514,9 +510,24 @@ mod tests {
     async fn a_rank_0_variable_that_fails_the_filter_prunes_the_file() {
         let dataset = grid_with_level(Some(2.0));
         let masks = masks_of(&dataset, col("level").eq(lit(5.0))).await;
-        assert!(masks.no_row);
+        assert!(no_row(&masks));
         assert_eq!(pruned_starts(&masks).len(), 4);
         assert_eq!(dataset.reads("temp") + dataset.reads("lat"), 0);
+    }
+
+    #[tokio::test]
+    async fn the_first_conjunct_that_rejects_the_file_ends_the_prune() {
+        let dataset = grid_with_level(Some(2.0));
+        let table_schema = schema_of(&[("level", DataType::Float64), ("lat", DataType::Float64)]);
+        // The conjuncts stay in this order: `level` first, then `lat`.
+        let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            physical(col("level").eq(lit(5.0)), &table_schema),
+            Operator::And,
+            physical(col("lat").gt(lit(1.0)), &table_schema),
+        ));
+        let masks = chunk_masks(&dataset, &predicate, &table_schema).await;
+        assert!(no_row(&masks));
+        assert_eq!(dataset.reads("lat"), 0);
     }
 
     #[tokio::test]
@@ -530,7 +541,7 @@ mod tests {
     async fn a_null_rank_0_variable_prunes_the_file_but_meets_is_null() {
         let dataset = grid_with_level(None);
         let masks = masks_of(&dataset, col("level").eq(lit(2.0))).await;
-        assert!(masks.no_row);
+        assert!(no_row(&masks));
         let masks = masks_of(&dataset, col("level").is_null()).await;
         assert!(is_empty(&masks));
     }
@@ -555,7 +566,7 @@ mod tests {
         let dataset = MemoryDataset::try_new("a.nd", vec![level]).unwrap();
         let table = [("level", DataType::Float64)];
         let masks = masks_in(&dataset, col("level").gt(lit(2.5)), &table).await;
-        assert!(masks.no_row);
+        assert!(no_row(&masks));
         let masks = masks_in(&dataset, col("level").gt(lit(1.5)), &table).await;
         assert!(is_empty(&masks));
     }

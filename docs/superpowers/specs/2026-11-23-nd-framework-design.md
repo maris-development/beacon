@@ -642,6 +642,11 @@ and compares them by hand.
   6. Evaluate the conjunct on a record batch of the coordinates. A null
      result becomes `false`.
   7. Combine the masks of one dimension with `AND`.
+
+  The result is `Masks::NoRow` or `Masks::Keep(masks)`. A mask is a bit
+  buffer with no null, so the type holds the rule "null is false". The first
+  conjunct that rejects the file gives `NoRow` at once: the prune does not
+  read the coordinates of the conjuncts after it.
 - `is_pruned(masks, grid, chunk)`: true when, on one axis, the mask has no
   `true` in the range of the chunk, or when a conjunct rejects the file.
 
