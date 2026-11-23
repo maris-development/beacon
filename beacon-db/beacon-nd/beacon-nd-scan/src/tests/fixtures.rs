@@ -118,8 +118,8 @@ mod tests {
     fn the_grid_fixture_has_four_chunks_of_twelve_rows() {
         let grid = ChunkGrid::try_new(&grid_dataset("a.nd"), 12).unwrap();
         assert_eq!(grid.dimensions().names(), vec!["time", "lat", "lon"]);
-        assert_eq!(grid.chunks().len(), 4);
-        assert!(grid.chunks().iter().all(|chunk| chunk.len() == 12));
-        assert_eq!(grid.chunks()[3].start, vec![0, 4, 3]);
+        assert_eq!(grid.len(), 4);
+        assert!(grid.chunks().all(|chunk| chunk.len() == 12));
+        assert_eq!(grid.chunk(3).start, vec![0, 4, 3]);
     }
 }

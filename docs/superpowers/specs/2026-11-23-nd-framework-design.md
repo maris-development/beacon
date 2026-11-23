@@ -404,9 +404,12 @@ tests:
 
 - The grid spans the dimensions that the variables of `dataset` use.
 - A variable on all grid dimensions drives the grid. With more than one, the
-  variable with the most elements drives it. On a tie, the last one in the
-  order of `variable_names` wins, as `max_by_key` does today. With none, the
+  last one in the order of `variable_names` wins. Each such variable has the
+  same dimensions, so only its native chunk shape can differ. With none, the
   grid is the cross-product of the used dimensions.
+- The grid holds no chunk list. It holds the chunk shape and the chunk count
+  of each axis, and `chunk(index)` computes one chunk. So a grid with many
+  chunks costs no memory, and the planner keeps only chunk numbers.
 - A grid of at most `batch_size` rows is one chunk, also with native chunks.
 - Else the native chunk shape of the driver is the chunk shape. Else the
   chunk fills from the last axis up to `batch_size` rows.

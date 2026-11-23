@@ -231,7 +231,7 @@ mod tests {
 
     use super::*;
     use crate::memory::testing::{dataset, dims, meta, ramp};
-    use crate::{ChunkGrid, DatasetSchema, Error, MemoryDataset, NdDataset, Region, validate};
+    use crate::{ChunkGrid, DatasetSchema, Error, MemoryDataset, NdDataset, validate};
 
     fn grid(names: &[&str]) -> Option<Vec<String>> {
         Some(names.iter().map(|n| n.to_string()).collect())
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(view.dimensions().names(), vec!["time"]);
         let count = select_columns(view, &[]);
         let grid = ChunkGrid::try_new(count.as_ref(), 8192).unwrap();
-        assert_eq!(grid.chunks().iter().map(Region::len).sum::<usize>(), 5);
+        assert_eq!(grid.chunks().map(|chunk| chunk.len()).sum::<usize>(), 5);
     }
 
     #[test]

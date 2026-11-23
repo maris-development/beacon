@@ -331,9 +331,8 @@ mod tests {
     fn pruned_starts(masks: &Masks) -> Vec<Vec<usize>> {
         let grid = ChunkGrid::try_new(&grid_dataset("a.nd"), 12).unwrap();
         grid.chunks()
-            .iter()
             .filter(|chunk| is_pruned(masks, &grid, chunk))
-            .map(|chunk| chunk.start.clone())
+            .map(|chunk| chunk.start)
             .collect()
     }
 

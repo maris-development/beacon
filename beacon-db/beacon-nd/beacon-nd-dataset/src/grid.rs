@@ -13,8 +13,12 @@ use crate::{Error, NdDataset, NdVariable, Region, Result};
 pub struct ChunkGrid {
     /// The dimensions the chunks index, outermost first.
     dimensions: Dimensions,
-    /// The chunks, in C order.
-    chunks: Vec<Region>,
+    /// The shape of a chunk that is not at an edge. Each entry is at least 1 on an axis with chunks.
+    chunk_shape: Vec<usize>,
+    /// The chunk count of each axis.
+    counts: Vec<usize>,
+    /// The chunk count of the grid.
+    len: usize,
 }
 
 impl ChunkGrid {
@@ -45,23 +49,76 @@ impl ChunkGrid {
         } else {
             c_order_chunk_shape(&shape, batch_size)
         };
-        let chunks = chunk_regions(&shape, &chunk_shape).ok_or_else(|| Error::Unsupported {
-            dataset: dataset.name().to_string(),
-            reason: format!(
-                "the grid {shape:?} in chunks of {chunk_shape:?} has more chunks than fit in usize"
-            ),
-        })?;
-        Ok(Self { dimensions, chunks })
+        // An axis of size 0 has no chunk, so the divide never sees a chunk of size 0.
+        let counts: Vec<usize> = shape
+            .iter()
+            .zip(&chunk_shape)
+            .map(|(&len, &chunk)| if len == 0 { 0 } else { len.div_ceil(chunk) })
+            .collect();
+        let len = if counts.contains(&0) {
+            0
+        } else {
+            counts
+                .iter()
+                .try_fold(1usize, |total, &count| total.checked_mul(count))
+                .ok_or_else(|| Error::Unsupported {
+                    dataset: dataset.name().to_string(),
+                    reason: format!(
+                        "the grid {shape:?} in chunks of {chunk_shape:?} has more chunks than fit in usize"
+                    ),
+                })?
+        };
+        Ok(Self {
+            dimensions,
+            chunk_shape,
+            counts,
+            len,
+        })
+    }
+
+    /// The chunk count of the grid.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True when the grid has no chunk.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Chunk `index` in C order. An edge chunk is smaller.
+    ///
+    /// # Panics
+    ///
+    /// When `index` is not below `len()`.
+    pub fn chunk(&self, index: usize) -> Region {
+        assert!(
+            index < self.len,
+            "chunk {index} of a grid with {} chunks",
+            self.len
+        );
+        let rank = self.counts.len();
+        let mut start = vec![0usize; rank];
+        // Start from the size of each axis, then cut it to the chunk.
+        let mut shape = self.dimensions.shape();
+        let mut rest = index;
+        for axis in (0..rank).rev() {
+            let chunk = self.chunk_shape[axis];
+            start[axis] = (rest % self.counts[axis]) * chunk;
+            shape[axis] = chunk.min(shape[axis] - start[axis]);
+            rest /= self.counts[axis];
+        }
+        Region::new(start, shape)
+    }
+
+    /// Each chunk, in C order.
+    pub fn chunks(&self) -> impl ExactSizeIterator<Item = Region> + '_ {
+        (0..self.len).map(|index| self.chunk(index))
     }
 
     /// The dimensions the chunks index, outermost first.
     pub fn dimensions(&self) -> &Dimensions {
         &self.dimensions
-    }
-
-    /// The chunks, in C order.
-    pub fn chunks(&self) -> &[Region] {
-        &self.chunks
     }
 
     /// The part of `chunk` that `variable` holds, on the axes of `variable`.
@@ -160,23 +217,14 @@ fn layout(dataset: &dyn NdDataset) -> Result<(Dimensions, Vec<usize>)> {
     let used = used_dimensions(dataset, &variables)?;
 
     // A variable on every used dimension drives the grid, and the others broadcast onto it.
+    // Each such variable has the same dimensions, and the last one wins.
     if let Some(driver) = variables
         .iter()
-        .filter(|variable| variable.dimensions().rank() == used.rank())
-        .max_by_key(|variable| element_count(variable.dimensions()))
+        .rev()
+        .find(|variable| variable.dimensions().rank() == used.rank())
     {
-        let dimensions = driver.dimensions().clone();
-        let chunk_shape = match driver.chunk_shape() {
-            None => dimensions.shape(),
-            Some(shape) if shape.len() == dimensions.rank() => shape.to_vec(),
-            Some(shape) => {
-                return Err(Error::Invalid {
-                    dataset: dataset.name().to_string(),
-                    reason: wrong_chunk_rank(driver.as_ref(), shape.len()),
-                });
-            }
-        };
-        return Ok((dimensions, chunk_shape));
+        let chunk_shape = native_chunk_shape(dataset, driver.as_ref())?;
+        return Ok((driver.dimensions().clone(), chunk_shape));
     }
 
     // No variable spans every used dimension, so those dimensions are the grid.
@@ -184,11 +232,20 @@ fn layout(dataset: &dyn NdDataset) -> Result<(Dimensions, Vec<usize>)> {
     Ok((used, shape))
 }
 
-/// The element count, or `usize::MAX` when it does not fit.
-fn element_count(dimensions: &Dimensions) -> usize {
-    dimensions.iter().fold(1usize, |count, dimension| {
-        count.saturating_mul(dimension.size())
-    })
+/// The native chunk shape of `driver`, or its shape when it has no chunks.
+///
+/// Each entry of a native shape is at least 1. `Invalid` on a wrong rank.
+fn native_chunk_shape(dataset: &dyn NdDataset, driver: &dyn NdVariable) -> Result<Vec<usize>> {
+    match driver.chunk_shape() {
+        None => Ok(driver.dimensions().shape()),
+        Some(shape) if shape.len() == driver.dimensions().rank() => {
+            Ok(shape.iter().map(|&size| size.max(1)).collect())
+        }
+        Some(shape) => Err(Error::Invalid {
+            dataset: dataset.name().to_string(),
+            reason: wrong_chunk_rank(driver, shape.len()),
+        }),
+    }
 }
 
 /// A chunk shape of about `batch_size` elements, filled from the last axis.
@@ -211,55 +268,6 @@ fn c_order_chunk_shape(shape: &[usize], batch_size: usize) -> Vec<usize> {
         }
     }
     chunk
-}
-
-/// Every chunk of `shape` at `chunk_shape`, in C order. An edge chunk is smaller.
-///
-/// `None` when the chunk count does not fit in `usize`.
-fn chunk_regions(shape: &[usize], chunk_shape: &[usize]) -> Option<Vec<Region>> {
-    if shape.is_empty() {
-        return Some(vec![Region::new(vec![], vec![])]);
-    }
-    let counts: Vec<usize> = shape
-        .iter()
-        .zip(chunk_shape)
-        .map(|(&len, &chunk)| {
-            if len == 0 {
-                0
-            } else {
-                len.div_ceil(chunk.max(1))
-            }
-        })
-        .collect();
-    if counts.contains(&0) {
-        return Some(vec![]);
-    }
-
-    let total = counts
-        .iter()
-        .try_fold(1usize, |total, &count| total.checked_mul(count))?;
-    let mut regions = Vec::with_capacity(total);
-    for linear in 0..total {
-        let mut rest = linear;
-        let mut index = vec![0usize; shape.len()];
-        for axis in (0..shape.len()).rev() {
-            index[axis] = rest % counts[axis];
-            rest /= counts[axis];
-        }
-        let start: Vec<usize> = index
-            .iter()
-            .zip(chunk_shape)
-            .map(|(&i, &chunk)| i * chunk.max(1))
-            .collect();
-        let size: Vec<usize> = shape
-            .iter()
-            .zip(&start)
-            .zip(chunk_shape)
-            .map(|((&len, &start), &chunk)| chunk.max(1).min(len - start))
-            .collect();
-        regions.push(Region::new(start, size));
-    }
-    Some(regions)
 }
 
 #[cfg(test)]
@@ -287,25 +295,78 @@ mod tests {
     fn a_native_chunk_layout_sets_the_grid() {
         let grid = ChunkGrid::try_new(&sst(), 8192).unwrap();
         assert_eq!(grid.dimensions().names(), vec!["time", "lat", "lon"]);
+        assert_eq!(grid.len(), 4);
         assert_eq!(grid.chunks().len(), 4);
+        assert_eq!(grid.chunk(0), Region::new(vec![0, 0, 0], vec![1, 604, 960]));
+        assert_eq!(grid.chunk(3).start, vec![0, 604, 960]);
         assert_eq!(
-            grid.chunks()[0],
-            Region::new(vec![0, 0, 0], vec![1, 604, 960])
-        );
-        assert_eq!(grid.chunks()[3].start, vec![0, 604, 960]);
-        assert_eq!(
-            grid.chunks().iter().map(Region::len).sum::<usize>(),
+            grid.chunks().map(|chunk| chunk.len()).sum::<usize>(),
             1208 * 1920
         );
+    }
+
+    /// Each chunk of `grid`, in C order.
+    fn all(grid: &ChunkGrid) -> Vec<Region> {
+        grid.chunks().collect()
     }
 
     #[test]
     fn a_small_grid_is_one_chunk_whatever_its_native_chunks() {
         let grid = ChunkGrid::try_new(&sst(), 1208 * 1920).unwrap();
         assert_eq!(
-            grid.chunks(),
+            all(&grid),
             [Region::new(vec![0, 0, 0], vec![1, 1208, 1920])]
         );
+    }
+
+    #[test]
+    fn an_edge_chunk_is_smaller() {
+        let ds = dataset(vec![
+            ramp("v", &[("a", 3), ("b", 5)]).with_chunk_shape(vec![2, 2]),
+        ]);
+        let grid = ChunkGrid::try_new(&ds, 2).unwrap();
+        assert_eq!(grid.len(), 6);
+        assert_eq!(
+            all(&grid),
+            [
+                Region::new(vec![0, 0], vec![2, 2]),
+                Region::new(vec![0, 2], vec![2, 2]),
+                Region::new(vec![0, 4], vec![2, 1]),
+                Region::new(vec![2, 0], vec![1, 2]),
+                Region::new(vec![2, 2], vec![1, 2]),
+                Region::new(vec![2, 4], vec![1, 1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_native_chunk_larger_than_the_grid_is_cut_to_the_grid() {
+        let ds = dataset(vec![
+            ramp("v", &[("a", 3), ("b", 5)]).with_chunk_shape(vec![8, 2]),
+        ]);
+        let grid = ChunkGrid::try_new(&ds, 2).unwrap();
+        assert_eq!(grid.len(), 3);
+        assert_eq!(grid.chunk(2), Region::new(vec![0, 4], vec![3, 1]));
+    }
+
+    #[test]
+    fn a_grid_with_very_many_chunks_holds_no_chunk_list() {
+        let sizes = [("a", 1 << 40), ("b", 1 << 20)];
+        let v: Arc<dyn NdVariable> = Arc::new(meta("v", DataType::Float64, &sizes));
+        let ds = DatasetSchema::try_new("test.nd", dims(&sizes), vec![v]).unwrap();
+        let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
+        assert_eq!(grid.len(), 1 << 47);
+        assert_eq!(grid.chunk(0), Region::new(vec![0, 0], vec![1, 8192]));
+        assert_eq!(
+            grid.chunk((1 << 47) - 1),
+            Region::new(vec![(1 << 40) - 1, (1 << 20) - 8192], vec![1, 8192])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "chunk 4 of a grid with 4 chunks")]
+    fn a_chunk_past_the_grid_panics() {
+        ChunkGrid::try_new(&sst(), 8192).unwrap().chunk(4);
     }
 
     #[test]
@@ -315,8 +376,8 @@ mod tests {
             &[("time", 1), ("lat", 1208), ("lon", 1920)],
         )]);
         let grid = ChunkGrid::try_new(&ds, 4096).unwrap();
-        assert_eq!(grid.chunks()[0].shape, vec![1, 2, 1920]);
-        assert_eq!(grid.chunks().len(), 604);
+        assert_eq!(grid.chunk(0).shape, vec![1, 2, 1920]);
+        assert_eq!(grid.len(), 604);
     }
 
     #[test]
@@ -325,7 +386,7 @@ mod tests {
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
         let lat = ds.variable("lat").unwrap();
         assert_eq!(
-            grid.variable_region(lat.as_ref(), &grid.chunks()[3]),
+            grid.variable_region(lat.as_ref(), &grid.chunk(3)),
             Region::new(vec![604], vec![604])
         );
     }
@@ -337,7 +398,7 @@ mod tests {
             .unwrap();
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
         assert_eq!(grid.dimensions().names(), vec!["time"]);
-        assert_eq!(grid.chunks(), [Region::new(vec![0], vec![5])]);
+        assert_eq!(all(&grid), [Region::new(vec![0], vec![5])]);
     }
 
     #[test]
@@ -345,7 +406,7 @@ mod tests {
         let ds = dataset(vec![ramp("lat", &[("lat", 3)]), ramp("lon", &[("lon", 4)])]);
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
         assert_eq!(grid.dimensions().names(), vec!["lat", "lon"]);
-        assert_eq!(grid.chunks(), [Region::new(vec![0, 0], vec![3, 4])]);
+        assert_eq!(all(&grid), [Region::new(vec![0, 0], vec![3, 4])]);
     }
 
     #[test]
@@ -355,7 +416,7 @@ mod tests {
             ramp("b", &[("x", 2), ("y", 3)]).with_chunk_shape(vec![2, 1]),
         ]);
         let grid = ChunkGrid::try_new(&ds, 2).unwrap();
-        assert_eq!(grid.chunks()[0].shape, vec![2, 1]);
+        assert_eq!(grid.chunk(0).shape, vec![2, 1]);
     }
 
     #[test]
@@ -368,31 +429,32 @@ mod tests {
         .unwrap();
         let grid = ChunkGrid::try_new(&ds, 1208 * 1920).unwrap();
         assert_eq!(grid.dimensions().names(), vec!["time", "lat", "lon"]);
-        assert_eq!(grid.chunks().len(), 1);
-        assert_eq!(grid.chunks()[0].len(), 1208 * 1920);
+        assert_eq!(grid.len(), 1);
+        assert_eq!(grid.chunk(0).len(), 1208 * 1920);
     }
 
     #[test]
     fn a_rank_0_grid_is_one_chunk_of_one_row() {
         let ds = dataset(vec![ramp("title", &[])]);
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
-        assert_eq!(grid.chunks(), [Region::new(vec![], vec![])]);
-        assert_eq!(grid.chunks()[0].len(), 1);
+        assert_eq!(all(&grid), [Region::new(vec![], vec![])]);
+        assert_eq!(grid.chunk(0).len(), 1);
     }
 
     #[test]
     fn a_dimension_of_size_0_gives_no_chunk() {
         let ds = dataset(vec![ramp("v", &[("n", 0), ("m", 2)])]);
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
-        assert!(grid.chunks().is_empty());
+        assert!(grid.is_empty());
+        assert_eq!(grid.chunks().len(), 0);
     }
 
     #[test]
     fn a_batch_size_of_0_counts_as_1() {
         let ds = dataset(vec![ramp("v", &[("n", 3)])]);
         let grid = ChunkGrid::try_new(&ds, 0).unwrap();
-        assert_eq!(grid.chunks().len(), 3);
-        assert!(grid.chunks().iter().all(|chunk| chunk.shape == vec![1]));
+        assert_eq!(grid.len(), 3);
+        assert!(grid.chunks().all(|chunk| chunk.shape == vec![1]));
     }
 
     #[test]
@@ -403,8 +465,8 @@ mod tests {
             .with_chunk_shape(vec![1 << 39, 1 << 40]);
         let ds = DatasetSchema::try_new("test.nd", dims(&sizes), vec![Arc::new(Meta(v))]).unwrap();
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
-        assert_eq!(grid.chunks().len(), 2);
-        assert_eq!(grid.chunks()[1].start, vec![1 << 39, 0]);
+        assert_eq!(grid.len(), 2);
+        assert_eq!(grid.chunk(1).start, vec![1 << 39, 0]);
     }
 
     #[test]
@@ -490,7 +552,7 @@ mod tests {
         let v = Broken(VariableInfo::new("v", DataType::Float64, dims(&[("n", 3)])));
         let ds = DatasetSchema::try_new("test.nd", dims(&[("n", 3)]), vec![Arc::new(v)]).unwrap();
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
-        let error = read_chunk(&ds, &grid, &grid.chunks()[0]).await.unwrap_err();
+        let error = read_chunk(&ds, &grid, &grid.chunk(0)).await.unwrap_err();
         assert!(matches!(error, Error::Format(_)));
         assert_eq!(error.to_string(), "variable 'v': disk gone");
     }
@@ -499,7 +561,7 @@ mod tests {
     async fn a_chunk_reads_each_variable_on_its_own_axes() {
         let ds = sst();
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
-        let batch = read_chunk(&ds, &grid, &grid.chunks()[0]).await.unwrap();
+        let batch = read_chunk(&ds, &grid, &grid.chunk(0)).await.unwrap();
         let names: Vec<&str> = batch
             .schema()
             .fields()
@@ -518,7 +580,7 @@ mod tests {
     async fn a_chunk_holds_the_values_of_its_region() {
         let ds = dataset(vec![ramp("v", &[("n", 6)])]);
         let grid = ChunkGrid::try_new(&ds, 4).unwrap();
-        let batch = read_chunk(&ds, &grid, &grid.chunks()[1]).await.unwrap();
+        let batch = read_chunk(&ds, &grid, &grid.chunk(1)).await.unwrap();
         let values = batch
             .column(0)
             .values()
@@ -533,11 +595,11 @@ mod tests {
         let ds = sst();
         let view = select_columns(Arc::new(ds.clone()), &[]);
         let grid = ChunkGrid::try_new(view.as_ref(), 8192).unwrap();
-        let batch = read_chunk(view.as_ref(), &grid, &grid.chunks()[0])
+        let batch = read_chunk(view.as_ref(), &grid, &grid.chunk(0))
             .await
             .unwrap();
         assert_eq!(batch.num_columns(), 0);
-        assert_eq!(batch.num_rows(), grid.chunks()[0].len());
+        assert_eq!(batch.num_rows(), grid.chunk(0).len());
         assert_eq!(ds.reads("analysed_sst") + ds.reads("lat"), 0);
     }
 
@@ -545,7 +607,7 @@ mod tests {
     async fn a_rank_0_variable_goes_in_each_chunk() {
         let ds = dataset(vec![ramp("v", &[("n", 6)]), ramp("title", &[])]);
         let grid = ChunkGrid::try_new(&ds, 4).unwrap();
-        let batch = read_chunk(&ds, &grid, &grid.chunks()[0]).await.unwrap();
+        let batch = read_chunk(&ds, &grid, &grid.chunk(0)).await.unwrap();
         assert_eq!(batch.column(1).len(), 1);
     }
 }

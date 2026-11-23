@@ -136,7 +136,7 @@ mod tests {
     /// Chunk `k` of `dataset` at a batch size of 12.
     async fn chunk(dataset: &dyn NdDataset, k: usize) -> beacon_nd_dataset::NdRecordBatch {
         let grid = ChunkGrid::try_new(dataset, 12).unwrap();
-        read_chunk(dataset, &grid, &grid.chunks()[k]).await.unwrap()
+        read_chunk(dataset, &grid, &grid.chunk(k)).await.unwrap()
     }
 
     /// The grid fixture with no variable: each chunk has 12 rows and no column.

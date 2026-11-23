@@ -19,7 +19,7 @@
 //! let file = Arc::new(MemoryDataset::try_new("a.nd", vec![temp, salt])?);
 //! let dataset = select_grid(file, &GridSelection::PerFile)?;
 //! let grid = ChunkGrid::try_new(dataset.as_ref(), 8192)?;
-//! let batch = read_chunk(dataset.as_ref(), &grid, &grid.chunks()[0]).await?;
+//! let batch = read_chunk(dataset.as_ref(), &grid, &grid.chunk(0)).await?;
 //! assert_eq!((batch.num_columns(), batch.num_rows()), (2, 3));
 //! # Ok(()) }
 //! ```

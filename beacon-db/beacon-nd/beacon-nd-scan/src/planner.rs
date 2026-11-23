@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use beacon_nd_dataset::{ChunkGrid, NdDataset, NdRecordBatch, Region, read_chunk, select_columns};
+use beacon_nd_dataset::{ChunkGrid, NdDataset, NdRecordBatch, read_chunk, select_columns};
 use datafusion::common::internal_err;
 use datafusion::error::Result;
 use datafusion::physical_expr::PhysicalExpr;
@@ -123,15 +123,13 @@ struct OpenFile {
     dataset: Arc<dyn NdDataset>,
     grid: ChunkGrid,
     output: FileOutput,
-    /// The chunks to read, each with its number in the file.
-    chunks: Vec<(usize, Region)>,
-    /// How many chunks the file has.
-    total: usize,
+    /// The numbers of the chunks to read, in the order of the grid.
+    chunks: Vec<usize>,
 }
 
 impl OpenFile {
     fn describe(&self, number: usize) -> String {
-        format!("{}, chunk {number} of {}", self.label, self.total)
+        format!("{}, chunk {number} of {}", self.label, self.grid.len())
     }
 }
 
@@ -169,7 +167,7 @@ impl MorselPlanner for Planner {
             Planner::Read { file, next, ready } => {
                 // The limit counts the rows of a read when the read is planned.
                 let more = match file.chunks.get(next) {
-                    Some((_, chunk)) => file.context.budget.take(chunk.len()),
+                    Some(&number) => file.context.budget.take(file.grid.chunk(number).len()),
                     None => false,
                 };
                 if ready.is_none() && !more {
@@ -254,7 +252,6 @@ async fn plan_entry(
     let output = FileOutput::try_new(dataset.as_ref(), &context.projected_schema)?;
     let grid =
         ChunkGrid::try_new(grid_source.as_ref(), context.batch_size).map_err(to_datafusion)?;
-    let total = grid.chunks().len();
     let chunks = select_chunks(context, dataset.as_ref(), &grid, slice).await;
     if chunks.is_empty() {
         return Ok(Box::new(Planner::Done));
@@ -268,57 +265,56 @@ async fn plan_entry(
             grid,
             output,
             chunks,
-            total,
         }),
         next: 0,
         ready: None,
     }))
 }
 
-/// The chunks of `slice` that the predicate does not prune, each with its number in the file.
+/// The numbers of the chunks of `slice` that the predicate does not prune.
 async fn select_chunks(
     context: &ScanContext,
     dataset: &dyn NdDataset,
     grid: &ChunkGrid,
     slice: NdSlice,
-) -> Vec<(usize, Region)> {
-    // The slice cut comes first, on the full list. Every slice builds the same list.
-    let range = slice.range(grid.chunks().len());
-    let mut chunks: Vec<(usize, Region)> = range
-        .clone()
-        .zip(grid.chunks()[range].iter().cloned())
-        .collect();
+) -> Vec<usize> {
+    // The slice cut comes first, on the whole grid. Every slice cuts the same grid.
+    let range = slice.range(grid.len());
     // An empty slice or a count scan reads no coordinate for a mask.
     let Some(predicate) = context
         .predicate
         .as_ref()
-        .filter(|_| !chunks.is_empty() && !dataset.variable_names().is_empty())
+        .filter(|_| !range.is_empty() && !dataset.variable_names().is_empty())
     else {
-        return chunks;
+        return range.collect();
     };
 
     // The scan casts each file column to its logical table type.
     let table_schema = table_schema(&context.projected_schema);
     let masks = chunk_masks(dataset, predicate, &table_schema).await;
-    let before = chunks.len();
-    let rows_before: usize = chunks.iter().map(|(_, chunk)| chunk.len()).sum();
-    chunks.retain(|(_, chunk)| !is_pruned(&masks, grid, chunk));
-    let rows_after: usize = chunks.iter().map(|(_, chunk)| chunk.len()).sum();
-    context.metrics.chunks_pruned.add(before - chunks.len());
-    context.metrics.rows_pruned.add(rows_before - rows_after);
+    let mut chunks = Vec::new();
+    for number in range {
+        let chunk = grid.chunk(number);
+        if is_pruned(&masks, grid, &chunk) {
+            context.metrics.chunks_pruned.add(1);
+            context.metrics.rows_pruned.add(chunk.len());
+        } else {
+            chunks.push(number);
+        }
+    }
     chunks
 }
 
 /// Read entry `index` of the chunks of `file`, and hand it to the next planner state.
 async fn read(file: Arc<OpenFile>, index: usize) -> Result<Box<dyn MorselPlanner>> {
-    let (number, chunk) = &file.chunks[index];
-    let batch = read_chunk(file.dataset.as_ref(), &file.grid, chunk)
+    let number = file.chunks[index];
+    let chunk = file.grid.chunk(number);
+    let batch = read_chunk(file.dataset.as_ref(), &file.grid, &chunk)
         .await
-        .map_err(|e| to_datafusion(e).context(file.describe(*number)))?;
+        .map_err(|e| to_datafusion(e).context(file.describe(number)))?;
 
     file.context.metrics.chunks_read.add(1);
     file.context.metrics.rows_read.add(chunk.len());
-    let number = *number;
     Ok(Box::new(Planner::Read {
         file,
         next: index + 1,
