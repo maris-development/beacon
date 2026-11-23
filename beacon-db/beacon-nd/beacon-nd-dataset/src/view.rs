@@ -72,7 +72,7 @@ pub fn select_grid(
 ) -> Result<Arc<dyn NdDataset>> {
     let variables = variables(dataset.as_ref())?;
     let grid = match grid {
-        GridSelection::PerFile => default_grid(dataset.as_ref()),
+        GridSelection::PerFile => grid_of(dataset.as_ref(), &variables),
         GridSelection::Given(names) => Some(names.clone()),
     };
     let Some(grid) = grid else {
@@ -150,17 +150,19 @@ type GridKey = (bool, u128, u128, u128);
 /// When the reader invented each dimension of the file, the row count moves
 /// to the second place, before the two counts.
 pub fn default_grid(dataset: &dyn NdDataset) -> Option<Vec<String>> {
-    let variables: Vec<Vec<String>> = dataset
+    let variables: Vec<Arc<dyn NdVariable>> = dataset
         .variable_names()
         .iter()
         .filter_map(|name| dataset.variable(name))
-        .map(|v| {
-            v.dimensions()
-                .names()
-                .into_iter()
-                .map(String::from)
-                .collect()
-        })
+        .collect();
+    grid_of(dataset, &variables)
+}
+
+/// The grid of `default_grid` for `variables`, which are the variables of `dataset`.
+fn grid_of(dataset: &dyn NdDataset, variables: &[Arc<dyn NdVariable>]) -> Option<Vec<String>> {
+    let variables: Vec<Vec<&str>> = variables
+        .iter()
+        .map(|variable| variable.dimensions().names())
         .collect();
 
     // `max_by_key` gives the last variable of the highest rank.
@@ -172,7 +174,7 @@ pub fn default_grid(dataset: &dyn NdDataset) -> Option<Vec<String>> {
         return None;
     }
 
-    let mut candidates: Vec<&Vec<String>> = Vec::new();
+    let mut candidates: Vec<&Vec<&str>> = Vec::new();
     for dims in &variables {
         if !dims.is_empty() && !candidates.contains(&dims) {
             candidates.push(dims);
@@ -180,18 +182,19 @@ pub fn default_grid(dataset: &dyn NdDataset) -> Option<Vec<String>> {
     }
 
     // Rank-0 variables fit each grid, so they do not count.
-    let score = |c: &[String]| -> u128 {
+    let score = |c: &[&str]| -> u128 {
         variables
             .iter()
             .filter(|dims| !dims.is_empty() && dims.iter().all(|d| c.contains(d)))
             .count() as u128
     };
     let exact_count =
-        |c: &[String]| -> u128 { variables.iter().filter(|dims| *dims == c).count() as u128 };
-    let grid_rows = |c: &[String]| -> u128 {
+        |c: &[&str]| -> u128 { variables.iter().filter(|dims| *dims == c).count() as u128 };
+    // A row count that does not fit stays at the maximum.
+    let grid_rows = |c: &[&str]| -> u128 {
         c.iter()
             .map(|d| dataset.dimensions().size_of(d).unwrap_or(0) as u128)
-            .product()
+            .fold(1, u128::saturating_mul)
     };
     let invented = dataset.invented_dimensions();
     let names_no_dimension = !invented.is_empty()
@@ -200,7 +203,7 @@ pub fn default_grid(dataset: &dyn NdDataset) -> Option<Vec<String>> {
             .iter()
             .all(|d| invented.iter().any(|i| &**i == d.name()));
 
-    let key = |c: &[String]| -> GridKey {
+    let key = |c: &[&str]| -> GridKey {
         let rows = grid_rows(c);
         if names_no_dimension {
             (rows > 0, rows, score(c), exact_count(c))
@@ -209,7 +212,7 @@ pub fn default_grid(dataset: &dyn NdDataset) -> Option<Vec<String>> {
         }
     };
 
-    let mut best: Option<(GridKey, &Vec<String>)> = None;
+    let mut best: Option<(GridKey, &Vec<&str>)> = None;
     for candidate in candidates {
         let candidate_key = key(candidate);
         // An equal key keeps the earlier candidate.
@@ -220,7 +223,7 @@ pub fn default_grid(dataset: &dyn NdDataset) -> Option<Vec<String>> {
             best = Some((candidate_key, candidate));
         }
     }
-    best.map(|(_, dims)| dims.clone())
+    best.map(|(_, dims)| dims.iter().map(|name| name.to_string()).collect())
 }
 
 #[cfg(test)]
@@ -439,7 +442,7 @@ mod tests {
         assert!(error.to_string().contains("nope"), "{error}");
     }
 
-    // The new tests.
+    // The tests that the source of the port does not have.
 
     #[test]
     fn per_file_narrows_a_file_that_does_not_broadcast() {

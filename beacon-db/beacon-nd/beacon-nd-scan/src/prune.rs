@@ -111,7 +111,8 @@ pub(crate) fn is_pruned(masks: &Masks, grid: &ChunkGrid, chunk: &Region) -> bool
                 else {
                     return false;
                 };
-                let (Some(&start), Some(&length)) = (chunk.start.get(axis), chunk.shape.get(axis))
+                let (Some(&start), Some(&length)) =
+                    (chunk.start().get(axis), chunk.shape().get(axis))
                 else {
                     return false;
                 };
@@ -332,7 +333,7 @@ mod tests {
         let grid = ChunkGrid::try_new(&grid_dataset("a.nd"), 12).unwrap();
         grid.chunks()
             .filter(|chunk| is_pruned(masks, &grid, chunk))
-            .map(|chunk| chunk.start)
+            .map(|chunk| chunk.start().to_vec())
             .collect()
     }
 

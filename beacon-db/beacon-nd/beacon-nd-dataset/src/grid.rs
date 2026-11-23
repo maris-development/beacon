@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(grid.len(), 4);
         assert_eq!(grid.chunks().len(), 4);
         assert_eq!(grid.chunk(0), Region::new(vec![0, 0, 0], vec![1, 604, 960]));
-        assert_eq!(grid.chunk(3).start, vec![0, 604, 960]);
+        assert_eq!(grid.chunk(3).start(), [0, 604, 960]);
         assert_eq!(
             grid.chunks().map(|chunk| chunk.len()).sum::<usize>(),
             1208 * 1920
@@ -290,7 +290,7 @@ mod tests {
             &[("time", 1), ("lat", 1208), ("lon", 1920)],
         )]);
         let grid = ChunkGrid::try_new(&ds, 4096).unwrap();
-        assert_eq!(grid.chunk(0).shape, vec![1, 2, 1920]);
+        assert_eq!(grid.chunk(0).shape(), [1, 2, 1920]);
         assert_eq!(grid.len(), 604);
     }
 
@@ -319,7 +319,7 @@ mod tests {
             ramp("b", &[("x", 2), ("y", 3)]).with_chunk_shape(vec![2, 1]),
         ]);
         let grid = ChunkGrid::try_new(&ds, 2).unwrap();
-        assert_eq!(grid.chunk(0).shape, vec![2, 1]);
+        assert_eq!(grid.chunk(0).shape(), [2, 1]);
     }
 
     #[test]
@@ -357,7 +357,7 @@ mod tests {
         let ds = dataset(vec![ramp("v", &[("n", 3)])]);
         let grid = ChunkGrid::try_new(&ds, 0).unwrap();
         assert_eq!(grid.len(), 3);
-        assert!(grid.chunks().all(|chunk| chunk.shape == vec![1]));
+        assert!(grid.chunks().all(|chunk| chunk.shape() == [1]));
     }
 
     #[test]
@@ -369,7 +369,7 @@ mod tests {
         let ds = DatasetSchema::try_new("test.nd", dims(&sizes), vec![Arc::new(Meta(v))]).unwrap();
         let grid = ChunkGrid::try_new(&ds, 8192).unwrap();
         assert_eq!(grid.len(), 2);
-        assert_eq!(grid.chunk(1).start, vec![1 << 39, 0]);
+        assert_eq!(grid.chunk(1).start(), [1 << 39, 0]);
     }
 
     #[test]

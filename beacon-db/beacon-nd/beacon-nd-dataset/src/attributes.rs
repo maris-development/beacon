@@ -14,7 +14,7 @@ use crate::{NdDataset, NdVariable, Region, Result, VariableInfo};
 
 /// Show each attribute as a rank-0 variable: `var.attr`, and `.attr` for a global attribute.
 ///
-/// An attribute gets a column only when its value has length 1 and is not a list.
+/// An attribute gets a column only when its value is not a list.
 /// A variable of `dataset` keeps its name when an attribute column has the same name.
 pub fn attribute_columns(dataset: Arc<dyn NdDataset>) -> Arc<dyn NdDataset> {
     let variable_names = dataset.variable_names();
@@ -22,8 +22,8 @@ pub fn attribute_columns(dataset: Arc<dyn NdDataset>) -> Arc<dyn NdDataset> {
     let mut columns: IndexMap<Arc<str>, Arc<dyn NdVariable>> = IndexMap::new();
     let mut add = |prefix: &str, attributes: &Attributes| {
         for (attribute, value) in attributes.iter() {
-            // An nd-arrow-array attribute has length 1, so the length check only guards.
-            if value.len() != 1 || is_list(value.data_type()) {
+            // An nd-arrow-array attribute always has length 1.
+            if is_list(value.data_type()) {
                 continue;
             }
             let name: Arc<str> = Arc::from(format!("{prefix}.{attribute}"));

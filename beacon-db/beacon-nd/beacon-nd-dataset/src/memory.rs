@@ -74,7 +74,7 @@ impl NdVariable for MemoryVariable {
         let selections: Vec<(&str, Selector)> = self
             .dimensions()
             .iter()
-            .zip(region.start.iter().zip(&region.shape))
+            .zip(region.start().iter().zip(region.shape()))
             .map(|(dimension, (&start, &length))| {
                 let slice = Slice::range(start as isize, (start + length) as isize);
                 (dimension.name(), Selector::Slice(slice))

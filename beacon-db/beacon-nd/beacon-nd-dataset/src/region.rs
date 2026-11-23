@@ -5,18 +5,37 @@ use nd_arrow_array::Dimensions;
 use crate::{Error, Result};
 
 /// A box inside one variable: a start and a length for each axis.
+///
+/// The start and the shape have the same rank.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Region {
-    /// The first index on each axis.
-    pub start: Vec<usize>,
-    /// The length on each axis.
-    pub shape: Vec<usize>,
+    start: Vec<usize>,
+    shape: Vec<usize>,
 }
 
 impl Region {
     /// A region with this start and shape.
+    ///
+    /// # Panics
+    ///
+    /// When `start` and `shape` do not have the same length.
     pub fn new(start: Vec<usize>, shape: Vec<usize>) -> Self {
+        assert_eq!(
+            start.len(),
+            shape.len(),
+            "the start and the shape of a region have the same rank"
+        );
         Self { start, shape }
+    }
+
+    /// The first index on each axis.
+    pub fn start(&self) -> &[usize] {
+        &self.start
+    }
+
+    /// The length on each axis.
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
     }
 
     /// The whole variable.
@@ -50,11 +69,10 @@ impl Region {
             reason,
         };
         let rank = dimensions.rank();
-        if self.start.len() != rank || self.shape.len() != rank {
+        if self.rank() != rank {
             return Err(invalid(format!(
-                "the region has start rank {} and shape rank {}, the variable has rank {rank}",
-                self.start.len(),
-                self.shape.len()
+                "the region has rank {}, the variable has rank {rank}",
+                self.rank()
             )));
         }
         for (axis, dimension) in dimensions.iter().enumerate() {
@@ -118,10 +136,15 @@ mod tests {
             Region::new(vec![0], vec![2]),
             Region::new(vec![0, 2], vec![2, 2]),
             Region::new(vec![usize::MAX, 0], vec![2, 1]),
-            Region::new(vec![0, 0], vec![2]),
         ] {
             let error = region.check("v", &d).unwrap_err();
             assert!(matches!(error, Error::InvalidRegion { ref variable, .. } if variable == "v"));
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "the same rank")]
+    fn a_start_and_a_shape_of_different_ranks_panic() {
+        Region::new(vec![0, 0], vec![2]);
     }
 }

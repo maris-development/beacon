@@ -93,15 +93,15 @@ impl ChunkReader {
             self.grid
                 .dimensions()
                 .iter()
-                .zip(&chunk.shape)
+                .zip(chunk.shape())
                 .map(|(dimension, &size)| Dimension::new(dimension.name(), size)),
         )?;
 
         let mut columns = Vec::with_capacity(self.variables.len());
         for BoundVariable { variable, axes } in &self.variables {
             let region = Region::new(
-                axes.iter().map(|&axis| chunk.start[axis]).collect(),
-                axes.iter().map(|&axis| chunk.shape[axis]).collect(),
+                axes.iter().map(|&axis| chunk.start()[axis]).collect(),
+                axes.iter().map(|&axis| chunk.shape()[axis]).collect(),
             );
             let column = variable.read(&region).await.map_err(|error| match error {
                 // This error names the variable.
@@ -112,7 +112,7 @@ impl ChunkReader {
                 },
             })?;
             // A wrong size of 1 would broadcast over the chunk with no error.
-            if column.dims().shape() != region.shape
+            if column.dims().shape() != region.shape()
                 || column.dims().names() != variable.dimensions().names()
             {
                 return Err(Error::Invalid {

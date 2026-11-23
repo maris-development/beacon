@@ -120,6 +120,6 @@ mod tests {
         assert_eq!(grid.dimensions().names(), vec!["time", "lat", "lon"]);
         assert_eq!(grid.len(), 4);
         assert!(grid.chunks().all(|chunk| chunk.len() == 12));
-        assert_eq!(grid.chunk(3).start, vec![0, 4, 3]);
+        assert_eq!(grid.chunk(3).start(), [0, 4, 3]);
     }
 }
