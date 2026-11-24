@@ -36,8 +36,8 @@
 //! choose the columns and the refresh interval of its statistics.
 //!
 //! The scan config gets the `PhysicalExprAdapterFactory` of the table type
-//! widening strategy. DataFusion's Parquet source reads it. The other formats
-//! adapt each file with the strategy of the session.
+//! widening strategy. Every format reads it from the config and adapts each
+//! file with it.
 //!
 //! A scan error is an [`ExternalTableError`]. It names the table, the file
 //! type, the step that failed and the file. With `skip_invalid_files_on_scan`,
